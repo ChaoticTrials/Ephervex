@@ -1,0 +1,24 @@
+[package]
+name = "ephervex-minecraft"
+description = "Mojang/Piston version metadata, release filtering, and the vanilla launch pipeline."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ephervex-model.workspace = true
+ephervex-download.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

@@ -1,0 +1,91 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "UNLICENSED"
+publish = false
+repository = "https://github.com/ChaoticTrials/ephervex"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# Pedantic lints that fight the domain rather than help it.
+# doc_markdown flags every product name written in prose — NeoForge,
+# CurseForge, LiteLoader, OpenJDK — which this codebase is necessarily full of.
+doc_markdown = "allow"
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+# Correctness rules that matter for a launcher handling untrusted archives.
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+dbg_macro = "warn"
+todo = "warn"
+
+[workspace.dependencies]
+# --- internal crates (path deps; dependency direction enforced in docs/architecture.md) ---
+ephervex-model = { path = "crates/model" }
+ephervex-storage = { path = "crates/storage" }
+ephervex-download = { path = "crates/download" }
+ephervex-minecraft = { path = "crates/minecraft" }
+ephervex-auth = { path = "crates/auth" }
+ephervex-java = { path = "crates/java" }
+ephervex-loaders = { path = "crates/loaders" }
+ephervex-mod-platform = { path = "crates/mod-platform" }
+ephervex-pack = { path = "crates/pack" }
+ephervex-options = { path = "crates/options" }
+ephervex-server = { path = "crates/server" }
+ephervex-i18n = { path = "crates/i18n" }
+ephervex-core = { path = "crates/core" }
+
+# --- external stack (versions resolved by `cargo add`, not hand-written) ---
+anyhow = "1.0.104"
+chrono = { version = "0.4.45", features = ["serde"] }
+clap = { version = "4.6.6", features = ["derive"] }
+directories = "6.0.0"
+flate2 = "1.1.9"
+futures-util = "0.3.33"
+hex = "0.4.3"
+i18n-embed = { version = "0.16.0", features = ["fluent-system", "desktop-requester"] }
+i18n-embed-fl = "0.10.1"
+keyring = "4.1.6"
+open = "5.4.1"
+reqwest = { version = "0.13.4", default-features = false, features = ["gzip", "http2", "json", "rustls", "stream", "system-proxy"] }
+rusqlite = { version = "0.40.1", features = ["bundled"] }
+rust-embed = "8.12.0"
+semver = "1.0.28"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha1 = "0.11.0"
+sha2 = "0.11.0"
+slint = "1.17.1"
+sysinfo = "0.39.6"
+tar = "0.4.46"
+tempfile = "3.27.0"
+thiserror = "2.0.19"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "fs", "process", "io-util", "sync", "time", "signal"] }
+tokio-util = { version = "0.7.19", features = ["io"] }
+toml = "1.1.4"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+unic-langid = "0.9.6"
+uuid = { version = "1.24.0", features = ["v4", "serde"] }
+zip = "8.6.0"
+
+# --- test-only ---
+wiremock = "0.6.5"
+
+[profile.release]
+lto = "thin"
+strip = "symbols"

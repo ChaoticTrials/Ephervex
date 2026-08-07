@@ -1,0 +1,34 @@
+[package]
+name = "ephervex-core"
+description = "Application services shared by the GUI and CLI. The only crate either frontend depends on."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ephervex-model.workspace = true
+ephervex-storage.workspace = true
+ephervex-download.workspace = true
+ephervex-minecraft.workspace = true
+ephervex-auth.workspace = true
+ephervex-java.workspace = true
+ephervex-loaders.workspace = true
+ephervex-mod-platform.workspace = true
+ephervex-pack.workspace = true
+ephervex-options.workspace = true
+ephervex-server.workspace = true
+ephervex-i18n.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+open.workspace = true
+sysinfo.workspace = true

@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Ephervex
+GenericName=Minecraft Launcher
+Comment=Spawn. Reproduce. Despawn.
+Exec=ephervex-gui %f
+TryExec=ephervex-gui
+Icon=ephervex
+Terminal=false
+Categories=Game;
+Keywords=minecraft;launcher;modding;forge;neoforge;
+StartupWMClass=ephervex
+MimeType=application/x-modrinth-modpack+zip;application/zip;

@@ -1,0 +1,15 @@
+/target
+**/*.rs.bk
+*.pdb
+
+# Local developer configuration and anything holding credentials.
+/.env
+/.env.local
+*.local.toml
+
+# Never commit an API key or a captured token.
+/secrets/
+
+# IDE
+/.idea/
+/.vscode/

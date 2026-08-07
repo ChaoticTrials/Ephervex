@@ -1,0 +1,25 @@
+[package]
+name = "ephervex-gui"
+description = "Ephervex desktop GUI."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "ephervex-gui"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+slint.workspace = true
+ephervex-core.workspace = true
+ephervex-model.workspace = true
+ephervex-i18n.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
