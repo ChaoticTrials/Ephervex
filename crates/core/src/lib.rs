@@ -34,7 +34,14 @@ pub use logging::init_tracing;
 ///
 /// These are plain records and requests, not services: a frontend needs to
 /// render a `ClientRecord` and build a `NewClient`, but it never needs the
-/// `Registry` that produced one.
+/// `Registry` that produced one — nor the `VersionCatalog` that produced a
+/// `ReleaseListing`.
+pub use ephervex_download::Freshness;
+pub use ephervex_minecraft::{
+    ArgumentEntry, ArgumentForm, ArgumentGroup, Arguments, Artifact, AssetIndexRef,
+    JavaRequirement, LatestVersions, Library, LoggingConfig, MINIMUM_SUPPORTED_VERSION,
+    MinecraftVersionId, ReleaseListing, ReleaseType, VersionMetadata, VersionRecord,
+};
 pub use ephervex_storage::{
     CONFIG_SCHEMA_VERSION, ClientRecord, Config, EulaConfig, FileDisposition, ImportSource,
     JavaConfig, JavaOverride, JvmSettings, NetworkAccess, NewClient, NewServer, PathError, Paths,

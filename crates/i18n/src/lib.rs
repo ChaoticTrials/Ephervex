@@ -460,4 +460,39 @@ mod tests {
             assert!(has(id), "missing message id: {id}");
         }
     }
+
+    #[test]
+    fn every_message_id_referenced_by_minecraft_metadata_errors_exists() {
+        // Same arrangement as above: `ephervex-minecraft` owns no `i18n.toml`,
+        // so its `MinecraftError::message_id()` arms are checked here.
+        for id in [
+            "error-minecraft-manifest-unavailable",
+            "error-minecraft-manifest-invalid",
+            "error-minecraft-version-unknown",
+            "error-minecraft-version-unsupported",
+            "error-minecraft-version-not-a-release",
+            "error-minecraft-version-metadata-unavailable",
+            "error-minecraft-version-metadata-corrupt",
+            "error-minecraft-version-metadata-invalid",
+            "error-minecraft-version-metadata-unreadable",
+            "error-minecraft-metadata-incomplete",
+            "error-minecraft-metadata-url-invalid",
+            "error-minecraft-cache-key-invalid",
+            "minecraft-versions-list-empty",
+            "minecraft-versions-list-count",
+            "minecraft-versions-stale",
+            "minecraft-version-id-unrecognized",
+        ] {
+            assert!(has(id), "missing message id: {id}");
+        }
+    }
+
+    #[test]
+    fn an_offline_version_list_offers_a_next_step_without_needing_a_path() {
+        // Most error actions interpolate `$path`. The network ones cannot, and
+        // a frontend must still be able to show them.
+        let action = lookup_attribute("error-minecraft-manifest-unavailable", "action")
+            .expect("being offline has an obvious next step");
+        assert!(action.contains("network"));
+    }
 }

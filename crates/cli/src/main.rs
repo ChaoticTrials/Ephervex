@@ -16,8 +16,9 @@ use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use ephervex_core::{
-    App, ClientRecord, Config, CoreError, FileDisposition, NewClient, NewServer, Paths,
-    ReconciliationReport, ServerRecord,
+    App, ArgumentForm, Artifact, AssetIndexRef, ClientRecord, Config, CoreError, FileDisposition,
+    Freshness, NewClient, NewServer, Paths, ReconciliationReport, ReleaseListing, ServerRecord,
+    VersionMetadata, VersionRecord,
 };
 use ephervex_i18n::Arg as MessageArg;
 use ephervex_model::{InstanceId, LoaderKind, LoaderSelection, ServerId, StorageClass};
@@ -65,8 +66,25 @@ enum Command {
         #[command(subcommand)]
         command: ServerCommand,
     },
+    /// Inspect Mojang's Minecraft release metadata.
+    Minecraft {
+        #[command(subcommand)]
+        command: MinecraftCommand,
+    },
     /// Reconcile the index against what is actually on disk.
     Reconcile,
+}
+
+#[derive(Debug, Subcommand)]
+enum MinecraftCommand {
+    /// List the Minecraft releases Ephervex supports.
+    Versions {
+        /// Show only the newest N releases.
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// Resolve one release's complete metadata.
+    Version { id: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -238,6 +256,14 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
         Command::Server { command } => {
             let app = open_app()?;
             run_server_command(&app, command, cli.json)
+        }
+        Command::Minecraft { command } => {
+            let app = open_app()?;
+            // A runtime is built here rather than wrapping `main` in
+            // `#[tokio::main]`, so the commands that only touch SQLite and the
+            // filesystem keep running on a plain thread with no executor.
+            let runtime = tokio::runtime::Runtime::new()?;
+            runtime.block_on(run_minecraft_command(&app, command, cli.json))
         }
         Command::Reconcile => {
             let app = open_app()?;
@@ -517,6 +543,240 @@ fn list_servers(app: &App, json: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn run_minecraft_command(
+    app: &App,
+    command: &MinecraftCommand,
+    json: bool,
+) -> anyhow::Result<()> {
+    match command {
+        MinecraftCommand::Versions { limit } => {
+            let listing = app.minecraft_releases().await?;
+            show_releases(&listing, *limit, json);
+        }
+        MinecraftCommand::Version { id } => {
+            let version = app.minecraft_version(id).await?;
+            show_version(&version, json)?;
+        }
+    }
+    Ok(())
+}
+
+fn show_releases(listing: &ReleaseListing, limit: Option<usize>, json: bool) {
+    let shown = limit
+        .unwrap_or(listing.releases.len())
+        .min(listing.releases.len());
+    let releases = listing.releases.get(..shown).unwrap_or(&listing.releases);
+
+    if json {
+        print_json(&serde_json::json!({
+            "releases": releases.iter().map(release_json).collect::<Vec<_>>(),
+            "latest_release": listing.latest.release,
+            "latest_snapshot": listing.latest.snapshot,
+            "supported_count": listing.releases.len(),
+            "manifest_versions": listing.total_versions,
+            "minimum_supported": ephervex_core::MINIMUM_SUPPORTED_VERSION,
+            "freshness": freshness_label(listing.freshness),
+            "stale": listing.is_stale(),
+            "fetched_at": listing.fetched_at,
+        }));
+        return;
+    }
+
+    if listing.releases.is_empty() {
+        println!("{}", ephervex_i18n::lookup("minecraft-versions-list-empty"));
+        return;
+    }
+
+    for record in releases {
+        println!(
+            "{:<10} {}{}",
+            record.id,
+            record.release_time.format("%Y-%m-%d"),
+            if record.has_recognized_version_id() {
+                ""
+            } else {
+                "  [unrecognized version scheme]"
+            }
+        );
+    }
+    println!(
+        "{}",
+        ephervex_i18n::lookup_args(
+            "minecraft-versions-list-count",
+            [("count", MessageArg::from(listing.releases.len()))]
+        )
+    );
+
+    // A user debugging a network problem must not mistake yesterday's cached
+    // list for a fresh response.
+    if listing.is_stale() {
+        eprintln!("{}", ephervex_i18n::lookup("minecraft-versions-stale"));
+    }
+    for record in listing.unrecognized_version_ids() {
+        eprintln!(
+            "{}",
+            ephervex_i18n::lookup_args(
+                "minecraft-version-id-unrecognized",
+                [
+                    ("version", MessageArg::from(record.id.as_str())),
+                    (
+                        "minimum",
+                        MessageArg::from(ephervex_core::MINIMUM_SUPPORTED_VERSION)
+                    ),
+                ]
+            )
+        );
+    }
+}
+
+fn show_version(version: &VersionMetadata, json: bool) -> anyhow::Result<()> {
+    // Reached through the accessors rather than the fields, so a document that
+    // is missing something a launch needs fails here with a typed error rather
+    // than printing a half-populated summary.
+    let client = version.client_jar()?;
+    let assets = version.asset_index()?;
+
+    if json {
+        print_version_json(version, client, assets);
+    } else {
+        print_version_text(version, client, assets);
+    }
+    Ok(())
+}
+
+fn print_version_json(version: &VersionMetadata, client: &Artifact, assets: &AssetIndexRef) {
+    print_json(&serde_json::json!({
+                "id": version.id,
+                "type": version.release_type.as_str(),
+                "release_time": version.release_time,
+                "main_class": version.main_class,
+                "compliance_level": version.compliance_level,
+                "java": version.java_version.as_ref().map(|java| serde_json::json!({
+                    "component": java.component,
+                    "major_version": java.major_version,
+                })),
+                "assets": {
+                    "id": assets.id,
+                    "sha1": assets.artifact.sha1.digest(),
+                    "total_size": assets.total_size,
+                },
+                "downloads": version.downloads.keys().collect::<Vec<_>>(),
+                "client": {"sha1": client.sha1.digest(), "size": client.size},
+                "arguments": {
+                    "form": argument_form_label(version.arguments.form()),
+                    "groups": version
+    .arguments
+    .groups()
+    .map(|(group, entries)| (group.to_string(), entries.len()))
+    .collect::<std::collections::BTreeMap<_, _>>(),
+                },
+                "libraries": {
+                    "total": version.libraries.len(),
+                    "rule_gated": version.libraries.iter().filter(|l| !l.rules.is_empty()).count(),
+                    "legacy_natives": version.libraries.iter().filter(|l| l.is_legacy_natives()).count(),
+                },
+                "logging": version.logging.as_ref().map(|logging| logging.id.clone()),
+                "inherits_from": version.inherits_from(),
+                "complete": version.is_complete_vanilla(),
+        }));
+}
+
+fn print_version_text(version: &VersionMetadata, client: &Artifact, assets: &AssetIndexRef) {
+    println!("id:         {}", version.id);
+    println!("type:       {}", version.release_type);
+    println!("released:   {}", version.release_time.format("%Y-%m-%d"));
+    println!("main class: {}", version.main_class);
+    match &version.java_version {
+        // Metadata records the requirement; Java selection resolves it.
+        Some(java) => println!(
+            "java:       {} (Mojang runtime {})",
+            java.major_version, java.component
+        ),
+        None => println!("java:       not declared"),
+    }
+    println!(
+        "arguments:  {} form",
+        argument_form_label(version.arguments.form())
+    );
+    for (group, entries) in version.arguments.groups() {
+        let conditional = entries
+            .iter()
+            .filter(|entry| !entry.is_unconditional())
+            .count();
+        println!(
+            "  {group:<17} {} entries, {conditional} conditional",
+            entries.len()
+        );
+    }
+    println!(
+        "libraries:  {} ({} rule-gated, {} with a legacy natives map)",
+        version.libraries.len(),
+        version
+            .libraries
+            .iter()
+            .filter(|library| !library.rules.is_empty())
+            .count(),
+        version
+            .libraries
+            .iter()
+            .filter(|library| library.is_legacy_natives())
+            .count()
+    );
+    println!(
+        "client jar: {} bytes, sha1 {}",
+        client.size,
+        client.sha1.digest()
+    );
+    println!(
+        "assets:     index {} ({} bytes of objects)",
+        assets.id,
+        assets
+            .total_size
+            .map_or_else(|| "unknown".to_owned(), |size| size.to_string())
+    );
+    println!(
+        "downloads:  {}",
+        version
+            .downloads
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    if let Some(logging) = &version.logging {
+        println!("logging:    {}", logging.id);
+    }
+    if let Some(parent) = version.inherits_from() {
+        println!("inherits:   {parent}  (merging lands with loader support)");
+    }
+}
+
+fn release_json(record: &VersionRecord) -> serde_json::Value {
+    serde_json::json!({
+        "id": record.id,
+        "type": record.release_type.as_str(),
+        "release_time": record.release_time,
+        "sha1": record.sha1.digest(),
+        "compliance_level": record.compliance_level,
+        "recognized_version_id": record.has_recognized_version_id(),
+    })
+}
+
+const fn freshness_label(freshness: Freshness) -> &'static str {
+    match freshness {
+        Freshness::Fetched => "fetched",
+        Freshness::Cached => "cached",
+        Freshness::Stale => "stale",
+    }
+}
+
+const fn argument_form_label(form: ArgumentForm) -> &'static str {
+    match form {
+        ArgumentForm::Legacy => "legacy",
+        ArgumentForm::Modern => "modern",
+    }
+}
+
 fn show_reconciliation(report: &ReconciliationReport, json: bool) {
     if json {
         print_json(&serde_json::json!({
@@ -722,15 +982,20 @@ fn localized_failure(error: &CoreError) -> (String, Option<String>) {
     let id = error.message_id();
     let summary = ephervex_i18n::lookup(id);
 
-    // Only supply an action when we have the argument it interpolates,
-    // otherwise the user would be shown a literal `{$path}`.
-    let action = error.failing_path().and_then(|path| {
-        ephervex_i18n::lookup_attribute_args(
+    // Two shapes of next step. One names the file to look at, and can only be
+    // rendered when the error carries a path — otherwise the user would be
+    // shown a literal `{$path}`. The other, typically a network failure, needs
+    // no argument at all and must still be shown .
+    let action = match error.failing_path() {
+        Some(path) => ephervex_i18n::lookup_attribute_args(
             id,
             "action",
             [("path", MessageArg::from(path.as_path()))],
-        )
-    });
+        ),
+        None => {
+            ephervex_i18n::lookup_attribute(id, "action").filter(|action| !action.contains("{$"))
+        }
+    };
 
     (summary, action)
 }

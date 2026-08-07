@@ -126,7 +126,7 @@ impl FileExtension {
 /// Rejects empty strings, `.`, `..`, and anything containing a separator or a
 /// character that is not part of a Maven identifier. This is what makes a
 /// coordinate a *validated* logical key rather than an attacker-chosen path.
-fn safe_segment(segment: &str) -> Result<&str, CacheKeyError> {
+pub(crate) fn safe_segment(segment: &str) -> Result<&str, CacheKeyError> {
     let unsafe_segment = || CacheKeyError::UnsafeSegment {
         segment: segment.to_owned(),
     };

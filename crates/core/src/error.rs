@@ -12,6 +12,7 @@
 
 use std::path::PathBuf;
 
+use ephervex_minecraft::MinecraftError;
 use ephervex_storage::StorageError;
 
 /// Anything an application service can fail with.
@@ -21,6 +22,11 @@ pub enum CoreError {
     /// Paths, configuration, the index, or the registry.
     #[error(transparent)]
     Storage(#[from] StorageError),
+
+    /// Mojang version metadata: the manifest, the release filter, or one
+    /// version's document.
+    #[error(transparent)]
+    Minecraft(#[from] MinecraftError),
 }
 
 impl CoreError {
@@ -33,6 +39,7 @@ impl CoreError {
     pub const fn message_id(&self) -> &'static str {
         match self {
             Self::Storage(error) => error.message_id(),
+            Self::Minecraft(error) => error.message_id(),
         }
     }
 
@@ -48,6 +55,7 @@ impl CoreError {
     pub fn failing_path(&self) -> Option<PathBuf> {
         match self {
             Self::Storage(error) => storage_failing_path(error),
+            Self::Minecraft(error) => error.failing_path(),
         }
     }
 }
@@ -151,5 +159,36 @@ mod tests {
         let expected = inner.message_id();
         let wrapped = CoreError::from(inner);
         assert_eq!(wrapped.message_id(), expected);
+    }
+
+    #[test]
+    fn a_wrapped_minecraft_error_keeps_its_own_message_id_and_path() {
+        let inner = MinecraftError::unsupported("1.7.10");
+        let expected = inner.message_id();
+        assert_eq!(CoreError::from(inner).message_id(), expected);
+
+        let unreadable = MinecraftError::VersionMetadataUnreadable {
+            path: PathBuf::from("/cache/ephervex/metadata/sha1/ab/abc.json"),
+            source: std::io::Error::other("denied"),
+        };
+        assert_eq!(
+            CoreError::from(unreadable).failing_path(),
+            Some(PathBuf::from("/cache/ephervex/metadata/sha1/ab/abc.json")),
+            "a frontend must be able to name the file without matching on MinecraftError"
+        );
+    }
+
+    #[test]
+    fn every_message_id_core_can_hand_out_exists_in_the_bundled_resources() {
+        // The frontend resolves these through `ephervex-i18n`; an id with no
+        // message renders as a placeholder in the user's face.
+        for id in [
+            MinecraftError::unsupported("x").message_id(),
+            MinecraftError::UnknownVersion { id: String::new() }.message_id(),
+            MinecraftError::VersionMetadataCorrupt { id: String::new() }.message_id(),
+            ephervex_storage::PathError::NoHomeDirectory.message_id(),
+        ] {
+            assert!(ephervex_i18n::has(id), "missing message id: {id}");
+        }
     }
 }

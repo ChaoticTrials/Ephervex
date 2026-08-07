@@ -12,11 +12,20 @@
 //! in their manifests, so a shortcut is a manifest change someone has to
 //! justify rather than an import someone can add absent-mindedly.
 
+use std::sync::OnceLock;
+
+use ephervex_download::{
+    CacheLayout, DownloadManager, DownloaderConfig, MetadataCacheError, OperationReporter,
+};
+use ephervex_minecraft::{
+    MinecraftError, ReleaseListing, VERSION_MANIFEST_CACHE_KEY, VersionCatalog, VersionMetadata,
+};
 use ephervex_model::{InstanceId, ServerId};
 use ephervex_storage::{
     ClientRecord, Config, FileDisposition, NewClient, NewServer, Paths, ReconciliationReport,
     Registry, ServerRecord, Storage,
 };
+use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 
 use crate::error::CoreResult;
@@ -31,6 +40,10 @@ use crate::error::CoreResult;
 #[derive(Debug)]
 pub struct App {
     storage: Storage,
+    /// Built on first use rather than at startup: constructing it builds an
+    /// HTTP client and a TLS stack, which `ephervex instance list` has no
+    /// business paying for.
+    minecraft: OnceLock<VersionCatalog>,
 }
 
 impl App {
@@ -40,6 +53,7 @@ impl App {
     pub fn open() -> CoreResult<Self> {
         Ok(Self {
             storage: ephervex_storage::open_from_environment()?,
+            minecraft: OnceLock::new(),
         })
     }
 
@@ -51,6 +65,7 @@ impl App {
     pub fn open_at(paths: Paths) -> CoreResult<Self> {
         Ok(Self {
             storage: ephervex_storage::open(paths)?,
+            minecraft: OnceLock::new(),
         })
     }
 
@@ -128,6 +143,68 @@ impl App {
     #[instrument(skip(self))]
     pub fn delete_server(&self, id: ServerId, files: FileDisposition) -> CoreResult<()> {
         Ok(self.registry().delete_server(id, files)?)
+    }
+
+    // -- minecraft versions ------------------------------------------------
+
+    /// The Minecraft releases Ephervex offers: `type == "release"` at or above
+    /// 1.12.2, in Mojang's own newest-first order.
+    ///
+    /// The returned [`ReleaseListing`] says whether the list came off the
+    /// network, out of a fresh cache, or out of a stale one because Mojang
+    /// could not be reached. A frontend is expected to show that distinction
+    /// rather than a spinner.
+    #[instrument(skip(self))]
+    pub async fn minecraft_releases(&self) -> CoreResult<ReleaseListing> {
+        let catalog = self.minecraft()?;
+        Ok(catalog
+            .supported_releases(&Self::reporter(), &CancellationToken::new())
+            .await?)
+    }
+
+    /// One supported release's complete metadata.
+    ///
+    /// Refuses a snapshot, a pre-release, or anything below the floor rather
+    /// than resolving it anyway.
+    #[instrument(skip(self))]
+    pub async fn minecraft_version(&self, id: &str) -> CoreResult<VersionMetadata> {
+        let catalog = self.minecraft()?;
+        Ok(catalog
+            .resolve(id, &Self::reporter(), &CancellationToken::new())
+            .await?)
+    }
+
+    /// The version catalog, built on first use.
+    ///
+    /// `OnceLock` rather than a field set in `open`: both construction steps
+    /// can fail, and a launcher that refuses to open because the HTTP client
+    /// could not be built would be unable to show the user their existing
+    /// instances — which is precisely what it should still be able to do
+    fn minecraft(&self) -> CoreResult<&VersionCatalog> {
+        if let Some(catalog) = self.minecraft.get() {
+            return Ok(catalog);
+        }
+        let manager = DownloadManager::new(DownloaderConfig::default()).map_err(|source| {
+            MinecraftError::ManifestUnavailable {
+                source: MetadataCacheError::Unavailable {
+                    key: VERSION_MANIFEST_CACHE_KEY.to_owned(),
+                    source: Box::new(source),
+                },
+            }
+        })?;
+        let catalog = VersionCatalog::mojang(manager, CacheLayout::new(self.paths().cache_dir()))?;
+        // Losing the race just means another thread built an equivalent
+        // catalog; this one is dropped and theirs is returned.
+        Ok(self.minecraft.get_or_init(|| catalog))
+    }
+
+    /// Progress reporting for a metadata fetch.
+    ///
+    /// Silent for now: metadata documents are small and finish before a
+    /// progress bar would be worth drawing. Vanilla launch support, which downloads assets by
+    /// the thousand, is where a real sink gets wired in.
+    fn reporter() -> OperationReporter {
+        OperationReporter::silent("minecraft-metadata")
     }
 
     /// The registry, for services inside this crate.

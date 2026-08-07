@@ -144,3 +144,59 @@ error-registry-metadata-unsupported-version = The instance metadata at { $path }
 
 error-registry-root-occupied = That instance directory already contains files.
     .action = Choose a different name, or remove { $path } first.
+
+## Minecraft version metadata 
+#
+# Version ids, release channels, and file paths are never translated; they are
+# passed in as arguments.
+
+minecraft-versions-list-empty = No supported Minecraft releases were found.
+
+minecraft-versions-list-count = { $count ->
+        [one] { $count } supported release
+       *[other] { $count } supported releases
+    }
+
+# Shown alongside a version list that could not be refreshed, so the user knows
+# what they are looking at rather than watching a spinner.
+minecraft-versions-stale = Showing the last version list Ephervex was able to fetch. Mojang could not be reached.
+
+minecraft-version-id-unrecognized = { $version } uses a version-numbering scheme this build does not know. It is listed because Mojang published it after { $minimum }.
+
+## Minecraft metadata errors 
+
+error-minecraft-manifest-unavailable = The Minecraft version list could not be fetched, and no cached copy is available.
+    .action = Check your network connection and try again. Instances that are already installed can still be launched.
+
+error-minecraft-manifest-invalid = Mojang returned something that is not a Minecraft version manifest.
+    .action = This is usually a captive portal or a proxy answering instead of Mojang. Try again once you have real internet access.
+
+error-minecraft-version-unknown = That Minecraft version is not in Mojang's version list.
+    .action = Check the version id. Only released versions appear in the list.
+
+error-minecraft-version-unsupported = That Minecraft version is older than Ephervex supports.
+    .action = Ephervex supports Minecraft releases from 1.12.2 onward.
+
+error-minecraft-version-not-a-release = That is a snapshot, pre-release, or release candidate rather than a Minecraft release.
+    .action = Ephervex deliberately offers only released versions, so that a reproduction can be repeated later against the same build.
+
+error-minecraft-version-metadata-unavailable = The metadata for that Minecraft version could not be fetched.
+    .action = Check your network connection and try again.
+
+# Verifying the SHA-1 Mojang publishes for each version document is a release
+# blocker, not a nicety .
+error-minecraft-version-metadata-corrupt = The metadata Mojang served for that version did not match the checksum Mojang published for it.
+    .action = Ephervex refused the file rather than using it. If this repeats, something between you and Mojang is rewriting the response.
+
+error-minecraft-version-metadata-invalid = The metadata for that Minecraft version could not be understood.
+
+error-minecraft-version-metadata-unreadable = The cached metadata for that Minecraft version could not be read.
+    .action = Check permissions on { $path }, or delete the file so Ephervex fetches it again.
+
+error-minecraft-metadata-incomplete = That version's metadata is missing something a launch needs.
+    .action = Mod-loader version files extend a vanilla version rather than standing alone. Ephervex cannot resolve one on its own yet.
+
+error-minecraft-metadata-url-invalid = Mojang's metadata contains a download address Ephervex will not use.
+    .action = Ephervex only downloads over HTTPS and never from an address that embeds credentials.
+
+error-minecraft-cache-key-invalid = A download could not be given a safe location in the cache.

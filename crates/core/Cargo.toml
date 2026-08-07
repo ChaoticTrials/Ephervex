@@ -25,6 +25,7 @@ ephervex-options.workspace = true
 ephervex-server.workspace = true
 ephervex-i18n.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 thiserror.workspace = true

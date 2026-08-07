@@ -9,16 +9,19 @@
 //! - **Atomic finalization.** A download is written to `<destination>.part` and
 //!   renamed into place only after verification. A partial artifact never
 //!   appears at a cache path, which is what entitles downstream consumers to treat
-//!   presence at that path as proof of a verified artifact .
+//!   presence at that path as proof of a verified artifact.
 //! - **Verification.** SHA-1, SHA-256, and SHA-512 are checked whenever the
 //!   provider metadata supplies them, as is the declared size. A mismatch
-//!   deletes the artifact and fails without retrying .
+//!   deletes the artifact and fails without retrying.
 //! - **Paths are never taken from remote input.** Destinations come from
 //!   [`CacheLayout`], derived from a content hash or a validated logical key —
 //!   never from a URL segment, a filename in a pack manifest, or a
-//!   `Content-Disposition` header .
+//!   `Content-Disposition` header.
 //! - **Untrusted URLs are filtered.** [`DomainAllowlist`] is the explicit,
-//!   auditable list of hosts a `.mrpack` may name .
+//!   auditable list of hosts a `.mrpack` may name.
+//! - **Provider metadata is cached with the time it was fetched.**
+//!   [`MetadataCache`] serves a document as fresh, cached, or explicitly
+//!   *stale*, so a provider outage degrades the launcher instead of stopping it
 //!
 //! # Example
 //!
@@ -57,6 +60,7 @@ pub mod cache;
 pub mod client;
 pub mod error;
 pub mod manager;
+pub mod metadata;
 pub mod progress;
 pub mod retry;
 pub mod verify;
@@ -69,6 +73,10 @@ pub use client::{HttpConfig, build_client};
 pub use error::DownloadError;
 pub use manager::{
     ArtifactSource, DownloadManager, DownloadOutcome, DownloadRequest, DownloaderConfig,
+};
+pub use metadata::{
+    CachedMetadata, DEFAULT_METADATA_TTL, Freshness, METADATA_ENVELOPE_VERSION, MetadataCache,
+    MetadataCacheError, MetadataKey,
 };
 pub use progress::{ByteTally, ChannelSink, OperationReporter, ProgressSink};
 pub use retry::{RetryPolicy, retry_after, status_is_transient};
