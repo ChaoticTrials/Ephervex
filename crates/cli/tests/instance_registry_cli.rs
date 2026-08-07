@@ -179,7 +179,7 @@ fn the_cli_writes_no_secret_into_the_configuration() {
     let rendered = sandbox.run(&["config"]);
     assert!(rendered.status.success());
     let text = String::from_utf8_lossy(&rendered.stdout).to_ascii_lowercase();
-    for marker in ephervex_storage::SECRET_KEY_MARKERS {
+    for marker in ephervex_core::SECRET_KEY_MARKERS {
         assert!(!text.contains(marker), "configuration mentions `{marker}`");
     }
 
@@ -190,7 +190,7 @@ fn the_cli_writes_no_secret_into_the_configuration() {
             let contents = std::fs::read_to_string(entry.path())
                 .unwrap_or_default()
                 .to_ascii_lowercase();
-            for marker in ephervex_storage::SECRET_KEY_MARKERS {
+            for marker in ephervex_core::SECRET_KEY_MARKERS {
                 assert!(
                     !contents.contains(marker),
                     "{:?} mentions `{marker}`",

@@ -12,16 +12,15 @@
 //!   errors below carry a stable message id, never English prose; the text a
 //!   user reads is resolved here through `ephervex-i18n`.
 
-use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use ephervex_core::{
+    App, ClientRecord, Config, CoreError, FileDisposition, NewClient, NewServer, Paths,
+    ReconciliationReport, ServerRecord,
+};
 use ephervex_i18n::Arg as MessageArg;
 use ephervex_model::{InstanceId, LoaderKind, LoaderSelection, ServerId, StorageClass};
-use ephervex_storage::{
-    ClientRecord, Config, FileDisposition, NewClient, NewServer, Paths, ReconciliationReport,
-    Registry, ServerRecord, Storage, StorageError,
-};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -217,32 +216,32 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
             show_config(&Config::load_or_default(&paths)?, &paths, cli.json)
         }
         Command::Instances { command } => {
-            let storage = open_storage()?;
+            let app = open_app()?;
             match command {
                 InstancesCommand::List => {
-                    list_instances(&storage.registry, cli.json)?;
+                    list_instances(&app, cli.json)?;
                 }
             }
             Ok(())
         }
         Command::Instance { command } => {
-            let storage = open_storage()?;
-            run_instance_command(&storage.registry, command, cli.json)
+            let app = open_app()?;
+            run_instance_command(&app, command, cli.json)
         }
         Command::Servers { command } => {
-            let storage = open_storage()?;
+            let app = open_app()?;
             match command {
-                ServersCommand::List => list_servers(&storage.registry, cli.json)?,
+                ServersCommand::List => list_servers(&app, cli.json)?,
             }
             Ok(())
         }
         Command::Server { command } => {
-            let storage = open_storage()?;
-            run_server_command(&storage.registry, command, cli.json)
+            let app = open_app()?;
+            run_server_command(&app, command, cli.json)
         }
         Command::Reconcile => {
-            let storage = open_storage()?;
-            let report = ephervex_storage::reconcile(&storage.registry)?;
+            let app = open_app()?;
+            let report = app.reconcile()?;
             show_reconciliation(&report, cli.json);
             Ok(())
         }
@@ -253,41 +252,37 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
 ///
 /// This is the one place the language setting is applied, so every command
 /// below it can call `ephervex_i18n::lookup` without worrying about ordering.
-fn open_storage() -> Result<Storage, StorageError> {
-    let storage = ephervex_storage::open_from_environment()?;
+fn open_app() -> Result<App, CoreError> {
+    let app = App::open()?;
 
-    if let Err(error) = ephervex_i18n::select_language(&storage.config.language) {
+    if let Err(error) = ephervex_i18n::select_language(&app.config().language) {
         // A language that is not bundled is worth saying out loud, but it is
         // not a reason to refuse to list instances.
         tracing::warn!(
-            requested = %storage.config.language,
+            requested = %app.config().language,
             %error,
             "keeping English; the configured language is not available"
         );
     }
 
-    Ok(storage)
+    Ok(app)
 }
 
 // ------------------------------------------------------------------- commands
 
-fn run_instance_command(
-    registry: &Registry,
-    command: &InstanceCommand,
-    json: bool,
-) -> anyhow::Result<()> {
+fn run_instance_command(app: &App, command: &InstanceCommand, json: bool) -> anyhow::Result<()> {
     match command {
         InstanceCommand::Create(args) => {
             let loader = build_loader(args.loader, args.loader_version.as_deref())?;
-            let record = registry.create_client(
+            let record = app.create_client(
                 NewClient::new(&args.name, &args.minecraft, loader)
                     .with_storage(args.storage.class()),
             )?;
-            print_instance(registry, &record, json)?;
+            print_instance(app, &record, json)?;
         }
         InstanceCommand::Show { id } => {
-            let record = registry.client(*id)?;
-            print_instance(registry, &record, json)?;
+            let record = app.client(*id)?;
+            print_instance(app, &record, json)?;
         }
         InstanceCommand::Delete { id, keep_files } => {
             let files = if *keep_files {
@@ -295,7 +290,7 @@ fn run_instance_command(
             } else {
                 FileDisposition::Remove
             };
-            registry.delete_client(*id, files)?;
+            app.delete_client(*id, files)?;
             if json {
                 println!(
                     "{}",
@@ -312,11 +307,7 @@ fn run_instance_command(
     Ok(())
 }
 
-fn run_server_command(
-    registry: &Registry,
-    command: &ServerCommand,
-    json: bool,
-) -> anyhow::Result<()> {
+fn run_server_command(app: &App, command: &ServerCommand, json: bool) -> anyhow::Result<()> {
     match command {
         ServerCommand::Create(args) => {
             let loader = build_loader(args.loader, args.loader_version.as_deref())?;
@@ -324,10 +315,10 @@ fn run_server_command(
                 .with_storage(args.storage.class());
             if let Some(client) = args.client {
                 // Fail before creating anything if the link is bogus.
-                registry.client(client)?;
+                app.client(client)?;
                 request = request.linked_to(client);
             }
-            let record = registry.create_server(request)?;
+            let record = app.create_server(request)?;
             print_server(&record, json);
         }
         ServerCommand::Delete { id, keep_files } => {
@@ -336,7 +327,7 @@ fn run_server_command(
             } else {
                 FileDisposition::Remove
             };
-            registry.delete_server(*id, files)?;
+            app.delete_server(*id, files)?;
             println!("deleted {id}");
         }
     }
@@ -442,13 +433,13 @@ fn show_config(config: &Config, paths: &Paths, json: bool) -> anyhow::Result<()>
     Ok(())
 }
 
-fn list_instances(registry: &Registry, json: bool) -> anyhow::Result<()> {
-    let records = registry.list_clients()?;
+fn list_instances(app: &App, json: bool) -> anyhow::Result<()> {
+    let records = app.list_clients()?;
 
     if json {
         let values: Vec<_> = records
             .iter()
-            .map(|record| instance_json(registry, record))
+            .map(|record| instance_json(app, record))
             .collect::<Result<_, _>>()?;
         print_json(&serde_json::Value::Array(values));
         return Ok(());
@@ -484,8 +475,8 @@ fn list_instances(registry: &Registry, json: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn list_servers(registry: &Registry, json: bool) -> anyhow::Result<()> {
-    let records = registry.list_servers()?;
+fn list_servers(app: &App, json: bool) -> anyhow::Result<()> {
+    let records = app.list_servers()?;
 
     if json {
         let values: Vec<_> = records.iter().map(server_json).collect();
@@ -578,9 +569,9 @@ fn show_reconciliation(report: &ReconciliationReport, json: bool) {
 
 // -------------------------------------------------------------------- output
 
-fn print_instance(registry: &Registry, record: &ClientRecord, json: bool) -> anyhow::Result<()> {
+fn print_instance(app: &App, record: &ClientRecord, json: bool) -> anyhow::Result<()> {
     if json {
-        print_json(&instance_json(registry, record)?);
+        print_json(&instance_json(app, record)?);
     } else {
         println!("id:        {}", record.id);
         println!("name:      {}", record.name);
@@ -588,7 +579,7 @@ fn print_instance(registry: &Registry, record: &ClientRecord, json: bool) -> any
         println!("minecraft: {}", record.minecraft_version);
         println!("loader:    {}", record.loader);
         println!("root:      {}", record.root.display());
-        for id in registry.linked_server_ids(record.id)? {
+        for id in app.linked_server_ids(record.id)? {
             println!("server:    {id}");
         }
         for reason in &record.attention {
@@ -612,7 +603,7 @@ fn print_server(record: &ServerRecord, json: bool) {
     }
 }
 
-fn instance_json(registry: &Registry, record: &ClientRecord) -> anyhow::Result<serde_json::Value> {
+fn instance_json(app: &App, record: &ClientRecord) -> anyhow::Result<serde_json::Value> {
     Ok(serde_json::json!({
         "id": record.id.to_string(),
         "name": record.name,
@@ -627,7 +618,7 @@ fn instance_json(registry: &Registry, record: &ClientRecord) -> anyhow::Result<s
         "attention": record.attention,
         "needs_attention": record.needs_attention(),
         "created_at": record.created_at,
-        "linked_server_ids": registry
+        "linked_server_ids": app
             .linked_server_ids(record.id)?
             .iter()
             .map(ToString::to_string)
@@ -653,7 +644,7 @@ fn server_json(record: &ServerRecord) -> serde_json::Value {
     })
 }
 
-fn reconciled_json(records: &[ephervex_storage::ReconciledRecord]) -> serde_json::Value {
+fn reconciled_json(records: &[ephervex_core::ReconciledRecord]) -> serde_json::Value {
     serde_json::Value::Array(
         records
             .iter()
@@ -697,7 +688,7 @@ fn summarize(record: &ClientRecord) -> String {
 fn report_failure(error: &anyhow::Error, json: bool) {
     let technical: Vec<String> = error.chain().map(ToString::to_string).collect();
 
-    let (summary, action) = error.downcast_ref::<StorageError>().map_or_else(
+    let (summary, action) = error.downcast_ref::<CoreError>().map_or_else(
         || (technical.first().cloned().unwrap_or_default(), None),
         localized_failure,
     );
@@ -727,13 +718,13 @@ fn report_failure(error: &anyhow::Error, json: bool) {
 ///
 /// The error itself never held any: it carries a stable message id and
 /// structured fields, and this is where they become a sentence.
-fn localized_failure(error: &StorageError) -> (String, Option<String>) {
+fn localized_failure(error: &CoreError) -> (String, Option<String>) {
     let id = error.message_id();
     let summary = ephervex_i18n::lookup(id);
 
     // Only supply an action when we have the argument it interpolates,
     // otherwise the user would be shown a literal `{$path}`.
-    let action = failing_path(error).and_then(|path| {
+    let action = error.failing_path().and_then(|path| {
         ephervex_i18n::lookup_attribute_args(
             id,
             "action",
@@ -742,76 +733,4 @@ fn localized_failure(error: &StorageError) -> (String, Option<String>) {
     });
 
     (summary, action)
-}
-
-/// The path a storage failure is about, where the error names one.
-///
-/// Split one function per error type rather than one deep match: the arms of a
-/// flattened version are identical across variants, which reads as duplication
-/// and is exactly what clippy objects to.
-fn failing_path(error: &StorageError) -> Option<PathBuf> {
-    match error {
-        StorageError::Config(inner) => config_failing_path(inner),
-        StorageError::Registry(inner) => registry_failing_path(inner),
-        StorageError::Path(inner) => path_failing_path(inner),
-    }
-}
-
-fn config_failing_path(error: &ephervex_storage::ConfigError) -> Option<PathBuf> {
-    use ephervex_storage::ConfigError;
-    match error {
-        ConfigError::Unreadable { path, .. }
-        | ConfigError::Invalid { path, .. }
-        | ConfigError::Unwritable { path, .. } => Some(path.clone()),
-        ConfigError::Path(inner) => path_failing_path(inner),
-        ConfigError::Serialization(_)
-        | ConfigError::UnsupportedSchema { .. }
-        | ConfigError::SecretRejected { .. } => None,
-    }
-}
-
-fn registry_failing_path(error: &ephervex_storage::RegistryError) -> Option<PathBuf> {
-    use ephervex_storage::RegistryError;
-    use ephervex_storage::index::IndexError;
-
-    match error {
-        RegistryError::RootOccupied { path }
-        | RegistryError::Io { path, .. }
-        | RegistryError::Index(IndexError::Unopenable { path, .. }) => Some(path.clone()),
-        RegistryError::Metadata(inner) => metadata_failing_path(inner),
-        RegistryError::Path(inner) => path_failing_path(inner),
-        RegistryError::Index(inner) => index_failing_path(inner),
-        RegistryError::InstanceUnknown { .. } | RegistryError::ServerUnknown { .. } => None,
-    }
-}
-
-fn metadata_failing_path(error: &ephervex_storage::MetadataError) -> Option<PathBuf> {
-    use ephervex_storage::MetadataError;
-    match error {
-        MetadataError::Unwritable { path, .. }
-        | MetadataError::Unreadable { path, .. }
-        | MetadataError::Invalid { path, .. }
-        | MetadataError::UnsupportedVersion { path, .. } => Some(path.clone()),
-        MetadataError::Path(inner) => path_failing_path(inner),
-    }
-}
-
-fn index_failing_path(error: &ephervex_storage::index::IndexError) -> Option<PathBuf> {
-    use ephervex_storage::index::IndexError;
-    match error {
-        IndexError::Unopenable { path, .. } => Some(path.clone()),
-        IndexError::Path(inner) => path_failing_path(inner),
-        IndexError::Query(_)
-        | IndexError::Migration { .. }
-        | IndexError::SchemaFromFuture { .. }
-        | IndexError::MalformedRow { .. } => None,
-    }
-}
-
-fn path_failing_path(error: &ephervex_storage::PathError) -> Option<PathBuf> {
-    use ephervex_storage::PathError;
-    match error {
-        PathError::DirectoryCreation { path, .. } => Some(path.clone()),
-        PathError::NoHomeDirectory => None,
-    }
 }

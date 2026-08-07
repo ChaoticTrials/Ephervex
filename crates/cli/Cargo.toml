@@ -16,14 +16,13 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
+# A frontend depends on `ephervex-core` and nothing below it.
+# No provider crate — storage, download, minecraft, loaders, … — belongs in
+# this list. If a command needs something core does not expose, the fix is to
+# add a service to core, not a dependency here.
 ephervex-core.workspace = true
 ephervex-model.workspace = true
 ephervex-i18n.workspace = true
-# storage and registry support only. `ephervex-core` does not yet expose the storage services, and
-# this crate must not edit it, so the CLI talks to the registry directly for
-# now. Move these calls behind `ephervex-core` when it grows an application
-# service layer, and drop this dependency (docs/architecture.md).
-ephervex-storage.workspace = true
 clap.workspace = true
 tokio.workspace = true
 anyhow.workspace = true

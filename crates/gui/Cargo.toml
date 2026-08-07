@@ -16,6 +16,10 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
+# A frontend depends on `ephervex-core` and nothing below it.
+# No provider crate — storage, download, minecraft, loaders, … — belongs in
+# this list. If a screen needs something core does not expose, the fix is to
+# add a service to core, not a dependency here.
 slint.workspace = true
 ephervex-core.workspace = true
 ephervex-model.workspace = true

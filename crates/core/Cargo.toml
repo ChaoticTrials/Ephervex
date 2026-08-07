@@ -32,3 +32,6 @@ uuid.workspace = true
 chrono.workspace = true
 open.workspace = true
 sysinfo.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
