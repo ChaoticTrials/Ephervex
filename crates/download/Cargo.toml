@@ -22,10 +22,11 @@ sha2.workspace = true
 hex.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-tempfile.workspace = true
-serde.workspace = true
-serde_json.workspace = true
 
 [dev-dependencies]
 wiremock.workspace = true
-tokio.workspace = true
+tempfile.workspace = true
+# `net` is additive on top of the workspace feature set: the interrupted-download
+# integration test drives a raw loopback TCP server so it can cut a response off
+# mid-body, which no mock-HTTP library can express.
+tokio = { workspace = true, features = ["net"] }

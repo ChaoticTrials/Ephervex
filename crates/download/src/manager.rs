@@ -1,0 +1,965 @@
+//! The download manager.
+//!
+//! Everything Ephervex fetches goes through here: Mojang assets and libraries,
+//! loader installers, Modrinth and CurseForge pack files, managed JDK
+//! archives. One implementation means one place where atomicity, hash
+//! verification, retry, cancellation, and progress are correct — rather than
+//! six places where five of them are.
+//!
+//! # The atomicity invariant
+//!
+//! A download is written to `<destination>.part` and only renamed into place
+//! after every supplied hash and size has been verified. A partial or corrupt
+//! artifact therefore never appears at the final path, and that is the
+//! invariant the whole shared-cache design rests on: downstream consumers check for a
+//! file at a cache path and treat its presence as proof that a verified
+//! artifact is there. `rename(2)` within one directory is
+//! atomic on every filesystem Ephervex supports, and the `.part` file lives in
+//! the destination's own directory precisely so the rename never crosses a
+//! filesystem boundary.
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+
+use ephervex_model::{Hash, OperationStatus, Progress};
+use futures_util::StreamExt;
+use futures_util::stream::FuturesUnordered;
+use reqwest::header::{ACCEPT_RANGES, CONTENT_RANGE, ETAG, IF_RANGE, RANGE};
+use reqwest::{Client, Response, StatusCode, Url};
+use tokio::fs::{self, File, OpenOptions};
+use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+use tokio::sync::Semaphore;
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, trace, warn};
+
+use crate::allowlist::{UrlPolicyError, check_transport, redacted};
+use crate::client::{HttpConfig, build_client};
+use crate::error::{AttemptFailure, DownloadError};
+use crate::progress::{ByteTally, OperationReporter};
+use crate::retry::{RetryPolicy, retry_after};
+use crate::verify::HashVerifier;
+
+/// Suffix for in-flight downloads. Kept in the destination directory so the
+/// finalizing rename is a same-filesystem operation.
+const PART_SUFFIX: &str = "part";
+
+/// Where an artifact came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactSource {
+    /// The file was already at the destination. Because of the atomicity
+    /// invariant, its presence is sufficient evidence that it was verified when
+    /// it was written, so it is not fetched or re-hashed again.
+    AlreadyCached,
+    /// Fetched over the network during this call.
+    Network,
+}
+
+/// The result of a completed download.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DownloadOutcome {
+    pub path: PathBuf,
+    pub bytes: u64,
+    pub source: ArtifactSource,
+}
+
+/// One artifact to fetch.
+#[derive(Debug, Clone)]
+pub struct DownloadRequest {
+    url: Url,
+    destination: PathBuf,
+    expected_hashes: Vec<Hash>,
+    expected_size: Option<u64>,
+    label: Option<String>,
+}
+
+impl DownloadRequest {
+    /// Creates a request.
+    ///
+    /// The destination is supplied by the caller — normally from
+    /// [`crate::CacheLayout`] — and is never derived from the URL's last path
+    /// segment or from a `Content-Disposition` header. A remote server does not
+    /// get to choose where a file lands.
+    #[must_use]
+    pub fn new(url: Url, destination: impl Into<PathBuf>) -> Self {
+        Self {
+            url,
+            destination: destination.into(),
+            expected_hashes: Vec::new(),
+            expected_size: None,
+            label: None,
+        }
+    }
+
+    /// Parses a URL and applies the transport policy, rejecting anything that
+    /// is not HTTPS or that embeds credentials.
+    pub fn parse(url: &str, destination: impl Into<PathBuf>) -> Result<Self, UrlPolicyError> {
+        let parsed = Url::parse(url.trim()).map_err(|_| UrlPolicyError::Malformed {
+            url: url.trim().to_owned(),
+        })?;
+        check_transport(&parsed, false)?;
+        Ok(Self::new(parsed, destination))
+    }
+
+    /// Adds a hash to verify. Every supplied hash must match.
+    #[must_use]
+    pub fn verifying(mut self, hash: Hash) -> Self {
+        self.expected_hashes.push(hash);
+        self
+    }
+
+    /// Adds several hashes to verify.
+    #[must_use]
+    pub fn verifying_all(mut self, hashes: impl IntoIterator<Item = Hash>) -> Self {
+        self.expected_hashes.extend(hashes);
+        self
+    }
+
+    /// Declares the expected size in bytes.
+    #[must_use]
+    pub const fn sized(mut self, bytes: u64) -> Self {
+        self.expected_size = Some(bytes);
+        self
+    }
+
+    /// Sets a human-readable label for progress reporting.
+    ///
+    /// Display only. It is deliberately not used to build any path, because it
+    /// generally originates in untrusted pack metadata.
+    #[must_use]
+    pub fn labeled(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
+        self
+    }
+
+    #[must_use]
+    pub fn url(&self) -> &Url {
+        &self.url
+    }
+
+    #[must_use]
+    pub fn destination(&self) -> &Path {
+        &self.destination
+    }
+
+    #[must_use]
+    pub fn expected_size(&self) -> Option<u64> {
+        self.expected_size
+    }
+
+    #[must_use]
+    pub fn expected_hashes(&self) -> &[Hash] {
+        &self.expected_hashes
+    }
+}
+
+/// Manager-level settings.
+#[derive(Debug, Clone)]
+pub struct DownloaderConfig {
+    /// Maximum simultaneous transfers. Bounded so an asset index with a few
+    /// thousand entries does not open a few thousand sockets.
+    pub concurrency: usize,
+    pub retry: RetryPolicy,
+    pub http: HttpConfig,
+    /// Whether to resume an interrupted transfer within a call. See
+    /// [`DownloadManager`] for the conditions under which resuming is safe.
+    pub allow_resume: bool,
+    /// Hard ceiling on a single response body, if any. Pack metadata is
+    /// untrusted, so a caller importing a bug report can cap how much disk one
+    /// entry may consume.
+    pub max_bytes: Option<u64>,
+}
+
+impl Default for DownloaderConfig {
+    fn default() -> Self {
+        Self {
+            concurrency: 6,
+            retry: RetryPolicy::default(),
+            http: HttpConfig::default(),
+            allow_resume: true,
+            max_bytes: None,
+        }
+    }
+}
+
+/// Whether the current transfer is being tracked on its own or as part of a
+/// batch.
+#[derive(Debug)]
+struct ProgressCursor<'a> {
+    reporter: &'a OperationReporter,
+    tally: Option<&'a ByteTally>,
+    /// Bytes this file has currently contributed to the batch tally.
+    contributed: u64,
+}
+
+impl ProgressCursor<'_> {
+    fn report(&mut self, bytes: u64, file_total: Option<u64>) {
+        let progress = match self.tally {
+            Some(tally) => {
+                let progress = tally.adjust(self.contributed, bytes);
+                self.contributed = bytes;
+                progress
+            }
+            None => Progress {
+                current: bytes,
+                total: file_total,
+            },
+        };
+        self.reporter.set_progress(progress);
+    }
+}
+
+/// State carried across the retry attempts of a single [`DownloadManager::download`] call.
+#[derive(Debug)]
+struct ResumeState {
+    /// Bytes already written to the `.part` file.
+    offset: u64,
+    /// The strong `ETag` of the response those bytes came from, when the server
+    /// supplied one.
+    validator: Option<String>,
+    /// Whether that response advertised `Accept-Ranges: bytes` *and* delivered
+    /// its body verbatim. See [`byte_offsets_are_meaningful`] for why the
+    /// second half matters.
+    ranges_advertised: bool,
+    /// Hash state covering exactly the first `offset` bytes of the `.part`
+    /// file. Kept in lockstep with the file so a resumed transfer does not have
+    /// to re-read what it already wrote.
+    verifier: HashVerifier,
+}
+
+impl ResumeState {
+    fn new(expected: &[Hash]) -> Self {
+        Self {
+            offset: 0,
+            validator: None,
+            ranges_advertised: false,
+            verifier: HashVerifier::new(expected),
+        }
+    }
+
+    fn restart(&mut self) {
+        self.offset = 0;
+        self.validator = None;
+        self.ranges_advertised = false;
+        self.verifier.reset();
+    }
+}
+
+/// The reusable download subsystem.
+///
+/// # Resume safety
+///
+/// Resuming a transfer means asserting that the bytes already on disk are a
+/// prefix of the bytes the server is about to send. Nothing about a plain
+/// `Range` request establishes that: the resource may have changed between the
+/// two requests, and the result would be a file that is a silent splice of two
+/// different versions. Where hashes are supplied that corruption is caught, but
+/// Sources may provide no hashes at all, so correctness cannot
+/// depend on the verifier.
+///
+/// Resume is therefore attempted only when all of the following hold:
+///
+/// 1. The interrupted response carried a **strong** `ETag`. Weak validators
+///    (`W/"…"`) are explicitly not usable with `If-Range` (RFC 9110 section 13.1.3):
+///    they permit semantically equivalent but byte-different representations,
+///    which is precisely what must not be spliced. `Last-Modified` is also not
+///    used — its one-second granularity makes it a strong validator only under
+///    conditions the client cannot verify.
+/// 2. The request carries `If-Range: <that etag>` alongside `Range`, so the
+///    *server* decides: `206` only if the representation is unchanged, and a
+///    full `200` otherwise, which this code treats as "start over".
+/// 3. The interrupted response advertised `Accept-Ranges: bytes` and delivered
+///    its body verbatim rather than transparently decoded — see
+///    [`byte_offsets_are_meaningful`], because a `Range` counts octets of the
+///    encoded representation while the `.part` file holds decoded ones.
+/// 4. The returned `Content-Range` starts at exactly the offset that was asked
+///    for. Anything else restarts the transfer.
+/// 5. The `.part` file's length still equals the recorded offset.
+///
+/// Resume is scoped to a single `download` call. A `.part` file left behind by
+/// an earlier process is *not* resumed: its validator died with that process,
+/// so condition 1 cannot be established. Such a file is truncated and the
+/// transfer starts from zero.
+#[derive(Debug, Clone)]
+pub struct DownloadManager {
+    client: Client,
+    config: DownloaderConfig,
+    permits: Arc<Semaphore>,
+}
+
+impl DownloadManager {
+    /// Builds a manager and its HTTP client.
+    pub fn new(config: DownloaderConfig) -> Result<Self, DownloadError> {
+        let client = build_client(&config.http)?;
+        Ok(Self::with_client(client, config))
+    }
+
+    /// Builds a manager around an existing client, so a process can share one
+    /// connection pool across subsystems.
+    #[must_use]
+    pub fn with_client(client: Client, config: DownloaderConfig) -> Self {
+        let concurrency = config.concurrency.max(1);
+        Self {
+            client,
+            config,
+            permits: Arc::new(Semaphore::new(concurrency)),
+        }
+    }
+
+    #[must_use]
+    pub fn config(&self) -> &DownloaderConfig {
+        &self.config
+    }
+
+    /// Fetches one artifact, reporting byte progress.
+    pub async fn download(
+        &self,
+        request: &DownloadRequest,
+        reporter: &OperationReporter,
+        cancel: &CancellationToken,
+    ) -> Result<DownloadOutcome, DownloadError> {
+        let mut cursor = ProgressCursor {
+            reporter,
+            tally: None,
+            contributed: 0,
+        };
+        reporter.begin(request.label.clone());
+        let outcome = self.fetch(request, &mut cursor, cancel).await;
+        reporter.finish(match &outcome {
+            Ok(_) => OperationStatus::Completed,
+            Err(error) if error.is_cancellation() => OperationStatus::Canceled,
+            Err(error) => OperationStatus::Failed(error.to_string()),
+        });
+        outcome
+    }
+
+    /// Fetches many artifacts with bounded concurrency, reporting one
+    /// aggregated byte-progress bar for the batch.
+    ///
+    /// The first failure cancels the remaining transfers: a pack import that
+    /// has already lost a required file gains nothing by continuing to hammer
+    /// the CDN for the rest.
+    pub async fn download_all(
+        &self,
+        requests: &[DownloadRequest],
+        reporter: &OperationReporter,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<DownloadOutcome>, DownloadError> {
+        reporter.begin(None);
+        let sizes: Vec<Option<u64>> = requests
+            .iter()
+            .map(DownloadRequest::expected_size)
+            .collect();
+        let tally = ByteTally::new(&sizes);
+        // A child token so one failure stops the siblings without canceling
+        // whatever else the caller's token governs.
+        let batch = cancel.child_token();
+
+        let mut pending: FuturesUnordered<_> = requests
+            .iter()
+            .enumerate()
+            .map(|(index, request)| {
+                let tally = &tally;
+                let batch = &batch;
+                async move {
+                    let mut cursor = ProgressCursor {
+                        reporter,
+                        tally: Some(tally),
+                        contributed: 0,
+                    };
+                    if let Some(label) = request.label.clone() {
+                        reporter.set_step(Some(label));
+                    }
+                    (index, self.fetch(request, &mut cursor, batch).await)
+                }
+            })
+            .collect();
+
+        let mut outcomes: Vec<Option<DownloadOutcome>> =
+            (0..requests.len()).map(|_| None).collect();
+        let mut failure: Option<DownloadError> = None;
+        while let Some((index, result)) = pending.next().await {
+            match result {
+                Ok(outcome) => outcomes[index] = Some(outcome),
+                Err(error) => {
+                    if failure.is_none() {
+                        batch.cancel();
+                        failure = Some(error);
+                    }
+                }
+            }
+        }
+
+        if let Some(error) = failure {
+            reporter.finish(if error.is_cancellation() {
+                OperationStatus::Canceled
+            } else {
+                OperationStatus::Failed(error.to_string())
+            });
+            return Err(error);
+        }
+        reporter.finish(OperationStatus::Completed);
+        Ok(outcomes.into_iter().flatten().collect())
+    }
+
+    /// The retry loop around a single artifact.
+    async fn fetch(
+        &self,
+        request: &DownloadRequest,
+        cursor: &mut ProgressCursor<'_>,
+        cancel: &CancellationToken,
+    ) -> Result<DownloadOutcome, DownloadError> {
+        let url_label = redacted(&request.url);
+        check_transport(&request.url, self.config.http.allow_plaintext_http)?;
+
+        if let Some(cached) = already_cached(&request.destination, cursor).await {
+            trace!(url = %url_label, path = %request.destination.display(), "artifact already cached");
+            return Ok(cached);
+        }
+
+        let _permit = self
+            .permits
+            .acquire()
+            .await
+            .map_err(|_| DownloadError::ShuttingDown)?;
+
+        // Re-check under the permit: a sibling transfer in the same batch may
+        // have deposited the identical content-addressed artifact while this
+        // one was queued.
+        if let Some(cached) = already_cached(&request.destination, cursor).await {
+            return Ok(cached);
+        }
+
+        let part = part_path(&request.destination);
+        let mut state = ResumeState::new(&request.expected_hashes);
+        let mut attempt: u32 = 0;
+
+        let result = loop {
+            attempt += 1;
+            let outcome = Transfer {
+                manager: self,
+                request,
+                part: &part,
+                state: &mut state,
+                cursor: &mut *cursor,
+                cancel,
+                url_label: url_label.clone(),
+            }
+            .run()
+            .await;
+            match outcome {
+                Ok(bytes) => break Ok(bytes),
+                Err(AttemptFailure {
+                    error,
+                    retry_after: hint,
+                }) => {
+                    let exhausted = attempt >= self.config.retry.max_attempts;
+                    if !error.is_transient() || exhausted || cancel.is_cancelled() {
+                        break Err(if error.is_transient() && exhausted && attempt > 1 {
+                            DownloadError::RetriesExhausted {
+                                url: url_label.clone(),
+                                attempts: attempt,
+                                source: Box::new(error),
+                            }
+                        } else {
+                            error
+                        });
+                    }
+                    let delay = self.config.retry.delay_after(attempt, hint);
+                    warn!(
+                        url = %url_label,
+                        attempt,
+                        max_attempts = self.config.retry.max_attempts,
+                        delay_ms = delay.as_millis(),
+                        error = %error,
+                        "download failed, retrying"
+                    );
+                    if sleep_or_cancel(delay, cancel).await.is_err() {
+                        break Err(DownloadError::Canceled {
+                            url: url_label.clone(),
+                        });
+                    }
+                }
+            }
+        };
+
+        match result {
+            Ok(bytes) => Ok(DownloadOutcome {
+                path: request.destination.clone(),
+                bytes,
+                source: ArtifactSource::Network,
+            }),
+            Err(error) => {
+                // The `.part` file is only useful for resuming inside this
+                // call, and its validator does not survive the process. Leaving
+                // it behind would litter the cache with bytes nothing can ever
+                // use.
+                if let Err(cleanup) = fs::remove_file(&part).await {
+                    if cleanup.kind() != std::io::ErrorKind::NotFound {
+                        debug!(path = %part.display(), error = %cleanup, "could not remove partial download");
+                    }
+                }
+                Err(error)
+            }
+        }
+    }
+}
+
+/// One HTTP attempt at one artifact.
+///
+/// Exists as a type rather than as a long function so that the four steps —
+/// decide whether resuming is provable, send, stream, finalize — are separately
+/// readable, and so none of them has to be handed six borrowed parameters.
+struct Transfer<'a, 'c> {
+    manager: &'a DownloadManager,
+    request: &'a DownloadRequest,
+    part: &'a Path,
+    state: &'a mut ResumeState,
+    cursor: &'a mut ProgressCursor<'c>,
+    cancel: &'a CancellationToken,
+    /// The URL as it may appear in logs and errors: query and credentials
+    /// already stripped.
+    url_label: String,
+}
+
+/// What the response said about where to write and how much is coming.
+#[derive(Debug, Clone, Copy)]
+struct BodyPlan {
+    /// Offset in the `.part` file the body continues from.
+    write_offset: u64,
+    /// Complete size of the artifact, when the server disclosed it.
+    total: Option<u64>,
+}
+
+impl Transfer<'_, '_> {
+    async fn run(mut self) -> Result<u64, AttemptFailure> {
+        if self.cancel.is_cancelled() {
+            return Err(self.canceled());
+        }
+        if let Some(parent) = self.request.destination.parent() {
+            fs::create_dir_all(parent)
+                .await
+                .map_err(|source| DownloadError::io(parent, source))?;
+        }
+
+        let resuming = self.prepare_resume().await;
+        let response = self.send(resuming).await?;
+        let plan = self.plan_body(&response, resuming)?;
+        let written = self.stream(response, plan).await?;
+        self.finalize(written).await
+    }
+
+    /// Decides whether the resume conditions documented on [`DownloadManager`]
+    /// all hold, resetting the state when they do not.
+    async fn prepare_resume(&mut self) -> bool {
+        let on_disk = fs::metadata(self.part).await.map(|meta| meta.len()).ok();
+        let resumable = self.manager.config.allow_resume
+            && self.state.offset > 0
+            && self.state.validator.is_some()
+            && self.state.ranges_advertised
+            && on_disk == Some(self.state.offset);
+        if !resumable && self.state.offset > 0 {
+            debug!(url = %self.url_label, "cannot prove resume safety, restarting from byte zero");
+            self.state.restart();
+        }
+        resumable
+    }
+
+    async fn send(&self, resuming: bool) -> Result<Response, AttemptFailure> {
+        let mut builder = self.manager.client.get(self.request.url.clone());
+        if let Some(validator) = self.state.validator.clone().filter(|_| resuming) {
+            // `If-Range` hands the decision to the server: it answers 206 only
+            // if the representation is byte-for-byte the one those `.part`
+            // bytes came from, and a plain 200 otherwise.
+            builder = builder
+                .header(RANGE, format!("bytes={}-", self.state.offset))
+                .header(IF_RANGE, validator);
+        }
+
+        // Cancellation has to cover the request step too, not just the body:
+        // a slow server that has not sent its headers yet is exactly when a
+        // user reaches for the cancel button.
+        let sent = tokio::select! {
+            biased;
+            () = self.cancel.cancelled() => return Err(self.canceled()),
+            sent = builder.send() => sent,
+        };
+        let response = sent.map_err(|source| DownloadError::Transport {
+            url: self.url_label.clone(),
+            source,
+        })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            return Err(AttemptFailure {
+                retry_after: retry_after(response.headers()),
+                error: DownloadError::HttpStatus {
+                    url: self.url_label.clone(),
+                    status: status.as_u16(),
+                },
+            });
+        }
+        Ok(response)
+    }
+
+    /// Reconciles what was asked for with what arrived.
+    fn plan_body(
+        &mut self,
+        response: &Response,
+        resuming: bool,
+    ) -> Result<BodyPlan, AttemptFailure> {
+        let status = response.status();
+        let partial = status == StatusCode::PARTIAL_CONTENT;
+
+        if resuming && !partial {
+            // The representation changed, so everything already written is
+            // stale. This is exactly the case `If-Range` exists to signal.
+            debug!(url = %self.url_label, %status, "full body returned for a ranged request, restarting");
+            self.state.restart();
+        }
+        if !resuming && partial {
+            // A 206 nobody asked for: refusing beats guessing which part of the
+            // resource this is.
+            return Err(self.range_not_honored());
+        }
+
+        let mut plan = BodyPlan {
+            write_offset: 0,
+            total: response.content_length(),
+        };
+        if partial {
+            match parse_content_range(response) {
+                Some((start, complete)) if start == self.state.offset => {
+                    plan.write_offset = start;
+                    plan.total = complete;
+                }
+                _ => {
+                    self.state.restart();
+                    return Err(self.range_not_honored());
+                }
+            }
+        }
+
+        self.state.validator = strong_etag(response);
+        self.state.ranges_advertised = byte_offsets_are_meaningful(response);
+        debug!(
+            url = %self.url_label,
+            %status,
+            resumed_from = plan.write_offset,
+            total = ?plan.total,
+            "streaming download"
+        );
+        Ok(plan)
+    }
+
+    /// Writes the body into the `.part` file, hashing as it goes.
+    async fn stream(&mut self, response: Response, plan: BodyPlan) -> Result<u64, AttemptFailure> {
+        let mut file = self.open_part(plan.write_offset).await?;
+        let mut written = plan.write_offset;
+        self.state.offset = plan.write_offset;
+
+        let mut stream = Box::pin(response.bytes_stream());
+        loop {
+            let next = tokio::select! {
+                biased;
+                () = self.cancel.cancelled() => return Err(self.canceled()),
+                next = stream.next() => next,
+            };
+            let Some(chunk) = next else { break };
+            let chunk = chunk.map_err(|source| DownloadError::Transport {
+                url: self.url_label.clone(),
+                source,
+            })?;
+
+            written = written.saturating_add(chunk.len() as u64);
+            if let Some(limit) = self.manager.config.max_bytes {
+                if written > limit {
+                    return Err(DownloadError::BodyTooLarge {
+                        url: self.url_label.clone(),
+                        limit,
+                    }
+                    .into());
+                }
+            }
+            // Stop as soon as the body overruns its declared size rather than
+            // reading an unbounded response to the end just to reject it.
+            if let Some(expected) = self.request.expected_size {
+                if written > expected {
+                    return Err(self.size_mismatch(expected, written));
+                }
+            }
+
+            file.write_all(&chunk)
+                .await
+                .map_err(|source| DownloadError::io(self.part, source))?;
+            // Hashed only after the write succeeds, so the verifier state always
+            // describes exactly the first `state.offset` bytes of the file —
+            // which is what makes resuming without re-reading them sound.
+            self.state.verifier.update(&chunk);
+            self.state.offset = written;
+            self.cursor.report(written, plan.total);
+        }
+
+        file.flush()
+            .await
+            .map_err(|source| DownloadError::io(self.part, source))?;
+        // Durable before the rename: a crash must not be able to leave a
+        // renamed-but-empty artifact at a cache path.
+        file.sync_all()
+            .await
+            .map_err(|source| DownloadError::io(self.part, source))?;
+        Ok(written)
+    }
+
+    /// Verifies, then renames into place.
+    async fn finalize(&mut self, written: u64) -> Result<u64, AttemptFailure> {
+        if let Some(expected) = self.request.expected_size {
+            if written != expected {
+                return Err(self.size_mismatch(expected, written));
+            }
+        }
+
+        // Taken out so the digests are finalized exactly once; any retry from
+        // here restarts at byte zero anyway.
+        let verifier = std::mem::replace(
+            &mut self.state.verifier,
+            HashVerifier::new(&self.request.expected_hashes),
+        );
+        if let Err(mismatch) = verifier.finish() {
+            // Bad bytes must not survive where a later attempt could mistake
+            // them for a valid prefix.
+            self.discard_part("mismatched download").await;
+            self.state.restart();
+            warn!(
+                url = %self.url_label,
+                algorithm = %mismatch.algorithm,
+                "hash mismatch, discarding artifact"
+            );
+            return Err(DownloadError::HashMismatch {
+                url: self.url_label.clone(),
+                algorithm: mismatch.algorithm,
+                expected: mismatch.expected,
+                actual: mismatch.actual,
+            }
+            .into());
+        }
+
+        fs::rename(self.part, &self.request.destination)
+            .await
+            .map_err(|source| DownloadError::io(&self.request.destination, source))?;
+        sync_parent_directory(&self.request.destination).await;
+        self.cursor.report(written, Some(written));
+        Ok(written)
+    }
+
+    /// Opens the `.part` file positioned at `offset`, truncating when starting
+    /// over.
+    async fn open_part(&self, offset: u64) -> Result<File, DownloadError> {
+        let mut options = OpenOptions::new();
+        options.write(true).create(true);
+        if offset == 0 {
+            options.truncate(true);
+        }
+        let mut file = options
+            .open(self.part)
+            .await
+            .map_err(|source| DownloadError::io(self.part, source))?;
+        if offset > 0 {
+            file.seek(std::io::SeekFrom::Start(offset))
+                .await
+                .map_err(|source| DownloadError::io(self.part, source))?;
+        }
+        Ok(file)
+    }
+
+    async fn discard_part(&self, reason: &str) {
+        if let Err(error) = fs::remove_file(self.part).await {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                debug!(path = %self.part.display(), %error, "could not remove {reason}");
+            }
+        }
+    }
+
+    fn canceled(&self) -> AttemptFailure {
+        DownloadError::Canceled {
+            url: self.url_label.clone(),
+        }
+        .into()
+    }
+
+    fn range_not_honored(&self) -> AttemptFailure {
+        DownloadError::RangeNotHonored {
+            url: self.url_label.clone(),
+        }
+        .into()
+    }
+
+    fn size_mismatch(&self, expected: u64, actual: u64) -> AttemptFailure {
+        DownloadError::SizeMismatch {
+            url: self.url_label.clone(),
+            expected,
+            actual,
+        }
+        .into()
+    }
+}
+
+/// Reports an artifact that is already at its destination.
+///
+/// No re-hashing: the atomicity invariant means nothing partial or unverified
+/// can be sitting at that path, so re-reading it would only cost I/O
+async fn already_cached(
+    destination: &Path,
+    cursor: &mut ProgressCursor<'_>,
+) -> Option<DownloadOutcome> {
+    let bytes = fs::metadata(destination)
+        .await
+        .ok()
+        .filter(std::fs::Metadata::is_file)?
+        .len();
+    cursor.report(bytes, Some(bytes));
+    Some(DownloadOutcome {
+        path: destination.to_path_buf(),
+        bytes,
+        source: ArtifactSource::AlreadyCached,
+    })
+}
+
+/// `<destination>.part`, in the destination's own directory.
+fn part_path(destination: &Path) -> PathBuf {
+    let mut name = destination.as_os_str().to_os_string();
+    name.push(".");
+    name.push(PART_SUFFIX);
+    PathBuf::from(name)
+}
+
+/// Waits, unless the caller cancels first.
+async fn sleep_or_cancel(delay: Duration, cancel: &CancellationToken) -> Result<(), ()> {
+    tokio::select! {
+        biased;
+        () = cancel.cancelled() => Err(()),
+        () = tokio::time::sleep(delay) => Ok(()),
+    }
+}
+
+/// Returns the response's `ETag` only if it is a strong validator.
+///
+/// Weak validators are rejected outright rather than stored, so the resume path
+/// cannot accidentally use one (RFC 9110 section 13.1.3).
+fn strong_etag(response: &Response) -> Option<String> {
+    let value = response.headers().get(ETAG)?.to_str().ok()?.trim();
+    if value.starts_with("W/") || !value.starts_with('"') || !value.ends_with('"') {
+        return None;
+    }
+    Some(value.to_owned())
+}
+
+/// Whether a byte offset into the `.part` file means the same thing to the
+/// server as it does to us.
+///
+/// Two conditions, and the second one is easy to miss. `Range` counts octets of
+/// the *encoded* representation, but the client stores the *decoded* body: if
+/// the response arrived `Content-Encoding: gzip` and reqwest inflated it
+/// transparently, then "resume from byte 1500" asks the server for a point in
+/// the compressed stream that has nothing to do with byte 1500 of what is on
+/// disk, and the result would be a silently spliced, corrupt artifact.
+///
+/// reqwest signals exactly this case: `Response::content_length` is documented
+/// to return `None` when the body was automatically decoded, because the
+/// declared length no longer describes what the caller receives. Requiring a
+/// known length therefore rules out every transparently decoded response
+/// without having to inspect headers reqwest has already consumed.
+fn byte_offsets_are_meaningful(response: &Response) -> bool {
+    let advertises_ranges = response
+        .headers()
+        .get(ACCEPT_RANGES)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("bytes"));
+    advertises_ranges && response.content_length().is_some()
+}
+
+/// Parses `Content-Range: bytes <start>-<end>/<complete-or-*>`.
+///
+/// Returns the start offset and the complete length when the server disclosed
+/// it.
+fn parse_content_range(response: &Response) -> Option<(u64, Option<u64>)> {
+    let value = response.headers().get(CONTENT_RANGE)?.to_str().ok()?;
+    let rest = value.trim().strip_prefix("bytes ")?;
+    let (range, complete) = rest.split_once('/')?;
+    let (start, _end) = range.split_once('-')?;
+    let start = start.trim().parse::<u64>().ok()?;
+    let complete = complete.trim().parse::<u64>().ok();
+    Some((start, complete))
+}
+
+/// Best-effort durability for the rename itself.
+///
+/// Renaming makes the artifact visible immediately, but on a crash the
+/// directory entry could be lost unless the directory is synced. Failure here
+/// is logged and ignored: the artifact is already correct and visible, and some
+/// filesystems refuse `fsync` on a directory handle.
+async fn sync_parent_directory(destination: &Path) {
+    let Some(parent) = destination.parent() else {
+        return;
+    };
+    match File::open(parent).await {
+        Ok(dir) => {
+            if let Err(error) = dir.sync_all().await {
+                trace!(path = %parent.display(), %error, "directory fsync unavailable");
+            }
+        }
+        Err(error) => trace!(path = %parent.display(), %error, "could not open directory to fsync"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use super::*;
+
+    #[test]
+    fn the_part_file_is_a_sibling_of_the_destination() {
+        let part = part_path(Path::new("/cache/ephervex/downloads/sha1/da/abc.jar"));
+        assert_eq!(
+            part,
+            PathBuf::from("/cache/ephervex/downloads/sha1/da/abc.jar.part")
+        );
+        assert_eq!(
+            part.parent(),
+            Path::new("/cache/ephervex/downloads/sha1/da/abc.jar").parent(),
+            "rename must not cross a filesystem boundary"
+        );
+    }
+
+    #[test]
+    fn a_request_refuses_a_non_https_url_at_construction() {
+        let error = DownloadRequest::parse("http://example.invalid/a.jar", "/tmp/a.jar")
+            .expect_err("plaintext must be refused");
+        assert!(matches!(error, UrlPolicyError::SchemeNotPermitted { .. }));
+    }
+
+    #[test]
+    fn a_request_refuses_a_file_url_at_construction() {
+        let error = DownloadRequest::parse("file:///etc/passwd", "/tmp/a")
+            .expect_err("file urls must be refused");
+        assert!(matches!(error, UrlPolicyError::SchemeNotPermitted { .. }));
+    }
+
+    #[test]
+    fn a_label_never_influences_the_destination() {
+        let request = DownloadRequest::parse("https://example.invalid/a.jar", "/cache/fixed.jar")
+            .expect("https url")
+            .labeled("../../../../etc/cron.d/evil");
+        assert_eq!(request.destination(), Path::new("/cache/fixed.jar"));
+    }
+
+    #[test]
+    fn concurrency_is_never_configured_below_one() {
+        let config = DownloaderConfig {
+            concurrency: 0,
+            ..DownloaderConfig::default()
+        };
+        let manager = DownloadManager::new(config).expect("client builds");
+        assert_eq!(manager.permits.available_permits(), 1);
+    }
+}

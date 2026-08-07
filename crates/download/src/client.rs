@@ -1,0 +1,118 @@
+//! The shared HTTP client.
+//!
+//! One client for the whole process: connection pooling and TLS session reuse
+//! are the difference between a pack import that takes thirty seconds and one
+//! that takes three minutes, and a single construction point is the only way to
+//! guarantee that every request Ephervex makes carries the same `User-Agent`
+//! and the same transport rules.
+//!
+//! TLS is rustls. The workspace declares `reqwest` with
+//! `default-features = false` and the `rustls` feature precisely so that
+//! nothing in the dependency graph links OpenSSL — a launcher that has to build
+//! and run on arbitrary Linux distributions cannot afford a system-OpenSSL
+//! ABI dependency.
+
+use std::time::Duration;
+
+use ephervex_model::user_agent;
+use reqwest::{Client, redirect};
+
+use crate::error::DownloadError;
+
+/// Transport-level settings for every outbound request.
+#[derive(Debug, Clone)]
+pub struct HttpConfig {
+    /// Identifies the launcher to upstream services, including a project URL
+    /// so they can contact us instead of silently blocking us.
+    pub user_agent: String,
+
+    /// How long to wait for a TCP connection and TLS handshake.
+    pub connect_timeout: Duration,
+
+    /// How long a *stalled* transfer is tolerated.
+    ///
+    /// Deliberately used instead of an overall request timeout: a managed JDK
+    /// archive on a slow connection is legitimately a multi-minute download,
+    /// and a wall-clock deadline would abort it. What must never happen is
+    /// hanging forever on a connection that has stopped delivering bytes, and
+    /// that is what a per-read timeout catches, producing an explicit error
+    /// states, not indefinite spinners).
+    pub read_timeout: Duration,
+
+    /// Redirects are followed but bounded. CDNs redirect
+    /// constantly, so refusing is not an option; following without a limit
+    /// turns a redirect loop into a hang.
+    pub max_redirects: usize,
+
+    /// Escape hatch for the loopback HTTP servers used by the integration
+    /// tests. Never enabled in production: `false` also switches reqwest into
+    /// HTTPS-only mode, which additionally blocks an *https → http* downgrade
+    /// part-way through a redirect chain.
+    pub allow_plaintext_http: bool,
+}
+
+impl Default for HttpConfig {
+    fn default() -> Self {
+        Self {
+            user_agent: user_agent(),
+            connect_timeout: Duration::from_secs(15),
+            read_timeout: Duration::from_secs(30),
+            max_redirects: 5,
+            allow_plaintext_http: false,
+        }
+    }
+}
+
+impl HttpConfig {
+    /// Configuration for tests that talk to a loopback HTTP server, with
+    /// timeouts short enough that a hung test fails rather than stalls CI.
+    #[must_use]
+    pub fn for_loopback_tests() -> Self {
+        Self {
+            connect_timeout: Duration::from_secs(2),
+            read_timeout: Duration::from_secs(5),
+            allow_plaintext_http: true,
+            ..Self::default()
+        }
+    }
+}
+
+/// Builds the shared client.
+pub fn build_client(config: &HttpConfig) -> Result<Client, DownloadError> {
+    Client::builder()
+        .user_agent(config.user_agent.clone())
+        .https_only(!config.allow_plaintext_http)
+        .redirect(redirect::Policy::limited(config.max_redirects))
+        .connect_timeout(config.connect_timeout)
+        .read_timeout(config.read_timeout)
+        .build()
+        .map_err(|source| DownloadError::ClientBuild { source })
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use super::*;
+
+    #[test]
+    fn the_default_config_identifies_ephervex_and_refuses_plaintext() {
+        let config = HttpConfig::default();
+        assert!(config.user_agent.starts_with("Ephervex/"));
+        assert!(
+            config
+                .user_agent
+                .contains("github.com/ChaoticTrials/ephervex")
+        );
+        assert!(!config.allow_plaintext_http);
+    }
+
+    #[test]
+    fn redirects_are_bounded_by_default() {
+        assert_eq!(HttpConfig::default().max_redirects, 5);
+    }
+
+    #[test]
+    fn the_client_builds_with_the_default_configuration() {
+        assert!(build_client(&HttpConfig::default()).is_ok());
+    }
+}
