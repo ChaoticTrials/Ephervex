@@ -12,13 +12,15 @@
 //!   errors below carry a stable message id, never English prose; the text a
 //!   user reads is resolved here through `ephervex-i18n`.
 
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use ephervex_core::{
     App, ArgumentForm, Artifact, AssetIndexRef, ClientRecord, Config, CoreError, FileDisposition,
-    Freshness, NewClient, NewServer, Paths, ReconciliationReport, ReleaseListing, ServerRecord,
-    VersionMetadata, VersionRecord,
+    Freshness, JavaPathChoice, JavaPlan, JavaPlanRequest, JavaRuntime, ManagedInstallation,
+    NewClient, NewServer, Paths, ReconciliationReport, ReleaseListing, RequirementBasis,
+    RuntimeInventory, ServerRecord, VersionMetadata, VersionRecord,
 };
 use ephervex_i18n::Arg as MessageArg;
 use ephervex_model::{InstanceId, LoaderKind, LoaderSelection, ServerId, StorageClass};
@@ -71,6 +73,11 @@ enum Command {
         #[command(subcommand)]
         command: MinecraftCommand,
     },
+    /// Inspect and manage Java runtimes.
+    Java {
+        #[command(subcommand)]
+        command: JavaCommand,
+    },
     /// Reconcile the index against what is actually on disk.
     Reconcile,
 }
@@ -85,6 +92,35 @@ enum MinecraftCommand {
     },
     /// Resolve one release's complete metadata.
     Version { id: String },
+}
+
+#[derive(Debug, Subcommand)]
+enum JavaCommand {
+    /// List the Java runtimes found on this computer.
+    List,
+    /// Rescan for Java runtimes, ignoring the cached result.
+    Refresh,
+    /// Probe one Java executable and report what it is.
+    Test { path: PathBuf },
+    /// Show which runtime would run a Minecraft version, and why.
+    Select {
+        /// Minecraft version id, e.g. `1.12.2`.
+        minecraft: String,
+        /// Apply this instance's Java and JVM overrides.
+        #[arg(long)]
+        instance: Option<InstanceId>,
+        /// Use this runtime instead of selecting one. Outranks every setting.
+        #[arg(long)]
+        java_path: Option<PathBuf>,
+        /// Download a managed runtime if nothing installed is compatible.
+        #[arg(long)]
+        install: bool,
+    },
+    /// Download and install a managed Temurin runtime.
+    Install {
+        /// Java major version, e.g. `21`.
+        major: u32,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -264,6 +300,14 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
             // filesystem keep running on a plain thread with no executor.
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(run_minecraft_command(&app, command, cli.json))
+        }
+        Command::Java { command } => {
+            let app = open_app()?;
+            // Probing forks a JVM per candidate and the managed provider
+            // downloads; both need an executor, for the same reason the
+            // Minecraft commands do.
+            let runtime = tokio::runtime::Runtime::new()?;
+            runtime.block_on(run_java_command(&app, command, cli.json))
         }
         Command::Reconcile => {
             let app = open_app()?;
@@ -559,6 +603,273 @@ async fn run_minecraft_command(
         }
     }
     Ok(())
+}
+
+async fn run_java_command(app: &App, command: &JavaCommand, json: bool) -> anyhow::Result<()> {
+    match command {
+        JavaCommand::List => show_runtimes(app.java_runtimes().await?.as_ref(), json),
+        JavaCommand::Refresh => {
+            show_runtimes(app.refresh_java_runtimes().await?.as_ref(), json);
+        }
+        JavaCommand::Test { path } => {
+            let runtime = app.test_java_runtime(path).await?;
+            show_runtime_detail(&runtime, json);
+        }
+        JavaCommand::Select {
+            minecraft,
+            instance,
+            java_path,
+            install,
+        } => {
+            let plan = app
+                .plan_java(
+                    minecraft,
+                    &JavaPlanRequest {
+                        instance: *instance,
+                        explicit_path: java_path.clone(),
+                        install_if_missing: *install,
+                    },
+                )
+                .await?;
+            show_java_plan(&plan, json);
+        }
+        JavaCommand::Install { major } => {
+            let installed = app.install_java(*major).await?;
+            show_managed_install(&installed, json);
+        }
+    }
+    Ok(())
+}
+
+fn show_runtimes(inventory: &RuntimeInventory, json: bool) {
+    if json {
+        print_json(&serde_json::json!({
+                    "runtimes": inventory.runtimes.iter().map(runtime_json).collect::<Vec<_>>(),
+                    "failures": inventory
+        .failures
+        .iter()
+        .map(|failure| serde_json::json!({
+                            "path": failure.origin.path,
+                            "source": failure.origin.kind.as_str(),
+                            "error": failure.error.to_string(),
+                        }))
+        .collect::<Vec<_>>(),
+                    "candidates_considered": inventory.candidates,
+                    "executables_probed": inventory.probed,
+                    "scanned_at": inventory.scanned_at,
+                }));
+        return;
+    }
+
+    if inventory.runtimes.is_empty() {
+        println!("{}", ephervex_i18n::lookup("java-runtimes-list-empty"));
+    } else {
+        for runtime in &inventory.runtimes {
+            println!(
+                "{:<4} {:<12} {:<8} {:<14} {}",
+                runtime.version.major,
+                runtime.version_string,
+                runtime.arch,
+                runtime.primary_source().as_str(),
+                runtime.executable.display()
+            );
+            println!("     {}", runtime.vendor);
+        }
+        println!(
+            "{}",
+            ephervex_i18n::lookup_args(
+                "java-runtimes-list-count",
+                [("count", MessageArg::from(inventory.runtimes.len()))]
+            )
+        );
+    }
+
+    // The deduplication is the whole reason a scan of a typical /usr/lib/jvm
+    // does not report the same JDK four times; saying so makes it checkable.
+    eprintln!(
+        "{} candidate paths considered, {} distinct executables probed",
+        inventory.candidates, inventory.probed
+    );
+    for failure in &inventory.failures {
+        eprintln!(
+            "{}",
+            ephervex_i18n::lookup_args(
+                "java-runtime-probe-failed",
+                [("path", MessageArg::from(failure.origin.path.as_path()))]
+            )
+        );
+    }
+}
+
+fn show_runtime_detail(runtime: &JavaRuntime, json: bool) {
+    if json {
+        print_json(&runtime_json(runtime));
+        return;
+    }
+    println!("path:     {}", runtime.executable.display());
+    println!(
+        "java:     {} (major {})",
+        runtime.version_string, runtime.version.major
+    );
+    println!("runtime:  {}", runtime.runtime_version);
+    println!("vendor:   {}", runtime.vendor);
+    println!("arch:     {}", runtime.arch);
+    if let Some(home) = &runtime.home {
+        println!("home:     {}", home.display());
+    }
+    for origin in &runtime.origins {
+        println!("found:    {} via {}", origin.path.display(), origin.kind);
+    }
+}
+
+fn show_java_plan(plan: &JavaPlan, json: bool) {
+    if json {
+        print_json(&serde_json::json!({
+                    "minecraft_version": plan.minecraft_version,
+                    "required_major": plan.required.major,
+                    "requirement_basis": plan.required.basis.as_str(),
+                    "mojang_runtime_component": match &plan.required.basis {
+                        RequirementBasis::Metadata { component } => Some(component.clone()),
+                        RequirementBasis::FallbackTable => None,
+                    },
+                    "choice": java_choice_json(&plan.choice),
+                    "runtime": runtime_json(&plan.runtime),
+                    "installed_now": plan.installed_now,
+                    "rejected": plan
+        .rejected
+        .iter()
+        .map(|rejected| serde_json::json!({
+                            "path": rejected.executable,
+                            "version": rejected.version.to_string(),
+                            "rule": rejected.rejection.rule,
+                            "reason": rejected.rejection.reason.to_string(),
+                        }))
+        .collect::<Vec<_>>(),
+                    "jvm": {
+                        "min_memory_mib": plan.jvm.min_memory_mib,
+                        "max_memory_mib": plan.jvm.max_memory_mib,
+                        "jvm_args": plan.jvm.jvm_args,
+                        "overrides_global": plan.jvm.overrides_global,
+                        "overridden_fields": plan
+        .jvm
+        .overridden
+        .iter()
+        .map(|field| field.as_str())
+        .collect::<Vec<_>>(),
+                    },
+                }));
+        return;
+    }
+
+    println!("minecraft: {}", plan.minecraft_version);
+    match &plan.required.basis {
+        RequirementBasis::Metadata { component } => println!(
+            "requires:  java {} (Mojang runtime {component})",
+            plan.required.major
+        ),
+        // Saying which of the two answered matters: one is Mojang's statement,
+        // the other is this build's table.
+        RequirementBasis::FallbackTable => println!(
+            "requires:  java {} (compatibility table; the metadata declares none)",
+            plan.required.major
+        ),
+    }
+    match &plan.choice {
+        JavaPathChoice::Pinned { path, source } => println!(
+            "selected:  {} (pinned by {})",
+            path.display(),
+            source.as_str()
+        ),
+        JavaPathChoice::Automatic => println!("selected:  {}", plan.runtime.executable.display()),
+    }
+    println!(
+        "runtime:   {} {} ({}, {})",
+        plan.runtime.version_string,
+        plan.runtime.arch,
+        plan.runtime.vendor,
+        plan.runtime.primary_source().as_str()
+    );
+    if plan.installed_now {
+        println!("installed: downloaded during this command");
+    }
+    println!(
+        "memory:    {} MiB – {} MiB{}",
+        plan.jvm.min_memory_mib,
+        plan.jvm.max_memory_mib,
+        if plan.jvm.overrides_global {
+            "  (instance overrides global settings)"
+        } else {
+            ""
+        }
+    );
+    if !plan.jvm.jvm_args.is_empty() {
+        println!("jvm args:  {}", plan.jvm.jvm_args.join(" "));
+    }
+    for rejected in &plan.rejected {
+        println!(
+            "rejected:  {} — {}",
+            rejected.executable.display(),
+            rejected.rejection
+        );
+    }
+}
+
+fn show_managed_install(installed: &ManagedInstallation, json: bool) {
+    if json {
+        print_json(&serde_json::json!({
+            "release": installed.release.release_name,
+            "vendor": installed.release.vendor,
+            "architecture": installed.release.architecture.as_str(),
+            "directory": installed.directory,
+            "newly_installed": installed.newly_installed,
+            "runtime": runtime_json(&installed.runtime),
+        }));
+        return;
+    }
+    println!("release:   {}", installed.release.release_name);
+    println!("directory: {}", installed.directory.display());
+    println!("java:      {}", installed.runtime.executable.display());
+    println!(
+        "status:    {}",
+        if installed.newly_installed {
+            "downloaded and installed"
+        } else {
+            "already installed"
+        }
+    );
+}
+
+fn runtime_json(runtime: &JavaRuntime) -> serde_json::Value {
+    serde_json::json!({
+            "path": runtime.executable,
+            "major": runtime.version.major,
+            "version": runtime.version_string,
+            "runtime_version": runtime.runtime_version,
+            "vendor": runtime.vendor,
+            "arch": runtime.arch,
+            "home": runtime.home,
+            "managed": runtime.is_managed(),
+            "source": runtime.primary_source().as_str(),
+            "origins": runtime
+    .origins
+    .iter()
+    .map(|origin| serde_json::json!({
+                    "source": origin.kind.as_str(),
+                    "path": origin.path,
+                }))
+    .collect::<Vec<_>>(),
+        })
+}
+
+fn java_choice_json(choice: &JavaPathChoice) -> serde_json::Value {
+    match choice {
+        JavaPathChoice::Pinned { path, source } => serde_json::json!({
+            "kind": "pinned",
+            "path": path,
+            "pinned_by": source.as_str(),
+        }),
+        JavaPathChoice::Automatic => serde_json::json!({"kind": "automatic"}),
+    }
 }
 
 fn show_releases(listing: &ReleaseListing, limit: Option<usize>, json: bool) {

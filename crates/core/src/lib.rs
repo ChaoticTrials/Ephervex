@@ -26,7 +26,7 @@ pub mod app;
 pub mod error;
 pub mod logging;
 
-pub use app::App;
+pub use app::{App, JavaPlan, JavaPlanRequest, global_java_settings};
 pub use error::{CoreError, CoreResult};
 pub use logging::init_tracing;
 
@@ -37,6 +37,12 @@ pub use logging::init_tracing;
 /// `Registry` that produced one — nor the `VersionCatalog` that produced a
 /// `ReleaseListing`.
 pub use ephervex_download::Freshness;
+pub use ephervex_java::{
+    EffectiveJvmSettings, GlobalJavaSettings, JavaError, JavaOrigin, JavaPathChoice, JavaRuntime,
+    JavaSourceKind, JavaVersion, JvmField, ManagedInstallation, ManagedRelease, PinSource,
+    ProbeFailure, RejectedRuntime, RejectionReason, RequiredJava, RequirementBasis, RuleRejection,
+    RuntimeInventory,
+};
 pub use ephervex_minecraft::{
     ArgumentEntry, ArgumentForm, ArgumentGroup, Arguments, Artifact, AssetIndexRef,
     JavaRequirement, LatestVersions, Library, LoggingConfig, MINIMUM_SUPPORTED_VERSION,

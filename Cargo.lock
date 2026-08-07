@@ -1601,10 +1601,12 @@ dependencies = [
 name = "ephervex-java"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "ephervex-download",
+ "ephervex-minecraft",
  "ephervex-model",
  "flate2",
- "hex",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -1612,7 +1614,9 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
+ "tokio-util",
  "tracing",
+ "wiremock",
 ]
 
 [[package]]

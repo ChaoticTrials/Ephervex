@@ -12,6 +12,7 @@
 
 use std::path::PathBuf;
 
+use ephervex_java::JavaError;
 use ephervex_minecraft::MinecraftError;
 use ephervex_storage::StorageError;
 
@@ -27,6 +28,10 @@ pub enum CoreError {
     /// version's document.
     #[error(transparent)]
     Minecraft(#[from] MinecraftError),
+
+    /// Java runtime discovery, selection, or managed installation.
+    #[error(transparent)]
+    Java(#[from] JavaError),
 }
 
 impl CoreError {
@@ -40,7 +45,28 @@ impl CoreError {
         match self {
             Self::Storage(error) => error.message_id(),
             Self::Minecraft(error) => error.message_id(),
+            Self::Java(error) => error.message_id(),
         }
+    }
+
+    /// The Java major version this failure is about, where it names one.
+    ///
+    /// Exists for the same reason as [`Self::failing_path`]: a frontend that
+    /// wants to offer "download Java 21" must not have to match on `JavaError`
+    /// to find the number, because doing so would put the whole Java error
+    /// hierarchy on its compile-time surface.
+    #[must_use]
+    pub const fn required_java_major(&self) -> Option<u32> {
+        match self {
+            Self::Java(error) => error.required_major(),
+            _ => None,
+        }
+    }
+
+    /// Whether downloading a managed runtime is a sensible next step.
+    #[must_use]
+    pub const fn managed_java_would_help(&self) -> bool {
+        matches!(self, Self::Java(error) if error.managed_download_would_help())
     }
 
     /// The path this failure is about, where it names one.
@@ -56,6 +82,7 @@ impl CoreError {
         match self {
             Self::Storage(error) => storage_failing_path(error),
             Self::Minecraft(error) => error.failing_path(),
+            Self::Java(error) => error.failing_path(),
         }
     }
 }

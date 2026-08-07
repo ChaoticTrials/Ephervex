@@ -14,16 +14,25 @@ workspace = true
 [dependencies]
 ephervex-model.workspace = true
 ephervex-download.workspace = true
+# The Java requirement lives in a Minecraft version document, and the fallback
+# table for the documents that predate it is keyed on Minecraft version ids.
+# Both are `ephervex-minecraft`'s types; re-parsing version ids here would be a
+# second ordering implementation to keep in step. `loaders` depends on both this
+# crate and that one, so the graph stays acyclic.
+ephervex-minecraft.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+chrono.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 flate2.workspace = true
 tar.workspace = true
-hex.workspace = true
-sha2.workspace = true
 
 [dev-dependencies]
+sha2.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
+wiremock.workspace = true

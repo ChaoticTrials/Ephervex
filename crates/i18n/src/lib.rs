@@ -488,6 +488,45 @@ mod tests {
     }
 
     #[test]
+    fn every_message_id_referenced_by_java_runtime_errors_exists() {
+        // `ephervex-java` owns no `i18n.toml` either, so its
+        // `JavaError::message_id()`, `ProbeError::message_id()`, and
+        // `ArchiveError::message_id()` arms are checked here. An id with no
+        // message renders as a placeholder in the user's face.
+        for id in [
+            "error-java-no-compatible-runtime",
+            "error-java-pinned-incompatible",
+            "error-java-runtime-unusable",
+            "error-java-auto-detect-disabled",
+            "error-java-managed-download-disabled",
+            "error-java-managed-arch-unsupported",
+            "error-java-managed-api-unusable",
+            "error-java-managed-index-unavailable",
+            "error-java-managed-index-invalid",
+            "error-java-managed-release-missing",
+            "error-java-managed-release-malformed",
+            "error-java-managed-download-failed",
+            "error-java-managed-extraction-failed",
+            "error-java-managed-runtime-unusable",
+            "error-java-managed-cache-key-invalid",
+            "error-java-io",
+            "error-java-archive-unsafe",
+            "error-java-archive-too-large",
+            "error-java-archive-unreadable",
+            "error-java-archive-unwritable",
+            "error-java-archive-empty",
+            "error-java-probe-not-executable",
+            "error-java-probe-unintelligible",
+            "error-java-probe-timed-out",
+            "java-runtimes-list-empty",
+            "java-runtimes-list-count",
+            "java-runtime-probe-failed",
+        ] {
+            assert!(has(id), "missing message id: {id}");
+        }
+    }
+
+    #[test]
     fn an_offline_version_list_offers_a_next_step_without_needing_a_path() {
         // Most error actions interpolate `$path`. The network ones cannot, and
         // a frontend must still be able to show them.

@@ -200,3 +200,81 @@ error-minecraft-metadata-url-invalid = Mojang's metadata contains a download add
     .action = Ephervex only downloads over HTTPS and never from an address that embeds credentials.
 
 error-minecraft-cache-key-invalid = A download could not be given a safe location in the cache.
+
+## Java runtime errors 
+
+# A missing compatible runtime leads to a compatible installation or a
+# managed download, never a near-miss the launcher picked on the user's behalf.
+error-java-no-compatible-runtime = None of the Java runtimes on this computer can run that Minecraft version.
+    .action = Let Ephervex download a compatible Java runtime, or install one yourself and refresh the list.
+
+error-java-pinned-incompatible = The Java runtime chosen for this instance cannot run that Minecraft version.
+    .action = Clear the Java override so Ephervex picks a compatible runtime, or point it at one that matches.
+
+error-java-runtime-unusable = That path is not a usable Java runtime.
+    .action = Point Ephervex at the `java` program itself, usually inside a `bin` folder.
+
+error-java-auto-detect-disabled = Automatic Java detection is turned off and no Java path is set.
+    .action = Turn automatic detection back on in Settings, or set a preferred Java path.
+
+error-java-managed-download-disabled = No installed Java runtime is compatible, and automatic Java downloads are turned off.
+    .action = Turn on "Auto-download compatible Java" in Settings, or install a matching Java runtime yourself.
+
+error-java-managed-arch-unsupported = No Java runtime is published for this computer's processor architecture.
+    .action = Install a Java runtime through your distribution's package manager instead.
+
+error-java-managed-api-unusable = The Java download service address is not usable.
+
+error-java-managed-index-unavailable = The list of downloadable Java runtimes could not be fetched.
+    .action = Check your network connection and try again. Java runtimes already installed still work.
+
+error-java-managed-index-invalid = The Java download service returned something Ephervex could not understand.
+
+error-java-managed-release-missing = The Java download service publishes no build of that Java version for this computer.
+
+error-java-managed-release-malformed = The published Java build is missing a download address or a checksum.
+    .action = Ephervex refuses to install a Java runtime it cannot verify.
+
+error-java-managed-download-failed = The Java runtime could not be downloaded.
+    .action = Check your network connection and try again.
+
+# Extraction limits and traversal checks are security boundaries, and
+# a refusal has to say that something was actually wrong with the archive.
+error-java-archive-unsafe = The downloaded Java archive tried to write files outside its own folder.
+    .action = Ephervex refused the archive and installed nothing. If this repeats, something between you and the download service is altering it.
+
+error-java-archive-too-large = The downloaded Java archive is larger than Ephervex is willing to unpack.
+
+error-java-archive-unreadable = The downloaded Java archive could not be read.
+
+error-java-archive-unwritable = A file could not be written while unpacking the Java runtime.
+    .action = Check free space and permissions on { $path }.
+
+error-java-archive-empty = The downloaded Java archive contained nothing Ephervex could install.
+
+error-java-managed-extraction-failed = Unpacking the Java runtime did not finish.
+
+error-java-managed-runtime-unusable = The downloaded Java runtime could not be started.
+    .action = Ephervex did not use it. Try again, or install a Java runtime through your distribution's package manager.
+
+error-java-managed-cache-key-invalid = The Java runtime could not be given a safe location in the cache.
+
+error-java-io = A file needed for the Java runtime could not be written.
+    .action = Check free space and permissions on { $path }.
+
+error-java-probe-not-executable = That Java program could not be started.
+
+error-java-probe-unintelligible = That program did not report a Java version.
+
+error-java-probe-timed-out = That Java program did not respond in time.
+
+## Java runtime output 
+
+java-runtimes-list-empty = No Java runtimes were found on this computer.
+
+java-runtimes-list-count = { $count ->
+        [one] { $count } Java runtime
+       *[other] { $count } Java runtimes
+    }
+
+java-runtime-probe-failed = { $path } could not be identified as a Java runtime.

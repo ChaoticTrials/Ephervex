@@ -20,6 +20,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::NetworkAccess;
 
+/// Re-exported so `ephervex_storage::JavaOverride` keeps resolving.
+///
+/// These definitions live in `ephervex-model` because storage and Java selection are independent
+/// reader: `ephervex-java` resolves an override against the global settings and
+/// cannot depend on the storage crate to do it.
+pub use ephervex_model::{JavaOverride, JvmSettings};
+
 /// Where an instance came from, and enough of a reference to say so in the UI.
 ///
 /// The reference is an untranslated technical string — a file name, a pack
@@ -54,27 +61,6 @@ impl Default for ImportSource {
     fn default() -> Self {
         Self::manual()
     }
-}
-
-/// A specific Java runtime pinned to one instance .
-///
-/// Imported archives may *name* a Java path; that path is never trusted or
-/// executed just because it appeared in a Prism export .
-/// A value here means the user chose it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct JavaOverride {
-    pub path: PathBuf,
-}
-
-/// Per-instance JVM settings overriding the global ones .
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct JvmSettings {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub min_memory_mib: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_memory_mib: Option<u32>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub jvm_args: Vec<String>,
 }
 
 /// How one server binds to the network.

@@ -110,6 +110,12 @@ pub struct JavaConfig {
     pub auto_download: bool,
     pub min_memory_mib: u32,
     pub max_memory_mib: u32,
+    /// the preferred Java path setting, or empty for `Auto...`.
+    ///
+    /// A string rather than an `Option<PathBuf>` because that is what the
+    /// settings field holds, and because clearing the box has to be
+    /// expressible in TOML without deleting the key.
+    pub preferred_path: String,
     /// Extra JVM arguments applied to every instance unless overridden.
     pub jvm_args: Vec<String>,
     /// Keys this build does not know about. See [`Config::unknown`].
@@ -124,9 +130,19 @@ impl Default for JavaConfig {
             auto_download: true,
             min_memory_mib: 512,
             max_memory_mib: 4096,
+            preferred_path: String::new(),
             jvm_args: Vec::new(),
             unknown: toml::Table::new(),
         }
+    }
+}
+
+impl JavaConfig {
+    /// The configured preferred runtime, or `None` for automatic selection.
+    #[must_use]
+    pub fn preferred_path(&self) -> Option<PathBuf> {
+        let trimmed = self.preferred_path.trim();
+        (!trimmed.is_empty()).then(|| PathBuf::from(trimmed))
     }
 }
 
