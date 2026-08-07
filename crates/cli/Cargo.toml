@@ -19,9 +19,17 @@ workspace = true
 ephervex-core.workspace = true
 ephervex-model.workspace = true
 ephervex-i18n.workspace = true
+# storage and registry support only. `ephervex-core` does not yet expose the storage services, and
+# this crate must not edit it, so the CLI talks to the registry directly for
+# now. Move these calls behind `ephervex-core` when it grows an application
+# service layer, and drop this dependency (docs/architecture.md).
+ephervex-storage.workspace = true
 clap.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

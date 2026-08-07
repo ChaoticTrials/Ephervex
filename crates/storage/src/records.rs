@@ -1,0 +1,400 @@
+//! The persisted shape of a client instance and a server.
+//!
+//! These records are written to two places that must agree: the SQLite index
+//! and the instance's own `.launcher/*.json`. The index is a cache of
+//! authority; the metadata file is what makes a lost database recoverable
+//! (ADR 0002), which is why every field the launcher needs to reconstruct an
+//! instance lives here and not only in a table.
+//!
+//! Provider-specific detail deliberately does not appear. A Modrinth pack's
+//! version id or a CurseForge project id belongs in a provider structure under
+//! `.launcher/source/`, not in the common model.
+
+use std::path::PathBuf;
+
+use chrono::{DateTime, Utc};
+use ephervex_model::{
+    AttentionReason, ImportSourceKind, InstanceId, LoaderSelection, ServerId, StorageClass,
+};
+use serde::{Deserialize, Serialize};
+
+use crate::config::NetworkAccess;
+
+/// Where an instance came from, and enough of a reference to say so in the UI.
+///
+/// The reference is an untranslated technical string — a file name, a pack
+/// slug, a version id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportSource {
+    pub kind: ImportSourceKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+}
+
+impl ImportSource {
+    /// Created in the launcher rather than imported.
+    #[must_use]
+    pub const fn manual() -> Self {
+        Self {
+            kind: ImportSourceKind::Manual,
+            reference: None,
+        }
+    }
+
+    #[must_use]
+    pub fn imported(kind: ImportSourceKind, reference: impl Into<String>) -> Self {
+        Self {
+            kind,
+            reference: Some(reference.into()),
+        }
+    }
+}
+
+impl Default for ImportSource {
+    fn default() -> Self {
+        Self::manual()
+    }
+}
+
+/// A specific Java runtime pinned to one instance .
+///
+/// Imported archives may *name* a Java path; that path is never trusted or
+/// executed just because it appeared in a Prism export .
+/// A value here means the user chose it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JavaOverride {
+    pub path: PathBuf,
+}
+
+/// Per-instance JVM settings overriding the global ones .
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct JvmSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_memory_mib: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_memory_mib: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub jvm_args: Vec<String>,
+}
+
+/// How one server binds to the network.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerNetworkSettings {
+    /// Off for test servers. Exposing an offline-mode server to a network is
+    /// warned about rather than blocked.
+    pub online_mode: bool,
+    pub access: NetworkAccess,
+    pub port: u16,
+    /// Only meaningful for [`NetworkAccess::Custom`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bind_address: Option<String>,
+}
+
+impl Default for ServerNetworkSettings {
+    fn default() -> Self {
+        Self {
+            online_mode: false,
+            access: NetworkAccess::Localhost,
+            port: 25565,
+            bind_address: None,
+        }
+    }
+}
+
+impl ServerNetworkSettings {
+    /// Whether this configuration exposes an unauthenticated server beyond the
+    /// local machine, which the UI must warn about.
+    #[must_use]
+    pub const fn is_unauthenticated_and_exposed(&self) -> bool {
+        !self.online_mode && !matches!(self.access, NetworkAccess::Localhost)
+    }
+}
+
+/// A client instance as stored (`ClientInstance`).
+///
+/// `linked_server_ids` from the specification is deliberately *not* a field:
+/// the link is owned by the server row, and a denormalized copy here would go
+/// stale the moment a server is deleted. Ask the registry with
+/// [`crate::Registry::linked_server_ids`] instead.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientRecord {
+    pub id: InstanceId,
+    /// User-facing and user-editable. Never used to build a path.
+    pub name: String,
+    pub root: PathBuf,
+    pub storage: StorageClass,
+    /// Untranslated Minecraft version id, e.g. `1.20.1`.
+    pub minecraft_version: String,
+    pub loader: LoaderSelection,
+    #[serde(default)]
+    pub source: ImportSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub java_override: Option<JavaOverride>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jvm_override: Option<JvmSettings>,
+    /// Why this instance is not straightforwardly runnable, if it is not. The
+    /// launcher never presents an approximation as faithful.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attention: Vec<AttentionReason>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_launched_at: Option<DateTime<Utc>>,
+}
+
+impl ClientRecord {
+    /// Whether this instance needs the user's attention before it can be
+    /// trusted to reproduce anything.
+    #[must_use]
+    pub fn needs_attention(&self) -> bool {
+        !self.attention.is_empty()
+    }
+
+    /// Records an attention reason, ignoring an exact duplicate so repeated
+    /// reconciliation runs do not grow the list.
+    pub fn add_attention(&mut self, reason: AttentionReason) {
+        if !self.attention.contains(&reason) {
+            self.attention.push(reason);
+        }
+    }
+}
+
+/// A server instance as stored (`ServerInstance`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerRecord {
+    pub id: ServerId,
+    pub name: String,
+    pub root: PathBuf,
+    pub storage: StorageClass,
+    /// The client this server was created from, if any. Several servers may
+    /// point at one client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linked_client_id: Option<InstanceId>,
+    pub minecraft_version: String,
+    pub loader: LoaderSelection,
+    #[serde(default)]
+    pub network: ServerNetworkSettings,
+    /// Whether `eula=true` may be written for this server. Never set on the
+    /// user's behalf.
+    #[serde(default)]
+    pub eula_accepted: bool,
+    #[serde(default)]
+    pub source: ImportSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub java_override: Option<JavaOverride>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jvm_override: Option<JvmSettings>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attention: Vec<AttentionReason>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_started_at: Option<DateTime<Utc>>,
+}
+
+impl ServerRecord {
+    #[must_use]
+    pub fn needs_attention(&self) -> bool {
+        !self.attention.is_empty()
+    }
+
+    pub fn add_attention(&mut self, reason: AttentionReason) {
+        if !self.attention.contains(&reason) {
+            self.attention.push(reason);
+        }
+    }
+}
+
+/// The request to create a client instance.
+///
+/// Storage defaults to [`StorageClass::Temporary`] because that is the
+/// product's defining default and a caller that forgets to choose should get
+/// the disposable one, not the one that accumulates on disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewClient {
+    pub name: String,
+    pub storage: StorageClass,
+    pub minecraft_version: String,
+    pub loader: LoaderSelection,
+    pub source: ImportSource,
+    pub attention: Vec<AttentionReason>,
+}
+
+impl NewClient {
+    #[must_use]
+    pub fn new(
+        name: impl Into<String>,
+        minecraft_version: impl Into<String>,
+        loader: LoaderSelection,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            storage: StorageClass::default_for_new_instance(),
+            minecraft_version: minecraft_version.into(),
+            loader,
+            source: ImportSource::manual(),
+            attention: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub const fn with_storage(mut self, storage: StorageClass) -> Self {
+        self.storage = storage;
+        self
+    }
+
+    #[must_use]
+    pub fn with_source(mut self, source: ImportSource) -> Self {
+        self.source = source;
+        self
+    }
+
+    #[must_use]
+    pub fn with_attention(mut self, attention: Vec<AttentionReason>) -> Self {
+        self.attention = attention;
+        self
+    }
+}
+
+/// The request to create a server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewServer {
+    pub name: String,
+    pub storage: StorageClass,
+    pub minecraft_version: String,
+    pub loader: LoaderSelection,
+    pub linked_client_id: Option<InstanceId>,
+    pub network: ServerNetworkSettings,
+    pub source: ImportSource,
+    pub attention: Vec<AttentionReason>,
+}
+
+impl NewServer {
+    #[must_use]
+    pub fn new(
+        name: impl Into<String>,
+        minecraft_version: impl Into<String>,
+        loader: LoaderSelection,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            storage: StorageClass::default_for_new_instance(),
+            minecraft_version: minecraft_version.into(),
+            loader,
+            linked_client_id: None,
+            network: ServerNetworkSettings::default(),
+            source: ImportSource::manual(),
+            attention: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub const fn with_storage(mut self, storage: StorageClass) -> Self {
+        self.storage = storage;
+        self
+    }
+
+    /// Links this server to a client instance.
+    #[must_use]
+    pub const fn linked_to(mut self, client: InstanceId) -> Self {
+        self.linked_client_id = Some(client);
+        self
+    }
+
+    #[must_use]
+    pub fn with_network(mut self, network: ServerNetworkSettings) -> Self {
+        self.network = network;
+        self
+    }
+
+    #[must_use]
+    pub fn with_source(mut self, source: ImportSource) -> Self {
+        self.source = source;
+        self
+    }
+}
+
+/// Whether deleting a record should also delete its files.
+///
+/// Never inferred. Explicit user-initiated deletion is the only thing that
+/// removes an instance's contents (ADR 0006).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileDisposition {
+    /// Remove the index row and the instance directory.
+    Remove,
+    /// Remove the index row only, leaving the directory on disk. Used by
+    /// reconciliation and by "forget without deleting".
+    Keep,
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use super::*;
+    use ephervex_model::LoaderKind;
+
+    #[test]
+    fn new_instances_are_temporary_unless_asked_otherwise() {
+        // The product's defining default: forgetting to choose gives you the
+        // disposable one.
+        let request = NewClient::new("repro", "1.20.1", LoaderSelection::vanilla());
+        assert_eq!(request.storage, StorageClass::Temporary);
+        assert_eq!(
+            request.with_storage(StorageClass::Persistent).storage,
+            StorageClass::Persistent
+        );
+    }
+
+    #[test]
+    fn an_offline_server_reachable_beyond_localhost_is_flagged() {
+        let mut network = ServerNetworkSettings::default();
+        assert!(!network.is_unauthenticated_and_exposed());
+
+        network.access = NetworkAccess::Lan;
+        assert!(network.is_unauthenticated_and_exposed());
+
+        network.online_mode = true;
+        assert!(!network.is_unauthenticated_and_exposed());
+    }
+
+    #[test]
+    fn repeated_attention_reasons_are_not_accumulated() {
+        // Reconciliation runs on every startup; a warning list that grows by
+        // one entry per launch would be useless.
+        let mut record = sample_client();
+        record.add_attention(AttentionReason::MissingRoot);
+        record.add_attention(AttentionReason::MissingRoot);
+        assert_eq!(record.attention, vec![AttentionReason::MissingRoot]);
+        assert!(record.needs_attention());
+    }
+
+    #[test]
+    fn records_round_trip_through_json_which_is_how_recovery_works() {
+        let record = sample_client();
+        let json = serde_json::to_string(&record).expect("serialize");
+        let back: ClientRecord = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(record, back);
+    }
+
+    fn sample_client() -> ClientRecord {
+        let now = Utc::now();
+        ClientRecord {
+            id: InstanceId::new(),
+            name: "Crash repro".to_owned(),
+            root: PathBuf::from("/tmp/ephervex/instances/x"),
+            storage: StorageClass::Temporary,
+            minecraft_version: "1.20.1".to_owned(),
+            loader: LoaderSelection::exact(LoaderKind::NeoForge, "47.1.106"),
+            source: ImportSource::imported(ImportSourceKind::ModrinthPack, "report.mrpack"),
+            java_override: None,
+            jvm_override: Some(JvmSettings {
+                max_memory_mib: Some(6144),
+                ..JvmSettings::default()
+            }),
+            attention: Vec::new(),
+            created_at: now,
+            updated_at: now,
+            last_launched_at: None,
+        }
+    }
+}
