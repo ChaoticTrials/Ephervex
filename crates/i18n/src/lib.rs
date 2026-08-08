@@ -462,6 +462,64 @@ mod tests {
     }
 
     #[test]
+    fn every_message_id_referenced_by_instance_management_exists() {
+        // `ephervex-options` and `ephervex-storage` own no `i18n.toml`, so
+        // `OptionsError::message_id()`, `InvalidPreferenceValue::message_id()`,
+        // and the instance and preference management CLI ids are checked here.
+        for id in [
+            "error-options-unreadable",
+            "error-options-unwritable",
+            "error-options-preference-value-invalid",
+            "error-registry-root-missing",
+            "instance-duplicated",
+            "instance-duplicate-skipped-links",
+            "instance-folder-unavailable",
+            "preferences-none-managed",
+            "preferences-managed-count",
+            "preferences-applied",
+            "preferences-unsupported-for-version",
+            "preference-set",
+            "preference-unmanaged",
+        ] {
+            assert!(has(id), "missing message id: {id}");
+        }
+
+        // The two refusals a user can act on carry a next step, and both of
+        // them interpolate: an action that lost its argument would render a
+        // literal `{$…}`.
+        let syntax = lookup_attribute_args(
+            "error-options-preference-value-invalid",
+            "action",
+            [("syntax", Arg::from("auto, or 1 to 4"))],
+        )
+        .expect("a refused value says what would have worked");
+        assert!(syntax.contains("auto, or 1 to 4"), "{syntax}");
+
+        let folder = lookup_attribute_args(
+            "instance-folder-unavailable",
+            "action",
+            [("folder", Arg::from("crash-reports"))],
+        )
+        .expect("an unavailable folder explains itself");
+        assert!(folder.contains("crash-reports"), "{folder}");
+    }
+
+    #[test]
+    fn a_vanished_instance_directory_does_not_read_as_a_missing_record() {
+        // Keep the record of a persistent instance whose files are gone,
+        // so the two failures must not share a sentence.
+        assert_ne!(
+            lookup("error-registry-root-missing"),
+            lookup("error-registry-instance-unknown")
+        );
+        assert!(
+            lookup_attribute("error-registry-root-missing", "action")
+                .expect("a next step")
+                .contains("kept the record")
+        );
+    }
+
+    #[test]
     fn every_message_id_referenced_by_minecraft_metadata_errors_exists() {
         // Same arrangement as above: `ephervex-minecraft` owns no `i18n.toml`,
         // so its `MinecraftError::message_id()` arms are checked here.

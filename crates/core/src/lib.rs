@@ -25,14 +25,16 @@
 pub mod account;
 pub mod app;
 pub mod error;
+pub mod instance;
 pub mod launch;
 pub mod logging;
 
 pub use account::{AccountStatus, AccountSummary, ApiSettings, LoginOptions, TOKEN_REFRESH_MARGIN};
 pub use app::{App, JavaPlan, JavaPlanRequest, global_java_settings};
 pub use error::{CoreError, CoreResult};
+pub use instance::{CreatedClient, global_minecraft_preferences};
 pub use launch::{LaunchOptions, LaunchOutcome};
-pub use logging::init_tracing;
+pub use logging::{DEFAULT_LOG_DIRECTIVES, init_tracing};
 
 /// Cancellation, re-exported because the services take one.
 ///
@@ -88,10 +90,15 @@ pub use ephervex_minecraft::{
     LoggingConfig, MINIMUM_SUPPORTED_VERSION, MinecraftVersionId, OutputLine, OutputStream,
     Platform, PlayerIdentity, ReleaseListing, ReleaseType, VersionMetadata, VersionRecord,
 };
+pub use ephervex_options::{
+    GlobalMinecraftPreferences, GuiScalePreference, InvalidPreferenceValue, LoadedPreferences,
+    Managed, OPTIONS_FILE_NAME, PreferenceApplication, PreferenceKey, PreferenceValue, WindowSize,
+};
 pub use ephervex_storage::{
-    AccountConfig, ApiConfig, CONFIG_SCHEMA_VERSION, ClientRecord, Config, EulaConfig,
-    FileDisposition, ImportSource, JavaConfig, JavaOverride, JvmSettings, LaunchState,
-    NetworkAccess, NewClient, NewServer, PathError, Paths, PreferenceSetting, ReconciledRecord,
-    ReconciliationReport, RecordRef, SECRET_KEY_MARKERS, ServerDefaults, ServerNetworkSettings,
-    ServerRecord, StorageError, running_state,
+    AccountConfig, ApiConfig, CONFIG_SCHEMA_VERSION, ClientFolder, ClientRecord, Config,
+    DUPLICATE_NAME_SUFFIX, DuplicateClient, DuplicatedClient, EulaConfig, FileDisposition,
+    ImportSource, JavaConfig, JavaOverride, JvmSettings, LaunchState, MissingFolder, NetworkAccess,
+    NewClient, NewServer, PathError, Paths, PreferenceSetting, ReconciledRecord,
+    ReconciliationReport, RecordRef, SECRET_KEY_MARKERS, ServerDefaults, ServerFolder,
+    ServerNetworkSettings, ServerRecord, StorageError, running_state,
 };

@@ -15,6 +15,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, RwLock};
 
+use crate::instance::CreatedClient;
 use ephervex_download::{
     CacheLayout, DownloadManager, DownloaderConfig, MetadataCacheError, OperationReporter,
 };
@@ -230,14 +231,50 @@ impl App {
     // -- client instances --------------------------------------------------
 
     /// Creates a client instance and materializes its directory.
+    ///
+    /// The global Minecraft preferences are applied here, once, because this is
+    /// the moment the compatibility matrix coverss. See [`Self::create_client_reporting`]
+    /// for what was applied.
     #[instrument(skip(self, request))]
     pub fn create_client(&self, request: NewClient) -> CoreResult<ClientRecord> {
-        Ok(self.registry().create_client(request)?)
+        Ok(self.create_client_reporting(request)?.record)
+    }
+
+    /// Creates a client instance and reports the one-time preference
+    /// application.
+    ///
+    /// A failure to write `options.txt` is reported and **not** propagated: the
+    /// instance exists, is launchable, and the game will write its own defaults
+    /// on first run. Undoing a successful creation over a GUI scale would be a
+    /// far worse trade — and leaving it half-created would be worse still.
+    #[instrument(skip(self, request))]
+    pub fn create_client_reporting(&self, request: NewClient) -> CoreResult<CreatedClient> {
+        let record = self.registry().create_client(request)?;
+        let preferences = match self.apply_global_preferences(&record) {
+            Ok(applied) => Some(applied),
+            Err(error) => {
+                warn!(
+                    instance_id = %record.id,
+                    %error,
+                    "created the instance without applying the global Minecraft preferences"
+                );
+                None
+            }
+        };
+        Ok(CreatedClient {
+            record,
+            preferences,
+        })
     }
 
     /// Fetches one client instance.
     pub fn client(&self, id: InstanceId) -> CoreResult<ClientRecord> {
         Ok(self.registry().client(id)?)
+    }
+
+    /// Fetches one server.
+    pub fn server(&self, id: ServerId) -> CoreResult<ServerRecord> {
+        Ok(self.registry().server(id)?)
     }
 
     /// Lists every indexed client instance.
@@ -696,9 +733,59 @@ impl App {
         &self.storage.registry
     }
 
-    /// The registry, for [`crate::launch`], which lives in a sibling module.
-    pub(crate) fn registry_for_launch(&self) -> &Registry {
+    /// The registry, for the services in sibling modules ([`crate::launch`],
+    /// [`crate::instance`]). Still not reachable from a frontend.
+    pub(crate) fn registry_for_services(&self) -> &Registry {
         self.registry()
+    }
+
+    /// Moves the persistent instance root.
+    ///
+    /// The one relocatable root, and the only setting that has to take effect
+    /// *within* the running process: the registry holds the resolved paths, so
+    /// writing the configuration alone would leave this process creating
+    /// instances in the old place until it was restarted. The index is
+    /// therefore reopened against the new resolver.
+    ///
+    /// Instances that already exist do not move. Their roots are absolute and
+    /// recorded, so they stay exactly where they are and keep working; the new
+    /// root applies to instances created from here on.
+    ///
+    /// A relative path is made absolute before it is stored. A setting that
+    /// resolved against the working directory would point somewhere different
+    /// for the GUI, the CLI, and a shell in another directory — three different
+    /// instance roots for one configured value.
+    #[instrument(skip(self))]
+    pub fn set_persistent_instance_root(&mut self, root: Option<&Path>) -> CoreResult<()> {
+        let root = root
+            .map(|path| {
+                std::path::absolute(path).map_err(|source| {
+                    ephervex_storage::PathError::DirectoryCreation {
+                        path: path.to_path_buf(),
+                        source,
+                    }
+                })
+            })
+            .transpose()?;
+
+        let setting = root
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned());
+        self.mutate_config(|config| {
+            config.persistent_instance_root = setting.clone().unwrap_or_default();
+        })?;
+
+        // Only this one field is overridable, so re-deriving is a replacement
+        // rather than a re-resolution of the other roots (see `Paths`).
+        let paths = self.paths().clone().with_persistent_instance_root(root);
+        paths.ensure_base_directories()?;
+        self.storage.registry = Registry::open(paths)?;
+
+        tracing::info!(
+            root = %self.paths().persistent_instances_dir().display(),
+            "moved the persistent instance root"
+        );
+        Ok(())
     }
 
     /// Changes a setting and writes the configuration file.
@@ -775,6 +862,88 @@ mod tests {
         let report = app.reconcile().expect("reconcile");
         assert_eq!(report.removed_stale_temporary.len(), 1);
         assert!(app.list_clients().expect("list").is_empty());
+    }
+
+    #[test]
+    fn moving_the_persistent_instance_root_takes_effect_without_a_restart() {
+        // The registry holds the resolved paths, so writing the setting alone
+        // would leave this process creating instances in the old place
+        let base = tempfile::tempdir().expect("temp dir");
+        let elsewhere = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+
+        let before = app
+            .create_client(
+                NewClient::new("before", "1.20.1", LoaderSelection::vanilla())
+                    .with_storage(StorageClass::Persistent),
+            )
+            .expect("create");
+        assert!(before.root.starts_with(base.path()));
+
+        app.set_persistent_instance_root(Some(elsewhere.path()))
+            .expect("move the root");
+
+        let after = app
+            .create_client(
+                NewClient::new("after", "1.20.1", LoaderSelection::vanilla())
+                    .with_storage(StorageClass::Persistent),
+            )
+            .expect("create");
+        assert!(after.root.starts_with(elsewhere.path()));
+        assert!(app.paths().persistent_instance_root_is_overridden());
+
+        // The instance created before the move stays where it is and stays
+        // readable: its root is absolute and recorded.
+        assert_eq!(app.client(before.id).expect("read").root, before.root);
+        assert!(before.root.is_dir());
+        assert_eq!(app.list_clients().expect("list").len(), 2);
+
+        // The setting survives the process, which is what a user expects of a
+        // settings screen.
+        let reopened = app_rooted_at(base.path());
+        assert_eq!(
+            reopened.paths().persistent_instances_dir(),
+            elsewhere.path()
+        );
+
+        //...and clearing it puts new instances back under XDG.
+        let mut app = reopened;
+        app.set_persistent_instance_root(None).expect("clear");
+        assert!(!app.paths().persistent_instance_root_is_overridden());
+    }
+
+    #[test]
+    fn a_relative_instance_root_is_stored_as_an_absolute_one() {
+        // A setting that resolved against the working directory would mean a
+        // different place for the GUI, the CLI, and a shell somewhere else.
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+
+        // Resolution is against the working directory by definition, so the
+        // target has to be *in* it. A `TempDir` there takes itself away again,
+        // including if this test fails.
+        let working = tempfile::TempDir::new_in(".").expect("temp dir in the working directory");
+        let relative = std::path::Path::new(
+            working
+                .path()
+                .file_name()
+                .expect("the temporary directory has a name"),
+        )
+        .join("instances");
+
+        app.set_persistent_instance_root(Some(&relative))
+            .expect("set");
+
+        let stored = &app.config().persistent_instance_root;
+        assert!(
+            std::path::Path::new(stored).is_absolute(),
+            "stored as `{stored}`"
+        );
+        assert!(
+            stored.ends_with(&relative.to_string_lossy().into_owned()),
+            "stored as `{stored}`"
+        );
+        assert!(app.paths().persistent_instances_dir().is_absolute());
     }
 
     #[test]

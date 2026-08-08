@@ -143,7 +143,54 @@ error-registry-metadata-invalid = The instance metadata file is not valid Epherv
 error-registry-metadata-unsupported-version = The instance metadata at { $path } was written by a newer version of { app-name }.
 
 error-registry-root-occupied = That instance directory already contains files.
-    .action = Choose a different name, or remove { $path } first.
+.action = Choose a different name, or remove { $path } first.
+
+# A persistent instance whose directory vanished keeps its record rather than
+# being deleted, so "the files are gone" has to read differently
+# from "no such instance".
+error-registry-root-missing = That instance's files are no longer on disk.
+.action = Ephervex expected them at { $path } and has kept the record. Restore the directory, or delete the instance to remove the record too.
+
+## Instance duplication and folders 
+
+instance-duplicated = Duplicated as { $name }.
+# Following a symlinked folder could copy a shared mods directory, or walk out
+# of the instance entirely, so the copy skips it and says so.
+instance-duplicate-skipped-links = { $count ->
+        [one] { $count } linked folder was not copied.
+       *[other] { $count } linked folders were not copied.
+    }
+.action = The copy points at nothing where the original had a link. Recreate it by hand if the instance needs it.
+
+# Used for both a client instance and a server, so it names neither.
+instance-folder-unavailable = That folder does not exist yet.
+.action = { $folder } appears once the game has written it, and Ephervex will not create an empty one that suggests otherwise.
+
+## Global Minecraft preferences 
+
+preferences-none-managed = No global Minecraft preferences are applied to new instances.
+preferences-managed-count = { $count ->
+        [one] { $count } preference is applied to new instances.
+       *[other] { $count } preferences are applied to new instances.
+    }
+preference-set = { $preference } is now applied to new instances, as { $value }.
+preference-unmanaged = { $preference } is no longer applied to new instances. Its value is remembered.
+# Applied once, when the instance is created; never synchronized afterwards.
+preferences-applied = Applied { $count ->
+        [one] { $count } global preference
+       *[other] { $count } global preferences
+    } to the new instance.
+preferences-unsupported-for-version = Minecraft { $version } has no setting for { $preference }, so it was not applied.
+
+error-options-unreadable = The instance's Minecraft settings file could not be read.
+.action = Check that { $path } is readable. Ephervex will not replace a settings file it could not read first.
+
+error-options-unwritable = The instance's Minecraft settings file could not be written.
+.action = Check that { $path } is writable.
+
+# $syntax is a literal input format, not prose to translate.
+error-options-preference-value-invalid = That is not a usable value for this setting.
+.action = Expected { $syntax }.
 
 ## Minecraft version metadata 
 #

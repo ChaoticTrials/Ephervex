@@ -15,6 +15,17 @@ static INITIALIZED: OnceLock<()> = OnceLock::new();
 /// `EPHERVEX_LOG=ephervex_download=debug`.
 pub const LOG_ENV_VAR: &str = "EPHERVEX_LOG";
 
+/// What both frontends log by default: Ephervex's own events, and nothing at
+/// `INFO` from libraries that narrate their own startup.
+///
+/// `i18n_embed` logs "Selecting translations for domain" at `INFO` every time a
+/// language is selected, which is once per CLI invocation. It says nothing a
+/// user or a bug report needs, and burying `created client instance` under it
+/// makes the logs that *do* matter harder to read. Still reachable with
+/// `EPHERVEX_LOG=info,i18n_embed=info` when the localization loader itself is
+/// the thing being debugged.
+pub const DEFAULT_LOG_DIRECTIVES: &str = "info,i18n_embed=warn";
+
 /// Initializes the global tracing subscriber.
 ///
 /// Safe to call more than once: repeated calls are ignored rather than

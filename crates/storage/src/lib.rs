@@ -28,6 +28,8 @@
 //! looks like one.
 
 pub mod config;
+pub(crate) mod copy;
+pub mod folders;
 pub mod index;
 pub mod lock;
 pub mod metadata;
@@ -43,14 +45,16 @@ pub use config::{
     AccountConfig, AccountLookup, ApiConfig, CONFIG_SCHEMA_VERSION, Config, ConfigError,
     EulaConfig, JavaConfig, NetworkAccess, PreferenceSetting, SECRET_KEY_MARKERS, ServerDefaults,
 };
+pub use folders::{ClientFolder, MissingFolder, ServerFolder};
 pub use index::{Index, IndexError, MIGRATIONS, Migration, MigrationOutcome, apply_migrations};
 pub use lock::{LAUNCH_LOCK_FILE, LaunchLock, LaunchState, LockError, running_state};
 pub use metadata::{METADATA_VERSION, MetadataError};
 pub use paths::{PathError, Paths};
 pub use reconcile::{ReconciledRecord, ReconciliationReport, RecordRef, reconcile};
 pub use records::{
-    ClientRecord, FileDisposition, ImportSource, JavaOverride, JvmSettings, NewClient, NewServer,
-    ServerNetworkSettings, ServerRecord,
+    ClientRecord, DUPLICATE_NAME_SUFFIX, DuplicateClient, DuplicatedClient, FileDisposition,
+    ImportSource, JavaOverride, JvmSettings, NewClient, NewServer, ServerNetworkSettings,
+    ServerRecord,
 };
 pub use registry::{Registry, RegistryError};
 

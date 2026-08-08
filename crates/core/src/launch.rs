@@ -307,7 +307,7 @@ impl App {
 
     /// Writes an updated instance record.
     fn update_client_record(&self, record: &mut ClientRecord) -> CoreResult<()> {
-        Ok(self.registry_for_launch().update_client(record)?)
+        Ok(self.registry_for_services().update_client(record)?)
     }
 }
 

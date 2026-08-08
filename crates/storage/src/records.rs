@@ -300,6 +300,55 @@ impl NewServer {
     }
 }
 
+/// The suffix a duplicate's name gets when the caller does not supply one.
+///
+/// User-facing but deliberately *not* localized: an instance name is user data
+/// that ends up in bug reports and in a directory listing, and a name that
+/// changes meaning with the interface language is not data.
+pub const DUPLICATE_NAME_SUFFIX: &str = " (copy)";
+
+/// The request to duplicate a client instance.
+///
+/// Both optional fields default to "the same as the original", which is what
+/// `ephervex instance duplicate <id>` with no other argument should mean.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DuplicateClient {
+    /// The copy's name, or `None` for the original's plus
+    /// [`DUPLICATE_NAME_SUFFIX`].
+    pub name: Option<String>,
+    /// Where the copy lives, or `None` for the original's storage class.
+    ///
+    /// The caller must choose how to handle a persistent
+    /// instance to try something disposable is the common case.
+    pub storage: Option<StorageClass>,
+}
+
+impl DuplicateClient {
+    #[must_use]
+    pub fn named(name: impl Into<String>) -> Self {
+        Self {
+            name: Some(name.into()),
+            storage: None,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_storage(mut self, storage: StorageClass) -> Self {
+        self.storage = Some(storage);
+        self
+    }
+}
+
+/// What duplicating an instance produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DuplicatedClient {
+    pub record: ClientRecord,
+    /// Symlinked directories the copy did not follow, relative to the source
+    /// root. Surfaced so a frontend can say the copy is not byte-identical
+    /// rather than leaving the user to find out.
+    pub skipped_links: Vec<PathBuf>,
+}
+
 /// Whether deleting a record should also delete its files.
 ///
 /// Never inferred. Explicit user-initiated deletion is the only thing that

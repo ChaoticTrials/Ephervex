@@ -9,7 +9,7 @@
 //! the GUI. See ADR 0001.
 
 fn main() {
-    ephervex_core::init_tracing("info");
+    ephervex_core::init_tracing(ephervex_core::DEFAULT_LOG_DIRECTIVES);
     // Touching the Slint runtime keeps the dependency load-bearing, so a
     // toolchain or backend regression surfaces here and not in the GUI.
     let _ui_platform_ready = slint::SharedString::from(ephervex_model::APP_NAME);

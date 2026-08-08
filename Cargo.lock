@@ -1705,8 +1705,10 @@ dependencies = [
 name = "ephervex-options"
 version = "0.1.0"
 dependencies = [
+ "ephervex-minecraft",
  "ephervex-model",
  "serde",
+ "tempfile",
  "thiserror 2.0.19",
  "tracing",
 ]

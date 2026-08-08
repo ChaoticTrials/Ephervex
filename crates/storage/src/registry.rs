@@ -17,11 +17,13 @@ use ephervex_model::{
 use rusqlite::{Row, params};
 
 use crate::index::{Index, IndexError};
+use crate::lock::LAUNCH_LOCK_FILE;
 use crate::metadata::{self, MetadataError};
 use crate::paths::{PathError, Paths, create_dir_all};
 use crate::records::{
-    ClientRecord, FileDisposition, ImportSource, JavaOverride, JvmSettings, NewClient, NewServer,
-    ServerNetworkSettings, ServerRecord,
+    ClientRecord, DUPLICATE_NAME_SUFFIX, DuplicateClient, DuplicatedClient, FileDisposition,
+    ImportSource, JavaOverride, JvmSettings, NewClient, NewServer, ServerNetworkSettings,
+    ServerRecord,
 };
 
 const CLIENT_COLUMNS: &str = "id, name, root, storage_class, minecraft_version, loader_kind, \
@@ -44,6 +46,13 @@ pub enum RegistryError {
     /// The directory chosen for a new instance already has contents.
     #[error("the instance directory {path} already contains files")]
     RootOccupied { path: PathBuf },
+    /// The instance is indexed but its files are gone.
+    ///
+    /// Distinct from [`Self::InstanceUnknown`] on purpose: the record is right
+    /// there, and the user needs to hear that the *directory* vanished — the
+    /// state reconciliation deliberately preserves rather than deletes
+    #[error("the instance directory {path} no longer exists")]
+    RootMissing { path: PathBuf },
     /// A filesystem operation failed.
     #[error("filesystem error at {path}")]
     Io {
@@ -67,6 +76,7 @@ impl RegistryError {
             Self::InstanceUnknown { .. } => "error-registry-instance-unknown",
             Self::ServerUnknown { .. } => "error-registry-server-unknown",
             Self::RootOccupied { .. } => "error-registry-root-occupied",
+            Self::RootMissing { .. } => "error-registry-root-missing",
             Self::Io { .. } => "error-paths-directory-creation",
             Self::Index(error) => error.message_id(),
             Self::Metadata(error) => error.message_id(),
@@ -173,6 +183,99 @@ impl Registry {
     /// for. The metadata file is left exactly as found.
     pub fn index_existing_client(&self, record: &ClientRecord) -> Result<(), RegistryError> {
         self.insert_client_row(record)
+    }
+
+    /// Duplicates a client instance, files and all.
+    ///
+    /// The copy is a *new instance that happens to contain the same files*: it
+    /// gets its own id, its own root, its own creation time, and no launch
+    /// history. Everything that describes what the instance **is** — Minecraft
+    /// version, loader, import source, Java and JVM overrides, warnings — is
+    /// preserved, because a duplicate that reproduces something different from
+    /// its original is not a duplicate.
+    ///
+    /// What is deliberately not carried over:
+    ///
+    /// * **the launch lock**, which describes a running process;
+    /// * **`last_launched_at`**, for the same reason;
+    /// * **linked servers** — a server is its own entity with its own world
+    ///   and its own process, and silently forking one because a client
+    ///   was copied would be a surprising amount of disk to spend;
+    /// * **global preferences**, which are *not* re-applied. Ephervex is explicit:
+    ///   the copy keeps the options file the original had, so duplicating an
+    ///   instance whose settings were tuned by hand does not quietly reset
+    ///   them.
+    pub fn duplicate_client(
+        &self,
+        source: InstanceId,
+        request: &DuplicateClient,
+    ) -> Result<DuplicatedClient, RegistryError> {
+        let original = self.client(source)?;
+        if !original.root.is_dir() {
+            return Err(RegistryError::RootMissing {
+                path: original.root.clone(),
+            });
+        }
+
+        let storage = request.storage.unwrap_or(original.storage);
+        let id = InstanceId::new();
+        let root = self.paths.instance_root(storage, id);
+        ensure_free_root(&root)?;
+
+        let report = crate::copy::copy_tree(&original.root, &root, &[LAUNCH_LOCK_FILE]).map_err(
+            |source| RegistryError::Io {
+                path: root.clone(),
+                source,
+            },
+        )?;
+
+        let now = Utc::now();
+        let record = ClientRecord {
+            id,
+            name: request
+                .name
+                .clone()
+                .unwrap_or_else(|| format!("{}{DUPLICATE_NAME_SUFFIX}", original.name)),
+            root: root.clone(),
+            storage,
+            minecraft_version: original.minecraft_version,
+            loader: original.loader,
+            source: original.source,
+            java_override: original.java_override,
+            jvm_override: original.jvm_override,
+            attention: original.attention,
+            created_at: now,
+            updated_at: now,
+            last_launched_at: None,
+        };
+
+        // The copy brought the original's `.launcher/instance.json` with it;
+        // this overwrites it with the new identity before the index learns of
+        // the row, in the order the module documentation requires.
+        create_dir_all(&metadata::client_game_dir(&root))?;
+        metadata::write_client_metadata(&root, &record)?;
+        self.insert_client_row(&record)?;
+
+        tracing::info!(
+            instance_id = %record.id,
+            duplicated_from = %source,
+            storage = %record.storage,
+            files = report.files,
+            skipped_links = report.skipped_links.len(),
+            "duplicated client instance"
+        );
+        for link in &report.skipped_links {
+            tracing::warn!(
+                instance_id = %record.id,
+                link = %link.display(),
+                "did not follow a symlinked directory while duplicating"
+            );
+        }
+
+        Ok(DuplicatedClient {
+            record,
+            skipped_links: report.skipped_links,
+        })
     }
 
     /// Reads one client instance.
@@ -899,6 +1002,168 @@ mod tests {
             .delete_client(removed.id, FileDisposition::Remove)
             .expect("delete");
         assert!(!removed.root.exists());
+    }
+
+    /// A client instance with a file in its game directory, for the
+    /// duplication tests.
+    fn client_with_files(registry: &Registry, name: &str) -> ClientRecord {
+        let record = registry
+            .create_client(
+                NewClient::new(
+                    name,
+                    "1.20.1",
+                    LoaderSelection::exact(LoaderKind::NeoForge, "47.1.106"),
+                )
+                .with_storage(StorageClass::Persistent)
+                .with_source(ImportSource::imported(
+                    ImportSourceKind::ModrinthPack,
+                    "report.mrpack",
+                )),
+            )
+            .expect("create");
+
+        let game = metadata::client_game_dir(&record.root);
+        std::fs::write(game.join("options.txt"), "guiScale:3\n").expect("write options");
+        create_dir_all(&game.join("mods")).expect("mkdir");
+        std::fs::write(game.join("mods/example.jar"), "jar").expect("write mod");
+        record
+    }
+
+    #[test]
+    fn a_duplicate_is_a_new_instance_holding_the_same_files() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let original = client_with_files(&registry, "Original");
+
+        let copy = registry
+            .duplicate_client(original.id, &DuplicateClient::default())
+            .expect("duplicate")
+            .record;
+
+        // A new identity...
+        assert_ne!(copy.id, original.id);
+        assert_ne!(copy.root, original.root);
+        assert_eq!(copy.name, "Original (copy)");
+        assert!(copy.last_launched_at.is_none());
+
+        //...reproducing the same thing.
+        assert_eq!(copy.minecraft_version, original.minecraft_version);
+        assert_eq!(copy.loader, original.loader);
+        assert_eq!(copy.source, original.source);
+        assert_eq!(copy.storage, original.storage);
+
+        let game = metadata::client_game_dir(&copy.root);
+        assert_eq!(
+            std::fs::read_to_string(game.join("options.txt")).expect("read"),
+            "guiScale:3\n",
+            "the copy keeps the options file the original had"
+        );
+        assert!(game.join("mods/example.jar").is_file());
+
+        // Both are indexed, and the copy is recoverable from its own metadata.
+        assert_eq!(registry.list_clients().expect("list").len(), 2);
+        assert_eq!(
+            metadata::read_client_metadata(&copy.root).expect("metadata"),
+            copy,
+            "the copied instance.json must describe the copy, not the original"
+        );
+    }
+
+    #[test]
+    fn a_duplicate_may_change_its_name_and_its_storage_class() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let original = client_with_files(&registry, "Original");
+
+        let copy = registry
+            .duplicate_client(
+                original.id,
+                &DuplicateClient::named("Disposable try").with_storage(StorageClass::Temporary),
+            )
+            .expect("duplicate")
+            .record;
+
+        assert_eq!(copy.name, "Disposable try");
+        assert_eq!(copy.storage, StorageClass::Temporary);
+        assert!(
+            copy.root
+                .starts_with(registry.paths().temporary_instances_dir())
+        );
+        assert_eq!(
+            registry.client(original.id).expect("read").storage,
+            StorageClass::Persistent,
+            "the original must not move"
+        );
+    }
+
+    #[test]
+    fn a_duplicate_does_not_inherit_a_launch_in_progress() {
+        // The lock file describes a process, and the copy is not it
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let original = client_with_files(&registry, "Original");
+        let _lock = crate::lock::LaunchLock::acquire(&original.root).expect("lock");
+
+        let copy = registry
+            .duplicate_client(original.id, &DuplicateClient::default())
+            .expect("duplicate")
+            .record;
+
+        assert!(crate::lock::running_state(&original.root).is_some());
+        assert!(
+            crate::lock::running_state(&copy.root).is_none(),
+            "a copy of a running instance is not running"
+        );
+    }
+
+    #[test]
+    fn duplicating_an_instance_whose_files_are_gone_says_so() {
+        // A persistent root that vanished keeps its record, so
+        // this has to be distinguishable from "no such instance".
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let original = client_with_files(&registry, "Original");
+        std::fs::remove_dir_all(&original.root).expect("remove");
+
+        let error = registry
+            .duplicate_client(original.id, &DuplicateClient::default())
+            .expect_err("nothing to copy");
+        assert!(matches!(error, RegistryError::RootMissing { .. }));
+        assert_eq!(error.message_id(), "error-registry-root-missing");
+    }
+
+    #[test]
+    fn duplicating_a_client_does_not_duplicate_its_servers() {
+        // a server is its own entity, with its own world and process.
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let original = client_with_files(&registry, "Original");
+        registry
+            .create_server(
+                NewServer::new("test server", "1.20.1", LoaderSelection::vanilla())
+                    .linked_to(original.id),
+            )
+            .expect("create server");
+
+        let copy = registry
+            .duplicate_client(original.id, &DuplicateClient::default())
+            .expect("duplicate")
+            .record;
+
+        assert_eq!(
+            registry
+                .linked_server_ids(original.id)
+                .expect("links")
+                .len(),
+            1
+        );
+        assert!(
+            registry
+                .linked_server_ids(copy.id)
+                .expect("links")
+                .is_empty()
+        );
+        assert_eq!(registry.list_servers().expect("list").len(), 1);
     }
 
     #[test]

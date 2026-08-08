@@ -13,6 +13,12 @@ workspace = true
 
 [dependencies]
 ephervex-model.workspace = true
+# Choosing a version adapter is a Minecraft version comparison, and
+# `MinecraftVersionId` already implements both published numbering schemes.
+ephervex-minecraft.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -12,18 +12,20 @@
 //!   errors below carry a stable message id, never English prose; the text a
 //!   user reads is resolved here through `ephervex-i18n`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use ephervex_core::{
     AccountStatus, AccountSummary, ApiSettings, App, ArgumentForm, Artifact, AssetIndexRef,
-    AuthEvent, AuthObserver, CancellationToken, ClientRecord, Config, CoreError, CredentialStorage,
-    Entitlements, FileDisposition, Freshness, JavaPathChoice, JavaPlan, JavaPlanRequest,
-    JavaRuntime, LaunchEvent, LaunchFeatures, LaunchObserver, LaunchOptions, LaunchOutcome,
-    LaunchState, LoginFlow, LoginOptions, LoginRequest, ManagedInstallation, NewClient, NewServer,
-    OutputLine, Paths, ReconciliationReport, ReleaseListing, RequirementBasis, RuntimeInventory,
-    SecretString, ServerRecord, Session, VersionMetadata, VersionRecord,
+    AuthEvent, AuthObserver, CancellationToken, ClientFolder, ClientRecord, Config, CoreError,
+    CreatedClient, CredentialStorage, DuplicateClient, Entitlements, FileDisposition, Freshness,
+    JavaPathChoice, JavaPlan, JavaPlanRequest, JavaRuntime, LaunchEvent, LaunchFeatures,
+    LaunchObserver, LaunchOptions, LaunchOutcome, LaunchState, LoginFlow, LoginOptions,
+    LoginRequest, ManagedInstallation, NewClient, NewServer, OutputLine, Paths,
+    PreferenceApplication, PreferenceKey, ReconciliationReport, ReleaseListing, RequirementBasis,
+    RuntimeInventory, SecretString, ServerFolder, ServerRecord, Session, VersionMetadata,
+    VersionRecord,
 };
 use ephervex_i18n::Arg as MessageArg;
 use ephervex_model::{InstanceId, LoaderKind, LoaderSelection, ServerId, StorageClass};
@@ -49,8 +51,17 @@ enum Command {
     Info,
     /// Show the resolved application directories.
     Paths,
-    /// Show the effective configuration.
-    Config,
+    /// Show or change the effective configuration.
+    Config {
+        /// Omit to show the configuration, as `ephervex config` always has.
+        #[command(subcommand)]
+        command: Option<ConfigCommand>,
+    },
+    /// Inspect and change global Minecraft preferences.
+    Preferences {
+        #[command(subcommand)]
+        command: PreferencesCommand,
+    },
     /// Operate on the set of client instances.
     Instances {
         #[command(subcommand)]
@@ -194,6 +205,42 @@ enum ApiCommand {
 }
 
 #[derive(Debug, Subcommand)]
+enum ConfigCommand {
+    /// Show the effective configuration.
+    Show,
+    /// Show or move the persistent instance root.
+    ///
+    /// Instances that already exist do not move: their locations are recorded
+    /// and absolute. The new root applies to instances created from here on.
+    InstanceRoot {
+        /// The directory to store persistent instances in. Omit to show it.
+        path: Option<PathBuf>,
+        /// Go back to the default under the XDG data directory.
+        #[arg(long, conflicts_with = "path")]
+        clear: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum PreferencesCommand {
+    /// Show every managed preference and the value it applies.
+    Show,
+    /// Set a preference and apply it to instances created from here on.
+    Set {
+        /// Preference name, e.g. `gui_scale`.
+        #[arg(value_parser = parse_preference_key)]
+        preference: PreferenceKey,
+        /// The value. Run `ephervex preferences show` for the accepted syntax.
+        value: String,
+    },
+    /// Stop applying a preference, keeping its value for later.
+    Unmanage {
+        #[arg(value_parser = parse_preference_key)]
+        preference: PreferenceKey,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum MinecraftCommand {
     /// List the Minecraft releases Ephervex supports.
     Versions {
@@ -246,6 +293,26 @@ enum InstanceCommand {
     Create(CreateInstanceArgs),
     /// Show one client instance in full.
     Show { id: InstanceId },
+    /// Copy an instance, files and all, into a new one.
+    Duplicate {
+        id: InstanceId,
+        /// The copy's name. Defaults to the original's plus " (copy)".
+        #[arg(long)]
+        name: Option<String>,
+        #[command(flatten)]
+        storage: DuplicateStorageArgs,
+    },
+    /// Open one of an instance's folders in the desktop's file manager.
+    Open {
+        id: InstanceId,
+        /// Which folder: root, minecraft, mods, config, logs, crash-reports,
+        /// resourcepacks, shaderpacks, or saves.
+        #[arg(long, default_value = "root", value_parser = parse_client_folder)]
+        folder: ClientFolder,
+        /// Print the path without handing it to a file manager.
+        #[arg(long)]
+        print: bool,
+    },
     /// Remove a client instance from the index.
     Delete {
         id: InstanceId,
@@ -265,6 +332,17 @@ enum ServersCommand {
 enum ServerCommand {
     /// Create a server.
     Create(CreateServerArgs),
+    /// Open one of a server's folders in the desktop's file manager.
+    Open {
+        id: ServerId,
+        /// Which folder: root, server, mods, config, logs, crash-reports, or
+        /// world.
+        #[arg(long, default_value = "root", value_parser = parse_server_folder)]
+        folder: ServerFolder,
+        /// Print the path without handing it to a file manager.
+        #[arg(long)]
+        print: bool,
+    },
     /// Remove a server from the index.
     Delete {
         id: ServerId,
@@ -332,6 +410,67 @@ impl StorageArgs {
     }
 }
 
+/// The same choice for a duplicate, where "neither flag" means something else.
+///
+/// A duplicate defaults to the *original's* storage class rather than to
+/// temporary: copying a persistent instance and silently getting a disposable
+/// one back would be a surprise, so callers can choose either class explicitly.
+#[derive(Debug, Args)]
+#[group(multiple = false)]
+struct DuplicateStorageArgs {
+    /// Store the copy under the OS temporary directory.
+    #[arg(long)]
+    temporary: bool,
+    /// Store the copy under the persistent instance root.
+    #[arg(long)]
+    persistent: bool,
+}
+
+impl DuplicateStorageArgs {
+    const fn class(&self) -> Option<StorageClass> {
+        match (self.temporary, self.persistent) {
+            (true, _) => Some(StorageClass::Temporary),
+            (_, true) => Some(StorageClass::Persistent),
+            _ => None,
+        }
+    }
+}
+
+/// Parses a folder name, listing the alternatives when it is not one.
+///
+/// The names come from `ephervex-core`'s own enums rather than from a copy
+/// here, so a folder added by another subsystem cannot go missing from the CLI.
+fn parse_client_folder(name: &str) -> Result<ClientFolder, String> {
+    ClientFolder::parse(name).ok_or_else(|| {
+        format!(
+            "expected one of: {}",
+            join_names(ClientFolder::ALL.iter().map(|folder| folder.as_str()))
+        )
+    })
+}
+
+fn parse_server_folder(name: &str) -> Result<ServerFolder, String> {
+    ServerFolder::parse(name).ok_or_else(|| {
+        format!(
+            "expected one of: {}",
+            join_names(ServerFolder::ALL.iter().map(|folder| folder.as_str()))
+        )
+    })
+}
+
+fn parse_preference_key(name: &str) -> Result<PreferenceKey, String> {
+    PreferenceKey::parse(name).ok_or_else(|| {
+        format!(
+            "expected one of: {}",
+            join_names(PreferenceKey::ALL.iter().map(|key| key.as_str()))
+        )
+    })
+}
+
+fn join_names<'a>(names: impl Iterator<Item = &'a str>) -> String {
+    names.collect::<Vec<_>>().join(", ")
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum LoaderArg {
     Vanilla,
@@ -351,7 +490,7 @@ impl From<LoaderArg> for LoaderKind {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    ephervex_core::init_tracing("info");
+    ephervex_core::init_tracing(ephervex_core::DEFAULT_LOG_DIRECTIVES);
 
     match run(&cli) {
         Ok(()) => ExitCode::SUCCESS,
@@ -376,9 +515,19 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
             show_paths(&config.apply_to(paths), cli.json);
             Ok(())
         }
-        Command::Config => {
-            let paths = Paths::from_environment()?;
-            show_config(&Config::load_or_default(&paths)?, &paths, cli.json)
+        Command::Config { command } => match command {
+            None | Some(ConfigCommand::Show) => {
+                let paths = Paths::from_environment()?;
+                show_config(&Config::load_or_default(&paths)?, &paths, cli.json)
+            }
+            Some(ConfigCommand::InstanceRoot { path, clear }) => {
+                let mut app = open_app()?;
+                run_instance_root(&mut app, path.as_deref(), *clear, cli.json)
+            }
+        },
+        Command::Preferences { command } => {
+            let mut app = open_app()?;
+            run_preferences_command(&mut app, command, cli.json)
         }
         Command::Instances { command } => {
             let app = open_app()?;
@@ -473,15 +622,43 @@ fn run_instance_command(app: &App, command: &InstanceCommand, json: bool) -> any
     match command {
         InstanceCommand::Create(args) => {
             let loader = build_loader(args.loader, args.loader_version.as_deref())?;
-            let record = app.create_client(
+            let created = app.create_client_reporting(
                 NewClient::new(&args.name, &args.minecraft, loader)
                     .with_storage(args.storage.class()),
             )?;
-            print_instance(app, &record, json)?;
+            print_created_instance(app, &created, json)?;
         }
         InstanceCommand::Show { id } => {
             let record = app.client(*id)?;
             print_instance(app, &record, json)?;
+        }
+        InstanceCommand::Duplicate { id, name, storage } => {
+            // Both fields default to "the same as the original", which is what
+            // `ephervex instance duplicate <id>` with no flags should mean.
+            let request = DuplicateClient {
+                name: name.clone(),
+                storage: storage.class(),
+            };
+            let copy = app.duplicate_client(*id, &request)?;
+            print_instance(app, &copy.record, json)?;
+            if !json {
+                eprintln!(
+                    "{}",
+                    ephervex_i18n::lookup_args(
+                        "instance-duplicated",
+                        [("name", MessageArg::from(copy.record.name.as_str()))]
+                    )
+                );
+            }
+            report_skipped_links(&copy.skipped_links, json);
+        }
+        InstanceCommand::Open { id, folder, print } => {
+            let path = if *print {
+                app.client_folder(*id, *folder)?
+            } else {
+                app.open_client_folder(*id, *folder)?
+            };
+            print_folder(path.as_deref(), folder.as_str(), json)?;
         }
         InstanceCommand::Delete { id, keep_files } => {
             let files = if *keep_files {
@@ -520,6 +697,14 @@ fn run_server_command(app: &App, command: &ServerCommand, json: bool) -> anyhow:
             let record = app.create_server(request)?;
             print_server(&record, json);
         }
+        ServerCommand::Open { id, folder, print } => {
+            let path = if *print {
+                app.server_folder(*id, *folder)?
+            } else {
+                app.open_server_folder(*id, *folder)?
+            };
+            print_folder(path.as_deref(), folder.as_str(), json)?;
+        }
         ServerCommand::Delete { id, keep_files } => {
             let files = if *keep_files {
                 FileDisposition::Keep
@@ -529,6 +714,162 @@ fn run_server_command(app: &App, command: &ServerCommand, json: bool) -> anyhow:
             app.delete_server(*id, files)?;
             println!("deleted {id}");
         }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------- preferences
+
+/// Global Minecraft preferences through the CLI.
+///
+/// Everything here goes through `ephervex-core`: the validation, the canonical
+/// value, and the accepted syntax all come from the same place the GUI will
+/// read them from, so the two frontends cannot disagree about what a valid FOV
+/// is.
+fn run_preferences_command(
+    app: &mut App,
+    command: &PreferencesCommand,
+    json: bool,
+) -> anyhow::Result<()> {
+    match command {
+        PreferencesCommand::Show => {
+            show_preferences(app, json);
+            Ok(())
+        }
+        PreferencesCommand::Set { preference, value } => {
+            let stored = app.set_minecraft_preference(*preference, value)?;
+            if json {
+                print_json(&serde_json::json!({
+                    "preference": preference.as_str(),
+                    "managed": true,
+                    "value": stored.to_setting_value(),
+                }));
+            } else {
+                println!(
+                    "{}",
+                    ephervex_i18n::lookup_args(
+                        "preference-set",
+                        [
+                            ("preference", MessageArg::from(preference.as_str())),
+                            ("value", MessageArg::from(stored.to_setting_value())),
+                        ]
+                    )
+                );
+                // Preferences apply once during creation. Existing instances
+                // remain unchanged.
+                eprintln!(
+                    "applies to instances created from now on; existing instances own their own settings"
+                );
+            }
+            Ok(())
+        }
+        PreferencesCommand::Unmanage { preference } => {
+            app.unmanage_minecraft_preference(*preference)?;
+            if json {
+                print_json(&serde_json::json!({
+                    "preference": preference.as_str(),
+                    "managed": false,
+                }));
+            } else {
+                println!(
+                    "{}",
+                    ephervex_i18n::lookup_args(
+                        "preference-unmanaged",
+                        [("preference", MessageArg::from(preference.as_str()))]
+                    )
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+fn show_preferences(app: &App, json: bool) {
+    let loaded = app.minecraft_preferences();
+    let preferences = &loaded.preferences;
+
+    if json {
+        print_json(&serde_json::json!({
+                    "preferences": PreferenceKey::ALL
+        .iter()
+        .map(|key| serde_json::json!({
+                            "preference": key.as_str(),
+                            "managed": preferences.is_managed(*key),
+                            "value": preferences.value(*key).to_setting_value(),
+                            "syntax": key.value_syntax(),
+                        }))
+        .collect::<Vec<_>>(),
+                    "rejected": loaded
+        .rejected
+        .iter()
+        .map(|error| serde_json::json!({
+                            "preference": error.key.as_str(),
+                            "value": error.value,
+                            "syntax": error.syntax,
+                        }))
+        .collect::<Vec<_>>(),
+                }));
+        return;
+    }
+
+    for key in PreferenceKey::ALL {
+        println!(
+            "{:<20} {:<9} {:<12} {}",
+            key.as_str(),
+            if preferences.is_managed(*key) {
+                "applied"
+            } else {
+                "ignored"
+            },
+            preferences.value(*key).to_setting_value(),
+            key.value_syntax()
+        );
+    }
+
+    let managed = preferences.managed_keys().len();
+    if managed == 0 {
+        println!("{}", ephervex_i18n::lookup("preferences-none-managed"));
+    } else {
+        println!(
+            "{}",
+            ephervex_i18n::lookup_args(
+                "preferences-managed-count",
+                [("count", MessageArg::from(managed))]
+            )
+        );
+    }
+
+    // A value that could not be parsed is not applied to anything, so it has
+    // to be visible rather than merely absent.
+    for error in &loaded.rejected {
+        eprintln!("{error}");
+    }
+}
+
+/// Shows or moves the persistent instance root.
+fn run_instance_root(
+    app: &mut App,
+    path: Option<&Path>,
+    clear: bool,
+    json: bool,
+) -> anyhow::Result<()> {
+    if path.is_some() || clear {
+        app.set_persistent_instance_root(path)?;
+    }
+
+    let root = app.paths().persistent_instances_dir();
+    let overridden = app.paths().persistent_instance_root_is_overridden();
+    if json {
+        print_json(&serde_json::json!({
+            "persistent_instance_root": root,
+            "overridden": overridden,
+        }));
+    } else {
+        println!("{}", root.display());
+        if !overridden {
+            eprintln!("the default, under the XDG data directory");
+        }
+        eprintln!("instances that already exist stay where they are");
     }
     Ok(())
 }
@@ -1980,6 +2321,119 @@ fn print_instance(app: &App, record: &ClientRecord, json: bool) -> anyhow::Resul
     Ok(())
 }
 
+/// Prints a newly created instance and what the one-time preference
+/// application did.
+fn print_created_instance(app: &App, created: &CreatedClient, json: bool) -> anyhow::Result<()> {
+    if json {
+        let mut value = instance_json(app, &created.record)?;
+        value["preferences"] = preferences_applied_json(created.preferences.as_ref());
+        print_json(&value);
+        return Ok(());
+    }
+
+    print_instance(app, &created.record, json)?;
+    let Some(applied) = &created.preferences else {
+        return Ok(());
+    };
+    if !applied.applied.is_empty() {
+        eprintln!(
+            "{}",
+            ephervex_i18n::lookup_args(
+                "preferences-applied",
+                [("count", MessageArg::from(applied.applied.len()))]
+            )
+        );
+    }
+    // A preference this release has no setting for is skipped, and silence
+    // would look like a bug.
+    for key in &applied.unsupported {
+        eprintln!(
+            "{}",
+            ephervex_i18n::lookup_args(
+                "preferences-unsupported-for-version",
+                [
+                    ("preference", MessageArg::from(key.as_str())),
+                    (
+                        "version",
+                        MessageArg::from(created.record.minecraft_version.as_str())
+                    ),
+                ]
+            )
+        );
+    }
+    Ok(())
+}
+
+fn preferences_applied_json(applied: Option<&PreferenceApplication>) -> serde_json::Value {
+    applied.map_or(serde_json::Value::Null, |applied| {
+        serde_json::json!({
+                    "adapter": applied.adapter,
+                    "created_file": applied.created_file,
+                    "applied": applied
+        .applied
+        .iter()
+        .map(|key| key.as_str())
+        .collect::<Vec<_>>(),
+                    "unsupported": applied
+        .unsupported
+        .iter()
+        .map(|key| key.as_str())
+        .collect::<Vec<_>>(),
+                })
+    })
+}
+
+/// Prints the outcome of an open-folder action.
+///
+/// An unavailable folder is a failure with an exit code, not a silent success:
+/// a script that asked for the crash reports of an instance that has never
+/// crashed should be able to tell.
+fn print_folder(path: Option<&Path>, folder: &str, json: bool) -> anyhow::Result<()> {
+    if let Some(path) = path {
+        if json {
+            print_json(&serde_json::json!({ "folder": folder, "path": path }));
+        } else {
+            println!("{}", path.display());
+        }
+        return Ok(());
+    }
+
+    let summary = ephervex_i18n::lookup("instance-folder-unavailable");
+    let action = ephervex_i18n::lookup_attribute_args(
+        "instance-folder-unavailable",
+        "action",
+        [("folder", MessageArg::from(folder))],
+    );
+    if json {
+        print_json(&serde_json::json!({
+            "folder": folder,
+            "path": serde_json::Value::Null,
+            "error": summary,
+        }));
+    }
+    match action {
+        Some(action) => anyhow::bail!("{summary} {action}"),
+        None => anyhow::bail!("{summary}"),
+    }
+}
+
+/// Reports the symlinked folders a duplication did not follow.
+fn report_skipped_links(skipped: &[PathBuf], json: bool) {
+    if skipped.is_empty() || json {
+        return;
+    }
+    eprintln!(
+        "{}",
+        ephervex_i18n::lookup_args(
+            "instance-duplicate-skipped-links",
+            [("count", MessageArg::from(skipped.len()))]
+        )
+    );
+    for link in skipped {
+        eprintln!("  {}", link.display());
+    }
+}
+
 fn print_server(record: &ServerRecord, json: bool) {
     if json {
         print_json(&server_json(record));
@@ -2108,7 +2562,10 @@ fn report_failure(error: &anyhow::Error, json: bool) {
     if let Some(action) = action {
         eprintln!("       {action}");
     }
-    for line in &technical {
+    // A failure that is not a `CoreError` has no localized message, so the
+    // summary *is* its first technical line. Printing the chain unfiltered
+    // would then say the same sentence twice.
+    for line in technical.iter().filter(|line| **line != summary) {
         eprintln!("  {line}");
     }
 }
@@ -2140,6 +2597,9 @@ fn localized_failure(error: &CoreError) -> (String, Option<String>) {
     }
     if let Some(subject) = error.help_subject() {
         args.push(("client_id", MessageArg::from(subject)));
+    }
+    if let Some(syntax) = error.expected_syntax() {
+        args.push(("syntax", MessageArg::from(syntax)));
     }
 
     let action = if args.is_empty() {

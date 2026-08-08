@@ -43,6 +43,18 @@ pub enum CoreError {
     #[error(transparent)]
     Auth(#[from] AuthError),
 
+    /// Reading or writing an instance's `options.txt`.
+    #[error(transparent)]
+    Options(#[from] ephervex_options::OptionsError),
+
+    /// A global Minecraft preference the user set to something unusable.
+    ///
+    /// Separate from [`Self::Options`] because it is not a filesystem failure
+    /// and has a different next step: the value is refused at the moment it is
+    /// typed, and the message names the syntax that would have worked.
+    #[error(transparent)]
+    Preference(#[from] ephervex_options::InvalidPreferenceValue),
+
     /// Installing or launching a version .
     ///
     /// The typed `LaunchError::AuthenticationRequired` and `MissingJava` states are
@@ -73,6 +85,8 @@ impl CoreError {
             // share a sentence.
             Self::Auth(error) => error.message_id(),
             Self::Launch(error) => error.message_id(),
+            Self::Options(error) => error.message_id(),
+            Self::Preference(error) => error.message_id(),
         }
     }
 
@@ -146,6 +160,21 @@ impl CoreError {
         }
     }
 
+    /// The input syntax a refused setting expected.
+    ///
+    /// The same idea as [`Self::help_subject`], for the one failure whose next
+    /// step is "here is what you should have typed". A literal format such as
+    /// `WIDTHxHEIGHT` is untranslated technical text that the localized message
+    /// takes as an argument, so a frontend needs it without
+    /// matching on the preference error.
+    #[must_use]
+    pub const fn expected_syntax(&self) -> Option<&'static str> {
+        match self {
+            Self::Preference(error) => Some(error.syntax),
+            _ => None,
+        }
+    }
+
     /// The Java major version this failure is about, where it names one.
     ///
     /// Exists for the same reason as [`Self::failing_path`]: a frontend that
@@ -160,7 +189,9 @@ impl CoreError {
             | Self::Minecraft(_)
             | Self::Loader(_)
             | Self::Auth(_)
-            | Self::Launch(_) => None,
+            | Self::Launch(_)
+            | Self::Options(_)
+            | Self::Preference(_) => None,
         }
     }
 
@@ -186,10 +217,12 @@ impl CoreError {
             Self::Java(error) => error.failing_path(),
             Self::Loader(error) => error.failing_path(),
             Self::Launch(error) => error.failing_path(),
+            Self::Options(error) => error.failing_path(),
             // Authentication failures are never about a file. The one thing
             // that would be — the keyring entry — is not a path the user can
-            // usefully be pointed at.
-            Self::Auth(_) => None,
+            // usefully be pointed at. A rejected preference value is about a
+            // setting, not a file either.
+            Self::Auth(_) | Self::Preference(_) => None,
         }
     }
 }
@@ -228,6 +261,7 @@ fn registry_failing_path(error: &ephervex_storage::RegistryError) -> Option<Path
     use ephervex_storage::{IndexError, RegistryError};
     match error {
         RegistryError::RootOccupied { path }
+        | RegistryError::RootMissing { path }
         | RegistryError::Io { path, .. }
         | RegistryError::Index(IndexError::Unopenable { path, .. }) => Some(path.clone()),
         RegistryError::Metadata(inner) => metadata_failing_path(inner),
