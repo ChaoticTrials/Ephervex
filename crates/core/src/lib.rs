@@ -22,13 +22,42 @@
 //! so taking a shortcut means editing a manifest — a visible act someone has
 //! to justify in review.
 
+pub mod account;
 pub mod app;
 pub mod error;
 pub mod logging;
 
+pub use account::{AccountStatus, AccountSummary, ApiSettings, LoginOptions, TOKEN_REFRESH_MARGIN};
 pub use app::{App, JavaPlan, JavaPlanRequest, global_java_settings};
 pub use error::{CoreError, CoreResult};
 pub use logging::init_tracing;
+
+/// Cancellation, re-exported because the services take one.
+///
+/// A frontend that cannot name the type cannot cancel a login, and adding
+/// `tokio-util` to a frontend's manifest to get at it would be exactly the kind
+/// of dependency creep the boundary exists to prevent.
+pub use tokio_util::sync::CancellationToken;
+
+/// Hands a URL to the desktop.
+///
+/// Here rather than in a frontend because both of them need it — the CLI for
+/// the sign-in address, the GUI for the same plus the project's open-folder
+/// actions — and because `ephervex-auth` deliberately must not do it: a
+/// headless machine has no desktop to hand anything to, so the crate that runs
+/// the login emits the URL and the frontend decides what to do with it.
+///
+/// Returns whether the desktop accepted it. A `false` is not a failure worth
+/// aborting a login over: the caller has already printed the address.
+pub fn open_in_browser(url: &str) -> bool {
+    match open::that_detached(url) {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(%error, "could not hand the address to a browser");
+            false
+        }
+    }
+}
 
 /// Data types that cross the frontend boundary.
 ///
@@ -36,6 +65,11 @@ pub use logging::init_tracing;
 /// render a `ClientRecord` and build a `NewClient`, but it never needs the
 /// `Registry` that produced one — nor the `VersionCatalog` that produced a
 /// `ReleaseListing`.
+pub use ephervex_auth::{
+    Account, AuthError, AuthEvent, AuthObserver, AuthStage, CredentialStorage,
+    DEFAULT_MICROSOFT_CLIENT_ID, DeviceCodePrompt, Entitlements, LoginFlow, LoginRequest,
+    MINECRAFT_API_REVIEW_FORM, OfflineAccount, SecretString, Session, XstsDenial, offline_uuid,
+};
 pub use ephervex_download::Freshness;
 pub use ephervex_java::{
     EffectiveJvmSettings, GlobalJavaSettings, JavaError, JavaOrigin, JavaPathChoice, JavaRuntime,
@@ -49,8 +83,9 @@ pub use ephervex_minecraft::{
     MinecraftVersionId, ReleaseListing, ReleaseType, VersionMetadata, VersionRecord,
 };
 pub use ephervex_storage::{
-    CONFIG_SCHEMA_VERSION, ClientRecord, Config, EulaConfig, FileDisposition, ImportSource,
-    JavaConfig, JavaOverride, JvmSettings, NetworkAccess, NewClient, NewServer, PathError, Paths,
-    PreferenceSetting, ReconciledRecord, ReconciliationReport, RecordRef, SECRET_KEY_MARKERS,
-    ServerDefaults, ServerNetworkSettings, ServerRecord, StorageError,
+    AccountConfig, ApiConfig, CONFIG_SCHEMA_VERSION, ClientRecord, Config, EulaConfig,
+    FileDisposition, ImportSource, JavaConfig, JavaOverride, JvmSettings, NetworkAccess, NewClient,
+    NewServer, PathError, Paths, PreferenceSetting, ReconciledRecord, ReconciliationReport,
+    RecordRef, SECRET_KEY_MARKERS, ServerDefaults, ServerNetworkSettings, ServerRecord,
+    StorageError,
 };

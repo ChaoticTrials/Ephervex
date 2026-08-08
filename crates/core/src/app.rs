@@ -161,6 +161,15 @@ pub struct App {
     /// deliberately not persisted: a Java installed or removed between runs
     /// would make a disk cache lie, and the launcher has no way to notice.
     java: RwLock<Option<Arc<RuntimeInventory>>>,
+    /// The signed-in session, for the life of the process and no longer.
+    ///
+    /// The Minecraft access token lives here and is written nowhere: it expires
+    /// in twenty-four hours and the refresh token in the keyring can mint
+    /// another, so persisting it would put a second credential at risk for no
+    /// benefit. A plain field rather than a lock because the
+    /// operations that set it already take `&mut self` — see
+    /// [`crate::account`].
+    pub(crate) session: Option<ephervex_auth::Session>,
 }
 
 impl App {
@@ -172,6 +181,7 @@ impl App {
             storage: ephervex_storage::open_from_environment()?,
             minecraft: OnceLock::new(),
             java: RwLock::new(None),
+            session: None,
         })
     }
 
@@ -185,6 +195,7 @@ impl App {
             storage: ephervex_storage::open(paths)?,
             minecraft: OnceLock::new(),
             java: RwLock::new(None),
+            session: None,
         })
     }
 
@@ -556,6 +567,24 @@ impl App {
     /// storage API through `App` and re-open the boundary this layer closes.
     fn registry(&self) -> &Registry {
         &self.storage.registry
+    }
+
+    /// Changes a setting and writes the configuration file.
+    ///
+    /// The single place configuration is mutated, so no service can change a
+    /// value in memory and forget to persist it — and so `Config::save`'s
+    /// refusal to write a credential-looking key (ADR 0004) is on the path of
+    /// every write rather than of most of them.
+    ///
+    /// The change is applied to a copy and only committed once the write
+    /// succeeds: an in-memory setting that failed to reach disk would come back
+    /// on the next run and look like the launcher had ignored the user.
+    pub(crate) fn mutate_config(&mut self, change: impl FnOnce(&mut Config)) -> CoreResult<()> {
+        let mut updated = self.storage.config.clone();
+        change(&mut updated);
+        updated.save(self.paths())?;
+        self.storage.config = updated;
+        Ok(())
     }
 }
 

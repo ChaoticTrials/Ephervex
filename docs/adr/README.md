@@ -14,3 +14,5 @@ so the reasoning trail survives.
 | [0006](0006-temporary-instance-lifecycle.md) | The OS owns temporary-instance cleanup | Accepted |
 | [0007](0007-licensing-and-prism-reference.md) | Licensing deferred; Prism is behavioral reference only | Accepted |
 | [0008](0008-first-version-scope.md) | Features excluded from the first complete version | Accepted |
+| [0009](0009-session-only-login.md) | Session-only login is a second credential store, not a fallback | Accepted |
+| [0010](0010-account-model.md) | Several accounts, two kinds, one default | Accepted |

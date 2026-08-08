@@ -1,0 +1,5 @@
+{
+  "error": "expired_token",
+  "error_description": "AADSTS70019: Verification code expired. The user did not sign in within the allotted time.",
+  "error_codes": [70019]
+}

@@ -278,3 +278,177 @@ java-runtimes-list-count = { $count ->
     }
 
 java-runtime-probe-failed = { $path } could not be identified as a Java runtime.
+
+## Authentication errors 
+#
+# The refusals here are shaped around what the user has to go and do, because
+# that is what actually differs between them. "Authentication failed" would be
+# accurate for all of these and useful for none.
+
+error-auth-client-id-missing = Ephervex has no Microsoft application ID to sign in with.
+.action = Set a Microsoft Client ID in Settings → APIs, or reinstall a build that ships one.
+
+error-auth-client-id-invalid = That is not a valid Microsoft application ID.
+.action = A Client ID looks like 00001111-aaaa-2222-bbbb-3333cccc4444. Copy it from the Overview page of your Azure app registration.
+
+error-auth-endpoint-unusable = A Microsoft sign-in address could not be built.
+
+error-auth-unreachable = Ephervex could not reach the Microsoft sign-in service.
+.action = Check your network connection and try again. Instances you already have still work offline.
+
+error-auth-unexpected-response = The sign-in service returned something Ephervex could not understand.
+.action = If it keeps happening, the sign-in process has probably changed and Ephervex needs an update.
+
+# Split from the message above on purpose: only one of the two is fixed by
+# waiting, and promising that it is when it is not sends the user into a retry
+# loop that can never succeed.
+error-auth-service-unavailable = A sign-in service is temporarily unavailable.
+.action = Try again in a few minutes.
+
+error-auth-microsoft-rejected = Microsoft refused the sign-in request.
+
+error-auth-declined = The sign-in was canceled.
+.action = Start the sign-in again and approve the permission request to continue.
+
+error-auth-device-code-expired = The sign-in code expired before it was used.
+.action = Start the sign-in again. A code is only valid for about fifteen minutes.
+
+error-auth-timed-out = Nobody finished signing in.
+.action = Start the sign-in again and complete it in the browser window that opens.
+
+error-auth-state-mismatch = That sign-in response did not belong to this request.
+.action = Close any leftover sign-in tabs and start again.
+
+error-auth-redirect-listener = Ephervex could not open a local port to receive the sign-in.
+.action = Sign in with a device code instead, which needs no local port.
+
+error-auth-canceled = The sign-in was stopped.
+
+error-auth-xbox-authentication-failed = Xbox Live would not accept this Microsoft account.
+.action = Check that you signed in with the account that owns Minecraft, and try again.
+
+# The XSTS refusals. Each one sends the user somewhere different, which is the
+# entire reason they are not one message.
+error-auth-xbox-no-account = This Microsoft account has no Xbox profile.
+.action = Create an Xbox profile for this account at xbox.com, then sign in again.
+
+error-auth-xbox-account-banned = This account is banned from Xbox Live.
+.action = Minecraft sign-in goes through Xbox Live, so this has to be resolved with Xbox support.
+
+error-auth-xbox-country-unavailable = Xbox Live is not available in this account's country or region.
+
+error-auth-xbox-adult-verification = This account needs to complete age verification before it can use Xbox Live.
+.action = Finish the verification at xbox.com, then sign in again.
+
+error-auth-xbox-child-account = This is a child account and must be added to a Microsoft Family before it can sign in.
+.action = Ask the family organiser to add this account to their Family group.
+
+error-auth-xbox-denied = Xbox Live refused to authorize this account for Minecraft.
+
+error-auth-xbox-user-hash-missing = Xbox Live's response was missing information Ephervex needs to continue.
+
+error-auth-minecraft-login-rejected = Minecraft would not accept the Xbox sign-in.
+.action = Sign in again. If it keeps happening, check that this account can play Minecraft: Java Edition at minecraft.net.
+
+error-auth-minecraft-unavailable = Minecraft's sign-in service is temporarily unavailable.
+.action = Try again in a few minutes.
+
+# Not a problem with the user, the account, or the sign-in — a property of the
+# Azure application registration. No amount of signing in again changes it, so
+# the next step is the approval form and nothing else. $url and $client_id are
+# technical values shown verbatim.
+error-auth-minecraft-api-not-approved = Minecraft has not approved this copy of Ephervex to sign you in.
+.action = Microsoft must approve an application before it may use the Minecraft API. Apply at { $url } using Client ID { $client_id }. Signing in again will not help until it is approved.
+
+error-auth-game-not-owned = This Microsoft account does not own Minecraft: Java Edition.
+.action = Sign in with the account that owns the game, or buy it at minecraft.net.
+
+# Not the same refusal, and telling this user they do not own the game would be
+# false: they do, through Game Pass. They just have no Java Edition profile yet.
+error-auth-game-pass-setup-required = This account reaches Minecraft through Game Pass but has no Java Edition profile yet.
+.action = Open the official Minecraft Launcher once and start Java Edition to create the profile, then sign in here again.
+
+error-auth-profile-unavailable = Your Minecraft profile could not be read.
+.action = Check your network connection and try again.
+
+error-auth-profile-malformed = Minecraft returned a profile Ephervex could not read.
+
+error-auth-secret-storage-unavailable = Ephervex cannot store your sign-in securely on this computer.
+.action = Install and unlock a keyring such as GNOME Keyring or KWallet, or sign in for this session only. Ephervex will never write your credentials to a file.
+
+error-auth-credential-store-failed = The system keyring could not be used.
+.action = Check that your keyring is unlocked, then try again.
+
+error-auth-not-signed-in = No Microsoft account is signed in.
+.action = Sign in with your Microsoft account before launching Minecraft.
+
+error-auth-reauthentication-required = Your saved Microsoft sign-in is no longer valid.
+.action = Sign in again. This happens when a sign-in expires or is revoked.
+
+## Authentication progress and status 
+
+auth-stage-microsoft = Signing in with Microsoft
+auth-stage-xbox-live = Authenticating with Xbox Live
+auth-stage-xsts = Authorizing for Minecraft
+auth-stage-minecraft-login = Signing in to Minecraft
+auth-stage-entitlements = Checking your Minecraft entitlements
+auth-stage-profile = Reading your Minecraft profile
+
+auth-storage-keyring = Saved in the system keyring
+auth-storage-session-only = This session only
+
+auth-signed-out = Not signed in.
+# $name is the account's Minecraft profile name and is never translated.
+auth-signed-in = Signed in as { $name }.
+auth-session-only-warning = This sign-in is not saved and will be forgotten when Ephervex closes.
+
+# $url is an address to open; shown verbatim.
+auth-open-browser = Open this address to sign in: { $url }
+# $code is Microsoft's short device code and $url is where to enter it.
+auth-device-code-prompt = Go to { $url } and enter the code { $code }.
+auth-logged-out = Signed out and removed the saved credential.
+auth-nothing-to-log-out-of = No account was signed in.
+
+## Accounts 
+#
+# Several accounts may exist at once, and exactly one of them is the default a
+# launch uses. Which kind an account is has to be visible everywhere it is
+# shown: an offline account cannot join an online-mode server, and a user who
+# cannot tell them apart will not understand why.
+
+account-kind-microsoft = Microsoft
+account-kind-offline = Offline
+
+accounts-list-empty = No accounts yet.
+
+accounts-list-count = { $count ->
+        [one] { $count } account
+       *[other] { $count } accounts
+    }
+
+# $name is a Minecraft player name and is never translated.
+account-added-offline = Added the offline account { $name }.
+account-default-set = { $name } is now the default account.
+
+# An offline account is not "signed in" to anything, and saying so would imply
+# it can do things it cannot — such as join an online-mode server.
+account-active-offline = Using the offline account { $name }.
+account-removed = Removed the account { $name }.
+account-removed-with-credential = Removed the account { $name } and deleted its saved credential.
+
+# An offline account has no credential at all — this is not a missing or
+# degraded one. Offline accounts have no credential material to store.
+auth-storage-none-needed = No credential needed
+auth-storage-not-saved = Not saved
+
+error-auth-offline-name-invalid = That is not a usable Minecraft player name.
+    .action = Use 3 to 16 characters: letters, digits, or underscores. Minecraft does not accept spaces or punctuation.
+
+error-auth-offline-account-exists = An offline account with that name already exists.
+    .action = An offline account's identity is derived from its name, so a second one would be the same player. Pick a different name.
+
+error-auth-account-unknown = No account matches that name or ID.
+    .action = Run `ephervex account list` to see the accounts this installation has.
+
+error-auth-account-ambiguous = More than one account has that name.
+    .action = Use the account's UUID instead. `ephervex account list` shows it.

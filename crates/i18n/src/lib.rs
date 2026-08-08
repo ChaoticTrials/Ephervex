@@ -527,6 +527,174 @@ mod tests {
     }
 
     #[test]
+    fn every_message_id_referenced_by_authentication_errors_exists() {
+        // `ephervex-auth` owns no `i18n.toml` either, so its
+        // `AuthError::message_id()`, `XstsDenial::message_id()`,
+        // `AuthStage::message_id()`, and `CredentialStorage::message_id()` arms
+        // are checked here. An id with no message renders as a placeholder at
+        // the exact moment a user is being told why they cannot log in.
+        for id in [
+            "error-auth-client-id-missing",
+            "error-auth-client-id-invalid",
+            "error-auth-endpoint-unusable",
+            "error-auth-unreachable",
+            "error-auth-unexpected-response",
+            "error-auth-service-unavailable",
+            "error-auth-microsoft-rejected",
+            "error-auth-declined",
+            "error-auth-device-code-expired",
+            "error-auth-timed-out",
+            "error-auth-state-mismatch",
+            "error-auth-redirect-listener",
+            "error-auth-canceled",
+            "error-auth-xbox-authentication-failed",
+            "error-auth-xbox-no-account",
+            "error-auth-xbox-account-banned",
+            "error-auth-xbox-country-unavailable",
+            "error-auth-xbox-adult-verification",
+            "error-auth-xbox-child-account",
+            "error-auth-xbox-denied",
+            "error-auth-xbox-user-hash-missing",
+            "error-auth-minecraft-login-rejected",
+            "error-auth-minecraft-unavailable",
+            "error-auth-minecraft-api-not-approved",
+            "error-auth-game-not-owned",
+            "error-auth-game-pass-setup-required",
+            "error-auth-profile-unavailable",
+            "error-auth-profile-malformed",
+            "error-auth-secret-storage-unavailable",
+            "error-auth-credential-store-failed",
+            "error-auth-not-signed-in",
+            "error-auth-reauthentication-required",
+            "auth-stage-microsoft",
+            "auth-stage-xbox-live",
+            "auth-stage-xsts",
+            "auth-stage-minecraft-login",
+            "auth-stage-entitlements",
+            "auth-stage-profile",
+            "auth-storage-keyring",
+            "auth-storage-session-only",
+            "auth-signed-out",
+            "auth-signed-in",
+            "auth-session-only-warning",
+            "auth-open-browser",
+            "auth-device-code-prompt",
+            "auth-logged-out",
+            "auth-nothing-to-log-out-of",
+            "auth-storage-none-needed",
+            "auth-storage-not-saved",
+            "account-kind-microsoft",
+            "account-kind-offline",
+            "accounts-list-empty",
+            "accounts-list-count",
+            "account-added-offline",
+            "account-default-set",
+            "account-active-offline",
+            "account-removed",
+            "account-removed-with-credential",
+            "error-auth-offline-name-invalid",
+            "error-auth-offline-account-exists",
+            "error-auth-account-unknown",
+            "error-auth-account-ambiguous",
+        ] {
+            assert!(has(id), "missing message id: {id}");
+        }
+    }
+
+    #[test]
+    fn the_no_secure_storage_message_names_the_alternative_and_the_guarantee() {
+        // This message must say that secure storage is
+        // unavailable, offer session-only login, and make clear nothing is
+        // being written to a file. All three have to survive a reword.
+        let action = lookup_attribute("error-auth-secret-storage-unavailable", "action")
+            .expect("this refusal has a next step");
+        assert!(action.contains("session only"), "{action}");
+        assert!(action.contains("never write"), "{action}");
+    }
+
+    #[test]
+    fn an_offline_account_is_never_described_as_a_missing_credential() {
+        // Offline accounts have no credential material to
+        // store, not by a laxer store. The wording has to reflect that, or a
+        // user will read it as a broken keyring.
+        let none_needed = lookup("auth-storage-none-needed");
+        let not_saved = lookup("auth-storage-not-saved");
+        assert_ne!(none_needed, not_saved);
+        assert!(
+            !none_needed.to_lowercase().contains("not saved"),
+            "{none_needed}"
+        );
+
+        // The two kinds must be distinguishable wherever they are listed.
+        assert_ne!(
+            lookup("account-kind-microsoft"),
+            lookup("account-kind-offline")
+        );
+    }
+
+    #[test]
+    fn a_permanent_authentication_failure_never_advises_waiting() {
+        // The regression this pins: a 403 from Minecraft Services means the
+        // Azure application is not approved, which is permanent until someone
+        // fills in a form. It was reported as "Try again in a few minutes",
+        // which is advice that can never come true.
+        let action = lookup_attribute_args(
+            "error-auth-minecraft-api-not-approved",
+            "action",
+            [
+                ("url", Arg::from("https://aka.ms/mce-reviewappid")),
+                (
+                    "client_id",
+                    Arg::from("00001111-aaaa-2222-bbbb-3333cccc4444"),
+                ),
+            ],
+        )
+        .expect("this refusal has a next step");
+        assert!(
+            action.contains("https://aka.ms/mce-reviewappid"),
+            "{action}"
+        );
+        assert!(
+            action.contains("00001111-aaaa-2222-bbbb-3333cccc4444"),
+            "{action}"
+        );
+        assert!(!action.contains("few minutes"), "{action}");
+
+        // The genuinely transient neighbors keep that advice, and must not
+        // share a message with the permanent one.
+        for id in [
+            "error-auth-minecraft-unavailable",
+            "error-auth-service-unavailable",
+        ] {
+            let action = lookup_attribute(id, "action").expect("a next step");
+            assert!(action.contains("few minutes"), "{id}: {action}");
+        }
+        assert_ne!(
+            lookup("error-auth-minecraft-api-not-approved"),
+            lookup("error-auth-minecraft-unavailable")
+        );
+        assert_ne!(
+            lookup("error-auth-minecraft-login-rejected"),
+            lookup("error-auth-minecraft-unavailable")
+        );
+    }
+
+    #[test]
+    fn not_owning_the_game_and_owning_it_through_game_pass_read_differently() {
+        // A Game Pass subscriber with no Java profile does own the game. The
+        // two messages must not be interchangeable.
+        let not_owned = lookup("error-auth-game-not-owned");
+        let game_pass = lookup("error-auth-game-pass-setup-required");
+        assert_ne!(not_owned, game_pass);
+        assert!(game_pass.contains("Game Pass"), "{game_pass}");
+        assert!(
+            lookup_attribute("error-auth-game-pass-setup-required", "action")
+                .expect("a next step")
+                .contains("official Minecraft Launcher")
+        );
+    }
+
+    #[test]
     fn an_offline_version_list_offers_a_next_step_without_needing_a_path() {
         // Most error actions interpolate `$path`. The network ones cannot, and
         // a frontend must still be able to show them.

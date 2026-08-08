@@ -51,17 +51,37 @@ ephervex-core = { path = "crates/core" }
 
 # --- external stack (versions resolved by `cargo add`, not hand-written) ---
 anyhow = "1.0.104"
+# `async-trait` exists for exactly one trait: `AccountProvider` (ADR 0005). A
+# native `async fn` in a trait is not dyn-compatible, and `ephervex-core` holds
+# the provider as `dyn AccountProvider` so the services layer depends on the
+# interface rather than on the Microsoft implementation.
+async-trait = "0.1.91"
+# URL-safe base64 for PKCE challenges. `default-features = false` drops the
+# crate's SIMD path, which this workspace has no throughput reason to want.
+base64 = { version = "0.23.1", default-features = false, features = ["std"] }
 chrono = { version = "0.4.45", features = ["serde"] }
 clap = { version = "4.6.6", features = ["derive"] }
 directories = "6.0.0"
 flate2 = "1.1.9"
 futures-util = "0.3.33"
+# The OS entropy source, used for PKCE verifiers and OAuth `state` values. A
+# full RNG crate would be more than this needs: these are one-shot secrets that
+# must come from the kernel, never from a seeded userspace generator.
+getrandom = "0.4.3"
 hex = "0.4.3"
 i18n-embed = { version = "0.16.0", features = ["fluent-system", "desktop-requester"] }
 i18n-embed-fl = "0.10.1"
 keyring = "4.1.6"
+# MD5 exists for exactly one reason: Minecraft derives an offline player's UUID
+# with `UUID.nameUUIDFromBytes`, which is MD5-based. Ephervex must reproduce
+# that byte for byte or a client and its own linked test server would disagree
+# about who the player is. Not used for anything security-bearing.
+md-5 = "0.11.0"
 open = "5.4.1"
-reqwest = { version = "0.13.4", default-features = false, features = ["gzip", "http2", "json", "rustls", "stream", "system-proxy"] }
+# `form` is needed by `ephervex-auth`: every OAuth token request is
+# `application/x-www-form-urlencoded`, which is the one body shape the identity
+# platform accepts there.
+reqwest = { version = "0.13.4", default-features = false, features = ["form", "gzip", "http2", "json", "rustls", "stream", "system-proxy"] }
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 rust-embed = "8.12.0"
 semver = "1.0.28"

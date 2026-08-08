@@ -1,0 +1,8 @@
+{
+  "device_code": "FAKE-DEVICE-CODE",
+  "user_code": "A1B2C3D4",
+  "verification_uri": "https://microsoft.com/devicelogin",
+  "expires_in": 900,
+  "interval": 1,
+  "message": "To sign in, use a web browser to open the page https://microsoft.com/devicelogin and enter the code A1B2C3D4 to authenticate."
+}

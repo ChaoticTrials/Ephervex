@@ -4,6 +4,7 @@
 //! workspace crate, and every other crate may depend on it. It holds types
 //! only — no networking, no filesystem access, no business logic.
 
+pub mod account;
 pub mod app;
 pub mod hash;
 pub mod ids;
@@ -13,6 +14,7 @@ pub mod loader;
 pub mod operation;
 pub mod storage;
 
+pub use account::AccountKind;
 pub use app::{APP_ID, APP_NAME, APP_URL, APP_VERSION, user_agent};
 pub use hash::{Hash, HashAlgorithm};
 pub use ids::{InstanceId, OperationId, ServerId};

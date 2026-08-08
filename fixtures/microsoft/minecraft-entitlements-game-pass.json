@@ -1,0 +1,7 @@
+{
+  "items": [
+    { "name": "product_game_pass_ultimate", "signature": "FAKE-ENTITLEMENT-SIGNATURE" }
+  ],
+  "signature": "FAKE-ENTITLEMENT-SIGNATURE",
+  "keyId": "1"
+}

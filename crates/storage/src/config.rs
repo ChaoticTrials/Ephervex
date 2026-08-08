@@ -18,6 +18,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use ephervex_model::AccountKind;
+
 use crate::paths::{PathError, Paths};
 
 /// The configuration schema this build understands.
@@ -205,6 +207,91 @@ impl Default for ServerDefaults {
     }
 }
 
+/// Provider credentials and identifiers that are *not* secrets.
+///
+/// # What is deliberately absent
+///
+/// Three user-configurable integration settings are grouped under "APIs": the Microsoft Client ID, the
+/// CurseForge API Key, and an advanced custom User-Agent. Two of them are here.
+/// The API key is not, and its absence is the point — it is a credential, so it
+/// lives in the desktop keyring under `CredentialKey::CurseForgeApiKey` and
+/// this struct has no field it could be written to (ADR 0004).
+///
+/// A settings screen still shows all three together; only one of them is backed
+/// by this file.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ApiConfig {
+    /// The Azure application registration to authenticate as, or empty for the
+    /// one this build ships with.
+    ///
+    /// Not a secret: Ephervex is registered as a public/native client, which
+    /// has no client secret and cannot have one. The Client ID identifies the
+    /// application to Microsoft and authenticates nothing.
+    pub microsoft_client_id: String,
+    /// An advanced override for the HTTP `User-Agent`, or empty for the
+    /// launcher's own.
+    ///
+    /// Exists because a provider may one day need a particular string to grant
+    /// access; it is not something a user should normally touch.
+    pub user_agent: String,
+    /// Keys this build does not know about. See [`Config::unknown`].
+    #[serde(flatten)]
+    pub unknown: toml::Table,
+}
+
+impl ApiConfig {
+    /// The configured Client ID, or `None` to use the build's default.
+    #[must_use]
+    pub fn microsoft_client_id(&self) -> Option<&str> {
+        let trimmed = self.microsoft_client_id.trim();
+        (!trimmed.is_empty()).then_some(trimmed)
+    }
+
+    /// The configured User-Agent, or `None` for the launcher's own.
+    #[must_use]
+    pub fn user_agent(&self) -> Option<&str> {
+        let trimmed = self.user_agent.trim();
+        (!trimmed.is_empty()).then_some(trimmed)
+    }
+}
+
+/// What is remembered about a signed-in account between runs.
+///
+/// Every field here is explicitly permitted in configuration: the profile id,
+/// the display name, and timestamps. The refresh token that makes the account
+/// usable is in the keyring and is not represented here at all — not even as a
+/// copy, and not even as a length.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct AccountConfig {
+    /// The account's Minecraft display name, for showing in the interface
+    /// without a network round trip.
+    pub name: String,
+    /// Microsoft or offline.
+    ///
+    /// Absent in a file written before offline accounts existed, and
+    /// [`AccountKind::default`] reads that as Microsoft — which is what such a
+    /// row is.
+    pub kind: AccountKind,
+    /// RFC 3339 timestamp of when this account was first added.
+    pub added_at: String,
+    /// RFC 3339 timestamp of the last successful chain completion, or of
+    /// creation for an offline account, which never authenticates.
+    pub last_authenticated_at: String,
+}
+
+/// Why an account reference did not resolve to exactly one account.
+///
+/// Two outcomes rather than an `Option`, because they need different messages:
+/// "no such account" is a typo, and "that name belongs to two accounts" needs
+/// the user to disambiguate with a UUID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountLookup {
+    Unknown,
+    Ambiguous { matches: usize },
+}
+
 /// Recorded Minecraft EULA workflow.
 ///
 /// The launcher must never claim on the user's behalf that they accepted the
@@ -229,11 +316,18 @@ pub struct Config {
     /// Checked before anything else; see [`CONFIG_SCHEMA_VERSION`].
     pub schema_version: u32,
     /// BCP 47 language tag. A language setting exists even though only English
-    /// ships .
+    /// ships.
     pub language: String,
     /// Custom persistent instance root, or empty for the XDG default. This is
-    /// the only relocatable root .
+    /// the only relocatable root.
     pub persistent_instance_root: String,
+    /// The account launches use, as a profile UUID, or empty when nobody is
+    /// signed in.
+    ///
+    /// Separate from [`Self::accounts`] so that "which one is active" is one
+    /// value rather than a flag that two rows could both claim. One account
+    /// ships, but the shape does not foreclose a second.
+    pub active_account: String,
     pub java: JavaConfig,
     /// Managed Minecraft preferences, keyed by preference name. An open map
     /// rather than a fixed struct because the set of managed keys grows with
@@ -241,6 +335,14 @@ pub struct Config {
     pub minecraft_preferences: BTreeMap<String, PreferenceSetting>,
     pub server_defaults: ServerDefaults,
     pub eula: EulaConfig,
+    pub api: ApiConfig,
+    /// Non-secret metadata for accounts that have signed in, keyed by profile
+    /// UUID.
+    ///
+    /// A map rather than a single `[account]` table because Ephervex supports
+    /// one account ships, and the data model must not make a second one a
+    /// schema change. Same arrangement as [`Self::minecraft_preferences`].
+    pub accounts: BTreeMap<String, AccountConfig>,
     /// Top-level keys this build does not know about.
     ///
     /// Carried through a load/save cycle so that running an older Ephervex once
@@ -256,6 +358,7 @@ impl Default for Config {
             schema_version: CONFIG_SCHEMA_VERSION,
             language: "en-US".to_owned(),
             persistent_instance_root: String::new(),
+            active_account: String::new(),
             java: JavaConfig::default(),
             minecraft_preferences: BTreeMap::from([
                 ("gui_scale".to_owned(), PreferenceSetting::managed("auto")),
@@ -263,6 +366,8 @@ impl Default for Config {
             ]),
             server_defaults: ServerDefaults::default(),
             eula: EulaConfig::default(),
+            api: ApiConfig::default(),
+            accounts: BTreeMap::new(),
             unknown: toml::Table::new(),
         }
     }
@@ -388,6 +493,131 @@ impl Config {
         paths.with_persistent_instance_root(self.persistent_instance_root())
     }
 
+    /// The default account, or `None` when there is none.
+    ///
+    /// A string rather than a `Uuid` in the file itself, and validated here, so
+    /// a hand-edited or truncated value degrades to "no default" rather than
+    /// failing to parse the whole configuration. A pointer at an account that
+    /// is not in the table is treated the same way.
+    #[must_use]
+    pub fn active_account(&self) -> Option<&str> {
+        let trimmed = self.active_account.trim();
+        (!trimmed.is_empty() && self.accounts.contains_key(trimmed)).then_some(trimmed)
+    }
+
+    /// The metadata recorded for the default account.
+    #[must_use]
+    pub fn active_account_config(&self) -> Option<(&str, &AccountConfig)> {
+        let id = self.active_account()?;
+        self.accounts.get(id).map(|account| (id, account))
+    }
+
+    /// Records an account, making it the default if there is not one already.
+    ///
+    /// Only non-secret metadata reaches this: the id, the name, the kind, and
+    /// the times. Any credential went to the keyring before this was called,
+    /// and an offline account has none at all.
+    ///
+    /// Adding does **not** steal the default from an account that already has
+    /// it. Signing into a second account to check something should not silently
+    /// change which one the next launch uses; [`Self::set_active_account`] is
+    /// how that changes, and it is always an explicit act. The exception is the
+    /// first account, which becomes the default because otherwise a single
+    /// account would sit there not being used by anything.
+    pub fn remember_account(&mut self, id: &str, name: &str, kind: AccountKind, at: &str) {
+        let entry = self.accounts.entry(id.to_owned()).or_default();
+        if entry.added_at.is_empty() {
+            at.clone_into(&mut entry.added_at);
+        }
+        name.clone_into(&mut entry.name);
+        entry.kind = kind;
+        at.clone_into(&mut entry.last_authenticated_at);
+
+        if self.active_account().is_none() {
+            id.clone_into(&mut self.active_account);
+        }
+    }
+
+    /// Makes an account the default.
+    ///
+    /// Returns `false` for an id this installation does not have, so a caller
+    /// cannot point the default at nothing.
+    pub fn set_active_account(&mut self, id: &str) -> bool {
+        if !self.accounts.contains_key(id) {
+            return false;
+        }
+        id.clone_into(&mut self.active_account);
+        true
+    }
+
+    /// Forgets an account and, if it was the default, promotes another.
+    ///
+    /// The promotion rule is **the most recently used account that remains**,
+    /// with the id as a tie-break so the outcome is deterministic rather than
+    /// dependent on map ordering. That is the account the user was working with
+    /// before this one, which is the least surprising thing to fall back to —
+    /// and it beats leaving no default at all, which would make the next launch
+    /// fail for a user who still has a perfectly good account.
+    ///
+    /// The stored credential is removed separately, by whoever owns the keyring
+    /// — this crate has no business touching it (ADR 0004).
+    pub fn forget_account(&mut self, id: &str) {
+        self.accounts.remove(id);
+        if self.active_account != id {
+            return;
+        }
+        self.active_account = self
+            .accounts
+            .iter()
+            .max_by(|(left_id, left), (right_id, right)| {
+                left.last_authenticated_at
+                    .cmp(&right.last_authenticated_at)
+                    .then_with(|| left_id.cmp(right_id))
+            })
+            .map(|(id, _)| id.clone())
+            .unwrap_or_default();
+    }
+
+    /// Finds an account by UUID or by display name.
+    ///
+    /// Names are matched case-insensitively because the user typed them, and
+    /// an id is tried first because it is unambiguous by construction. A name
+    /// held by more than one account resolves to nothing rather than to an
+    /// arbitrary one — removing the wrong account is not recoverable.
+    pub fn find_account(&self, reference: &str) -> Result<&str, AccountLookup> {
+        let reference = reference.trim();
+        if self.accounts.contains_key(reference) {
+            return self
+                .accounts
+                .get_key_value(reference)
+                .map(|(id, _)| id.as_str())
+                .ok_or(AccountLookup::Unknown);
+        }
+
+        let matches: Vec<&str> = self
+            .accounts
+            .iter()
+            .filter(|(_, account)| account.name.eq_ignore_ascii_case(reference))
+            .map(|(id, _)| id.as_str())
+            .collect();
+
+        match matches.as_slice() {
+            [only] => Ok(only),
+            [] => Err(AccountLookup::Unknown),
+            many => Err(AccountLookup::Ambiguous {
+                matches: many.len(),
+            }),
+        }
+    }
+
+    /// Whether any account has this name, for refusing a duplicate offline one.
+    #[must_use]
+    pub fn has_account_named(&self, name: &str) -> bool {
+        self.accounts
+            .values()
+            .any(|account| account.name.eq_ignore_ascii_case(name.trim()))
+    }
+
     /// Returns the dotted path of the first credential-looking key, if any.
     #[must_use]
     pub fn find_secret_looking_key(&self) -> Option<String> {
@@ -399,6 +629,10 @@ impl Config {
             .or_else(|| find_secret_key(&self.java.unknown, "java"))
             .or_else(|| find_secret_key(&self.server_defaults.unknown, "server_defaults"))
             .or_else(|| find_secret_key(&self.eula.unknown, "eula"))
+            // `[api]` is the table a hand edit is most likely to put a
+            // CurseForge key into, since that is where the settings screen
+            // shows the field.
+            .or_else(|| find_secret_key(&self.api.unknown, "api"))
     }
 
     fn strip_secret_looking_keys(&mut self) {
@@ -407,6 +641,7 @@ impl Config {
             (&mut self.java.unknown, "java"),
             (&mut self.server_defaults.unknown, "server_defaults"),
             (&mut self.eula.unknown, "eula"),
+            (&mut self.api.unknown, "api"),
         ] {
             while let Some(key) = find_secret_key(table, prefix) {
                 let leaf = key.rsplit('.').next().unwrap_or(&key).to_owned();
@@ -461,6 +696,8 @@ fn remove_nested(table: &mut toml::Table, leaf: &str) {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use ephervex_model::AccountKind;
+
     use super::*;
 
     /// The serialized configuration schema.
@@ -714,6 +951,303 @@ reference = ""
         );
         // The other roots stay where XDG says.
         assert_eq!(paths.config_dir(), Path::new("/example/config"));
+    }
+
+    #[test]
+    fn the_api_settings_default_to_using_the_builds_own_values() {
+        // An empty field in a settings screen means "use the default", not
+        // "authenticate as nobody" and not "send an empty User-Agent".
+        let api = ApiConfig::default();
+        assert!(api.microsoft_client_id().is_none());
+        assert!(api.user_agent().is_none());
+
+        let configured = ApiConfig {
+            microsoft_client_id: "  11112222-bbbb-3333-cccc-4444dddd5555  ".to_owned(),
+            user_agent: " CustomAgent/1.0 ".to_owned(),
+            unknown: toml::Table::new(),
+        };
+        assert_eq!(
+            configured.microsoft_client_id(),
+            Some("11112222-bbbb-3333-cccc-4444dddd5555")
+        );
+        assert_eq!(configured.user_agent(), Some("CustomAgent/1.0"));
+    }
+
+    #[test]
+    fn the_api_table_has_no_field_a_curseforge_key_could_be_written_to() {
+        // ADR 0004 requires the key to remain in the system keyring. This is enforced
+        // by there being nowhere here to put it, not by remembering not to.
+        let text = Config::default().to_toml_string().expect("serialize");
+        let api_section = text
+            .split("[api]")
+            .nth(1)
+            .expect("the api table is emitted");
+        let lowered = api_section.to_ascii_lowercase();
+        for marker in SECRET_KEY_MARKERS {
+            assert!(!lowered.contains(marker), "`{marker}` in [api]:\n{text}");
+        }
+    }
+
+    #[test]
+    fn a_credential_hand_edited_into_the_api_table_is_dropped_on_load() {
+        // The likeliest place for someone to put one, because it is where the
+        // settings screen shows the field.
+        let text =
+            format!("{DEFAULT_CONFIG_EXAMPLE}\n[api]\ncurseforge_api_key = \"$2a$10$notreal\"\n");
+        let config = Config::from_toml_str(&text).expect("parse");
+        assert!(config.find_secret_looking_key().is_none());
+        assert!(
+            !config
+                .to_toml_string()
+                .expect("serialize")
+                .contains("notreal")
+        );
+    }
+
+    fn microsoft(config: &mut Config, id: &str, name: &str, at: &str) {
+        config.remember_account(id, name, AccountKind::Microsoft, at);
+    }
+
+    #[test]
+    fn account_metadata_round_trips_and_holds_nothing_secret() {
+        let mut config = Config::default();
+        assert!(config.active_account().is_none());
+
+        microsoft(
+            &mut config,
+            "069a79f4-44e9-4726-a5be-fca90e38aaf5",
+            "TestAccount",
+            "2026-08-08T12:00:00Z",
+        );
+        let text = config.to_toml_string().expect("serialize");
+        let parsed = Config::from_toml_str(&text).expect("re-parse");
+        assert_eq!(parsed, config);
+
+        let (id, account) = parsed.active_account_config().expect("an active account");
+        assert_eq!(id, "069a79f4-44e9-4726-a5be-fca90e38aaf5");
+        assert_eq!(account.name, "TestAccount");
+        assert_eq!(account.kind, AccountKind::Microsoft);
+        assert_eq!(account.added_at, "2026-08-08T12:00:00Z");
+        assert_eq!(account.last_authenticated_at, "2026-08-08T12:00:00Z");
+
+        // The id, name, kind, and timestamps are non-secret account metadata; only
+        // nothing else. The refresh token is in the keyring and has no
+        // representation in this file at all.
+        let lowered = text.to_ascii_lowercase();
+        for marker in SECRET_KEY_MARKERS {
+            assert!(!lowered.contains(marker), "`{marker}`:\n{text}");
+        }
+    }
+
+    #[test]
+    fn an_offline_account_records_its_kind_and_still_holds_no_secret() {
+        let mut config = Config::default();
+        config.remember_account(
+            "b50ad385-829d-3141-a216-7e7d7539ba7f",
+            "Notch",
+            AccountKind::Offline,
+            "2026-08-08T12:00:00Z",
+        );
+
+        let text = config.to_toml_string().expect("serialize");
+        assert!(text.contains("offline"), "{text}");
+        let parsed = Config::from_toml_str(&text).expect("re-parse");
+        let (_, account) = parsed.active_account_config().expect("active");
+        assert_eq!(account.kind, AccountKind::Offline);
+
+        let lowered = text.to_ascii_lowercase();
+        for marker in SECRET_KEY_MARKERS {
+            assert!(!lowered.contains(marker), "`{marker}`:\n{text}");
+        }
+    }
+
+    #[test]
+    fn an_account_row_without_a_kind_reads_as_microsoft() {
+        // Written by a build that predates offline accounts. Reading it as
+        // offline would silently downgrade a real account.
+        let text = format!(
+            "{DEFAULT_CONFIG_EXAMPLE}\n[accounts.069a79f4-44e9-4726-a5be-fca90e38aaf5]\n\
+             name = \"TestAccount\"\nadded_at = \"\"\nlast_authenticated_at = \"\"\n"
+        );
+        let config = Config::from_toml_str(&text).expect("parse");
+        assert_eq!(
+            config.accounts["069a79f4-44e9-4726-a5be-fca90e38aaf5"].kind,
+            AccountKind::Microsoft
+        );
+    }
+
+    #[test]
+    fn signing_in_again_keeps_the_original_added_at_and_updates_the_rest() {
+        let mut config = Config::default();
+        microsoft(&mut config, "id-1", "OldName", "2026-01-01T00:00:00Z");
+        microsoft(&mut config, "id-1", "NewName", "2026-08-08T12:00:00Z");
+
+        let (_, account) = config.active_account_config().expect("active");
+        assert_eq!(account.added_at, "2026-01-01T00:00:00Z");
+        assert_eq!(account.last_authenticated_at, "2026-08-08T12:00:00Z");
+        assert_eq!(account.name, "NewName");
+    }
+
+    #[test]
+    fn the_first_account_added_becomes_the_default_on_its_own() {
+        // With one account there is nothing to choose, and leaving the default
+        // empty would mean a launcher that has an account and refuses to use it.
+        let mut config = Config::default();
+        microsoft(&mut config, "id-1", "First", "2026-01-01T00:00:00Z");
+        assert_eq!(config.active_account(), Some("id-1"));
+    }
+
+    #[test]
+    fn adding_a_second_account_does_not_steal_the_default() {
+        // Signing into another account to check something must not silently
+        // change which one the next launch uses.
+        let mut config = Config::default();
+        microsoft(&mut config, "id-1", "First", "2026-01-01T00:00:00Z");
+        microsoft(&mut config, "id-2", "Second", "2026-08-08T12:00:00Z");
+        assert_eq!(config.active_account(), Some("id-1"));
+
+        //...but asking for it does.
+        assert!(config.set_active_account("id-2"));
+        assert_eq!(config.active_account(), Some("id-2"));
+    }
+
+    #[test]
+    fn the_default_cannot_be_pointed_at_an_account_that_does_not_exist() {
+        let mut config = Config::default();
+        microsoft(&mut config, "id-1", "First", "2026-01-01T00:00:00Z");
+        assert!(!config.set_active_account("id-nope"));
+        assert_eq!(config.active_account(), Some("id-1"));
+    }
+
+    #[test]
+    fn removing_the_default_promotes_the_most_recently_used_survivor() {
+        let mut config = Config::default();
+        microsoft(&mut config, "id-old", "Old", "2026-01-01T00:00:00Z");
+        microsoft(&mut config, "id-recent", "Recent", "2026-07-01T00:00:00Z");
+        microsoft(&mut config, "id-active", "Active", "2026-08-08T12:00:00Z");
+        assert!(config.set_active_account("id-active"));
+
+        config.forget_account("id-active");
+        assert_eq!(
+            config.active_account(),
+            Some("id-recent"),
+            "the account used before this one is the least surprising fallback"
+        );
+    }
+
+    #[test]
+    fn removing_a_non_default_account_leaves_the_default_alone() {
+        let mut config = Config::default();
+        microsoft(&mut config, "id-1", "First", "2026-01-01T00:00:00Z");
+        microsoft(&mut config, "id-2", "Second", "2026-08-08T12:00:00Z");
+
+        config.forget_account("id-2");
+        assert_eq!(config.active_account(), Some("id-1"));
+        assert_eq!(config.accounts.len(), 1);
+    }
+
+    #[test]
+    fn removing_the_last_account_leaves_no_default() {
+        let mut config = Config::default();
+        microsoft(&mut config, "id-1", "Only", "2026-01-01T00:00:00Z");
+        config.forget_account("id-1");
+
+        assert!(config.active_account().is_none());
+        assert!(config.accounts.is_empty());
+        assert!(config.active_account.is_empty());
+    }
+
+    #[test]
+    fn promotion_is_deterministic_when_two_accounts_tie() {
+        // Equal timestamps must not make the outcome depend on map ordering.
+        let mut config = Config::default();
+        microsoft(&mut config, "id-b", "B", "2026-01-01T00:00:00Z");
+        microsoft(&mut config, "id-a", "A", "2026-01-01T00:00:00Z");
+        microsoft(&mut config, "id-z", "Z", "2026-08-08T12:00:00Z");
+        assert!(config.set_active_account("id-z"));
+
+        config.forget_account("id-z");
+        assert_eq!(config.active_account(), Some("id-b"), "id tie-break");
+    }
+
+    #[test]
+    fn an_active_account_pointing_at_nothing_reads_as_no_default() {
+        // A hand edit, or a configuration copied between machines, must not
+        // make the launcher claim a login it has no metadata for.
+        let config = Config {
+            active_account: "069a79f4-44e9-4726-a5be-fca90e38aaf5".to_owned(),
+            ..Config::default()
+        };
+        assert!(config.active_account().is_none());
+        assert!(config.active_account_config().is_none());
+    }
+
+    #[test]
+    fn accounts_resolve_by_uuid_or_by_name() {
+        let mut config = Config::default();
+        microsoft(
+            &mut config,
+            "069a79f4-44e9-4726-a5be-fca90e38aaf5",
+            "Notch",
+            "t",
+        );
+        config.remember_account(
+            "b50ad385-829d-3141-a216-7e7d7539ba7f",
+            "Steve",
+            AccountKind::Offline,
+            "t",
+        );
+
+        assert_eq!(
+            config.find_account("069a79f4-44e9-4726-a5be-fca90e38aaf5"),
+            Ok("069a79f4-44e9-4726-a5be-fca90e38aaf5")
+        );
+        assert_eq!(
+            config.find_account("Steve"),
+            Ok("b50ad385-829d-3141-a216-7e7d7539ba7f")
+        );
+        // The user typed it, so case is not their problem.
+        assert_eq!(
+            config.find_account("  notch  "),
+            Ok("069a79f4-44e9-4726-a5be-fca90e38aaf5")
+        );
+        assert_eq!(config.find_account("nobody"), Err(AccountLookup::Unknown));
+    }
+
+    #[test]
+    fn an_ambiguous_name_resolves_to_nothing_rather_than_to_a_guess() {
+        // A Microsoft account and an offline account may legitimately share a
+        // name. Removing the wrong one is not recoverable, so the user is made
+        // to disambiguate.
+        let mut config = Config::default();
+        microsoft(&mut config, "id-1", "Notch", "t");
+        config.remember_account("id-2", "Notch", AccountKind::Offline, "t");
+
+        assert_eq!(
+            config.find_account("Notch"),
+            Err(AccountLookup::Ambiguous { matches: 2 })
+        );
+        // The unambiguous id still works.
+        assert_eq!(config.find_account("id-2"), Ok("id-2"));
+    }
+
+    #[test]
+    fn a_second_account_is_expressible_and_round_trips() {
+        let mut config = Config::default();
+        microsoft(&mut config, "id-1", "First", "2026-01-01T00:00:00Z");
+        config.remember_account(
+            "id-2",
+            "Second",
+            AccountKind::Offline,
+            "2026-08-08T12:00:00Z",
+        );
+
+        assert_eq!(config.accounts.len(), 2);
+        assert!(config.has_account_named("second"));
+        assert!(!config.has_account_named("third"));
+        let parsed =
+            Config::from_toml_str(&config.to_toml_string().expect("serialize")).expect("parse");
+        assert_eq!(parsed, config);
     }
 
     #[test]

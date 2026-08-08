@@ -1,0 +1,8 @@
+{
+  "items": [
+    { "name": "product_minecraft", "signature": "FAKE-ENTITLEMENT-SIGNATURE" },
+    { "name": "game_minecraft", "signature": "FAKE-ENTITLEMENT-SIGNATURE" }
+  ],
+  "signature": "FAKE-ENTITLEMENT-SIGNATURE",
+  "keyId": "1"
+}

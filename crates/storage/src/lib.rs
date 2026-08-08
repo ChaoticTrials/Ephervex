@@ -39,8 +39,8 @@ pub mod registry;
 mod test_support;
 
 pub use config::{
-    CONFIG_SCHEMA_VERSION, Config, ConfigError, EulaConfig, JavaConfig, NetworkAccess,
-    PreferenceSetting, SECRET_KEY_MARKERS, ServerDefaults,
+    AccountConfig, AccountLookup, ApiConfig, CONFIG_SCHEMA_VERSION, Config, ConfigError,
+    EulaConfig, JavaConfig, NetworkAccess, PreferenceSetting, SECRET_KEY_MARKERS, ServerDefaults,
 };
 pub use index::{Index, IndexError, MIGRATIONS, Migration, MigrationOutcome, apply_migrations};
 pub use metadata::{METADATA_VERSION, MetadataError};

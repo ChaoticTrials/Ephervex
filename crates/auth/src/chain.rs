@@ -1,0 +1,398 @@
+//! The whole chain, assembled: Microsoft → Xbox Live → XSTS → Minecraft →
+//! entitlements → profile.
+//!
+//! # The shape of it
+//!
+//! Both flows and the refresh path converge after one step. The browser flow
+//! and the device flow differ only in *how* a Microsoft access token is
+//! obtained; a refresh differs only in that it obtains one without the user
+//! present. Everything after that is identical, which is why [`Self::finish`]
+//! exists and why there is exactly one implementation of the four Minecraft
+//! legs rather than three near-copies that drift.
+//!
+//! # Rotation is not optional
+//!
+//! Microsoft may issue a new refresh token on any redemption and documents that
+//! the client is expected to discard the old one. So every path that produces
+//! tokens re-stores whatever refresh token came back, and a resume that
+//! forgot to would work for weeks and then strand the user.
+
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use chrono::Utc;
+use ephervex_download::HttpConfig;
+use ephervex_model::AccountKind;
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, instrument, warn};
+use uuid::Uuid;
+
+use crate::endpoints::Endpoints;
+use crate::error::{AuthError, AuthResult};
+use crate::loopback::{LoopbackReceiver, Redirect};
+use crate::microsoft::{MicrosoftClient, MicrosoftTokens};
+use crate::minecraft::{Entitlements, MinecraftServicesClient};
+use crate::pkce::Pkce;
+use crate::provider::{
+    Account, AccountProvider, AuthEvent, AuthObserver, Credentials, LoginFlow, LoginRequest,
+    Session,
+};
+use crate::secret::SecretString;
+use crate::stage::AuthStage;
+use crate::store::{CredentialKey, CredentialStorage, CredentialStore};
+use crate::xbox::XboxClient;
+
+/// The Microsoft implementation of [`AccountProvider`].
+#[derive(Debug, Clone)]
+pub struct MicrosoftAccountProvider {
+    microsoft: MicrosoftClient,
+    xbox: XboxClient,
+    minecraft: MinecraftServicesClient,
+    credentials: Arc<dyn CredentialStore>,
+}
+
+impl MicrosoftAccountProvider {
+    /// Builds a provider against the real services.
+    pub fn new(client_id: &str, credentials: Arc<dyn CredentialStore>) -> AuthResult<Self> {
+        Self::with_endpoints(
+            client_id,
+            credentials,
+            Endpoints::production(),
+            &HttpConfig::default(),
+        )
+    }
+
+    /// Builds a provider against explicit endpoints.
+    ///
+    /// The offline test suite's entry point. Not a configuration knob —
+    /// see [`crate::endpoints`].
+    pub fn with_endpoints(
+        client_id: &str,
+        credentials: Arc<dyn CredentialStore>,
+        endpoints: Endpoints,
+        http: &HttpConfig,
+    ) -> AuthResult<Self> {
+        let client = crate::http::build_client(http)?;
+        Ok(Self {
+            microsoft: MicrosoftClient::new(client.clone(), endpoints.clone(), client_id)?,
+            xbox: XboxClient::new(client.clone(), endpoints.clone()),
+            minecraft: MinecraftServicesClient::new(client, endpoints, client_id),
+            credentials,
+        })
+    }
+
+    /// The Azure application registration in use. Not a secret.
+    #[must_use]
+    pub fn client_id(&self) -> &str {
+        self.microsoft.client_id()
+    }
+
+    // -- flows -------------------------------------------------------------
+
+    /// Authorization code with PKCE, through the user's own browser.
+    #[instrument(skip_all)]
+    async fn browser_login(
+        &self,
+        request: &LoginRequest,
+        observer: &AuthObserver,
+        cancel: &CancellationToken,
+    ) -> AuthResult<MicrosoftTokens> {
+        let pkce = Pkce::generate().ok_or_else(|| AuthError::RedirectListener {
+            source: std::io::Error::other("the operating system provided no entropy"),
+        })?;
+
+        // Bound *before* the URL is built: the redirect URI has to carry the
+        // port, and it has to be the same string in both legs of the exchange.
+        let receiver = LoopbackReceiver::bind().await?;
+        let redirect_uri = receiver.redirect_uri().to_owned();
+        let url = self.microsoft.authorization_url(&pkce, &redirect_uri)?;
+
+        // The frontend decides whether to open a browser, print the URL, or
+        // both. This crate must not reach for the desktop: a headless caller
+        // has no desktop to reach for.
+        observer.emit(AuthEvent::OpenBrowser { url });
+
+        match receiver.wait(pkce.state(), request.timeout, cancel).await? {
+            Redirect::Code(code) => {
+                self.microsoft
+                    .redeem_code(&code, &pkce, &redirect_uri, cancel)
+                    .await
+            }
+            Redirect::Error { code, description } => Err(crate::http::OAuthErrorBody {
+                error: code,
+                error_description: description,
+            }
+            .into_error()),
+        }
+    }
+
+    /// The device authorization grant, for a machine with no browser.
+    #[instrument(skip_all)]
+    async fn device_code_login(
+        &self,
+        observer: &AuthObserver,
+        cancel: &CancellationToken,
+    ) -> AuthResult<MicrosoftTokens> {
+        let session = self.microsoft.begin_device_code(cancel).await?;
+        observer.emit(AuthEvent::DeviceCode(session.prompt.clone()));
+        self.microsoft.poll_device_code(&session, cancel).await
+    }
+
+    // -- the shared tail ---------------------------------------------------
+
+    /// Everything after a Microsoft access token exists.
+    ///
+    /// One implementation for three entry points. The ownership check happens
+    /// here, before a `Session` can be constructed at all, which is what makes
+    /// "verify ownership before allowing launch" a property of the type rather
+    /// than a step someone has to remember.
+    #[instrument(skip_all)]
+    async fn finish(
+        &self,
+        tokens: MicrosoftTokens,
+        observer: &AuthObserver,
+        cancel: &CancellationToken,
+    ) -> AuthResult<Session> {
+        observer.stage(AuthStage::XboxLive);
+        let user_token = self.xbox.authenticate(&tokens.access, cancel).await?;
+
+        observer.stage(AuthStage::Xsts);
+        let xsts = self.xbox.authorize(&user_token, cancel).await?;
+
+        observer.stage(AuthStage::MinecraftLogin);
+        let minecraft = self.minecraft.login(&xsts.identity_token(), cancel).await?;
+
+        observer.stage(AuthStage::Entitlements);
+        // A failing entitlement store must not block a login on its own: the
+        // profile is what decides, and this call exists to explain a refusal.
+        // Treating an outage here as "you do not own the game" would lock a
+        // paying user out of their own instances.
+        let entitlements = match self.minecraft.entitlements(&minecraft.access, cancel).await {
+            Ok(entitlements) => entitlements,
+            // Two failures are not outages and must not be swallowed: the user
+            // asking to stop, and the application not being approved for the
+            // API at all. The second would otherwise be reported one call later
+            // as a profile problem, under a warning blaming the store.
+            Err(error) if error.is_cancellation() || error.needs_app_registration_approval() => {
+                return Err(error);
+            }
+            Err(error) => {
+                warn!(%error, "could not read the entitlement store; relying on the profile");
+                Entitlements::default()
+            }
+        };
+
+        observer.stage(AuthStage::Profile);
+        let Some(profile) = self.minecraft.profile(&minecraft.access, cancel).await? else {
+            // No Java Edition profile. Which refusal this is depends on what
+            // the store said, and the two need different instructions.
+            return Err(AuthError::GameNotOwned {
+                game_pass: entitlements.has_game_pass(),
+                entitlements: entitlements.items,
+            });
+        };
+
+        let account = Account {
+            id: profile.id,
+            name: profile.name,
+            kind: AccountKind::Microsoft,
+            authenticated_at: Utc::now(),
+        };
+
+        // Store the refresh token *after* the chain has succeeded. Persisting
+        // one for an account that cannot play would leave a credential behind
+        // that every later resume fails on.
+        if let Some(refresh) = &tokens.refresh {
+            self.credentials
+                .store(&CredentialKey::MicrosoftRefreshToken(account.id), refresh)?;
+        } else {
+            // Microsoft always issues one for `offline_access`, so this means
+            // the scope was dropped somewhere. Worth saying: the symptom is a
+            // login that mysteriously does not survive a restart.
+            warn!(
+                account = %account.id,
+                "no refresh token was issued; this login will not survive a restart"
+            );
+        }
+
+        debug!(
+            account = %account.id,
+            entitlements = ?entitlements.items,
+            storage = self.credentials.storage().as_str(),
+            "authentication chain completed"
+        );
+
+        Ok(Session {
+            account,
+            credentials: Credentials::Microsoft {
+                token: minecraft.access,
+                expires_at: Utc::now()
+                    + chrono::TimeDelta::try_seconds(minecraft.expires_in).unwrap_or_default(),
+                entitlements,
+                storage: self.credentials.storage(),
+            },
+        })
+    }
+}
+
+#[async_trait]
+impl AccountProvider for MicrosoftAccountProvider {
+    #[instrument(skip_all, fields(flow = request.flow.as_str()))]
+    async fn login(
+        &self,
+        request: &LoginRequest,
+        observer: &AuthObserver,
+        cancel: &CancellationToken,
+    ) -> AuthResult<Session> {
+        observer.stage(AuthStage::Microsoft);
+        let tokens = match request.flow {
+            LoginFlow::Browser => self.browser_login(request, observer, cancel).await?,
+            LoginFlow::DeviceCode => self.device_code_login(observer, cancel).await?,
+        };
+        self.finish(tokens, observer, cancel).await
+    }
+
+    #[instrument(skip_all, fields(account = %account))]
+    async fn resume(
+        &self,
+        account: Uuid,
+        observer: &AuthObserver,
+        cancel: &CancellationToken,
+    ) -> AuthResult<Session> {
+        observer.stage(AuthStage::Microsoft);
+        let key = CredentialKey::MicrosoftRefreshToken(account);
+        let Some(refresh) = self.credentials.load(&key)? else {
+            return Err(AuthError::NotSignedIn);
+        };
+
+        let tokens = match self.microsoft.refresh(&refresh, cancel).await {
+            Ok(tokens) => tokens,
+            Err(error) if error.requires_interactive_login() => {
+                // The credential is dead. Leaving it in the keyring would make
+                // every later resume fail the same way while `account status`
+                // insisted a credential existed.
+                if let Err(removal) = self.credentials.delete(&key) {
+                    warn!(%removal, "could not remove the rejected credential");
+                }
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
+
+        self.finish(tokens, observer, cancel).await
+    }
+
+    fn logout(&self, account: Uuid) -> AuthResult<()> {
+        self.credentials
+            .delete(&CredentialKey::MicrosoftRefreshToken(account))
+    }
+
+    fn has_stored_credential(&self, account: Uuid) -> AuthResult<bool> {
+        Ok(self
+            .credentials
+            .load(&CredentialKey::MicrosoftRefreshToken(account))?
+            .is_some())
+    }
+
+    fn storage(&self) -> CredentialStorage {
+        self.credentials.storage()
+    }
+}
+
+/// Reads the CurseForge API key out of a credential store.
+///
+/// Authentication owns this access because all credentials share the same
+/// secure store. Prism and CurseForge importers consume the key, while the
+/// settings surface writes it. It must never reach `config.toml`.
+pub fn curseforge_api_key(store: &dyn CredentialStore) -> AuthResult<Option<SecretString>> {
+    store.load(&CredentialKey::CurseForgeApiKey)
+}
+
+/// Stores the CurseForge API key, or removes it when given an empty value.
+pub fn set_curseforge_api_key(
+    store: &dyn CredentialStore,
+    key: Option<&SecretString>,
+) -> AuthResult<()> {
+    match key.filter(|key| !key.is_empty()) {
+        Some(key) => store.store(&CredentialKey::CurseForgeApiKey, key),
+        None => store.delete(&CredentialKey::CurseForgeApiKey),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use super::*;
+    use crate::store::MemoryStore;
+
+    fn provider() -> MicrosoftAccountProvider {
+        MicrosoftAccountProvider::with_endpoints(
+            "767ea465-0bba-443b-a06b-831c71777b90",
+            Arc::new(MemoryStore::new()),
+            Endpoints::with_base("http://127.0.0.1:1"),
+            &HttpConfig::for_loopback_tests(),
+        )
+        .expect("provider")
+    }
+
+    #[tokio::test]
+    async fn resuming_without_a_stored_credential_asks_for_a_login() {
+        let error = provider()
+            .resume(
+                Uuid::nil(),
+                &AuthObserver::silent(),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("nothing is stored");
+        assert!(matches!(error, AuthError::NotSignedIn));
+        assert!(error.requires_interactive_login());
+    }
+
+    #[test]
+    fn logout_is_idempotent_and_reports_the_credential_afterwards() {
+        let provider = provider();
+        let account = Uuid::nil();
+        assert!(!provider.has_stored_credential(account).expect("query"));
+        provider.logout(account).expect("first logout");
+        provider.logout(account).expect("second logout");
+    }
+
+    #[test]
+    fn the_curseforge_key_round_trips_through_the_credential_store() {
+        let store = MemoryStore::new();
+        assert!(curseforge_api_key(&store).expect("read").is_none());
+
+        set_curseforge_api_key(&store, Some(&SecretString::new("$2a$10$key"))).expect("store");
+        assert_eq!(
+            curseforge_api_key(&store)
+                .expect("read")
+                .expect("present")
+                .expose(),
+            "$2a$10$key"
+        );
+
+        // Clearing the field in a settings screen must remove the credential,
+        // not store an empty string that later reads as "a key exists".
+        set_curseforge_api_key(&store, Some(&SecretString::new(""))).expect("clear");
+        assert!(curseforge_api_key(&store).expect("read").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_canceled_login_stops_rather_than_reaching_the_network() {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let error = provider()
+            .login(
+                &LoginRequest {
+                    flow: LoginFlow::DeviceCode,
+                    ..LoginRequest::default()
+                },
+                &AuthObserver::silent(),
+                &cancel,
+            )
+            .await
+            .expect_err("must stop");
+        assert!(error.is_cancellation(), "{error:?}");
+    }
+}

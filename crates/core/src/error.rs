@@ -12,6 +12,7 @@
 
 use std::path::PathBuf;
 
+use ephervex_auth::AuthError;
 use ephervex_java::JavaError;
 use ephervex_minecraft::MinecraftError;
 use ephervex_storage::StorageError;
@@ -32,6 +33,10 @@ pub enum CoreError {
     /// Java runtime discovery, selection, or managed installation.
     #[error(transparent)]
     Java(#[from] JavaError),
+
+    /// The Microsoft/Xbox/Minecraft token chain, or credential storage.
+    #[error(transparent)]
+    Auth(#[from] AuthError),
 }
 
 impl CoreError {
@@ -41,11 +46,80 @@ impl CoreError {
     /// across the whole stack, so the CLI and the GUI cannot drift into
     /// describing the same problem differently.
     #[must_use]
-    pub const fn message_id(&self) -> &'static str {
+    pub fn message_id(&self) -> &'static str {
         match self {
             Self::Storage(error) => error.message_id(),
             Self::Minecraft(error) => error.message_id(),
             Self::Java(error) => error.message_id(),
+            // Not `const`: this one chooses between message ids on the HTTP
+            // status, so that a temporary outage and a permanent refusal do not
+            // share a sentence.
+            Self::Auth(error) => error.message_id(),
+        }
+    }
+
+    /// Whether the user has to sign in again before this can succeed.
+    ///
+    /// Exists for the same reason as [`Self::failing_path`]: a frontend that
+    /// wants to show a "Sign in" button must not have to match on `AuthError`
+    /// to know it should, because doing so would put the whole authentication
+    /// error hierarchy on its compile-time surface. Vanilla launch support's
+    /// `LaunchError::AuthenticationRequired` is this predicate wearing a
+    /// different name.
+    #[must_use]
+    pub const fn requires_interactive_login(&self) -> bool {
+        matches!(self, Self::Auth(error) if error.requires_interactive_login())
+    }
+
+    /// Whether offering a session-only login is a sensible next step.
+    ///
+    /// True only when secure credential storage is missing. Callers use this to
+    /// offer to be explicit rather than a silent fallback, so the decision is
+    /// made once here instead of by each frontend.
+    #[must_use]
+    pub const fn session_only_login_would_help(&self) -> bool {
+        matches!(self, Self::Auth(error) if error.session_only_would_help())
+    }
+
+    /// Whether the user canceled rather than something failing.
+    #[must_use]
+    pub const fn is_cancellation(&self) -> bool {
+        matches!(self, Self::Auth(error) if error.is_cancellation())
+    }
+
+    /// Whether this installation cannot authenticate until its Azure
+    /// application registration is approved for the Minecraft Services API.
+    ///
+    /// Worth a predicate of its own because it is the one authentication
+    /// failure no user action inside the launcher can resolve — not signing in
+    /// again, not waiting, not switching accounts. A frontend showing a
+    /// "Sign in" button for it would be offering a button that cannot work.
+    #[must_use]
+    pub const fn needs_app_registration_approval(&self) -> bool {
+        matches!(self, Self::Auth(error) if error.needs_app_registration_approval())
+    }
+
+    /// A page the user has to visit to resolve this failure, where one exists.
+    ///
+    /// The same idea as [`Self::failing_path`], for the failures that send a
+    /// user to a web page rather than to a file. The URL is untranslated
+    /// technical text that the localized message takes as an argument, so a
+    /// frontend needs it without matching on `AuthError`.
+    #[must_use]
+    pub const fn help_url(&self) -> Option<&'static str> {
+        match self {
+            Self::Auth(error) => error.help_url(),
+            _ => None,
+        }
+    }
+
+    /// The value the user has to supply at [`Self::help_url`], where the
+    /// failure names one — for the approval form, the Client ID.
+    #[must_use]
+    pub fn help_subject(&self) -> Option<&str> {
+        match self {
+            Self::Auth(error) => error.help_subject(),
+            _ => None,
         }
     }
 
@@ -59,7 +133,7 @@ impl CoreError {
     pub const fn required_java_major(&self) -> Option<u32> {
         match self {
             Self::Java(error) => error.required_major(),
-            _ => None,
+            Self::Storage(_) | Self::Minecraft(_) | Self::Auth(_) => None,
         }
     }
 
@@ -83,6 +157,10 @@ impl CoreError {
             Self::Storage(error) => storage_failing_path(error),
             Self::Minecraft(error) => error.failing_path(),
             Self::Java(error) => error.failing_path(),
+            // Authentication failures are never about a file. The one thing
+            // that would be — the keyring entry — is not a path the user can
+            // usefully be pointed at.
+            Self::Auth(_) => None,
         }
     }
 }
