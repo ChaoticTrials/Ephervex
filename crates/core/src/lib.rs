@@ -25,6 +25,7 @@
 pub mod account;
 pub mod app;
 pub mod error;
+pub mod import;
 pub mod instance;
 pub mod launch;
 pub mod logging;
@@ -32,6 +33,7 @@ pub mod logging;
 pub use account::{AccountStatus, AccountSummary, ApiSettings, LoginOptions, TOKEN_REFRESH_MARGIN};
 pub use app::{App, JavaPlan, JavaPlanRequest, global_java_settings};
 pub use error::{CoreError, CoreResult};
+pub use import::{ImportRequest, ImportedPack};
 pub use instance::{CreatedClient, global_minecraft_preferences};
 pub use launch::{LaunchOptions, LaunchOutcome};
 pub use logging::{DEFAULT_LOG_DIRECTIVES, init_tracing};
@@ -74,7 +76,11 @@ pub use ephervex_auth::{
     DEFAULT_MICROSOFT_CLIENT_ID, DeviceCodePrompt, Entitlements, LoginFlow, LoginRequest,
     MINECRAFT_API_REVIEW_FORM, OfflineAccount, SecretString, Session, XstsDenial, offline_uuid,
 };
-pub use ephervex_download::Freshness;
+/// Progress, re-exported because the import service takes a reporter and
+/// `Operation` is the single progress abstraction both frontends
+/// render. A frontend that could not name these would have to add
+/// `ephervex-download` to its manifest to show a progress bar.
+pub use ephervex_download::{Freshness, OperationReporter, ProgressSink};
 pub use ephervex_java::{
     EffectiveJvmSettings, GlobalJavaSettings, JavaError, JavaOrigin, JavaPathChoice, JavaRuntime,
     JavaSourceKind, JavaVersion, JvmField, ManagedInstallation, ManagedRelease, PinSource,
@@ -93,6 +99,12 @@ pub use ephervex_minecraft::{
 pub use ephervex_options::{
     GlobalMinecraftPreferences, GuiScalePreference, InvalidPreferenceValue, LoadedPreferences,
     Managed, OPTIONS_FILE_NAME, PreferenceApplication, PreferenceKey, PreferenceValue, WindowSize,
+};
+pub use ephervex_pack::{
+    AppliedLayer, ExtractionLimits, MaterializedFiles, MaterializedPack, OptionalComponent,
+    OptionalSelection, OverrideLayer, OverrideScope, PackAnalysis, PackError, PackFileRecipe,
+    PackFormat, PackPolicy, PackRecipe, PackSide, ProviderFileIdentity, ProviderRecipeMetadata,
+    SidePlan, SideRequirement,
 };
 pub use ephervex_storage::{
     AccountConfig, ApiConfig, CONFIG_SCHEMA_VERSION, ClientFolder, ClientRecord, Config,

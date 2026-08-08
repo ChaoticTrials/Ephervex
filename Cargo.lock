@@ -1537,6 +1537,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "zip",
 ]
 
 [[package]]
@@ -1565,6 +1566,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "zip",
 ]
 
 [[package]]
@@ -1621,6 +1623,7 @@ dependencies = [
  "ephervex-download",
  "ephervex-minecraft",
  "ephervex-model",
+ "ephervex-pack",
  "flate2",
  "reqwest",
  "serde",
@@ -1718,15 +1721,17 @@ name = "ephervex-pack"
 version = "0.1.0"
 dependencies = [
  "ephervex-download",
+ "ephervex-i18n",
  "ephervex-model",
- "hex",
+ "reqwest",
  "serde",
  "serde_json",
- "sha1",
- "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.19",
+ "tokio",
+ "tokio-util",
  "tracing",
+ "wiremock",
  "zip",
 ]
 

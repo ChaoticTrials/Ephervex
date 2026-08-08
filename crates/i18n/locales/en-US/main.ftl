@@ -533,68 +533,175 @@ operation-installing-minecraft = Installing Minecraft
 ## Launch errors 
 
 error-launch-already-running = That instance is already being launched.
-    .action = Close the running copy first. Two Minecraft processes in one instance directory overwrite each other's saves and options.
+.action = Close the running copy first. Two Minecraft processes in one instance directory overwrite each other's saves and options.
 
 error-launch-lock-unusable = Ephervex could not claim the instance for launching.
-    .action = Check permissions on { $path }.
+.action = Check permissions on { $path }.
 
 error-launch-invalid-version-metadata = That version's metadata does not describe something Ephervex can launch.
-    .action = The loader metadata may not match its declared Minecraft parent. Ephervex refuses rather than constructing an approximate launch.
+.action = The loader metadata may not match its declared Minecraft parent. Ephervex refuses rather than constructing an approximate launch.
 
-# $loader is a product name and stays untranslated .
+# $loader is a product name and stays untranslated.
 error-launch-loader-not-supported = This build does not support the { $loader } loader.
-    .action = Ephervex refuses to substitute Vanilla or another loader because that would not reproduce the selected instance.
+.action = Ephervex refuses to substitute Vanilla or another loader because that would not reproduce the selected instance.
 
 error-launch-download-failed = A file Minecraft needs could not be downloaded.
-    .action = Check your network connection and try again. Nothing partial or unverified is kept, so a retry starts clean.
+.action = Check your network connection and try again. Nothing partial or unverified is kept, so a retry starts clean.
 
 error-loader-metadata-unavailable = Loader version information is unavailable.
-    .action = Check the network connection. Ephervex will use a cached copy when one exists.
+.action = Check the network connection. Ephervex will use a cached copy when one exists.
 error-loader-metadata-invalid = Loader version information could not be understood.
-    .action = The provider may have changed its format. Ephervex refused to guess.
+.action = The provider may have changed its format. Ephervex refused to guess.
 error-loader-version-unavailable = The requested loader version is unavailable.
-    .action = Choose an available exact build. Stable is not replaced with Latest automatically.
+.action = Choose an available exact build. Stable is not replaced with Latest automatically.
 error-loader-identity-mismatch = The downloaded loader installer does not match the requested Minecraft or loader version.
-    .action = Ephervex refused the installer instead of installing different software.
+.action = Ephervex refused the installer instead of installing different software.
 error-loader-installer-invalid = The loader installer uses an unsupported or unsafe format.
-    .action = Check for an Ephervex update before trying this installer again.
+.action = Check for an Ephervex update before trying this installer again.
 error-loader-download-failed = A file required by the loader could not be downloaded or verified.
-    .action = Check the network connection and retry. Partial or unverified files are not kept.
+.action = Check the network connection and retry. Partial or unverified files are not kept.
 error-loader-version-metadata-invalid = The loader's launch metadata could not be merged with Minecraft.
-    .action = Ephervex refused to launch with incomplete or conflicting metadata.
+.action = Ephervex refused to launch with incomplete or conflicting metadata.
 error-loader-io = The loader installation could not be written.
-    .action = Check permissions and free disk space at { $path }.
+.action = Check permissions and free disk space at { $path }.
 error-loader-processor-failed = A loader installation processor failed.
-    .action = Review the technical details. Ephervex removed the incomplete staging directory.
+.action = Review the technical details. Ephervex removed the incomplete staging directory.
 error-loader-server-target-occupied = The server installation target is not empty.
-    .action = Choose an empty directory so existing server data cannot be overwritten.
+.action = Choose an empty directory so existing server data cannot be overwritten.
 
 error-launch-asset-index-invalid = The asset index for that version could not be understood.
-    .action = Ephervex refused it rather than launching a game with no sounds or textures and no reason on screen.
+.action = Ephervex refused it rather than launching a game with no sounds or textures and no reason on screen.
 
 error-launch-natives-unreadable = One of the native library archives could not be read.
-    .action = Delete { $path } so Ephervex fetches it again.
+.action = Delete { $path } so Ephervex fetches it again.
 
 error-launch-natives-unsafe-path = A native library archive contained a file that would be written outside the launcher's own directories.
-    .action = Ephervex refused the archive. This should never happen with Mojang's own files; please report it.
+.action = Ephervex refused the archive. This should never happen with Mojang's own files; please report it.
 
 error-launch-natives-too-large = A native library archive is larger than Ephervex will unpack.
-    .action = Ephervex refused it rather than filling the disk.
+.action = Ephervex refused it rather than filling the disk.
 
 error-launch-natives-write = The native libraries could not be written.
-    .action = Check permissions and free space at { $path }.
+.action = Check permissions and free space at { $path }.
 
 # $placeholder is the unresolved token, verbatim from Mojang's metadata.
 error-launch-unresolved-placeholder = Minecraft's launch arguments contain a value this build of Ephervex does not know how to fill in.
-    .action = This means Mojang added something new. Ephervex refuses rather than passing { $placeholder } to the game unchanged. Please report it.
+.action = This means Mojang added something new. Ephervex refuses rather than passing { $placeholder } to the game unchanged. Please report it.
 
 error-launch-game-directory = The instance's game directory could not be prepared.
-    .action = Check permissions and free space at { $path }.
+.action = Check permissions and free space at { $path }.
 
 error-launch-process-start = Minecraft could not be started.
-    .action = Check that { $path } is a working Java runtime. `ephervex java list` shows the ones Ephervex found.
+.action = Check that { $path } is a working Java runtime. `ephervex java list` shows the ones Ephervex found.
 
 error-launch-process-lost = Ephervex lost track of the Minecraft process.
-    .action = Minecraft may still be running. Check your process list before launching again.
+.action = Minecraft may still be running. Check your process list before launching again.
 
 error-launch-canceled = The launch was canceled.
+
+## Pack import 
+#
+# Pack names, file paths inside a pack, loader ids, and provider names are all
+# untranslated technical text passed in as arguments.
+
+pack-analysis-summary = { $name } — Minecraft { $version }, { $loader }, from { $provider }.
+pack-analysis-file-count = { $count ->
+        [one] { $count } file is installed automatically.
+       *[other] { $count } files are installed automatically.
+    }
+pack-analysis-optional-count = { $count ->
+        [one] { $count } optional file can be selected.
+       *[other] { $count } optional files can be selected.
+    }
+# a client import keeps the server side of the pack rather than
+# installing it, so a server can be created from the same recipe later.
+pack-analysis-server-preserved = The pack's server files are recorded for later rather than installed.
+pack-import-completed = Imported { $name } as { $instance }.
+pack-import-files-preserved = { $count ->
+        [one] { $count } file was recorded but not installed for this side.
+       *[other] { $count } files were recorded but not installed for this side.
+    }
+# a refused address is reported rather than silently dropped.
+pack-import-rejected-addresses = { $count ->
+        [one] { $count } download address was refused by the download policy.
+       *[other] { $count } download addresses were refused by the download policy.
+    }
+.action = Ephervex only downloads pack files from the hosts Modrinth's own pack validation accepts.
+pack-recipe-missing = This instance was not imported from a pack, so it has no pack recipe.
+pack-recipe-layer-missing = One of the pack's file layers was not kept, so a server made from this recipe would be missing it.
+
+pack-requirement-required = Required
+pack-requirement-optional = Optional
+pack-requirement-unsupported = Not supported
+
+error-pack-archive-unreadable = The pack file could not be read.
+.action = Check that { $path } exists and is readable.
+
+error-pack-archive-invalid = That file is not a readable archive.
+.action = A pack is a ZIP file. Check that { $path } downloaded completely.
+
+error-pack-format-unrecognized = Ephervex does not recognize that file as a modpack.
+.action = Ephervex imports Modrinth `.mrpack` files, CurseForge exports, and Prism instance exports.
+
+# a recognized format with no importer yet is said out loud rather than
+# reported as a broken file.
+error-pack-format-not-implemented = This build of Ephervex cannot import { $format } packs yet.
+.action = Modrinth `.mrpack` import is available now; the other formats arrive in a later version.
+
+error-pack-manifest-missing = The pack is missing the file that describes it.
+.action = Ephervex expected { $entry } inside the archive.
+
+error-pack-manifest-invalid = The pack's description file could not be understood.
+.action = Ephervex refuses a pack it cannot read completely rather than importing part of one.
+
+error-pack-manifest-unsupported-version = That pack uses a newer pack format than this build of Ephervex understands.
+.action = Update Ephervex. Guessing at a format revision would risk importing the wrong files.
+
+error-pack-game-unsupported = That pack is not a Minecraft pack.
+
+error-pack-minecraft-missing = The pack does not say which Minecraft version it is for.
+.action = Ephervex reproduces exact versions and will not guess one.
+
+# an unsupported-loader error: named, not silently downgraded to vanilla.
+error-pack-loader-unsupported = { $loader } is not a mod loader Ephervex supports.
+.action = Ephervex supports Vanilla, Forge, and NeoForge. The pack was not imported rather than being imported as something it is not.
+
+error-pack-loader-ambiguous = The pack declares two different mod loaders.
+.action = { $first } and { $second } cannot both apply. Ephervex will not pick one on the pack author's behalf.
+
+error-pack-entry-unsafe = The pack contains a file path that would write outside the instance.
+.action = Ephervex refused the whole pack. Please report this to whoever produced it.
+
+error-pack-entry-reserved = The pack contains a file that would overwrite Ephervex's own instance metadata.
+.action = Ephervex refused the whole pack. Pack contents may never write into the.launcher folder.
+
+error-pack-entry-type-unsupported = The pack contains an archive entry Ephervex will not extract.
+.action = Ephervex extracts ordinary files and folders only.
+
+error-pack-limit-exceeded = The pack is larger than Ephervex is willing to unpack.
+.action = Ephervex stopped rather than filling the disk. The limits are deliberately generous.
+
+error-pack-file-hashes-missing = One of the pack's files has no checksum Ephervex can verify.
+.action = Ephervex will not download a file it cannot verify.
+
+error-pack-file-downloads-missing = One of the pack's files has no download address.
+
+error-pack-download-url-rejected = One of the pack's files is hosted somewhere Ephervex will not download from.
+.action = Ephervex only downloads pack files over HTTPS from the hosts Modrinth's own pack validation accepts.
+
+# a hash mismatch is a hard failure, and the bad file is deleted.
+error-pack-download-failed = A file from the pack could not be downloaded or did not match its checksum.
+.action = Ephervex deleted the bad file rather than installing it. Check the network connection and try again.
+
+error-pack-write-failed = A file from the pack could not be written.
+.action = Check permissions and free space at { $path }.
+
+error-pack-recipe-unreadable = This instance's retained pack recipe could not be read.
+.action = Check that { $path } is readable. Without it, a server cannot be created from this instance's pack.
+
+error-pack-recipe-invalid = This instance's retained pack recipe is not valid.
+
+error-pack-recipe-unsupported-version = This instance's pack recipe was written by a newer version of { app-name }.
+.action = Update Ephervex rather than letting this build read part of it.
+
+error-pack-canceled = The import was canceled.

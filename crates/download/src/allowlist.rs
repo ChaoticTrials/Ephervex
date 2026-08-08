@@ -125,6 +125,8 @@ pub fn check_transport(url: &Url, allow_plaintext_http: bool) -> Result<(), UrlP
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DomainAllowlist {
     hosts: BTreeSet<String>,
+    allow_plaintext_http: bool,
+    allow_non_default_ports: bool,
 }
 
 impl DomainAllowlist {
@@ -155,6 +157,25 @@ impl DomainAllowlist {
                 .map(|host| host.as_ref().trim().to_ascii_lowercase())
                 .filter(|host| !host.is_empty())
                 .collect(),
+            allow_plaintext_http: false,
+            allow_non_default_ports: false,
+        }
+    }
+
+    /// Builds an allowlist for an HTTP loopback integration-test server.
+    ///
+    /// This is the allowlist counterpart to
+    /// [`crate::client::HttpConfig::for_loopback_tests`]. Production
+    /// constructors always require HTTPS.
+    #[must_use]
+    pub fn for_loopback_tests(host: &str) -> Self {
+        Self {
+            hosts: [host.trim().to_ascii_lowercase()]
+                .into_iter()
+                .filter(|host| !host.is_empty())
+                .collect(),
+            allow_plaintext_http: true,
+            allow_non_default_ports: true,
         }
     }
 
@@ -196,15 +217,13 @@ impl DomainAllowlist {
 
     /// Validates an already-parsed URL.
     pub fn validate_url(&self, url: &Url) -> Result<(), UrlPolicyError> {
-        // Plaintext is never acceptable for pack metadata, regardless of the
-        // downloader's test escape hatch.
-        check_transport(url, false)?;
+        check_transport(url, self.allow_plaintext_http)?;
 
         let display = redacted(url);
         let Some(host) = url.host_str() else {
             return Err(UrlPolicyError::MissingHost { url: display });
         };
-        if let Some(port) = url.port() {
+        if let Some(port) = url.port().filter(|_| !self.allow_non_default_ports) {
             // `Url::port` is `None` when the port is the scheme default, so
             // anything here is an explicit non-443 port.
             return Err(UrlPolicyError::PortNotPermitted { url: display, port });
@@ -343,5 +362,12 @@ mod tests {
         let url = Url::parse("http://127.0.0.1:9/a.jar").expect("test url parses");
         assert!(check_transport(&url, false).is_err());
         assert!(check_transport(&url, true).is_ok());
+    }
+
+    #[test]
+    fn the_loopback_constructor_allows_http_and_an_ephemeral_port() {
+        let list = DomainAllowlist::for_loopback_tests("127.0.0.1");
+        assert!(list.validate("http://127.0.0.1:49152/a.jar").is_ok());
+        assert!(list.validate("http://localhost:49152/a.jar").is_err());
     }
 }

@@ -20,6 +20,12 @@ ephervex-download.workspace = true
 # second ordering implementation to keep in step. `loaders` depends on both this
 # crate and that one, so the graph stays acyclic.
 ephervex-minecraft.workspace = true
+# The path rules a hostile archive entry has to pass — no `..`, no absolute
+# path, no escaping symlink — are `ephervex-pack`'s, and are shared with every
+# importer rather than reimplemented here. Only the
+# tar-specific handling lives in this crate. `pack` does not depend on this
+# crate; both crates depend on `minecraft`, so the graph stays acyclic.
+ephervex-pack.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 reqwest.workspace = true

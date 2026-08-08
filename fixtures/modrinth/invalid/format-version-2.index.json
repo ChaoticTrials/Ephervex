@@ -1,0 +1,10 @@
+{
+  "formatVersion": 2,
+  "game": "minecraft",
+  "versionId": "1.0.0",
+  "name": "Future Format Pack",
+  "files": [],
+  "dependencies": {
+    "minecraft": "1.20.1"
+  }
+}

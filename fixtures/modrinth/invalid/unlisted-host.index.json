@@ -1,0 +1,18 @@
+{
+  "formatVersion": 1,
+  "game": "minecraft",
+  "versionId": "1.0.0",
+  "name": "Unlisted Host Pack",
+  "files": [
+    {
+      "path": "mods/somewhere-else.jar",
+      "hashes": { "sha1": "da39a3ee5e6b4b0d3255bfef95601890afd80709" },
+      "env": { "client": "required", "server": "required" },
+      "downloads": ["https://mods.example.invalid/somewhere-else.jar"],
+      "fileSize": 0
+    }
+  ],
+  "dependencies": {
+    "minecraft": "1.20.1"
+  }
+}

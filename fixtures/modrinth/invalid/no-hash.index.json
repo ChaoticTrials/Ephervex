@@ -1,0 +1,18 @@
+{
+  "formatVersion": 1,
+  "game": "minecraft",
+  "versionId": "1.0.0",
+  "name": "Unverifiable Pack",
+  "files": [
+    {
+      "path": "mods/unverifiable.jar",
+      "hashes": { "md5": "0123456789abcdef0123456789abcdef" },
+      "env": { "client": "required", "server": "required" },
+      "downloads": ["https://cdn.modrinth.com/data/NOHASH/versions/1/unverifiable.jar"],
+      "fileSize": 0
+    }
+  ],
+  "dependencies": {
+    "minecraft": "1.20.1"
+  }
+}

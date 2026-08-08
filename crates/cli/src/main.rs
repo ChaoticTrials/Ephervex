@@ -20,12 +20,13 @@ use ephervex_core::{
     AccountStatus, AccountSummary, ApiSettings, App, ArgumentForm, Artifact, AssetIndexRef,
     AuthEvent, AuthObserver, CancellationToken, ClientFolder, ClientRecord, Config, CoreError,
     CreatedClient, CredentialStorage, DuplicateClient, Entitlements, FileDisposition, Freshness,
-    JavaPathChoice, JavaPlan, JavaPlanRequest, JavaRuntime, LaunchEvent, LaunchFeatures,
-    LaunchObserver, LaunchOptions, LaunchOutcome, LaunchState, LoginFlow, LoginOptions,
-    LoginRequest, ManagedInstallation, NewClient, NewServer, OutputLine, Paths,
+    ImportRequest, ImportedPack, JavaPathChoice, JavaPlan, JavaPlanRequest, JavaRuntime,
+    LaunchEvent, LaunchFeatures, LaunchObserver, LaunchOptions, LaunchOutcome, LaunchState,
+    LoginFlow, LoginOptions, LoginRequest, ManagedInstallation, NewClient, NewServer,
+    OptionalSelection, OutputLine, PackAnalysis, PackRecipe, PackSide, Paths,
     PreferenceApplication, PreferenceKey, ReconciliationReport, ReleaseListing, RequirementBasis,
-    RuntimeInventory, SecretString, ServerFolder, ServerRecord, Session, VersionMetadata,
-    VersionRecord,
+    RuntimeInventory, SecretString, ServerFolder, ServerRecord, Session, SideRequirement,
+    VersionMetadata, VersionRecord,
 };
 use ephervex_i18n::Arg as MessageArg;
 use ephervex_model::{InstanceId, LoaderKind, LoaderSelection, ServerId, StorageClass};
@@ -97,11 +98,13 @@ enum Command {
         #[command(subcommand)]
         command: AccountCommand,
     },
-    /// Inspect and change the provider API settings .
+    /// Inspect and change provider API settings.
     Api {
         #[command(subcommand)]
         command: ApiCommand,
     },
+    /// Import a modpack archive into a client instance.
+    Import(ImportArgs),
     /// Install and launch a client instance, streaming its log to the terminal.
     Launch(LaunchArgs),
     /// Reconcile the index against what is actually on disk.
@@ -130,6 +133,32 @@ struct LaunchArgs {
     /// files that were never downloaded describes a launch that could not run.
     #[arg(long)]
     dry_run: bool,
+}
+
+#[derive(Debug, Args)]
+struct ImportArgs {
+    /// The pack archive. The format is detected from its contents, not its
+    /// name: a `.mrpack` renamed to `.zip` still imports.
+    archive: PathBuf,
+    /// The instance's name. Defaults to the pack's own name.
+    #[arg(long)]
+    name: Option<String>,
+    #[command(flatten)]
+    storage: StorageArgs,
+    /// Read the pack and report what importing it would do, without importing.
+    ///
+    /// This reports optional files and planned changes before any instance is
+    /// written.
+    #[arg(long)]
+    inspect: bool,
+    /// Take this optional file, by its path inside the game directory.
+    ///
+    /// Repeatable. Optional files are off by default unless selected explicitly.
+    #[arg(long = "optional", value_name = "PATH")]
+    optional: Vec<PathBuf>,
+    /// Take every optional file the pack offers.
+    #[arg(long, conflicts_with = "optional")]
+    all_optional: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -302,6 +331,20 @@ enum InstanceCommand {
         #[command(flatten)]
         storage: DuplicateStorageArgs,
     },
+    /// Show the pack recipe this instance retained when it was imported.
+    ///
+    /// Read from the instance's own `.launcher/source/`, never from the
+    /// original archive. Server creation uses this retained recipe.
+    Recipe {
+        id: InstanceId,
+        /// Which side to plan for. The server plan is what "Create Server"
+        /// will use.
+        #[arg(long, value_enum, default_value_t = SideArg::Client)]
+        side: SideArg,
+        /// Include the optional files that were not selected at import time.
+        #[arg(long)]
+        all_optional: bool,
+    },
     /// Open one of an instance's folders in the desktop's file manager.
     Open {
         id: InstanceId,
@@ -471,6 +514,22 @@ fn join_names<'a>(names: impl Iterator<Item = &'a str>) -> String {
     names.collect::<Vec<_>>().join(", ")
 }
 
+/// Which side of a pack a command is about.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SideArg {
+    Client,
+    Server,
+}
+
+impl From<SideArg> for PackSide {
+    fn from(value: SideArg) -> Self {
+        match value {
+            SideArg::Client => Self::Client,
+            SideArg::Server => Self::Server,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum LoaderArg {
     Vanilla,
@@ -580,6 +639,17 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
             let mut app = open_app()?;
             run_api_command(&mut app, command, cli.json)
         }
+        Command::Import(args) => {
+            let app = open_app()?;
+            if args.inspect {
+                // Analysis touches nothing and needs no executor.
+                return run_inspect(&app, args, cli.json);
+            }
+            // Downloading a pack's files needs one, for the same reason the
+            // Minecraft commands do.
+            let runtime = tokio::runtime::Runtime::new()?;
+            runtime.block_on(run_import(&app, args, cli.json))
+        }
         Command::Launch(args) => {
             let mut app = open_app()?;
             // Downloading, spawning, and streaming all need an executor, for
@@ -651,6 +721,27 @@ fn run_instance_command(app: &App, command: &InstanceCommand, json: bool) -> any
                 );
             }
             report_skipped_links(&copy.skipped_links, json);
+        }
+        InstanceCommand::Recipe {
+            id,
+            side,
+            all_optional,
+        } => {
+            let Some(recipe) = app.pack_recipe(*id)? else {
+                // Not an error: an instance created by hand has no pack.
+                if json {
+                    print_json(&serde_json::json!({ "recipe": serde_json::Value::Null }));
+                } else {
+                    println!("{}", ephervex_i18n::lookup("pack-recipe-missing"));
+                }
+                return Ok(());
+            };
+            let selection = if *all_optional {
+                OptionalSelection::all()
+            } else {
+                OptionalSelection::none()
+            };
+            print_recipe(&recipe, (*side).into(), &selection, json);
         }
         InstanceCommand::Open { id, folder, print } => {
             let path = if *print {
@@ -2298,6 +2389,246 @@ fn show_reconciliation(report: &ReconciliationReport, json: bool) {
 
 // -------------------------------------------------------------------- output
 
+/// Implements `ephervex import <file> --inspect` without writing an instance.
+fn run_inspect(app: &App, args: &ImportArgs, json: bool) -> anyhow::Result<()> {
+    let analysis = app.analyze_pack(&args.archive)?;
+    print_analysis(&analysis, json);
+    Ok(())
+}
+
+/// `ephervex import <file>`.
+async fn run_import(app: &App, args: &ImportArgs, json: bool) -> anyhow::Result<()> {
+    let selection = if args.all_optional {
+        OptionalSelection::all()
+    } else {
+        OptionalSelection::of(args.optional.clone())
+    };
+    let mut request = ImportRequest::new(&args.archive)
+        .with_storage(args.storage.class())
+        .selecting(selection);
+    if let Some(name) = &args.name {
+        request = request.named(name);
+    }
+
+    // Progress goes to stderr through the reporter's log, so `--json` output
+    // stays pipeable (see this file's header).
+    let reporter = ephervex_core::OperationReporter::silent("operation-importing-pack");
+    let imported = app
+        .import_pack(&request, &reporter, &CancellationToken::new())
+        .await?;
+    print_imported(app, &imported, json)
+}
+
+/// Prints what a pack is, without importing it.
+fn print_analysis(analysis: &PackAnalysis, json: bool) {
+    if json {
+        print_json(&analysis_json(analysis));
+        return;
+    }
+
+    println!("pack:      {}", analysis.name());
+    if let Some(version) = &analysis.recipe.original_version {
+        println!("version:   {version}");
+    }
+    println!("source:    {}", analysis.format);
+    println!("minecraft: {}", analysis.minecraft_version());
+    println!("loader:    {}", analysis.loader());
+    println!(
+        "files:     {} required, {} optional",
+        analysis.required_file_count(PackSide::Client),
+        analysis.optional_components(PackSide::Client).len()
+    );
+    for component in analysis.optional_components(PackSide::Client) {
+        println!(
+            "optional:  {} [{}]",
+            component.display_name(),
+            if component.starts_selected() {
+                "x"
+            } else {
+                " "
+            }
+        );
+    }
+    for layer in analysis.layers() {
+        println!("layer:     {}", layer.as_str());
+    }
+    if analysis.has_files_for(PackSide::Server) {
+        eprintln!(
+            "{}",
+            ephervex_i18n::lookup("pack-analysis-server-preserved")
+        );
+    }
+    report_rejected_addresses(&analysis.rejected_urls, json);
+}
+
+/// Prints an imported instance and what the import did.
+fn print_imported(app: &App, imported: &ImportedPack, json: bool) -> anyhow::Result<()> {
+    if json {
+        let mut value = instance_json(app, &imported.record)?;
+        value["preferences"] = preferences_applied_json(imported.preferences.as_ref());
+        value["pack"] = analysis_json(&imported.analysis);
+        value["installed"] = serde_json::json!(imported.materialized.files.installed);
+        value["preserved"] = serde_json::json!(imported.materialized.files.skipped);
+        value["recipe"] = serde_json::json!({
+                    "path": imported.materialized.recipe_path,
+                    "files": imported.recipe().files.len(),
+                    "layers": imported
+        .recipe()
+        .override_layers
+        .iter()
+        .map(|layer| serde_json::json!({
+                            "scope": layer.scope.as_str(),
+                            "retained": layer.is_retained(),
+                            "files": layer.files,
+                        }))
+        .collect::<Vec<_>>(),
+                });
+        print_json(&value);
+        return Ok(());
+    }
+
+    print_instance(app, &imported.record, json)?;
+    println!("pack:      {}", imported.analysis.name());
+    println!(
+        "installed: {} files",
+        imported.materialized.files.installed.len()
+    );
+    println!("recipe:    {}", imported.materialized.recipe_path.display());
+
+    // A client import preserves the server side rather than installing it;
+    // saying nothing would look like the files went missing.
+    let preserved = imported.materialized.files.skipped.len();
+    if preserved > 0 {
+        eprintln!(
+            "{}",
+            ephervex_i18n::lookup_args(
+                "pack-import-files-preserved",
+                [("count", MessageArg::from(preserved))]
+            )
+        );
+    }
+    report_rejected_addresses(&imported.analysis.rejected_urls, json);
+    Ok(())
+}
+
+/// Prints one side's plan out of a retained recipe.
+fn print_recipe(recipe: &PackRecipe, side: PackSide, selection: &OptionalSelection, json: bool) {
+    let plan = recipe.plan(side, selection);
+    if json {
+        print_json(&serde_json::json!({
+                    "side": side.as_str(),
+                    "source": recipe.source_kind,
+                    "pack": recipe.original_name,
+                    "pack_version": recipe.original_version,
+                    "minecraft_version": plan.minecraft_version,
+                    "loader": {
+                        "kind": plan.loader.kind.to_string(),
+                        "version": plan.loader.version,
+                    },
+                    "files": plan
+        .files
+        .iter()
+        .map(|file| serde_json::json!({
+                            "path": file.logical_path,
+                            "client": file.client.as_str(),
+                            "server": file.server.as_str(),
+                            "selected": file.selected,
+                        }))
+        .collect::<Vec<_>>(),
+                    "layers": plan
+        .layers
+        .iter()
+        .map(|layer| serde_json::json!({
+                            "scope": layer.scope.as_str(),
+                            "retained": layer.is_retained(),
+                            "files": layer.files,
+                        }))
+        .collect::<Vec<_>>(),
+                    "layers_retained": plan.layers_are_retained(),
+                    "total_bytes": plan.total_bytes(),
+                }));
+        return;
+    }
+
+    println!("pack:      {}", recipe.original_name);
+    println!("source:    {}", recipe.source_kind);
+    println!("side:      {}", side.as_str());
+    println!("minecraft: {}", plan.minecraft_version);
+    println!("loader:    {}", plan.loader);
+    for file in &plan.files {
+        println!("file:      {}", file.display_name());
+    }
+    for file in &recipe.files {
+        if file.requirement(side) == SideRequirement::Unsupported {
+            println!("excluded:  {}", file.display_name());
+        }
+    }
+    for layer in &plan.layers {
+        println!(
+            "layer:     {} ({} files, {})",
+            layer.scope.as_str(),
+            layer.files,
+            if layer.is_retained() {
+                "retained"
+            } else {
+                "in the instance"
+            }
+        );
+    }
+    if !plan.layers_are_retained() && side == PackSide::Server {
+        eprintln!("{}", ephervex_i18n::lookup("pack-recipe-layer-missing"));
+    }
+}
+
+fn analysis_json(analysis: &PackAnalysis) -> serde_json::Value {
+    serde_json::json!({
+            "format": analysis.format.to_string(),
+            "source_kind": analysis.format.source_kind(),
+            "name": analysis.name(),
+            "version": analysis.recipe.original_version,
+            "summary": analysis.recipe.summary,
+            "minecraft_version": analysis.minecraft_version(),
+            "loader": {
+                "kind": analysis.loader().kind.to_string(),
+                "version": analysis.loader().version,
+            },
+            "required_files": analysis.required_file_count(PackSide::Client),
+            "optional_files": analysis
+    .optional_components(PackSide::Client)
+    .iter()
+    .map(|component| serde_json::json!({
+                    "path": component.logical_path,
+                    "size": component.size,
+                    "selected": component.starts_selected(),
+                    "server": component.opposite_side.as_str(),
+                }))
+    .collect::<Vec<_>>(),
+            "layers": analysis
+    .layers()
+    .map(ephervex_core::OverrideScope::as_str)
+    .collect::<Vec<_>>(),
+            "has_server_files": analysis.has_files_for(PackSide::Server),
+            "rejected_addresses": analysis.rejected_urls,
+        })
+}
+
+/// Reports download addresses the URL policy refused.
+fn report_rejected_addresses(rejected: &[String], json: bool) {
+    if rejected.is_empty() || json {
+        return;
+    }
+    eprintln!(
+        "{}",
+        ephervex_i18n::lookup_args(
+            "pack-import-rejected-addresses",
+            [("count", MessageArg::from(rejected.len()))]
+        )
+    );
+    for address in rejected {
+        eprintln!("  {address}");
+    }
+}
+
 fn print_instance(app: &App, record: &ClientRecord, json: bool) -> anyhow::Result<()> {
     if json {
         print_json(&instance_json(app, record)?);
@@ -2540,6 +2871,7 @@ fn summarize(record: &ClientRecord) -> String {
 /// exists, and the technical chain underneath.
 fn report_failure(error: &anyhow::Error, json: bool) {
     let technical: Vec<String> = error.chain().map(ToString::to_string).collect();
+    let message_id = error.downcast_ref::<CoreError>().map(CoreError::message_id);
 
     let (summary, action) = error.downcast_ref::<CoreError>().map_or_else(
         || (technical.first().cloned().unwrap_or_default(), None),
@@ -2548,6 +2880,7 @@ fn report_failure(error: &anyhow::Error, json: bool) {
 
     if json {
         let value = serde_json::json!({
+            "message_id": message_id,
             "error": summary,
             "action": action,
             "detail": technical,
@@ -2576,7 +2909,6 @@ fn report_failure(error: &anyhow::Error, json: bool) {
 /// structured fields, and this is where they become a sentence.
 fn localized_failure(error: &CoreError) -> (String, Option<String>) {
     let id = error.message_id();
-    let summary = ephervex_i18n::lookup(id);
 
     // Next steps come in three shapes, and each needs different arguments. One
     // names the file to look at; one names a page to visit and the value to
@@ -2601,6 +2933,15 @@ fn localized_failure(error: &CoreError) -> (String, Option<String>) {
     if let Some(syntax) = error.expected_syntax() {
         args.push(("syntax", MessageArg::from(syntax)));
     }
+    if let Some(loader) = error.unsupported_loader() {
+        args.push(("loader", MessageArg::from(loader)));
+    }
+
+    let summary = if args.is_empty() {
+        ephervex_i18n::lookup(id)
+    } else {
+        ephervex_i18n::lookup_args(id, args.iter().cloned())
+    };
 
     let action = if args.is_empty() {
         // Nothing to substitute, so an action that wanted an argument would

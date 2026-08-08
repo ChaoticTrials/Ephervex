@@ -1,17 +1,55 @@
-//! Safely unpacking a managed JDK tarball.
+//! Unpacking a JDK tarball without letting it out of its directory
 //!
-//! Adoptium archives are untrusted input. This module accepts one archive shape
-//! — a gzipped tar — and enforces entry-count, extracted-size, path, link, and
-//! permission boundaries before publishing a managed runtime. Absolute paths,
-//! traversal, escaping links, hard links, devices, and other special entries
-//! are refused. Relative symlinks are resolved against their containing
-//! directory because valid Temurin archives rely on them.
+//! # Where the rules live
+//!
+//! This module reads one archive shape — a gzipped tar from Adoptium — but the
+//! rules it applies to an entry name are not its own. [`safe_relative_path`],
+//! [`safe_link_target`], and [`walks_through_a_link`] come from
+//! `ephervex-pack`'s `path` module, which every importer and extractor in the
+//! workspace shares. Keeping one implementation prevents JDK and pack
+//! extraction from drifting into different security policies.
+//!
+//! What stays here is what is genuinely tar-specific: which entry *types* are
+//! acceptable, the extraction limits a JDK needs, and the permission bits.
+//!
+//! # What is rejected
+//!
+//! Absolute paths, any `..` component, Windows drive prefixes, NUL bytes, and
+//! anything whose resolved destination falls outside the extraction root.
+//! Hard links are refused outright, as are device nodes, FIFOs, and anything
+//! else that is not a file, a directory, or a symlink.
+//!
+//! **Symlinks are resolved, not banned.** The Temurin 16 archive contains 208
+//! symlinks — `legal/jdk.naming.rmi/LICENSE` and its siblings point at
+//! `../java.base/LICENSE` — so a blanket ban rejects valid upstream archives.
+//! [`safe_link_target`] enforces the narrower security rule:
+//! resolve the target lexically from the link's own directory and refuse it
+//! only if it climbs out of the extraction root.
+//!
+//! That resolution is lexical, though, so it describes where the archive
+//! *says* an entry goes. [`walks_through_a_link`] closes the gap: once an
+//! entry has become a symlink, nothing may be written through it, because a
+//! link that lands on the root relocates everything named beneath it.
+//!
+//! # Limits
+//!
+//! Entry count and total uncompressed size are bounded. The defaults are
+//! generous — a JDK is roughly 25 000 files and 350 MB unpacked — because this
+//! is a developer tool, but "generous" is not "absent": without them a gzip
+//! bomb is a full disk.
+//!
+//! # The executable bit
+//!
+//! Preserved from the tar header, masked to the permission bits. Losing it
+//! makes the whole install useless, which is a failure mode worth stating out
+//! loud because it would otherwise only surface at launch.
 
 use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{self, Read};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
+use ephervex_pack::path::{safe_link_target, safe_relative_path, walks_through_a_link};
 use flate2::read::GzDecoder;
 use tar::{Archive, EntryType};
 use tracing::{debug, instrument};
@@ -330,65 +368,6 @@ fn create_symlink<R: Read>(
     }
 }
 
-/// Whether `relative` is, or sits underneath, a path this archive has already
-/// made a symlink.
-///
-/// A JDK's links are leaves — `legal/…/LICENSE`, `bin/…` — so nothing legitimate
-/// is written through one. An archive that does it is doing the one thing the
-/// lexical checks cannot see: `a/l1 -> ..` is a link that lands on the root and
-/// passes every test, and it silently relocates everything named `a/l1/…` one
-/// level up, so those entries' own `..` components climb further than the
-/// checker believes.
-fn walks_through_a_link(relative: &Path, links: &BTreeSet<PathBuf>) -> bool {
-    relative
-        .ancestors()
-        .any(|ancestor| links.contains(ancestor))
-}
-
-/// Validates a symlink target, resolving it against the link's own directory.
-///
-/// Rejecting escaping symlinks requires a *resolution*
-/// rather than a ban. A real Temurin archive contains a couple of hundred
-/// symlinks — `legal/jdk.naming.rmi/LICENSE -> ../java.base/LICENSE` and its
-/// siblings — every one of which climbs out of its own directory with `..` and
-/// every one of which lands back inside the JDK. Refusing any link containing
-/// `..` refuses the actual product; refusing none of them accepts
-/// `bin/java -> /etc/shadow`.
-///
-/// So the target is walked lexically from the link's directory: `..` pops a
-/// component, and popping past the root is the escape. Lexical rather than
-/// filesystem resolution on purpose — `fs::canonicalize` would follow links
-/// that already exist on disk, which is exactly the input being validated.
-fn safe_link_target(raw: &[u8], link_path: &Path) -> Option<PathBuf> {
-    if raw.is_empty() || raw.contains(&0) {
-        return None;
-    }
-    let text = std::str::from_utf8(raw).ok()?;
-    if text.starts_with('/') || text.contains('\\') || text.contains(':') {
-        return None;
-    }
-
-    // Start from the directory holding the link, measured in components from
-    // the extraction root.
-    let mut depth = link_path
-        .parent()
-        .map_or(0, |parent| parent.components().count());
-
-    for component in Path::new(text).components() {
-        match component {
-            Component::Normal(_) => depth += 1,
-            Component::CurDir => {}
-            Component::ParentDir => {
-                // Popping past the root is the escape, and it is the only thing
-                // that distinguishes Temurin's links from a hostile one.
-                depth = depth.checked_sub(1)?;
-            }
-            Component::RootDir | Component::Prefix(_) => return None,
-        }
-    }
-    Some(PathBuf::from(text))
-}
-
 /// Writes one file entry, enforcing both size limits. Returns the new running
 /// byte total.
 fn extract_file<R: Read>(
@@ -488,38 +467,6 @@ const fn forbidden_entry_type(kind: EntryType) -> Option<&'static str> {
         EntryType::Fifo => Some("fifo"),
         _ => Some("unsupported entry"),
     }
-}
-
-/// Validates an entry name and turns it into a relative path, or refuses it.
-///
-/// Refuses, in order: NUL bytes, non-UTF-8, absolute paths, Windows drive
-/// prefixes, and any `..` component. `.` components are dropped as noise.
-fn safe_relative_path(raw: &[u8], strip_components: usize) -> Option<PathBuf> {
-    if raw.contains(&0) {
-        return None;
-    }
-    let text = std::str::from_utf8(raw).ok()?;
-    // A backslash is a separator on the platform an archive may have been
-    // built for, and `C:\x` must not become a single filename here.
-    if text.starts_with('/') || text.contains('\\') || text.contains(':') {
-        return None;
-    }
-
-    let mut safe = PathBuf::new();
-    let mut depth = 0usize;
-    for component in Path::new(text).components() {
-        match component {
-            Component::Normal(part) => {
-                depth += 1;
-                if depth > strip_components {
-                    safe.push(part);
-                }
-            }
-            Component::CurDir => {}
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
-        }
-    }
-    Some(safe)
 }
 
 #[cfg(test)]

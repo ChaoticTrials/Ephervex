@@ -1,0 +1,18 @@
+{
+  "formatVersion": 1,
+  "game": "minecraft",
+  "versionId": "1.0.0",
+  "name": "Plaintext Download Pack",
+  "files": [
+    {
+      "path": "mods/plaintext.jar",
+      "hashes": { "sha1": "da39a3ee5e6b4b0d3255bfef95601890afd80709" },
+      "env": { "client": "required", "server": "required" },
+      "downloads": ["http://cdn.modrinth.com/data/PLAIN/versions/1/plaintext.jar"],
+      "fileSize": 0
+    }
+  ],
+  "dependencies": {
+    "minecraft": "1.20.1"
+  }
+}

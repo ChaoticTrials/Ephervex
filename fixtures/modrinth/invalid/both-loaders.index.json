@@ -1,0 +1,12 @@
+{
+  "formatVersion": 1,
+  "game": "minecraft",
+  "versionId": "1.0.0",
+  "name": "Ambiguous Loader Pack",
+  "files": [],
+  "dependencies": {
+    "minecraft": "1.20.1",
+    "forge": "47.4.0",
+    "neoforge": "47.1.106"
+  }
+}

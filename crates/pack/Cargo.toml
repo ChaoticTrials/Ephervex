@@ -17,11 +17,16 @@ ephervex-download.workspace = true
 zip.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha1.workspace = true
-sha2.workspace = true
-hex.workspace = true
 thiserror.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+ephervex-i18n.workspace = true
 tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+wiremock.workspace = true
+# The workflow test rewrites the fixture's download origin to its loopback
+# server and asserts the original host first; both need a URL parser.
+reqwest.workspace = true
+serde_json.workspace = true

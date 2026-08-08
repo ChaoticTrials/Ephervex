@@ -81,5 +81,13 @@ pub use metadata::{
     MetadataCacheError, MetadataKey,
 };
 pub use progress::{ByteTally, ChannelSink, OperationReporter, ProgressSink};
+/// The URL type the policy functions take, re-exported.
+///
+/// [`redacted`] and [`check_transport`] are part of this crate's public surface
+/// and both take one, so a caller that wants to redact an address before
+/// logging it must be able to name the type without adding `reqwest` to its own
+/// manifest — which would put an HTTP client on the compile-time surface of a
+/// crate that only parses text.
+pub use reqwest::Url;
 pub use retry::{RetryPolicy, retry_after, status_is_transient};
 pub use verify::{HashMismatch, HashVerifier};

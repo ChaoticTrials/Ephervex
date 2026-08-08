@@ -1,0 +1,73 @@
+{
+  "formatVersion": 1,
+  "game": "minecraft",
+  "versionId": "1.0.0",
+  "name": "Ephervex Environment Split",
+  "summary": "Fixture pack: one file per client/server environment combination.",
+  "files": [
+    {
+      "path": "mods/both-sides.jar",
+      "hashes": {
+        "sha1": "1726b9210f6a517b654e0fec81091468d30b688f",
+        "sha512": "e348a4a3405b631429af878201d448d9b50eeb28cbb07143d5c52ec587b35a30e7a8d6e3e89a0f3c9c4d647622957d358c5d9c6b7403796552a307bc7c0a7f59"
+      },
+      "env": {
+        "client": "required",
+        "server": "required"
+      },
+      "downloads": [
+        "https://cdn.modrinth.com/data/EPHRVXTS/versions/1.0.0/both-sides.jar"
+      ],
+      "fileSize": 201
+    },
+    {
+      "path": "mods/client-only.jar",
+      "hashes": {
+        "sha1": "dd4ef7c20b4b702b0681f51c67375e514f4e163d",
+        "sha512": "66912191ea455d4ee740ff9c2a7e3a4cd90f51c21bd57c2071c4c7fd5c3f6c6f7bf1e884e91a4f06bb462c4f797d8b85954ee078653aeaf577bd15e4d8d8cf13"
+      },
+      "env": {
+        "client": "required",
+        "server": "unsupported"
+      },
+      "downloads": [
+        "https://cdn.modrinth.com/data/EPHRVXTS/versions/1.0.0/client-only.jar"
+      ],
+      "fileSize": 203
+    },
+    {
+      "path": "mods/server-only.jar",
+      "hashes": {
+        "sha1": "827aeaa73df436cf0b8f5aa920dc6b3ccc39345b",
+        "sha512": "001718b3711ad1db9cba8fe958211bf39795f0deaef4bd3e152f74c9df5fa58296cdbfda65c39640f7f63a785da3036a4f3d85cad8e218af3adb91672ae83741"
+      },
+      "env": {
+        "client": "unsupported",
+        "server": "required"
+      },
+      "downloads": [
+        "https://cdn.modrinth.com/data/EPHRVXTS/versions/1.0.0/server-only.jar"
+      ],
+      "fileSize": 203
+    },
+    {
+      "path": "mods/optional.jar",
+      "hashes": {
+        "sha1": "840504918e47346c783c7d98699869fab0290c46",
+        "sha512": "aeeeb5a79b2d0513d3bf8f6b593f167de43b65fb3535259190efd4b0390661de14d7e1fee97967948058f6b0636d85ade439b3f30e41f81ec628c9cb6225201e"
+      },
+      "env": {
+        "client": "optional",
+        "server": "optional"
+      },
+      "downloads": [
+        "https://cdn.modrinth.com/data/EPHRVXTS/versions/1.0.0/optional.jar"
+      ],
+      "fileSize": 205
+    }
+  ],
+  "dependencies": {
+    "minecraft": "1.20.1",
+    "neoforge": "47.1.106"
+  }
+}

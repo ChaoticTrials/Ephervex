@@ -36,3 +36,6 @@ sysinfo.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# The import tests build `.mrpack` archives to import; nothing in this crate
+# reads an archive itself.
+zip.workspace = true

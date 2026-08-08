@@ -16,6 +16,7 @@ use ephervex_auth::AuthError;
 use ephervex_java::JavaError;
 use ephervex_loaders::LoaderError;
 use ephervex_minecraft::{LaunchError, MinecraftError};
+use ephervex_pack::PackError;
 use ephervex_storage::StorageError;
 
 /// Anything an application service can fail with.
@@ -55,7 +56,11 @@ pub enum CoreError {
     #[error(transparent)]
     Preference(#[from] ephervex_options::InvalidPreferenceValue),
 
-    /// Installing or launching a version .
+    /// Reading, validating, or materializing an imported pack.
+    #[error(transparent)]
+    Pack(#[from] PackError),
+
+    /// Installing or launching a version.
     ///
     /// The typed `LaunchError::AuthenticationRequired` and `MissingJava` states are
     /// deliberately *not* in here: they arrive as [`Self::Auth`] and
@@ -87,6 +92,7 @@ impl CoreError {
             Self::Launch(error) => error.message_id(),
             Self::Options(error) => error.message_id(),
             Self::Preference(error) => error.message_id(),
+            Self::Pack(error) => error.message_id(),
         }
     }
 
@@ -120,6 +126,7 @@ impl CoreError {
             Self::Auth(error) => error.is_cancellation(),
             Self::Loader(error) => error.is_cancellation(),
             Self::Launch(error) => error.is_cancellation(),
+            Self::Pack(error) => error.is_cancellation(),
             _ => false,
         }
     }
@@ -175,6 +182,21 @@ impl CoreError {
         }
     }
 
+    /// The mod loader an imported pack asked for that this launcher does not
+    /// support.
+    ///
+    /// Exists for the same reason as [`Self::required_java_major`]: a frontend
+    /// that wants to say *which* loader was refused — and to record it as an
+    /// attention reason — must not have to match on `PackError` to find the
+    /// name.
+    #[must_use]
+    pub fn unsupported_loader(&self) -> Option<&str> {
+        match self {
+            Self::Pack(error) => error.unsupported_loader(),
+            _ => None,
+        }
+    }
+
     /// The Java major version this failure is about, where it names one.
     ///
     /// Exists for the same reason as [`Self::failing_path`]: a frontend that
@@ -191,7 +213,8 @@ impl CoreError {
             | Self::Auth(_)
             | Self::Launch(_)
             | Self::Options(_)
-            | Self::Preference(_) => None,
+            | Self::Preference(_)
+            | Self::Pack(_) => None,
         }
     }
 
@@ -218,6 +241,7 @@ impl CoreError {
             Self::Loader(error) => error.failing_path(),
             Self::Launch(error) => error.failing_path(),
             Self::Options(error) => error.failing_path(),
+            Self::Pack(error) => error.failing_path(),
             // Authentication failures are never about a file. The one thing
             // that would be — the keyring entry — is not a path the user can
             // usefully be pointed at. A rejected preference value is about a

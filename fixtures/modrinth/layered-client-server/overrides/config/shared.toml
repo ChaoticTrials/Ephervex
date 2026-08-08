@@ -1,0 +1,4 @@
+# A config file both sides get. The client and server layers do not replace it,
+# so this proves that the common layer reaches both.
+[repro]
+debug = true
