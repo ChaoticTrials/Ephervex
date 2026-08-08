@@ -278,6 +278,16 @@ impl Paths {
         self.cache.join("installer-cache")
     }
 
+    /// Natives unpacked per Minecraft version and platform.
+    ///
+    /// Under the cache rather than under `shared/` because the contents are
+    /// re-derivable from the libraries store: deleting it costs an unpack, not
+    /// an instance, which is exactly the promise the cache root makes.
+    #[must_use]
+    pub fn natives_cache_dir(&self) -> PathBuf {
+        self.cache.join("natives")
+    }
+
     /// `$XDG_STATE_HOME/ephervex/launcher.sqlite`.
     #[must_use]
     pub fn database_file(&self) -> PathBuf {
@@ -359,6 +369,7 @@ impl Paths {
             self.assets_cache_dir(),
             self.libraries_cache_dir(),
             self.installer_cache_dir(),
+            self.natives_cache_dir(),
             self.logs_dir(),
             self.temporary_instances_dir(),
             self.temporary_servers_dir(),
@@ -537,6 +548,10 @@ mod tests {
         assert_eq!(
             paths.installer_cache_dir(),
             Path::new("/example/cache/installer-cache")
+        );
+        assert_eq!(
+            paths.natives_cache_dir(),
+            Path::new("/example/cache/natives")
         );
         assert_eq!(paths.java_dir(), Path::new("/example/data/java"));
         assert_eq!(paths.shared_dir(), Path::new("/example/data/shared"));

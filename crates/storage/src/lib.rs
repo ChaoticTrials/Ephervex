@@ -29,6 +29,7 @@
 
 pub mod config;
 pub mod index;
+pub mod lock;
 pub mod metadata;
 pub mod paths;
 pub mod reconcile;
@@ -43,6 +44,7 @@ pub use config::{
     EulaConfig, JavaConfig, NetworkAccess, PreferenceSetting, SECRET_KEY_MARKERS, ServerDefaults,
 };
 pub use index::{Index, IndexError, MIGRATIONS, Migration, MigrationOutcome, apply_migrations};
+pub use lock::{LAUNCH_LOCK_FILE, LaunchLock, LaunchState, LockError, running_state};
 pub use metadata::{METADATA_VERSION, MetadataError};
 pub use paths::{PathError, Paths};
 pub use reconcile::{ReconciledRecord, ReconciliationReport, RecordRef, reconcile};
@@ -61,6 +63,9 @@ pub enum StorageError {
     Registry(#[from] RegistryError),
     #[error(transparent)]
     Path(#[from] PathError),
+    /// The per-instance launch lock.
+    #[error(transparent)]
+    Lock(#[from] LockError),
 }
 
 impl StorageError {
@@ -71,6 +76,7 @@ impl StorageError {
             Self::Config(error) => error.message_id(),
             Self::Registry(error) => error.message_id(),
             Self::Path(error) => error.message_id(),
+            Self::Lock(error) => error.message_id(),
         }
     }
 }

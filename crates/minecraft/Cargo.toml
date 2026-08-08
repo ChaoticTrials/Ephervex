@@ -22,7 +22,15 @@ serde_json.workspace = true
 chrono.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+# Natives up to 1.18.x ship as classifier jars that have to be on disk before
+# the JVM starts: `-Djava.library.path` cannot read inside an archive
+#.
+zip.workspace = true
 
 [dev-dependencies]
 wiremock.workspace = true
 tempfile.workspace = true
+# The installation tests serve artifacts they generate, so they have to compute
+# the SHA-1 Mojang's metadata would have published for them.
+sha1.workspace = true
+hex.workspace = true

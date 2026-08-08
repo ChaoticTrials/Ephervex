@@ -20,9 +20,10 @@ use ephervex_core::{
     AccountStatus, AccountSummary, ApiSettings, App, ArgumentForm, Artifact, AssetIndexRef,
     AuthEvent, AuthObserver, CancellationToken, ClientRecord, Config, CoreError, CredentialStorage,
     Entitlements, FileDisposition, Freshness, JavaPathChoice, JavaPlan, JavaPlanRequest,
-    JavaRuntime, LoginFlow, LoginOptions, LoginRequest, ManagedInstallation, NewClient, NewServer,
-    Paths, ReconciliationReport, ReleaseListing, RequirementBasis, RuntimeInventory, SecretString,
-    ServerRecord, Session, VersionMetadata, VersionRecord,
+    JavaRuntime, LaunchEvent, LaunchFeatures, LaunchObserver, LaunchOptions, LaunchOutcome,
+    LaunchState, LoginFlow, LoginOptions, LoginRequest, ManagedInstallation, NewClient, NewServer,
+    OutputLine, Paths, ReconciliationReport, ReleaseListing, RequirementBasis, RuntimeInventory,
+    SecretString, ServerRecord, Session, VersionMetadata, VersionRecord,
 };
 use ephervex_i18n::Arg as MessageArg;
 use ephervex_model::{InstanceId, LoaderKind, LoaderSelection, ServerId, StorageClass};
@@ -90,8 +91,34 @@ enum Command {
         #[command(subcommand)]
         command: ApiCommand,
     },
+    /// Install and launch a client instance, streaming its log to the terminal.
+    Launch(LaunchArgs),
     /// Reconcile the index against what is actually on disk.
     Reconcile,
+}
+
+#[derive(Debug, Args)]
+struct LaunchArgs {
+    /// The client instance to launch.
+    id: InstanceId,
+    /// Use this Java runtime instead of the selected one.
+    #[arg(long)]
+    java_path: Option<PathBuf>,
+    /// Download a managed runtime if nothing installed is compatible.
+    #[arg(long)]
+    install_java: bool,
+    /// Start Minecraft in demo mode.
+    #[arg(long)]
+    demo: bool,
+    /// Open the game window at this size, as `WIDTHxHEIGHT`.
+    #[arg(long, value_name = "WIDTHxHEIGHT")]
+    resolution: Option<String>,
+    /// Prepare everything and print the command without starting Minecraft.
+    ///
+    /// Everything is still installed, because a command whose classpath names
+    /// files that were never downloaded describes a launch that could not run.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -404,6 +431,13 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
             let mut app = open_app()?;
             run_api_command(&mut app, command, cli.json)
         }
+        Command::Launch(args) => {
+            let mut app = open_app()?;
+            // Downloading, spawning, and streaming all need an executor, for
+            // the same reason the Minecraft commands do.
+            let runtime = tokio::runtime::Runtime::new()?;
+            runtime.block_on(run_launch(&mut app, args, cli.json))
+        }
         Command::Reconcile => {
             let app = open_app()?;
             let report = app.reconcile()?;
@@ -497,6 +531,216 @@ fn run_server_command(app: &App, command: &ServerCommand, json: bool) -> anyhow:
         }
     }
     Ok(())
+}
+
+// --------------------------------------------------------------------- launch
+
+/// Installs and launches an instance, streaming the game's log.
+///
+/// Two streams, as everywhere else in this file: the game's own output is
+/// **data** and goes to stdout, so it can be piped or redirected to a file;
+/// everything the launcher has to say about the launch is commentary and goes
+/// to stderr. With `--json` the game's output becomes one JSON object per line,
+/// which is what makes `ephervex launch … --json | jq` work while the game is
+/// still running.
+async fn run_launch(app: &mut App, args: &LaunchArgs, json: bool) -> anyhow::Result<()> {
+    let mut features = LaunchFeatures::none();
+    if args.demo {
+        features = features.demo();
+    }
+    if let Some(resolution) = &args.resolution {
+        let (width, height) = parse_resolution(resolution)?;
+        features = features.custom_resolution(width, height);
+    }
+
+    let options = LaunchOptions {
+        features,
+        java_path: args.java_path.clone(),
+        install_java_if_missing: args.install_java,
+        dry_run: args.dry_run,
+    };
+
+    let (observer, mut events) = LaunchObserver::channel();
+    let cancel = CancellationToken::new();
+
+    // Ctrl-C stops the game rather than orphaning it. The task ends with the
+    // process, so nothing has to shut it down.
+    let interrupt = cancel.clone();
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            eprintln!("stopping Minecraft…");
+            interrupt.cancel();
+        }
+    });
+
+    // Drained on its own task so a long download reports progress while the
+    // launch is still in `app.launch`.
+    let printer = tokio::spawn(async move {
+        let mut progress = LaunchProgressPrinter::default();
+        while let Some(event) = events.recv().await {
+            progress.print(&event, json);
+        }
+    });
+
+    let outcome = app.launch(args.id, &options, &observer, &cancel).await;
+    // The printer ends when every sender is gone, so this drop is what lets it
+    // finish rather than hang.
+    drop(observer);
+    let _ = printer.await;
+
+    let outcome = outcome?;
+    report_launch(&outcome, json);
+    Ok(())
+}
+
+/// Renders launch events, keeping download progress to one line per decile.
+///
+/// The reporter already throttles to ten emissions a second, which is right for
+/// a progress bar and far too much for a terminal that may be a log file. A
+/// decile is enough to see that something is happening and few enough to read.
+///
+/// The *step* is deliberately not what resets the counter: inside a batch the
+/// step is the file currently being fetched, so resetting on it would print a
+/// line per asset — four and a half thousand of them on a modern release. A
+/// fraction that goes *backwards* is what marks a new batch.
+#[derive(Debug, Default)]
+struct LaunchProgressPrinter {
+    last_decile: Option<u64>,
+}
+
+impl LaunchProgressPrinter {
+    fn print(&mut self, event: &LaunchEvent, json: bool) {
+        match event {
+            LaunchEvent::Preparing => eprintln!("{}", ephervex_i18n::lookup("launch-preparing")),
+            LaunchEvent::Downloading(operation) => self.print_progress(operation),
+            LaunchEvent::Starting(command) => {
+                eprintln!("{}", ephervex_i18n::lookup("launch-starting"));
+                // Redacted, always: one of these arguments is an access token
+                tracing::debug!(command = %command, "launching");
+            }
+            LaunchEvent::OutputLine(line) => print_game_line(line, json),
+            LaunchEvent::Exited { code, signal } => eprintln!("{}", exit_message(*code, *signal)),
+            LaunchEvent::Failed { detail, .. } => tracing::debug!(%detail, "launch failed"),
+            // A variant added below this build is not a reason to stop
+            // streaming a game that is running perfectly well.
+            _ => {}
+        }
+    }
+
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "a decile boundary, not a measurement"
+    )]
+    fn print_progress(&mut self, operation: &ephervex_model::Operation) {
+        let Some(fraction) = operation.progress.fraction() else {
+            return;
+        };
+        // A decile. Computed by comparison rather than by casting a float,
+        // because a `f64 as u64` that clippy cannot prove is in range is not
+        // worth an allow for arithmetic this simple.
+        let Some(decile) = (0..=10u64)
+            .rev()
+            .find(|step| fraction * 10.0 >= *step as f64)
+        else {
+            return;
+        };
+        match self.last_decile {
+            Some(last) if decile > last => {}
+            // A fraction that dropped means the next batch started.
+            Some(last) if decile < last => {}
+            Some(_) => return,
+            None => {}
+        }
+        self.last_decile = Some(decile);
+        // The title is a message id, not English.
+        eprintln!(
+            "  {} {}%",
+            ephervex_i18n::lookup(&operation.title),
+            decile * 10
+        );
+    }
+}
+
+/// One line of the game's output.
+fn print_game_line(line: &OutputLine, json: bool) {
+    if json {
+        let value = serde_json::json!({
+            "stream": line.stream.as_str(),
+            "level": line.record.level,
+            "logger": line.record.logger,
+            "thread": line.record.thread,
+            "message": line.record.message,
+        });
+        if let Ok(text) = serde_json::to_string(&value) {
+            println!("{text}");
+        }
+    } else {
+        // Minecraft's own log text is never translated.
+        println!("{}", line.display());
+    }
+}
+
+fn exit_message(code: Option<i32>, signal: Option<i32>) -> String {
+    match (code, signal) {
+        (Some(code), _) if code != 0 => ephervex_i18n::lookup_args(
+            "launch-exited-with-code",
+            [("code", MessageArg::from(i64::from(code)))],
+        ),
+        (None, Some(signal)) => ephervex_i18n::lookup_args(
+            "launch-exited-with-signal",
+            [("signal", MessageArg::from(i64::from(signal)))],
+        ),
+        // Exit code 0, or a process that reported neither: the game closed.
+        _ => ephervex_i18n::lookup("launch-exited-cleanly"),
+    }
+}
+
+/// The summary printed once the game has exited.
+fn report_launch(outcome: &LaunchOutcome, json: bool) {
+    if json {
+        let value = serde_json::json!({
+            "instance": outcome.instance.to_string(),
+            "minecraft_version": outcome.minecraft_version,
+            "java": outcome.java.runtime.executable,
+            "account": outcome.account,
+            "authenticated": outcome.authenticated,
+            "classpath_entries": outcome.installation.plan.classpath().len(),
+            "natives_directory": outcome.installation.plan.natives_dir,
+            "assets": outcome.installation.assets,
+            // Never the real arguments: one of them is an access token.
+            "command": outcome.command.redacted_arguments(),
+            "dry_run": outcome.exit.is_none(),
+            "exit_code": outcome.exit.and_then(|exit| exit.code),
+            "exit_signal": outcome.exit.and_then(|exit| exit.signal),
+        });
+        print_json(&value);
+        return;
+    }
+
+    if outcome.exit.is_none() {
+        eprintln!("{}", ephervex_i18n::lookup("launch-dry-run"));
+        println!("{}", outcome.command.java.display());
+        for argument in outcome.command.redacted_arguments() {
+            println!("  {argument}");
+        }
+        eprintln!("{}", ephervex_i18n::lookup("launch-command-redacted"));
+    }
+}
+
+/// Describes a launch that is currently holding an instance.
+fn describe_running(state: &LaunchState) -> String {
+    match state.game_pid {
+        Some(pid) => format!("minecraft pid {pid}, launched by {}", state.owner_pid),
+        None => format!("preparing, launcher pid {}", state.owner_pid),
+    }
+}
+
+/// Parses `--resolution 1280x720`.
+fn parse_resolution(value: &str) -> anyhow::Result<(u32, u32)> {
+    let (width, height) = value
+        .split_once(['x', 'X'])
+        .ok_or_else(|| anyhow::anyhow!("expected WIDTHxHEIGHT, e.g. 1280x720"))?;
+    Ok((width.trim().parse()?, height.trim().parse()?))
 }
 
 /// Builds a loader selection, rejecting an incoherent one up front.
@@ -1723,6 +1967,9 @@ fn print_instance(app: &App, record: &ClientRecord, json: bool) -> anyhow::Resul
         println!("minecraft: {}", record.minecraft_version);
         println!("loader:    {}", record.loader);
         println!("root:      {}", record.root.display());
+        if let Some(state) = app.launch_state(record.id)? {
+            println!("running:   {}", describe_running(&state));
+        }
         for id in app.linked_server_ids(record.id)? {
             println!("server:    {id}");
         }
@@ -1749,25 +1996,33 @@ fn print_server(record: &ServerRecord, json: bool) {
 
 fn instance_json(app: &App, record: &ClientRecord) -> anyhow::Result<serde_json::Value> {
     Ok(serde_json::json!({
-        "id": record.id.to_string(),
-        "name": record.name,
-        "storage": record.storage.to_string(),
-        "minecraft_version": record.minecraft_version,
-        "loader": {
-            "kind": record.loader.kind.to_string(),
-            "version": record.loader.version,
-        },
-        "root": record.root,
-        "source": record.source,
-        "attention": record.attention,
-        "needs_attention": record.needs_attention(),
-        "created_at": record.created_at,
-        "linked_server_ids": app
-            .linked_server_ids(record.id)?
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>(),
-    }))
+            "id": record.id.to_string(),
+            "name": record.name,
+            "storage": record.storage.to_string(),
+            "minecraft_version": record.minecraft_version,
+            "loader": {
+                "kind": record.loader.kind.to_string(),
+                "version": record.loader.version,
+            },
+            "root": record.root,
+            "source": record.source,
+            "attention": record.attention,
+            "needs_attention": record.needs_attention(),
+            "created_at": record.created_at,
+            "last_launched_at": record.last_launched_at,
+            // Read from the instance's own launch lock, so it is true across the
+            // CLI, the GUI, and a second terminal.
+            "running": app.launch_state(record.id)?.map(|state| serde_json::json!({
+                "launcher_pid": state.owner_pid,
+                "game_pid": state.game_pid,
+                "since": state.since,
+            })),
+            "linked_server_ids": app
+    .linked_server_ids(record.id)?
+    .iter()
+    .map(ToString::to_string)
+    .collect::<Vec<_>>(),
+        }))
 }
 
 fn server_json(record: &ServerRecord) -> serde_json::Value {

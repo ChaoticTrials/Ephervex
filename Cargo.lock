@@ -1657,15 +1657,18 @@ dependencies = [
  "chrono",
  "ephervex-download",
  "ephervex-model",
+ "hex",
  "reqwest",
  "serde",
  "serde_json",
+ "sha1",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
  "tokio-util",
  "tracing",
  "wiremock",
+ "zip",
 ]
 
 [[package]]

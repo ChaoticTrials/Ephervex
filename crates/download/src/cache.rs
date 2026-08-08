@@ -42,22 +42,31 @@ pub enum CacheKeyError {
     UnsafeExtension { extension: String },
 }
 
-/// The shared stores under `$XDG_CACHE_HOME/ephervex/` .
+/// The shared stores under `$XDG_CACHE_HOME/ephervex/`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ContentStore {
     /// Mojang asset objects.
     Assets,
     /// Loader and Minecraft libraries, addressed by Maven coordinate because
-    /// the launch classpath has to name them that way .
+    /// the launch classpath has to name them that way.
     Libraries,
     /// Forge/NeoForge/Mojang installer jars and other artifacts the launcher is
-    /// permitted to execute .
+    /// permitted to execute.
     InstallerCache,
     /// Everything else fetched by hash: pack files, managed JDK archives,
     /// logging configuration.
     Downloads,
-    /// Cached provider metadata with timestamps .
+    /// Cached provider metadata with timestamps.
     Metadata,
+    /// Natives unpacked from the pre-1.19 classifier jars, and the scratch
+    /// directory 1.19-and-later releases extract into at run time.
+    ///
+    /// Launcher-level rather than instance-local because the contents are a
+    /// pure function of (version, platform): copying them into every disposable
+    /// instance would duplicate content that belongs in the shared store. Unlike
+    /// the other stores this one is *derived*, not downloaded — see
+    /// [`CacheLayout::natives`].
+    Natives,
 }
 
 impl ContentStore {
@@ -71,6 +80,7 @@ impl ContentStore {
             Self::InstallerCache => "installer-cache",
             Self::Downloads => "downloads",
             Self::Metadata => "metadata",
+            Self::Natives => "natives",
         }
     }
 }
@@ -284,6 +294,25 @@ impl CacheLayout {
             .join(coordinate.relative_path())
     }
 
+    /// Directory holding one version's natives for one platform.
+    ///
+    /// Fallible rather than infallible because both components are *logical*
+    /// keys rather than digests: a Minecraft version id arrives from Mojang's
+    /// manifest and a platform key is assembled from an OS and an architecture
+    /// name that also came out of metadata. Validating them here is what keeps
+    /// the project's "never trust a name to choose a destination path" true for
+    /// the one store whose path is not derived from a hash.
+    ///
+    /// Two levels rather than one flattened `<version>-<platform>` segment so
+    /// that clearing one version's natives is a single `rm -r`, and so a
+    /// version id containing the separator cannot collide with another pair.
+    pub fn natives(&self, version: &str, platform: &str) -> Result<PathBuf, CacheKeyError> {
+        Ok(self
+            .store_root(ContentStore::Natives)
+            .join(safe_segment(version.trim())?)
+            .join(safe_segment(platform.trim())?))
+    }
+
     /// Path of any content-addressed artifact.
     ///
     /// The filename is the digest, optionally suffixed with a validated
@@ -436,5 +465,30 @@ mod tests {
         assert_eq!(ContentStore::InstallerCache.directory(), "installer-cache");
         assert_eq!(ContentStore::Downloads.directory(), "downloads");
         assert_eq!(ContentStore::Metadata.directory(), "metadata");
+        assert_eq!(ContentStore::Natives.directory(), "natives");
+    }
+
+    #[test]
+    fn a_natives_directory_is_one_version_and_one_platform_deep() {
+        assert_eq!(
+            layout().natives("1.12.2", "linux-x86_64").expect("safe"),
+            PathBuf::from("/cache/ephervex/natives/1.12.2/linux-x86_64")
+        );
+    }
+
+    #[test]
+    fn a_natives_directory_cannot_be_escaped_by_a_version_id_from_metadata() {
+        for (version, platform) in [
+            ("../../etc", "linux-x86_64"),
+            ("1.12.2", "../.."),
+            ("1.12.2/..", "linux-x86_64"),
+            ("", "linux-x86_64"),
+            ("1.12.2", ""),
+        ] {
+            assert!(
+                layout().natives(version, platform).is_err(),
+                "`{version}` / `{platform}` should be rejected"
+            );
+        }
     }
 }

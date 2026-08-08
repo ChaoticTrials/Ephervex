@@ -442,13 +442,91 @@ auth-storage-none-needed = No credential needed
 auth-storage-not-saved = Not saved
 
 error-auth-offline-name-invalid = That is not a usable Minecraft player name.
-    .action = Use 3 to 16 characters: letters, digits, or underscores. Minecraft does not accept spaces or punctuation.
+.action = Use 3 to 16 characters: letters, digits, or underscores. Minecraft does not accept spaces or punctuation.
 
 error-auth-offline-account-exists = An offline account with that name already exists.
-    .action = An offline account's identity is derived from its name, so a second one would be the same player. Pick a different name.
+.action = An offline account's identity is derived from its name, so a second one would be the same player. Pick a different name.
 
 error-auth-account-unknown = No account matches that name or ID.
-    .action = Run `ephervex account list` to see the accounts this installation has.
+.action = Run `ephervex account list` to see the accounts this installation has.
 
 error-auth-account-ambiguous = More than one account has that name.
-    .action = Use the account's UUID instead. `ephervex account list` shows it.
+.action = Use the account's UUID instead. `ephervex account list` shows it.
+
+## Launching 
+#
+# Minecraft's own log output, version ids, paths, and Java flags are never
+# translated; they reach the user verbatim.
+
+# Deliberately unparameterized: `LaunchEvent::Preparing` and `Starting` are
+# emitted before and after the version has been resolved respectively, and a
+# message that asks for an argument its event cannot supply renders the
+# placeholder in the user's face.
+launch-preparing = Preparing the launch…
+launch-starting = Starting Minecraft…
+
+# $name is a Minecraft player name and is never translated.
+launch-account-offline = Launching as { $name } (offline). This account cannot join online-mode servers.
+launch-account-microsoft = Launching as { $name }.
+
+# $code is the process exit status.
+launch-exited-cleanly = Minecraft exited normally.
+launch-exited-with-code = Minecraft exited with code { $code }.
+# $signal is a POSIX signal number.
+launch-exited-with-signal = Minecraft was stopped by signal { $signal }.
+
+launch-dry-run = Prepared the launch without starting Minecraft.
+
+# The command line is shown with the access token replaced, always
+#.
+launch-command-redacted = The access token is not shown.
+
+operation-installing-minecraft = Installing Minecraft
+
+## Launch errors 
+
+error-launch-already-running = That instance is already being launched.
+    .action = Close the running copy first. Two Minecraft processes in one instance directory overwrite each other's saves and options.
+
+error-launch-lock-unusable = Ephervex could not claim the instance for launching.
+    .action = Check permissions on { $path }.
+
+error-launch-invalid-version-metadata = That version's metadata does not describe something Ephervex can launch.
+    .action = Mod-loader version files extend a vanilla version rather than standing alone. Ephervex installs vanilla releases only for now.
+
+# $loader is a product name and stays untranslated .
+error-launch-loader-not-supported = Ephervex cannot launch { $loader } instances yet.
+    .action = Only Vanilla instances launch for now. Launching one as Vanilla would start something other than what the instance describes, so Ephervex refuses rather than approximating.
+
+error-launch-download-failed = A file Minecraft needs could not be downloaded.
+    .action = Check your network connection and try again. Nothing partial or unverified is kept, so a retry starts clean.
+
+error-launch-asset-index-invalid = The asset index for that version could not be understood.
+    .action = Ephervex refused it rather than launching a game with no sounds or textures and no reason on screen.
+
+error-launch-natives-unreadable = One of the native library archives could not be read.
+    .action = Delete { $path } so Ephervex fetches it again.
+
+error-launch-natives-unsafe-path = A native library archive contained a file that would be written outside the launcher's own directories.
+    .action = Ephervex refused the archive. This should never happen with Mojang's own files; please report it.
+
+error-launch-natives-too-large = A native library archive is larger than Ephervex will unpack.
+    .action = Ephervex refused it rather than filling the disk.
+
+error-launch-natives-write = The native libraries could not be written.
+    .action = Check permissions and free space at { $path }.
+
+# $placeholder is the unresolved token, verbatim from Mojang's metadata.
+error-launch-unresolved-placeholder = Minecraft's launch arguments contain a value this build of Ephervex does not know how to fill in.
+    .action = This means Mojang added something new. Ephervex refuses rather than passing { $placeholder } to the game unchanged. Please report it.
+
+error-launch-game-directory = The instance's game directory could not be prepared.
+    .action = Check permissions and free space at { $path }.
+
+error-launch-process-start = Minecraft could not be started.
+    .action = Check that { $path } is a working Java runtime. `ephervex java list` shows the ones Ephervex found.
+
+error-launch-process-lost = Ephervex lost track of the Minecraft process.
+    .action = Minecraft may still be running. Check your process list before launching again.
+
+error-launch-canceled = The launch was canceled.

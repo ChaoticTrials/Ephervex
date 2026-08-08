@@ -151,6 +151,154 @@ impl MinecraftError {
 /// Shorthand for a metadata result.
 pub type MinecraftResult<T> = Result<T, MinecraftError>;
 
+/// Anything the vanilla installation and launch pipeline can fail with
+///
+/// # Authentication and runtime failures deliberately live elsewhere
+///
+/// `LaunchError` includes `AuthenticationRequired` and `MissingJava`
+/// alongside these. Both are produced *above* this crate: the session comes
+/// from `ephervex-auth` and the runtime from `ephervex-java`, and both already
+/// carry typed errors with the predicates a frontend needs —
+/// `CoreError::requires_interactive_login()` is the typed `AuthenticationRequired` state,
+/// and `CoreError::required_java_major()` with
+/// `CoreError::managed_java_would_help()` is its `MissingJava`. Re-expressing
+/// them here would mean two definitions of "the user must sign in", and the one
+/// that drifts is the one a button is wired to.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum LaunchError {
+    /// The version's metadata does not describe something launchable — a field
+    /// a launch needs is missing, or the document is a loader child that has
+    /// not been merged with its parent.
+    #[error("the metadata for minecraft `{version}` cannot describe a launch")]
+    InvalidVersionMetadata {
+        version: String,
+        #[source]
+        source: crate::version::VersionMetadataError,
+    },
+
+    /// The instance asks for a loader this pipeline does not install. Refused
+    /// rather than launched as vanilla, which would silently reproduce the
+    /// wrong thing.
+    #[error("`{loader}` instances cannot be launched by the vanilla pipeline")]
+    LoaderNotSupported { loader: String },
+
+    /// A required artifact could not be fetched or failed its hash.
+    #[error("could not obtain `{artifact}`")]
+    DownloadFailed {
+        /// What was being fetched, in technical terms: a library coordinate, an
+        /// asset name, `client.jar`.
+        artifact: String,
+        #[source]
+        source: Box<ephervex_download::DownloadError>,
+    },
+
+    /// The asset index could not be read.
+    #[error(transparent)]
+    AssetIndex(#[from] crate::assets::AssetIndexError),
+
+    /// A natives jar could not be unpacked.
+    #[error(transparent)]
+    Natives(#[from] crate::natives::NativesError),
+
+    /// An argument template names a placeholder this build cannot fill in.
+    ///
+    /// Refused rather than left in place or blanked: an unsubstituted
+    /// `${…}` reaches the game as a literal, and a blank one changes what the
+    /// game is told without saying so. Either way the launch would no longer be
+    /// the one the metadata described.
+    #[error("`{argument}` names `${{{placeholder}}}`, which this build cannot resolve")]
+    UnresolvedPlaceholder {
+        placeholder: String,
+        argument: String,
+    },
+
+    /// The instance's game directory could not be prepared.
+    #[error("the game directory {path} could not be prepared")]
+    GameDirectory {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// The JVM could not be started.
+    #[error("could not start {executable}")]
+    ProcessStart {
+        executable: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// The game process could not be supervised after it started.
+    #[error("lost track of the minecraft process")]
+    ProcessLost {
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// The launch was canceled before the game started.
+    #[error("the launch was canceled")]
+    Canceled,
+
+    /// A destination path could not be formed from a validated key.
+    #[error(transparent)]
+    CacheKey(#[from] ephervex_download::CacheKeyError),
+
+    /// A URL in the metadata is not one the launcher will fetch.
+    #[error(transparent)]
+    Url(#[from] UrlPolicyError),
+}
+
+impl LaunchError {
+    /// The `ephervex-i18n` message id describing this failure to a user.
+    #[must_use]
+    pub const fn message_id(&self) -> &'static str {
+        match self {
+            Self::InvalidVersionMetadata { .. } => "error-launch-invalid-version-metadata",
+            Self::LoaderNotSupported { .. } => "error-launch-loader-not-supported",
+            Self::DownloadFailed { .. } => "error-launch-download-failed",
+            Self::AssetIndex(_) => "error-launch-asset-index-invalid",
+            Self::Natives(error) => error.message_id(),
+            Self::UnresolvedPlaceholder { .. } => "error-launch-unresolved-placeholder",
+            Self::GameDirectory { .. } => "error-launch-game-directory",
+            Self::ProcessStart { .. } => "error-launch-process-start",
+            Self::ProcessLost { .. } => "error-launch-process-lost",
+            Self::Canceled => "error-launch-canceled",
+            Self::CacheKey(_) => "error-minecraft-cache-key-invalid",
+            Self::Url(_) => "error-minecraft-metadata-url-invalid",
+        }
+    }
+
+    /// The path this failure is about, where it names one.
+    #[must_use]
+    pub fn failing_path(&self) -> Option<PathBuf> {
+        match self {
+            Self::GameDirectory { path, .. } => Some(path.clone()),
+            Self::ProcessStart { executable, .. } => Some(executable.clone()),
+            Self::Natives(error) => Some(error.failing_path()),
+            _ => None,
+        }
+    }
+
+    /// Whether the user canceled rather than something failing.
+    #[must_use]
+    pub const fn is_cancellation(&self) -> bool {
+        matches!(self, Self::Canceled)
+    }
+
+    /// Wraps a download failure with the name of what was being fetched.
+    #[must_use]
+    pub fn download(artifact: impl Into<String>, source: ephervex_download::DownloadError) -> Self {
+        Self::DownloadFailed {
+            artifact: artifact.into(),
+            source: Box::new(source),
+        }
+    }
+}
+
+/// Shorthand for a launch result.
+pub type LaunchResult<T> = Result<T, LaunchError>;
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]

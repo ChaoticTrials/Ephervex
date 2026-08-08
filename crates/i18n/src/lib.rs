@@ -602,6 +602,55 @@ mod tests {
     }
 
     #[test]
+    fn every_message_id_referenced_by_the_launch_pipeline_exists() {
+        // `ephervex-minecraft` and `ephervex-storage`'s lock own no `i18n.toml`
+        // either, so `LaunchError::message_id()`, `NativesError::message_id()`,
+        // and `LockError::message_id()` are checked here. An id with no message
+        // renders as a placeholder at the exact moment a launch is failing.
+        for id in [
+            "error-launch-already-running",
+            "error-launch-lock-unusable",
+            "error-launch-invalid-version-metadata",
+            "error-launch-loader-not-supported",
+            "error-launch-download-failed",
+            "error-launch-asset-index-invalid",
+            "error-launch-natives-unreadable",
+            "error-launch-natives-unsafe-path",
+            "error-launch-natives-too-large",
+            "error-launch-natives-write",
+            "error-launch-unresolved-placeholder",
+            "error-launch-game-directory",
+            "error-launch-process-start",
+            "error-launch-process-lost",
+            "error-launch-canceled",
+            "launch-preparing",
+            "launch-starting",
+            "launch-account-offline",
+            "launch-account-microsoft",
+            "launch-exited-cleanly",
+            "launch-exited-with-code",
+            "launch-exited-with-signal",
+            "launch-dry-run",
+            "launch-command-redacted",
+            "operation-installing-minecraft",
+        ] {
+            assert!(has(id), "missing message id: {id}");
+        }
+    }
+
+    #[test]
+    fn launching_as_an_offline_account_says_it_cannot_join_online_servers() {
+        // The one thing a user has to understand about an offline account, at
+        // the one moment it matters.
+        let message = lookup_args("launch-account-offline", [("name", "Notch".into())]);
+        assert!(message.contains("Notch"));
+        assert!(
+            message.to_lowercase().contains("online-mode"),
+            "an offline identity proves nothing, and the launch must say so: {message}"
+        );
+    }
+
+    #[test]
     fn the_no_secure_storage_message_names_the_alternative_and_the_guarantee() {
         // This message must say that secure storage is
         // unavailable, offer session-only login, and make clear nothing is

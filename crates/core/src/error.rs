@@ -14,7 +14,7 @@ use std::path::PathBuf;
 
 use ephervex_auth::AuthError;
 use ephervex_java::JavaError;
-use ephervex_minecraft::MinecraftError;
+use ephervex_minecraft::{LaunchError, MinecraftError};
 use ephervex_storage::StorageError;
 
 /// Anything an application service can fail with.
@@ -37,6 +37,17 @@ pub enum CoreError {
     /// The Microsoft/Xbox/Minecraft token chain, or credential storage.
     #[error(transparent)]
     Auth(#[from] AuthError),
+
+    /// Installing or launching a version .
+    ///
+    /// The typed `LaunchError::AuthenticationRequired` and `MissingJava` states are
+    /// deliberately *not* in here: they arrive as [`Self::Auth`] and
+    /// [`Self::Java`], and the predicates below —
+    /// [`Self::requires_interactive_login`], [`Self::required_java_major`] —
+    /// are what a frontend asks instead. One definition of "the user must sign
+    /// in" rather than two that can drift.
+    #[error(transparent)]
+    Launch(#[from] LaunchError),
 }
 
 impl CoreError {
@@ -55,6 +66,7 @@ impl CoreError {
             // status, so that a temporary outage and a permanent refusal do not
             // share a sentence.
             Self::Auth(error) => error.message_id(),
+            Self::Launch(error) => error.message_id(),
         }
     }
 
@@ -84,7 +96,11 @@ impl CoreError {
     /// Whether the user canceled rather than something failing.
     #[must_use]
     pub const fn is_cancellation(&self) -> bool {
-        matches!(self, Self::Auth(error) if error.is_cancellation())
+        match self {
+            Self::Auth(error) => error.is_cancellation(),
+            Self::Launch(error) => error.is_cancellation(),
+            _ => false,
+        }
     }
 
     /// Whether this installation cannot authenticate until its Azure
@@ -133,7 +149,7 @@ impl CoreError {
     pub const fn required_java_major(&self) -> Option<u32> {
         match self {
             Self::Java(error) => error.required_major(),
-            Self::Storage(_) | Self::Minecraft(_) | Self::Auth(_) => None,
+            Self::Storage(_) | Self::Minecraft(_) | Self::Auth(_) | Self::Launch(_) => None,
         }
     }
 
@@ -157,6 +173,7 @@ impl CoreError {
             Self::Storage(error) => storage_failing_path(error),
             Self::Minecraft(error) => error.failing_path(),
             Self::Java(error) => error.failing_path(),
+            Self::Launch(error) => error.failing_path(),
             // Authentication failures are never about a file. The one thing
             // that would be — the keyring entry — is not a path the user can
             // usefully be pointed at.
@@ -172,6 +189,13 @@ fn storage_failing_path(error: &StorageError) -> Option<PathBuf> {
         StorageError::Config(inner) => config_failing_path(inner),
         StorageError::Registry(inner) => registry_failing_path(inner),
         StorageError::Path(inner) => path_failing_path(inner),
+        StorageError::Lock(inner) => inner.failing_path(),
+    }
+}
+
+impl From<ephervex_storage::LockError> for CoreError {
+    fn from(error: ephervex_storage::LockError) -> Self {
+        Self::Storage(StorageError::Lock(error))
     }
 }
 

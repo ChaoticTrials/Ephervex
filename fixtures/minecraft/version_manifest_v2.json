@@ -37,7 +37,7 @@
       "url": "https://piston-meta.mojang.com/v1/packages/d6e4071ad771d30003e17727e8acd41283aef208/26.1.json",
       "time": "2026-08-04T06:37:35+00:00",
       "releaseTime": "2026-03-24T12:11:04+00:00",
-      "sha1": "4c7b7c6aace074f72fa132927a62727eb8b33cac",
+      "sha1": "2381c6a73138bf9a6369953df3ce594e0012fe34",
       "complianceLevel": 1
     },
     {
@@ -46,7 +46,7 @@
       "url": "https://piston-meta.mojang.com/v1/packages/091b2c2728f8ac413b6e7e683a6c12f21a53057c/1.21.1.json",
       "time": "2026-08-04T06:29:30+00:00",
       "releaseTime": "2024-08-08T12:24:45+00:00",
-      "sha1": "8b09cec02c0d98688e8fff22f5b857a9ec0baba7",
+      "sha1": "0f32072d7c30cc2958817742cae803eb9ba7d0ef",
       "complianceLevel": 1
     },
     {
@@ -64,7 +64,7 @@
       "url": "https://piston-meta.mojang.com/v1/packages/c2f76c955503c7143424b51e21eea87bbe5c6547/1.20.1.json",
       "time": "2026-08-04T06:39:48+00:00",
       "releaseTime": "2023-06-12T13:25:51+00:00",
-      "sha1": "91d21188ddb9a178c6fdd82fbf9f6fb3d60d2864",
+      "sha1": "8789eb9a3eb37911774a2e5552377d3460a57593",
       "complianceLevel": 1
     },
     {
@@ -73,7 +73,7 @@
       "url": "https://piston-meta.mojang.com/v1/packages/832d95b9f40699d4961394dcf6cf549e65f15dc5/1.12.2.json",
       "time": "2023-06-07T11:49:20+00:00",
       "releaseTime": "2017-09-18T08:39:46+00:00",
-      "sha1": "a5ed2a295beba0f03a28305748882dd0a8d8e3b5",
+      "sha1": "4cb18237b1ae67d67ce1d537926a552453c91d57",
       "complianceLevel": 0
     },
     {

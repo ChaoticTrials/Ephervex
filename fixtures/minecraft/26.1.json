@@ -178,6 +178,22 @@
       "${auth_player_name}",
       "--version",
       "${version_name}",
+      "--gameDir",
+      "${game_directory}",
+      "--assetsDir",
+      "${assets_root}",
+      "--assetIndex",
+      "${assets_index_name}",
+      "--uuid",
+      "${auth_uuid}",
+      "--accessToken",
+      "${auth_access_token}",
+      "--clientId",
+      "${clientid}",
+      "--xuid",
+      "${auth_xuid}",
+      "--versionType",
+      "${version_type}",
       {
         "rules": [
           {
@@ -263,10 +279,6 @@
       }
     ],
     "jvm": [
-      "--sun-misc-unsafe-memory-access=allow",
-      "--enable-native-access=ALL-UNNAMED",
-      "-Djava.library.path=${natives_directory}",
-      "-Djna.tmpdir=${natives_directory}",
       {
         "rules": [
           {
@@ -301,7 +313,17 @@
           }
         ],
         "value": "-Xss1M"
-      }
+      },
+      "--sun-misc-unsafe-memory-access=allow",
+      "--enable-native-access=ALL-UNNAMED",
+      "-Djava.library.path=${natives_directory}",
+      "-Djna.tmpdir=${natives_directory}",
+      "-Dorg.lwjgl.system.SharedLibraryExtractPath=${natives_directory}",
+      "-Dio.netty.native.workdir=${natives_directory}",
+      "-Dminecraft.launcher.brand=${launcher_name}",
+      "-Dminecraft.launcher.version=${launcher_version}",
+      "-cp",
+      "${classpath}"
     ]
   }
 }

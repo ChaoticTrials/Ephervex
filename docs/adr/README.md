@@ -16,3 +16,4 @@ so the reasoning trail survives.
 | [0008](0008-first-version-scope.md) | Features excluded from the first complete version | Accepted |
 | [0009](0009-session-only-login.md) | Session-only login is a second credential store, not a fallback | Accepted |
 | [0010](0010-account-model.md) | Several accounts, two kinds, one default | Accepted |
+| [0011](0011-shared-launch-stores.md) | Everything a launch can re-download is launcher-level, including natives | Accepted |

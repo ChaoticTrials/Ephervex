@@ -569,6 +569,11 @@ impl App {
         &self.storage.registry
     }
 
+    /// The registry, for [`crate::launch`], which lives in a sibling module.
+    pub(crate) fn registry_for_launch(&self) -> &Registry {
+        self.registry()
+    }
+
     /// Changes a setting and writes the configuration file.
     ///
     /// The single place configuration is mutated, so no service can change a

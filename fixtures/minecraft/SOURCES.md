@@ -1,8 +1,9 @@
 # Minecraft metadata fixtures
 
-Captured from Mojang's public Piston metadata service on **2026-08-07** and
-then reduced to the fields the tests actually exercise . Tests
-must run with no network, so nothing here is fetched at test time.
+Captured from Mojang's public Piston metadata service on **2026-08-07**, checked
+against it again on **2026-08-08**, and reduced to the fields the tests actually
+exercise. Tests must run with no network, so nothing here is
+fetched at test time.
 
 ## Sources
 
@@ -39,19 +40,35 @@ release candidate plus a pre-release — both of which Mojang types as
 
 * **Manifest** — 891 of the 905 version entries. The 14 that remain are
   verbatim, in Mojang's own newest-first order.
-* **Version JSONs** — most `libraries` entries (39–107 down to 4–6, chosen to
-  cover every distinct shape) and most unconditional `arguments` entries (the
-  first four of each group are kept; **every** conditional entry is kept,
-  because those are the ones carrying rules).
+* **Version JSONs** — most `libraries` entries (39–107 down to 5–8, chosen to
+  cover every distinct shape).
 
-Everything else — `javaVersion`, `assetIndex`, `downloads`, `logging`,
-`mainClass`, `assets`, `complianceLevel`, `minimumLauncherVersion`, and the
-timestamps — is preserved verbatim.
+Everything else — the complete `arguments` object or `minecraftArguments`
+string, `javaVersion`, `assetIndex`, `downloads`, `logging`, `mainClass`,
+`assets`, `complianceLevel`, `minimumLauncherVersion`, and the timestamps — is
+preserved verbatim.
+
+### Launch-sensitive content retained
+
+The complete argument groups are preserved because entries such as **`-cp` and
+`${classpath}`**, the launcher brand, and game arguments are necessary to prove
+that a generated command is runnable. The modern `arguments` objects and the
+legacy `minecraftArguments` string are verbatim from their source documents.
+
+The following library entries are retained because each carries a distinct
+installer behavior:
+
+| Fixture | Entry | Why it is the only one |
+|---|---|---|
+| `1.12.2` | both `com.mojang:text2speech:1.10.3` entries | one coordinate listed twice, once as a classpath jar and once carrying the `natives` map: the classpath has to deduplicate it while the natives still get unpacked |
+| `1.21.1` | `org.lwjgl:lwjgl-glfw:3.3.3:natives-windows` | proves a Linux launch *selects* rather than merely happens to contain one platform's natives |
+
+Every listed entry is byte-identical to the live document.
 
 ## The `sha1` fields are deliberately not the live ones
 
 `version_manifest_v2.json` records a `sha1` per version entry, and Ephervex
-verifies it when it downloads that version's JSON . Reducing a
+verifies it when it downloads that version's JSON. Reducing a
 version JSON changes its digest, so the four fixture entries carry the SHA-1 of
 the **reduced** file instead of Mojang's. The verification path is therefore
 exercised end to end offline. Every other field of those entries, including the

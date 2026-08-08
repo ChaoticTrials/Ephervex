@@ -120,6 +120,25 @@
           }
         }
       ]
+    },
+    {
+      "downloads": {
+        "artifact": {
+          "path": "org/lwjgl/lwjgl-glfw/3.3.3/lwjgl-glfw-3.3.3-natives-windows.jar",
+          "sha1": "e449e28b4891fc423c54c85fbc5bb0b9efece67a",
+          "size": 166368,
+          "url": "https://libraries.minecraft.net/org/lwjgl/lwjgl-glfw/3.3.3/lwjgl-glfw-3.3.3-natives-windows.jar"
+        }
+      },
+      "name": "org.lwjgl:lwjgl-glfw:3.3.3:natives-windows",
+      "rules": [
+        {
+          "action": "allow",
+          "os": {
+            "name": "windows"
+          }
+        }
+      ]
     }
   ],
   "arguments": {
@@ -128,6 +147,24 @@
       "${auth_player_name}",
       "--version",
       "${version_name}",
+      "--gameDir",
+      "${game_directory}",
+      "--assetsDir",
+      "${assets_root}",
+      "--assetIndex",
+      "${assets_index_name}",
+      "--uuid",
+      "${auth_uuid}",
+      "--accessToken",
+      "${auth_access_token}",
+      "--clientId",
+      "${clientid}",
+      "--xuid",
+      "${auth_xuid}",
+      "--userType",
+      "${user_type}",
+      "--versionType",
+      "${version_type}",
       {
         "rules": [
           {
@@ -213,10 +250,6 @@
       }
     ],
     "jvm": [
-      "-Djava.library.path=${natives_directory}",
-      "-Djna.tmpdir=${natives_directory}",
-      "-Dorg.lwjgl.system.SharedLibraryExtractPath=${natives_directory}",
-      "-Dio.netty.native.workdir=${natives_directory}",
       {
         "rules": [
           {
@@ -251,7 +284,15 @@
           }
         ],
         "value": "-Xss1M"
-      }
+      },
+      "-Djava.library.path=${natives_directory}",
+      "-Djna.tmpdir=${natives_directory}",
+      "-Dorg.lwjgl.system.SharedLibraryExtractPath=${natives_directory}",
+      "-Dio.netty.native.workdir=${natives_directory}",
+      "-Dminecraft.launcher.brand=${launcher_name}",
+      "-Dminecraft.launcher.version=${launcher_version}",
+      "-cp",
+      "${classpath}"
     ]
   }
 }
