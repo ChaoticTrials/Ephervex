@@ -1,0 +1,46 @@
+{
+  "spec": 1,
+  "profile": "NeoForge",
+  "version": "neoforge-26.1.2.94",
+  "minecraft": "26.1.2",
+  "json": "/version.json",
+  "data": {
+    "BINPATCH": { "client": "/data/client.lzma", "server": "/data/client.lzma" },
+    "PATCHED": {
+      "client": "[net.neoforged:minecraft-client-patched:26.1.2.94]",
+      "server": "[net.neoforged:minecraft-server-patched:26.1.2.94]"
+    }
+  },
+  "processors": [
+    {
+      "sides": ["server"],
+      "jar": "net.neoforged.installertools:installertools:4.0.12:fatjar",
+      "classpath": ["net.neoforged.installertools:installertools:4.0.12:fatjar"],
+      "args": [
+        "--task", "EXTRACT_FILES", "--archive", "{INSTALLER}",
+        "--from", "data/unix_args.txt", "--to",
+        "{ROOT}/libraries/net/neoforged/neoforge/26.1.2.94/unix_args.txt"
+      ]
+    },
+    {
+      "jar": "net.neoforged.installertools:installertools:4.0.12:fatjar",
+      "classpath": ["net.neoforged.installertools:installertools:4.0.12:fatjar"],
+      "args": [
+        "--task", "PROCESS_MINECRAFT_JAR", "--input", "{MINECRAFT_JAR}",
+        "--output", "{PATCHED}", "--apply-patches", "{BINPATCH}"
+      ]
+    }
+  ],
+  "libraries": [
+    {
+      "name": "net.neoforged.fancymodloader:earlydisplay:11.0.15",
+      "downloads": {
+        "artifact": {
+          "url": "https://maven.neoforged.net/releases/net/neoforged/fancymodloader/earlydisplay/11.0.15/earlydisplay-11.0.15.jar",
+          "sha1": "b254aa4ec40828f8ce65411dcb7fb9f6ce008064",
+          "size": 360749
+        }
+      }
+    }
+  ]
+}

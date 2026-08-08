@@ -26,7 +26,7 @@
 //! # The order is the guarantee
 //!
 //! ```text
-//! lock -> record -> metadata -> java -> session -> install -> command -> spawn
+//! lock -> record -> session -> metadata -> java -> install -> command -> spawn
 //! ```
 //!
 //! The lock is first because everything after it writes somewhere. The session
@@ -37,15 +37,13 @@
 use std::path::PathBuf;
 
 use ephervex_auth::{AuthObserver, Credentials, Session};
-use ephervex_download::{
-    CacheLayout, DownloadManager, DownloaderConfig, OperationReporter, ProgressSink,
-};
+use ephervex_download::{OperationReporter, ProgressSink};
+use ephervex_loaders::{ClientInstallRequest, InstalledClient};
 use ephervex_minecraft::{
     GameExit, GameProcess, Installation, JvmOptions, LaunchCommand, LaunchError, LaunchEvent,
-    LaunchFeatures, LaunchObserver, LaunchSettings, Platform, PlayerIdentity, VanillaInstaller,
-    VersionMetadata,
+    LaunchFeatures, LaunchObserver, LaunchSettings, Platform, PlayerIdentity, VersionMetadata,
 };
-use ephervex_model::{InstanceId, LoaderKind, Operation};
+use ephervex_model::{InstanceId, Operation};
 use ephervex_storage::{ClientRecord, LaunchLock, LaunchState};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument};
@@ -155,12 +153,15 @@ impl App {
         observer.emit(LaunchEvent::Preparing);
 
         let mut record = self.client(instance)?;
-        require_vanilla(&record)?;
 
         // Taken before anything writes, and held until the game exits. A
         // second launch of the same instance is refused here rather than
         // discovered when two processes fight over `saves/`.
         let mut lock = LaunchLock::acquire(&record.root)?;
+
+        // Establish identity before metadata or artifacts are fetched. A
+        // missing account is locally knowable and should fail without network.
+        let identity = self.launch_identity(cancel).await?;
 
         let metadata = self.minecraft_version(&record.minecraft_version).await?;
         let java = self
@@ -174,17 +175,20 @@ impl App {
             )
             .await?;
 
-        // Before the install, not after: a launch that cannot authenticate
-        // should fail in a second rather than after six hundred megabytes.
-        let identity = self.launch_identity(cancel).await?;
-
-        let installation = self
-            .install_version(&metadata, options, observer, cancel)
+        let installed = self
+            .install_version(
+                &record,
+                &metadata,
+                &java.runtime.executable,
+                options,
+                observer,
+                cancel,
+            )
             .await?;
 
         let command = ephervex_minecraft::build_command(
-            &metadata,
-            &installation.plan,
+            &installed.metadata,
+            &installed.installation.plan,
             &LaunchSettings {
                 java: java.runtime.executable.clone(),
                 game_directory: game_directory(&record),
@@ -200,12 +204,12 @@ impl App {
 
         let mut outcome = LaunchOutcome {
             instance,
-            minecraft_version: metadata.id.clone(),
+            minecraft_version: record.minecraft_version.clone(),
             java: Box::new(java),
             account: identity.name.clone(),
             authenticated: identity.is_authenticated(),
             command: Box::new(command),
-            installation: Box::new(installation),
+            installation: Box::new(installed.installation),
             exit: None,
         };
 
@@ -242,20 +246,14 @@ impl App {
     /// Downloads and unpacks everything the version needs.
     async fn install_version(
         &self,
+        record: &ClientRecord,
         metadata: &VersionMetadata,
+        java: &std::path::Path,
         options: &LaunchOptions,
         observer: &LaunchObserver,
         cancel: &CancellationToken,
-    ) -> CoreResult<Installation> {
-        let manager = DownloadManager::new(DownloaderConfig {
-            http: self.http_config(),
-            ..DownloaderConfig::default()
-        })
-        .map_err(|source| LaunchError::download("the download manager", source))?;
-
-        let installer = VanillaInstaller::new(manager, CacheLayout::new(self.paths().cache_dir()));
+    ) -> CoreResult<InstalledClient> {
         let context = options.features.rule_context(Platform::host());
-        let plan = installer.plan(metadata, &context)?;
 
         let reporter = OperationReporter::new(
             "operation-installing-minecraft",
@@ -264,7 +262,19 @@ impl App {
                 observer: observer.clone(),
             }),
         );
-        Ok(installer.install(plan, &reporter, cancel).await?)
+        Ok(self
+            .loaders()?
+            .provider(record.loader.kind)
+            .install_client(ClientInstallRequest {
+                minecraft: &record.minecraft_version,
+                exact_loader: record.loader.version.as_deref(),
+                parent: metadata,
+                java,
+                context: &context,
+                reporter: &reporter,
+                cancel,
+            })
+            .await?)
     }
 
     /// The identity the game is told it is running as.
@@ -315,21 +325,6 @@ fn identity_of(session: &Session) -> PlayerIdentity {
     }
 }
 
-/// Refuses an instance the vanilla pipeline cannot faithfully reproduce.
-///
-/// Launching a Forge instance as vanilla would start *something*, and it would
-/// not be the thing the bug report describes — the silent approximation
-/// Ephervex does not allow. loader support installs the loaders; until then this is a
-/// clear refusal rather than a surprise.
-fn require_vanilla(record: &ClientRecord) -> Result<(), LaunchError> {
-    match record.loader.kind {
-        LoaderKind::Vanilla => Ok(()),
-        kind => Err(LaunchError::LoaderNotSupported {
-            loader: kind.to_string(),
-        }),
-    }
-}
-
 /// `<instance>/minecraft/`, where saves, options, logs, and crash reports live.
 fn game_directory(record: &ClientRecord) -> PathBuf {
     ephervex_storage::metadata::client_game_dir(&record.root)
@@ -338,7 +333,7 @@ fn game_directory(record: &ClientRecord) -> PathBuf {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-    use ephervex_model::{LoaderSelection, StorageClass};
+    use ephervex_model::{LoaderKind, LoaderSelection, StorageClass};
     use ephervex_storage::{NewClient, Paths};
 
     use super::*;
@@ -384,10 +379,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_loader_instance_is_refused_rather_than_launched_as_vanilla() {
+    async fn a_loader_instance_dispatches_to_the_matching_provider() {
         let base = tempfile::tempdir().expect("temp dir");
-        let mut app = app_rooted_at(base.path());
-        app.add_offline_account("Notch").expect("account");
+        let app = app_rooted_at(base.path());
 
         let forge = app
             .create_client(NewClient::new(
@@ -396,17 +390,14 @@ mod tests {
                 LoaderSelection::exact(LoaderKind::Forge, "47.4.0"),
             ))
             .expect("create");
-
-        let error = app
-            .launch(
-                forge.id,
-                &LaunchOptions::default(),
-                &LaunchObserver::silent(),
-                &CancellationToken::new(),
-            )
-            .await
-            .expect_err("loader support owns loaders");
-        assert_eq!(error.message_id(), "error-launch-loader-not-supported");
+        let record = app.client(forge.id).expect("record");
+        assert_eq!(
+            app.loaders()
+                .expect("registry")
+                .provider(record.loader.kind)
+                .kind(),
+            LoaderKind::Forge
+        );
     }
 
     #[tokio::test]

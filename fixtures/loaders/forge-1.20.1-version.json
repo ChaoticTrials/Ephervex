@@ -1,0 +1,27 @@
+{
+  "id": "1.20.1-forge-47.4.10",
+  "time": "2025-10-09T22:56:29+00:00",
+  "releaseTime": "2025-10-09T22:56:29+00:00",
+  "type": "release",
+  "mainClass": "cpw.mods.bootstraplauncher.BootstrapLauncher",
+  "inheritsFrom": "1.20.1",
+  "arguments": {
+    "game": [
+      "--launchTarget", "forgeclient",
+      "--fml.forgeVersion", "47.4.10",
+      "--fml.mcVersion", "1.20.1",
+      "--fml.forgeGroup", "net.minecraftforge",
+      "--fml.mcpVersion", "20230612.114412"
+    ],
+    "jvm": [
+      "-Djava.net.preferIPv6Addresses=system",
+      "-DignoreList=bootstraplauncher,securejarhandler,asm-commons,asm-util,asm-analysis,asm-tree,asm,JarJarFileSystems,client-extra,fmlcore,javafmllanguage,lowcodelanguage,mclanguage,forge-,${version_name}.jar",
+      "-DmergeModules=jna-5.10.0.jar,jna-platform-5.10.0.jar",
+      "-DlibraryDirectory=${library_directory}",
+      "-p",
+      "${library_directory}/cpw/mods/bootstraplauncher/1.1.2/bootstraplauncher-1.1.2.jar${classpath_separator}${library_directory}/cpw/mods/securejarhandler/2.1.10/securejarhandler-2.1.10.jar",
+      "--add-modules", "ALL-MODULE-PATH"
+    ]
+  },
+  "libraries": []
+}

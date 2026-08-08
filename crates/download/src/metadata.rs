@@ -169,6 +169,14 @@ impl CachedMetadata {
         serde_json::from_str(self.payload.get())
     }
 
+    /// Decodes an opaque UTF-8 provider document cached as a JSON string.
+    ///
+    /// Maven metadata is XML, but still needs the same freshness envelope and
+    /// stale fallback as JSON provider documents.
+    pub fn text(&self) -> Result<String, serde_json::Error> {
+        self.parse()
+    }
+
     /// When this document was fetched from the provider.
     #[must_use]
     pub const fn fetched_at(&self) -> DateTime<Utc> {
@@ -244,6 +252,14 @@ pub enum MetadataCacheError {
         key: String,
         #[source]
         source: serde_json::Error,
+    },
+
+    /// An opaque provider document was not UTF-8.
+    #[error("`{key}` was fetched but is not utf-8 text")]
+    NotUtf8 {
+        key: String,
+        #[source]
+        source: std::string::FromUtf8Error,
     },
 
     /// Filesystem failure against a specific path.
@@ -388,6 +404,40 @@ impl MetadataCache {
         }
     }
 
+    /// Serves an opaque UTF-8 document with the same TTL and stale fallback as
+    /// [`Self::fetch`]. The on-disk payload is a JSON string so the envelope
+    /// format remains unchanged.
+    pub async fn fetch_text(
+        &self,
+        manager: &DownloadManager,
+        key: &MetadataKey,
+        url: &Url,
+        reporter: &OperationReporter,
+        cancel: &CancellationToken,
+    ) -> Result<CachedMetadata, MetadataCacheError> {
+        let cached = self.peek(key).await;
+        if let Some(entry) = cached.as_ref().filter(|entry| !entry.freshness.is_stale()) {
+            debug!(%key, age_s = entry.age().as_secs(), "serving cached provider text");
+            return Ok(entry.clone());
+        }
+
+        match self.refresh_text(manager, key, url, reporter, cancel).await {
+            Ok(entry) => Ok(entry),
+            Err(error) => match cached {
+                Some(entry) => {
+                    warn!(
+                        %key,
+                        age_s = entry.age().as_secs(),
+                        %error,
+                        "serving stale provider text; the refresh failed"
+                    );
+                    Ok(entry.with_freshness(Freshness::Stale))
+                }
+                None => Err(error.into_unavailable()),
+            },
+        }
+    }
+
     /// Fetches unconditionally, ignoring both the TTL and any cached copy.
     ///
     /// On success the cache is updated. A failure leaves the previous entry
@@ -427,6 +477,46 @@ impl MetadataCache {
                 key: key.to_string(),
                 source,
             })?;
+        self.store(key, url, payload).await
+    }
+
+    /// Refreshes an opaque UTF-8 document unconditionally.
+    pub async fn refresh_text(
+        &self,
+        manager: &DownloadManager,
+        key: &MetadataKey,
+        url: &Url,
+        reporter: &OperationReporter,
+        cancel: &CancellationToken,
+    ) -> Result<CachedMetadata, MetadataCacheError> {
+        let staging = self.staging_path(key);
+        remove_if_present(&staging).await;
+
+        let request = DownloadRequest::new(url.clone(), &staging).labeled(key.to_string());
+        let outcome = manager.download(&request, reporter, cancel).await;
+        let read = match outcome {
+            Ok(_) => fs::read(&staging)
+                .await
+                .map_err(|source| MetadataCacheError::Io {
+                    path: staging.clone(),
+                    source,
+                }),
+            Err(source) => Err(MetadataCacheError::Fetch {
+                key: key.to_string(),
+                source: Box::new(source),
+            }),
+        };
+        remove_if_present(&staging).await;
+        let text = String::from_utf8(read?).map_err(|source| MetadataCacheError::NotUtf8 {
+            key: key.to_string(),
+            source,
+        })?;
+        let payload = serde_json::value::to_raw_value(&text).map_err(|source| {
+            MetadataCacheError::NotJson {
+                key: key.to_string(),
+                source,
+            }
+        })?;
         self.store(key, url, payload).await
     }
 
@@ -568,6 +658,22 @@ mod tests {
         assert_eq!(read.source(), "https://provider.invalid/index.json");
         assert_eq!(read.freshness(), Freshness::Cached);
         assert!(read.age() < Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn opaque_text_uses_the_same_envelope_without_becoming_json() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let cache = MetadataCache::new(CacheLayout::new(base.path()));
+        let key = MetadataKey::new("provider-xml").expect("safe key");
+        let payload = serde_json::value::to_raw_value("<metadata><version>1</version></metadata>")
+            .expect("json string");
+
+        cache.store(&key, &url(), payload).await.expect("store");
+        let read = cache.peek(&key).await.expect("cached");
+        assert_eq!(
+            read.text().expect("text"),
+            "<metadata><version>1</version></metadata>"
+        );
     }
 
     #[tokio::test]

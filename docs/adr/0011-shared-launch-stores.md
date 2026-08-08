@@ -41,7 +41,8 @@ launch produces from a remote artifact is written into an instance.
 |---|---|---|
 | Libraries | `$XDG_CACHE_HOME/ephervex/libraries/` | validated Maven coordinate |
 | Client jar, logging config, natives jars | `…/downloads/` | SHA-1 |
-| Asset index | `…/metadata/` | SHA-1 |
+| Asset index, canonical | `…/metadata/` | SHA-1 |
+| Asset index, launch view | `…/assets/indexes/<id>.json` | validated index id |
 | Asset objects | `…/assets/objects/<xx>/<sha1>` | SHA-1, Mojang's own layout |
 | **Unpacked natives** | `…/natives/<version>/<os>-<arch>/` | validated version id and platform |
 
@@ -50,6 +51,14 @@ because both of its components are
 logical keys rather than digests — a Minecraft version id arrives from Mojang's
 manifest — and the project's "never trust a name to choose a destination path"
 has to hold for the one store whose path is not derived from a hash.
+
+The asset-index launch view is a small atomic copy of the verified canonical
+file, not a second download and not an instance-local artifact. Minecraft is
+given only an assets root and index id and unconditionally derives
+`assets/indexes/<id>.json`; keeping only the SHA-1 path therefore makes every
+asset object unreachable even when all of those objects were downloaded. A
+copy is used instead of a hard link so editing the browsable launch view cannot
+corrupt the canonical file whose presence means it passed verification.
 
 Instance directories hold only what a user or the game produced: saves,
 `options.txt`, resource packs, logs, crash reports, and later mods and pack
@@ -62,6 +71,13 @@ the download manager's "already at the destination" short-circuit would then
 serve a stale jar for a republished version. Libraries get a coordinate only
 because the shared store has to be browsable as a Maven repository for Forge
 and NeoForge installers.
+
+Some loader metadata classifies classpath entries by filename. In particular,
+Forge 1.20.1's BootstrapLauncher uses `-DignoreList` prefixes to keep the
+vanilla client out of its Java module scan, while the official metadata names a
+version-layout jar. The launch builder preserves those official prefixes and
+adds the actual SHA-1 filename when necessary; it does not rename or duplicate
+the canonical client jar.
 
 ## Consequences
 

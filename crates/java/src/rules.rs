@@ -16,10 +16,8 @@
 //!
 //! Nobody here. `ephervex-loaders` owns loader knowledge and depends on this
 //! crate; the dependency never runs the other way. This module defines the
-//! vocabulary and one ready-made implementation general enough that loader support can
-//! express the known caveats as data rather than as code. The tests below build
-//! the Forge rules as that phase will, to prove the vocabulary is sufficient
-//! *before* anything depends on it.
+//! vocabulary and one ready-made implementation general enough for the loader
+//! providers to express known caveats as data rather than as code.
 //!
 //! # Rules reject; they do not rank
 //!
@@ -101,8 +99,8 @@ impl fmt::Display for RejectionReason {
 
 /// A constraint a loader places on the Java runtime.
 ///
-/// Implemented by `ephervex-loaders` in loader support. `Send + Sync` because
-/// selection runs inside async services shared between frontends.
+/// Implemented by `ephervex-loaders`. `Send + Sync` because selection runs
+/// inside async services shared between frontends.
 pub trait JavaCompatibilityRule: fmt::Debug + Send + Sync {
     /// A stable, untranslated identifier, used in logs and in the rejection.
     fn id(&self) -> &str;
@@ -158,6 +156,12 @@ impl VersionBound {
         self.maximum = Some(maximum);
         self
     }
+
+    /// The inclusive upper bound, when this rule declares one.
+    #[must_use]
+    pub const fn maximum(&self) -> Option<JavaVersion> {
+        self.maximum
+    }
 }
 
 impl JavaCompatibilityRule for VersionBound {
@@ -205,8 +209,8 @@ impl JavaCompatibilityRule for VersionBound {
 /// touching the rule engine, and so that a reader can see it is a judgement
 /// call rather than something the code derived.
 ///
-/// loader support decides which Forge builds it applies to. This crate only has to be
-/// able to express it.
+/// The Forge provider decides which builds it applies to. This crate only has
+/// to be able to express it.
 pub const LEGACY_FORGE_MAX_JAVA_8_UPDATE: u32 = 320;
 
 #[cfg(test)]
@@ -233,7 +237,7 @@ mod tests {
         }
     }
 
-    /// What loader support will register for Forge on 1.12.2: Java 8, and not a late
+    /// What the Forge provider registers for 1.12.2: Java 8, and not a late
     /// one.
     fn forge_1_12_2() -> VersionBound {
         VersionBound::new("forge-legacy-java8")

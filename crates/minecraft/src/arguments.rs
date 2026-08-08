@@ -17,7 +17,7 @@
 //! Both become [`Arguments`]: a set of named groups, each a list of
 //! [`ArgumentEntry`] carrying its values and its (possibly empty) rules. The
 //! form itself is preserved in [`Arguments::form`], because the difference is
-//! not merely cosmetic — see the gap note below.
+//! not merely cosmetic — see the legacy note below.
 //!
 //! # Groups are open-ended on purpose
 //!
@@ -28,7 +28,7 @@
 //! [`ArgumentGroup::Other`] means the next such addition arrives as data rather
 //! than as a parse failure or a hole.
 //!
-//! # Gap: the legacy form carries no JVM arguments
+//! # The legacy form carries no JVM arguments
 //!
 //! A pre-1.13 version JSON says nothing about `-cp`, `-Djava.library.path`, or
 //! the log4j configuration flag; a launcher is expected to know them. Supplying
@@ -201,6 +201,30 @@ impl Arguments {
                 )
             })
             .collect();
+        Self {
+            form: ArgumentForm::Modern,
+            groups,
+        }
+    }
+
+    /// Merges a loader child onto its Minecraft parent's arguments.
+    ///
+    /// Legacy loader metadata publishes a complete replacement game string.
+    /// Modern metadata instead extends every named group, with the parent's
+    /// entries first and the child's entries second.
+    #[must_use]
+    pub fn inherit(parent: &Self, child: &Self) -> Self {
+        if child.form == ArgumentForm::Legacy {
+            return child.clone();
+        }
+
+        let mut groups = parent.groups.clone();
+        for (group, entries) in &child.groups {
+            groups
+                .entry(group.clone())
+                .or_default()
+                .extend(entries.iter().cloned());
+        }
         Self {
             form: ArgumentForm::Modern,
             groups,

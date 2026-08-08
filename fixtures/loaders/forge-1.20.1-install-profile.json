@@ -1,0 +1,41 @@
+{
+  "spec": 1,
+  "profile": "forge",
+  "version": "1.20.1-forge-47.4.10",
+  "minecraft": "1.20.1",
+  "json": "/version.json",
+  "data": {
+    "BINPATCH": { "client": "/data/client.lzma", "server": "/data/server.lzma" },
+    "PATCHED": {
+      "client": "[net.minecraftforge:forge:1.20.1-47.4.10:client]",
+      "server": "[net.minecraftforge:forge:1.20.1-47.4.10:server]"
+    }
+  },
+  "processors": [
+    {
+      "sides": ["server"],
+      "jar": "net.minecraftforge:installertools:1.4.1",
+      "args": [
+        "--task", "EXTRACT_FILES", "--archive", "{INSTALLER}",
+        "--from", "data/unix_args.txt", "--to",
+        "{ROOT}/libraries/net/minecraftforge/forge/1.20.1-47.4.10/unix_args.txt"
+      ]
+    },
+    {
+      "jar": "net.minecraftforge:binarypatcher:1.1.1",
+      "args": ["--clean", "{MINECRAFT_JAR}", "--output", "{PATCHED}", "--apply", "{BINPATCH}"]
+    }
+  ],
+  "libraries": [
+    {
+      "name": "com.github.jponge:lzma-java:1.3",
+      "downloads": {
+        "artifact": {
+          "url": "https://maven.minecraftforge.net/com/github/jponge/lzma-java/1.3/lzma-java-1.3.jar",
+          "sha1": "a25db9d4d385ccda4825ae1b47a7a61d86e595af",
+          "size": 51041
+        }
+      }
+    }
+  ]
+}

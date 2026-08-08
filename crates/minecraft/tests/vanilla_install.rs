@@ -315,6 +315,12 @@ async fn a_pre_1_19_version_installs_its_libraries_assets_and_unpacked_natives()
             .join(&digest)
             .is_file()
     );
+    assert_eq!(
+        std::fs::read(cache.path().join("assets/indexes/1.12.json"))
+            .expect("launch-visible asset index"),
+        fake.asset_index(),
+        "Minecraft must find the verified index at --assetsDir/indexes/--assetIndex.json"
+    );
 }
 
 #[tokio::test]
@@ -355,6 +361,10 @@ async fn a_1_19_or_later_version_puts_its_natives_on_the_classpath_and_unpacks_n
     for library in &installation.plan.libraries {
         assert!(library.path.is_file(), "{}", library.label);
     }
+    assert!(
+        cache.path().join("assets/indexes/17.json").is_file(),
+        "modern releases use the same named asset-index presentation layout"
+    );
 }
 
 #[tokio::test]

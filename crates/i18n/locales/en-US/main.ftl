@@ -166,101 +166,101 @@ minecraft-version-id-unrecognized = { $version } uses a version-numbering scheme
 ## Minecraft metadata errors 
 
 error-minecraft-manifest-unavailable = The Minecraft version list could not be fetched, and no cached copy is available.
-    .action = Check your network connection and try again. Instances that are already installed can still be launched.
+.action = Check your network connection and try again. Instances that are already installed can still be launched.
 
 error-minecraft-manifest-invalid = Mojang returned something that is not a Minecraft version manifest.
-    .action = This is usually a captive portal or a proxy answering instead of Mojang. Try again once you have real internet access.
+.action = This is usually a captive portal or a proxy answering instead of Mojang. Try again once you have real internet access.
 
 error-minecraft-version-unknown = That Minecraft version is not in Mojang's version list.
-    .action = Check the version id. Only released versions appear in the list.
+.action = Check the version id. Only released versions appear in the list.
 
 error-minecraft-version-unsupported = That Minecraft version is older than Ephervex supports.
-    .action = Ephervex supports Minecraft releases from 1.12.2 onward.
+.action = Ephervex supports Minecraft releases from 1.12.2 onward.
 
 error-minecraft-version-not-a-release = That is a snapshot, pre-release, or release candidate rather than a Minecraft release.
-    .action = Ephervex deliberately offers only released versions, so that a reproduction can be repeated later against the same build.
+.action = Ephervex deliberately offers only released versions, so that a reproduction can be repeated later against the same build.
 
 error-minecraft-version-metadata-unavailable = The metadata for that Minecraft version could not be fetched.
-    .action = Check your network connection and try again.
+.action = Check your network connection and try again.
 
 # Verifying the SHA-1 Mojang publishes for each version document is a release
-# blocker, not a nicety .
+# blocker, not a nicety.
 error-minecraft-version-metadata-corrupt = The metadata Mojang served for that version did not match the checksum Mojang published for it.
-    .action = Ephervex refused the file rather than using it. If this repeats, something between you and Mojang is rewriting the response.
+.action = Ephervex refused the file rather than using it. If this repeats, something between you and Mojang is rewriting the response.
 
 error-minecraft-version-metadata-invalid = The metadata for that Minecraft version could not be understood.
 
 error-minecraft-version-metadata-unreadable = The cached metadata for that Minecraft version could not be read.
-    .action = Check permissions on { $path }, or delete the file so Ephervex fetches it again.
+.action = Check permissions on { $path }, or delete the file so Ephervex fetches it again.
 
 error-minecraft-metadata-incomplete = That version's metadata is missing something a launch needs.
-    .action = Mod-loader version files extend a vanilla version rather than standing alone. Ephervex cannot resolve one on its own yet.
+.action = Mod-loader version files extend an exact vanilla parent rather than standing alone. Ephervex refuses a raw or mismatched child document.
 
 error-minecraft-metadata-url-invalid = Mojang's metadata contains a download address Ephervex will not use.
-    .action = Ephervex only downloads over HTTPS and never from an address that embeds credentials.
+.action = Ephervex only downloads over HTTPS and never from an address that embeds credentials.
 
 error-minecraft-cache-key-invalid = A download could not be given a safe location in the cache.
 
 ## Java runtime errors 
 
-# A missing compatible runtime leads to a compatible installation or a
+# the missing-compatible-Java case: the next step is a compatible runtime or a
 # managed download, never a near-miss the launcher picked on the user's behalf.
 error-java-no-compatible-runtime = None of the Java runtimes on this computer can run that Minecraft version.
-    .action = Let Ephervex download a compatible Java runtime, or install one yourself and refresh the list.
+.action = Let Ephervex download a compatible Java runtime, or install one yourself and refresh the list.
 
 error-java-pinned-incompatible = The Java runtime chosen for this instance cannot run that Minecraft version.
-    .action = Clear the Java override so Ephervex picks a compatible runtime, or point it at one that matches.
+.action = Clear the Java override so Ephervex picks a compatible runtime, or point it at one that matches.
 
 error-java-runtime-unusable = That path is not a usable Java runtime.
-    .action = Point Ephervex at the `java` program itself, usually inside a `bin` folder.
+.action = Point Ephervex at the `java` program itself, usually inside a `bin` folder.
 
 error-java-auto-detect-disabled = Automatic Java detection is turned off and no Java path is set.
-    .action = Turn automatic detection back on in Settings, or set a preferred Java path.
+.action = Turn automatic detection back on in Settings, or set a preferred Java path.
 
 error-java-managed-download-disabled = No installed Java runtime is compatible, and automatic Java downloads are turned off.
-    .action = Turn on "Auto-download compatible Java" in Settings, or install a matching Java runtime yourself.
+.action = Turn on "Auto-download compatible Java" in Settings, or install a matching Java runtime yourself.
 
 error-java-managed-arch-unsupported = No Java runtime is published for this computer's processor architecture.
-    .action = Install a Java runtime through your distribution's package manager instead.
+.action = Install a Java runtime through your distribution's package manager instead.
 
 error-java-managed-api-unusable = The Java download service address is not usable.
 
 error-java-managed-index-unavailable = The list of downloadable Java runtimes could not be fetched.
-    .action = Check your network connection and try again. Java runtimes already installed still work.
+.action = Check your network connection and try again. Java runtimes already installed still work.
 
 error-java-managed-index-invalid = The Java download service returned something Ephervex could not understand.
 
 error-java-managed-release-missing = The Java download service publishes no build of that Java version for this computer.
 
 error-java-managed-release-malformed = The published Java build is missing a download address or a checksum.
-    .action = Ephervex refuses to install a Java runtime it cannot verify.
+.action = Ephervex refuses to install a Java runtime it cannot verify.
 
 error-java-managed-download-failed = The Java runtime could not be downloaded.
-    .action = Check your network connection and try again.
+.action = Check your network connection and try again.
 
 # Extraction limits and traversal checks are security boundaries, and
 # a refusal has to say that something was actually wrong with the archive.
 error-java-archive-unsafe = The downloaded Java archive tried to write files outside its own folder.
-    .action = Ephervex refused the archive and installed nothing. If this repeats, something between you and the download service is altering it.
+.action = Ephervex refused the archive and installed nothing. If this repeats, something between you and the download service is altering it.
 
 error-java-archive-too-large = The downloaded Java archive is larger than Ephervex is willing to unpack.
 
 error-java-archive-unreadable = The downloaded Java archive could not be read.
 
 error-java-archive-unwritable = A file could not be written while unpacking the Java runtime.
-    .action = Check free space and permissions on { $path }.
+.action = Check free space and permissions on { $path }.
 
 error-java-archive-empty = The downloaded Java archive contained nothing Ephervex could install.
 
 error-java-managed-extraction-failed = Unpacking the Java runtime did not finish.
 
 error-java-managed-runtime-unusable = The downloaded Java runtime could not be started.
-    .action = Ephervex did not use it. Try again, or install a Java runtime through your distribution's package manager.
+.action = Ephervex did not use it. Try again, or install a Java runtime through your distribution's package manager.
 
 error-java-managed-cache-key-invalid = The Java runtime could not be given a safe location in the cache.
 
 error-java-io = A file needed for the Java runtime could not be written.
-    .action = Check free space and permissions on { $path }.
+.action = Check free space and permissions on { $path }.
 
 error-java-probe-not-executable = That Java program could not be started.
 
@@ -492,14 +492,35 @@ error-launch-lock-unusable = Ephervex could not claim the instance for launching
     .action = Check permissions on { $path }.
 
 error-launch-invalid-version-metadata = That version's metadata does not describe something Ephervex can launch.
-    .action = Mod-loader version files extend a vanilla version rather than standing alone. Ephervex installs vanilla releases only for now.
+    .action = The loader metadata may not match its declared Minecraft parent. Ephervex refuses rather than constructing an approximate launch.
 
 # $loader is a product name and stays untranslated .
-error-launch-loader-not-supported = Ephervex cannot launch { $loader } instances yet.
-    .action = Only Vanilla instances launch for now. Launching one as Vanilla would start something other than what the instance describes, so Ephervex refuses rather than approximating.
+error-launch-loader-not-supported = This build does not support the { $loader } loader.
+    .action = Ephervex refuses to substitute Vanilla or another loader because that would not reproduce the selected instance.
 
 error-launch-download-failed = A file Minecraft needs could not be downloaded.
     .action = Check your network connection and try again. Nothing partial or unverified is kept, so a retry starts clean.
+
+error-loader-metadata-unavailable = Loader version information is unavailable.
+    .action = Check the network connection. Ephervex will use a cached copy when one exists.
+error-loader-metadata-invalid = Loader version information could not be understood.
+    .action = The provider may have changed its format. Ephervex refused to guess.
+error-loader-version-unavailable = The requested loader version is unavailable.
+    .action = Choose an available exact build. Stable is not replaced with Latest automatically.
+error-loader-identity-mismatch = The downloaded loader installer does not match the requested Minecraft or loader version.
+    .action = Ephervex refused the installer instead of installing different software.
+error-loader-installer-invalid = The loader installer uses an unsupported or unsafe format.
+    .action = Check for an Ephervex update before trying this installer again.
+error-loader-download-failed = A file required by the loader could not be downloaded or verified.
+    .action = Check the network connection and retry. Partial or unverified files are not kept.
+error-loader-version-metadata-invalid = The loader's launch metadata could not be merged with Minecraft.
+    .action = Ephervex refused to launch with incomplete or conflicting metadata.
+error-loader-io = The loader installation could not be written.
+    .action = Check permissions and free disk space at { $path }.
+error-loader-processor-failed = A loader installation processor failed.
+    .action = Review the technical details. Ephervex removed the incomplete staging directory.
+error-loader-server-target-occupied = The server installation target is not empty.
+    .action = Choose an empty directory so existing server data cannot be overwritten.
 
 error-launch-asset-index-invalid = The asset index for that version could not be understood.
     .action = Ephervex refused it rather than launching a game with no sounds or textures and no reason on screen.

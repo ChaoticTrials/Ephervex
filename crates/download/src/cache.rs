@@ -90,7 +90,7 @@ impl ContentStore {
 /// Wrapping it in a type means an extension can only reach a path after being
 /// checked once, at construction, rather than at every call site that felt like
 /// it.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FileExtension(String);
 
 impl FileExtension {
@@ -167,6 +167,20 @@ pub struct MavenCoordinate {
     extension: FileExtension,
 }
 
+/// The identity used when a child Minecraft version shadows a parent's
+/// library entry.
+///
+/// Maven versions are intentionally absent: `g:a:2` replaces `g:a:1` during
+/// version inheritance. Classifiers and extensions remain part of the key so
+/// a native classifier or a non-JAR artifact is not mistaken for the main JAR.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct MavenConflictKey {
+    group: String,
+    artifact: String,
+    classifier: Option<String>,
+    extension: FileExtension,
+}
+
 impl MavenCoordinate {
     /// Parses `group:artifact:version[:classifier][@extension]`.
     ///
@@ -238,6 +252,42 @@ impl MavenCoordinate {
         ));
         path
     }
+
+    /// The version-excluding identity used for parent/child shadowing.
+    #[must_use]
+    pub fn conflict_key(&self) -> MavenConflictKey {
+        MavenConflictKey {
+            group: self.group.clone(),
+            artifact: self.artifact.clone(),
+            classifier: self.classifier.clone(),
+            extension: self.extension.clone(),
+        }
+    }
+
+    #[must_use]
+    pub fn group(&self) -> &str {
+        &self.group
+    }
+
+    #[must_use]
+    pub fn artifact(&self) -> &str {
+        &self.artifact
+    }
+
+    #[must_use]
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
+    #[must_use]
+    pub fn classifier(&self) -> Option<&str> {
+        self.classifier.as_deref()
+    }
+
+    #[must_use]
+    pub fn extension(&self) -> &FileExtension {
+        &self.extension
+    }
 }
 
 /// Resolves cache paths under a single root.
@@ -285,6 +335,20 @@ impl CacheLayout {
             .join("objects")
             .join(prefix)
             .join(digest))
+    }
+
+    /// Launch-visible path of a Mojang asset index.
+    ///
+    /// The verified canonical copy remains content-addressed in `metadata/`,
+    /// but Minecraft does not receive that path. Given `--assetsDir <root>`
+    /// and `--assetIndex <id>`, it unconditionally opens
+    /// `<root>/indexes/<id>.json`. The id is therefore a validated logical key
+    /// for a small presentation copy, never a download destination.
+    pub fn asset_index(&self, id: &str) -> Result<PathBuf, CacheKeyError> {
+        Ok(self
+            .store_root(ContentStore::Assets)
+            .join("indexes")
+            .join(format!("{}.json", safe_segment(id.trim())?)))
     }
 
     /// Path of a library, addressed by its validated Maven coordinate.
@@ -381,6 +445,25 @@ mod tests {
     }
 
     #[test]
+    fn an_asset_index_uses_the_launchers_named_presentation_layout() {
+        assert_eq!(
+            layout().asset_index("1.12").expect("safe index id"),
+            PathBuf::from("/cache/ephervex/assets/indexes/1.12.json")
+        );
+        assert_eq!(
+            layout().asset_index("30").expect("safe index id"),
+            PathBuf::from("/cache/ephervex/assets/indexes/30.json")
+        );
+    }
+
+    #[test]
+    fn an_asset_index_id_cannot_escape_the_assets_store() {
+        for hostile in ["../evil", "a/b", "..", ""] {
+            assert!(layout().asset_index(hostile).is_err(), "`{hostile}`");
+        }
+    }
+
+    #[test]
     fn a_content_path_is_derived_from_the_digest_and_not_from_any_filename() {
         let extension = FileExtension::new(".JAR").expect("jar is a safe extension");
         let path = layout().content(ContentStore::Downloads, &sha1(), Some(&extension));
@@ -421,6 +504,19 @@ mod tests {
                 "/cache/ephervex/libraries/net/neoforged/neoforge/21.1.0/neoforge-21.1.0-installer.zip"
             )
         );
+    }
+
+    #[test]
+    fn the_inheritance_conflict_key_excludes_only_the_version() {
+        let old = MavenCoordinate::parse("example.loader:bootstrap:1.0").expect("coordinate");
+        let new = MavenCoordinate::parse("example.loader:bootstrap:2.0@JAR").expect("coordinate");
+        let native = MavenCoordinate::parse("example.loader:bootstrap:2.0:natives-linux")
+            .expect("coordinate");
+        let zip = MavenCoordinate::parse("example.loader:bootstrap:2.0@zip").expect("coordinate");
+
+        assert_eq!(old.conflict_key(), new.conflict_key());
+        assert_ne!(old.conflict_key(), native.conflict_key());
+        assert_ne!(old.conflict_key(), zip.conflict_key());
     }
 
     #[test]

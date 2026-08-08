@@ -40,8 +40,8 @@
 //!
 //! * **It does not know about loaders.** `ephervex-loaders` depends on this
 //!   crate, never the other way round. [`rules`] defines the vocabulary a
-//!   loader states its constraints in; loader support supplies the constraints
-//!   themselves.
+//!   loader states its constraints in; `ephervex-loaders` supplies the
+//!   constraints themselves.
 //! * **It does not launch anything.** Vanilla launch support builds the command line;
 //!   [`selection::EffectiveJvmSettings`] is the memory and argument half of
 //!   the selected requirement resolved and waiting for it.

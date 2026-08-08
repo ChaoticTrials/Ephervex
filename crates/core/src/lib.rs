@@ -79,6 +79,7 @@ pub use ephervex_java::{
     ProbeFailure, RejectedRuntime, RejectionReason, RequiredJava, RequirementBasis, RuleRejection,
     RuntimeInventory,
 };
+pub use ephervex_loaders::{InstalledServer, LoaderBuild, LoaderVersionListing, ServerLaunch};
 pub use ephervex_minecraft::LaunchObserver;
 pub use ephervex_minecraft::{
     ArgumentEntry, ArgumentForm, ArgumentGroup, Arguments, Artifact, AssetIndexRef,

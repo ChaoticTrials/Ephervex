@@ -371,6 +371,8 @@ pub fn build_command(
     values.insert("launcher_name", APP_ID.to_owned());
     values.insert("launcher_version", APP_VERSION.to_owned());
     values.insert("classpath", classpath);
+    values.insert("library_directory", display(&plan.libraries_dir));
+    values.insert("classpath_separator", CLASSPATH_SEPARATOR.to_owned());
     // -- game --
     values.insert("auth_player_name", settings.identity.name.clone());
     values.insert("version_name", metadata.id.clone());
@@ -406,7 +408,9 @@ pub fn build_command(
         }
     } else {
         for value in expand(declared, &context) {
-            arguments.push(argument(&substitute(&value, &values)?, &values));
+            let resolved = substitute(&value, &values)?;
+            let resolved = adapt_classpath_filename_argument(&resolved, plan);
+            arguments.push(argument(&resolved, &values));
         }
     }
 
@@ -534,6 +538,36 @@ const fn plain(value: String) -> Argument {
 
 fn display(path: &Path) -> String {
     path.to_string_lossy().into_owned()
+}
+
+/// Adapts loader metadata whose semantics depend on classpath *filenames* to
+/// Ephervex's content-addressed client-jar path.
+///
+/// Forge's BootstrapLauncher 1.1.x scans the legacy classpath and turns every
+/// entry not matched by `-DignoreList` into a Java module. Its official version
+/// metadata ignores `${version_name}.jar`, which is the filename used by the
+/// official launcher. Ephervex deliberately stores the same verified bytes as
+/// `<sha1>.jar`; without adding that actual filename, Forge also loads the
+/// vanilla client beside its patched `minecraft` module and Java rejects their
+/// overlapping packages. BootstrapLauncher uses `filename.starts_with(token)`,
+/// so preserving every official token and appending the real filename exactly
+/// retains the metadata's intended exclusion.
+fn adapt_classpath_filename_argument(value: &str, plan: &InstallationPlan) -> String {
+    let Some(ignore_list) = value.strip_prefix("-DignoreList=") else {
+        return value.to_owned();
+    };
+    let Some(filename) = plan.client_jar.path.file_name() else {
+        return value.to_owned();
+    };
+    let filename = filename.to_string_lossy();
+    if ignore_list
+        .split(',')
+        .any(|prefix| filename.starts_with(prefix))
+    {
+        value.to_owned()
+    } else {
+        format!("{value},{filename}")
+    }
 }
 
 /// Builds a command around an arbitrary executable, for the process tests.
@@ -685,6 +719,69 @@ mod tests {
                 .iter()
                 .any(|argument| argument == "-XstartOnFirstThread"),
             "a macOS-only flag must not be on a Linux command line"
+        );
+    }
+
+    #[test]
+    fn loader_library_placeholders_resolve_to_the_shared_maven_root() {
+        let parent = metadata("1.20.1.json");
+        let child = VersionMetadata::parse(
+            r#"{
+              "id":"1.20.1-forge-test","inheritsFrom":"1.20.1","type":"release",
+              "releaseTime":"2026-08-08T00:00:00Z","time":"2026-08-08T00:00:00Z",
+              "mainClass":"example.Loader","arguments":{"game":[],"jvm":[
+                "-DlibraryDirectory=${library_directory}",
+                "-Dpair=a${classpath_separator}b"
+              ]}
+            }"#,
+        )
+        .expect("child");
+        let merged = VersionMetadata::inherit(&parent, &child).expect("merge");
+        let settings = settings(offline());
+        let context = settings.features.rule_context(platform());
+        let plan = InstallationPlan::resolve(&merged, &context, &layout()).expect("plan");
+        let arguments = all(&build_command(&merged, &plan, &settings).expect("command"));
+        assert!(arguments.contains(&"-DlibraryDirectory=/cache/ephervex/libraries".to_owned()));
+        assert!(arguments.contains(&format!("-Dpair=a{CLASSPATH_SEPARATOR}b")));
+    }
+
+    #[test]
+    fn forge_1_20_ignore_list_covers_the_content_addressed_client_jar() {
+        let parent = metadata("1.20.1.json");
+        let child = VersionMetadata::parse(include_str!(
+            "../../../fixtures/loaders/forge-1.20.1-version.json"
+        ))
+        .expect("official Forge child fixture");
+        let merged = VersionMetadata::inherit(&parent, &child).expect("merge");
+        let settings = settings(offline());
+        let context = settings.features.rule_context(platform());
+        let plan = InstallationPlan::resolve(&merged, &context, &layout()).expect("plan");
+        let client_filename = plan
+            .client_jar
+            .path
+            .file_name()
+            .expect("client filename")
+            .to_string_lossy()
+            .into_owned();
+        let arguments = all(&build_command(&merged, &plan, &settings).expect("command"));
+        let ignore = arguments
+            .iter()
+            .find_map(|argument| argument.strip_prefix("-DignoreList="))
+            .expect("Forge ignore list");
+
+        assert!(
+            ignore
+                .split(',')
+                .any(|prefix| client_filename.starts_with(prefix)),
+            "BootstrapLauncher must not turn the vanilla client into a second minecraft module: {ignore}"
+        );
+        assert!(
+            ignore.contains("1.20.1-forge-47.4.10.jar"),
+            "the official installer token remains intact"
+        );
+        assert!(
+            ignore.contains(&client_filename),
+            "the content-addressed launch path is added without renaming its verified artifact"
         );
     }
 

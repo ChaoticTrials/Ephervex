@@ -248,6 +248,69 @@ impl AdoptiumClient {
             })?;
         asset.into_release(major, architecture)
     }
+
+    /// Resolves the newest GA build below an exclusive Java update boundary.
+    ///
+    /// This uses the official assets/version range endpoint. It exists for
+    /// legacy Forge, where the current Java 8 GA is too new to launch 1.12.2.
+    #[instrument(skip(self, reporter, cancel))]
+    pub async fn release_before_update(
+        &self,
+        major: u32,
+        exclusive_update: u32,
+        architecture: AdoptiumArchitecture,
+        reporter: &OperationReporter,
+        cancel: &CancellationToken,
+    ) -> Result<ManagedRelease, JavaError> {
+        let encoded_range = format!("%5B{major}%2C{major}.0.{exclusive_update}%29");
+        let mut url = self
+            .base
+            .join(&format!("/v3/assets/version/{encoded_range}"))
+            .map_err(|_| JavaError::ManagedApiUnusable {
+                url: self.base.to_string(),
+            })?;
+        url.query_pairs_mut()
+            .append_pair("architecture", architecture.as_str())
+            .append_pair("heap_size", "normal")
+            .append_pair("image_type", "jdk")
+            .append_pair("jvm_impl", "hotspot")
+            .append_pair("os", "linux")
+            .append_pair("project", "jdk")
+            .append_pair("release_type", "ga")
+            .append_pair("sort_method", "DATE")
+            .append_pair("sort_order", "DESC")
+            .append_pair("vendor", "eclipse");
+
+        let key = MetadataKey::new(&format!(
+            "adoptium-before-{major}-{exclusive_update}-linux-{}",
+            architecture.as_str()
+        ))
+        .map_err(|source| JavaError::ManagedCacheKey { source })?;
+        let document = self
+            .cache
+            .fetch(&self.manager, &key, &url, reporter, cancel)
+            .await
+            .map_err(|source| JavaError::ManagedIndexUnavailable {
+                major,
+                source: Box::new(source),
+            })?;
+        let assets: Vec<VersionAsset> =
+            document
+                .parse()
+                .map_err(|source| JavaError::ManagedIndexInvalid {
+                    major,
+                    source: Box::new(source),
+                })?;
+        for asset in assets {
+            if let Some(release) = asset.into_release(major, architecture) {
+                return release;
+            }
+        }
+        Err(JavaError::ManagedReleaseMissing {
+            major,
+            architecture: architecture.as_str(),
+        })
+    }
 }
 
 /// One element of `/v3/assets/latest/{major}/{jvm_impl}`.
@@ -277,6 +340,21 @@ struct BinaryPackage {
     /// only place it says so.
     checksum: String,
     size: u64,
+}
+
+/// One element of assets/version, whose binary collection is plural.
+#[derive(Debug, Deserialize)]
+struct VersionAsset {
+    #[serde(default)]
+    binaries: Vec<VersionBinary>,
+    release_name: String,
+    #[serde(default)]
+    vendor: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct VersionBinary {
+    package: BinaryPackage,
 }
 
 impl LatestAsset {
@@ -311,6 +389,52 @@ impl LatestAsset {
             architecture,
         })
     }
+}
+
+impl VersionAsset {
+    fn into_release(
+        self,
+        major: u32,
+        architecture: AdoptiumArchitecture,
+    ) -> Option<Result<ManagedRelease, JavaError>> {
+        let package = self.binaries.into_iter().next()?.package;
+        Some(release_from_package(
+            major,
+            architecture,
+            self.release_name,
+            self.vendor,
+            package,
+        ))
+    }
+}
+
+fn release_from_package(
+    major: u32,
+    architecture: AdoptiumArchitecture,
+    release_name: String,
+    vendor: String,
+    package: BinaryPackage,
+) -> Result<ManagedRelease, JavaError> {
+    let malformed = || JavaError::ManagedReleaseMalformed {
+        major,
+        release: release_name.clone(),
+    };
+    let url = Url::parse(&package.link).map_err(|_| malformed())?;
+    let checksum = Hash::new(HashAlgorithm::Sha256, &package.checksum).ok_or_else(malformed)?;
+    Ok(ManagedRelease {
+        major,
+        release_name,
+        vendor: if vendor.is_empty() {
+            "eclipse".to_owned()
+        } else {
+            vendor
+        },
+        url,
+        filename: package.name,
+        checksum,
+        size: package.size,
+        architecture,
+    })
 }
 
 /// Adapts a metadata-cache failure into this crate's error, for a caller that
@@ -418,6 +542,27 @@ mod tests {
         assert_eq!(release.checksum.algorithm, HashAlgorithm::Sha256);
         assert_eq!(release.size, 207_486_543);
         assert!(release.url.as_str().ends_with(".tar.gz"));
+    }
+
+    #[test]
+    fn the_archived_asset_shape_uses_plural_binaries() {
+        let json = r#"[{
+          "binaries":[{"package":{
+            "checksum":"e4446ff06a276155697597cc0f1b15da004ff083f4964a35271ecee567177370",
+            "link":"https://example.invalid/OpenJDK8U-jdk.tar.gz",
+            "name":"OpenJDK8U-jdk_x64_linux_hotspot_8u312b07.tar.gz",
+            "size":103
+          }}],
+          "release_name":"jdk8u312-b07","vendor":"eclipse"
+        }]"#;
+        let mut assets: Vec<VersionAsset> = serde_json::from_str(json).expect("assets");
+        let release = assets
+            .remove(0)
+            .into_release(8, AdoptiumArchitecture::from_java_arch("x64").expect("x64"))
+            .expect("binary")
+            .expect("release");
+        assert_eq!(release.release_name, "jdk8u312-b07");
+        assert_eq!(release.major, 8);
     }
 
     #[test]

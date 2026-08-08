@@ -118,6 +118,38 @@ impl ManagedJavaProvider {
             .client
             .latest_release(major, architecture, reporter, cancel)
             .await?;
+        self.install_release(release, reporter, cancel).await
+    }
+
+    /// Installs the newest GA runtime whose update is at most `maximum_update`.
+    /// Used only when a loader compatibility rule declares an upper bound.
+    #[instrument(skip(self, reporter, cancel))]
+    pub async fn install_at_most_update(
+        &self,
+        major: u32,
+        maximum_update: u32,
+        reporter: &OperationReporter,
+        cancel: &CancellationToken,
+    ) -> Result<ManagedInstallation, JavaError> {
+        let architecture =
+            AdoptiumArchitecture::current().ok_or_else(|| JavaError::ManagedArchUnsupported {
+                arch: std::env::consts::ARCH.to_owned(),
+            })?;
+        let exclusive = maximum_update.saturating_add(1);
+        let release = self
+            .client
+            .release_before_update(major, exclusive, architecture, reporter, cancel)
+            .await?;
+        self.install_release(release, reporter, cancel).await
+    }
+
+    async fn install_release(
+        &self,
+        release: ManagedRelease,
+        reporter: &OperationReporter,
+        cancel: &CancellationToken,
+    ) -> Result<ManagedInstallation, JavaError> {
+        let major = release.major;
 
         let directory = self
             .major_directory(major)

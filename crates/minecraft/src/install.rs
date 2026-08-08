@@ -25,7 +25,9 @@
 //! | Artifact | Store | Keyed by |
 //! |---|---|---|
 //! | libraries | `libraries/` | validated Maven coordinate |
-//! | client jar, logging config, asset index | `downloads/` | SHA-1 |
+//! | client jar, logging config | `downloads/` | SHA-1 |
+//! | asset index (canonical) | `metadata/` | SHA-1 |
+//! | asset index (launch view) | `assets/indexes/` | validated index id |
 //! | asset objects | `assets/objects/` | SHA-1, Mojang's own layout |
 //! | unpacked natives | `natives/<version>/<platform>/` | derived, not downloaded |
 //!
@@ -41,7 +43,8 @@
 //! Every other hash-named artifact in the workspace makes the same trade.
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use ephervex_download::{
     CacheLayout, ContentStore, DownloadManager, DownloadRequest, FileExtension, OperationReporter,
@@ -131,6 +134,8 @@ pub struct InstallationPlan {
     /// deduplicated. The client jar is **not** in here; see
     /// [`Self::classpath`].
     pub libraries: Vec<PlannedArtifact>,
+    /// The shared Maven root, exposed to loader argument placeholders.
+    pub libraries_dir: PathBuf,
     /// Pre-1.19 natives jars to unpack. Empty from 1.19 onward, where natives
     /// are ordinary classpath entries instead.
     pub natives: Vec<PlannedNatives>,
@@ -139,6 +144,9 @@ pub struct InstallationPlan {
     pub asset_index: PlannedArtifact,
     /// The id `--assetIndex` is given, e.g. `1.12`, `17`, `30`.
     pub asset_index_id: String,
+    /// The named copy Minecraft opens below [`Self::assets_dir`]. The
+    /// canonical verified download remains [`Self::asset_index`].
+    pub asset_index_path: PathBuf,
     /// The shared assets root `--assetsDir` is given.
     pub assets_dir: PathBuf,
     pub logging: Option<PlannedLogging>,
@@ -182,6 +190,7 @@ impl InstallationPlan {
             path: layout.content(ContentStore::Metadata, &index.artifact.sha1, Some(&json)),
             artifact: index.artifact.clone(),
         };
+        let asset_index_path = layout.asset_index(&index.id)?;
 
         let logging = metadata.logging.as_ref().map(|logging| PlannedLogging {
             argument: logging.argument.clone(),
@@ -260,10 +269,12 @@ impl InstallationPlan {
             platform: context.platform.clone(),
             client_jar,
             libraries,
+            libraries_dir: layout.store_root(ContentStore::Libraries),
             natives,
             natives_dir,
             asset_index_id: index.id.clone(),
             asset_index,
+            asset_index_path,
             assets_dir: layout.store_root(ContentStore::Assets),
             logging,
             excluded,
@@ -432,6 +443,7 @@ impl VanillaInstaller {
         reporter.set_step(Some(format!("{} · assets", plan.version)));
         let assets = self.download_assets(&index, reporter, cancel).await?;
         let natives_files = unpack_natives(&plan).await?;
+        materialize_verified(&plan.asset_index.path, &plan.asset_index_path).await?;
 
         debug!(
             version = %plan.version,
@@ -478,6 +490,50 @@ impl VanillaInstaller {
         let prefix = digest.get(..2).unwrap_or(digest);
         format!("{}/{prefix}/{digest}", self.assets_base)
     }
+}
+
+static PRESENTATION_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Atomically publishes a verified cache artifact at the logical path a game
+/// opens directly.
+///
+/// This is intentionally a copy rather than a hard link: the launch-visible
+/// file is user-browsable, and modifying it must never mutate the canonical
+/// hash-addressed artifact whose presence means "verified".
+async fn materialize_verified(source: &Path, destination: &Path) -> LaunchResult<()> {
+    let parent = destination
+        .parent()
+        .ok_or_else(|| LaunchError::GameDirectory {
+            path: destination.to_path_buf(),
+            source: std::io::Error::other("presentation path has no parent"),
+        })?;
+    tokio::fs::create_dir_all(parent)
+        .await
+        .map_err(|source| LaunchError::GameDirectory {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+
+    let counter = PRESENTATION_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut temporary_name = destination.file_name().unwrap_or_default().to_os_string();
+    temporary_name.push(format!(".{}.{}.part", std::process::id(), counter));
+    let temporary = parent.join(temporary_name);
+
+    if let Err(source) = tokio::fs::copy(source, &temporary).await {
+        let _ = tokio::fs::remove_file(&temporary).await;
+        return Err(LaunchError::GameDirectory {
+            path: destination.to_path_buf(),
+            source,
+        });
+    }
+    if let Err(source) = tokio::fs::rename(&temporary, destination).await {
+        let _ = tokio::fs::remove_file(&temporary).await;
+        return Err(LaunchError::GameDirectory {
+            path: destination.to_path_buf(),
+            source,
+        });
+    }
+    Ok(())
 }
 
 /// Unpacks the pre-1.19 natives jars, on a blocking thread.
@@ -803,6 +859,11 @@ mod tests {
         ] {
             let plan = plan(name, &linux());
             assert_eq!(plan.asset_index_id, id, "{name}");
+            assert_eq!(
+                plan.asset_index_path,
+                PathBuf::from(format!("/cache/ephervex/assets/indexes/{id}.json")),
+                "{name}: Minecraft opens the index below the assets root"
+            );
             assert_eq!(
                 plan.assets_dir,
                 PathBuf::from("/cache/ephervex/assets"),

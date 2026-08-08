@@ -15,20 +15,16 @@
 //! with a typed error naming the missing field
 //! ([`VersionMetadata::client_jar`], [`VersionMetadata::asset_index`]).
 //!
-//! **Gap, deliberately left for loader support:** `inheritsFrom` is parsed and
-//! reported by [`VersionMetadata::inherits_from`], but nothing here *merges* a
-//! child onto its parent. Merging is a loader concern with loader-specific
-//! rules — argument concatenation order, library override semantics, which side
-//! wins on `mainClass` — and implementing a guess at it now would be exactly
-//! the silent approximation Ephervex does not allow. Until loader support lands, a
-//! document with `inherits_from()` set is parseable but not launchable, and
-//! that is detectable rather than hidden.
+//! A raw document with `inherits_from()` set is parseable but not launchable.
+//! [`VersionMetadata::inherit`] validates the named parent, merges arguments,
+//! and applies the version-excluding Maven conflict key before the common
+//! installation pipeline receives it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDateTime, Utc};
 use ephervex_model::{Hash, HashAlgorithm};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use tracing::warn;
 
 use crate::arguments::{Arguments, RawArgument};
@@ -136,6 +132,14 @@ pub enum VersionMetadataError {
     /// A digest in the document is not a well-formed SHA-1.
     #[error("version `{id}` declares a malformed sha1 for `{field}`")]
     MalformedDigest { id: String, field: &'static str },
+    /// A loader child extends a different Minecraft release than the one it
+    /// was being installed for.
+    #[error("loader version `{child}` inherits `{declared}`, not `{expected}`")]
+    WrongParent {
+        child: String,
+        declared: String,
+        expected: String,
+    },
 }
 
 /// One version's complete metadata.
@@ -171,7 +175,7 @@ pub struct VersionMetadata {
     pub arguments: Arguments,
     pub logging: Option<LoggingConfig>,
     /// The parent this document extends, for loader JSONs. Always `None` for
-    /// vanilla. See the module docs: parsed, reported, never merged here.
+    /// vanilla and for metadata returned by [`Self::inherit`].
     pub inherits_from: Option<String>,
 }
 
@@ -226,7 +230,7 @@ impl VersionMetadata {
     /// The parent document this one extends, if any.
     ///
     /// A `Some` here means the document is **not** launchable on its own and
-    /// merging has not happened. loader support owns that step.
+    /// still needs to be resolved with [`Self::inherit`].
     #[must_use]
     pub fn inherits_from(&self) -> Option<&str> {
         self.inherits_from.as_deref()
@@ -239,6 +243,65 @@ impl VersionMetadata {
             && self.asset_index.is_some()
             && self.downloads.contains_key("client")
             && !self.main_class.is_empty()
+    }
+
+    /// Resolves a Forge/NeoForge child document onto its exact vanilla parent.
+    ///
+    /// A child library shadows all parent entries with the same
+    /// group/artifact/classifier/extension key. The Maven version is excluded
+    /// deliberately, while duplicate rule-gated entries inside either source
+    /// document retain their original order.
+    pub fn inherit(parent: &Self, child: &Self) -> Result<Self, VersionMetadataError> {
+        let declared = child.inherits_from.clone().unwrap_or_default();
+        if declared != parent.id {
+            return Err(VersionMetadataError::WrongParent {
+                child: child.id.clone(),
+                declared,
+                expected: parent.id.clone(),
+            });
+        }
+
+        let child_keys: BTreeSet<_> = child
+            .libraries
+            .iter()
+            .map(|library| library.coordinate.conflict_key())
+            .collect();
+        let mut libraries = child.libraries.clone();
+        libraries.extend(
+            parent
+                .libraries
+                .iter()
+                .filter(|library| !child_keys.contains(&library.coordinate.conflict_key()))
+                .cloned(),
+        );
+
+        let mut downloads = parent.downloads.clone();
+        downloads.extend(child.downloads.clone());
+
+        Ok(Self {
+            id: child.id.clone(),
+            version: child.version.clone(),
+            release_type: child.release_type.clone(),
+            release_time: child.release_time,
+            time: child.time,
+            main_class: child.main_class.clone(),
+            minimum_launcher_version: child.minimum_launcher_version,
+            compliance_level: child.compliance_level,
+            java_version: child
+                .java_version
+                .clone()
+                .or_else(|| parent.java_version.clone()),
+            assets: child.assets.clone().or_else(|| parent.assets.clone()),
+            asset_index: child
+                .asset_index
+                .clone()
+                .or_else(|| parent.asset_index.clone()),
+            downloads,
+            libraries,
+            arguments: Arguments::inherit(&parent.arguments, &child.arguments),
+            logging: child.logging.clone().or_else(|| parent.logging.clone()),
+            inherits_from: None,
+        })
     }
 }
 
@@ -262,7 +325,9 @@ struct RawVersion {
     id: String,
     #[serde(rename = "type")]
     release_type: ReleaseType,
+    #[serde(deserialize_with = "deserialize_published_time")]
     release_time: DateTime<Utc>,
+    #[serde(deserialize_with = "deserialize_published_time")]
     time: DateTime<Utc>,
     main_class: String,
     #[serde(default)]
@@ -322,6 +387,23 @@ struct RawLoggingFile {
     url: String,
     sha1: String,
     size: u64,
+}
+
+/// Mojang and Forge use RFC 3339 offsets. Current NeoForge metadata omits the
+/// offset while publishing an otherwise ISO-8601 UTC timestamp with
+/// nanoseconds; the repository timestamps are UTC, so that spelling is
+/// accepted explicitly rather than rejected or interpreted in local time.
+fn deserialize_published_time<'de, D>(deserializer: D) -> Result<DateTime<Utc>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if let Ok(timestamp) = DateTime::parse_from_rfc3339(&value) {
+        return Ok(timestamp.with_timezone(&Utc));
+    }
+    NaiveDateTime::parse_from_str(&value, "%Y-%m-%dT%H:%M:%S%.f")
+        .map(|timestamp| timestamp.and_utc())
+        .map_err(serde::de::Error::custom)
 }
 
 impl RawVersion {
@@ -448,6 +530,33 @@ mod tests {
         })
     }
 
+    fn child(json: &str) -> VersionMetadata {
+        VersionMetadata::parse(json).expect("child metadata")
+    }
+
+    const EMPTY_SHA1: &str = "da39a3ee5e6b4b0d3255bfef95601890afd80709";
+
+    fn child_json(libraries: &str, arguments: &str) -> String {
+        format!(
+            r#"{{
+                "id":"1.20.1-loader-test",
+                "inheritsFrom":"1.20.1",
+                "type":"release",
+                "releaseTime":"2026-08-08T00:00:00Z",
+                "time":"2026-08-08T00:00:00Z",
+                "mainClass":"example.Loader",
+                "libraries":[{libraries}],
+                "arguments":{arguments}
+            }}"#
+        )
+    }
+
+    fn library(name: &str) -> String {
+        format!(
+            r#"{{"name":"{name}","downloads":{{"artifact":{{"url":"https://example.invalid/library.jar","sha1":"{EMPTY_SHA1}","size":0}}}}}}"#
+        )
+    }
+
     #[test]
     fn every_era_fixture_resolves_to_complete_vanilla_metadata() {
         for (name, java, arguments) in [
@@ -474,6 +583,121 @@ mod tests {
             assert!(!version.libraries.is_empty(), "{name}");
             assert!(version.logging.is_some(), "{name}");
         }
+    }
+
+    #[test]
+    fn a_child_version_shadows_parent_versions_by_artifact_identity() {
+        let parent = parse("1.20.1.json");
+        let inherited = parent
+            .libraries
+            .iter()
+            .find(|entry| entry.name.starts_with("com.github.oshi:oshi-core:"))
+            .expect("parent library");
+        let replacement = library("com.github.oshi:oshi-core:99.0");
+        let child = child(&child_json(&replacement, r#"{"game":[],"jvm":[]}"#));
+
+        let merged = VersionMetadata::inherit(&parent, &child).expect("merge");
+        assert_eq!(merged.libraries[0].name, "com.github.oshi:oshi-core:99.0");
+        assert!(
+            !merged
+                .libraries
+                .iter()
+                .any(|entry| entry.name == inherited.name),
+            "the inherited version must not remain on the classpath"
+        );
+    }
+
+    #[test]
+    fn classifiers_and_extensions_are_distinct_conflict_keys() {
+        let mut parent = parse("1.20.1.json");
+        parent.libraries = [
+            library("example:artifact:1"),
+            library("example:artifact:1:natives-linux"),
+            library("example:artifact:1@zip"),
+        ]
+        .into_iter()
+        .map(|json| {
+            child(&child_json(&json, r#"{"game":[],"jvm":[]}"#))
+                .libraries
+                .remove(0)
+        })
+        .collect();
+        let child_library = library("example:artifact:2@JAR");
+        let child = child(&child_json(&child_library, r#"{"game":[],"jvm":[]}"#));
+
+        let merged = VersionMetadata::inherit(&parent, &child).expect("merge");
+        let names: Vec<_> = merged
+            .libraries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "example:artifact:2@JAR",
+                "example:artifact:1:natives-linux",
+                "example:artifact:1@zip"
+            ]
+        );
+    }
+
+    #[test]
+    fn child_duplicates_keep_their_order_while_the_parent_is_shadowed() {
+        let mut parent = parse("1.20.1.json");
+        parent.libraries = vec![
+            child(&child_json(
+                &library("example:rules:1"),
+                r#"{"game":[],"jvm":[]}"#,
+            ))
+            .libraries
+            .remove(0),
+        ];
+        let entries = format!(
+            "{},{}",
+            library("example:rules:2"),
+            library("example:rules:3")
+        );
+        let child = child(&child_json(&entries, r#"{"game":[],"jvm":[]}"#));
+
+        let merged = VersionMetadata::inherit(&parent, &child).expect("merge");
+        let names: Vec<_> = merged
+            .libraries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        assert_eq!(names, ["example:rules:2", "example:rules:3"]);
+    }
+
+    #[test]
+    fn modern_arguments_append_but_legacy_arguments_replace() {
+        let modern_parent = parse("1.20.1.json");
+        let modern_child = child(&child_json(
+            "",
+            r#"{"game":["--loader"],"jvm":["-Dloader=true"]}"#,
+        ));
+        let merged = VersionMetadata::inherit(&modern_parent, &modern_child).expect("modern merge");
+        assert_eq!(
+            merged
+                .arguments
+                .group(&ArgumentGroup::Game)
+                .last()
+                .expect("child game")
+                .values,
+            ["--loader"]
+        );
+
+        let legacy_parent = parse("1.12.2.json");
+        let legacy_child = child(
+            r#"{
+                "id":"1.12.2-forge-test","inheritsFrom":"1.12.2","type":"release",
+                "releaseTime":"2026-08-08T00:00:00Z","time":"2026-08-08T00:00:00Z",
+                "mainClass":"net.minecraft.launchwrapper.Launch",
+                "minecraftArguments":"--tweakClass example.Loader"
+            }"#,
+        );
+        let merged = VersionMetadata::inherit(&legacy_parent, &legacy_child).expect("legacy merge");
+        let values = &merged.arguments.group(&ArgumentGroup::Game)[0].values;
+        assert_eq!(values, &["--tweakClass", "example.Loader"]);
     }
 
     #[test]
@@ -650,7 +874,7 @@ mod tests {
         assert_eq!(version.inherits_from(), Some("1.20.1"));
         assert!(
             !version.is_complete_vanilla(),
-            "a child is not launchable until loader support merges its parent"
+            "a raw child is not launchable until its parent is merged"
         );
         let error = version.client_jar().expect_err("no client jar of its own");
         assert!(matches!(
@@ -660,6 +884,22 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn current_neoforge_timestamps_without_offsets_are_utc() {
+        let metadata = child(
+            r#"{
+                "id":"neoforge-26.1.2.94","inheritsFrom":"26.1.2","type":"release",
+                "releaseTime":"2026-08-01T13:59:11.541184081",
+                "time":"2026-08-01T13:59:11.541184081",
+                "mainClass":"net.neoforged.fml.startup.Client"
+            }"#,
+        );
+        assert_eq!(
+            metadata.release_time.to_rfc3339(),
+            "2026-08-01T13:59:11.541184081+00:00"
+        );
     }
 
     #[test]

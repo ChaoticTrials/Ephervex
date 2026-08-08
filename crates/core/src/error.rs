@@ -14,6 +14,7 @@ use std::path::PathBuf;
 
 use ephervex_auth::AuthError;
 use ephervex_java::JavaError;
+use ephervex_loaders::LoaderError;
 use ephervex_minecraft::{LaunchError, MinecraftError};
 use ephervex_storage::StorageError;
 
@@ -33,6 +34,10 @@ pub enum CoreError {
     /// Java runtime discovery, selection, or managed installation.
     #[error(transparent)]
     Java(#[from] JavaError),
+
+    /// Forge/NeoForge discovery and installation.
+    #[error(transparent)]
+    Loader(#[from] LoaderError),
 
     /// The Microsoft/Xbox/Minecraft token chain, or credential storage.
     #[error(transparent)]
@@ -62,6 +67,7 @@ impl CoreError {
             Self::Storage(error) => error.message_id(),
             Self::Minecraft(error) => error.message_id(),
             Self::Java(error) => error.message_id(),
+            Self::Loader(error) => error.message_id(),
             // Not `const`: this one chooses between message ids on the HTTP
             // status, so that a temporary outage and a permanent refusal do not
             // share a sentence.
@@ -98,6 +104,7 @@ impl CoreError {
     pub const fn is_cancellation(&self) -> bool {
         match self {
             Self::Auth(error) => error.is_cancellation(),
+            Self::Loader(error) => error.is_cancellation(),
             Self::Launch(error) => error.is_cancellation(),
             _ => false,
         }
@@ -149,7 +156,11 @@ impl CoreError {
     pub const fn required_java_major(&self) -> Option<u32> {
         match self {
             Self::Java(error) => error.required_major(),
-            Self::Storage(_) | Self::Minecraft(_) | Self::Auth(_) | Self::Launch(_) => None,
+            Self::Storage(_)
+            | Self::Minecraft(_)
+            | Self::Loader(_)
+            | Self::Auth(_)
+            | Self::Launch(_) => None,
         }
     }
 
@@ -173,6 +184,7 @@ impl CoreError {
             Self::Storage(error) => storage_failing_path(error),
             Self::Minecraft(error) => error.failing_path(),
             Self::Java(error) => error.failing_path(),
+            Self::Loader(error) => error.failing_path(),
             Self::Launch(error) => error.failing_path(),
             // Authentication failures are never about a file. The one thing
             // that would be — the keyring entry — is not a path the user can

@@ -1639,13 +1639,19 @@ dependencies = [
 name = "ephervex-loaders"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "ephervex-download",
  "ephervex-java",
  "ephervex-minecraft",
  "ephervex-model",
+ "quick-xml 0.38.4",
+ "reqwest",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.19",
+ "tokio",
+ "tokio-util",
  "tracing",
  "zip",
 ]

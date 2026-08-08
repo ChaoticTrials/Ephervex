@@ -53,15 +53,12 @@
 //! | [`process`] | spawning the game, streaming its output, tracking its exit |
 //! | [`log`] | reassembling the log4j records Mojang's own logging config produces |
 //!
-//! # Deliberate gaps
+//! # Boundaries
 //!
-//! * **`inheritsFrom` is parsed but never merged.** Forge and NeoForge publish
-//!   *child* version JSONs that extend a vanilla parent. The field is read and
-//!   reported by [`VersionMetadata::inherits_from`], so a child document is
-//!   detectable, but merging one onto its parent has loader-specific semantics
-//!   and belongs to loader support. Until then a child parses, is explicitly *not*
-//!   [`complete`](VersionMetadata::is_complete_vanilla), and is refused by
-//!   [`InstallationPlan::resolve`] rather than launched as vanilla.
+//! * **`inheritsFrom` is explicit.** Forge and NeoForge publish *child* version
+//!   JSONs that extend a vanilla parent. A raw child remains detectably
+//!   incomplete; [`VersionMetadata::inherit`] validates and merges it before
+//!   the shared installation and launch pipeline sees it.
 //! * **The Java requirement is recorded, not acted on here.**
 //!   [`VersionMetadata::java_major_version`] and the runtime `component` name
 //!   are carried through for `ephervex-java`; this crate takes

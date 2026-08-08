@@ -68,7 +68,9 @@ pub mod verify;
 pub use allowlist::{
     DomainAllowlist, MODRINTH_PACK_HOSTS, UrlPolicyError, check_transport, redacted,
 };
-pub use cache::{CacheKeyError, CacheLayout, ContentStore, FileExtension, MavenCoordinate};
+pub use cache::{
+    CacheKeyError, CacheLayout, ContentStore, FileExtension, MavenConflictKey, MavenCoordinate,
+};
 pub use client::{HttpConfig, build_client};
 pub use error::DownloadError;
 pub use manager::{

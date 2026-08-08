@@ -51,10 +51,9 @@ ephervex-core = { path = "crates/core" }
 
 # --- external stack (versions resolved by `cargo add`, not hand-written) ---
 anyhow = "1.0.104"
-# `async-trait` exists for exactly one trait: `AccountProvider` (ADR 0005). A
-# native `async fn` in a trait is not dyn-compatible, and `ephervex-core` holds
-# the provider as `dyn AccountProvider` so the services layer depends on the
-# interface rather than on the Microsoft implementation.
+# `AccountProvider` and `LoaderProvider` are held behind trait objects (ADR
+# 0005). Native async trait methods are not dyn-compatible, so both use this
+# adapter and the services layer can depend on their interfaces.
 async-trait = "0.1.91"
 # URL-safe base64 for PKCE challenges. `default-features = false` drops the
 # crate's SIMD path, which this workspace has no throughput reason to want.
@@ -82,6 +81,7 @@ open = "5.4.1"
 # `application/x-www-form-urlencoded`, which is the one body shape the identity
 # platform accepts there.
 reqwest = { version = "0.13.4", default-features = false, features = ["form", "gzip", "http2", "json", "rustls", "stream", "system-proxy"] }
+quick-xml = { version = "0.38.4", features = ["serialize"] }
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 rust-embed = "8.12.0"
 semver = "1.0.28"

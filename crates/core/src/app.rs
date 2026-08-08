@@ -23,11 +23,14 @@ use ephervex_java::{
     JavaOrigin, JavaPathChoice, JavaPreference, JavaRuntime, JavaSourceKind, ManagedInstallation,
     ManagedJavaProvider, PinSource, RequiredJava, RuntimeInventory, Selection,
 };
+use ephervex_loaders::{
+    InstalledServer, LoaderRegistry, LoaderVersionListing, ServerInstallRequest,
+};
 use ephervex_minecraft::{
     MinecraftError, MinecraftVersionId, ReleaseListing, VERSION_MANIFEST_CACHE_KEY, VersionCatalog,
     VersionMetadata,
 };
-use ephervex_model::{InstanceId, JavaOverride, ServerId};
+use ephervex_model::{InstanceId, JavaOverride, LoaderKind, LoaderVersionMode, ServerId};
 use ephervex_storage::{
     ClientRecord, Config, FileDisposition, JavaConfig, NewClient, NewServer, Paths,
     ReconciliationReport, Registry, ServerRecord, Storage,
@@ -153,6 +156,7 @@ pub struct App {
     /// HTTP client and a TLS stack, which `ephervex instance list` has no
     /// business paying for.
     minecraft: OnceLock<VersionCatalog>,
+    loaders: OnceLock<LoaderRegistry>,
     /// The last Java scan, held for the life of the process.
     ///
     /// Discovery forks a JVM per distinct runtime, so recomputing it whenever a
@@ -180,6 +184,7 @@ impl App {
         Ok(Self {
             storage: ephervex_storage::open_from_environment()?,
             minecraft: OnceLock::new(),
+            loaders: OnceLock::new(),
             java: RwLock::new(None),
             session: None,
         })
@@ -194,6 +199,7 @@ impl App {
         Ok(Self {
             storage: ephervex_storage::open(paths)?,
             minecraft: OnceLock::new(),
+            loaders: OnceLock::new(),
             java: RwLock::new(None),
             session: None,
         })
@@ -304,6 +310,74 @@ impl App {
             .await?)
     }
 
+    /// The exact loader builds offered for one Minecraft release.
+    #[instrument(skip(self))]
+    pub async fn loader_versions(
+        &self,
+        kind: LoaderKind,
+        minecraft: &str,
+    ) -> CoreResult<LoaderVersionListing> {
+        Ok(self
+            .loaders()?
+            .provider(kind)
+            .list_versions(
+                minecraft,
+                &OperationReporter::silent("loader-metadata"),
+                &CancellationToken::new(),
+            )
+            .await?)
+    }
+
+    /// Resolves Stable, Latest, or an exact imported loader build.
+    #[instrument(skip(self))]
+    pub async fn resolve_loader_version(
+        &self,
+        kind: LoaderKind,
+        minecraft: &str,
+        mode: LoaderVersionMode,
+        exact: Option<&str>,
+    ) -> CoreResult<String> {
+        Ok(self
+            .loaders()?
+            .provider(kind)
+            .resolve_version(
+                minecraft,
+                mode,
+                exact,
+                &OperationReporter::silent("loader-metadata"),
+                &CancellationToken::new(),
+            )
+            .await?)
+    }
+
+    /// Installs a dedicated-server layout without starting it or touching its
+    /// EULA. Server lifecycle belongs to `ephervex-server`.
+    #[instrument(skip(self, java, target, cancel))]
+    pub async fn install_server_version(
+        &self,
+        minecraft: &str,
+        loader: &ephervex_model::LoaderSelection,
+        java: &Path,
+        target: &Path,
+        cancel: &CancellationToken,
+    ) -> CoreResult<InstalledServer> {
+        let parent = self.minecraft_version(minecraft).await?;
+        let reporter = OperationReporter::silent("installing-loader-server");
+        Ok(self
+            .loaders()?
+            .provider(loader.kind)
+            .install_server(ServerInstallRequest {
+                minecraft,
+                exact_loader: loader.version.as_deref(),
+                parent: &parent,
+                java,
+                target,
+                reporter: &reporter,
+                cancel,
+            })
+            .await?)
+    }
+
     // -- java runtimes -----------------------------------------------------
 
     /// Every Java runtime installed on this machine, from the process cache.
@@ -370,10 +444,25 @@ impl App {
         request: &JavaPlanRequest,
     ) -> CoreResult<JavaPlan> {
         let required = self.required_java(minecraft_version).await?;
-        // loader support registers the loader's own constraints here; until then the
-        // required major is the only rule. The plumbing exists now so that
-        // adding them is a change to `loaders`, not to this layer .
-        let rules: Vec<&dyn JavaCompatibilityRule> = Vec::new();
+        let loader = request
+            .instance
+            .map(|id| self.client(id).map(|record| record.loader))
+            .transpose()?
+            .unwrap_or_else(ephervex_model::LoaderSelection::vanilla);
+        let loader_rules = self
+            .loaders()?
+            .provider(loader.kind)
+            .java_rules(minecraft_version, loader.version.as_deref());
+        let rules: Vec<&dyn JavaCompatibilityRule> = loader_rules
+            .iter()
+            .map(|rule| rule as &dyn JavaCompatibilityRule)
+            .collect();
+        let maximum_update = loader_rules
+            .iter()
+            .filter_map(ephervex_java::VersionBound::maximum)
+            .filter(|maximum| maximum.major == required.major)
+            .map(|maximum| maximum.update)
+            .min();
 
         let settings = self.java_settings();
         let preference = JavaPreference {
@@ -431,12 +520,22 @@ impl App {
                     }
                     .into());
                 }
-                let installed = self.install_java(required.major).await?;
+                let installed = self
+                    .install_java_with_maximum_update(required.major, maximum_update)
+                    .await?;
+                let inventory = RuntimeInventory {
+                    runtimes: vec![installed.runtime.clone()],
+                    failures: Vec::new(),
+                    probed: 1,
+                    candidates: 1,
+                    scanned_at: chrono::Utc::now(),
+                };
+                let checked = ephervex_java::select(&inventory, &required, &rules)?;
                 Ok(JavaPlan {
                     minecraft_version: minecraft_version.to_owned(),
                     required,
                     choice,
-                    runtime: installed.runtime,
+                    runtime: checked.runtime,
                     rejected: Vec::new(),
                     jvm,
                     installed_now: installed.newly_installed,
@@ -452,6 +551,14 @@ impl App {
     /// so the new runtime is visible without an explicit Refresh.
     #[instrument(skip(self))]
     pub async fn install_java(&self, major: u32) -> CoreResult<ManagedInstallation> {
+        self.install_java_with_maximum_update(major, None).await
+    }
+
+    async fn install_java_with_maximum_update(
+        &self,
+        major: u32,
+        maximum_update: Option<u32>,
+    ) -> CoreResult<ManagedInstallation> {
         let manager = DownloadManager::new(DownloaderConfig::default()).map_err(|source| {
             JavaError::ManagedDownloadFailed {
                 major,
@@ -465,13 +572,16 @@ impl App {
             self.paths().java_dir(),
         )?;
 
-        let installed = provider
-            .install(
-                major,
-                &OperationReporter::silent("managed-java"),
-                &CancellationToken::new(),
-            )
-            .await?;
+        let reporter = OperationReporter::silent("managed-java");
+        let cancel = CancellationToken::new();
+        let installed = match maximum_update {
+            Some(maximum) => {
+                provider
+                    .install_at_most_update(major, maximum, &reporter, &cancel)
+                    .await?
+            }
+            None => provider.install(major, &reporter, &cancel).await?,
+        };
         if let Ok(mut cache) = self.java.write() {
             *cache = None;
         }
@@ -550,6 +660,23 @@ impl App {
         // Losing the race just means another thread built an equivalent
         // catalog; this one is dropped and theirs is returned.
         Ok(self.minecraft.get_or_init(|| catalog))
+    }
+
+    /// The loader registry shared by discovery, Java planning, and launch.
+    pub(crate) fn loaders(&self) -> CoreResult<&LoaderRegistry> {
+        if let Some(loaders) = self.loaders.get() {
+            return Ok(loaders);
+        }
+        let manager = DownloadManager::new(DownloaderConfig {
+            http: self.http_config(),
+            ..DownloaderConfig::default()
+        })
+        .map_err(|source| ephervex_loaders::LoaderError::MetadataInvalid {
+            provider: "loader",
+            detail: source.to_string(),
+        })?;
+        let loaders = LoaderRegistry::new(manager, CacheLayout::new(self.paths().cache_dir()))?;
+        Ok(self.loaders.get_or_init(|| loaders))
     }
 
     /// Progress reporting for a metadata fetch.
