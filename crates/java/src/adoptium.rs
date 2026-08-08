@@ -1,9 +1,8 @@
 //! Eclipse Temurin releases, read through the Adoptium API v3.
 //!
-//! # The contract, re-verified
+//! # The API contract
 //!
-//! Checked against the live service on 2026-08-07 rather than taken from
-//! the project's snapshot:
+//! Adoptium documents the latest-assets endpoint as:
 //!
 //! ```text
 //! GET /v3/assets/latest/{major}/hotspot
@@ -21,9 +20,8 @@
 //! answering it with a paged release list would mean re-implementing Adoptium's
 //! own ordering.
 //!
-//! Java 8 is still served (`jdk8u502-b07` at the time of writing) and
-//! `/v3/info/available_releases` reports majors 8 through 26 with 25 as the
-//! most recent LTS — so nothing here may treat 21 as a ceiling.
+//! The API still serves Java 8 and reports available releases above Java 21,
+//! so nothing here may treat 21 as a ceiling.
 //!
 //! # Architecture names do not match Java's
 //!
@@ -315,7 +313,7 @@ impl AdoptiumClient {
 
 /// One element of `/v3/assets/latest/{major}/{jvm_impl}`.
 ///
-/// Only the fields Ephervex acts on are modelled. The API returns download
+/// Only the fields Ephervex acts on are modeled. The API returns download
 /// counts, signature links, and SCM references that would be dead weight here,
 /// and `serde` ignores what is not named.
 #[derive(Debug, Deserialize)]

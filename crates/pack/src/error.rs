@@ -5,17 +5,17 @@
 //! resolves through `ephervex-i18n`. Nothing in this crate knows what language
 //! the user reads.
 //!
-//! Two families are worth naming explicitly because they define the trust boundary:
-//! exists for:
+//! Two families are worth naming explicitly because they define the trust
+//! boundary:
 //!
 //! * **Refusals.** An unsupported loader, a pack declaring two loaders at once,
 //!   an entry that escapes the extraction root. These are hard errors, not
 //!   warnings, because the alternative is a launcher quietly approximating a
 //!   reproduction that then reproduces something else.
-//! * **Unavailable importers.** [`PackError::FormatNotImplemented`] is how a
-//!   CurseForge or Prism archive is reported when its importer is unavailable. Detection is
-//!   provider-independent and already recognizes them, so the user is told what
-//!   the file is rather than being told it is not a pack.
+//! * **Recognized but unsupported formats.** [`PackError::FormatUnsupported`]
+//!   reports a CurseForge or Prism archive by its detected format. Detection is
+//!   provider-independent, so the user is told what the file is rather than
+//!   being told it is not a pack.
 
 use std::path::PathBuf;
 
@@ -47,9 +47,9 @@ pub enum PackError {
     #[error("{path} is not a Modrinth, CurseForge, or Prism pack")]
     FormatUnrecognized { path: PathBuf },
 
-    /// A pack format Ephervex recognizes but cannot import yet.
-    #[error("importing {format} packs is not implemented yet")]
-    FormatNotImplemented { format: PackFormat },
+    /// A recognized pack format that this build cannot import.
+    #[error("importing {format} packs is not supported")]
+    FormatUnsupported { format: PackFormat },
 
     /// The archive is missing the manifest its format is defined by.
     #[error("the archive has no `{entry}`")]
@@ -84,7 +84,7 @@ pub enum PackError {
     LoaderUnsupported { loader: String },
 
     /// A pack declaring both Forge and NeoForge is ambiguous rather than
-    /// clever, and Ephervex requires to treat it as invalid.
+    /// clever, so Ephervex treats it as invalid.
     #[error("the pack declares both `{first}` and `{second}`")]
     LoaderAmbiguous { first: String, second: String },
 
@@ -177,7 +177,7 @@ impl PackError {
             Self::Unreadable { .. } => "error-pack-archive-unreadable",
             Self::ArchiveInvalid { .. } => "error-pack-archive-invalid",
             Self::FormatUnrecognized { .. } => "error-pack-format-unrecognized",
-            Self::FormatNotImplemented { .. } => "error-pack-format-not-implemented",
+            Self::FormatUnsupported { .. } => "error-pack-format-unsupported",
             Self::ManifestMissing { .. } => "error-pack-manifest-missing",
             Self::ManifestInvalid { .. } => "error-pack-manifest-invalid",
             Self::ManifestUnsupportedVersion { .. } => "error-pack-manifest-unsupported-version",
@@ -259,7 +259,7 @@ mod tests {
             PackError::FormatUnrecognized {
                 path: PathBuf::from("/tmp/a.zip"),
             },
-            PackError::FormatNotImplemented {
+            PackError::FormatUnsupported {
                 format: PackFormat::CurseForgePack,
             },
             PackError::ManifestMissing {

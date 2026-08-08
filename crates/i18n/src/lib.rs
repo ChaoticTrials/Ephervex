@@ -1,7 +1,7 @@
 //! Localization resources and message lookup.
 //!
-//! Only English ships initially, but the architecture is in place from the
-//! start so no user-facing string ends up embedded deep inside business logic.
+//! English is the only bundled locale. The localization boundary keeps
+//! user-facing strings out of business logic.
 //! Provider names, technical ids, paths, versions, and Minecraft log text stay
 //! untranslated — they travel through this layer as *arguments*, never as part
 //! of a translatable message.

@@ -15,7 +15,7 @@
 //! imported instance: it applies the preferences at creation, which would put
 //! them before the pack's own `options.txt` instead of after it. The registry is
 //! called directly and [`crate::App::apply_global_preferences`] is called at the
-//! end — the same one-time application, at the moment the compatibility matrix coverss.
+//! end, preserving the same one-time application after pack options are in place.
 //!
 //! # An import either produces an instance or leaves nothing behind
 //!

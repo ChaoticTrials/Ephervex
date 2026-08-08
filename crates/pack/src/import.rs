@@ -135,8 +135,8 @@ pub fn analyze(path: &Path, policy: &PackPolicy) -> PackResult<(PackArchive, Pac
 
 /// Parses an already-identified archive with the provider that owns its format.
 ///
-/// The single dispatch point. A recognized format with no importer yet is
-/// reported as exactly that rather than as a parse failure.
+/// The single dispatch point. A recognized but unsupported format is reported
+/// as exactly that rather than as a parse failure.
 pub fn parse_with(
     format: PackFormat,
     archive: &mut PackArchive,
@@ -156,7 +156,7 @@ pub fn parse_with(
             })
         }
         PackFormat::CurseForgePack | PackFormat::PrismExport => {
-            Err(PackError::FormatNotImplemented { format })
+            Err(PackError::FormatUnsupported { format })
         }
     }
 }
@@ -288,7 +288,7 @@ fn retain_source(
     let already_applied = side.override_scope();
     for layer in &mut recipe.override_layers {
         if layer.scope == already_applied {
-            // Already in the game directory, and Ephervex requires it need not be
+            // Already in the game directory, so it does not need to be
             // duplicated. The recipe records that it was not retained so a
             // later plan can say so rather than assume.
             layer.retained_at = None;
@@ -387,7 +387,7 @@ mod tests {
     }
 
     #[test]
-    fn a_recognized_format_with_no_importer_says_so_rather_than_failing_to_parse() {
+    fn a_recognized_but_unsupported_format_is_not_reported_as_unrecognized() {
         let dir = tempfile::tempdir().expect("temp dir");
         let archive = dir.path().join("pack.zip");
         zip_file(
@@ -398,14 +398,14 @@ mod tests {
             ],
         );
 
-        let error = analyze(&archive, &PackPolicy::default()).expect_err("not implemented yet");
+        let error = analyze(&archive, &PackPolicy::default()).expect_err("unsupported format");
         assert!(matches!(
             error,
-            PackError::FormatNotImplemented {
+            PackError::FormatUnsupported {
                 format: PackFormat::CurseForgePack
             }
         ));
-        assert_eq!(error.message_id(), "error-pack-format-not-implemented");
+        assert_eq!(error.message_id(), "error-pack-format-unsupported");
     }
 
     #[test]

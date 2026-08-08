@@ -19,9 +19,9 @@
 //! explicit request  >  per-instance override  >  global preferred path  >  automatic
 //! ```
 //!
-//! The global setting sits at the bottom because it is a *default*. Instance and
-//! "Preferred Java path" in global settings and "Use global settings" on the
-//! instance, which only means anything if the instance can win.
+//! The global setting sits at the bottom because it is a *default*. An instance
+//! override must take precedence for "Use global settings" to have a meaningful
+//! alternative.
 //!
 //! # "Use global settings" is a state, not an absence
 //!
@@ -167,8 +167,8 @@ pub struct EffectiveJvmSettings {
     pub min_memory_mib: u32,
     pub max_memory_mib: u32,
     pub jvm_args: Vec<String>,
-    /// Whether the instance opted out of global settings at all. This distinction
-    /// checkbox. True even when the override pins no individual field.
+    /// Whether the instance opted out of global settings at all. This preserves
+    /// the checkbox state even when the override pins no individual field.
     pub overrides_global: bool,
     /// The fields the instance pinned. A field absent here follows the global
     /// setting and will move when it does.
@@ -360,9 +360,9 @@ mod tests {
         }
     }
 
-    /// The four runtimes actually installed on the machine this was developed
-    /// against, at their real versions.
-    fn machine_inventory() -> RuntimeInventory {
+    /// A representative runtime inventory covering the Java majors used by
+    /// supported Minecraft releases.
+    fn representative_inventory() -> RuntimeInventory {
         RuntimeInventory {
             runtimes: vec![
                 runtime(
@@ -402,7 +402,7 @@ mod tests {
 
     #[test]
     fn each_minecraft_era_selects_the_runtime_its_metadata_asks_for() {
-        // The Java selection behavior, against the four supported release eras.
+        // Each supported release era selects the exact Java major its metadata
         // names.
         for (major, expected) in [
             (8, "/usr/lib/jvm/java-8-openjdk-amd64/jre/bin/java"),
@@ -410,8 +410,8 @@ mod tests {
             (21, "/usr/lib/jvm/java-21-openjdk-amd64/bin/java"),
             (25, "/usr/lib/jvm/java-25-openjdk-amd64/bin/java"),
         ] {
-            let selection =
-                select(&machine_inventory(), &required(major), &[]).expect("a runtime exists");
+            let selection = select(&representative_inventory(), &required(major), &[])
+                .expect("a runtime exists");
             assert_eq!(
                 selection.runtime.executable,
                 PathBuf::from(expected),
@@ -422,9 +422,11 @@ mod tests {
 
     #[test]
     fn a_missing_major_fails_rather_than_falling_back_to_a_near_miss() {
-        // Java 16 is the 1.17 requirement and is not installed here. Handing
-        // over Java 17 "because it is close" is the substitution Ephervex does not allow.
-        let error = select(&machine_inventory(), &required(16), &[]).expect_err("no java 16");
+        // Java 16 is the 1.17 requirement and is not present in this fixture.
+        // Handing over Java 17 "because it is close" is the substitution
+        // Ephervex does not allow.
+        let error =
+            select(&representative_inventory(), &required(16), &[]).expect_err("no java 16");
         assert!(
             matches!(
                 error,
@@ -439,15 +441,16 @@ mod tests {
 
     #[test]
     fn a_loader_rule_can_veto_a_runtime_the_major_check_accepted() {
-        // Forge 1.12.2 on this machine: Java 8 is present, but it is 8u492.
+        // Java 8 is present in this fixture, but 8u492 is too new for Forge
+        // 1.12.2.
         let legacy_forge = VersionBound::new("forge-legacy-java8")
             .major(8)
             .at_most(JavaVersion::new(8, 0, LEGACY_FORGE_MAX_JAVA_8_UPDATE));
 
-        let plain = select(&machine_inventory(), &required(8), &[]).expect("java 8 exists");
+        let plain = select(&representative_inventory(), &required(8), &[]).expect("java 8 exists");
         assert_eq!(plain.runtime.version.update, 492);
 
-        let error = select(&machine_inventory(), &required(8), &[&legacy_forge])
+        let error = select(&representative_inventory(), &required(8), &[&legacy_forge])
             .expect_err("8u492 is too new for old forge");
         let JavaError::NoCompatibleRuntime { rejections, .. } = &error else {
             panic!("{error:?}");
@@ -462,7 +465,7 @@ mod tests {
 
     #[test]
     fn the_newest_update_of_the_required_major_wins() {
-        let mut inventory = machine_inventory();
+        let mut inventory = representative_inventory();
         inventory.runtimes.push(runtime(
             "/usr/lib/jvm/java-17-old/bin/java",
             JavaVersion::new(17, 0, 2),
@@ -474,7 +477,7 @@ mod tests {
 
     #[test]
     fn a_managed_runtime_wins_a_tie_against_a_system_one() {
-        let mut inventory = machine_inventory();
+        let mut inventory = representative_inventory();
         inventory.runtimes.push(runtime(
             "/home/dev/.local/share/ephervex/java/21/eclipse-jdk-21.0.11+9/bin/java",
             JavaVersion::new(21, 0, 11),
@@ -489,7 +492,7 @@ mod tests {
 
     #[test]
     fn rejected_runtimes_are_reported_alongside_the_winner() {
-        let selection = select(&machine_inventory(), &required(21), &[]).expect("java 21");
+        let selection = select(&representative_inventory(), &required(21), &[]).expect("java 21");
         assert_eq!(
             selection.rejected.len(),
             3,

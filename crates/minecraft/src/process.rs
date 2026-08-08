@@ -2,12 +2,12 @@
 //!
 //! # One event stream, two frontends
 //!
-//! the compatibility matrix coverss the events and says the GUI and the CLI consume the same ones.
-//! [`LaunchObserver`] is therefore shaped exactly like `ephervex-auth`'s
-//! `AuthObserver` and `ephervex-download`'s `OperationReporter`: an unbounded
-//! channel a frontend drains, plus a `silent()` constructor for callers that
-//! only want the result. Nothing in this module knows which frontend is
-//! listening, and nothing in it can block on a window.
+//! The GUI and CLI consume the same launch events. [`LaunchObserver`] is
+//! therefore shaped exactly like `ephervex-auth`'s `AuthObserver` and
+//! `ephervex-download`'s `OperationReporter`: an unbounded channel a frontend
+//! drains, plus a `silent()` constructor for callers that only want the result.
+//! Nothing in this module knows which frontend is listening, and nothing in it
+//! can block on a window.
 //!
 //! Unbounded because a slow consumer must never stall the game: a terminal that
 //! is not being read would otherwise apply backpressure all the way to the
@@ -98,7 +98,7 @@ pub enum LaunchEvent {
     /// Resolving metadata, choosing a runtime, refreshing the session.
     Preparing,
     /// A snapshot of the download operation. The workspace's one progress
-    /// abstraction  rather than a second shape invented here.
+    /// abstraction rather than a second shape invented here.
     Downloading(Box<Operation>),
     /// The command line is built and the JVM is about to start.
     ///
@@ -119,8 +119,8 @@ pub enum LaunchEvent {
     /// through `ephervex-i18n`, exactly as it does for a returned error
     Failed {
         message_id: &'static str,
-        /// Untranslated technical detail for the expandable section The interface asks
-        /// for, and for the log.
+        /// Untranslated technical detail for an expandable interface section
+        /// and for the log.
         detail: String,
     },
 }
@@ -417,7 +417,7 @@ mod tests {
         });
 
         let exit = waiting.await.expect("task").expect("waits");
-        assert_eq!(exit.code, None, "a signalled process has no exit code");
+        assert_eq!(exit.code, None, "a signaled process has no exit code");
         assert!(exit.signal.is_some(), "and the signal is reported instead");
         assert!(!std::path::Path::new(&format!("/proc/{pid}/stat")).exists());
     }

@@ -641,12 +641,12 @@ error-pack-archive-invalid = That file is not a readable archive.
 .action = A pack is a ZIP file. Check that { $path } downloaded completely.
 
 error-pack-format-unrecognized = Ephervex does not recognize that file as a modpack.
-.action = Ephervex imports Modrinth `.mrpack` files, CurseForge exports, and Prism instance exports.
+.action = Choose a supported Modrinth `.mrpack` file.
 
-# a recognized format with no importer yet is said out loud rather than
-# reported as a broken file.
-error-pack-format-not-implemented = This build of Ephervex cannot import { $format } packs yet.
-.action = Modrinth `.mrpack` import is available now; the other formats arrive in a later version.
+# A recognized but unsupported format is said out loud rather than reported as
+# a broken file.
+error-pack-format-unsupported = This build of Ephervex cannot import { $format } packs.
+.action = Use a Modrinth `.mrpack` file, which this build supports.
 
 error-pack-manifest-missing = The pack is missing the file that describes it.
 .action = Ephervex expected { $entry } inside the archive.

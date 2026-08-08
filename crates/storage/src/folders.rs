@@ -195,10 +195,9 @@ impl ServerFolder {
             Self::Config => game.join("config"),
             Self::Logs => game.join("logs"),
             Self::CrashReports => game.join("crash-reports"),
-            // `world` is `level-name`'s default; a server configured with
-            // another level name is server management's business, and until then
-            // pointing at a folder that is not there is disabled rather than
-            // invented.
+            // `world` is `level-name`'s default. Folder inspection does not
+            // infer custom server configuration, so a missing default world is
+            // unavailable rather than invented.
             Self::World => game.join("world"),
         }
     }

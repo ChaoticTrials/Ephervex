@@ -110,9 +110,9 @@ pub trait JavaCompatibilityRule: fmt::Debug + Send + Sync {
 
 /// A rule expressed entirely as version bounds.
 ///
-/// General enough for every caveat the compatibility matrix coverss, which is the point: a loader
-/// should be able to state "Java 8, no later than update 320" as data rather
-/// than by writing a trait implementation whose logic then has to be reviewed.
+/// General enough for the supported compatibility constraints: a loader should
+/// be able to state "Java 8, no later than update 320" as data rather than by
+/// writing a trait implementation whose logic then has to be reviewed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VersionBound {
     id: String,
@@ -254,9 +254,8 @@ mod tests {
     #[test]
     fn forge_1_12_2_refuses_a_late_java_8_that_forge_1_16_5_accepts() {
         // A current Java 8 update must still satisfy an exact Java 8 requirement.
-        // This machine's Java 8 is 8u492 —
-        // fine for 1.16.5, and the exact runtime a major-only check would
-        // silently hand to 1.12.2.
+        // The fixture's Java 8 is 8u492: fine for 1.16.5, and the exact runtime
+        // a major-only check would silently hand to 1.12.2.
         let late_java_8 = runtime(JavaVersion::new(8, 0, 492));
 
         let legacy = forge_1_12_2().evaluate(&late_java_8);

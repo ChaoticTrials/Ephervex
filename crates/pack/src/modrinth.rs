@@ -194,9 +194,9 @@ fn resolve_loader(dependencies: &BTreeMap<String, String>) -> PackResult<LoaderS
             .copied()
         else {
             // Fabric, Quilt, or something this build has never heard of. Both
-            // are refusals: Ephervex requires an unsupported loader must not be silently
-            // ignored, and an unknown key cannot be assumed harmless because a
-            // pack that needs it will not run without it.
+            // are refusals: an unsupported loader must not be silently ignored,
+            // and an unknown key cannot be assumed harmless because a pack that
+            // needs it will not run without it.
             return Err(PackError::LoaderUnsupported {
                 loader: key.clone(),
             });

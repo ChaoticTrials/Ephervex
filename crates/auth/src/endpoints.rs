@@ -2,10 +2,9 @@
 //!
 //! # Verified against live documentation on 2026-08-08
 //!
-//! Ephervex requires not to trust its own 2026 snapshot, so every address and
-//! every field name below was re-read from the current official documentation
-//! on **2026-08-08**. See the crate-level docs in [`crate`] for the sources and
-//! for what actually differed.
+//! Every address and field name below was checked against the official
+//! documentation on **2026-08-08**. See the crate-level docs in [`crate`] for
+//! the sources and upstream contract notes.
 //!
 //! # Why the bases are injectable but not configurable
 //!

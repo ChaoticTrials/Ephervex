@@ -42,9 +42,8 @@ impl PackPolicy {
     /// The policy for one recognized format.
     ///
     /// CurseForge and Prism resolve to an empty allowlist rather than to
-    /// Modrinth's: their importers are separate consumers, and a format whose rules
-    /// have not been decided yet should permit nothing rather than inherit
-    /// somebody else's answer.
+    /// Modrinth's: unsupported formats permit nothing rather than inheriting
+    /// another provider's policy.
     #[must_use]
     pub fn for_format(format: PackFormat) -> Self {
         match format {
@@ -76,7 +75,7 @@ mod tests {
     }
 
     #[test]
-    fn a_format_with_no_importer_yet_permits_no_host_at_all() {
+    fn an_unsupported_format_permits_no_download_hosts() {
         let policy = PackPolicy::for_format(PackFormat::CurseForgePack);
         assert_eq!(policy.allowlist.hosts().len(), 0);
     }

@@ -2,17 +2,16 @@
 //!
 //! # Why detection is not the Modrinth importer's job
 //!
-//! the import workflow opens with one file chooser and three possible answers, and the
-//! user picks a file rather than a format. Detection therefore belongs to the
-//! import pipeline rather than to any one provider: it looks at what the
+//! The import workflow opens with one file chooser and three possible answers,
+//! and the user picks a file rather than a format. Detection therefore belongs
+//! to the import pipeline rather than to any one provider: it looks at what the
 //! archive *contains*, so a `.mrpack` renamed to `.zip` and a CurseForge export
 //! renamed to `.mrpack` are both identified correctly.
 //!
-//! Modrinth pack import implements the Modrinth importer only. The other two formats are
-//! still recognized here, because "this is a CurseForge pack, and Ephervex
-//! cannot import one yet" is a far more useful answer than "this is not a
-//! pack" — and because the recognizer is provider-independent plumbing that
-//! Prism and CurseForge import support extend rather than replace.
+//! The other formats are still recognized here even though only Modrinth packs
+//! are supported. "This is an unsupported CurseForge pack" is more useful than
+//! "this is not a pack," and the recognizer is provider-independent plumbing
+//! that other importers can extend rather than replace.
 
 use std::fmt;
 use std::path::Path;
@@ -146,8 +145,8 @@ mod tests {
 
     #[test]
     fn unsupported_pack_formats_are_recognized_before_import() {
-        // "Ephervex cannot import a CurseForge pack yet" beats "that is not a
-        // pack" by a wide margin.
+        // A recognized but unsupported CurseForge pack must not be reported as
+        // an unrecognized archive.
         assert_eq!(
             identify(["manifest.json", "overrides/mods/a.jar"]),
             Some(PackFormat::CurseForgePack)

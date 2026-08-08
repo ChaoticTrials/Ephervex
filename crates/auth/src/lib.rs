@@ -11,9 +11,8 @@
 //!
 //! # The chain, verified against live documentation on 2026-08-08
 //!
-//! Ephervex does not trust trusting its own 2026 snapshot, so every
-//! URL, field name, and error code below was re-read from current official
-//! sources on **2026-08-08** before any of it was implemented.
+//! Every URL, field name, and error code below was checked against the current
+//! official sources on **2026-08-08**.
 //!
 //! ```text
 //! 1. POST login.microsoftonline.com/consumers/oauth2/v2.0/{authorize,devicecode,token}
@@ -33,7 +32,7 @@
 //! | Microsoft Learn, *Authentication flow support in MSAL* | the device flow is public-client only, i.e. it needs `allowPublicClient` |
 //! | Minecraft Wiki, *Microsoft authentication* | the Xbox and Minecraft Services half: bodies, `RpsTicket` `d=` prefix, relying parties, `XErr` codes, `entitlements/mcstore`, the `404 NOT_FOUND` profile signal, and the Game Pass caveat |
 //!
-//! ## What differed from the project's snapshot
+//! ## Upstream contract notes
 //!
 //! * Microsoft documents desktop-app configuration but leaves
 //!   the Xbox/Minecraft half as "verify against current upstream documentation". It is verified

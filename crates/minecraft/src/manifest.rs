@@ -1,7 +1,7 @@
 //! The Mojang version manifest and the release filter.
 //!
-//! `version_manifest_v2.json` is the index of every version Mojang has ever
-//! published — 905 entries at the time of writing, of which 102 are releases.
+//! `version_manifest_v2.json` is the index of every version Mojang has
+//! published.
 //! Each entry carries the URL of that version's own JSON and the SHA-1 of that
 //! document, which is what lets a per-version fetch be verified without
 //! trusting anything but this one file.
@@ -21,15 +21,15 @@
 //! Nor is there an exclusion rule for release candidates or pre-releases. It
 //! would be dead code: Mojang types `26.2-rc-1` and `1.20.2-pre1` as
 //! `"snapshot"`, not as channels of their own, so the `type` test already
-//! removes them. This was re-verified against the live manifest on 2026-08-07
-//! and is pinned by `fixtures/minecraft/version_manifest_v2.json`, which keeps
+//! removes them. This behavior is pinned by
+//! `fixtures/minecraft/version_manifest_v2.json`, which keeps
 //! one of each specifically so the assumption fails loudly if it ever changes.
 //!
 //! # Deciding the floor for an id that will not parse
 //!
 //! [`MinecraftVersionId`] cannot rank an id in a scheme it has never seen, and
-//! Ephervex requires selection should follow Mojang's own ordering and release dates
-//! rather than arithmetic on version strings. So when the id is unreadable, the
+//! Selection follows Mojang's own ordering and release dates rather than
+//! arithmetic on version strings. So when the id is unreadable, the
 //! floor is decided by comparing `releaseTime` against the `releaseTime` of the
 //! 1.12.2 entry **in the same manifest** — no hardcoded date, no guess. A
 //! future scheme therefore appears in the list on the strength of being newer
@@ -43,7 +43,7 @@ use tracing::{debug, warn};
 use crate::version::ReleaseType;
 use crate::version_id::{MINIMUM_SUPPORTED_VERSION, MinecraftVersionId};
 
-/// The canonical manifest URL (re-verified 2026-08-07).
+/// The canonical Mojang version manifest URL.
 pub const VERSION_MANIFEST_URL: &str =
     "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
 
@@ -192,7 +192,7 @@ fn supports(
     }
 
     // The id is in a scheme this build cannot rank. Fall back to what the
-    // manifest itself asserts  rather than dropping the entry,
+    // manifest itself asserts rather than dropping the entry,
     // which would hide a new release behind an outdated parser.
     match floor_released_at {
         Some(cutoff) if record.release_time >= cutoff => {

@@ -48,7 +48,7 @@ prevents UI code from acquiring storage or provider policy accidentally.
 | `ephervex-server` | Boundary reserved for dedicated-server installation and process management |
 | `ephervex-core` | Application services and error classification shared by frontends |
 | `ephervex-cli` | Command-line frontend and human/JSON rendering |
-| `ephervex-gui` | Slint frontend boundary; the interactive UI is not implemented |
+| `ephervex-gui` | Slint frontend boundary; no functional interface is available |
 
 Provider-neutral types stay neutral. A Modrinth project ID or CurseForge file ID
 belongs in an explicit provider/source field, not in a generic loader, file, or
@@ -202,11 +202,11 @@ stderr so machine-readable output remains valid.
 
 ## Supported scope and known boundaries
 
-The implemented launcher supports Linux, Minecraft release versions from
-1.12.2 onward, Vanilla, Forge, NeoForge, and Modrinth pack import. The GUI,
-CurseForge and Prism import, mod browsing, and dedicated-server process
-management are not implemented. Fabric, Quilt, snapshots, Windows, and macOS
-are outside the supported scope recorded in ADR 0008.
+The supported scope includes Linux, Minecraft release versions from 1.12.2
+onward, Vanilla, Forge, NeoForge, and Modrinth pack import. The GUI, CurseForge
+and Prism import, mod browsing, and dedicated-server process management are
+unavailable. Fabric, Quilt, snapshots, Windows, and macOS are outside the
+supported scope recorded in ADR 0008.
 
 ## Verification
 
@@ -221,4 +221,3 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
-

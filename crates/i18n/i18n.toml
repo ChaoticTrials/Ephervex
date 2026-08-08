@@ -2,9 +2,9 @@
 # and by the `fl!()` macro, which uses the fallback language's resource to check
 # message ids and their arguments while the crate is being built.
 
-# Every message must exist in the fallback language. Only English ships for now,
-# but a language setting exists from the start so adding a locale is dropping a
-# directory into `locales/` rather than a refactor.
+# Every message must exist in the fallback language. English is the only bundled
+# locale, and adding one requires a directory in `locales/` rather than a code
+# refactor.
 fallback_language = "en-US"
 
 [fluent]

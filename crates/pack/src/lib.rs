@@ -19,8 +19,8 @@
 //! Exactly one module knows which provider produced an archive
 //! ([`import::parse_with`], which dispatches on [`detect::PackFormat`]).
 //! Everything downstream — [`recipe::PackRecipe`], [`install`], [`store`] — is
-//! provider-neutral, because Modrinth is the first pack provider implemented
-//! and not the shape of the problem. Adding CurseForge is a module beside
+//! provider-neutral because provider-specific formats are not the shape of the
+//! problem. Supporting CurseForge requires a module beside
 //! [`modrinth`] plus an arm in that dispatch; it is not a change to the recipe,
 //! the installer, the retained-source layout, or anything above this crate.
 //!

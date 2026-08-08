@@ -17,9 +17,9 @@
 //! hard, but because a launcher that reverts a setting the user changed inside
 //! the game is a launcher fighting its user.
 //!
-//! Duplication is the other side of the same rule: Ephervex requires a copy keeps the
-//! options file its original had, so [`App::duplicate_client`] does not
-//! re-apply preferences either.
+//! Duplication is the other side of the same rule: a copy keeps the options
+//! file its original had, so [`App::duplicate_client`] does not re-apply
+//! preferences either.
 
 use std::path::{Path, PathBuf};
 

@@ -42,7 +42,7 @@ The CLI currently supports:
 
 ## Current limitations
 
-- The Slint GUI is a boundary placeholder; use the `ephervex` CLI.
+- The Slint GUI does not provide a functional interface; use the `ephervex` CLI.
 - CurseForge and Prism pack import, mod browsing, and dedicated-server process
   management are not available.
 - Microsoft sign-in requires a suitable Azure application registration and
@@ -70,4 +70,3 @@ Production-service smoke tests are opt-in.
 - [`docs/architecture.md`](docs/architecture.md) describes crate ownership,
   dependency direction, workflows, and security boundaries.
 - [`docs/adr/`](docs/adr/) contains architecture decision records.
-

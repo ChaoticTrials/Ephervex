@@ -111,7 +111,7 @@ impl Account {
 /// # Why this is an enum rather than an optional token
 ///
 /// An offline session is not a Microsoft session with the token missing, and
-/// modelling it that way would make "no token" mean two different things —
+/// modeling it that way would make "no token" mean two different things —
 /// "offline" and "expired" — which the launch pipeline must never confuse.
 /// Vanilla launch support has to build a command line for both, and the two differ in more
 /// than one argument, so it is made to match rather than allowed to unwrap.

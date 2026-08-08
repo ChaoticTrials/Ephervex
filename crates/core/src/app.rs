@@ -232,9 +232,9 @@ impl App {
 
     /// Creates a client instance and materializes its directory.
     ///
-    /// The global Minecraft preferences are applied here, once, because this is
-    /// the moment the compatibility matrix coverss. See [`Self::create_client_reporting`]
-    /// for what was applied.
+    /// The global Minecraft preferences are applied here, once, when the
+    /// instance is created. See [`Self::create_client_reporting`] for what was
+    /// applied.
     #[instrument(skip(self, request))]
     pub fn create_client(&self, request: NewClient) -> CoreResult<ClientRecord> {
         Ok(self.create_client_reporting(request)?.record)
@@ -718,9 +718,8 @@ impl App {
 
     /// Progress reporting for a metadata fetch.
     ///
-    /// Silent for now: metadata documents are small and finish before a
-    /// progress bar would be worth drawing. Vanilla launch support, which downloads assets by
-    /// the thousand, is where a real sink gets wired in.
+    /// Metadata documents are small enough that this operation does not expose
+    /// progress. Large artifact downloads use their own reporting sink.
     fn reporter() -> OperationReporter {
         OperationReporter::silent("minecraft-metadata")
     }

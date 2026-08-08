@@ -2,9 +2,9 @@
 //!
 //! # Why not `java -version`
 //!
-//! Ephervex requires to run `java -version`, and that is what the banner *is* — but
-//! the banner is prose. It is free-form, it differs between vendors, and it
-//! does not report the architecture at all. `-XshowSettings:properties` makes
+//! Runtime discovery has to run `java -version`, and that is what the banner
+//! *is* — but the banner is prose. It is free-form, it differs between vendors,
+//! and it does not report the architecture at all. `-XshowSettings:properties` makes
 //! the same JVM print its own system properties as `key = value` lines, which
 //! is the difference between parsing a sentence and reading a table:
 //!
@@ -21,7 +21,7 @@
 //!
 //! # A probe is a process
 //!
-//! Every probe forks a JVM. On a developer machine with a dozen entries under
+//! Every probe forks a JVM. On a host with a dozen entries under
 //! `/usr/lib/jvm` that is a noticeable amount of work, which is why discovery
 //! deduplicates *before* probing and why the result is cached
 //! ([`crate::discovery`]). A JVM that hangs is bounded by [`PROBE_TIMEOUT`]:
@@ -60,8 +60,8 @@ pub struct ProbeReport {
     pub version_string: String,
     /// `java.runtime.version` verbatim, which carries the vendor build.
     pub runtime_version: String,
-    /// `java.vendor` verbatim. Never matched against a known set: this machine
-    /// reports `Private Build` for its Java 8, and refusing an unrecognized
+    /// `java.vendor` verbatim. Never matched against a known set: some Java 8
+    /// distributions report `Private Build`, and refusing an unrecognized
     /// vendor would refuse a working runtime.
     pub vendor: String,
     /// `os.arch` in the JVM's own spelling — `amd64`, not `x86_64`, and not
@@ -200,8 +200,8 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
 
-    /// Verbatim (abridged) output of `java -XshowSettings:properties -version`
-    /// from this machine's Java 8. The vendor string is the interesting part.
+    /// Representative abridged output of
+    /// `java -XshowSettings:properties -version` from an Ubuntu Java 8 runtime.
     const JAVA_8_PROPERTIES: &str = r#"Property settings:
     file.encoding = UTF-8
     java.class.path =
@@ -242,8 +242,8 @@ openjdk version "1.8.0_492"
 
     #[test]
     fn an_unrecognized_vendor_is_carried_through_rather_than_rejected() {
-        // This machine's Java 8 genuinely reports `Private Build`. A launcher
-        // that only accepts a known vendor enum would discard a working JDK.
+        // The fixture reports `Private Build`. A launcher that only accepts a
+        // known vendor enum would discard a working JDK.
         let report = from_properties(Path::new("/x/bin/java"), JAVA_8_PROPERTIES).expect("report");
         assert_eq!(report.vendor, "Private Build");
         assert_eq!(report.version.major, 8);

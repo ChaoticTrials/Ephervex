@@ -1,22 +1,21 @@
 //! Ephervex desktop GUI.
 //!
-//! The Slint UI is built in the GUI. Until then this binary holds the frontend
-//! boundary open: it depends on `ephervex-core` and nothing below it, and it
-//! must never depend on `ephervex-cli`.
+//! This binary defines the frontend boundary and does not provide a functional
+//! interface. It depends on `ephervex-core` and nothing below it, and it must
+//! never depend on `ephervex-cli`.
 //!
-//! Slint is already a dependency so the real graph — including its native
-//! backend requirements — is exercised by every build rather than discovered in
-//! the GUI. See ADR 0001.
+//! Slint is a dependency so the real graph, including its native backend
+//! requirements, is exercised by every build. See ADR 0001.
 
 fn main() {
     ephervex_core::init_tracing(ephervex_core::DEFAULT_LOG_DIRECTIVES);
-    // Touching the Slint runtime keeps the dependency load-bearing, so a
-    // toolchain or backend regression surfaces here and not in the GUI.
+    // Touching the Slint runtime keeps the dependency load-bearing so toolchain
+    // and backend compatibility remain part of normal builds.
     let _ui_platform_ready = slint::SharedString::from(ephervex_model::APP_NAME);
     tracing::info!(
         "{} {} — GUI is provided by the GUI",
         ephervex_model::APP_NAME,
         ephervex_model::APP_VERSION
     );
-    println!("The Ephervex GUI is not implemented yet. Use the `ephervex` CLI.");
+    println!("The Ephervex GUI is unavailable in this build. Use the `ephervex` CLI.");
 }

@@ -14,8 +14,8 @@
 //!
 //! # Why this model has no Modrinth in it
 //!
-//! Modrinth is the first provider implemented, not the shape of the problem.
-//! CurseForge names files by project and file id and resolves their addresses
+//! Provider-specific formats are not the shape of the problem. CurseForge
+//! names files by project and file id and resolves their addresses
 //! through an API; Prism has no file list at all and carries a component list
 //! instead. All three have to land in the same normalized structure, because
 //! everything downstream — the installer, "Create Server", the instance UI —

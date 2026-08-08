@@ -14,8 +14,9 @@
 //!
 //! # Never "every cached jar"
 //!
-//! Ephervex requires it outright, and the reason is that the shared libraries
-//! store holds every library of every version the launcher has ever touched.
+//! The classpath must never be assembled from every cached JAR: the shared
+//! libraries store holds every library of every version the launcher has ever
+//! touched.
 //! The classpath is built from *this version's* `libraries` array, filtered by
 //! its rules, in the order Mojang published — with the client jar last, where
 //! Mojang's own launcher puts it.

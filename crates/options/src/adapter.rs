@@ -28,8 +28,8 @@
 //!
 //! # And what happens outside them
 //!
-//! An id in a numbering scheme this build cannot parse — the thing Ephervex requires to
-//! expect, because Mojang has changed schemes once already — gets
+//! An id in a numbering scheme this build cannot parse — a case Ephervex must
+//! expect because Mojang has changed schemes once already — gets
 //! [`CONSERVATIVE`], which applies only the three keys that have been spelled
 //! and encoded identically for the whole supported range. The conservative
 //! behavior is to apply the known-safe keys, warn in the developer log,
