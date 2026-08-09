@@ -318,8 +318,9 @@ pub fn spawn() -> BackendHandle {
         .spawn(move || run_worker(command_rx, worker_events, worker_cancellations))
     {
         tracing::error!(%error, "could not start the GUI core worker");
-        let _ = event_tx.send(Event::ModalError(format!(
-            "The background service could not start: {error}"
+        let _ = event_tx.send(Event::ModalError(localized_value(
+            "gui-background-service-failed",
+            &error.to_string(),
         )));
     }
     BackendHandle {
@@ -340,8 +341,9 @@ fn run_worker(
     {
         Ok(runtime) => runtime,
         Err(error) => {
-            let _ = events.send(Event::ModalError(format!(
-                "The background runtime could not start: {error}"
+            let _ = events.send(Event::ModalError(localized_value(
+                "gui-background-runtime-failed",
+                &error.to_string(),
             )));
             return;
         }
@@ -364,18 +366,20 @@ fn run_worker(
             Command::CancelOperation(id) => cancel_operation(&cancellations, &events, &id),
             Command::PickImport => {
                 if let Some(path) = rfd::FileDialog::new()
-                    .set_title("Choose a modpack archive")
-                    .add_filter("Modpack archives", &["mrpack", "zip"])
+                    .set_title(lookup("gui-choose-modpack-archive"))
+                    .add_filter(lookup("gui-modpack-archives"), &["mrpack", "zip"])
                     .pick_file()
                 {
                     match app.analyze_pack(&path) {
                         Ok(analysis) => {
-                            let summary = format!(
-                                "{} | Minecraft {} | {} | {} files",
-                                analysis.format,
-                                analysis.minecraft_version(),
-                                analysis.loader(),
-                                analysis.recipe.files.len()
+                            let summary = lookup_args(
+                                "gui-import-analysis",
+                                [
+                                    ("first", Arg::from(analysis.format.to_string())),
+                                    ("second", Arg::from(analysis.minecraft_version())),
+                                    ("third", Arg::from(analysis.loader().to_string())),
+                                    ("count", Arg::from(analysis.recipe.files.len())),
+                                ],
                             );
                             let _ = events.send(Event::ImportAnalysis {
                                 path,
@@ -401,7 +405,7 @@ fn run_worker(
                 Ok(created) => {
                     let _ = events.send(Event::CloseModal);
                     let _ = events.send(Event::Toast {
-                        message: format!("Created \"{}\".", created.record.name),
+                        message: localized_value("gui-created-entity", &created.record.name),
                         error: false,
                     });
                     send_snapshot(&app, &events);
@@ -428,7 +432,7 @@ fn run_worker(
                         }
                         app.import_pack(&request, &reporter, &cancel)
                             .await
-                            .map(|pack| format!("Imported \"{}\".", pack.record.name))
+                            .map(|pack| localized_value("gui-imported-pack", &pack.record.name))
                     },
                 );
             }
@@ -452,8 +456,10 @@ fn run_worker(
                     app.open_client_folder(instance, ClientFolder::Root)
                         .map(|path| {
                             path.map_or_else(
-                                || "Folder unavailable.".to_owned(),
-                                |path| format!("Opened {}.", path.display()),
+                                || lookup("gui-folder-unavailable"),
+                                |path| {
+                                    localized_value("gui-opened-path", &path.display().to_string())
+                                },
                             )
                         }),
                 );
@@ -464,8 +470,10 @@ fn run_worker(
                     app.open_server_folder(server, ServerFolder::Root)
                         .map(|path| {
                             path.map_or_else(
-                                || "Folder unavailable.".to_owned(),
-                                |path| format!("Opened {}.", path.display()),
+                                || lookup("gui-folder-unavailable"),
+                                |path| {
+                                    localized_value("gui-opened-path", &path.display().to_string())
+                                },
                             )
                         }),
                 );
@@ -506,8 +514,8 @@ fn run_worker(
                                     author: hit
                                         .project
                                         .author
-                                        .unwrap_or_else(|| "Unknown author".to_owned()),
-                                    downloads: "Compatible".to_owned(),
+                                        .unwrap_or_else(|| lookup("gui-unknown-author")),
+                                    downloads: lookup("gui-compatible"),
                                 })
                                 .collect();
                             let _ = events.send(Event::ModResults(rows));
@@ -552,10 +560,7 @@ fn run_worker(
                         let count = plan.all_mods().len();
                         app.install_mods(instance, &request, &reporter, &cancel)
                             .await?;
-                        Ok(format!(
-                            "Installed {count} managed mod{} with required dependencies.",
-                            if count == 1 { "" } else { "s" }
-                        ))
+                        Ok(localized_count("gui-installed-managed-mods", count))
                     },
                 );
             }
@@ -594,7 +599,9 @@ fn run_worker(
                                     &cancel,
                                 )
                                 .await
-                                .map(|commit| format!("Created \"{}\".", commit.record.name))
+                                .map(|commit| {
+                                    localized_value("gui-created-entity", &commit.record.name)
+                                })
                             },
                         );
                     }
@@ -613,7 +620,7 @@ fn run_worker(
                     &runtime,
                     &events,
                     app.stop_server(server),
-                    "Stop requested.",
+                    "gui-stop-requested",
                 );
                 send_snapshot(&app, &events);
             }
@@ -622,7 +629,7 @@ fn run_worker(
                     &runtime,
                     &events,
                     app.restart_server(server),
-                    "Restart requested.",
+                    "gui-restart-requested",
                 );
                 send_snapshot(&app, &events);
             }
@@ -631,7 +638,7 @@ fn run_worker(
                     &runtime,
                     &events,
                     app.kill_server(server),
-                    "Force kill requested.",
+                    "gui-force-kill-requested",
                 );
                 send_snapshot(&app, &events);
             }
@@ -640,7 +647,7 @@ fn run_worker(
                     &runtime,
                     &events,
                     app.send_server_console(server, command),
-                    "Command sent.",
+                    "gui-command-sent",
                 );
                 send_server_workspace(&app, server, &events);
             }
@@ -659,7 +666,7 @@ fn run_worker(
                 match result {
                     Ok(()) => {
                         let _ = events.send(Event::Toast {
-                            message: "Saved server properties.".to_owned(),
+                            message: lookup("gui-server-properties-saved"),
                             error: false,
                         });
                         send_server_workspace(&app, server, &events);
@@ -672,7 +679,7 @@ fn run_worker(
                 Ok(_) => {
                     let _ = events.send(Event::CloseModal);
                     let _ = events.send(Event::Toast {
-                        message: "Minecraft Server EULA consent recorded.".to_owned(),
+                        message: lookup("gui-eula-consent-recorded"),
                         error: false,
                     });
                     send_snapshot(&app, &events);
@@ -683,7 +690,7 @@ fn run_worker(
                 Ok(()) => {
                     let _ = events.send(Event::CloseModal);
                     let _ = events.send(Event::Toast {
-                        message: "Minecraft Server EULA consent revoked.".to_owned(),
+                        message: lookup("gui-eula-consent-revoked"),
                         error: false,
                     });
                     send_snapshot(&app, &events);
@@ -695,11 +702,10 @@ fn run_worker(
                     ephervex_core::open_in_browser(ephervex_core::MINECRAFT_EULA_REFERENCE);
                 let _ = events.send(Event::Toast {
                     message: if opened {
-                        "Opened the Minecraft EULA in your browser."
+                        lookup("gui-eula-browser-opened")
                     } else {
-                        "The browser could not be opened. Visit https://aka.ms/MinecraftEULA."
-                    }
-                    .to_owned(),
+                        lookup("gui-eula-browser-failed")
+                    },
                     error: !opened,
                 });
             }
@@ -720,8 +726,8 @@ fn run_worker(
                     &events,
                     app.open_diagnostic_folder(scope, kind).map(|path| {
                         path.map_or_else(
-                            || "Folder unavailable.".to_owned(),
-                            |path| format!("Opened {}.", path.display()),
+                            || lookup("gui-folder-unavailable"),
+                            |path| localized_value("gui-opened-path", &path.display().to_string()),
                         )
                     }),
                 );
@@ -729,7 +735,7 @@ fn run_worker(
             Command::AddOfflineAccount(name) => match app.add_offline_account(&name) {
                 Ok(account) => {
                     let _ = events.send(Event::Toast {
-                        message: format!("Added offline account \"{}\".", account.name),
+                        message: localized_value("gui-offline-account-added", &account.name),
                         error: false,
                     });
                     send_snapshot(&app, &events);
@@ -739,7 +745,7 @@ fn run_worker(
             Command::SetDefaultAccount(reference) => match app.set_default_account(&reference) {
                 Ok(account) => {
                     let _ = events.send(Event::Toast {
-                        message: format!("\"{}\" is now the default account.", account.name),
+                        message: localized_value("gui-default-account-set", &account.name),
                         error: false,
                     });
                     send_snapshot(&app, &events);
@@ -749,7 +755,7 @@ fn run_worker(
             Command::RemoveAccount(reference) => match app.remove_account(&reference) {
                 Ok(_) => {
                     let _ = events.send(Event::Toast {
-                        message: "Removed account.".to_owned(),
+                        message: lookup("gui-account-removed"),
                         error: false,
                     });
                     send_snapshot(&app, &events);
@@ -770,7 +776,7 @@ fn run_worker(
                 match result {
                     Ok(()) => {
                         let _ = events.send(Event::Toast {
-                            message: "Saved provider settings.".to_owned(),
+                            message: lookup("gui-provider-settings-saved"),
                             error: false,
                         });
                         send_snapshot(&app, &events);
@@ -783,7 +789,7 @@ fn run_worker(
                 match app.set_persistent_instance_root(path) {
                     Ok(()) => {
                         let _ = events.send(Event::Toast {
-                            message: "Saved the persistent instance root.".to_owned(),
+                            message: lookup("gui-storage-root-saved"),
                             error: false,
                         });
                         send_snapshot(&app, &events);
@@ -827,7 +833,7 @@ fn run_worker(
                 match app.set_java_settings(&settings) {
                     Ok(()) => {
                         let _ = events.send(Event::Toast {
-                            message: "Saved Java settings.".to_owned(),
+                            message: lookup("gui-java-settings-saved"),
                             error: false,
                         });
                         send_snapshot(&app, &events);
@@ -848,7 +854,7 @@ fn run_worker(
                 match result {
                     Ok(()) => {
                         let _ = events.send(Event::Toast {
-                            message: "Saved the Minecraft default.".to_owned(),
+                            message: lookup("gui-minecraft-default-saved"),
                             error: false,
                         });
                         send_snapshot(&app, &events);
@@ -910,14 +916,13 @@ fn snapshot(app: &App) -> Result<Snapshot, CoreError> {
             is_default: account.is_default,
             credential_state: if account.kind.is_authenticated() {
                 if account.has_stored_credential {
-                    "Credential stored securely"
+                    lookup("gui-credential-stored")
                 } else {
-                    "Sign-in required"
+                    lookup("gui-signin-required")
                 }
             } else {
-                "No credential"
-            }
-            .to_owned(),
+                lookup("gui-no-credential")
+            },
         })
         .collect();
     let loaded = app.minecraft_preferences();
@@ -927,7 +932,7 @@ fn snapshot(app: &App) -> Result<Snapshot, CoreError> {
             let setting = app.config().minecraft_preferences.get(key.as_str());
             PreferenceData {
                 key: key.as_str().to_owned(),
-                label: preference_label(*key).to_owned(),
+                label: preference_label(*key),
                 value: setting.map_or_else(String::new, |setting| setting.value.clone()),
                 enabled: setting.is_some_and(|setting| setting.enabled),
                 kind: preference_kind(*key).to_owned(),
@@ -990,7 +995,7 @@ fn send_server_workspace(app: &App, server: ServerId, events: &Sender<Event>) {
                 .collect(),
             motd: properties
                 .get("motd")
-                .unwrap_or_else(|| "A Minecraft Server".to_owned()),
+                .unwrap_or_else(|| lookup("gui-default-motd")),
             max_players: properties
                 .get("max-players")
                 .unwrap_or_else(|| "20".to_owned()),
@@ -1038,7 +1043,7 @@ fn send_diagnostics(
                 path: entry.path.display().to_string(),
                 modified: entry
                     .modified
-                    .map_or_else(|| "Unknown time".to_owned(), relative_time),
+                    .map_or_else(|| lookup("gui-unknown-time"), relative_time),
                 size: format_bytes(entry.size_bytes),
                 summary: entry
                     .summary
@@ -1080,13 +1085,16 @@ fn send_diagnostic_content(
         Ok((view, matches)) => {
             let mut text = view.text;
             if view.truncated {
-                text.push_str("\n\n[This is a bounded window; the file is larger.]\n");
+                text.push_str("\n\n[");
+                text.push_str(&lookup("gui-diagnostic-window-bounded"));
+                text.push_str("]\n");
             }
             if let Some(matches) = matches {
-                text.insert_str(
-                    0,
-                    &format!("[Search found {matches} matches in this window.]\n\n"),
+                let summary = lookup_args(
+                    "gui-diagnostic-search-window-matches",
+                    [("count", Arg::from(matches))],
                 );
+                text.insert_str(0, &format!("[{summary}]\n\n"));
             }
             let _ = events.send(Event::DiagnosticContent(DiagnosticContent {
                 title: format!(
@@ -1147,20 +1155,21 @@ fn spawn_launch(paths: Paths, events: &Sender<Event>, instance: InstanceId, enti
                 let _ = forward.await;
                 match result {
                     Ok(outcome) => {
+                        let detail = if outcome.is_success() {
+                            lookup("gui-activity-exited-cleanly")
+                        } else {
+                            lookup("gui-activity-game-error")
+                        };
                         send_activity_state(
                             &events,
                             outcome.operation.to_string(),
-                            "Launch Minecraft",
+                            &lookup("gui-activity-launch-minecraft"),
                             &entity,
+                            &detail,
                             if outcome.is_success() {
-                                "Exited cleanly"
+                                "completed"
                             } else {
-                                "Game exited with an error"
-                            },
-                            if outcome.is_success() {
-                                "Completed"
-                            } else {
-                                "Failed"
+                                "failed"
                             },
                             false,
                             !outcome.is_success(),
@@ -1175,10 +1184,10 @@ fn spawn_launch(paths: Paths, events: &Sender<Event>, instance: InstanceId, enti
                         send_activity_state(
                             &events,
                             id,
-                            "Launch Minecraft",
+                            &lookup("gui-activity-launch-minecraft"),
                             &entity,
                             &localized_error(&error),
-                            "Failed",
+                            "failed",
                             false,
                             true,
                         );
@@ -1207,10 +1216,10 @@ fn forward_launch_event(
             send_activity_state(
                 events,
                 operation.to_string(),
-                "Launching Minecraft",
+                &lookup("gui-activity-launching-minecraft"),
                 entity,
-                "Preparing exact environment",
-                "Running",
+                &lookup("gui-activity-preparing-environment"),
+                "running",
                 true,
                 false,
             );
@@ -1220,7 +1229,7 @@ fn forward_launch_event(
         }
         LaunchEvent::Starting(_) => {
             let _ = events.send(Event::Toast {
-                message: format!("Starting Minecraft for \"{entity}\"."),
+                message: localized_value("gui-starting-minecraft", entity),
                 error: false,
             });
         }
@@ -1255,17 +1264,20 @@ fn spawn_server(paths: Paths, events: &Sender<Event>, server: ServerId, entity: 
                                 send_activity_state(
                                     &event_sender,
                                     operation.to_string(),
-                                    "Starting server",
+                                    &lookup("gui-activity-starting-server"),
                                     &entity_for_events,
-                                    "Validating runtime, EULA, and network",
-                                    "Running",
+                                    &lookup("gui-activity-validating-server"),
+                                    "running",
                                     true,
                                     false,
                                 );
                             }
                             ServerEvent::Started { .. } => {
                                 let _ = event_sender.send(Event::Toast {
-                                    message: format!("\"{entity_for_events}\" is running."),
+                                    message: localized_value(
+                                        "gui-server-running",
+                                        &entity_for_events,
+                                    ),
                                     error: false,
                                 });
                             }
@@ -1293,10 +1305,10 @@ fn spawn_server(paths: Paths, events: &Sender<Event>, server: ServerId, entity: 
                         send_activity_state(
                             &events,
                             id,
-                            "Server run",
+                            &lookup("gui-activity-server-run"),
                             &entity,
-                            "Server exited",
-                            if failed { "Failed" } else { "Completed" },
+                            &lookup("gui-activity-server-exited"),
+                            if failed { "failed" } else { "completed" },
                             false,
                             failed,
                         );
@@ -1310,10 +1322,10 @@ fn spawn_server(paths: Paths, events: &Sender<Event>, server: ServerId, entity: 
                         send_activity_state(
                             &events,
                             id,
-                            "Starting server",
+                            &lookup("gui-activity-starting-server"),
                             &entity,
                             &localized_error(&error),
-                            "Failed",
+                            "failed",
                             false,
                             true,
                         );
@@ -1360,10 +1372,10 @@ fn spawn_connect(
                     Ok(outcome) => send_activity_state(
                         &events,
                         outcome.launch.operation.to_string(),
-                        "Launch & Connect",
+                        &lookup("gui-launch-and-connect"),
                         &entity,
-                        &format!("Connected to {}", outcome.target),
-                        "Completed",
+                        &localized_value("gui-activity-connected-to", &outcome.target.to_string()),
+                        "completed",
                         false,
                         false,
                     ),
@@ -1388,24 +1400,24 @@ fn spawn_login(paths: Paths, events: &Sender<Event>) {
                         AuthEvent::OpenBrowser { url } => {
                             if !ephervex_core::open_in_browser(&url) {
                                 let _ = auth_events.send(Event::Toast {
-                                    message: "Open the sign-in URL shown in launcher diagnostics."
-                                        .to_owned(),
+                                    message: lookup("gui-signin-browser-failed"),
                                     error: true,
                                 });
                             }
                         }
                         AuthEvent::DeviceCode(prompt) => {
                             let _ = auth_events.send(Event::Toast {
-                                message: format!(
-                                    "Open {} and enter code {}.",
-                                    prompt.verification_uri, prompt.user_code
+                                message: localized_values(
+                                    "gui-device-code-prompt",
+                                    &prompt.verification_uri,
+                                    &prompt.user_code,
                                 ),
                                 error: false,
                             });
                         }
                         AuthEvent::Stage(stage) => {
                             let _ = auth_events.send(Event::Toast {
-                                message: format!("Sign-in: {stage}"),
+                                message: localized_value("gui-signin-stage", &stage.to_string()),
                                 error: false,
                             });
                         }
@@ -1425,7 +1437,7 @@ fn spawn_login(paths: Paths, events: &Sender<Event>) {
             match result {
                 Ok(login) => {
                     let _ = events.send(Event::Toast {
-                        message: format!("Signed in as \"{}\".", login.account.name),
+                        message: localized_value("gui-signed-in", &login.account.name),
                         error: false,
                     });
                     send_snapshot(&app, &events);
@@ -1475,7 +1487,7 @@ fn spawn_async_operation<F, Fut>(
                     if error.is_cancellation() {
                         reporter.finish(OperationStatus::Canceled);
                         let _ = events.send(Event::Toast {
-                            message: "Operation canceled.".to_owned(),
+                            message: lookup("gui-operation-canceled"),
                             error: false,
                         });
                     } else {
@@ -1515,12 +1527,12 @@ fn cancel_operation(cancellations: &CancellationRegistry, events: &Sender<Event>
     if let Some(token) = token {
         token.cancel();
         let _ = events.send(Event::Toast {
-            message: "Cancellation requested.".to_owned(),
+            message: lookup("gui-cancellation-requested"),
             error: false,
         });
     } else {
         let _ = events.send(Event::Toast {
-            message: "That operation has already finished or cannot be canceled.".to_owned(),
+            message: lookup("gui-operation-not-cancellable"),
             error: true,
         });
     }
@@ -1546,7 +1558,7 @@ fn spawn_detached(
             Ok(runtime) => runtime,
             Err(error) => {
                 let _ = events.send(Event::Toast {
-                    message: format!("A background operation could not start: {error}"),
+                    message: localized_value("gui-background-operation-failed", &error.to_string()),
                     error: true,
                 });
                 return;
@@ -1600,7 +1612,7 @@ fn send_activity_state(
     title: &str,
     entity: &str,
     detail: &str,
-    status: &'static str,
+    status_kind: &'static str,
     active: bool,
     failed: bool,
 ) {
@@ -1608,7 +1620,14 @@ fn send_activity_state(
         item: ActivityPresentation {
             id,
             title: title.to_owned(),
-            status,
+            status: lookup(match status_kind {
+                "queued" => "gui-state-queued",
+                "running" => "gui-state-running",
+                "canceled" => "gui-state-canceled",
+                "completed" => "gui-state-completed",
+                _ => "gui-state-failed",
+            }),
+            status_kind,
             detail: detail.to_owned(),
             progress: 0.0,
             indeterminate: active,
@@ -1624,9 +1643,12 @@ fn report_async_control<T>(
     runtime: &tokio::runtime::Runtime,
     events: &Sender<Event>,
     future: impl std::future::Future<Output = Result<T, CoreError>>,
-    success: &str,
+    success_message_id: &str,
 ) {
-    report_sync(events, runtime.block_on(future).map(|_| success.to_owned()));
+    report_sync(
+        events,
+        runtime.block_on(future).map(|_| lookup(success_message_id)),
+    );
 }
 
 fn report_sync(events: &Sender<Event>, result: Result<String, CoreError>) {
@@ -1675,6 +1697,21 @@ fn localized_error(error: &CoreError) -> String {
     message
 }
 
+fn localized_value(message_id: &str, value: &str) -> String {
+    lookup_args(message_id, [("value", Arg::from(value))])
+}
+
+fn localized_values(message_id: &str, first: &str, second: &str) -> String {
+    lookup_args(
+        message_id,
+        [("first", Arg::from(first)), ("second", Arg::from(second))],
+    )
+}
+
+fn localized_count(message_id: &str, count: usize) -> String {
+    lookup_args(message_id, [("count", Arg::from(count))])
+}
+
 fn send_error(events: &Sender<Event>, error: &CoreError) {
     tracing::warn!(message_id = error.message_id(), detail = %error, "GUI operation failed");
     let _ = events.send(Event::Toast {
@@ -1711,31 +1748,31 @@ fn eula_data(status: &EulaStatus) -> EulaData {
     match status {
         EulaStatus::NotAccepted => EulaData {
             accepted: false,
-            status: "Not accepted. Server starts remain blocked.".to_owned(),
+            status: lookup("gui-eula-not-accepted"),
         },
         EulaStatus::Accepted { accepted_at, .. } => EulaData {
             accepted: true,
-            status: format!(
-                "Accepted explicitly on {}.",
-                accepted_at.format("%Y-%m-%d %H:%M UTC")
+            status: localized_value(
+                "gui-eula-accepted-at",
+                &accepted_at.format("%Y-%m-%d %H:%M UTC").to_string(),
             ),
         },
         EulaStatus::Malformed => EulaData {
             accepted: false,
-            status: "The recorded consent is invalid and must be reviewed again.".to_owned(),
+            status: lookup("gui-eula-malformed"),
         },
     }
 }
 
-fn preference_label(key: PreferenceKey) -> &'static str {
+fn preference_label(key: PreferenceKey) -> String {
     match key {
-        PreferenceKey::GuiScale => "GUI scale",
-        PreferenceKey::Language => "Language",
-        PreferenceKey::Fullscreen => "Fullscreen",
-        PreferenceKey::WindowSize => "Window size",
-        PreferenceKey::Fov => "Field of view",
-        PreferenceKey::RenderDistance => "Render distance",
-        PreferenceKey::SimulationDistance => "Simulation distance",
+        PreferenceKey::GuiScale => lookup("gui-preference-gui-scale"),
+        PreferenceKey::Language => lookup("gui-preference-language"),
+        PreferenceKey::Fullscreen => lookup("gui-preference-fullscreen"),
+        PreferenceKey::WindowSize => lookup("gui-preference-window-size"),
+        PreferenceKey::Fov => lookup("gui-preference-fov"),
+        PreferenceKey::RenderDistance => lookup("gui-preference-render-distance"),
+        PreferenceKey::SimulationDistance => lookup("gui-preference-simulation-distance"),
     }
 }
 
@@ -1765,18 +1802,18 @@ fn scope_entity(app: &App, scope: DiagnosticScope) -> String {
         DiagnosticScope::Server(id) => app
             .server(id)
             .map_or_else(|_| format!("Server {id}"), |record| record.name),
-        DiagnosticScope::Launcher => diagnostic_scope_label(scope).to_owned(),
+        DiagnosticScope::Launcher => diagnostic_scope_label(scope),
     }
 }
 
 fn relative_time(timestamp: DateTime<Utc>) -> String {
     let age = Utc::now().signed_duration_since(timestamp);
     if age.num_minutes() < 1 {
-        "Just now".to_owned()
+        lookup("gui-just-now")
     } else if age.num_hours() < 1 {
-        format!("{} min ago", age.num_minutes())
+        lookup_args("gui-minutes-ago", [("count", Arg::from(age.num_minutes()))])
     } else if age.num_days() < 1 {
-        format!("{} h ago", age.num_hours())
+        lookup_args("gui-hours-ago", [("count", Arg::from(age.num_hours()))])
     } else {
         timestamp.format("%Y-%m-%d %H:%M").to_string()
     }
@@ -1799,15 +1836,11 @@ fn format_decimal_unit(bytes: u64, divisor: u64, unit: &str) -> String {
 
 fn server_warning_message(warning: &ephervex_core::ServerWarning) -> String {
     match warning {
-        ephervex_core::ServerWarning::OfflineModeExposed => {
-            "This offline-mode server is exposed beyond localhost. Authentication is not enforced."
-                .to_owned()
+        ephervex_core::ServerWarning::OfflineModeExposed => lookup("gui-warning-offline-exposed"),
+        ephervex_core::ServerWarning::PortUnavailable { address, port, .. } => {
+            localized_values("gui-warning-port-unavailable", address, &port.to_string())
         }
-        ephervex_core::ServerWarning::PortUnavailable { address, port, .. } => format!(
-            "The configured address {address}:{port} is already in use or unavailable. Stop the conflicting service or choose another port."
-        ),
-        _ => "The server reported a warning. Review its console and logs before continuing."
-            .to_owned(),
+        _ => lookup("gui-warning-server-generic"),
     }
 }
 

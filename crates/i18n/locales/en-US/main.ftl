@@ -913,3 +913,410 @@ error-connect-server-stopped-before-ready = Server { $server } stopped before it
 .action = Inspect the server output and correct the startup failure before launching the client.
 error-connect-supervisor-lost = Supervision for server { $server } ended unexpectedly.
 .action = Inspect server status before trying again.
+
+## Desktop interface
+
+gui-import-modpack = Import Modpack
+gui-new-instance = + New Instance
+gui-new-server = + New Server
+gui-refresh = Refresh
+gui-instances = Instances
+gui-servers = Servers
+gui-logs = Logs
+gui-activity = Activity
+gui-settings = Settings
+gui-tagline = Spawn. Reproduce. Despawn.
+gui-all = All
+gui-temporary = Temporary
+gui-persistent = Persistent
+gui-filter-instances = Filter instances...
+gui-loading-instances = Loading instances...
+gui-no-client-instances = No client instances yet
+gui-no-client-instances-detail = Create an exact Vanilla, Forge, or NeoForge environment, or import a supported modpack.
+gui-client-instances-count = { $count ->
+    [one] 1 client instance
+   *[other] { $count } client instances
+}
+gui-attention = ATTENTION
+gui-managed-mods-count = { $count ->
+    [one] 1 managed mod
+   *[other] { $count } managed mods
+}
+gui-linked-servers-count = { $count ->
+    [one] 1 linked server
+   *[other] { $count } linked servers
+}
+gui-source-instance = { $value } instance
+gui-launch = Launch
+gui-launch-unavailable = Launch unavailable
+gui-start = Start
+gui-stop = Stop
+gui-unavailable = Unavailable
+gui-no-instance-selected = No instance selected
+gui-select-instance = Select an instance to inspect it.
+gui-open = Open
+gui-overview = OVERVIEW
+gui-status = Status
+gui-minecraft = Minecraft
+gui-loader = Loader
+gui-source = Source
+gui-mods = Mods
+gui-managed-count = { $count } managed
+gui-storage = Storage
+gui-actions = ACTIONS
+gui-needs-attention = Needs attention
+gui-ready = Ready
+gui-ready-to-launch = Ready to launch
+gui-busy = Busy
+gui-launch-connect = Launch & Connect to { $value }
+gui-open-workspace = Open Workspace
+gui-create-linked-server = Create Linked Server
+gui-open-folder = Open Folder
+gui-diagnostics = DIAGNOSTICS
+gui-view-logs-crash-reports = View Logs & Crash Reports
+gui-back-instances = Back to Instances
+gui-instance = Instance
+gui-instance-tab-overview = Overview
+gui-instance-tab-mods = Mods
+gui-instance-tab-minecraft-settings = Minecraft Settings
+gui-instance-tab-logs = Logs
+gui-reproduction-environment = Reproduction Environment
+gui-reproduction-environment-detail = Exact target, retained source details, and safe actions for this client instance.
+gui-target-summary = Minecraft { $first } | { $second }
+gui-open-diagnostics = View Diagnostics
+gui-temporary-lifecycle = Temporary instances remain until the operating system clears its temporary storage. Converting an existing instance in place is not available from the current application service.
+gui-persistent-lifecycle = This instance is stored under the persistent instance root.
+gui-managed-mods = Managed Mods
+gui-managed-mods-detail = Only mods installed through Ephervex are shown as managed.
+gui-no-managed-mods = No managed mods
+gui-no-managed-mods-detail = Manual JARs are not adopted or modified.
+gui-add-modrinth-mods = Add Mods from Modrinth
+gui-modrinth-compatibility = Search results are constrained to this instance's exact Minecraft version and loader.
+gui-search-compatible-mods = Search compatible mods...
+gui-search = Search
+gui-mod-result-meta = by { $first } | { $second } downloads
+gui-review = Review
+gui-instance-settings-unavailable = Instance-owned Minecraft settings
+gui-instance-settings-unavailable-detail = The current core safely applies known Vanilla defaults when an instance is created, but does not expose a typed editor for an existing instance. Unknown and mod-added options remain untouched.
+gui-open-global-defaults = Open Global Defaults
+gui-filter-servers = Filter servers...
+gui-no-servers = No servers yet
+gui-no-servers-detail = Create a standalone exact server or create one linked to a client reproduction environment.
+gui-no-server-selected = No server selected
+gui-select-server = Select a server to inspect its runtime.
+gui-state = State
+gui-target = Target
+gui-relation = Relation
+gui-address = Address
+gui-open-server-workspace = Open Server Workspace
+gui-launch-client-connect = Launch Client & Connect
+gui-force-kill = Force Kill...
+gui-back-servers = Back to Servers
+gui-server = Server
+gui-restart = Restart
+gui-server-tab-console = Console
+gui-server-tab-properties = Properties
+gui-server-run = Server run
+gui-server-run-detail = Runtime state, exact target, network endpoint, and linked client relationship.
+gui-dedicated-server = Dedicated Server
+gui-exact-target = Exact target
+gui-runtime = Runtime
+gui-network = Network
+gui-relationship = Relationship
+gui-view-logs = View Logs
+gui-bounded-output = { $value } | bounded retained output
+gui-kill = Kill...
+gui-server-console = Server Console
+gui-server-console-detail = Output is streamed through the core supervisor and bounded to the retained capture window.
+gui-enter-server-command = Enter server command...
+gui-start-server-command = Start the server to send commands
+gui-send = Send
+gui-server-properties = server.properties
+gui-server-properties-detail = Typed settings are saved explicitly. Unknown properties and comments are preserved by core.
+gui-network-detail = Changes are validated and saved explicitly. A custom bind accepts an IP address, not a hostname.
+gui-access = Access
+gui-access-localhost = Localhost
+gui-access-lan = LAN
+gui-access-custom = Custom
+gui-port = Port
+gui-custom-bind-address = Custom bind address
+gui-network-safety = Offline-mode servers exposed beyond localhost are flagged by core as a security risk.
+gui-network-warning = Warning: Offline-mode access beyond localhost is unsafe.
+gui-gameplay = Gameplay
+gui-message-of-the-day = Message of the day
+gui-default-motd = A Minecraft Server
+gui-maximum-players = Maximum players
+gui-allow-flight = Allow flight
+gui-pvp = PvP
+gui-allowlist = Allowlist
+gui-online-mode = Online mode
+gui-difficulty = Difficulty
+gui-game-mode = Game mode
+gui-save-changes = Save Changes
+gui-server-eula = Minecraft Server EULA
+gui-eula-review = Review
+gui-eula-review-accept = Review & Accept
+gui-logs-crash-reports = Logs & Crash Reports
+gui-client = Client
+gui-server-source = Server
+gui-launcher = Launcher
+gui-diagnostic-files-count = { $count ->
+    [one] 1 diagnostic file
+   *[other] { $count } diagnostic files
+}
+gui-no-diagnostics = No diagnostics
+gui-no-diagnostics-detail = This source has not written any matching files.
+gui-crash-name = Crash: { $value }
+gui-log-name = Log: { $value }
+gui-select-diagnostic = Select a diagnostic file
+gui-search-loaded-content = Search loaded content...
+gui-find = Find
+gui-copy = Copy
+gui-folder = Folder
+gui-no-file-open = No file open
+gui-no-file-open-detail = Choose a log or crash report. Ephervex reads a bounded, safe text window through diagnostics services.
+gui-copy-path = Copy Path
+gui-activity-detail = Current and recent work while Ephervex is running. Activity is not persisted across application restarts.
+gui-no-recent-activity = No recent activity
+gui-no-recent-activity-detail = Creation, imports, installations, launches, and server work will appear here.
+gui-cancel = Cancel
+gui-settings-heading = SETTINGS
+gui-settings-general = General
+gui-settings-minecraft = Minecraft
+gui-settings-java = Java
+gui-settings-accounts = Accounts
+gui-settings-providers = Providers & APIs
+gui-settings-storage = Storage
+gui-settings-about = About & Licenses
+gui-application-behavior = Application behavior
+gui-desktop-scale = Desktop scale
+gui-desktop-scale-detail = Ephervex follows the desktop scale reported by Slint and your Linux environment.
+gui-system = SYSTEM
+gui-minecraft-defaults-detail = Known Vanilla defaults are applied once when a client is created or imported. Existing instances and unknown or mod-added options are not synchronized or modified.
+gui-display-gameplay-defaults = Display & Gameplay Defaults
+gui-enabled = Enabled
+gui-disabled = Disabled
+gui-apply = Apply
+gui-options-unavailable-detail = Sound & Music and key bindings are not shown because the current core does not expose safe typed mappings for them. Ephervex never guesses schemas for options.txt.
+gui-java-detail = Runtime discovery and JVM defaults are owned by the application services.
+gui-java-detect = Detect installed Java runtimes
+gui-java-download = Download a managed runtime when needed
+gui-java-memory-min = Minimum memory (MiB)
+gui-java-memory-max = Maximum memory (MiB)
+gui-java-preferred = Preferred Java executable (leave empty for automatic)
+gui-java-refresh = Refresh Runtimes
+gui-java-save = Save Java Settings
+gui-accounts-detail = Access tokens and refresh credentials are never displayed. Microsoft credentials use the desktop keyring when available.
+gui-offline-account-placeholder = Offline player name
+gui-add-offline-account = Add Offline Account
+gui-microsoft-sign-in = Sign in with Microsoft
+gui-no-accounts = No accounts
+gui-no-accounts-detail = Add an offline identity for local testing or sign in to launch authenticated Minecraft.
+gui-default = DEFAULT
+gui-make-default = Make Default
+gui-remove = Remove...
+gui-provider-detail = Provider configuration remains scoped. Stored secrets are reported only as present or absent.
+gui-microsoft-client-id = Microsoft application Client ID
+gui-client-id-placeholder = Use Ephervex build default
+gui-user-agent = Custom HTTP User-Agent
+gui-user-agent-placeholder = Use Ephervex default
+gui-save-api-settings = Save API Settings
+gui-curseforge-unavailable = CurseForge API credentials are kept in the desktop keyring and are never revealed after storage. Credential editing will be enabled when the GUI core boundary exposes a secure secret prompt.
+gui-storage-detail = Temporary instances use the operating system's temporary directory. Ephervex does not delete them when Minecraft exits; the operating system owns cleanup.
+gui-storage-root = Persistent instance root (leave empty for the XDG default)
+gui-save-storage-root = Save Storage Root
+gui-logo-accessible = Ephervex application logo
+gui-version = Version { $value }
+gui-apache-license = Licensed under the Apache License 2.0
+gui-view-ephervex-license = View Ephervex License
+gui-built-with-slint = Built with Slint
+gui-third-party-software = Third-Party Software
+gui-third-party-detail = Ephervex depends on open-source software with its own license terms.
+gui-third-party-licenses = Third-Party Licenses
+gui-active-operations = { $count ->
+    [one] 1 active operation
+   *[other] { $count } active operations
+}
+gui-no-active-tasks = No active tasks
+gui-dismiss-notification = Dismiss notification
+gui-modal-new-instance = New Instance
+gui-modal-import = Import Modpack
+gui-modal-new-server = New Server
+gui-modal-install-mod = Install Mod
+gui-modal-force-kill = Force Kill Server
+gui-modal-apache-license = Apache License 2.0
+gui-create-instance-detail = Create an exact client environment. Temporary storage is the default.
+gui-name = Name
+gui-instance-name-placeholder = Reproduction environment
+gui-minecraft-release = Minecraft release
+gui-loader-version-placeholder = Exact loader version
+gui-store-persistently = Store persistently
+gui-persistent-root = Persistent instance root
+gui-temporary-root = Operating system temporary directory
+gui-create-instance = Create Instance
+gui-import-detail = Supported archives are inspected and imported through Ephervex application services. Imported commands and unsafe paths are never executed.
+gui-modpack-archive = Modpack archive
+gui-modpack-placeholder = Choose a .mrpack or supported .zip
+gui-browse = Browse...
+gui-validated = Validated: { $value }
+gui-instance-name-optional = Instance name (optional)
+gui-detected-pack-name = Use the detected pack name
+gui-create-linked-server-detail = Create and materialize a server linked to the selected client's retained recipe.
+gui-create-standalone-server-detail = Create and install a standalone exact server.
+gui-server-name-placeholder = Test server
+gui-eula-create-warning = EULA consent is not implied. Starting is blocked until you explicitly review and accept it.
+gui-create-server = Create Server
+gui-mod-plan-compatible = Ephervex core checked compatibility with the selected instance.
+gui-mod-plan-install = { $count ->
+    [one] 1 file will be installed
+   *[other] { $count } files will be installed
+}
+gui-mod-plan-required = { $count ->
+    [one] 1 required dependency
+   *[other] { $count } required dependencies
+}
+gui-mod-plan-existing = { $count ->
+    [one] 1 matching managed mod is already installed
+   *[other] { $count } matching managed mods are already installed
+}
+gui-mod-plan-optional = { $count ->
+    [one] 1 optional dependency is available but not selected
+   *[other] { $count } optional dependencies are available but not selected
+}
+gui-mod-plan-warnings = { $count ->
+    [one] Warning: the plan has 1 compatibility note.
+   *[other] Warning: the plan has { $count } compatibility notes.
+}
+gui-install-required = Install Required Set
+gui-eula-detail = Minecraft's server EULA is a legal agreement. Ephervex records global consent only after this explicit action; starting a server never accepts it for you.
+gui-open-minecraft-eula = Open Minecraft EULA
+gui-eula-confirm = By choosing Accept, you confirm that you have reviewed and agree to the Minecraft EULA.
+gui-revoke-consent = Revoke Consent...
+gui-accept-eula = Accept EULA
+gui-force-kill-detail = Force killing "{ $value }" may lose unsaved world data. Use normal Stop whenever the server responds.
+gui-this-server = this server
+gui-force-kill-action = Force Kill
+gui-third-party-unavailable = An audited third-party license report is not bundled in this build yet. Ephervex does not invent dependency license information. The repository's Cargo metadata and lockfile remain the source inputs for a future generated license audit.
+gui-slint-attribution = Slint attribution is available directly in About & Licenses through Slint's official AboutSlint widget.
+gui-close = Close
+gui-clipboard-copied = Copied to the clipboard.
+gui-clipboard-unavailable = The desktop clipboard is unavailable.
+gui-server-property-values-invalid = Correct the maximum-player, difficulty, or game-mode value before saving.
+gui-digits-only = Use digits only.
+gui-player-count-minimum = Use at least 1 player.
+gui-java-memory-digits-only = Java memory values must contain digits only.
+gui-java-memory-range-invalid = Java memory must be greater than zero, and the minimum cannot exceed the maximum.
+gui-diagnostic-unavailable = Diagnostic unavailable
+gui-diagnostic-disappeared = The selected diagnostic disappeared or is unavailable.
+gui-available = Available
+gui-diagnostic-search-matches = { $count ->
+    [one] Search found 1 match in the loaded window.
+   *[other] Search found { $count } matches in the loaded window.
+}
+gui-diagnostic-window-lossy = Loaded a bounded window; invalid bytes were replaced.
+gui-diagnostic-window-bounded = Loaded a bounded window of a larger file.
+gui-diagnostic-file-lossy = Loaded the file; invalid bytes were replaced.
+gui-diagnostic-loaded = Diagnostic loaded.
+gui-diagnostic-search-window-matches = { $count ->
+    [one] Search found 1 match in this window.
+   *[other] Search found { $count } matches in this window.
+}
+gui-client-already-running = The client is already running.
+gui-port-required = Enter a port from 1 to 65535.
+gui-port-digits-only = Ports contain digits only.
+gui-port-range = Port must be from 1 to 65535.
+gui-ip-required = Enter an IPv4 or IPv6 address.
+gui-ip-invalid = Enter a valid IPv4 or IPv6 address.
+gui-network-access-required = Choose a network access mode.
+gui-background-service-failed = The background service could not start: { $value }
+gui-background-runtime-failed = The background runtime could not start: { $value }
+gui-choose-modpack-archive = Choose a modpack archive
+gui-modpack-archives = Modpack archives
+gui-import-analysis = { $first } | Minecraft { $second } | { $third } | { $count } files
+gui-created-entity = Created "{ $value }".
+gui-imported-pack = Imported "{ $value }".
+gui-folder-unavailable = Folder unavailable.
+gui-opened-path = Opened { $value }.
+gui-unknown-author = Unknown author
+gui-compatible = Compatible
+gui-installed-managed-mods = { $count ->
+    [one] Installed 1 managed mod with required dependencies.
+   *[other] Installed { $count } managed mods with required dependencies.
+}
+gui-stop-requested = Stop requested.
+gui-restart-requested = Restart requested.
+gui-force-kill-requested = Force kill requested.
+gui-command-sent = Command sent.
+gui-server-properties-saved = Saved server properties.
+gui-eula-consent-recorded = Minecraft Server EULA consent recorded.
+gui-eula-consent-revoked = Minecraft Server EULA consent revoked.
+gui-eula-browser-opened = Opened the Minecraft EULA in your browser.
+gui-eula-browser-failed = The browser could not be opened. Visit https://aka.ms/MinecraftEULA.
+gui-offline-account-added = Added offline account "{ $value }".
+gui-default-account-set = "{ $value }" is now the default account.
+gui-account-removed = Removed account.
+gui-provider-settings-saved = Saved provider settings.
+gui-storage-root-saved = Saved the persistent instance root.
+gui-java-settings-saved = Saved Java settings.
+gui-minecraft-default-saved = Saved the Minecraft default.
+gui-operation-canceled = Operation canceled.
+gui-cancellation-requested = Cancellation requested.
+gui-operation-not-cancellable = That operation has already finished or cannot be canceled.
+gui-background-operation-failed = A background operation could not start: { $value }
+gui-signin-browser-failed = Open the sign-in URL shown in launcher diagnostics.
+gui-device-code-prompt = Open { $first } and enter code { $second }.
+gui-signin-stage = Sign-in: { $value }
+gui-signed-in = Signed in as "{ $value }".
+gui-starting-minecraft = Starting Minecraft for "{ $value }".
+gui-server-running = "{ $value }" is running.
+gui-credential-stored = Credential stored securely
+gui-signin-required = Sign-in required
+gui-no-credential = No credential
+gui-unknown-time = Unknown time
+gui-just-now = Just now
+gui-minutes-ago = { $count } min ago
+gui-hours-ago = { $count } h ago
+gui-eula-not-accepted = Not accepted. Server starts remain blocked.
+gui-eula-accepted-at = Accepted explicitly on { $value }.
+gui-eula-malformed = The recorded consent is invalid and must be reviewed again.
+gui-warning-offline-exposed = This offline-mode server is exposed beyond localhost. Authentication is not enforced.
+gui-warning-port-unavailable = The configured address { $first }:{ $second } is already in use or unavailable. Stop the conflicting service or choose another port.
+gui-warning-server-generic = The server reported a warning. Review its console and logs before continuing.
+gui-preference-gui-scale = GUI scale
+gui-preference-language = Language
+gui-preference-fullscreen = Fullscreen
+gui-preference-window-size = Window size
+gui-preference-fov = Field of view
+gui-preference-render-distance = Render distance
+gui-preference-simulation-distance = Simulation distance
+gui-state-stopped = Stopped
+gui-state-running = Running
+gui-state-unknown = Unknown
+gui-state-orphaned = Orphaned
+gui-state-needs-recovery = Needs recovery
+gui-state-queued = Queued
+gui-state-canceled = Canceled
+gui-state-completed = Completed
+gui-state-failed = Failed
+gui-state-ready-to-start = Ready to start
+gui-state-controlled = Controlled by Ephervex
+gui-state-process-may-run = A process may still be running
+gui-state-orphaned-detail = Java is running without its supervisor
+gui-state-needs-recovery-detail = Recorded processes have exited
+gui-standalone = Standalone
+gui-linked-client = Linked client
+gui-log = Log
+gui-crash-report = Crash report
+gui-player-versus-player = Player versus player
+gui-use-allowlist = Use allowlist
+gui-activity-launch-minecraft = Launch Minecraft
+gui-activity-launching-minecraft = Launching Minecraft
+gui-activity-exited-cleanly = Exited cleanly
+gui-activity-game-error = Game exited with an error
+gui-activity-preparing-environment = Preparing exact environment
+gui-activity-starting-server = Starting server
+gui-activity-validating-server = Validating runtime, EULA, and network
+gui-activity-server-run = Server run
+gui-activity-server-exited = Server exited
+gui-activity-connected-to = Connected to { $value }
+gui-launch-and-connect = Launch & Connect

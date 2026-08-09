@@ -12,27 +12,8 @@ repository.workspace = true
 name = "ephervex-gui"
 path = "src/main.rs"
 
-# Slint's generated component bindings contain audited framework-level unsafe
-# code even when the application's Rust contains none. Keep the workspace's
-# other lint policy here while allowing those generated bindings to compile.
-[lints.rust]
-unsafe_code = "allow"
-missing_debug_implementations = "warn"
-unreachable_pub = "warn"
-
-[lints.clippy]
-all = { level = "warn", priority = -1 }
-pedantic = { level = "warn", priority = -1 }
-doc_markdown = "allow"
-module_name_repetitions = "allow"
-missing_errors_doc = "allow"
-missing_panics_doc = "allow"
-must_use_candidate = "allow"
-unwrap_used = "warn"
-expect_used = "warn"
-panic = "warn"
-dbg_macro = "warn"
-todo = "warn"
+[lints]
+workspace = true
 
 [dependencies]
 # A frontend depends on `ephervex-core` and nothing below it.

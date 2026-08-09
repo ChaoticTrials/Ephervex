@@ -10,6 +10,7 @@ use ephervex_core::{
     ClientRecord, DiagnosticKind, DiagnosticScope, LaunchAndConnectAvailability, NetworkAccess,
     PreferenceKey, RuntimeClassification, ServerRecord, ServerStatus,
 };
+use ephervex_i18n::lookup;
 use ephervex_model::{LoaderKind, Operation, OperationStatus, StorageClass};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,7 +20,8 @@ pub struct InstancePresentation {
     pub minecraft: String,
     pub loader: String,
     pub loader_kind: &'static str,
-    pub storage: &'static str,
+    pub storage: String,
+    pub storage_kind: &'static str,
     pub source: String,
     pub path: String,
     pub linked_servers: usize,
@@ -55,6 +57,7 @@ impl InstancePresentation {
             loader: record.loader.to_string(),
             loader_kind: loader_kind_name(record.loader.kind),
             storage: storage_name(record.storage),
+            storage_kind: storage_kind_name(record.storage),
             source: record.source.kind.to_string(),
             path: record.root.display().to_string(),
             linked_servers,
@@ -70,7 +73,7 @@ impl InstancePresentation {
                         target: availability.target.to_string(),
                         enabled: !availability.client_running,
                         reason: if availability.client_running {
-                            "The client is already running.".to_owned()
+                            lookup("gui-client-already-running")
                         } else {
                             String::new()
                         },
@@ -99,11 +102,13 @@ pub struct ServerPresentation {
     pub minecraft: String,
     pub loader: String,
     pub loader_kind: &'static str,
-    pub storage: &'static str,
+    pub storage: String,
+    pub storage_kind: &'static str,
     pub relationship: String,
     pub linked_client_id: String,
-    pub state: &'static str,
-    pub state_detail: &'static str,
+    pub state: String,
+    pub state_kind: &'static str,
+    pub state_detail: String,
     pub address: String,
     pub path: String,
     pub installed: bool,
@@ -121,23 +126,39 @@ impl ServerPresentation {
     pub fn from_status(status: &ServerStatus) -> Self {
         let record = &status.record;
         let controlled = status.runtime.is_controlled();
-        let (state, detail, uncertain, needs_recovery) = match &status.runtime {
-            RuntimeClassification::Stopped => ("Stopped", "Ready to start", false, false),
-            RuntimeClassification::Controlled { .. } => {
-                ("Running", "Controlled by Ephervex", false, false)
-            }
-            RuntimeClassification::UnknownRunning { .. } => {
-                ("Unknown", "A process may still be running", true, false)
-            }
+        let (state_kind, state_id, detail_id, uncertain, needs_recovery) = match &status.runtime {
+            RuntimeClassification::Stopped => (
+                "stopped",
+                "gui-state-stopped",
+                "gui-state-ready-to-start",
+                false,
+                false,
+            ),
+            RuntimeClassification::Controlled { .. } => (
+                "running",
+                "gui-state-running",
+                "gui-state-controlled",
+                false,
+                false,
+            ),
+            RuntimeClassification::UnknownRunning { .. } => (
+                "unknown",
+                "gui-state-unknown",
+                "gui-state-process-may-run",
+                true,
+                false,
+            ),
             RuntimeClassification::Orphaned { .. } => (
-                "Orphaned",
-                "Java is running without its supervisor",
+                "orphaned",
+                "gui-state-orphaned",
+                "gui-state-orphaned-detail",
                 true,
                 false,
             ),
             RuntimeClassification::ProvenStale { .. } => (
-                "Needs recovery",
-                "Recorded processes have exited",
+                "needs-recovery",
+                "gui-state-needs-recovery",
+                "gui-state-needs-recovery-detail",
                 false,
                 true,
             ),
@@ -150,14 +171,16 @@ impl ServerPresentation {
             loader: record.loader.to_string(),
             loader_kind: loader_kind_name(record.loader.kind),
             storage: storage_name(record.storage),
+            storage_kind: storage_kind_name(record.storage),
             relationship: record
                 .linked_client_id
-                .map_or_else(|| "Standalone".to_owned(), |_| "Linked client".to_owned()),
+                .map_or_else(|| lookup("gui-standalone"), |_| lookup("gui-linked-client")),
             linked_client_id: record
                 .linked_client_id
                 .map_or_else(String::new, |id| id.to_string()),
-            state,
-            state_detail: detail,
+            state: lookup(state_id),
+            state_kind,
+            state_detail: lookup(detail_id),
             address: format_connection_target(record),
             path: record.root.display().to_string(),
             installed,
@@ -176,7 +199,8 @@ impl ServerPresentation {
 pub struct ActivityPresentation {
     pub id: String,
     pub title: String,
-    pub status: &'static str,
+    pub status: String,
+    pub status_kind: &'static str,
     pub detail: String,
     pub progress: f32,
     pub indeterminate: bool,
@@ -186,18 +210,23 @@ pub struct ActivityPresentation {
 
 impl From<&Operation> for ActivityPresentation {
     fn from(operation: &Operation) -> Self {
-        let (status, failed, failure) = match &operation.status {
-            OperationStatus::Pending => ("Queued", false, String::new()),
-            OperationStatus::Running => ("Running", false, String::new()),
-            OperationStatus::Canceled => ("Canceled", false, String::new()),
-            OperationStatus::Completed => ("Completed", false, String::new()),
-            OperationStatus::Failed(message) => ("Failed", true, message.clone()),
+        let (status_kind, status_id, failed, failure) = match &operation.status {
+            OperationStatus::Pending => ("queued", "gui-state-queued", false, String::new()),
+            OperationStatus::Running => ("running", "gui-state-running", false, String::new()),
+            OperationStatus::Canceled => ("canceled", "gui-state-canceled", false, String::new()),
+            OperationStatus::Completed => {
+                ("completed", "gui-state-completed", false, String::new())
+            }
+            OperationStatus::Failed(message) => {
+                ("failed", "gui-state-failed", true, message.clone())
+            }
         };
         let fraction = operation.progress.fraction();
         Self {
             id: operation.id.to_string(),
             title: operation.title.clone(),
-            status,
+            status: lookup(status_id),
+            status_kind,
             detail: operation.current_step.clone().unwrap_or(failure),
             #[allow(clippy::cast_possible_truncation)]
             progress: fraction.unwrap_or_default() as f32,
@@ -220,19 +249,19 @@ pub enum PropertyControl {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PropertyDefinition {
     pub key: &'static str,
-    pub label: &'static str,
+    pub label_message_id: &'static str,
     pub control: PropertyControl,
 }
 
 pub const SERVER_PROPERTY_DEFINITIONS: &[PropertyDefinition] = &[
     PropertyDefinition {
         key: "motd",
-        label: "Message of the day",
+        label_message_id: "gui-message-of-the-day",
         control: PropertyControl::Text,
     },
     PropertyDefinition {
         key: "max-players",
-        label: "Maximum players",
+        label_message_id: "gui-maximum-players",
         control: PropertyControl::Integer {
             minimum: 1,
             maximum: u16::MAX,
@@ -240,27 +269,27 @@ pub const SERVER_PROPERTY_DEFINITIONS: &[PropertyDefinition] = &[
     },
     PropertyDefinition {
         key: "difficulty",
-        label: "Difficulty",
+        label_message_id: "gui-difficulty",
         control: PropertyControl::Choice(&["peaceful", "easy", "normal", "hard"]),
     },
     PropertyDefinition {
         key: "gamemode",
-        label: "Game mode",
+        label_message_id: "gui-game-mode",
         control: PropertyControl::Choice(&["survival", "creative", "adventure", "spectator"]),
     },
     PropertyDefinition {
         key: "allow-flight",
-        label: "Allow flight",
+        label_message_id: "gui-allow-flight",
         control: PropertyControl::Toggle,
     },
     PropertyDefinition {
         key: "pvp",
-        label: "Player versus player",
+        label_message_id: "gui-player-versus-player",
         control: PropertyControl::Toggle,
     },
     PropertyDefinition {
         key: "white-list",
-        label: "Use allowlist",
+        label_message_id: "gui-use-allowlist",
         control: PropertyControl::Toggle,
     },
 ];
@@ -274,14 +303,14 @@ pub struct ValidationResult {
 #[must_use]
 pub fn validate_port(value: &str) -> ValidationResult {
     if value.is_empty() {
-        return invalid("Enter a port from 1 to 65535.");
+        return invalid(&lookup("gui-port-required"));
     }
     if !value.bytes().all(|byte| byte.is_ascii_digit()) {
-        return invalid("Ports contain digits only.");
+        return invalid(&lookup("gui-port-digits-only"));
     }
     match value.parse::<u32>() {
         Ok(1..=65_535) => valid(),
-        _ => invalid("Port must be from 1 to 65535."),
+        _ => invalid(&lookup("gui-port-range")),
     }
 }
 
@@ -290,7 +319,7 @@ pub fn validate_ip(value: &str, required: bool) -> ValidationResult {
     let value = value.trim();
     if value.is_empty() {
         return if required {
-            invalid("Enter an IPv4 or IPv6 address.")
+            invalid(&lookup("gui-ip-required"))
         } else {
             valid()
         };
@@ -298,7 +327,7 @@ pub fn validate_ip(value: &str, required: bool) -> ValidationResult {
     if value.parse::<IpAddr>().is_ok() {
         valid()
     } else {
-        invalid("Enter a valid IPv4 or IPv6 address.")
+        invalid(&lookup("gui-ip-invalid"))
     }
 }
 
@@ -308,19 +337,19 @@ pub fn known_vanilla_preferences() -> &'static [PreferenceKey] {
 }
 
 #[must_use]
-pub const fn diagnostic_scope_label(scope: DiagnosticScope) -> &'static str {
+pub fn diagnostic_scope_label(scope: DiagnosticScope) -> String {
     match scope {
-        DiagnosticScope::Client(_) => "Client",
-        DiagnosticScope::Server(_) => "Server",
-        DiagnosticScope::Launcher => "Launcher",
+        DiagnosticScope::Client(_) => lookup("gui-client"),
+        DiagnosticScope::Server(_) => lookup("gui-server"),
+        DiagnosticScope::Launcher => lookup("gui-launcher"),
     }
 }
 
 #[must_use]
-pub const fn diagnostic_kind_label(kind: DiagnosticKind) -> &'static str {
+pub fn diagnostic_kind_label(kind: DiagnosticKind) -> String {
     match kind {
-        DiagnosticKind::Log => "Log",
-        DiagnosticKind::CrashReport => "Crash report",
+        DiagnosticKind::Log => lookup("gui-log"),
+        DiagnosticKind::CrashReport => lookup("gui-crash-report"),
     }
 }
 
@@ -334,10 +363,18 @@ pub const fn loader_kind_name(kind: LoaderKind) -> &'static str {
 }
 
 #[must_use]
-pub const fn storage_name(storage: StorageClass) -> &'static str {
+pub fn storage_name(storage: StorageClass) -> String {
     match storage {
-        StorageClass::Temporary => "Temporary",
-        StorageClass::Persistent => "Persistent",
+        StorageClass::Temporary => lookup("gui-temporary"),
+        StorageClass::Persistent => lookup("gui-persistent"),
+    }
+}
+
+#[must_use]
+pub const fn storage_kind_name(storage: StorageClass) -> &'static str {
+    match storage {
+        StorageClass::Temporary => "temporary",
+        StorageClass::Persistent => "persistent",
     }
 }
 
@@ -355,7 +392,7 @@ pub fn parse_network(
         "Localhost" => NetworkAccess::Localhost,
         "LAN" => NetworkAccess::Lan,
         "Custom" => NetworkAccess::Custom,
-        _ => return Err(invalid("Choose a network access mode.")),
+        _ => return Err(invalid(&lookup("gui-network-access-required"))),
     };
     let address_validation = validate_ip(address, matches!(access, NetworkAccess::Custom));
     if !address_validation.valid {
@@ -363,7 +400,7 @@ pub fn parse_network(
     }
     let port = port
         .parse::<u16>()
-        .map_err(|_| invalid("Port must be from 1 to 65535."))?;
+        .map_err(|_| invalid(&lookup("gui-port-range")))?;
     Ok(ephervex_core::ServerNetworkSettings {
         online_mode,
         access,
@@ -474,6 +511,7 @@ mod tests {
             [],
         );
         assert_eq!(temporary.storage, "Temporary");
+        assert_eq!(temporary.storage_kind, "temporary");
         assert_eq!(temporary.loader, "Vanilla");
         assert_eq!(
             [LoaderKind::Vanilla, LoaderKind::Forge, LoaderKind::NeoForge].map(loader_kind_name),

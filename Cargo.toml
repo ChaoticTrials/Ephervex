@@ -11,7 +11,7 @@ publish = false
 repository = "https://github.com/ChaoticTrials/ephervex"
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "deny"
 missing_debug_implementations = "warn"
 unreachable_pub = "warn"
 

@@ -7,6 +7,7 @@ use std::sync::mpsc::Sender;
 use std::time::Duration;
 
 use copypasta::{ClipboardContext, ClipboardProvider as _};
+use ephervex_i18n::{Arg, lookup, lookup_args};
 use slint::{ComponentHandle as _, ModelRc, SharedString, Timer, TimerMode, VecModel};
 
 use crate::backend::{
@@ -15,8 +16,8 @@ use crate::backend::{
 };
 use crate::presentation::{parse_network, validate_ip, validate_port};
 use crate::ui::{
-    AccountRow, ActivityRow, AppWindow, DiagnosticRow, InstanceRow, JavaRow, ModRow, ModSearchRow,
-    PreferenceRow, ServerRow,
+    AccountRow, ActivityRow, AppWindow, DiagnosticRow, GuiI18n, InstanceRow, JavaRow, ModRow,
+    ModSearchRow, PreferenceRow, ServerRow,
 };
 
 pub struct Controller {
@@ -33,6 +34,7 @@ pub fn attach(ui: &AppWindow) -> Controller {
     let backend = backend::spawn();
     let receiver = Rc::new(RefCell::new(backend.events));
     let activities = Rc::new(RefCell::new(Vec::<ActivityData>::new()));
+    register_i18n(ui);
     register_callbacks(ui, &backend.commands);
 
     let weak = ui.as_weak();
@@ -57,6 +59,25 @@ pub fn attach(ui: &AppWindow) -> Controller {
     Controller {
         _poll_timer: poll_timer,
     }
+}
+
+fn register_i18n(ui: &AppWindow) {
+    let i18n = ui.global::<GuiI18n>();
+    i18n.on_text(|id| lookup(id.as_str()).into());
+    i18n.on_count(|id, count| lookup_args(id.as_str(), [("count", Arg::from(count))]).into());
+    i18n.on_value(|id, value| {
+        lookup_args(id.as_str(), [("value", Arg::from(value.as_str()))]).into()
+    });
+    i18n.on_values(|id, first, second| {
+        lookup_args(
+            id.as_str(),
+            [
+                ("first", Arg::from(first.as_str())),
+                ("second", Arg::from(second.as_str())),
+            ],
+        )
+        .into()
+    });
 }
 
 #[allow(clippy::too_many_lines)]
@@ -204,9 +225,9 @@ fn register_callbacks(ui: &AppWindow, commands: &Sender<Command>) {
             ui.set_toast_error(!copied);
             ui.set_toast_text(
                 if copied {
-                    "Copied to the clipboard."
+                    lookup("gui-clipboard-copied")
                 } else {
-                    "The desktop clipboard is unavailable."
+                    lookup("gui-clipboard-unavailable")
                 }
                 .into(),
             );
@@ -325,10 +346,7 @@ fn register_server_actions(ui: &AppWindow, commands: &Sender<Command>) {
             if !max_players_valid || !difficulty_valid || !gamemode_valid {
                 if let Some(ui) = weak.upgrade() {
                     ui.set_toast_error(true);
-                    ui.set_toast_text(
-                        "Correct the maximum-player, difficulty, or game-mode value before saving."
-                            .into(),
-                    );
+                    ui.set_toast_text(lookup("gui-server-property-values-invalid").into());
                 }
                 return;
             }
@@ -361,12 +379,12 @@ fn register_server_actions(ui: &AppWindow, commands: &Sender<Command>) {
 
 fn validate_player_count(value: &str) -> String {
     if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
-        return "Use digits only.".to_owned();
+        return lookup("gui-digits-only");
     }
     if value.parse::<u32>().is_ok_and(|players| players > 0) {
         String::new()
     } else {
-        "Use at least 1 player.".to_owned()
+        lookup("gui-player-count-minimum")
     }
 }
 
@@ -482,13 +500,15 @@ fn register_settings(ui: &AppWindow, commands: &Sender<Command>) {
     let weak = ui.as_weak();
     ui.on_save_java_settings(
         move |auto_detect, auto_download, minimum, maximum, preferred_path| {
-            let parsed = minimum.parse::<u32>().ok().zip(maximum.parse::<u32>().ok());
-            let Some((minimum_mib, maximum_mib)) = parsed else {
-                if let Some(ui) = weak.upgrade() {
-                    ui.set_toast_error(true);
-                    ui.set_toast_text("Java memory values must contain digits only.".into());
+            let (minimum_mib, maximum_mib) = match parse_java_memory(&minimum, &maximum) {
+                Ok(memory) => memory,
+                Err(message) => {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.set_toast_error(true);
+                        ui.set_toast_text(message.into());
+                    }
+                    return;
                 }
-                return;
             };
             send(
                 &sender,
@@ -516,6 +536,19 @@ fn register_settings(ui: &AppWindow, commands: &Sender<Command>) {
             );
         }
     });
+}
+
+fn parse_java_memory(minimum: &str, maximum: &str) -> Result<(u32, u32), String> {
+    let parsed = minimum
+        .parse::<u32>()
+        .ok()
+        .zip(maximum.parse::<u32>().ok())
+        .ok_or_else(|| lookup("gui-java-memory-digits-only"))?;
+    if parsed.0 == 0 || parsed.1 == 0 || parsed.0 > parsed.1 {
+        Err(lookup("gui-java-memory-range-invalid"))
+    } else {
+        Ok(parsed)
+    }
 }
 
 fn apply_event(ui: &AppWindow, event: Event, activities: &Rc<RefCell<Vec<ActivityData>>>) {
@@ -554,10 +587,10 @@ fn apply_event(ui: &AppWindow, event: Event, activities: &Rc<RefCell<Vec<Activit
         }
         Event::DiagnosticContent(content) => apply_diagnostic_content(ui, content),
         Event::DiagnosticUnavailable(message) => {
-            ui.set_diagnostic_title("Diagnostic unavailable".into());
+            ui.set_diagnostic_title(lookup("gui-diagnostic-unavailable").into());
             ui.set_diagnostic_path(SharedString::default());
             ui.set_diagnostic_content(message.into());
-            ui.set_status_message("The selected diagnostic disappeared or is unavailable.".into());
+            ui.set_status_message(lookup("gui-diagnostic-disappeared").into());
         }
         Event::JavaRuntimes(rows) => ui.set_java_runtimes(model(java_rows(rows))),
         Event::Activity(activity) => {
@@ -602,9 +635,10 @@ fn apply_snapshot(ui: &AppWindow, snapshot: Snapshot) {
             loader: item.loader.into(),
             loader_kind: item.loader_kind.into(),
             storage: item.storage.into(),
+            storage_kind: item.storage_kind.into(),
             source: item.source.into(),
             path: item.path.into(),
-            updated: "Available".into(),
+            updated: lookup("gui-available").into(),
             linked_servers: to_i32(item.linked_servers),
             mods: to_i32(item.managed_mods),
             needs_attention: item.needs_attention,
@@ -630,7 +664,7 @@ fn apply_snapshot(ui: &AppWindow, snapshot: Snapshot) {
     let storage_filter = ui.get_instance_filter();
     let query = ui.get_instance_query().to_ascii_lowercase();
     instance_rows.retain(|row| {
-        (storage_filter == "All" || row.storage == storage_filter)
+        (storage_filter == "all" || row.storage_kind == storage_filter)
             && row_matches(
                 &query,
                 [&row.name, &row.minecraft, &row.loader, &row.source],
@@ -656,9 +690,11 @@ fn apply_snapshot(ui: &AppWindow, snapshot: Snapshot) {
             loader: item.loader.into(),
             loader_kind: item.loader_kind.into(),
             storage: item.storage.into(),
+            storage_kind: item.storage_kind.into(),
             relationship: item.relationship.into(),
             linked_client_id: item.linked_client_id.into(),
             state: item.state.into(),
+            state_kind: item.state_kind.into(),
             state_detail: item.state_detail.into(),
             address: item.address.into(),
             path: item.path.into(),
@@ -707,7 +743,7 @@ fn apply_snapshot(ui: &AppWindow, snapshot: Snapshot) {
     ui.set_eula_accepted(snapshot.eula.accepted);
     ui.set_eula_status(snapshot.eula.status.into());
     ui.set_loading(false);
-    ui.set_status_message("Ready".into());
+    ui.set_status_message(lookup("gui-ready").into());
 }
 
 fn apply_server_workspace(ui: &AppWindow, workspace: ServerWorkspaceData) {
@@ -745,11 +781,14 @@ fn apply_diagnostic_content(ui: &AppWindow, content: DiagnosticContent) {
     ui.set_diagnostic_path(content.path.into());
     ui.set_diagnostic_content(content.text.into());
     let status = match (content.truncated, content.lossy, content.matches) {
-        (_, _, Some(matches)) => format!("Search found {matches} matches in the loaded window."),
-        (true, true, None) => "Loaded a bounded window; invalid bytes were replaced.".to_owned(),
-        (true, false, None) => "Loaded a bounded window of a larger file.".to_owned(),
-        (false, true, None) => "Loaded the file; invalid bytes were replaced.".to_owned(),
-        (false, false, None) => "Diagnostic loaded.".to_owned(),
+        (_, _, Some(matches)) => lookup_args(
+            "gui-diagnostic-search-matches",
+            [("count", Arg::from(matches))],
+        ),
+        (true, true, None) => lookup("gui-diagnostic-window-lossy"),
+        (true, false, None) => lookup("gui-diagnostic-window-bounded"),
+        (false, true, None) => lookup("gui-diagnostic-file-lossy"),
+        (false, false, None) => lookup("gui-diagnostic-loaded"),
     };
     ui.set_status_message(status.into());
 }
@@ -777,12 +816,12 @@ fn apply_activities(ui: &AppWindow, activities: &[ActivityData]) {
             id: activity.item.id.clone().into(),
             title: activity.item.title.clone().into(),
             entity: activity.entity.clone().into(),
-            status: activity.item.status.into(),
+            status: activity.item.status.clone().into(),
             detail: activity.item.detail.clone().into(),
             time: activity.time.clone().into(),
             progress: activity.item.progress,
             indeterminate: activity.item.indeterminate,
-            active: matches!(activity.item.status, "Queued" | "Running"),
+            active: matches!(activity.item.status_kind, "queued" | "running"),
             failed: activity.item.failed,
             cancellable: activity.item.cancellable,
         })
@@ -910,15 +949,17 @@ fn to_i32(value: usize) -> i32 {
 #[cfg(test)]
 mod tests {
     use crate::presentation::ActivityPresentation;
+    use ephervex_i18n::has;
 
     use super::*;
 
-    fn activity(id: &str, status: &'static str) -> ActivityData {
+    fn activity(id: &str, status_kind: &'static str) -> ActivityData {
         ActivityData {
             item: ActivityPresentation {
                 id: id.to_owned(),
                 title: "Import pack".to_owned(),
-                status,
+                status: status_kind.to_owned(),
+                status_kind,
                 detail: String::new(),
                 progress: 0.0,
                 indeterminate: true,
@@ -932,17 +973,17 @@ mod tests {
 
     #[test]
     fn operation_updates_replace_the_same_activity_instead_of_fabricating_history() {
-        let mut rows = vec![activity("operation-id", "Running")];
-        upsert_activity(&mut rows, activity("operation-id", "Completed"));
+        let mut rows = vec![activity("operation-id", "running")];
+        upsert_activity(&mut rows, activity("operation-id", "completed"));
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].item.status, "Completed");
+        assert_eq!(rows[0].item.status_kind, "completed");
     }
 
     #[test]
     fn in_memory_activity_is_bounded() {
         let mut rows = Vec::new();
         for index in 0..120 {
-            upsert_activity(&mut rows, activity(&index.to_string(), "Completed"));
+            upsert_activity(&mut rows, activity(&index.to_string(), "completed"));
         }
         assert_eq!(rows.len(), 100);
     }
@@ -954,6 +995,46 @@ mod tests {
         assert!(row_matches("repro", [&name, &loader]));
         assert!(row_matches("1.21.1", [&name, &loader]));
         assert!(!row_matches("forge", [&name, &loader]));
+    }
+
+    #[test]
+    fn java_memory_input_requires_digits_and_an_ordered_nonzero_range() {
+        assert_eq!(parse_java_memory("512", "4096"), Ok((512, 4096)));
+        assert!(parse_java_memory("512 MiB", "4096").is_err());
+        assert!(parse_java_memory("0", "4096").is_err());
+        assert!(parse_java_memory("4096", "512").is_err());
+    }
+
+    #[test]
+    fn every_gui_message_id_exists_in_the_fluent_catalog() {
+        for source in [
+            include_str!("ui.rs"),
+            include_str!("controller.rs"),
+            include_str!("backend.rs"),
+            include_str!("presentation.rs"),
+        ] {
+            let mut remaining = source;
+            while let Some(start) = remaining.find("\"gui-") {
+                let candidate = &remaining[start + 1..];
+                let Some(end) = candidate.find('"') else {
+                    assert_eq!(candidate, "", "unterminated GUI localization id");
+                    break;
+                };
+                let message_id = &candidate[..end];
+                if message_id != "gui-" {
+                    assert!(has(message_id), "missing GUI localization: {message_id}");
+                }
+                remaining = &candidate[end + 1..];
+            }
+        }
+    }
+
+    #[test]
+    fn modrinth_search_does_not_reuse_the_server_filter() {
+        let source = include_str!("ui.rs");
+        assert!(source.contains("text <=> root.mod-query"));
+        assert!(source.contains("text <=> root.server-query"));
+        assert!(!source.contains("search-mods(root.selected-instance-id, root.server-query)"));
     }
 
     #[test]
