@@ -164,6 +164,42 @@ pub enum PackError {
         supported: u32,
     },
 
+    /// A file was recorded as a managed mod without the identity that makes it
+    /// one. A record nothing can re-resolve is worse than no record.
+    #[error("`{path}` cannot be recorded as a managed mod without a provider and project")]
+    ManagedIdentityMissing { path: String },
+
+    /// The project is already installed at a different version.
+    ///
+    /// Changing an installed mod's version is a mod *update*, which this build
+    /// does not implement — so this refuses rather than replacing a jar the
+    /// user did not ask about.
+    #[error(
+        "`{project_id}` is already installed from {provider} at version `{installed}`, not `{requested}`"
+    )]
+    ManagedVersionConflict {
+        provider: ephervex_model::ModProvider,
+        project_id: String,
+        installed: String,
+        requested: String,
+    },
+
+    /// Something is already at a planned destination, and it is not the managed
+    /// mod being reused.
+    ///
+    /// Almost always a jar the user put there themselves. Overwriting it would
+    /// destroy the local build or the attached bug-report file that is very
+    /// likely the whole point of the instance.
+    #[error("`{path}` already exists and was not installed by Ephervex")]
+    DestinationOccupied { path: PathBuf },
+
+    /// Two mods in one installation resolve to the same file name.
+    ///
+    /// Installing them in sequence would leave whichever landed last, silently
+    /// producing an instance missing a mod the plan promised.
+    #[error("two mods in this installation both install as `{name}`")]
+    DestinationCollision { name: String },
+
     /// The user canceled the import.
     #[error("the import was canceled")]
     Canceled,
@@ -197,6 +233,10 @@ impl PackError {
             Self::RecipeUnreadable { .. } => "error-pack-recipe-unreadable",
             Self::RecipeInvalid { .. } => "error-pack-recipe-invalid",
             Self::RecipeUnsupportedVersion { .. } => "error-pack-recipe-unsupported-version",
+            Self::ManagedIdentityMissing { .. } => "error-mod-managed-identity-missing",
+            Self::ManagedVersionConflict { .. } => "error-mod-already-installed",
+            Self::DestinationOccupied { .. } => "error-mod-destination-occupied",
+            Self::DestinationCollision { .. } => "error-mod-destination-collision",
             Self::Canceled => "error-pack-canceled",
         }
     }
@@ -215,8 +255,34 @@ impl PackError {
             | Self::Unwritable { path, .. }
             | Self::RecipeUnreadable { path, .. }
             | Self::RecipeInvalid { path, .. }
-            | Self::RecipeUnsupportedVersion { path, .. } => Some(path.clone()),
+            | Self::RecipeUnsupportedVersion { path, .. }
+            | Self::DestinationOccupied { path } => Some(path.clone()),
             _ => None,
+        }
+    }
+
+    /// The values this failure's message and its next step take as arguments,
+    /// beyond the path [`Self::failing_path`] already exposes.
+    ///
+    /// One list per variant rather than an accessor per field, so a new
+    /// refusal carries its arguments beside its message id.
+    #[must_use]
+    pub fn message_args(&self) -> Vec<(&'static str, String)> {
+        match self {
+            Self::ManagedIdentityMissing { path } => vec![("path", path.clone())],
+            Self::ManagedVersionConflict {
+                provider,
+                project_id,
+                installed,
+                requested,
+            } => vec![
+                ("provider", provider.to_string()),
+                ("project", project_id.clone()),
+                ("installed", installed.clone()),
+                ("requested", requested.clone()),
+            ],
+            Self::DestinationCollision { name } => vec![("name", name.clone())],
+            _ => Vec::new(),
         }
     }
 
@@ -301,6 +367,21 @@ mod tests {
             },
             PackError::FileDownloadsMissing {
                 path: "mods/a.jar".to_owned(),
+            },
+            PackError::ManagedIdentityMissing {
+                path: "mods/a.jar".to_owned(),
+            },
+            PackError::ManagedVersionConflict {
+                provider: ephervex_model::ModProvider::Modrinth,
+                project_id: "p".to_owned(),
+                installed: "a".to_owned(),
+                requested: "b".to_owned(),
+            },
+            PackError::DestinationOccupied {
+                path: PathBuf::from("/instance/minecraft/mods/theirs.jar"),
+            },
+            PackError::DestinationCollision {
+                name: "mods/a.jar".to_owned(),
             },
             PackError::Canceled,
         ] {

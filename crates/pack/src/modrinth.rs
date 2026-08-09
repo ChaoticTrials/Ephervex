@@ -27,7 +27,9 @@
 use std::collections::BTreeMap;
 
 use ephervex_download::DomainAllowlist;
-use ephervex_model::{Hash, HashAlgorithm, ImportSourceKind, LoaderKind, LoaderSelection};
+use ephervex_model::{
+    Hash, HashAlgorithm, ImportSourceKind, LoaderKind, LoaderSelection, ModOrigin,
+};
 use serde::Deserialize;
 use tracing::{debug, warn};
 
@@ -295,9 +297,12 @@ fn normalize_file(
         client: environment.client.into(),
         server: environment.server.into(),
         selected: None,
+        // The pack asked for this file; nobody browsed for it.
+        origin: ModOrigin::PackDeclared,
         // A Modrinth pack index identifies its files by hash and address only.
         // Leaving this `None` rather than inventing an id is what keeps the
-        // normalized model honest for the providers that do have one.
+        // normalized model honest for the providers that do have one — and what
+        // keeps a pack file from being mistaken for a managed mod.
         identity: None,
     })
 }

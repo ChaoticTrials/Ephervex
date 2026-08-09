@@ -158,6 +158,10 @@ pub struct App {
     /// business paying for.
     minecraft: OnceLock<VersionCatalog>,
     loaders: OnceLock<LoaderRegistry>,
+    /// The mod catalog, built on first use for the same reason as the two
+    /// above: constructing it builds an HTTP client and a TLS stack, and
+    /// `ephervex instance list` has no business paying for one.
+    pub(crate) mods: OnceLock<ephervex_mod_platform::ModrinthProvider>,
     /// The last Java scan, held for the life of the process.
     ///
     /// Discovery forks a JVM per distinct runtime, so recomputing it whenever a
@@ -186,6 +190,7 @@ impl App {
             storage: ephervex_storage::open_from_environment()?,
             minecraft: OnceLock::new(),
             loaders: OnceLock::new(),
+            mods: OnceLock::new(),
             java: RwLock::new(None),
             session: None,
         })
@@ -201,6 +206,7 @@ impl App {
             storage: ephervex_storage::open(paths)?,
             minecraft: OnceLock::new(),
             loaders: OnceLock::new(),
+            mods: OnceLock::new(),
             java: RwLock::new(None),
             session: None,
         })

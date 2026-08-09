@@ -11,6 +11,7 @@ pub mod ids;
 pub mod instance;
 pub mod java;
 pub mod loader;
+pub mod mods;
 pub mod operation;
 pub mod storage;
 
@@ -21,5 +22,6 @@ pub use ids::{InstanceId, OperationId, ServerId};
 pub use instance::{AttentionReason, ImportSourceKind, InstanceKind};
 pub use java::{JavaOverride, JvmSettings};
 pub use loader::{LoaderKind, LoaderSelection, LoaderVersionMode};
+pub use mods::{ModOrigin, ModProvider};
 pub use operation::{Operation, OperationStatus, Progress};
 pub use storage::StorageClass;

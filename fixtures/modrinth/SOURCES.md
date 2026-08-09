@@ -69,3 +69,33 @@ One document per refusal, so a regression names the rule it broke rather than
 The digests in these documents are the SHA-1 of the empty string. They are never
 verified: every one of these packs is refused before anything is downloaded, and
 a digest that looked real would suggest otherwise.
+
+## `api/`
+
+**Hand-authored** responses in the shapes Modrinth's public API documentation
+describes, transcribed on **2026-08-09** rather than captured from the live
+service. Nothing here is copied from a real project, and no test in this
+repository contacts Modrinth.
+
+They are written rather than captured for the same reason the `.mrpack`
+fixtures are: a real capture would carry a real project's metadata and CDN
+addresses, which belong to whoever published them, and would drift the moment
+that project published a new version. What the parsers under test read is the
+*shape* — field names, nesting, and the enumerated values — and a transcribed
+fixture exercises that exactly as well.
+
+| File | What only this file proves |
+|---|---|
+| `search-mods.json` | three hits with different verdicts, including one whose project-wide `versions` and `categories` arrays both look compatible |
+| `versions-fits.json` | a newest compatible version, an older compatible one, and a newer one for the wrong release — so "newest" cannot be read as "last published" |
+| `versions-old.json` | a project published only for another Minecraft release |
+| `versions-split.json` | the case search facets get wrong: one version supports this release, another supports this loader, and neither supports both |
+| `versions-library.json` | a required dependency that resolves cleanly |
+| `versions-optional-extra.json` | an optional dependency, which must stay unselected |
+| `versions-primary-files.json` | exactly one file marked `primary` alongside a `sources-jar`, and a version with none marked, whose first entry is the documented fallback |
+| `project-undeclared-sides.json` | `server_side: "unknown"` — an upstream value an author can leave in place, which Ephervex records rather than resolves |
+
+The digests are well-formed placeholders. Nothing in these files is downloaded:
+the fixtures drive catalog parsing and dependency resolution, and the tests that
+actually fetch and verify bytes build their own artifacts against a loopback
+server (`crates/pack/tests/managed_mod_installation.rs`).

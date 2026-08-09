@@ -1,0 +1,59 @@
+[
+  {
+    "id": "ONEPRIMARY",
+    "project_id": "FILESPROJ",
+    "name": "One primary",
+    "version_number": "1.0.0",
+    "version_type": "release",
+    "game_versions": ["1.20.1"],
+    "loaders": ["neoforge"],
+    "date_published": "2026-01-01T00:00:00Z",
+    "downloads": 1,
+    "files": [
+      {
+        "hashes": { "sha1": "3333333333333333333333333333333333333333" },
+        "url": "https://cdn.modrinth.com/data/FILESPROJ/versions/ONEPRIMARY/sources.jar",
+        "filename": "sources.jar",
+        "primary": false,
+        "size": 1,
+        "file_type": "sources-jar"
+      },
+      {
+        "hashes": { "sha1": "4444444444444444444444444444444444444444" },
+        "url": "https://cdn.modrinth.com/data/FILESPROJ/versions/ONEPRIMARY/mod.jar",
+        "filename": "mod.jar",
+        "primary": true,
+        "size": 2
+      }
+    ],
+    "dependencies": []
+  },
+  {
+    "id": "NOPRIMARY",
+    "project_id": "FILESPROJ",
+    "name": "No primary",
+    "version_number": "2.0.0",
+    "version_type": "release",
+    "game_versions": ["1.20.1"],
+    "loaders": ["neoforge"],
+    "date_published": "2026-02-01T00:00:00Z",
+    "downloads": 1,
+    "files": [
+      {
+        "hashes": { "sha1": "5555555555555555555555555555555555555555" },
+        "url": "https://cdn.modrinth.com/data/FILESPROJ/versions/NOPRIMARY/first.jar",
+        "filename": "first.jar",
+        "primary": false,
+        "size": 3
+      },
+      {
+        "hashes": { "sha1": "6666666666666666666666666666666666666666" },
+        "url": "https://cdn.modrinth.com/data/FILESPROJ/versions/NOPRIMARY/second.jar",
+        "filename": "second.jar",
+        "primary": false,
+        "size": 4
+      }
+    ],
+    "dependencies": []
+  }
+]

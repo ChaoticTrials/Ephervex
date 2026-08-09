@@ -1,0 +1,26 @@
+[
+  {
+    "id": "LIBV1",
+    "project_id": "LIBPROJ",
+    "name": "Library 1.0.0",
+    "version_number": "1.0.0",
+    "version_type": "release",
+    "game_versions": ["1.20.1"],
+    "loaders": ["neoforge"],
+    "date_published": "2026-01-15T00:00:00Z",
+    "downloads": 500,
+    "files": [
+      {
+        "hashes": {
+          "sha1": "1111111111111111111111111111111111111111",
+          "sha512": "1111223344556677889900aabbccddeeff11223344556677889900aabbccddeeff11223344556677889900aabbccddeeff11223344556677889900aabbccdd"
+        },
+        "url": "https://cdn.modrinth.com/data/LIBPROJ/versions/LIBV1/library-1.0.0.jar",
+        "filename": "library-1.0.0.jar",
+        "primary": true,
+        "size": 8192
+      }
+    ],
+    "dependencies": []
+  }
+]

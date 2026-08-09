@@ -1,0 +1,76 @@
+[
+  {
+    "id": "FITSOLD1",
+    "project_id": "FITSPROJ",
+    "name": "Fits 1.0.0",
+    "version_number": "1.0.0",
+    "version_type": "release",
+    "game_versions": ["1.20.1"],
+    "loaders": ["neoforge"],
+    "date_published": "2026-01-01T00:00:00Z",
+    "downloads": 10,
+    "files": [
+      {
+        "hashes": {
+          "sha1": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "sha512": "aa11223344556677889900aabbccddeeff11223344556677889900aabbccddeeff11223344556677889900aabbccddeeff11223344556677889900aabbccdd"
+        },
+        "url": "https://cdn.modrinth.com/data/FITSPROJ/versions/FITSOLD1/fits-1.0.0.jar",
+        "filename": "fits-1.0.0.jar",
+        "primary": true,
+        "size": 2048
+      }
+    ],
+    "dependencies": [
+      { "project_id": "LIBPROJ", "version_id": null, "file_name": null, "dependency_type": "required" }
+    ]
+  },
+  {
+    "id": "FITSNEW1",
+    "project_id": "FITSPROJ",
+    "name": "Fits 2.0.0",
+    "version_number": "2.0.0",
+    "version_type": "release",
+    "game_versions": ["1.20.1"],
+    "loaders": ["neoforge"],
+    "date_published": "2026-02-01T00:00:00Z",
+    "downloads": 90,
+    "files": [
+      {
+        "hashes": {
+          "sha1": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "sha512": "bb11223344556677889900aabbccddeeff11223344556677889900aabbccddeeff11223344556677889900aabbccddeeff11223344556677889900aabbccdd"
+        },
+        "url": "https://cdn.modrinth.com/data/FITSPROJ/versions/FITSNEW1/fits-2.0.0.jar",
+        "filename": "fits-2.0.0.jar",
+        "primary": true,
+        "size": 4096
+      }
+    ],
+    "dependencies": [
+      { "project_id": "LIBPROJ", "version_id": null, "file_name": null, "dependency_type": "required" },
+      { "project_id": "EXTRAPROJ", "version_id": null, "file_name": null, "dependency_type": "optional" }
+    ]
+  },
+  {
+    "id": "FITSNEXT",
+    "project_id": "FITSPROJ",
+    "name": "Fits 3.0.0",
+    "version_number": "3.0.0",
+    "version_type": "release",
+    "game_versions": ["1.21.1"],
+    "loaders": ["neoforge"],
+    "date_published": "2026-03-01T00:00:00Z",
+    "downloads": 5,
+    "files": [
+      {
+        "hashes": { "sha1": "cccccccccccccccccccccccccccccccccccccccc" },
+        "url": "https://cdn.modrinth.com/data/FITSPROJ/versions/FITSNEXT/fits-3.0.0.jar",
+        "filename": "fits-3.0.0.jar",
+        "primary": true,
+        "size": 4096
+      }
+    ],
+    "dependencies": []
+  }
+]

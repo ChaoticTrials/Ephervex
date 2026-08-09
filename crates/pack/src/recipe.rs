@@ -26,35 +26,75 @@
 //! provider fills all of them, and [`ProviderRecipeMetadata`], which points at
 //! the verbatim original manifest and carries whatever else a provider needs as
 //! opaque JSON. Nothing in the launcher branches on the contents of either.
+//!
+//! # Why this describes an instance rather than an archive
+//!
+//! A recipe starts as what an import learned, but it is not frozen there. A
+//! mod installed later through the mod browser is part of what this instance is
+//! *supposed to contain*, and a server built from the recipe has to include it.
+//! Keeping such a mod anywhere else would mean two records of the same `mods/`
+//! directory that can disagree, so managed mods are entries here, told apart
+//! from the pack's own files by [`PackFileRecipe::origin`]. An instance created
+//! by hand acquires a recipe the first time something is installed into it
+//! ([`PackRecipe::for_manual_instance`]).
+//!
+//! What is still *not* here: a jar the user dropped into `mods/` themselves.
+//! Nothing scans that directory, and a file with no provenance is left alone
+//! rather than given an invented record.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use ephervex_model::{Hash, ImportSourceKind, LoaderSelection};
+use ephervex_model::{Hash, ImportSourceKind, LoaderSelection, ModOrigin, ModProvider};
 use serde::{Deserialize, Serialize};
+
+use crate::error::{PackError, PackResult};
 
 /// The recipe format version, stamped into `recipe.json`.
 ///
 /// Separate from the instance metadata version: a recipe is copied into a
 /// server when one is created from a client, so it travels independently of the
 /// record that referenced it.
-pub const RECIPE_VERSION: u32 = 1;
+///
+/// Version 2 added managed-mod entries — [`PackFileRecipe::origin`],
+/// [`ProviderFileIdentity::provider`], and [`SideRequirement::Unknown`]. The
+/// bump is deliberate rather than a silent additive change: a version 1 build
+/// reading one of these files would drop every browser-installed mod without
+/// noticing, and build a server missing them. Reading a version 1 recipe still
+/// works, because the new fields default.
+pub const RECIPE_VERSION: u32 = 2;
 
 /// Whether one side of the game needs a file.
 ///
-/// Three states rather than a boolean because "optional" is a genuine third
-/// answer that the UI has to offer and the recipe has to remember — collapsing
-/// it either way silently changes what gets installed.
+/// Four states rather than a boolean. "Optional" is a genuine third answer that
+/// the UI has to offer and the recipe has to remember — collapsing it either
+/// way silently changes what gets installed.
+///
+/// [`Unknown`](Self::Unknown) is the fourth, and it is not a synonym for any of
+/// the others. It means the source declared nothing about this side. A
+/// `.mrpack` cannot produce it: that format has three environment values, and
+/// an *omitted* `env` object is defined to mean required on both sides. A
+/// Modrinth project can, because its `client_side`/`server_side` fields have an
+/// `unknown` value an author may leave in place. Reading that as `Required`
+/// would assert something the author declined to assert — and would put the mod
+/// into a reconstructed server on that assertion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SideRequirement {
     Required,
     Optional,
     Unsupported,
+    /// The source says nothing about this side. Never installed automatically;
+    /// distinct from `Optional` so "the author said optional" and "the author
+    /// said nothing" stay tellable apart.
+    Unknown,
 }
 
 impl SideRequirement {
     /// Whether a file with this requirement is installed without asking.
+    ///
+    /// False for `Unknown`: nothing is installed on the strength of an
+    /// undeclared value.
     #[must_use]
     pub const fn is_automatic(self) -> bool {
         matches!(self, Self::Required)
@@ -66,6 +106,12 @@ impl SideRequirement {
         !matches!(self, Self::Unsupported)
     }
 
+    /// Whether installing on this side waits for an explicit decision.
+    #[must_use]
+    pub const fn needs_decision(self) -> bool {
+        matches!(self, Self::Optional | Self::Unknown)
+    }
+
     /// The `ephervex-i18n` message id naming this requirement to a user.
     #[must_use]
     pub const fn message_id(self) -> &'static str {
@@ -73,6 +119,7 @@ impl SideRequirement {
             Self::Required => "pack-requirement-required",
             Self::Optional => "pack-requirement-optional",
             Self::Unsupported => "pack-requirement-unsupported",
+            Self::Unknown => "pack-requirement-unknown",
         }
     }
 
@@ -83,6 +130,7 @@ impl SideRequirement {
             Self::Required => "required",
             Self::Optional => "optional",
             Self::Unsupported => "unsupported",
+            Self::Unknown => "unknown",
         }
     }
 }
@@ -135,6 +183,14 @@ impl PackSide {
 /// be shared by all importers.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderFileIdentity {
+    /// Which catalog the ids below belong to.
+    ///
+    /// `None` for a file whose identity came from a pack manifest that names no
+    /// catalog — a Modrinth pack index gives a path and hashes and nothing to
+    /// resolve a project against. Absence is the honest answer there, and it is
+    /// what keeps such a file from being mistaken for a managed mod.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<ModProvider>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -147,7 +203,20 @@ impl ProviderFileIdentity {
     /// Whether this identity names anything at all.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.project_id.is_none() && self.version_id.is_none() && self.file_id.is_none()
+        self.provider.is_none()
+            && self.project_id.is_none()
+            && self.version_id.is_none()
+            && self.file_id.is_none()
+    }
+
+    /// The provider and project this identity resolves against, if it names
+    /// both.
+    ///
+    /// The pair the mod browser keys on. Half an identity resolves nothing, so
+    /// this returns nothing rather than letting a caller improvise.
+    #[must_use]
+    pub fn project(&self) -> Option<(ModProvider, &str)> {
+        Some((self.provider?, self.project_id.as_deref()?))
     }
 }
 
@@ -173,6 +242,11 @@ pub struct PackFileRecipe {
     /// later needs to know so it can prompt rather than assume.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected: Option<bool>,
+    /// Why this file is in the instance's desired state. Defaults to
+    /// `PackDeclared`, which is what every entry a pack import writes is and
+    /// what every recipe written before managed mods existed contains.
+    #[serde(default)]
+    pub origin: ModOrigin,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<ProviderFileIdentity>,
 }
@@ -195,17 +269,61 @@ impl PackFileRecipe {
 
     /// Whether this file is installed on a side, given a selection.
     ///
-    /// `required` installs, `unsupported` never installs, and `optional`
-    /// installs only if something explicitly selected it — the default for an
-    /// unanswered optional is off.
+    /// `required` installs, `unsupported` never installs, and both `optional`
+    /// and `unknown` install only if something explicitly selected them — the
+    /// default for an unanswered one is off. An undeclared side is treated as
+    /// needing a decision for the same reason an optional one is: nothing here
+    /// justifies installing it on its own.
     #[must_use]
     pub fn is_installed_on(&self, side: PackSide, selection: &OptionalSelection) -> bool {
         match self.requirement(side) {
             SideRequirement::Required => true,
             SideRequirement::Unsupported => false,
-            SideRequirement::Optional => selection.includes(&self.logical_path, self.selected),
+            SideRequirement::Optional | SideRequirement::Unknown => {
+                selection.includes(&self.logical_path, self.selected)
+            }
         }
     }
+
+    /// The managed mod this entry records, if it is one.
+    ///
+    /// A file qualifies only when it names a provider, a project, *and* a
+    /// version: those are what make it re-resolvable. A pack-declared file has
+    /// none of them and is correctly not a managed mod — it is still installed
+    /// and still part of the server plan, just not something the mod browser
+    /// owns. A jar someone dropped into `mods/` has no entry here at all.
+    #[must_use]
+    pub fn managed_mod(&self) -> Option<ManagedMod> {
+        let identity = self.identity.as_ref()?;
+        Some(ManagedMod {
+            provider: identity.provider?,
+            project_id: identity.project_id.clone()?,
+            version_id: identity.version_id.clone()?,
+            file_name: self
+                .logical_path
+                .file_name()?
+                .to_string_lossy()
+                .into_owned(),
+            hashes: self.hashes.clone(),
+            origin: self.origin,
+        })
+    }
+}
+
+/// A mod this instance installed through a provider.
+///
+/// A read model assembled from [`PackFileRecipe::managed_mod`] rather than a
+/// second place the same facts are stored. Everything in it is durable: the
+/// provider and ids survive a reopen, so the mod can be re-resolved without
+/// reading a jar's file name and hoping.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedMod {
+    pub provider: ModProvider,
+    pub project_id: String,
+    pub version_id: String,
+    pub file_name: String,
+    pub hashes: Vec<Hash>,
+    pub origin: ModOrigin,
 }
 
 /// Which override directory a layer came from.
@@ -368,15 +486,21 @@ impl PackRecipe {
         layers
     }
 
-    /// Every optional file for this side, in pack order.
+    /// Every file for this side that is waiting on a decision, in pack order.
+    ///
+    /// Both `optional` and `unknown` qualify: neither installs on its own, and
+    /// both are questions a human has to answer. The component carries which of
+    /// the two it is, because "the author said optional" and "the author said
+    /// nothing" deserve different words in front of a checkbox.
     #[must_use]
     pub fn optional_components(&self, side: PackSide) -> Vec<OptionalComponent> {
         self.files
             .iter()
-            .filter(|file| file.requirement(side) == SideRequirement::Optional)
+            .filter(|file| file.requirement(side).needs_decision())
             .map(|file| OptionalComponent {
                 logical_path: file.logical_path.clone(),
                 size: file.size,
+                requirement: file.requirement(side),
                 // default unchecked unless the pack format gains an
                 // explicit default-selection mechanism. Neither Modrinth's
                 // index nor a CurseForge manifest has one, so the only thing
@@ -414,27 +538,136 @@ impl PackRecipe {
     /// distinguish "unchecked by default" from "the user said no".
     pub fn record_selection(&mut self, side: PackSide, selection: &OptionalSelection) {
         for file in &mut self.files {
-            if file.requirement(side) == SideRequirement::Optional {
+            if file.requirement(side).needs_decision() {
                 file.selected = Some(selection.includes(&file.logical_path, file.selected));
             }
         }
+    }
+
+    /// A recipe for an instance that was created by hand rather than imported.
+    ///
+    /// An instance with no pack still has a desired state the moment a mod is
+    /// installed into it, and that state has to survive a restart and reach
+    /// "Create Server". Rather than inventing a second store for the
+    /// no-pack case, such an instance acquires a recipe on first use: same
+    /// file, same reader, same server planner.
+    ///
+    /// The Minecraft version and loader come from the instance record, so the
+    /// recipe agrees with what the instance actually is; nothing here resolves
+    /// or substitutes either.
+    #[must_use]
+    pub fn for_manual_instance(
+        name: impl Into<String>,
+        minecraft_version: impl Into<String>,
+        loader: LoaderSelection,
+    ) -> Self {
+        Self {
+            recipe_version: RECIPE_VERSION,
+            source_kind: ImportSourceKind::Manual,
+            original_name: name.into(),
+            original_version: None,
+            summary: None,
+            archive_name: None,
+            minecraft_version: minecraft_version.into(),
+            loader,
+            files: Vec::new(),
+            override_layers: Vec::new(),
+            provider_metadata: ProviderRecipeMetadata::new(ImportSourceKind::Manual, None),
+        }
+    }
+
+    /// Every mod installed through a provider, in recipe order.
+    #[must_use]
+    pub fn managed_mods(&self) -> Vec<ManagedMod> {
+        self.files
+            .iter()
+            .filter_map(PackFileRecipe::managed_mod)
+            .collect()
+    }
+
+    /// The entry recording one provider's project, if this instance has it.
+    #[must_use]
+    pub fn managed_project(
+        &self,
+        provider: ModProvider,
+        project_id: &str,
+    ) -> Option<&PackFileRecipe> {
+        self.files.iter().find(|file| {
+            file.identity
+                .as_ref()
+                .and_then(ProviderFileIdentity::project)
+                .is_some_and(|(kind, id)| kind == provider && id == project_id)
+        })
+    }
+
+    /// Adds a managed mod to the desired state.
+    ///
+    /// **Insert-only, on purpose.** If the project is already recorded at a
+    /// different version this refuses rather than replacing. An upsert would
+    /// have to decide what happens to the old, differently-named jar, and the
+    /// honest answer — delete it — is a mod *update*, which this build does not
+    /// implement. Enforcing that here rather than only at the call site means
+    /// the "two jars for one project" state cannot be reached at all, including
+    /// by a future caller who has forgotten the rule.
+    ///
+    /// Re-recording the identical version is a no-op, so an install that turns
+    /// out to be redundant leaves the recipe byte-identical.
+    pub fn record_managed(&mut self, file: PackFileRecipe) -> PackResult<()> {
+        let Some((provider, project_id)) = file
+            .identity
+            .as_ref()
+            .and_then(ProviderFileIdentity::project)
+            .map(|(provider, id)| (provider, id.to_owned()))
+        else {
+            return Err(PackError::ManagedIdentityMissing {
+                path: file.display_name(),
+            });
+        };
+
+        if let Some(existing) = self.managed_project(provider, &project_id) {
+            let installed = existing
+                .identity
+                .as_ref()
+                .and_then(|identity| identity.version_id.clone())
+                .unwrap_or_default();
+            let requested = file
+                .identity
+                .as_ref()
+                .and_then(|identity| identity.version_id.clone())
+                .unwrap_or_default();
+            if installed != requested {
+                return Err(PackError::ManagedVersionConflict {
+                    provider,
+                    project_id,
+                    installed,
+                    requested,
+                });
+            }
+            return Ok(());
+        }
+
+        self.files.push(file);
+        Ok(())
     }
 
     /// Whether any file is optional on either side, i.e. whether any optional
     /// step is worth showing at all.
     #[must_use]
     pub fn has_optional_files(&self) -> bool {
-        self.files.iter().any(|file| {
-            file.client == SideRequirement::Optional || file.server == SideRequirement::Optional
-        })
+        self.files
+            .iter()
+            .any(|file| file.client.needs_decision() || file.server.needs_decision())
     }
 }
 
-/// One optional file, as the import wizard's step 4 needs it.
+/// One file awaiting a decision, as the import wizard's step 4 needs it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OptionalComponent {
     pub logical_path: PathBuf,
     pub size: Option<u64>,
+    /// Whether this side is `optional` or `unknown`. Both wait for an answer;
+    /// only one of them is a statement the author actually made.
+    pub requirement: SideRequirement,
     /// Always false today. Present as a field rather than a constant because
     /// a future pack format may encode a default selection directly.
     pub default_selected: bool,
@@ -588,6 +821,7 @@ mod tests {
             client,
             server,
             selected: None,
+            origin: ModOrigin::PackDeclared,
             identity: None,
         }
     }
@@ -809,5 +1043,202 @@ mod tests {
         assert!(SideRequirement::Optional.is_installable());
         assert!(!SideRequirement::Optional.is_automatic());
         assert!(!SideRequirement::Unsupported.is_installable());
+        assert_eq!(SideRequirement::Unknown.as_str(), "unknown");
+    }
+
+    // -- managed mods ------------------------------------------------------
+
+    /// A mod as the browser installs one: on the client because the user asked,
+    /// and undeclared on the server because the project says nothing.
+    fn managed(project: &str, version: &str, file_name: &str) -> PackFileRecipe {
+        PackFileRecipe {
+            logical_path: PathBuf::from("mods").join(file_name),
+            hashes: vec![
+                Hash::new(
+                    HashAlgorithm::Sha1,
+                    "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+                )
+                .expect("valid sha1"),
+            ],
+            downloads: vec![format!(
+                "https://cdn.modrinth.com/data/{project}/{file_name}"
+            )],
+            size: Some(10),
+            client: SideRequirement::Required,
+            server: SideRequirement::Unknown,
+            selected: None,
+            origin: ModOrigin::UserSelected,
+            identity: Some(ProviderFileIdentity {
+                provider: Some(ModProvider::Modrinth),
+                project_id: Some(project.to_owned()),
+                version_id: Some(version.to_owned()),
+                file_id: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn an_instance_created_by_hand_gets_a_recipe_that_matches_what_it_is() {
+        let recipe = PackRecipe::for_manual_instance(
+            "By hand",
+            "1.20.1",
+            LoaderSelection::exact(LoaderKind::NeoForge, "47.1.106"),
+        );
+        assert_eq!(recipe.source_kind, ImportSourceKind::Manual);
+        assert_eq!(recipe.minecraft_version, "1.20.1");
+        assert_eq!(recipe.loader.version.as_deref(), Some("47.1.106"));
+        assert!(recipe.files.is_empty());
+        assert!(recipe.managed_mods().is_empty());
+    }
+
+    #[test]
+    fn a_managed_mod_carries_everything_needed_to_resolve_it_again() {
+        let mut recipe = PackRecipe::for_manual_instance(
+            "Repro",
+            "1.20.1",
+            LoaderSelection::exact(LoaderKind::NeoForge, "47.1.106"),
+        );
+        recipe
+            .record_managed(managed("u6dRKJwZ", "Orv4ObRj", "library-1.2.3.jar"))
+            .expect("record");
+
+        let mods = recipe.managed_mods();
+        assert_eq!(mods.len(), 1);
+        assert_eq!(mods[0].provider, ModProvider::Modrinth);
+        assert_eq!(mods[0].project_id, "u6dRKJwZ");
+        assert_eq!(mods[0].version_id, "Orv4ObRj");
+        assert_eq!(mods[0].file_name, "library-1.2.3.jar");
+        assert_eq!(mods[0].origin, ModOrigin::UserSelected);
+        assert!(!mods[0].hashes.is_empty(), "verification survives a reopen");
+    }
+
+    #[test]
+    fn a_pack_declared_file_is_not_a_managed_mod_but_is_still_installed() {
+        // The pack's own files stay in the recipe and in the server plan; they
+        // are simply not something the mod browser owns.
+        let recipe = recipe();
+        assert!(recipe.managed_mods().is_empty());
+        assert!(
+            recipe
+                .files_for(PackSide::Client, &OptionalSelection::none())
+                .iter()
+                .any(|file| file.display_name() == "mods/both.jar")
+        );
+    }
+
+    #[test]
+    fn a_file_with_half_an_identity_is_not_promoted_to_a_managed_mod() {
+        // Half an identity resolves nothing. Reporting it as managed would
+        // claim a version the launcher cannot look up.
+        let mut file = managed("u6dRKJwZ", "Orv4ObRj", "library.jar");
+        if let Some(identity) = file.identity.as_mut() {
+            identity.version_id = None;
+        }
+        assert_eq!(file.managed_mod(), None);
+
+        let mut file = managed("u6dRKJwZ", "Orv4ObRj", "library.jar");
+        if let Some(identity) = file.identity.as_mut() {
+            identity.provider = None;
+        }
+        assert_eq!(file.managed_mod(), None);
+    }
+
+    #[test]
+    fn recording_the_same_version_twice_leaves_the_recipe_untouched() {
+        let mut recipe =
+            PackRecipe::for_manual_instance("Repro", "1.20.1", LoaderSelection::vanilla());
+        let entry = managed("u6dRKJwZ", "Orv4ObRj", "library-1.2.3.jar");
+        recipe.record_managed(entry.clone()).expect("record");
+        let after_first = recipe.clone();
+
+        recipe
+            .record_managed(entry)
+            .expect("an exact repeat is a no-op");
+        assert_eq!(recipe, after_first);
+        assert_eq!(recipe.files.len(), 1);
+    }
+
+    #[test]
+    fn recording_a_different_version_of_an_installed_project_is_refused() {
+        // Replacing it is a mod update, which this build does not implement.
+        // Refusing here means no code path can leave two jars for one project.
+        let mut recipe =
+            PackRecipe::for_manual_instance("Repro", "1.20.1", LoaderSelection::vanilla());
+        recipe
+            .record_managed(managed("u6dRKJwZ", "Orv4ObRj", "library-1.2.3.jar"))
+            .expect("record");
+
+        let error = recipe
+            .record_managed(managed("u6dRKJwZ", "PPPPPPPP", "library-2.0.0.jar"))
+            .expect_err("must refuse");
+        assert!(matches!(
+            error,
+            PackError::ManagedVersionConflict {
+                ref installed,
+                ref requested,
+                ..
+            } if installed == "Orv4ObRj" && requested == "PPPPPPPP"
+        ));
+        assert_eq!(
+            recipe.files.len(),
+            1,
+            "the refused entry left nothing behind"
+        );
+    }
+
+    #[test]
+    fn recording_a_file_with_no_provider_identity_is_refused() {
+        let mut recipe =
+            PackRecipe::for_manual_instance("Repro", "1.20.1", LoaderSelection::vanilla());
+        let mut file = managed("u6dRKJwZ", "Orv4ObRj", "library.jar");
+        file.identity = None;
+        assert!(matches!(
+            recipe.record_managed(file),
+            Err(PackError::ManagedIdentityMissing { .. })
+        ));
+    }
+
+    #[test]
+    fn an_undeclared_server_side_never_installs_on_its_own() {
+        // The whole point of keeping `unknown` distinct: it must not behave
+        // like `required` on the side nobody declared.
+        let mut recipe =
+            PackRecipe::for_manual_instance("Repro", "1.20.1", LoaderSelection::vanilla());
+        recipe
+            .record_managed(managed("u6dRKJwZ", "Orv4ObRj", "library.jar"))
+            .expect("record");
+
+        let client = recipe.plan(PackSide::Client, &OptionalSelection::none());
+        assert_eq!(client.files.len(), 1, "the user asked for it on the client");
+
+        let server = recipe.plan(PackSide::Server, &OptionalSelection::none());
+        assert!(
+            server.files.is_empty(),
+            "an undeclared server side is a question, not a yes"
+        );
+
+        // ...and it is a question that is asked, rather than silently dropped.
+        let waiting = recipe.optional_components(PackSide::Server);
+        assert_eq!(waiting.len(), 1);
+        assert_eq!(waiting[0].requirement, SideRequirement::Unknown);
+        assert!(!waiting[0].starts_selected());
+    }
+
+    #[test]
+    fn an_undeclared_side_is_distinguishable_from_an_optional_one_after_a_reopen() {
+        let mut recipe =
+            PackRecipe::for_manual_instance("Repro", "1.20.1", LoaderSelection::vanilla());
+        recipe
+            .record_managed(managed("u6dRKJwZ", "Orv4ObRj", "library.jar"))
+            .expect("record");
+
+        let json = serde_json::to_string(&recipe).expect("serialize");
+        assert!(
+            json.contains("\"server\":\"unknown\""),
+            "the undeclared state is what is written, not a resolved guess: {json}"
+        );
+        let back: PackRecipe = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.files[0].server, SideRequirement::Unknown);
+        assert_eq!(back, recipe);
     }
 }

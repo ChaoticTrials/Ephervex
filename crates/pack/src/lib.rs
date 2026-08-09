@@ -48,6 +48,7 @@ pub mod detect;
 pub mod error;
 pub mod import;
 pub mod install;
+pub mod managed;
 pub mod modrinth;
 pub mod path;
 pub mod policy;
@@ -58,17 +59,19 @@ pub use archive::{ExtractionLimits, ExtractionReport, PackArchive};
 pub use detect::{
     CURSEFORGE_MANIFEST, MODRINTH_INDEX, PRISM_PACK, PackFormat, has_mrpack_extension, identify,
 };
+pub use ephervex_model::ModOrigin;
 pub use error::{PackError, PackResult};
 pub use import::{
     MaterializeRequest, MaterializedPack, PackAnalysis, analyze, has_retained_recipe, materialize,
     retained_recipe,
 };
 pub use install::{AppliedLayer, FileInstall, MaterializedFiles, apply_overrides, install_files};
-pub use path::RESERVED_METADATA_DIR;
+pub use managed::{MODS_DIR, ManagedModInstall, ManagedModInstallation, install_managed};
+pub use path::{RESERVED_METADATA_DIR, safe_file_name};
 pub use policy::PackPolicy;
 pub use recipe::{
-    OptionalComponent, OptionalSelection, OverrideLayer, OverrideScope, PackFileRecipe, PackRecipe,
-    PackSide, ProviderFileIdentity, ProviderRecipeMetadata, RECIPE_VERSION, SidePlan,
+    ManagedMod, OptionalComponent, OptionalSelection, OverrideLayer, OverrideScope, PackFileRecipe,
+    PackRecipe, PackSide, ProviderFileIdentity, ProviderRecipeMetadata, RECIPE_VERSION, SidePlan,
     SideRequirement,
 };
 pub use store::{RECIPE_FILE, SourceStore, provider_directory};

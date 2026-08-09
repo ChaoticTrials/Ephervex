@@ -633,6 +633,9 @@ pack-recipe-layer-missing = One of the pack's file layers was not kept, so a ser
 pack-requirement-required = Required
 pack-requirement-optional = Optional
 pack-requirement-unsupported = Not supported
+# Distinct from "Optional": the mod's author declared nothing for this side, so
+# Ephervex has nothing to go on and does not guess on their behalf.
+pack-requirement-unknown = Not stated
 
 error-pack-archive-unreadable = The pack file could not be read.
 .action = Check that { $path } exists and is readable.
@@ -705,3 +708,108 @@ error-pack-recipe-unsupported-version = This instance's pack recipe was written 
 .action = Update Ephervex rather than letting this build read part of it.
 
 error-pack-canceled = The import was canceled.
+
+## Mods installed through a provider
+#
+# Project ids, version ids, file names, and provider names are technical values
+# and are passed in as arguments rather than translated.
+
+# A jar Ephervex did not install is never overwritten. It is very often the
+# local build the instance exists to reproduce a bug against.
+error-mod-destination-occupied = A file Ephervex did not install is already in the way.
+.action = { $path } was not installed by Ephervex, so it was left alone. Move or rename it if you want this mod installed there.
+
+error-mod-destination-collision = Two of these mods install under the same file name.
+.action = { $name } is claimed twice, so installing them would leave only one. Install them separately, or leave one out.
+
+# Changing an installed mod's version is a mod update, which this build does not
+# implement. Replacing the file would delete a jar the user did not ask about.
+error-mod-already-installed = That mod is already installed at a different version.
+.action = { $project } is installed from { $provider } at { $installed }, not { $requested }. Changing an installed mod's version is not supported yet.
+
+error-mod-managed-identity-missing = That file cannot be recorded as an installed mod.
+.action = Ephervex only records mods it can look up again by project and version, so nothing was invented for { $path }.
+
+## Browsing and resolving mods
+#
+# Almost every message here is a refusal. Each one is a case where guessing
+# would produce an instance that reproduces something other than the bug being
+# chased, so the launcher says what it will not do and why.
+
+mod-search-empty = No mods matched.
+.action = Try a different search, or turn on incompatible results to see mods that do not fit this instance.
+mod-search-count = { $count ->
+        [one] { $count } mod
+       *[other] { $count } mods
+    }
+mod-list-empty = No mods have been installed into this instance through a provider.
+mod-installed-count = { $count ->
+        [one] { $count } installed mod
+       *[other] { $count } installed mods
+    }
+mod-install-completed = Installed { $name }.
+mod-install-nothing-to-do = Everything requested is already installed at the requested version.
+
+# Shown next to an incompatible result rather than hiding it, so a user can see
+# why the mod they are looking at is not offered.
+mod-incompatible-minecraft-version = Does not support Minecraft { $required }.
+mod-incompatible-loader = Does not support { $required }.
+
+mod-warning-client-side-unsupported = { $project } says it does not run on the client.
+.action = It was installed because you asked for it by name. Remove it if this instance is not meant to have it.
+mod-warning-uncheckable-conflict = { $declared_by } says it conflicts with the file { $file_name }, which Ephervex cannot check automatically.
+.action = Check your mods folder for that file.
+mod-warning-optional-not-offered = { $project } was selected as an optional dependency, but nothing in this graph offers it.
+
+error-mod-provider-unreachable = { $provider } could not be reached.
+.action = Check the network connection and try again.
+
+error-mod-provider-response-invalid = { $provider } returned something Ephervex could not read.
+.action = This is usually temporary. If it persists, Ephervex may need updating for a changed API.
+
+error-mod-project-unknown = No such mod.
+.action = Check the project id or slug. Ephervex looked for { $reference }.
+
+error-mod-project-type-unsupported = That is not a mod.
+.action = { $reference } is a { $project_type }. Modpacks are imported rather than installed into an existing instance.
+
+error-mod-version-unknown = No such version.
+
+# At most one file per version may be marked primary, so two is a malformed
+# version rather than a choice to make.
+error-mod-primary-file-ambiguous = That version does not name exactly one file to install.
+.action = Ephervex will not pick between { $found } candidate files. Choose a different version.
+
+error-mod-hashes-missing = That version published no checksum Ephervex can verify.
+.action = Every downloaded file is verified before it is installed, so this one is refused.
+
+error-mod-loader-cannot-host-mods = { $loader } instances cannot install mods.
+.action = Create a Forge or NeoForge instance to browse for mods.
+
+# Never resolved by substituting a nearby release.
+error-mod-version-incompatible = That exact version does not fit this instance.
+.action = { $version_id } does not support Minecraft { $minecraft } with { $loader }. Choose a version that does; Ephervex will not substitute another.
+
+error-mod-no-compatible-version = No version of that mod fits this instance.
+.action = Nothing published for { $project } supports Minecraft { $minecraft } with { $loader }.
+
+# Two mods each demanding a different exact version is a genuine conflict.
+# Picking one would be the launcher inventing an answer.
+error-mod-conflicting-pins = Two mods require different exact versions of the same dependency.
+.action = { $project } is required at { $first } by { $first_source } and at { $second } by { $second_source }. Install them separately, or choose versions that agree.
+
+error-mod-dependency-incompatible = These mods cannot be installed together.
+.action = { $declared_by } declares that it is incompatible with { $conflicting }.
+
+error-mod-dependency-unresolvable = A required dependency could not be identified.
+.action = { $declared_by } requires the file { $file_name }, which names no project Ephervex can look up. Install that file yourself, then try again.
+
+error-mod-dependency-inconsistent = A dependency contradicts itself.
+.action = It names the project { $project_id } and a version belonging to { $version_project_id }.
+
+error-mod-dependency-malformed = A dependency of { $declared_by } identifies nothing to install.
+
+error-mod-resolution-did-not-converge = Ephervex could not settle this mod's dependencies.
+.action = This is a defect in Ephervex rather than a problem with the mod. Please report it.
+
+error-mod-canceled = The operation was canceled.

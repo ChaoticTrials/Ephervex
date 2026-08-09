@@ -18,15 +18,17 @@ use std::process::ExitCode;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use ephervex_core::{
     AccountStatus, AccountSummary, ApiSettings, App, ArgumentForm, Artifact, AssetIndexRef,
-    AuthEvent, AuthObserver, CancellationToken, ClientFolder, ClientRecord, Config, CoreError,
-    CreatedClient, CredentialStorage, DuplicateClient, Entitlements, FileDisposition, Freshness,
-    ImportRequest, ImportedPack, JavaPathChoice, JavaPlan, JavaPlanRequest, JavaRuntime,
-    LaunchEvent, LaunchFeatures, LaunchObserver, LaunchOptions, LaunchOutcome, LaunchState,
-    LoginFlow, LoginOptions, LoginRequest, ManagedInstallation, NewClient, NewServer,
-    OptionalSelection, OutputLine, PackAnalysis, PackRecipe, PackSide, Paths,
-    PreferenceApplication, PreferenceKey, ReconciliationReport, ReleaseListing, RequirementBasis,
-    RuntimeInventory, SecretString, ServerFolder, ServerRecord, Session, SideRequirement,
-    VersionMetadata, VersionRecord,
+    AuthEvent, AuthObserver, CancellationToken, ClientFolder, ClientRecord, Compatibility, Config,
+    CoreError, CreatedClient, CredentialStorage, DEFAULT_SEARCH_LIMIT, DuplicateClient,
+    Entitlements, FileDisposition, Freshness, ImportRequest, ImportedPack, IncompatibilityReason,
+    InstalledMods, JavaPathChoice, JavaPlan, JavaPlanRequest, JavaRuntime, LaunchEvent,
+    LaunchFeatures, LaunchObserver, LaunchOptions, LaunchOutcome, LaunchState, LoginFlow,
+    LoginOptions, LoginRequest, ManagedInstallation, ManagedMod, ModInstallPlan, ModInstallRequest,
+    ModProjectDetails, ModSearchQuery, ModSearchResults, NewClient, NewServer, OperationReporter,
+    OptionalSelection, OutputLine, PackAnalysis, PackRecipe, PackSide, Paths, PlanWarning,
+    PlannedMod, PreferenceApplication, PreferenceKey, ReconciliationReport, ReleaseListing,
+    RequirementBasis, RuntimeInventory, SecretString, ServerFolder, ServerRecord, Session,
+    SideRequirement, VersionMetadata, VersionRecord,
 };
 use ephervex_i18n::Arg as MessageArg;
 use ephervex_model::{InstanceId, LoaderKind, LoaderSelection, ServerId, StorageClass};
@@ -103,6 +105,11 @@ enum Command {
         #[command(subcommand)]
         command: ApiCommand,
     },
+    /// Find and install mods in a client instance.
+    Mod {
+        #[command(subcommand)]
+        command: ModCommand,
+    },
     /// Import a modpack archive into a client instance.
     Import(ImportArgs),
     /// Install and launch a client instance, streaming its log to the terminal.
@@ -159,6 +166,98 @@ struct ImportArgs {
     /// Take every optional file the pack offers.
     #[arg(long, conflicts_with = "optional")]
     all_optional: bool,
+}
+
+/// Mods are searched for, inspected, and installed against one instance,
+/// because whether a mod fits depends entirely on that instance's exact
+/// Minecraft version and mod loader.
+#[derive(Debug, Subcommand)]
+enum ModCommand {
+    /// Search Modrinth for mods that fit an instance.
+    Search {
+        /// The client instance the results are judged against.
+        instance: InstanceId,
+        /// What to search for.
+        query: String,
+        /// Show at most this many results.
+        #[arg(long, default_value_t = DEFAULT_SEARCH_LIMIT)]
+        limit: u8,
+        /// Also list mods that do not fit, with the reason each one does not.
+        ///
+        /// They are shown so you can see why the mod you were looking for is
+        /// not offered. They still cannot be installed.
+        #[arg(long)]
+        include_incompatible: bool,
+    },
+    /// Show a mod and the versions available for an instance.
+    Show {
+        instance: InstanceId,
+        /// The mod, by its Modrinth project id or slug.
+        project: String,
+        /// Also list versions that do not fit, with the reason each one does
+        /// not.
+        #[arg(long)]
+        include_incompatible: bool,
+    },
+    /// Show what installing a mod would involve, without installing it.
+    ///
+    /// Reports the version that would be installed, every dependency that
+    /// comes with it, and the optional ones you could add. Writes nothing.
+    Plan {
+        /// The client instance the mod would be installed into.
+        instance: InstanceId,
+        /// The mod, by its Modrinth project id or slug.
+        project: String,
+        #[command(flatten)]
+        selection: ModSelectionArgs,
+    },
+    /// Install a mod and everything it requires.
+    ///
+    /// The newest version that fits the instance is chosen unless you name
+    /// one. Required dependencies are installed with it; optional ones are not,
+    /// unless you ask for them.
+    Install {
+        /// The client instance to install into.
+        instance: InstanceId,
+        /// The mod, by its Modrinth project id or slug.
+        project: String,
+        #[command(flatten)]
+        selection: ModSelectionArgs,
+    },
+    /// List the mods installed into an instance through a provider.
+    ///
+    /// Jars you placed in the mods folder yourself are not listed: Ephervex has
+    /// no project or version for them and does not guess at one.
+    List {
+        /// The client instance to list.
+        instance: InstanceId,
+    },
+}
+
+/// Which version, and which optional extras, an install should take.
+#[derive(Debug, Args)]
+struct ModSelectionArgs {
+    /// Install this exact version instead of the newest compatible one.
+    ///
+    /// Preserved exactly. If it does not fit the instance, the install is
+    /// refused rather than moved to a nearby release.
+    #[arg(long)]
+    version: Option<String>,
+    /// Also install this optional dependency, by its project id.
+    ///
+    /// Repeatable. Optional dependencies are left out unless named here.
+    #[arg(long = "optional", value_name = "PROJECT")]
+    optional: Vec<String>,
+}
+
+impl ModSelectionArgs {
+    fn request(&self, project: &str) -> ModInstallRequest {
+        let request = ModInstallRequest::new(project).selecting_optional(self.optional.clone());
+        match &self.version {
+            Some(version) => request.at_version(version),
+            None => request,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -638,6 +737,13 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
         Command::Api { command } => {
             let mut app = open_app()?;
             run_api_command(&mut app, command, cli.json)
+        }
+        Command::Mod { command } => {
+            let app = open_app()?;
+            // Every one of these talks to a provider, so they all need an
+            // executor, for the same reason the Minecraft commands do.
+            let runtime = tokio::runtime::Runtime::new()?;
+            runtime.block_on(run_mod_command(&app, command, cli.json))
         }
         Command::Import(args) => {
             let app = open_app()?;
@@ -1356,6 +1462,377 @@ fn list_servers(app: &App, json: bool) -> anyhow::Result<()> {
         )
     );
     Ok(())
+}
+
+// ------------------------------------------------------------------- mods
+
+async fn run_mod_command(app: &App, command: &ModCommand, json: bool) -> anyhow::Result<()> {
+    match command {
+        ModCommand::Search {
+            instance,
+            query,
+            limit,
+            include_incompatible,
+        } => {
+            let query = ModSearchQuery::new(query)
+                .limited(*limit)
+                .including_incompatible(*include_incompatible);
+            let results = app.search_mods(*instance, &query).await?;
+            print_mod_search(&results, json);
+        }
+        ModCommand::Show {
+            instance,
+            project,
+            include_incompatible,
+        } => {
+            let details = app
+                .mod_project(*instance, project, *include_incompatible)
+                .await?;
+            print_mod_project(&details, json);
+        }
+        ModCommand::Plan {
+            instance,
+            project,
+            selection,
+        } => {
+            let plan = app
+                .plan_mod_installation(*instance, &selection.request(project))
+                .await?;
+            print_mod_plan(&plan, json);
+        }
+        ModCommand::Install {
+            instance,
+            project,
+            selection,
+        } => {
+            let installed = app
+                .install_mods(
+                    *instance,
+                    &selection.request(project),
+                    &OperationReporter::silent("installing-mods"),
+                    &CancellationToken::new(),
+                )
+                .await?;
+            print_installed_mods(&installed, json);
+        }
+        ModCommand::List { instance } => {
+            let mods = app.managed_mods(*instance)?;
+            print_managed_mods(&mods, json);
+        }
+    }
+    Ok(())
+}
+
+/// Why something does not fit, as untranslated technical detail plus a
+/// localized sentence.
+fn incompatibility_text(reason: &IncompatibilityReason) -> String {
+    match reason {
+        IncompatibilityReason::MinecraftVersion { required, .. } => ephervex_i18n::lookup_args(
+            reason.message_id(),
+            [("required", MessageArg::from(required.as_str()))],
+        ),
+        IncompatibilityReason::Loader { required, .. } => ephervex_i18n::lookup_args(
+            reason.message_id(),
+            [("required", MessageArg::from(required.to_string()))],
+        ),
+    }
+}
+
+fn incompatibility_json(reason: &IncompatibilityReason) -> serde_json::Value {
+    match reason {
+        IncompatibilityReason::MinecraftVersion {
+            required,
+            supported,
+        } => serde_json::json!({
+            "reason": reason.as_str(),
+            "required": required,
+            "supported": supported,
+        }),
+        IncompatibilityReason::Loader {
+            required,
+            supported,
+        } => serde_json::json!({
+            "reason": reason.as_str(),
+            "required": required.to_string(),
+            "supported": supported,
+        }),
+    }
+}
+
+fn compatibility_json(compatibility: &Compatibility) -> serde_json::Value {
+    serde_json::json!({
+        "compatible": compatibility.is_compatible(),
+        "reasons": compatibility
+            .reasons()
+            .iter()
+            .map(incompatibility_json)
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn print_mod_search(results: &ModSearchResults, json: bool) {
+    if json {
+        print_json(&serde_json::json!({
+            "provider": results.provider.as_str(),
+            "total_hits": results.total_hits,
+            "offset": results.offset,
+            "hits": results.hits.iter().map(|hit| serde_json::json!({
+                "project_id": hit.project.id,
+                "slug": hit.project.slug,
+                "title": hit.project.title,
+                "description": hit.project.description,
+                "author": hit.project.author,
+                "client_side": hit.project.client_side.to_string(),
+                "server_side": hit.project.server_side.to_string(),
+                "best_version": hit.best_version.as_ref().map(|version| serde_json::json!({
+                    "id": version.id,
+                    "version_number": version.version_number,
+                    "file_name": version.file.file_name,
+                })),
+                "compatibility": compatibility_json(&hit.compatibility),
+            })).collect::<Vec<_>>(),
+        }));
+        return;
+    }
+
+    if results.hits.is_empty() {
+        println!("{}", ephervex_i18n::lookup("mod-search-empty"));
+        if let Some(action) = ephervex_i18n::lookup_attribute("mod-search-empty", "action") {
+            println!("  {action}");
+        }
+        return;
+    }
+
+    for hit in &results.hits {
+        println!("{}  {}", hit.project.id, hit.project.title);
+        println!("  {}", hit.project.description);
+        match &hit.best_version {
+            Some(version) => println!("  version: {} ({})", version.version_number, version.id),
+            None => {
+                for reason in hit.compatibility.reasons() {
+                    println!("  {}", incompatibility_text(reason));
+                }
+            }
+        }
+    }
+    println!(
+        "{}",
+        ephervex_i18n::lookup_args(
+            "mod-search-count",
+            [("count", MessageArg::from(results.hits.len()))]
+        )
+    );
+}
+
+fn print_mod_project(details: &ModProjectDetails, json: bool) {
+    if json {
+        print_json(&serde_json::json!({
+            "project_id": details.project.id,
+            "slug": details.project.slug,
+            "title": details.project.title,
+            "description": details.project.description,
+            "client_side": details.project.client_side.to_string(),
+            "server_side": details.project.server_side.to_string(),
+            "default_version": details.default_version,
+            "versions": details.versions.iter().map(|entry| serde_json::json!({
+                "id": entry.version.id,
+                "name": entry.version.name,
+                "version_number": entry.version.version_number,
+                "channel": entry.version.channel.as_str(),
+                "game_versions": entry.version.game_versions,
+                "loaders": entry.version.loaders,
+                "published_at": entry.version.published_at.to_rfc3339(),
+                "file_name": entry.version.file.file_name,
+                "compatibility": compatibility_json(&entry.compatibility),
+                "default": Some(&entry.version.id) == details.default_version.as_ref(),
+            })).collect::<Vec<_>>(),
+        }));
+        return;
+    }
+
+    println!("{}  {}", details.project.id, details.project.title);
+    println!("  {}", details.project.description);
+    println!(
+        "  client: {}  server: {}",
+        details.project.client_side, details.project.server_side
+    );
+    for entry in &details.versions {
+        let marker = if Some(&entry.version.id) == details.default_version.as_ref() {
+            "*"
+        } else {
+            " "
+        };
+        println!(
+            "{marker} {}  {}  ({})",
+            entry.version.id, entry.version.version_number, entry.version.file.file_name
+        );
+        for reason in entry.compatibility.reasons() {
+            println!("    {}", incompatibility_text(reason));
+        }
+    }
+}
+
+fn planned_json(planned: &PlannedMod) -> serde_json::Value {
+    serde_json::json!({
+        "project_id": planned.version.project_id,
+        "title": planned.project.title,
+        "version_id": planned.version.id,
+        "version_number": planned.version.version_number,
+        "file_name": planned.version.file.file_name,
+        "origin": planned.origin.as_str(),
+        "requested_by": planned.requested_by,
+        "server_side": planned.project.server_side.to_string(),
+    })
+}
+
+fn warning_text(warning: &PlanWarning) -> String {
+    match warning {
+        PlanWarning::ClientSideUnsupported { project_id }
+        | PlanWarning::OptionalNotOffered { project_id } => ephervex_i18n::lookup_args(
+            warning.message_id(),
+            [("project", MessageArg::from(project_id.as_str()))],
+        ),
+        PlanWarning::UncheckableConflict {
+            declared_by,
+            file_name,
+        } => ephervex_i18n::lookup_args(
+            warning.message_id(),
+            [
+                ("declared_by", MessageArg::from(declared_by.as_str())),
+                ("file_name", MessageArg::from(file_name.as_str())),
+            ],
+        ),
+    }
+}
+
+fn print_mod_plan(plan: &ModInstallPlan, json: bool) {
+    if json {
+        print_json(&serde_json::json!({
+            "provider": plan.provider.as_str(),
+            "root": planned_json(&plan.root),
+            "dependencies": plan.dependencies.iter().map(planned_json).collect::<Vec<_>>(),
+            "optional": plan.optional.iter().map(|candidate| serde_json::json!({
+                "project_id": candidate.project_id,
+                "declared_by": candidate.declared_by,
+                "selected": false,
+                "version_id": candidate.version.as_ref().map(|version| version.id.clone()),
+                "compatibility": compatibility_json(&candidate.compatibility),
+            })).collect::<Vec<_>>(),
+            "external": plan.external.iter().map(|external| serde_json::json!({
+                "kind": external.kind.as_str(),
+                "file_name": external.file_name,
+                "declared_by": external.declared_by,
+            })).collect::<Vec<_>>(),
+            "embedded": plan.embedded.iter().map(|embedded| serde_json::json!({
+                "project_id": embedded.project_id,
+                "file_name": embedded.file_name,
+                "declared_by": embedded.declared_by,
+            })).collect::<Vec<_>>(),
+            "already_installed": plan.already_installed.iter().map(|installed| serde_json::json!({
+                "project_id": installed.project_id,
+                "version_id": installed.version_id,
+            })).collect::<Vec<_>>(),
+            "warnings": plan.warnings.iter().map(warning_text).collect::<Vec<_>>(),
+        }));
+        return;
+    }
+
+    println!(
+        "{}  {}  ({})",
+        plan.root.version.project_id, plan.root.project.title, plan.root.version.version_number
+    );
+    for planned in &plan.dependencies {
+        println!(
+            "  + {}  {}  ({})",
+            planned.version.project_id, planned.project.title, planned.version.version_number
+        );
+    }
+    for candidate in &plan.optional {
+        // Unchecked by default, and shown as such rather than hidden.
+        println!("  [ ] {} (optional)", candidate.project_id);
+    }
+    for external in &plan.external {
+        println!("  ? {} ({})", external.file_name, external.kind.as_str());
+    }
+    for installed in &plan.already_installed {
+        println!("  = {} (already installed)", installed.project_id);
+    }
+    for warning in &plan.warnings {
+        eprintln!("{}", warning_text(warning));
+    }
+}
+
+fn print_installed_mods(installed: &InstalledMods, json: bool) {
+    if json {
+        print_json(&serde_json::json!({
+            "installed": installed.installation.installed,
+            "repaired": installed.installation.repaired,
+            "already_present": installed.installation.already_present,
+            "reused_from_cache": installed.installation.reused_from_cache,
+            "bytes": installed.installation.bytes,
+            "plan": {
+                "root": planned_json(&installed.plan.root),
+                "dependencies": installed.plan.dependencies.iter().map(planned_json).collect::<Vec<_>>(),
+            },
+        }));
+        return;
+    }
+
+    if installed.installation.changed_anything() {
+        println!(
+            "{}",
+            ephervex_i18n::lookup_args(
+                "mod-install-completed",
+                [(
+                    "name",
+                    MessageArg::from(installed.plan.root.project.title.as_str())
+                )]
+            )
+        );
+        for path in &installed.installation.installed {
+            println!("  {}", path.display());
+        }
+    } else {
+        println!("{}", ephervex_i18n::lookup("mod-install-nothing-to-do"));
+    }
+    for warning in &installed.plan.warnings {
+        eprintln!("{}", warning_text(warning));
+    }
+}
+
+fn print_managed_mods(mods: &[ManagedMod], json: bool) {
+    if json {
+        print_json(&serde_json::json!({
+            "mods": mods.iter().map(|managed| serde_json::json!({
+                "provider": managed.provider.as_str(),
+                "project_id": managed.project_id,
+                "version_id": managed.version_id,
+                "file_name": managed.file_name,
+                "origin": managed.origin.as_str(),
+                "hashes": managed.hashes.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            })).collect::<Vec<_>>(),
+        }));
+        return;
+    }
+
+    if mods.is_empty() {
+        println!("{}", ephervex_i18n::lookup("mod-list-empty"));
+        return;
+    }
+    for managed in mods {
+        println!(
+            "{}  {}  {}  ({})",
+            managed.provider, managed.project_id, managed.version_id, managed.file_name
+        );
+        println!("  {}  {}", managed.origin.as_str(), managed.file_name);
+    }
+    println!(
+        "{}",
+        ephervex_i18n::lookup_args(
+            "mod-installed-count",
+            [("count", MessageArg::from(mods.len()))]
+        )
+    );
 }
 
 async fn run_minecraft_command(
@@ -2935,6 +3412,12 @@ fn localized_failure(error: &CoreError) -> (String, Option<String>) {
     }
     if let Some(loader) = error.unsupported_loader() {
         args.push(("loader", MessageArg::from(loader)));
+    }
+    // Failures that name several technical values state their own arguments,
+    // so a message gaining a placeholder does not need a branch here.
+    let supplied = error.message_args();
+    for (key, value) in &supplied {
+        args.push((key, MessageArg::from(value.as_str())));
     }
 
     let summary = if args.is_empty() {

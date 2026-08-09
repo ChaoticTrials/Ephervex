@@ -1,0 +1,43 @@
+{
+  "hits": [
+    {
+      "project_id": "FITSPROJ",
+      "slug": "fits",
+      "title": "Fits This Instance",
+      "description": "Has a version for this exact release and loader.",
+      "author": "someone",
+      "client_side": "required",
+      "server_side": "required",
+      "project_type": "mod",
+      "categories": ["neoforge", "utility"],
+      "versions": ["1.20.1"]
+    },
+    {
+      "project_id": "OLDPROJ",
+      "slug": "old",
+      "title": "For A Later Release",
+      "description": "Only published for a Minecraft version this instance is not on.",
+      "author": "someone",
+      "client_side": "required",
+      "server_side": "unsupported",
+      "project_type": "mod",
+      "categories": ["neoforge"],
+      "versions": ["1.21.1"]
+    },
+    {
+      "project_id": "SPLITPROJ",
+      "slug": "split",
+      "title": "Split Across Two Versions",
+      "description": "Supports this release, and supports this loader, but never in the same version.",
+      "author": "someone",
+      "client_side": "required",
+      "server_side": "unknown",
+      "project_type": "mod",
+      "categories": ["forge", "neoforge"],
+      "versions": ["1.20.1", "1.21.1"]
+    }
+  ],
+  "offset": 0,
+  "limit": 10,
+  "total_hits": 3
+}

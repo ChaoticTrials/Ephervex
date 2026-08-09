@@ -73,6 +73,30 @@ pub fn safe_relative_path(raw: &[u8], strip_components: usize) -> Option<PathBuf
     Some(safe)
 }
 
+/// Validates a provider-supplied file name as a single, safe path component.
+///
+/// Stricter than [`safe_relative_path`] on purpose. That function validates an
+/// archive *path*, which legitimately has directories in it; this validates a
+/// name a remote catalog published for one file, which never should. A
+/// `filename` of `nested/mod.jar` is not something to helpfully create a
+/// directory for — it is a provider saying something this launcher does not
+/// expect, and the safe response is to refuse rather than to guess at an
+/// intention.
+///
+/// Returns `None` for anything with a separator, a traversal component, a
+/// reserved name, or nothing in it at all.
+#[must_use]
+pub fn safe_file_name(raw: &str) -> Option<PathBuf> {
+    let candidate = safe_relative_path(raw.as_bytes(), 0)?;
+    let mut components = candidate.components();
+    let only = match (components.next(), components.next()) {
+        (Some(Component::Normal(part)), None) => PathBuf::from(part),
+        // Zero components (empty, or `.`), or more than one (a directory).
+        _ => return None,
+    };
+    (!is_reserved(&only)).then_some(only)
+}
+
 /// Whether a validated relative path would write into launcher-owned metadata.
 ///
 /// Checked on the *validated* path rather than on the raw name so that

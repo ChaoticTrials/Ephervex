@@ -278,9 +278,10 @@ mod tests {
         store.write_recipe(&recipe()).expect("write");
 
         let path = store.recipe_path();
-        let text = std::fs::read_to_string(&path)
-            .expect("read")
-            .replace("\"recipe_version\": 1", "\"recipe_version\": 99");
+        let text = std::fs::read_to_string(&path).expect("read").replace(
+            &format!("\"recipe_version\": {RECIPE_VERSION}"),
+            "\"recipe_version\": 99",
+        );
         std::fs::write(&path, text).expect("write");
 
         let error = store.read_recipe().expect_err("must refuse");
@@ -288,10 +289,52 @@ mod tests {
             error,
             PackError::RecipeUnsupportedVersion {
                 found: 99,
-                supported: 1,
+                supported: RECIPE_VERSION,
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn a_recipe_written_before_managed_mods_existed_still_reads() {
+        // Version 1 recipes are on disk in every instance imported by an
+        // earlier build. Refusing them, or misreading their files, would strand
+        // instances that are working perfectly well.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = SourceStore::new(dir.path().join("source"));
+        std::fs::create_dir_all(store.dir()).expect("mkdir");
+        std::fs::write(
+            store.recipe_path(),
+            r#"{
+              "recipe_version": 1,
+              "source_kind": "modrinth_pack",
+              "original_name": "Older Import",
+              "minecraft_version": "1.20.1",
+              "loader": {"kind": "neo_forge", "version": "47.1.106"},
+              "files": [{
+                "logical_path": "mods/a.jar",
+                "hashes": [{"algorithm": "sha1", "digest": "da39a3ee5e6b4b0d3255bfef95601890afd80709"}],
+                "downloads": ["https://cdn.modrinth.com/data/x/a.jar"],
+                "client": "required",
+                "server": "required"
+              }],
+              "provider_metadata": {"kind": "modrinth_pack"}
+            }"#,
+        )
+        .expect("write");
+
+        let recipe = store.read_recipe().expect("a version 1 recipe still reads");
+        assert_eq!(recipe.recipe_version, 1);
+        assert_eq!(recipe.files.len(), 1);
+        assert_eq!(
+            recipe.files[0].origin,
+            ephervex_model::ModOrigin::PackDeclared,
+            "a file written before origins existed is what it always was: the pack's"
+        );
+        assert!(
+            recipe.managed_mods().is_empty(),
+            "nothing in an old recipe is retroactively a managed mod"
+        );
     }
 
     #[test]

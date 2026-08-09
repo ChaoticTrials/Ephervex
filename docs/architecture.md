@@ -43,8 +43,8 @@ prevents UI code from acquiring storage or provider policy accidentally.
 | `ephervex-auth` | Microsoft, Xbox, and Minecraft Services authentication; offline identities; account sessions; keyring and memory-only credentials |
 | `ephervex-loaders` | Vanilla, Forge, and NeoForge metadata resolution and client/server installation |
 | `ephervex-options` | Line-preserving `options.txt` parsing and version-aware application of global preferences |
-| `ephervex-pack` | Format detection, hardened archive handling, provider-neutral recipes, Modrinth parsing, optional selection, and materialization |
-| `ephervex-mod-platform` | Boundary reserved for Modrinth and CurseForge project/version providers |
+| `ephervex-pack` | Format detection, hardened archive handling, provider-neutral recipes, Modrinth parsing, optional selection, materialization, and managed-mod installation |
+| `ephervex-mod-platform` | Modrinth project/version catalog, compatibility verdicts, and provider-neutral dependency resolution |
 | `ephervex-server` | Boundary reserved for dedicated-server installation and process management |
 | `ephervex-core` | Application services and error classification shared by frontends |
 | `ephervex-cli` | Command-line frontend and human/JSON rendering |
@@ -148,6 +148,51 @@ field names, archive conventions, and IDs remain nested provider metadata.
 Common/client/server applicability and optional selection have provider-neutral
 representations, preventing each importer from inventing a separate installer.
 
+## Mod-installation data flow
+
+```text
+instance record
+   │
+   ├── exact Minecraft version + loader          (inputs, never written)
+   ▼
+provider catalog
+   ├── search, narrowed by facets
+   ├── compatibility decided per concrete version
+   ▼
+dependency resolution to a fixpoint             (no writes)
+   ├── constraints merged per project
+   ├── conflicts, unresolvable requirements, and
+   │   already-installed version changes refused here
+   ▼
+destination pre-flight                          (no writes)
+   ├── intra-plan filename collisions refused
+   └── occupied destinations refused
+   ▼
+verified shared downloads ──▶ instance mods/ ──▶ recipe.json
+```
+
+Search facets narrow the candidate set; they do not decide compatibility. A
+project satisfies a version facet and a loader facet through two different
+versions, so the verdict always comes from a concrete version's own
+`game_versions` and `loaders`. Showing incompatible results widens the upstream
+query rather than filtering locally, because a filter would remove the rows that
+need annotating. Per-search version lookups are bounded, and the page size is
+clamped.
+
+Exact selections are preserved. A pinned version that does not fit is refused
+rather than moved to a neighboring release, two mods pinning one project to
+different versions is a conflict rather than an arbitration, and a required
+dependency naming only a file fails rather than being skipped or given an
+invented project identity. The instance's Minecraft version and loader are
+inputs throughout; no graph is satisfied by changing them.
+
+Mods installed through a provider are entries in the same recipe (ADR 0013), so
+a server built later contains them. A jar the launcher did not install is never
+overwritten, deleted, or adopted into that record: nothing enumerates `mods/`,
+and a file with no provenance stays outside the managed model. Installation
+writes the recipe last; any failure — including a failure to write the recipe —
+removes the files that operation created and leaves everything else untouched.
+
 ## Security boundaries
 
 ### Untrusted paths and archives
@@ -203,10 +248,11 @@ stderr so machine-readable output remains valid.
 ## Supported scope and known boundaries
 
 The supported scope includes Linux, Minecraft release versions from 1.12.2
-onward, Vanilla, Forge, NeoForge, and Modrinth pack import. The GUI, CurseForge
-and Prism import, mod browsing, and dedicated-server process management are
-unavailable. Fabric, Quilt, snapshots, Windows, and macOS are outside the
-supported scope recorded in ADR 0008.
+onward, Vanilla, Forge, NeoForge, Modrinth pack import, and Modrinth mod
+browsing with dependency resolution. The GUI, CurseForge browsing, CurseForge
+and Prism import, mod updates and removal, and dedicated-server process
+management are unavailable. Fabric, Quilt, snapshots, Windows, and macOS are
+outside the supported scope recorded in ADR 0008.
 
 ## Verification
 

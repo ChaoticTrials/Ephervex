@@ -1,0 +1,44 @@
+[
+  {
+    "id": "SPLITA",
+    "project_id": "SPLITPROJ",
+    "name": "Split 1.0.0",
+    "version_number": "1.0.0",
+    "version_type": "release",
+    "game_versions": ["1.20.1"],
+    "loaders": ["forge"],
+    "date_published": "2026-01-01T00:00:00Z",
+    "downloads": 7,
+    "files": [
+      {
+        "hashes": { "sha1": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" },
+        "url": "https://cdn.modrinth.com/data/SPLITPROJ/versions/SPLITA/split-1.0.0.jar",
+        "filename": "split-1.0.0.jar",
+        "primary": true,
+        "size": 512
+      }
+    ],
+    "dependencies": []
+  },
+  {
+    "id": "SPLITB",
+    "project_id": "SPLITPROJ",
+    "name": "Split 2.0.0",
+    "version_number": "2.0.0",
+    "version_type": "release",
+    "game_versions": ["1.21.1"],
+    "loaders": ["neoforge"],
+    "date_published": "2026-02-01T00:00:00Z",
+    "downloads": 7,
+    "files": [
+      {
+        "hashes": { "sha1": "ffffffffffffffffffffffffffffffffffffffff" },
+        "url": "https://cdn.modrinth.com/data/SPLITPROJ/versions/SPLITB/split-2.0.0.jar",
+        "filename": "split-2.0.0.jar",
+        "primary": true,
+        "size": 512
+      }
+    ],
+    "dependencies": []
+  }
+]

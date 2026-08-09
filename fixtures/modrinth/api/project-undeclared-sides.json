@@ -1,0 +1,11 @@
+{
+  "id": "SPLITPROJ",
+  "slug": "split",
+  "title": "Split Across Two Versions",
+  "description": "Its author never stated whether it belongs on a server.",
+  "project_type": "mod",
+  "client_side": "required",
+  "server_side": "unknown",
+  "game_versions": ["1.20.1", "1.21.1"],
+  "loaders": ["forge", "neoforge"]
+}

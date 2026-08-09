@@ -29,6 +29,7 @@ pub mod import;
 pub mod instance;
 pub mod launch;
 pub mod logging;
+pub mod mods;
 
 pub use account::{AccountStatus, AccountSummary, ApiSettings, LoginOptions, TOKEN_REFRESH_MARGIN};
 pub use app::{App, JavaPlan, JavaPlanRequest, global_java_settings};
@@ -37,6 +38,7 @@ pub use import::{ImportRequest, ImportedPack};
 pub use instance::{CreatedClient, global_minecraft_preferences};
 pub use launch::{LaunchOptions, LaunchOutcome};
 pub use logging::{DEFAULT_LOG_DIRECTIVES, init_tracing};
+pub use mods::{InstalledMods, ModInstallRequest};
 
 /// Cancellation, re-exported because the services take one.
 ///
@@ -96,15 +98,27 @@ pub use ephervex_minecraft::{
     LoggingConfig, MINIMUM_SUPPORTED_VERSION, MinecraftVersionId, OutputLine, OutputStream,
     Platform, PlayerIdentity, ReleaseListing, ReleaseType, VersionMetadata, VersionRecord,
 };
+/// The mod catalog's data types, re-exported so a frontend can render a search
+/// result and a dependency plan without naming `ephervex-mod-platform`.
+///
+/// The provider trait and the resolver itself are deliberately *not* here: a
+/// frontend displays a plan, it does not build one.
+pub use ephervex_mod_platform::{
+    AnnotatedVersion, Compatibility, DEFAULT_SEARCH_LIMIT, DependencyKind, EmbeddedNote,
+    ExternalDependency, IncompatibilityReason, InstanceTarget, MAX_SEARCH_LIMIT, ModFile,
+    ModInstallPlan, ModPlatformError, ModProject, ModProjectDetails, ModSearchHit, ModSearchQuery,
+    ModSearchResults, ModVersionInfo, OptionalCandidate, PlanWarning, PlannedMod, ReleaseChannel,
+    SideSupport,
+};
 pub use ephervex_options::{
     GlobalMinecraftPreferences, GuiScalePreference, InvalidPreferenceValue, LoadedPreferences,
     Managed, OPTIONS_FILE_NAME, PreferenceApplication, PreferenceKey, PreferenceValue, WindowSize,
 };
 pub use ephervex_pack::{
-    AppliedLayer, ExtractionLimits, MaterializedFiles, MaterializedPack, OptionalComponent,
-    OptionalSelection, OverrideLayer, OverrideScope, PackAnalysis, PackError, PackFileRecipe,
-    PackFormat, PackPolicy, PackRecipe, PackSide, ProviderFileIdentity, ProviderRecipeMetadata,
-    SidePlan, SideRequirement,
+    AppliedLayer, ExtractionLimits, ManagedMod, ManagedModInstallation, MaterializedFiles,
+    MaterializedPack, ModOrigin, OptionalComponent, OptionalSelection, OverrideLayer,
+    OverrideScope, PackAnalysis, PackError, PackFileRecipe, PackFormat, PackPolicy, PackRecipe,
+    PackSide, ProviderFileIdentity, ProviderRecipeMetadata, SidePlan, SideRequirement,
 };
 pub use ephervex_storage::{
     AccountConfig, ApiConfig, CONFIG_SCHEMA_VERSION, ClientFolder, ClientRecord, Config,

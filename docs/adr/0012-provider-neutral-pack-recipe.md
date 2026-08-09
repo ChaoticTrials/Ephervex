@@ -57,3 +57,17 @@ the mutable client directory, is the source for subsequent side planning.
   are not duplicated because Modrinth import materializes them in the client;
   their recipe entry records that they were not retained.
 - A newer incompatible recipe version is refused rather than partially read.
+
+## Amendment: the recipe describes an instance, not only an archive
+
+ADR 0013 extends this boundary. A mod installed through the mod browser is part
+of what an instance is supposed to contain and has to reach a server built from
+the recipe, so managed mods are entries in the same `PackRecipe`, told apart
+from an archive's own files by a per-file origin and an explicit provider on the
+file identity. An instance created by hand acquires a recipe the first time
+something is installed into it.
+
+Nothing above changes. Analysis still validates without writing, one
+materializer still installs, and provider vocabulary still stays nested. What
+changes is the reading of "source": the recipe records what this instance is
+meant to be, of which an imported pack is the first and largest contributor.

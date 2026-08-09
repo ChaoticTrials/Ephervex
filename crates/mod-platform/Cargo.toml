@@ -19,3 +19,13 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+tokio-util.workspace = true
+futures-util.workspace = true
+
+[dev-dependencies]
+ephervex-i18n.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+wiremock.workspace = true

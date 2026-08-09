@@ -84,11 +84,8 @@ pub struct FileInstall<'a> {
 
 /// Downloads and installs the pack files one side needs.
 ///
-/// Files are fetched as a batch so the download manager's bounded concurrency
-/// and single aggregated progress bar apply. If the batch fails, each remaining
-/// file is retried address by address: a `downloads` array with more than one
-/// entry is a mirror list, and using only the first would throw away the
-/// pack's own answer to a CDN outage.
+/// Fetching is [`fetch_all`]'s job, so this and managed-mod installation share
+/// one batching and mirror-fallback policy rather than two that can drift.
 #[instrument(skip_all, fields(side = request.side.as_str(), game_dir = %request.game_dir.display()))]
 pub async fn install_files(request: FileInstall<'_>) -> PackResult<MaterializedFiles> {
     let FileInstall {
@@ -116,22 +113,7 @@ pub async fn install_files(request: FileInstall<'_>) -> PackResult<MaterializedF
         return Ok(report);
     }
 
-    let requests: Vec<DownloadRequest> = wanted
-        .iter()
-        .map(|file| primary_request(file, cache))
-        .collect::<PackResult<_>>()?;
-
-    let outcomes = match manager.download_all(&requests, reporter, cancel).await {
-        Ok(outcomes) => outcomes,
-        Err(error) if error.is_cancellation() => return Err(PackError::Canceled),
-        Err(error) => {
-            warn!(
-                %error,
-                "a pack download failed; retrying each file against its remaining addresses"
-            );
-            fetch_one_by_one(&wanted, cache, manager, reporter, cancel).await?
-        }
-    };
+    let outcomes = fetch_all(&wanted, cache, manager, reporter, cancel).await?;
 
     for (file, outcome) in wanted.iter().zip(outcomes.iter()) {
         if cancel.is_cancelled() {
@@ -153,6 +135,41 @@ pub async fn install_files(request: FileInstall<'_>) -> PackResult<MaterializedF
         "installed the pack's files"
     );
     Ok(report)
+}
+
+/// Fetches every file into the verified shared cache.
+///
+/// Shared by pack materialization and managed-mod installation so there is one
+/// definition of "fetch these files": one batch for the download manager's
+/// bounded concurrency and aggregated progress, falling back to a per-file,
+/// per-address walk when the batch fails. A `downloads` array with more than one
+/// entry is a mirror list, and using only the first would throw away the
+/// source's own answer to a CDN outage.
+///
+/// Returns outcomes positionally matching `files`.
+pub(crate) async fn fetch_all(
+    files: &[&PackFileRecipe],
+    cache: &CacheLayout,
+    manager: &DownloadManager,
+    reporter: &OperationReporter,
+    cancel: &CancellationToken,
+) -> PackResult<Vec<ephervex_download::DownloadOutcome>> {
+    let requests: Vec<DownloadRequest> = files
+        .iter()
+        .map(|file| primary_request(file, cache))
+        .collect::<PackResult<_>>()?;
+
+    match manager.download_all(&requests, reporter, cancel).await {
+        Ok(outcomes) => Ok(outcomes),
+        Err(error) if error.is_cancellation() => Err(PackError::Canceled),
+        Err(error) => {
+            warn!(
+                %error,
+                "a download failed; retrying each file against its remaining addresses"
+            );
+            fetch_one_by_one(files, cache, manager, reporter, cancel).await
+        }
+    }
 }
 
 /// One download request per file, using its first permitted address.
@@ -276,7 +293,7 @@ async fn fetch_one_by_one(
 }
 
 /// Copies a verified cache entry into the instance.
-fn copy_into_instance(source: &Path, destination: &Path) -> PackResult<()> {
+pub(crate) fn copy_into_instance(source: &Path, destination: &Path) -> PackResult<()> {
     if let Some(parent) = destination.parent() {
         std::fs::create_dir_all(parent).map_err(|source| PackError::Unwritable {
             path: parent.to_path_buf(),
@@ -330,6 +347,8 @@ mod tests {
     use ephervex_model::{HashAlgorithm, ImportSourceKind, LoaderSelection};
 
     use super::*;
+    use ephervex_model::ModOrigin;
+
     use crate::recipe::{OverrideScope, ProviderRecipeMetadata, RECIPE_VERSION, SideRequirement};
 
     const SHA1: &str = "da39a3ee5e6b4b0d3255bfef95601890afd80709";
@@ -347,6 +366,7 @@ mod tests {
             client: SideRequirement::Required,
             server: SideRequirement::Required,
             selected: None,
+            origin: ModOrigin::PackDeclared,
             identity: None,
         }
     }

@@ -60,6 +60,10 @@ pub enum CoreError {
     #[error(transparent)]
     Pack(#[from] PackError),
 
+    /// Searching a mod catalog, or resolving a mod's dependencies.
+    #[error(transparent)]
+    ModPlatform(#[from] ephervex_mod_platform::ModPlatformError),
+
     /// Installing or launching a version.
     ///
     /// The typed `LaunchError::AuthenticationRequired` and `MissingJava` states are
@@ -93,6 +97,22 @@ impl CoreError {
             Self::Options(error) => error.message_id(),
             Self::Preference(error) => error.message_id(),
             Self::Pack(error) => error.message_id(),
+            Self::ModPlatform(error) => error.message_id(),
+        }
+    }
+
+    /// Extra values the localized message and its next step take as arguments.
+    ///
+    /// The same idea as [`Self::failing_path`] and [`Self::help_subject`], for
+    /// the failures whose messages name several technical values. Delegated so
+    /// that each provider states its own arguments beside its own message ids,
+    /// and a frontend supplies them without matching on any error hierarchy.
+    #[must_use]
+    pub fn message_args(&self) -> Vec<(&'static str, String)> {
+        match self {
+            Self::Pack(error) => error.message_args(),
+            Self::ModPlatform(error) => error.message_args(),
+            _ => Vec::new(),
         }
     }
 
@@ -127,6 +147,7 @@ impl CoreError {
             Self::Loader(error) => error.is_cancellation(),
             Self::Launch(error) => error.is_cancellation(),
             Self::Pack(error) => error.is_cancellation(),
+            Self::ModPlatform(error) => error.is_cancellation(),
             _ => false,
         }
     }
@@ -214,6 +235,7 @@ impl CoreError {
             | Self::Launch(_)
             | Self::Options(_)
             | Self::Preference(_)
+            | Self::ModPlatform(_)
             | Self::Pack(_) => None,
         }
     }
@@ -245,8 +267,9 @@ impl CoreError {
             // Authentication failures are never about a file. The one thing
             // that would be — the keyring entry — is not a path the user can
             // usefully be pointed at. A rejected preference value is about a
-            // setting, not a file either.
-            Self::Auth(_) | Self::Preference(_) => None,
+            // setting, not a file either, and a catalog failure is about a
+            // project rather than anything on disk.
+            Self::Auth(_) | Self::Preference(_) | Self::ModPlatform(_) => None,
         }
     }
 }
