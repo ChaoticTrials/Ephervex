@@ -409,7 +409,7 @@ mod tests {
     ) {
         let loader = LoaderSelection::exact(LoaderKind::Forge, "47.4.0");
         let client = app
-            .create_client(NewClient::new("client", "1.20.1", loader.clone()))
+            .create_client_for_test(NewClient::new("client", "1.20.1", loader.clone()))
             .expect("client");
         let mut server = app
             .registry_for_services()
@@ -472,7 +472,7 @@ mod tests {
         let app = app_rooted_at(directory.path());
         let (client, mut linked) = installed_linked_server(&app, ServerNetworkSettings::default());
         let other = app
-            .create_client(NewClient::new(
+            .create_client_for_test(NewClient::new(
                 "other",
                 "1.20.1",
                 LoaderSelection::exact(LoaderKind::Forge, "47.4.0"),

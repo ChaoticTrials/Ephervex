@@ -25,7 +25,7 @@ use ephervex_java::{
     ManagedJavaProvider, PinSource, RequiredJava, RuntimeInventory, Selection,
 };
 use ephervex_loaders::{
-    InstalledServer, LoaderRegistry, LoaderVersionListing, ServerInstallRequest,
+    InstalledServer, LoaderError, LoaderRegistry, LoaderVersionListing, ServerInstallRequest,
 };
 use ephervex_minecraft::{
     MinecraftError, MinecraftVersionId, ReleaseListing, VERSION_MANIFEST_CACHE_KEY, VersionCatalog,
@@ -250,8 +250,8 @@ impl App {
     /// instance is created. See [`Self::create_client_reporting`] for what was
     /// applied.
     #[instrument(skip(self, request))]
-    pub fn create_client(&self, request: NewClient) -> CoreResult<ClientRecord> {
-        Ok(self.create_client_reporting(request)?.record)
+    pub async fn create_client(&self, request: NewClient) -> CoreResult<ClientRecord> {
+        Ok(self.create_client_reporting(request).await?.record)
     }
 
     /// Creates a client instance and reports the one-time preference
@@ -262,7 +262,52 @@ impl App {
     /// on first run. Undoing a successful creation over a GUI scale would be a
     /// far worse trade — and leaving it half-created would be worse still.
     #[instrument(skip(self, request))]
-    pub fn create_client_reporting(&self, request: NewClient) -> CoreResult<CreatedClient> {
+    pub async fn create_client_reporting(&self, request: NewClient) -> CoreResult<CreatedClient> {
+        let validation = self.validate_client_target(&request).await;
+        self.publish_client_after_validation(request, validation)
+    }
+
+    /// Validates the exact game and loader selection without publishing any
+    /// filesystem or registry state.
+    async fn validate_client_target(&self, request: &NewClient) -> CoreResult<()> {
+        self.minecraft_version(&request.minecraft_version).await?;
+        if request.loader.kind == LoaderKind::Vanilla {
+            if request.loader.version.is_none() {
+                return Ok(());
+            }
+            return Err(LoaderError::VersionUnavailable {
+                loader: LoaderKind::Vanilla,
+                minecraft: request.minecraft_version.clone(),
+                mode: "exact",
+            }
+            .into());
+        }
+
+        let selected = request.loader.version.as_deref().unwrap_or_default();
+        let listing = self
+            .loader_versions(request.loader.kind, &request.minecraft_version)
+            .await?;
+        if !loader_build_is_available(&listing, selected) {
+            return Err(LoaderError::VersionUnavailable {
+                loader: request.loader.kind,
+                minecraft: request.minecraft_version.clone(),
+                mode: "exact",
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    fn publish_client_after_validation(
+        &self,
+        request: NewClient,
+        validation: CoreResult<()>,
+    ) -> CoreResult<CreatedClient> {
+        validation?;
+        self.publish_client(request)
+    }
+
+    fn publish_client(&self, request: NewClient) -> CoreResult<CreatedClient> {
         let record = self.registry().create_client(request)?;
         let preferences = match self.apply_global_preferences(&record) {
             Ok(applied) => Some(applied),
@@ -279,6 +324,11 @@ impl App {
             record,
             preferences,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn create_client_for_test(&self, request: NewClient) -> CoreResult<ClientRecord> {
+        Ok(self.publish_client(request)?.record)
     }
 
     /// Fetches one client instance.
@@ -851,6 +901,10 @@ impl App {
     }
 }
 
+fn loader_build_is_available(listing: &LoaderVersionListing, selected: &str) -> bool {
+    listing.builds.iter().any(|build| build.version == selected)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -863,6 +917,50 @@ mod tests {
     }
 
     #[test]
+    fn failed_target_validation_publishes_no_instance_or_directory() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let request = NewClient::new(
+            "Invalid target",
+            "1.21.f",
+            LoaderSelection::exact(LoaderKind::Forge, "12121212"),
+        );
+        let validation = Err(MinecraftError::UnknownVersion {
+            id: "1.21.f".to_owned(),
+        }
+        .into());
+
+        let result = app.publish_client_after_validation(request, validation);
+
+        assert!(result.is_err());
+        assert!(app.list_clients().expect("list").is_empty());
+        assert_eq!(
+            std::fs::read_dir(app.paths().temporary_instances_dir())
+                .expect("temporary instance root")
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn exact_loader_validation_requires_a_catalog_build_match() {
+        let listing = LoaderVersionListing {
+            loader: LoaderKind::Forge,
+            minecraft: "1.20.1".to_owned(),
+            builds: vec![ephervex_loaders::LoaderBuild {
+                version: "47.3.0".to_owned(),
+                prerelease: false,
+            }],
+            latest: Some("47.3.0".to_owned()),
+            stable: Some("47.3.0".to_owned()),
+            freshness: ephervex_download::Freshness::Cached,
+        };
+
+        assert!(loader_build_is_available(&listing, "47.3.0"));
+        assert!(!loader_build_is_available(&listing, "12121212"));
+    }
+
+    #[test]
     fn the_services_layer_walks_the_instance_lifecycle() {
         let base = tempfile::tempdir().expect("temp dir");
         let app = app_rooted_at(base.path());
@@ -870,7 +968,7 @@ mod tests {
         assert!(app.list_clients().expect("list").is_empty());
 
         let created = app
-            .create_client(NewClient::new(
+            .create_client_for_test(NewClient::new(
                 "Bug Repro",
                 "1.20.1",
                 LoaderSelection::vanilla(),
@@ -893,7 +991,7 @@ mod tests {
         let app = app_rooted_at(base.path());
 
         let created = app
-            .create_client(NewClient::new(
+            .create_client_for_test(NewClient::new(
                 "Doomed",
                 "1.21.1",
                 LoaderSelection::vanilla(),
@@ -917,7 +1015,7 @@ mod tests {
         let mut app = app_rooted_at(base.path());
 
         let before = app
-            .create_client(
+            .create_client_for_test(
                 NewClient::new("before", "1.20.1", LoaderSelection::vanilla())
                     .with_storage(StorageClass::Persistent),
             )
@@ -928,7 +1026,7 @@ mod tests {
             .expect("move the root");
 
         let after = app
-            .create_client(
+            .create_client_for_test(
                 NewClient::new("after", "1.20.1", LoaderSelection::vanilla())
                     .with_storage(StorageClass::Persistent),
             )

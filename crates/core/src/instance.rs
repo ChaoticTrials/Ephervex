@@ -270,7 +270,7 @@ mod tests {
     }
 
     fn create(app: &App, name: &str, version: &str) -> ClientRecord {
-        app.create_client(NewClient::new(name, version, LoaderSelection::vanilla()))
+        app.create_client_for_test(NewClient::new(name, version, LoaderSelection::vanilla()))
             .expect("create")
     }
 

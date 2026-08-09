@@ -86,6 +86,28 @@ fn register_callbacks(ui: &AppWindow, commands: &Sender<Command>) {
     ui.on_refresh(move || send(&sender, Command::Refresh));
 
     let sender = commands.clone();
+    ui.on_request_version_catalog(move || send(&sender, Command::LoadMinecraftReleases));
+
+    let sender = commands.clone();
+    ui.on_request_loader_catalog(move |form, loader, minecraft| {
+        let loader = match loader.as_str() {
+            "Forge" => Some(ephervex_model::LoaderKind::Forge),
+            "NeoForge" => Some(ephervex_model::LoaderKind::NeoForge),
+            _ => None,
+        };
+        if let Some(loader) = loader {
+            send(
+                &sender,
+                Command::LoadLoaderVersions {
+                    form: form.into(),
+                    loader,
+                    minecraft: minecraft.into(),
+                },
+            );
+        }
+    });
+
+    let sender = commands.clone();
     ui.on_submit_create_instance(move |name, minecraft, loader, loader_version, persistent| {
         send(
             &sender,
@@ -138,6 +160,27 @@ fn register_callbacks(ui: &AppWindow, commands: &Sender<Command>) {
     ui.on_open_client_folder(move |id| {
         if let Some(id) = backend::parse_instance_id(&id) {
             send(&sender, Command::OpenClientFolder(id));
+        }
+    });
+
+    let sender = commands.clone();
+    ui.on_duplicate_client(move |id| {
+        if let Some(id) = backend::parse_instance_id(&id) {
+            send(&sender, Command::DuplicateClient(id));
+        }
+    });
+
+    let sender = commands.clone();
+    ui.on_delete_client(move |id, files| {
+        if let Some(id) = backend::parse_instance_id(&id) {
+            send(&sender, Command::DeleteClient { id, files });
+        }
+    });
+
+    let sender = commands.clone();
+    ui.on_delete_server(move |id, files| {
+        if let Some(id) = backend::parse_server_id(&id) {
+            send(&sender, Command::DeleteServer { id, files });
         }
     });
 
@@ -554,6 +597,54 @@ fn parse_java_memory(minimum: &str, maximum: &str) -> Result<(u32, u32), String>
 fn apply_event(ui: &AppWindow, event: Event, activities: &Rc<RefCell<Vec<ActivityData>>>) {
     match event {
         Event::Snapshot(snapshot) => apply_snapshot(ui, snapshot),
+        Event::MinecraftReleases(versions) => {
+            if !versions.is_empty() {
+                let create_current = ui.get_create_minecraft();
+                let server_current = ui.get_create_server_minecraft();
+                if !versions
+                    .iter()
+                    .any(|version| version == create_current.as_str())
+                {
+                    ui.set_create_minecraft(versions[0].clone().into());
+                }
+                if !versions
+                    .iter()
+                    .any(|version| version == server_current.as_str())
+                {
+                    ui.set_create_server_minecraft(versions[0].clone().into());
+                }
+            }
+            ui.set_minecraft_releases(model(
+                versions.into_iter().map(SharedString::from).collect(),
+            ));
+        }
+        Event::LoaderVersions {
+            form,
+            loader,
+            minecraft,
+            versions,
+        } => {
+            let label = loader.to_string();
+            let current_matches = if form == "server" {
+                ui.get_create_server_loader() == label
+                    && ui.get_create_server_minecraft() == minecraft
+            } else {
+                ui.get_create_loader() == label && ui.get_create_minecraft() == minecraft
+            };
+            if !current_matches {
+                return;
+            }
+            let rows = model(versions.iter().cloned().map(SharedString::from).collect());
+            if form == "server" {
+                ui.set_create_server_loader_versions(rows);
+                ui.set_create_server_loader_version(
+                    versions.first().cloned().unwrap_or_default().into(),
+                );
+            } else {
+                ui.set_create_loader_versions(rows);
+                ui.set_create_loader_version(versions.first().cloned().unwrap_or_default().into());
+            }
+        }
         Event::ManagedMods(rows) => ui.set_managed_mods(model(managed_mod_rows(rows))),
         Event::ModResults(rows) => ui.set_mod_results(model(mod_search_rows(rows))),
         Event::ModPlan(plan) => {
@@ -747,6 +838,7 @@ fn apply_snapshot(ui: &AppWindow, snapshot: Snapshot) {
 }
 
 fn apply_server_workspace(ui: &AppWindow, workspace: ServerWorkspaceData) {
+    ui.set_console_text(workspace.console_lines.join("\n").into());
     ui.set_console_lines(model(
         workspace
             .console_lines
@@ -1043,5 +1135,30 @@ mod tests {
         assert!(!validate_player_count("0").is_empty());
         assert!(!validate_player_count("2.5").is_empty());
         assert!(!validate_player_count("many").is_empty());
+    }
+
+    #[test]
+    fn creation_forms_use_catalog_models_for_exact_versions() {
+        let source = include_str!("ui.rs");
+        assert!(source.contains("model: root.minecraft-releases"));
+        assert!(source.contains("model: root.create-loader-versions"));
+        assert!(source.contains("model: root.create-server-loader-versions"));
+        assert!(!source.contains("text <=> root.create-minecraft"));
+        assert!(!source.contains("text <=> root.create-loader-version"));
+    }
+
+    #[test]
+    fn fov_presentation_keeps_core_degree_semantics() {
+        let rows = preference_rows(vec![PreferenceData {
+            key: "fov".to_owned(),
+            label: "Field of View".to_owned(),
+            value: "70".to_owned(),
+            enabled: true,
+            kind: "slider".to_owned(),
+            syntax: "field of view in degrees, 30 to 110".to_owned(),
+        }]);
+
+        assert_eq!(rows[0].numeric_value, 70.0);
+        assert_eq!(rows[0].value, "70");
     }
 }

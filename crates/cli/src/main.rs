@@ -955,7 +955,8 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
         }
         Command::Instance { command } => {
             let app = open_app()?;
-            run_instance_command(&app, command, cli.json)
+            let runtime = tokio::runtime::Runtime::new()?;
+            runtime.block_on(run_instance_command(&app, command, cli.json))
         }
         Command::Servers { command } => {
             let app = open_app()?;
@@ -1057,14 +1058,20 @@ fn open_app() -> Result<App, CoreError> {
 
 // ------------------------------------------------------------------- commands
 
-fn run_instance_command(app: &App, command: &InstanceCommand, json: bool) -> anyhow::Result<()> {
+async fn run_instance_command(
+    app: &App,
+    command: &InstanceCommand,
+    json: bool,
+) -> anyhow::Result<()> {
     match command {
         InstanceCommand::Create(args) => {
             let loader = build_loader(args.loader, args.loader_version.as_deref())?;
-            let created = app.create_client_reporting(
-                NewClient::new(&args.name, &args.minecraft, loader)
-                    .with_storage(args.storage.class()),
-            )?;
+            let created = app
+                .create_client_reporting(
+                    NewClient::new(&args.name, &args.minecraft, loader)
+                        .with_storage(args.storage.class()),
+                )
+                .await?;
             print_created_instance(app, &created, json)?;
         }
         InstanceCommand::Show { id } => {

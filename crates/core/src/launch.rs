@@ -389,7 +389,7 @@ mod tests {
     }
 
     fn vanilla(app: &App, version: &str) -> ClientRecord {
-        app.create_client(
+        app.create_client_for_test(
             NewClient::new("Repro", version, LoaderSelection::vanilla())
                 .with_storage(StorageClass::Temporary),
         )
@@ -430,7 +430,7 @@ mod tests {
         let app = app_rooted_at(base.path());
 
         let forge = app
-            .create_client(NewClient::new(
+            .create_client_for_test(NewClient::new(
                 "Forge repro",
                 "1.20.1",
                 LoaderSelection::exact(LoaderKind::Forge, "47.4.0"),

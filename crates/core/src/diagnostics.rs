@@ -376,7 +376,7 @@ mod tests {
     }
 
     fn client(app: &App) -> ephervex_storage::ClientRecord {
-        app.create_client(NewClient::new(
+        app.create_client_for_test(NewClient::new(
             "Repro",
             "1.20.1",
             LoaderSelection::vanilla(),

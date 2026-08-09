@@ -16,7 +16,7 @@ use ephervex_core::{
     PreferenceKey, ProgressSink, SearchOptions, ServerCreateOptions, ServerEvent, ServerFolder,
     ServerNetworkSettings, ServerObserver,
 };
-use ephervex_i18n::{Arg, lookup, lookup_args, lookup_attribute};
+use ephervex_i18n::{Arg, lookup, lookup_args, lookup_attribute, lookup_attribute_args};
 use ephervex_model::{
     InstanceId, LoaderKind, LoaderSelection, Operation, OperationStatus, ServerId, StorageClass,
 };
@@ -31,6 +31,12 @@ type CancellationRegistry = Arc<Mutex<HashMap<String, CancellationToken>>>;
 #[derive(Debug)]
 pub enum Command {
     Refresh,
+    LoadMinecraftReleases,
+    LoadLoaderVersions {
+        form: String,
+        loader: LoaderKind,
+        minecraft: String,
+    },
     CancelOperation(String),
     PickImport,
     CreateClient {
@@ -52,6 +58,15 @@ pub enum Command {
     },
     OpenClientFolder(InstanceId),
     OpenServerFolder(ServerId),
+    DuplicateClient(InstanceId),
+    DeleteClient {
+        id: InstanceId,
+        files: bool,
+    },
+    DeleteServer {
+        id: ServerId,
+        files: bool,
+    },
     LoadInstanceWorkspace(InstanceId),
     SearchMods {
         instance: InstanceId,
@@ -260,6 +275,13 @@ pub struct JavaData {
 #[derive(Debug, Clone)]
 pub enum Event {
     Snapshot(Snapshot),
+    MinecraftReleases(Vec<String>),
+    LoaderVersions {
+        form: String,
+        loader: LoaderKind,
+        minecraft: String,
+        versions: Vec<String>,
+    },
     ManagedMods(Vec<ManagedModData>),
     ModResults(Vec<ModSearchData>),
     ModPlan(ModPlanData),
@@ -363,6 +385,37 @@ fn run_worker(
     for command in commands {
         match command {
             Command::Refresh => send_snapshot(&app, &events),
+            Command::LoadMinecraftReleases => match runtime.block_on(app.minecraft_releases()) {
+                Ok(listing) => {
+                    let versions = listing
+                        .releases
+                        .into_iter()
+                        .map(|release| release.id)
+                        .collect();
+                    let _ = events.send(Event::MinecraftReleases(versions));
+                }
+                Err(error) => send_modal_error(&events, &error),
+            },
+            Command::LoadLoaderVersions {
+                form,
+                loader,
+                minecraft,
+            } => match runtime.block_on(app.loader_versions(loader, &minecraft)) {
+                Ok(listing) => {
+                    let versions = listing
+                        .builds
+                        .into_iter()
+                        .map(|build| build.version)
+                        .collect();
+                    let _ = events.send(Event::LoaderVersions {
+                        form,
+                        loader,
+                        minecraft,
+                        versions,
+                    });
+                }
+                Err(error) => send_modal_error(&events, &error),
+            },
             Command::CancelOperation(id) => cancel_operation(&cancellations, &events, &id),
             Command::PickImport => {
                 if let Some(path) = rfd::FileDialog::new()
@@ -398,9 +451,9 @@ fn run_worker(
                 loader_version,
                 persistent,
             } => match loader_selection(&loader, &loader_version).and_then(|loader| {
-                app.create_client_reporting(
+                runtime.block_on(app.create_client_reporting(
                     NewClient::new(name, minecraft, loader).with_storage(storage_class(persistent)),
-                )
+                ))
             }) {
                 Ok(created) => {
                     let _ = events.send(Event::CloseModal);
@@ -477,6 +530,54 @@ fn run_worker(
                             )
                         }),
                 );
+            }
+            Command::DuplicateClient(instance) => {
+                match app.duplicate_client(instance, &ephervex_core::DuplicateClient::default()) {
+                    Ok(copy) => {
+                        let _ = events.send(Event::Toast {
+                            message: localized_value("gui-created-entity", &copy.record.name),
+                            error: false,
+                        });
+                        send_snapshot(&app, &events);
+                    }
+                    Err(error) => send_error(&events, &error),
+                }
+            }
+            Command::DeleteClient { id, files } => {
+                let disposition = if files {
+                    ephervex_core::FileDisposition::Remove
+                } else {
+                    ephervex_core::FileDisposition::Keep
+                };
+                match app.delete_client(id, disposition) {
+                    Ok(()) => {
+                        let _ = events.send(Event::CloseModal);
+                        let _ = events.send(Event::Toast {
+                            message: lookup("gui-instance-deleted"),
+                            error: false,
+                        });
+                        send_snapshot(&app, &events);
+                    }
+                    Err(error) => send_modal_error(&events, &error),
+                }
+            }
+            Command::DeleteServer { id, files } => {
+                let disposition = if files {
+                    ephervex_core::FileDisposition::Remove
+                } else {
+                    ephervex_core::FileDisposition::Keep
+                };
+                match app.delete_server(id, disposition) {
+                    Ok(()) => {
+                        let _ = events.send(Event::CloseModal);
+                        let _ = events.send(Event::Toast {
+                            message: lookup("gui-server-deleted"),
+                            error: false,
+                        });
+                        send_snapshot(&app, &events);
+                    }
+                    Err(error) => send_modal_error(&events, &error),
+                }
             }
             Command::LoadInstanceWorkspace(instance) => {
                 let mods = app.managed_mods(instance).map(|mods| {
@@ -928,16 +1029,13 @@ fn snapshot(app: &App) -> Result<Snapshot, CoreError> {
     let loaded = app.minecraft_preferences();
     let preferences = PreferenceKey::ALL
         .iter()
-        .map(|key| {
-            let setting = app.config().minecraft_preferences.get(key.as_str());
-            PreferenceData {
-                key: key.as_str().to_owned(),
-                label: preference_label(*key),
-                value: setting.map_or_else(String::new, |setting| setting.value.clone()),
-                enabled: setting.is_some_and(|setting| setting.enabled),
-                kind: preference_kind(*key).to_owned(),
-                syntax: key.value_syntax().to_owned(),
-            }
+        .map(|key| PreferenceData {
+            key: key.as_str().to_owned(),
+            label: preference_label(*key),
+            value: loaded.preferences.value(*key).to_setting_value(),
+            enabled: loaded.preferences.is_managed(*key),
+            kind: preference_kind(*key).to_owned(),
+            syntax: key.value_syntax().to_owned(),
         })
         .collect();
     if !loaded.rejected.is_empty() {
@@ -1688,9 +1786,14 @@ fn localized_error(error: &CoreError) -> String {
     let mut message = if args.is_empty() {
         lookup(error.message_id())
     } else {
-        lookup_args(error.message_id(), args)
+        lookup_args(error.message_id(), args.clone())
     };
-    if let Some(action) = lookup_attribute(error.message_id(), "action") {
+    let action = if args.is_empty() {
+        lookup_attribute(error.message_id(), "action")
+    } else {
+        lookup_attribute_args(error.message_id(), "action", args)
+    };
+    if let Some(action) = action {
         message.push('\n');
         message.push_str(&action);
     }
@@ -1867,6 +1970,8 @@ pub fn parse_diagnostic_kind(value: &str) -> Option<DiagnosticKind> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used)]
+
     use super::*;
 
     #[test]
@@ -1885,6 +1990,20 @@ mod tests {
         assert!(loader_selection("Forge", "47.3.0").is_ok());
         assert!(loader_selection("NeoForge", "21.1.72").is_ok());
         assert!(loader_selection("Fabric", "0.16").is_err());
+    }
+
+    #[test]
+    fn localized_preference_errors_resolve_action_arguments() {
+        let error = ephervex_core::PreferenceValue::parse(
+            ephervex_core::PreferenceKey::Fov,
+            "not-a-number",
+        )
+        .expect_err("invalid FOV should be rejected");
+        let rendered = localized_error(&CoreError::from(error));
+
+        assert!(!rendered.contains("{$"));
+        assert!(!rendered.contains("{ $"));
+        assert!(rendered.contains("Expected"));
     }
 
     #[test]

@@ -134,6 +134,7 @@ impl CoreError {
             Self::ModPlatform(error) => error.message_args(),
             Self::Server(error) => error.message_args(),
             Self::Connect(error) => error.message_args(),
+            Self::Preference(error) => vec![("syntax", error.syntax.to_owned())],
             Self::JavaSettingsInvalid {
                 minimum_mib,
                 maximum_mib,

@@ -507,7 +507,7 @@ mod tests {
         let base = tempfile::tempdir().expect("temp dir");
         let app = app_rooted_at(base.path());
         let record = app
-            .create_client(NewClient::new(
+            .create_client_for_test(NewClient::new(
                 "By hand",
                 "1.20.1",
                 ephervex_model::LoaderSelection::vanilla(),
