@@ -14,6 +14,7 @@
 //! refuses to write a key whose name looks like a credential.
 
 use std::collections::BTreeMap;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -466,14 +467,33 @@ impl Config {
         let text = self.to_toml_string()?;
         let temporary = path.with_extension("toml.tmp");
 
-        std::fs::write(&temporary, text).map_err(|source| ConfigError::Unwritable {
-            path: temporary.clone(),
-            source,
-        })?;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&temporary)
+            .map_err(|source| ConfigError::Unwritable {
+                path: temporary.clone(),
+                source,
+            })?;
+        file.write_all(text.as_bytes())
+            .and_then(|()| file.sync_all())
+            .map_err(|source| ConfigError::Unwritable {
+                path: temporary.clone(),
+                source,
+            })?;
         std::fs::rename(&temporary, path).map_err(|source| ConfigError::Unwritable {
             path: path.to_path_buf(),
             source,
         })?;
+        if let Some(parent) = path.parent() {
+            std::fs::File::open(parent)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|source| ConfigError::Unwritable {
+                    path: parent.to_path_buf(),
+                    source,
+                })?;
+        }
         Ok(())
     }
 

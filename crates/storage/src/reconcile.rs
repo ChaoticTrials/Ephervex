@@ -71,6 +71,20 @@ pub struct ReconciliationReport {
     pub reindexed: Vec<ReconciledRecord>,
     /// Records whose previously missing root came back.
     pub recovered: Vec<ReconciledRecord>,
+    /// Valid canonical metadata that replaced a disagreeing SQLite copy.
+    pub index_repaired: Vec<ReconciledRecord>,
+    /// Indexed recovery copies whose canonical metadata is unavailable or
+    /// unusable. These remain visible but must not be launched or mutated.
+    pub persistence_unhealthy: Vec<ReconciledRecord>,
+    /// Several valid roots claimed the same server identity. No root was
+    /// selected automatically.
+    pub server_conflicts: Vec<ServerRootConflict>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerRootConflict {
+    pub id: ServerId,
+    pub roots: Vec<PathBuf>,
 }
 
 impl ReconciliationReport {
@@ -81,6 +95,9 @@ impl ReconciliationReport {
             && self.missing_persistent.is_empty()
             && self.reindexed.is_empty()
             && self.recovered.is_empty()
+            && self.index_repaired.is_empty()
+            && self.persistence_unhealthy.is_empty()
+            && self.server_conflicts.is_empty()
     }
 
     /// Whether anything here needs the user's attention.
@@ -89,6 +106,8 @@ impl ReconciliationReport {
     #[must_use]
     pub fn needs_attention(&self) -> bool {
         !self.missing_persistent.is_empty()
+            || !self.persistence_unhealthy.is_empty()
+            || !self.server_conflicts.is_empty()
     }
 }
 
@@ -112,6 +131,9 @@ pub fn reconcile(registry: &Registry) -> Result<ReconciliationReport, RegistryEr
             missing_persistent = report.missing_persistent.len(),
             reindexed = report.reindexed.len(),
             recovered = report.recovered.len(),
+            index_repaired = report.index_repaired.len(),
+            persistence_unhealthy = report.persistence_unhealthy.len(),
+            server_conflicts = report.server_conflicts.len(),
             "startup reconciliation complete"
         );
     }
@@ -186,6 +208,31 @@ fn reconcile_servers(
         };
 
         if record.root.is_dir() {
+            match metadata::read_server_metadata(&record.root) {
+                Ok(mut canonical) if canonical.id == record.id => {
+                    canonical.root.clone_from(&record.root);
+                    if canonical != record {
+                        metadata::write_server_metadata(&record.root, &canonical)?;
+                        registry.synchronize_server_index(&canonical)?;
+                        report.index_repaired.push(ReconciledRecord {
+                            reference: RecordRef::Server(canonical.id),
+                            name: canonical.name.clone(),
+                            root: canonical.root.clone(),
+                            storage: canonical.storage,
+                        });
+                    }
+                    record = canonical;
+                }
+                Ok(_) | Err(_) => {
+                    tracing::warn!(
+                        server_id = %record.id,
+                        root = %record.root.display(),
+                        "server canonical metadata is unhealthy; retaining only the recovery copy"
+                    );
+                    report.persistence_unhealthy.push(entry);
+                    continue;
+                }
+            }
             if record.attention.contains(&AttentionReason::MissingRoot) {
                 record
                     .attention
@@ -279,48 +326,67 @@ fn reindex_orphaned_servers(
     registry: &Registry,
     report: &mut ReconciliationReport,
 ) -> Result<(), RegistryError> {
-    let known: HashSet<ServerId> = registry
-        .list_servers()?
-        .into_iter()
-        .map(|record| record.id)
-        .collect();
+    let indexed = registry.list_servers()?;
+    let known: HashSet<ServerId> = indexed.iter().map(|record| record.id).collect();
 
+    let mut discovered = std::collections::BTreeMap::<ServerId, Vec<PathBuf>>::new();
     for directory in candidate_directories(&registry.paths().persistent_servers_dir()) {
         if !metadata::is_server_root(&directory) {
             continue;
         }
+        if let Ok(record) = metadata::read_server_metadata(&directory) {
+            discovered.entry(record.id).or_default().push(directory);
+        }
+    }
 
-        let mut record = match metadata::read_server_metadata(&directory) {
-            Ok(record) => record,
-            Err(error) => {
-                tracing::warn!(
-                    path = %directory.display(),
-                    %error,
-                    "ignoring an unreadable server metadata file during reconciliation"
-                );
-                continue;
-            }
-        };
+    for (id, mut roots) in discovered {
+        roots.sort();
+        roots.dedup();
+        if roots.len() > 1 {
+            report
+                .server_conflicts
+                .push(ServerRootConflict { id, roots });
+            continue;
+        }
+        let directory = roots.remove(0);
+        let mut record = metadata::read_server_metadata(&directory)?;
+
+        // Trust the directory that actually contains the metadata. Correct the
+        // canonical file atomically before mirroring the index.
+        if record.root != directory || record.storage != StorageClass::Persistent {
+            record.root.clone_from(&directory);
+            record.storage = StorageClass::Persistent;
+            metadata::write_server_metadata(&directory, &record)?;
+        }
 
         if known.contains(&record.id) {
+            let indexed = registry.server(record.id)?;
+            if indexed.root != directory && indexed.root.is_dir() {
+                report.server_conflicts.push(ServerRootConflict {
+                    id: record.id,
+                    roots: vec![indexed.root, directory],
+                });
+                continue;
+            }
+            if indexed != record {
+                registry.synchronize_server_index(&record)?;
+                report.index_repaired.push(ReconciledRecord {
+                    reference: RecordRef::Server(record.id),
+                    name: record.name,
+                    root: record.root,
+                    storage: record.storage,
+                });
+            }
             continue;
         }
 
-        record.root.clone_from(&directory);
-        record.storage = StorageClass::Persistent;
-
         // A re-indexed server may reference a client that is no longer indexed.
-        // Dropping the dangling link keeps the foreign key satisfiable; the
-        // server itself is still worth recovering.
-        if let Some(client) = record.linked_client_id {
-            if registry.client(client).is_err() {
-                tracing::warn!(
-                    server_id = %record.id,
-                    client_id = %client,
-                    "re-indexed server references an unknown client; clearing the link"
-                );
-                record.linked_client_id = None;
-            }
+        // Clear it through canonical metadata before the SQLite mirror.
+        if let Some(client) = record.linked_client_id
+            && registry.client(client).is_err()
+        {
+            record.linked_client_id = None;
+            metadata::write_server_metadata(&directory, &record)?;
         }
 
         registry.index_existing_server(&record)?;
@@ -331,6 +397,7 @@ fn reindex_orphaned_servers(
             storage: StorageClass::Persistent,
         });
     }
+
     Ok(())
 }
 
@@ -562,5 +629,98 @@ mod tests {
             RecordRef::Server(server.id)
         );
         assert!(registry.list_servers().expect("list").is_empty());
+    }
+
+    #[test]
+    fn canonical_server_metadata_replaces_a_disagreeing_index_copy() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = registry
+            .create_server(
+                NewServer::new("canonical", "1.20.1", LoaderSelection::vanilla())
+                    .with_storage(StorageClass::Persistent),
+            )
+            .expect("create");
+        registry
+            .index()
+            .connection()
+            .execute(
+                "UPDATE servers SET name = 'stale index value' WHERE id = ?1",
+                rusqlite::params![server.id.to_string()],
+            )
+            .expect("damage index copy");
+
+        let report = reconcile(&registry).expect("reconcile");
+        assert_eq!(report.index_repaired.len(), 1);
+        assert_eq!(registry.server(server.id).expect("read").name, "canonical");
+    }
+
+    #[test]
+    fn a_moved_server_root_corrects_metadata_and_the_index() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = registry
+            .create_server(
+                NewServer::new("moved", "1.20.1", LoaderSelection::vanilla())
+                    .with_storage(StorageClass::Persistent),
+            )
+            .expect("create");
+        let moved = registry.paths().persistent_servers_dir().join("moved-root");
+        std::fs::rename(&server.root, &moved).expect("move");
+
+        reconcile(&registry).expect("reconcile");
+        let indexed = registry.server(server.id).expect("read");
+        assert_eq!(indexed.root, moved);
+        assert_eq!(
+            metadata::read_server_metadata(&indexed.root)
+                .expect("metadata")
+                .root,
+            indexed.root
+        );
+    }
+
+    #[test]
+    fn duplicate_server_roots_are_reported_without_selecting_one() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = registry
+            .create_server(
+                NewServer::new("original", "1.20.1", LoaderSelection::vanilla())
+                    .with_storage(StorageClass::Persistent),
+            )
+            .expect("create");
+        let duplicate = registry.paths().persistent_servers_dir().join("duplicate");
+        std::fs::create_dir_all(metadata::metadata_dir(&duplicate)).expect("create");
+        std::fs::copy(
+            metadata::server_metadata_path(&server.root),
+            metadata::server_metadata_path(&duplicate),
+        )
+        .expect("copy metadata");
+
+        let report = reconcile(&registry).expect("reconcile");
+        assert_eq!(report.server_conflicts.len(), 1);
+        assert_eq!(report.server_conflicts[0].id, server.id);
+        assert_eq!(
+            registry.server(server.id).expect("unchanged").root,
+            server.root
+        );
+    }
+
+    #[test]
+    fn corrupt_server_metadata_keeps_the_sqlite_recovery_copy_unhealthy() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = registry
+            .create_server(
+                NewServer::new("recoverable", "1.20.1", LoaderSelection::vanilla())
+                    .with_storage(StorageClass::Persistent),
+            )
+            .expect("create");
+        std::fs::write(metadata::server_metadata_path(&server.root), "{broken")
+            .expect("damage metadata");
+
+        let report = reconcile(&registry).expect("reconcile");
+        assert_eq!(report.persistence_unhealthy.len(), 1);
+        assert_eq!(registry.server(server.id).expect("recovery copy"), server);
     }
 }

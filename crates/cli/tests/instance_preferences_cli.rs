@@ -379,30 +379,24 @@ fn ordinary_commands_do_not_narrate_the_localization_loader() {
 }
 
 #[test]
-fn a_server_has_the_same_folder_actions() {
+fn server_folder_actions_validate_names_before_lookup() {
     let sandbox = Sandbox::new();
-    let server = sandbox.json(&[
-        "--json",
-        "server",
-        "create",
-        "test",
-        "--minecraft",
-        "1.20.1",
-    ]);
-    let id = server["id"].as_str().expect("id");
-    let root = PathBuf::from(server["root"].as_str().expect("root"));
+    let id = "00000000-0000-0000-0000-000000000001";
 
-    let config = sandbox.json(&[
-        "--json", "server", "open", id, "--folder", "config", "--print",
-    ]);
-    assert_eq!(
-        PathBuf::from(config["path"].as_str().expect("path")),
-        root.join("server/config")
+    let supported = sandbox.run(&["server", "open", id, "--folder", "config", "--print"]);
+    assert!(!supported.status.success());
+    assert!(
+        String::from_utf8_lossy(&supported.stderr).contains("no server with id"),
+        "a supported folder must reach server lookup; stderr was:\n{}",
+        String::from_utf8_lossy(&supported.stderr)
     );
 
-    // A world that does not exist yet is not conjured up.
-    let world = sandbox.run(&["server", "open", id, "--folder", "world", "--print"]);
-    assert!(!world.status.success());
+    let unsupported = sandbox.run(&["server", "open", id, "--folder", "saves", "--print"]);
+    assert!(!unsupported.status.success());
+    assert!(
+        String::from_utf8_lossy(&unsupported.stderr).contains("invalid value"),
+        "a client-only folder must be rejected during parsing"
+    );
 }
 
 #[test]

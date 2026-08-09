@@ -73,8 +73,8 @@ invariant structural means no code path can leave two jars for one project.
   build something that never existed.
 - Adding a provider adds a `ModProvider` variant and a translation; it does not
   change the recipe, the installer, or the retained-source layout.
-- **Open, and belonging to the server work:** what "Create Server" does with a
-  mod whose server support is undeclared. This decision records the state
-  faithfully and stops there. Resolving it inside a mapping function here would
-  fix the product behavior by accident, in the one place nobody would look for
-  it.
+- Base server creation does not consume or materialize this recipe. It installs
+  only the exact supported Minecraft and loader base selected directly or
+  derived from a linked client. Recipe materialization is the later operation
+  that must decide how undeclared server applicability is handled; this ADR
+  continues to preserve `SideRequirement::Unknown` without interpreting it.

@@ -38,19 +38,26 @@ The CLI currently supports:
 - global Minecraft preferences applied through version-aware `options.txt`
   adapters; and
 - Modrinth `.mrpack` analysis and import with optional-file selection, layered
-  overrides, secure extraction, and verified downloads.
+  overrides, secure extraction, and verified downloads; and
+- exact Vanilla, Forge, and NeoForge dedicated-server installation, typed
+  properties and network settings, explicit global EULA consent, foreground
+  supervision, console control, conservative recovery, and bounded diagnostic
+  capture.
 
 ## Current limitations
 
 - The Slint GUI does not provide a functional interface; use the `ephervex` CLI.
-- CurseForge and Prism pack import, mod browsing, and dedicated-server process
-  management are not available.
+- CurseForge and Prism pack import are not available.
 - Microsoft sign-in requires a suitable Azure application registration and
   Microsoft approval for the Minecraft Services API. Offline accounts do not
   require either.
 - Ephervex targets Linux, release versions of Minecraft 1.12.2 and newer, and
   Vanilla, Forge, and NeoForge. Fabric, Quilt, snapshots, Windows, and macOS are
   outside the current supported scope.
+- Dedicated servers are supervised in the foreground. Abrupt supervisor
+  termination can leave an orphaned Java process; Ephervex reports verified
+  identity and requires explicit operating-system termination rather than
+  adopting or signaling that process.
 
 ## Building and testing
 

@@ -48,7 +48,7 @@ use ephervex_storage::{ClientRecord, LaunchLock, LaunchState};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument};
 
-use crate::app::{App, JavaPlan, JavaPlanRequest};
+use crate::app::{App, JavaPlan, JavaPlanRequest, JavaTarget};
 use crate::error::CoreResult;
 
 /// What a caller is asking for when it launches an instance.
@@ -168,7 +168,7 @@ impl App {
             .plan_java(
                 &record.minecraft_version,
                 &JavaPlanRequest {
-                    instance: Some(instance),
+                    target: JavaTarget::Client(instance),
                     explicit_path: options.java_path.clone(),
                     install_if_missing: options.install_java_if_missing,
                 },

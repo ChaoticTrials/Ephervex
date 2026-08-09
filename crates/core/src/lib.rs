@@ -30,15 +30,17 @@ pub mod instance;
 pub mod launch;
 pub mod logging;
 pub mod mods;
+pub mod server;
 
 pub use account::{AccountStatus, AccountSummary, ApiSettings, LoginOptions, TOKEN_REFRESH_MARGIN};
-pub use app::{App, JavaPlan, JavaPlanRequest, global_java_settings};
+pub use app::{App, JavaPlan, JavaPlanRequest, JavaTarget, global_java_settings};
 pub use error::{CoreError, CoreResult};
 pub use import::{ImportRequest, ImportedPack};
 pub use instance::{CreatedClient, global_minecraft_preferences};
 pub use launch::{LaunchOptions, LaunchOutcome};
 pub use logging::{DEFAULT_LOG_DIRECTIVES, init_tracing};
 pub use mods::{InstalledMods, ModInstallRequest};
+pub use server::{CaptureSnapshot, ServerCreateOptions, ServerPersistenceHealth, ServerStatus};
 
 /// Cancellation, re-exported because the services take one.
 ///
@@ -110,6 +112,7 @@ pub use ephervex_mod_platform::{
     ModSearchResults, ModVersionInfo, OptionalCandidate, PlanWarning, PlannedMod, ReleaseChannel,
     SideSupport,
 };
+pub use ephervex_model::{JavaOverride, JvmSettings, ServerInstallation, ServerRelativePath};
 pub use ephervex_options::{
     GlobalMinecraftPreferences, GuiScalePreference, InvalidPreferenceValue, LoadedPreferences,
     Managed, OPTIONS_FILE_NAME, PreferenceApplication, PreferenceKey, PreferenceValue, WindowSize,
@@ -120,11 +123,16 @@ pub use ephervex_pack::{
     OverrideScope, PackAnalysis, PackError, PackFileRecipe, PackFormat, PackPolicy, PackRecipe,
     PackSide, ProviderFileIdentity, ProviderRecipeMetadata, SidePlan, SideRequirement,
 };
+pub use ephervex_server::{
+    CaptureHealth, CaptureRetention, CapturedLine, ControlAction, ControlResponse,
+    EULA_CONFIRMATION_PHRASE, EulaStatus, MINECRAFT_EULA_REFERENCE, PropertiesDocument,
+    RuntimeClassification, ServerEvent, ServerExit, ServerObserver, ServerWarning,
+};
 pub use ephervex_storage::{
     AccountConfig, ApiConfig, CONFIG_SCHEMA_VERSION, ClientFolder, ClientRecord, Config,
     DUPLICATE_NAME_SUFFIX, DuplicateClient, DuplicatedClient, EulaConfig, FileDisposition,
-    ImportSource, JavaConfig, JavaOverride, JvmSettings, LaunchState, MissingFolder, NetworkAccess,
-    NewClient, NewServer, PathError, Paths, PreferenceSetting, ReconciledRecord,
-    ReconciliationReport, RecordRef, SECRET_KEY_MARKERS, ServerDefaults, ServerFolder,
-    ServerNetworkSettings, ServerRecord, StorageError, running_state,
+    ImportSource, JavaConfig, LaunchState, MissingFolder, NetworkAccess, NewClient, NewServer,
+    PathError, Paths, PreferenceSetting, ReconciledRecord, ReconciliationReport, RecordRef,
+    SECRET_KEY_MARKERS, ServerCommit, ServerCommitWarning, ServerDefaults, ServerFolder,
+    ServerNetworkSettings, ServerRecord, ServerRootConflict, StorageError, running_state,
 };

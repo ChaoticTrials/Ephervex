@@ -13,6 +13,7 @@ pub mod java;
 pub mod loader;
 pub mod mods;
 pub mod operation;
+pub mod server;
 pub mod storage;
 
 pub use account::AccountKind;
@@ -24,4 +25,5 @@ pub use java::{JavaOverride, JvmSettings};
 pub use loader::{LoaderKind, LoaderSelection, LoaderVersionMode};
 pub use mods::{ModOrigin, ModProvider};
 pub use operation::{Operation, OperationStatus, Progress};
+pub use server::{InvalidServerRelativePath, ServerInstallation, ServerLaunch, ServerRelativePath};
 pub use storage::StorageClass;

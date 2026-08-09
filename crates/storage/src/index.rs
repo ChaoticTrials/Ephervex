@@ -40,11 +40,18 @@ pub struct Migration {
 /// Append only. An applied migration is a fact about databases in the wild;
 /// editing one changes what a fresh install produces without changing what an
 /// existing install has, and the two silently diverge.
-pub const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "initial-schema",
-    sql: include_str!("migrations/0001-initial-schema.sql"),
-}];
+pub const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "initial-schema",
+        sql: include_str!("migrations/0001-initial-schema.sql"),
+    },
+    Migration {
+        version: 2,
+        name: "server-installation-state",
+        sql: include_str!("migrations/0002-server-installation-state.sql"),
+    },
+];
 
 /// The `user_version` a fully migrated database has.
 #[must_use]
@@ -390,6 +397,34 @@ mod tests {
     }
 
     #[test]
+    fn server_scaffolds_migrate_to_an_explicit_uninstalled_state() {
+        let mut connection = Connection::open_in_memory().expect("open");
+        apply_migrations(&mut connection, &MIGRATIONS[..1]).expect("initial schema");
+        connection
+            .execute(
+                "INSERT INTO servers
+                 (id, name, root, storage_class, minecraft_version, loader_kind, network,
+                  eula_accepted, source_kind, attention, created_at, updated_at)
+                 VALUES ('server-id', 'old scaffold', '/tmp/server', 'persistent', '1.20.1',
+                         'vanilla', '{}', 1, 'manual', '[]',
+                         '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                [],
+            )
+            .expect("insert old row");
+
+        apply_migrations(&mut connection, MIGRATIONS).expect("upgrade");
+        let (installation, old_eula): (String, bool) = connection
+            .query_row(
+                "SELECT installation, eula_accepted FROM servers WHERE id = 'server-id'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read migrated row");
+        assert_eq!(installation, r#"{"state":"not_installed"}"#);
+        assert!(old_eula, "the compatibility column survives but is inert");
+    }
+
+    #[test]
     fn a_failing_migration_is_rolled_back_and_the_version_is_not_advanced() {
         const BROKEN: &[Migration] = &[
             Migration {
@@ -429,7 +464,7 @@ mod tests {
             error,
             IndexError::SchemaFromFuture {
                 found: 999,
-                supported: 1
+                supported: 2
             }
         ));
         assert_eq!(error.message_id(), "error-index-schema-from-future");

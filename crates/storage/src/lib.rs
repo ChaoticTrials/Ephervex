@@ -50,11 +50,13 @@ pub use index::{Index, IndexError, MIGRATIONS, Migration, MigrationOutcome, appl
 pub use lock::{LAUNCH_LOCK_FILE, LaunchLock, LaunchState, LockError, running_state};
 pub use metadata::{METADATA_VERSION, MetadataError};
 pub use paths::{PathError, Paths};
-pub use reconcile::{ReconciledRecord, ReconciliationReport, RecordRef, reconcile};
+pub use reconcile::{
+    ReconciledRecord, ReconciliationReport, RecordRef, ServerRootConflict, reconcile,
+};
 pub use records::{
     ClientRecord, DUPLICATE_NAME_SUFFIX, DuplicateClient, DuplicatedClient, FileDisposition,
-    ImportSource, JavaOverride, JvmSettings, NewClient, NewServer, ServerNetworkSettings,
-    ServerRecord,
+    ImportSource, JavaOverride, JvmSettings, NewClient, NewServer, ServerCommit,
+    ServerCommitWarning, ServerCreationSource, ServerNetworkSettings, ServerRecord,
 };
 pub use registry::{Registry, RegistryError};
 

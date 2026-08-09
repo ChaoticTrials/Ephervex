@@ -45,7 +45,7 @@ prevents UI code from acquiring storage or provider policy accidentally.
 | `ephervex-options` | Line-preserving `options.txt` parsing and version-aware application of global preferences |
 | `ephervex-pack` | Format detection, hardened archive handling, provider-neutral recipes, Modrinth parsing, optional selection, materialization, and managed-mod installation |
 | `ephervex-mod-platform` | Modrinth project/version catalog, compatibility verdicts, and provider-neutral dependency resolution |
-| `ephervex-server` | Boundary reserved for dedicated-server installation and process management |
+| `ephervex-server` | Dedicated-server properties, EULA enforcement, process identity, foreground supervision, control channel, and bounded capture |
 | `ephervex-core` | Application services and error classification shared by frontends |
 | `ephervex-cli` | Command-line frontend and human/JSON rendering |
 | `ephervex-gui` | Slint frontend boundary; no functional interface is available |
@@ -80,6 +80,54 @@ The registry writes instance metadata before publishing the corresponding
 SQLite row. Reconciliation can therefore rebuild an index entry from an intact
 instance. A missing temporary root is treated as expected operating-system
 cleanup; a missing persistent root remains registered and requires attention.
+
+For servers, `.launcher/server.json` is the canonical entity and SQLite is a
+query index plus recovery copy. New servers are fully built in a hidden sibling
+root and published with one directory rename. Existing metadata wins during
+reconciliation; corrupt or missing metadata leaves the SQLite recovery copy
+visible but unusable for launch or mutation. Multiple roots claiming one server
+ID are a blocking conflict rather than a selection opportunity (ADR 0014).
+
+## Dedicated-server data flow
+
+```text
+typed standalone selection or linked client
+   │
+   ├── exact Minecraft and loader metadata
+   ├── Java requirement + loader compatibility rules
+   ├── shared verified downloads and libraries
+   ▼
+hidden sibling root
+   ├── server/ base installation
+   ├── managed network properties
+   └── .launcher/server.json
+              │ atomic directory rename
+              ▼
+        published server ──▶ SQLite query index
+```
+
+Runtime Java precedence is operation-specific path, server override, global
+preferred path, then compatible discovered or managed runtime. Minimum memory,
+maximum memory, and extra JVM arguments resolve independently from per-server
+overrides over global defaults. Compatibility is checked during installation
+and every start, including the legacy Forge Java 8 update ceiling.
+
+A start first merges canonical typed network settings and validates global EULA
+consent. Only then may it atomically merge `eula=true`. The foreground
+supervisor owns the Java child's stdin and both output pipes, the runtime lock,
+and a mode-0600 Unix socket in a short, mode-0700 per-user runtime directory.
+The runtime record's generation selects the socket without embedding the
+potentially long server root in its path. Stop is graceful and never
+escalates; kill is explicit and available only through the owner channel.
+Linux boot ID, PID start ticks, canonical executable, and executable identity
+distinguish a controlled process, an orphan, an unverifiable process, and
+proven-stale state. An orphan is reported but never adopted or signaled.
+
+Launcher capture is separate from Minecraft's own `server/logs/` and
+`server/crash-reports/`. A bounded memory ring feeds frontends while rotated
+JSON Lines segments provide durable combined output. Retention and write
+failures are observable events; pipe draining continues when durable capture
+is unavailable.
 
 ## Launch data flow
 
@@ -250,8 +298,9 @@ stderr so machine-readable output remains valid.
 The supported scope includes Linux, Minecraft release versions from 1.12.2
 onward, Vanilla, Forge, NeoForge, Modrinth pack import, and Modrinth mod
 browsing with dependency resolution. The GUI, CurseForge browsing, CurseForge
-and Prism import, mod updates and removal, and dedicated-server process
-management are unavailable. Fabric, Quilt, snapshots, Windows, and macOS are
+and Prism import, mod updates and removal, recipe materialization into servers,
+and full server GUI/log views are unavailable. Fabric, Quilt, snapshots,
+Windows, and macOS are
 outside the supported scope recorded in ADR 0008.
 
 ## Verification

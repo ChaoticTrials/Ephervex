@@ -1558,6 +1558,7 @@ dependencies = [
  "ephervex-server",
  "ephervex-storage",
  "open",
+ "serde_json",
  "sysinfo",
  "tempfile",
  "thiserror 2.0.19",
@@ -1750,14 +1751,19 @@ dependencies = [
 name = "ephervex-server"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "ephervex-download",
  "ephervex-loaders",
+ "ephervex-minecraft",
  "ephervex-model",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.19",
  "tokio",
+ "tokio-util",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

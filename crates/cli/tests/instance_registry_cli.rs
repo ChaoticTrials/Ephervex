@@ -224,7 +224,7 @@ fn a_modded_loader_without_a_version_is_rejected_rather_than_guessed() {
 }
 
 #[test]
-fn several_servers_can_link_to_one_client_through_the_cli() {
+fn linked_server_creation_rejects_an_independent_version_selection() {
     let sandbox = Sandbox::new();
     let client = sandbox.json(&[
         "--json",
@@ -237,31 +237,28 @@ fn several_servers_can_link_to_one_client_through_the_cli() {
     ]);
     let client_id = client["id"].as_str().expect("id");
 
-    for name in ["server a", "server b"] {
-        sandbox.json(&[
-            "--json",
-            "server",
-            "create",
-            name,
-            "--minecraft",
-            "1.20.1",
-            "--client",
-            client_id,
-            "--persistent",
-        ]);
-    }
+    let output = sandbox.run(&[
+        "server",
+        "create",
+        "linked server",
+        "--minecraft",
+        "1.20.1",
+        "--client",
+        client_id,
+        "--persistent",
+    ]);
 
-    let shown = sandbox.json(&["--json", "instance", "show", client_id]);
-    assert_eq!(
-        shown["linked_server_ids"].as_array().expect("array").len(),
-        2
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("cannot be used with"),
+        "stderr was:\n{stderr}"
     );
-    assert_eq!(
+    assert!(
         sandbox
             .json(&["--json", "servers", "list"])
             .as_array()
             .expect("array")
-            .len(),
-        2
+            .is_empty()
     );
 }

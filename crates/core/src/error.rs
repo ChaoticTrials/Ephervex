@@ -17,6 +17,7 @@ use ephervex_java::JavaError;
 use ephervex_loaders::LoaderError;
 use ephervex_minecraft::{LaunchError, MinecraftError};
 use ephervex_pack::PackError;
+use ephervex_server::ServerError;
 use ephervex_storage::StorageError;
 
 /// Anything an application service can fail with.
@@ -74,6 +75,10 @@ pub enum CoreError {
     /// in" rather than two that can drift.
     #[error(transparent)]
     Launch(#[from] LaunchError),
+
+    /// Dedicated-server properties, consent, process, or capture lifecycle.
+    #[error(transparent)]
+    Server(#[from] ServerError),
 }
 
 impl CoreError {
@@ -98,6 +103,7 @@ impl CoreError {
             Self::Preference(error) => error.message_id(),
             Self::Pack(error) => error.message_id(),
             Self::ModPlatform(error) => error.message_id(),
+            Self::Server(error) => error.message_id(),
         }
     }
 
@@ -236,7 +242,8 @@ impl CoreError {
             | Self::Options(_)
             | Self::Preference(_)
             | Self::ModPlatform(_)
-            | Self::Pack(_) => None,
+            | Self::Pack(_)
+            | Self::Server(_) => None,
         }
     }
 
@@ -264,6 +271,7 @@ impl CoreError {
             Self::Launch(error) => error.failing_path(),
             Self::Options(error) => error.failing_path(),
             Self::Pack(error) => error.failing_path(),
+            Self::Server(error) => error.failing_path(),
             // Authentication failures are never about a file. The one thing
             // that would be — the keyring entry — is not a path the user can
             // usefully be pointed at. A rejected preference value is about a

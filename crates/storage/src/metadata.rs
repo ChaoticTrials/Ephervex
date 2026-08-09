@@ -23,6 +23,7 @@
 //! leaves a directory that startup reconciliation will re-index; the reverse
 //! order would leave an index row pointing at nothing.
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -202,8 +203,10 @@ pub fn write_client_metadata(root: &Path, record: &ClientRecord) -> Result<(), M
 /// Writes `.launcher/server.json` and `.launcher/warnings.json`.
 pub fn write_server_metadata(root: &Path, record: &ServerRecord) -> Result<(), MetadataError> {
     prepare_metadata_dir(root)?;
-    write_json(&server_metadata_path(root), &MetadataFile::new(record))?;
-    write_json(&warnings_path(root), &record.attention)
+    // `server.json` is the entity commit point. Attention is already part of
+    // the record, so a redundant warnings file must not turn a committed
+    // mutation into an apparent failure.
+    write_json(&server_metadata_path(root), &MetadataFile::new(record))
 }
 
 /// Reads `.launcher/instance.json`.
@@ -270,14 +273,34 @@ fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), MetadataError>
     // Same rename dance as the configuration file: an interrupted write must
     // not be able to turn a recoverable instance into an unparseable one.
     let temporary = path.with_extension("json.tmp");
-    std::fs::write(&temporary, text).map_err(|source| MetadataError::Unwritable {
-        path: temporary.clone(),
-        source,
-    })?;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&temporary)
+        .map_err(|source| MetadataError::Unwritable {
+            path: temporary.clone(),
+            source,
+        })?;
+    file.write_all(text.as_bytes())
+        .and_then(|()| file.sync_all())
+        .map_err(|source| MetadataError::Unwritable {
+            path: temporary.clone(),
+            source,
+        })?;
     std::fs::rename(&temporary, path).map_err(|source| MetadataError::Unwritable {
         path: path.to_path_buf(),
         source,
-    })
+    })?;
+    if let Some(parent) = path.parent() {
+        std::fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|source| MetadataError::Unwritable {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

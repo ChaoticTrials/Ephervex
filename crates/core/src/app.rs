@@ -31,10 +31,10 @@ use ephervex_minecraft::{
     MinecraftError, MinecraftVersionId, ReleaseListing, VERSION_MANIFEST_CACHE_KEY, VersionCatalog,
     VersionMetadata,
 };
-use ephervex_model::{InstanceId, JavaOverride, LoaderKind, LoaderVersionMode, ServerId};
+use ephervex_model::{InstanceId, LoaderKind, LoaderVersionMode, ServerId};
 use ephervex_storage::{
-    ClientRecord, Config, FileDisposition, JavaConfig, NewClient, NewServer, Paths,
-    ReconciliationReport, Registry, ServerRecord, Storage,
+    ClientRecord, Config, FileDisposition, JavaConfig, NewClient, Paths, ReconciliationReport,
+    Registry, ServerRecord, Storage,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{instrument, warn};
@@ -46,10 +46,18 @@ use crate::error::CoreResult;
 /// The default — no instance, no explicit path, no installing — is "what would
 /// happen if I launched this right now", which is the question a `--dry-run`
 /// and a settings screen both ask.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum JavaTarget {
+    #[default]
+    VersionOnly,
+    Client(InstanceId),
+    Server(ServerId),
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct JavaPlanRequest {
-    /// The instance whose overrides apply, if the plan is for one.
-    pub instance: Option<InstanceId>,
+    /// The typed entity whose loader and overrides apply.
+    pub target: JavaTarget,
     /// A path supplied for this operation only. Outranks every stored setting.
     pub explicit_path: Option<PathBuf>,
     /// Whether to download a managed runtime when nothing installed qualifies.
@@ -307,21 +315,9 @@ impl App {
 
     // -- servers -----------------------------------------------------------
 
-    /// Creates a server, optionally linked to a client.
-    #[instrument(skip(self, request))]
-    pub fn create_server(&self, request: NewServer) -> CoreResult<ServerRecord> {
-        Ok(self.registry().create_server(request)?)
-    }
-
     /// Lists every indexed server.
     pub fn list_servers(&self) -> CoreResult<Vec<ServerRecord>> {
         Ok(self.registry().list_servers()?)
-    }
-
-    /// Deletes a server.
-    #[instrument(skip(self))]
-    pub fn delete_server(&self, id: ServerId, files: FileDisposition) -> CoreResult<()> {
-        Ok(self.registry().delete_server(id, files)?)
     }
 
     // -- minecraft versions ------------------------------------------------
@@ -487,11 +483,49 @@ impl App {
         request: &JavaPlanRequest,
     ) -> CoreResult<JavaPlan> {
         let required = self.required_java(minecraft_version).await?;
-        let loader = request
-            .instance
-            .map(|id| self.client(id).map(|record| record.loader))
-            .transpose()?
-            .unwrap_or_else(ephervex_model::LoaderSelection::vanilla);
+        let (loader, java_override, jvm_override) = match request.target {
+            JavaTarget::VersionOnly => (ephervex_model::LoaderSelection::vanilla(), None, None),
+            JavaTarget::Client(id) => {
+                let record = self.client(id)?;
+                (record.loader, record.java_override, record.jvm_override)
+            }
+            JavaTarget::Server(id) => {
+                let record = self.server(id)?;
+                (record.loader, record.java_override, record.jvm_override)
+            }
+        };
+        self.plan_java_for_selection(
+            minecraft_version,
+            required,
+            &loader,
+            java_override,
+            jvm_override,
+            request,
+        )
+        .await
+    }
+
+    pub(crate) async fn plan_java_for_unindexed_server(
+        &self,
+        minecraft_version: &str,
+        loader: &ephervex_model::LoaderSelection,
+        request: &JavaPlanRequest,
+    ) -> CoreResult<JavaPlan> {
+        let required = self.required_java(minecraft_version).await?;
+        self.plan_java_for_selection(minecraft_version, required, loader, None, None, request)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn plan_java_for_selection(
+        &self,
+        minecraft_version: &str,
+        required: RequiredJava,
+        loader: &ephervex_model::LoaderSelection,
+        java_override: Option<ephervex_model::JavaOverride>,
+        jvm_override: Option<ephervex_model::JvmSettings>,
+        request: &JavaPlanRequest,
+    ) -> CoreResult<JavaPlan> {
         let loader_rules = self
             .loaders()?
             .provider(loader.kind)
@@ -510,13 +544,10 @@ impl App {
         let settings = self.java_settings();
         let preference = JavaPreference {
             explicit: request.explicit_path.clone(),
-            instance: self.instance_java_override(request.instance)?,
+            instance: java_override,
             global: settings.preferred_path.clone(),
         };
-        let jvm = EffectiveJvmSettings::resolve(
-            &settings,
-            self.instance_jvm_override(request.instance)?.as_ref(),
-        );
+        let jvm = EffectiveJvmSettings::resolve(&settings, jvm_override.as_ref());
 
         let choice = preference.resolve();
         if let JavaPathChoice::Pinned { path, source } = &choice {
@@ -652,23 +683,6 @@ impl App {
                 )))
             }
             Err(other) => Err(other),
-        }
-    }
-
-    fn instance_java_override(&self, id: Option<InstanceId>) -> CoreResult<Option<JavaOverride>> {
-        match id {
-            Some(id) => Ok(self.client(id)?.java_override),
-            None => Ok(None),
-        }
-    }
-
-    fn instance_jvm_override(
-        &self,
-        id: Option<InstanceId>,
-    ) -> CoreResult<Option<ephervex_model::JvmSettings>> {
-        match id {
-            Some(id) => Ok(self.client(id)?.jvm_override),
-            None => Ok(None),
         }
     }
 

@@ -813,3 +813,33 @@ error-mod-resolution-did-not-converge = Ephervex could not settle this mod's dep
 .action = This is a defect in Ephervex rather than a problem with the mod. Please report it.
 
 error-mod-canceled = The operation was canceled.
+
+## Dedicated servers
+
+error-server-property-invalid = That server property value is invalid.
+.action = Correct the value and try again.
+error-server-property-protected = That property has a dedicated server setting.
+.action = Use the typed network or EULA command instead.
+error-server-eula-not-accepted = Minecraft EULA consent has not been accepted.
+.action = Review the Minecraft EULA, then accept it interactively with the server EULA command.
+error-server-eula-consent-malformed = The recorded Minecraft EULA consent is incomplete or invalid.
+.action = Revoke it, review the current EULA, and accept again interactively.
+error-server-runtime-state = The server runtime evidence could not be read or written.
+.action = Inspect the server's .launcher directory and its permissions.
+error-server-file-io = A server file could not be read or written.
+.action = Check the path, available disk space, and permissions.
+error-server-runtime-may-be-alive = Ephervex cannot prove that the recorded server process is gone.
+.action = Check the reported PID and executable with operating-system tools. Runtime evidence can be cleared only after the process is proven dead.
+error-server-control-unavailable = The live server owner could not be reached.
+.action = Check server status. An abrupt supervisor termination may leave an orphaned Java process that Ephervex will not adopt or signal.
+error-server-process-start = The server Java process could not be started.
+.action = Check the selected Java executable and the server installation.
+error-server-already-running = This server is already running or may still be running.
+.action = Check server recovery status before trying to start, delete, install, or change it.
+error-server-console-invalid = A console command must be exactly one line.
+error-server-process-io = Communication with the server process failed.
+error-server-control-response-invalid = The server control channel returned an invalid response.
+error-server-not-installed = This server's base installation is not complete.
+.action = Install the exact selected Minecraft and loader versions before starting it.
+error-server-persistence-unhealthy = This server's canonical metadata is unhealthy or conflicted.
+.action = Inspect server status and resolve missing, corrupt, unsupported, or duplicate metadata before changing or starting it.

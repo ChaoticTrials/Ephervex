@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use ephervex_model::{
     AttentionReason, ImportSourceKind, InstanceId, LoaderKind, LoaderSelection, ServerId,
-    StorageClass,
+    ServerInstallation, StorageClass,
 };
 use rusqlite::{Row, params};
 
@@ -22,8 +22,8 @@ use crate::metadata::{self, MetadataError};
 use crate::paths::{PathError, Paths, create_dir_all};
 use crate::records::{
     ClientRecord, DUPLICATE_NAME_SUFFIX, DuplicateClient, DuplicatedClient, FileDisposition,
-    ImportSource, JavaOverride, JvmSettings, NewClient, NewServer, ServerNetworkSettings,
-    ServerRecord,
+    ImportSource, JavaOverride, JvmSettings, NewClient, NewServer, ServerCommit,
+    ServerCommitWarning, ServerCreationSource, ServerNetworkSettings, ServerRecord,
 };
 
 const CLIENT_COLUMNS: &str = "id, name, root, storage_class, minecraft_version, loader_kind, \
@@ -32,7 +32,7 @@ const CLIENT_COLUMNS: &str = "id, name, root, storage_class, minecraft_version, 
 
 const SERVER_COLUMNS: &str = "id, name, root, storage_class, linked_client_id, minecraft_version, \
      loader_kind, loader_version, network, eula_accepted, source_kind, source_reference, \
-     java_override, jvm_override, attention, created_at, updated_at, last_started_at";
+     java_override, jvm_override, attention, created_at, updated_at, last_started_at, installation";
 
 /// Failures from registry operations.
 #[derive(Debug, thiserror::Error)]
@@ -373,6 +373,19 @@ impl Registry {
     ) -> Result<(), RegistryError> {
         let record = self.client(id)?;
 
+        // The relationship is owned canonically by each server. Clear every
+        // metadata record before SQLite's ON DELETE SET NULL mirrors it.
+        for server_id in self.linked_server_ids(id)? {
+            let indexed = self.server(server_id)?;
+            let mut server = if indexed.root.is_dir() {
+                metadata::read_server_metadata(&indexed.root)?
+            } else {
+                indexed
+            };
+            server.linked_client_id = None;
+            let _committed = self.update_server_committed(&mut server)?;
+        }
+
         if files == FileDisposition::Remove {
             remove_tree(&record.root)?;
         }
@@ -409,34 +422,9 @@ impl Registry {
 
     /// Creates a server: directory, metadata, then index row.
     pub fn create_server(&self, request: NewServer) -> Result<ServerRecord, RegistryError> {
-        let id = ServerId::new();
-        let root = self.paths.server_root(request.storage, id);
-        ensure_free_root(&root)?;
-
-        let now = Utc::now();
-        let record = ServerRecord {
-            id,
-            name: request.name,
-            root: root.clone(),
-            storage: request.storage,
-            linked_client_id: request.linked_client_id,
-            minecraft_version: request.minecraft_version,
-            loader: request.loader,
-            network: request.network,
-            // Never pre-accepted. The user accepts the EULA globally and
-            // explicitly, and only then does a new server inherit it
-            eula_accepted: false,
-            source: request.source,
-            java_override: None,
-            jvm_override: None,
-            attention: request.attention,
-            created_at: now,
-            updated_at: now,
-            last_started_at: None,
-        };
-
-        create_dir_all(&metadata::server_game_dir(&root))?;
-        metadata::write_server_metadata(&root, &record)?;
+        let record = self.prepare_server(request)?;
+        create_dir_all(&metadata::server_game_dir(&record.root))?;
+        metadata::write_server_metadata(&record.root, &record)?;
         self.insert_server_row(&record)?;
 
         tracing::info!(
@@ -448,9 +436,108 @@ impl Registry {
         Ok(record)
     }
 
+    /// Resolves a request into its canonical record without publishing files.
+    /// Linked requests derive their exact selection from the client here.
+    pub fn prepare_server(&self, request: NewServer) -> Result<ServerRecord, RegistryError> {
+        let id = ServerId::new();
+        let root = self.paths.server_root(request.storage, id);
+        ensure_free_root(&root)?;
+
+        let (linked_client_id, minecraft_version, loader) = match request.creation {
+            ServerCreationSource::Standalone {
+                minecraft_version,
+                loader,
+            } => (None, minecraft_version, loader),
+            ServerCreationSource::LinkedClient { client_id } => {
+                let client = self.client(client_id)?;
+                (Some(client_id), client.minecraft_version, client.loader)
+            }
+        };
+
+        let now = Utc::now();
+        Ok(ServerRecord {
+            id,
+            name: request.name,
+            root: root.clone(),
+            storage: request.storage,
+            linked_client_id,
+            minecraft_version,
+            loader,
+            installation: ServerInstallation::NotInstalled,
+            network: request.network,
+            source: request.source,
+            java_override: None,
+            jvm_override: None,
+            attention: request.attention,
+            created_at: now,
+            updated_at: now,
+            last_started_at: None,
+        })
+    }
+
+    /// Publishes a complete staging root, then mirrors it into SQLite.
+    ///
+    /// The root rename is the commit point. An index failure after it is a
+    /// warning attached to the committed record, never a failed creation.
+    pub fn publish_staged_server(
+        &self,
+        record: &ServerRecord,
+        staging_root: &Path,
+    ) -> Result<ServerCommit<ServerRecord>, RegistryError> {
+        ensure_free_root(&record.root)?;
+        metadata::write_server_metadata(staging_root, record)?;
+        std::fs::rename(staging_root, &record.root).map_err(|source| RegistryError::Io {
+            path: record.root.clone(),
+            source,
+        })?;
+        let warnings = match self.insert_server_row(record) {
+            Ok(()) => Vec::new(),
+            Err(error) => vec![ServerCommitWarning::IndexOutOfSync {
+                detail: error.to_string(),
+            }],
+        };
+        Ok(ServerCommit {
+            record: record.clone(),
+            warnings,
+        })
+    }
+
     /// Adds an already-existing server directory to the index.
     pub fn index_existing_server(&self, record: &ServerRecord) -> Result<(), RegistryError> {
         self.insert_server_row(record)
+    }
+
+    /// Atomically replaces the SQLite recovery copy from canonical metadata.
+    pub fn synchronize_server_index(&self, record: &ServerRecord) -> Result<(), RegistryError> {
+        self.index.connection().execute(
+            "INSERT OR REPLACE INTO servers
+             (id, name, root, storage_class, linked_client_id, minecraft_version, loader_kind,
+              loader_version, network, eula_accepted, source_kind, source_reference,
+              java_override, jvm_override, attention, created_at, updated_at, last_started_at,
+              installation)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+            params![
+                record.id.to_string(),
+                record.name,
+                path_to_sql(&record.root),
+                storage_class_to_sql(record.storage),
+                record.linked_client_id.map(|id| id.to_string()),
+                record.minecraft_version,
+                loader_kind_to_sql(record.loader.kind),
+                record.loader.version,
+                to_json(&record.network)?,
+                source_kind_to_sql(record.source.kind),
+                record.source.reference,
+                to_json_option(record.java_override.as_ref())?,
+                to_json_option(record.jvm_override.as_ref())?,
+                to_json(&record.attention)?,
+                timestamp_to_sql(record.created_at),
+                timestamp_to_sql(record.updated_at),
+                record.last_started_at.map(timestamp_to_sql),
+                to_json(&record.installation)?,
+            ],
+        )?;
+        Ok(())
     }
 
     /// Reads one server.
@@ -486,19 +573,29 @@ impl Registry {
 
     /// Persists changes to a server.
     pub fn update_server(&self, record: &mut ServerRecord) -> Result<(), RegistryError> {
+        let _committed = self.update_server_committed(record)?;
+        Ok(())
+    }
+
+    /// Commits canonical metadata first and reports an index-mirror failure as
+    /// a warning rather than rolling back an already durable mutation.
+    pub fn update_server_committed(
+        &self,
+        record: &mut ServerRecord,
+    ) -> Result<ServerCommit<ServerRecord>, RegistryError> {
         record.updated_at = Utc::now();
 
         if record.root.is_dir() {
             metadata::write_server_metadata(&record.root, record)?;
         }
 
-        let changed = self.index.connection().execute(
+        let indexed = self.index.connection().execute(
             "UPDATE servers SET
                 name = ?2, root = ?3, storage_class = ?4, linked_client_id = ?5,
                 minecraft_version = ?6, loader_kind = ?7, loader_version = ?8, network = ?9,
-                eula_accepted = ?10, source_kind = ?11, source_reference = ?12,
-                java_override = ?13, jvm_override = ?14, attention = ?15,
-                updated_at = ?16, last_started_at = ?17
+                source_kind = ?10, source_reference = ?11,
+                java_override = ?12, jvm_override = ?13, attention = ?14,
+                updated_at = ?15, last_started_at = ?16, installation = ?17
              WHERE id = ?1",
             params![
                 record.id.to_string(),
@@ -510,7 +607,6 @@ impl Registry {
                 loader_kind_to_sql(record.loader.kind),
                 record.loader.version,
                 to_json(&record.network)?,
-                record.eula_accepted,
                 source_kind_to_sql(record.source.kind),
                 record.source.reference,
                 to_json_option(record.java_override.as_ref())?,
@@ -518,13 +614,23 @@ impl Registry {
                 to_json(&record.attention)?,
                 timestamp_to_sql(record.updated_at),
                 record.last_started_at.map(timestamp_to_sql),
+                to_json(&record.installation)?,
             ],
-        )?;
+        );
 
-        if changed == 0 {
-            return Err(RegistryError::ServerUnknown { id: record.id });
-        }
-        Ok(())
+        let warnings = match indexed {
+            Ok(0) => vec![ServerCommitWarning::IndexOutOfSync {
+                detail: RegistryError::ServerUnknown { id: record.id }.to_string(),
+            }],
+            Ok(_) => Vec::new(),
+            Err(error) => vec![ServerCommitWarning::IndexOutOfSync {
+                detail: error.to_string(),
+            }],
+        };
+        Ok(ServerCommit {
+            record: record.clone(),
+            warnings,
+        })
     }
 
     /// Removes a server from the index, and optionally from disk.
@@ -578,8 +684,9 @@ impl Registry {
             "INSERT INTO servers
              (id, name, root, storage_class, linked_client_id, minecraft_version, loader_kind,
               loader_version, network, eula_accepted, source_kind, source_reference,
-              java_override, jvm_override, attention, created_at, updated_at, last_started_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+              java_override, jvm_override, attention, created_at, updated_at, last_started_at,
+              installation)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             params![
                 record.id.to_string(),
                 record.name,
@@ -590,7 +697,6 @@ impl Registry {
                 loader_kind_to_sql(record.loader.kind),
                 record.loader.version,
                 to_json(&record.network)?,
-                record.eula_accepted,
                 source_kind_to_sql(record.source.kind),
                 record.source.reference,
                 to_json_option(record.java_override.as_ref())?,
@@ -599,6 +705,7 @@ impl Registry {
                 timestamp_to_sql(record.created_at),
                 timestamp_to_sql(record.updated_at),
                 record.last_started_at.map(timestamp_to_sql),
+                to_json(&record.installation)?,
             ],
         )?;
         Ok(())
@@ -674,6 +781,7 @@ fn server_from_row(row: &Row<'_>) -> rusqlite::Result<Result<ServerRecord, Index
     let created_at: String = row.get(15)?;
     let updated_at: String = row.get(16)?;
     let last_started_at: Option<String> = row.get(17)?;
+    let installation: String = row.get(18)?;
 
     let record = (|| {
         Ok(ServerRecord {
@@ -690,8 +798,8 @@ fn server_from_row(row: &Row<'_>) -> rusqlite::Result<Result<ServerRecord, Index
                 kind: loader_kind_from_sql(&loader_kind)?,
                 version: row.get(7).unwrap_or_default(),
             },
+            installation: from_json::<ServerInstallation>(&installation, "servers.installation")?,
             network: from_json::<ServerNetworkSettings>(&network, "servers.network")?,
-            eula_accepted: row.get(9).unwrap_or_default(),
             source: ImportSource {
                 kind: source_kind_from_sql(&source_kind)?,
                 reference: row.get(11).unwrap_or_default(),
@@ -1207,15 +1315,51 @@ mod tests {
     }
 
     #[test]
-    fn a_new_server_never_starts_with_the_eula_accepted() {
-        // the launcher must never claim the user agreed.
+    fn deleting_a_client_clears_links_in_canonical_server_metadata() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = registry
+            .create_client(NewClient::new(
+                "client",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create client");
+        let server = registry
+            .create_server(NewServer::linked("server", client.id))
+            .expect("create server");
+
+        registry
+            .delete_client(client.id, FileDisposition::Remove)
+            .expect("delete client");
+        assert_eq!(
+            metadata::read_server_metadata(&server.root)
+                .expect("metadata")
+                .linked_client_id,
+            None
+        );
+        assert_eq!(
+            registry
+                .server(server.id)
+                .expect("indexed")
+                .linked_client_id,
+            None
+        );
+    }
+
+    #[test]
+    fn a_new_server_is_explicitly_not_installed() {
         let environment = TestEnvironment::new();
         let registry = environment.registry();
         let server = registry
             .create_server(NewServer::new("test", "1.20.1", LoaderSelection::vanilla()))
             .expect("create");
-        assert!(!server.eula_accepted);
+        assert_eq!(server.installation, ServerInstallation::NotInstalled);
         assert!(!server.network.online_mode);
+
+        let metadata = std::fs::read_to_string(metadata::server_metadata_path(&server.root))
+            .expect("read metadata");
+        assert!(!metadata.contains("eula_accepted"));
     }
 
     #[test]

@@ -12,23 +12,28 @@
 //!   errors below carry a stable message id, never English prose; the text a
 //!   user reads is resolved here through `ephervex-i18n`.
 
+use std::io::{IsTerminal as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use ephervex_core::{
     AccountStatus, AccountSummary, ApiSettings, App, ArgumentForm, Artifact, AssetIndexRef,
-    AuthEvent, AuthObserver, CancellationToken, ClientFolder, ClientRecord, Compatibility, Config,
-    CoreError, CreatedClient, CredentialStorage, DEFAULT_SEARCH_LIMIT, DuplicateClient,
-    Entitlements, FileDisposition, Freshness, ImportRequest, ImportedPack, IncompatibilityReason,
-    InstalledMods, JavaPathChoice, JavaPlan, JavaPlanRequest, JavaRuntime, LaunchEvent,
-    LaunchFeatures, LaunchObserver, LaunchOptions, LaunchOutcome, LaunchState, LoginFlow,
-    LoginOptions, LoginRequest, ManagedInstallation, ManagedMod, ModInstallPlan, ModInstallRequest,
-    ModProjectDetails, ModSearchQuery, ModSearchResults, NewClient, NewServer, OperationReporter,
+    AuthEvent, AuthObserver, CancellationToken, CaptureHealth, CapturedLine, ClientFolder,
+    ClientRecord, Compatibility, Config, ControlResponse, CoreError, CreatedClient,
+    CredentialStorage, DEFAULT_SEARCH_LIMIT, DuplicateClient, EULA_CONFIRMATION_PHRASE,
+    Entitlements, EulaStatus, FileDisposition, Freshness, ImportRequest, ImportedPack,
+    IncompatibilityReason, InstalledMods, JavaPathChoice, JavaPlan, JavaPlanRequest, JavaRuntime,
+    JavaTarget, LaunchEvent, LaunchFeatures, LaunchObserver, LaunchOptions, LaunchOutcome,
+    LaunchState, LoginFlow, LoginOptions, LoginRequest, MINECRAFT_EULA_REFERENCE,
+    ManagedInstallation, ManagedMod, ModInstallPlan, ModInstallRequest, ModProjectDetails,
+    ModSearchQuery, ModSearchResults, NetworkAccess, NewClient, NewServer, OperationReporter,
     OptionalSelection, OutputLine, PackAnalysis, PackRecipe, PackSide, Paths, PlanWarning,
     PlannedMod, PreferenceApplication, PreferenceKey, ReconciliationReport, ReleaseListing,
-    RequirementBasis, RuntimeInventory, SecretString, ServerFolder, ServerRecord, Session,
-    SideRequirement, VersionMetadata, VersionRecord,
+    RequirementBasis, RuntimeClassification, RuntimeInventory, SecretString, ServerCommitWarning,
+    ServerCreateOptions, ServerEvent, ServerFolder, ServerNetworkSettings, ServerObserver,
+    ServerPersistenceHealth, ServerRecord, ServerWarning, Session, SideRequirement,
+    VersionMetadata, VersionRecord,
 };
 use ephervex_i18n::Arg as MessageArg;
 use ephervex_model::{InstanceId, LoaderKind, LoaderSelection, ServerId, StorageClass};
@@ -472,8 +477,55 @@ enum ServersCommand {
 
 #[derive(Debug, Subcommand)]
 enum ServerCommand {
-    /// Create a server.
+    /// Create and fully install an exact server selection.
     Create(CreateServerArgs),
+    /// Install the exact base for an existing uninstalled server record.
+    Install {
+        id: ServerId,
+        #[arg(long)]
+        java: Option<PathBuf>,
+    },
+    /// Show canonical server metadata.
+    Show { id: ServerId },
+    /// Show persistence, installation, runtime, and capture status.
+    Status { id: ServerId },
+    /// Read or change `server.properties` through managed services.
+    Properties {
+        #[command(subcommand)]
+        command: ServerPropertiesCommand,
+    },
+    /// Change typed network settings.
+    Network(ServerNetworkArgs),
+    /// Inspect, explicitly accept, or revoke global Minecraft EULA consent.
+    Eula {
+        #[command(subcommand)]
+        command: ServerEulaCommand,
+    },
+    /// Start in the foreground and stream server output.
+    Start {
+        id: ServerId,
+        #[arg(long)]
+        java: Option<PathBuf>,
+    },
+    /// Request a graceful stop and wait up to 30 seconds.
+    Stop { id: ServerId },
+    /// Gracefully stop and respawn through the live supervisor.
+    Restart { id: ServerId },
+    /// Force termination through the live owner channel.
+    Kill { id: ServerId },
+    /// Send one line to the live server console.
+    Console { id: ServerId, command: String },
+    /// Show retained combined launcher output.
+    Output {
+        id: ServerId,
+        #[arg(long, default_value_t = 200)]
+        lines: usize,
+    },
+    /// Inspect or conservatively clear runtime evidence.
+    Recover {
+        #[command(subcommand)]
+        command: ServerRecoverCommand,
+    },
     /// Open one of a server's folders in the desktop's file manager.
     Open {
         id: ServerId,
@@ -485,7 +537,7 @@ enum ServerCommand {
         #[arg(long)]
         print: bool,
     },
-    /// Remove a server from the index.
+    /// Delete a server and, unless requested, its files.
     Delete {
         id: ServerId,
         /// Leave the server directory on disk.
@@ -512,18 +564,82 @@ struct CreateInstanceArgs {
 
 #[derive(Debug, Args)]
 struct CreateServerArgs {
+    /// Display name. Never used to build a path.
     name: String,
+    /// Exact Minecraft version for a standalone server.
     #[arg(long)]
-    minecraft: String,
+    minecraft: Option<String>,
+    /// Loader for a standalone server.
     #[arg(long, value_enum, default_value_t = LoaderArg::Vanilla)]
     loader: LoaderArg,
+    /// Exact loader build. Required for Forge and NeoForge.
     #[arg(long)]
     loader_version: Option<String>,
-    /// Link this server to a client instance.
-    #[arg(long)]
+    /// Derive the exact Minecraft and loader selection from this client.
+    #[arg(
+        long,
+        conflicts_with_all = ["minecraft", "loader", "loader_version"]
+    )]
     client: Option<InstanceId>,
+    /// Use this Java executable for installation.
+    #[arg(long)]
+    java: Option<PathBuf>,
     #[command(flatten)]
     storage: StorageArgs,
+}
+
+#[derive(Debug, Subcommand)]
+enum ServerPropertiesCommand {
+    /// Show the line-preserving properties document.
+    Show { id: ServerId },
+    /// Set an untyped property; managed network and EULA keys are refused.
+    Set {
+        id: ServerId,
+        key: String,
+        value: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum NetworkAccessArg {
+    Localhost,
+    Lan,
+    Custom,
+}
+
+#[derive(Debug, Args)]
+struct ServerNetworkArgs {
+    id: ServerId,
+    /// Require authenticated Minecraft accounts.
+    #[arg(long)]
+    online_mode: bool,
+    /// Network exposure for the server listener.
+    #[arg(long, value_enum, default_value_t = NetworkAccessArg::Localhost)]
+    access: NetworkAccessArg,
+    /// TCP port; zero is invalid.
+    #[arg(long, default_value_t = 25565)]
+    port: u16,
+    /// IP address required by `--access custom`.
+    #[arg(long)]
+    address: Option<String>,
+}
+
+#[derive(Debug, Subcommand)]
+enum ServerEulaCommand {
+    /// Show global Minecraft EULA consent status.
+    Status,
+    /// Review and explicitly accept in an interactive terminal.
+    Accept,
+    /// Revoke current global consent.
+    Revoke,
+}
+
+#[derive(Debug, Subcommand)]
+enum ServerRecoverCommand {
+    /// Classify recorded supervisor and Java-child identities.
+    Status { id: ServerId },
+    /// Clear runtime evidence only after every recorded process is proven dead.
+    Clear { id: ServerId },
 }
 
 /// Temporary versus persistent, expressed as two mutually exclusive flags.
@@ -708,8 +824,9 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
             Ok(())
         }
         Command::Server { command } => {
-            let app = open_app()?;
-            run_server_command(&app, command, cli.json)
+            let mut app = open_app()?;
+            let runtime = tokio::runtime::Runtime::new()?;
+            runtime.block_on(run_server_command(&mut app, command, cli.json))
         }
         Command::Minecraft { command } => {
             let app = open_app()?;
@@ -880,20 +997,161 @@ fn run_instance_command(app: &App, command: &InstanceCommand, json: bool) -> any
     Ok(())
 }
 
-fn run_server_command(app: &App, command: &ServerCommand, json: bool) -> anyhow::Result<()> {
+#[allow(clippy::too_many_lines)]
+async fn run_server_command(
+    app: &mut App,
+    command: &ServerCommand,
+    json: bool,
+) -> anyhow::Result<()> {
     match command {
         ServerCommand::Create(args) => {
-            let loader = build_loader(args.loader, args.loader_version.as_deref())?;
-            let mut request = NewServer::new(&args.name, &args.minecraft, loader)
-                .with_storage(args.storage.class());
-            if let Some(client) = args.client {
-                // Fail before creating anything if the link is bogus.
-                app.client(client)?;
-                request = request.linked_to(client);
-            }
-            let record = app.create_server(request)?;
-            print_server(&record, json);
+            let request = if let Some(client) = args.client {
+                NewServer::linked(&args.name, client).with_storage(args.storage.class())
+            } else {
+                let minecraft = args.minecraft.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!("--minecraft is required for a standalone server")
+                })?;
+                let loader = build_loader(args.loader, args.loader_version.as_deref())?;
+                NewServer::new(&args.name, minecraft, loader).with_storage(args.storage.class())
+            };
+            let committed = app
+                .create_server(
+                    request,
+                    &ServerCreateOptions {
+                        java_path: args.java.clone(),
+                        install_java_if_missing: true,
+                    },
+                    &CancellationToken::new(),
+                )
+                .await?;
+            print_server_commit(&committed.record, &committed.warnings, json);
         }
+        ServerCommand::Install { id, java } => {
+            let committed = app
+                .install_server(
+                    *id,
+                    &ServerCreateOptions {
+                        java_path: java.clone(),
+                        install_java_if_missing: true,
+                    },
+                    &CancellationToken::new(),
+                )
+                .await?;
+            print_server_commit(&committed.record, &committed.warnings, json);
+        }
+        ServerCommand::Show { id } => {
+            if json {
+                print_json(&server_status_json(app, *id)?);
+            } else {
+                print_server(&app.server(*id)?, false);
+            }
+        }
+        ServerCommand::Status { id } => print_server_status(app, *id, json)?,
+        ServerCommand::Properties { command } => match command {
+            ServerPropertiesCommand::Show { id } => {
+                let text = app.server_properties(*id)?.render();
+                if json {
+                    print_json(&serde_json::json!({ "server_id": id, "properties": text }));
+                } else {
+                    print!("{text}");
+                }
+            }
+            ServerPropertiesCommand::Set { id, key, value } => {
+                app.set_server_property(*id, key, value)?;
+                if json {
+                    print_json(&serde_json::json!({ "server_id": id, "key": key, "value": value }));
+                } else {
+                    println!("set {key}");
+                }
+            }
+        },
+        ServerCommand::Network(args) => {
+            let access = match args.access {
+                NetworkAccessArg::Localhost => NetworkAccess::Localhost,
+                NetworkAccessArg::Lan => NetworkAccess::Lan,
+                NetworkAccessArg::Custom => NetworkAccess::Custom,
+            };
+            let committed = app.set_server_network(
+                args.id,
+                ServerNetworkSettings {
+                    online_mode: args.online_mode,
+                    access,
+                    port: args.port,
+                    bind_address: args.address.clone(),
+                },
+            )?;
+            print_server_commit(&committed.record, &committed.warnings, json);
+        }
+        ServerCommand::Eula { command } => match command {
+            ServerEulaCommand::Status => print_eula_status(&app.server_eula_status(), json),
+            ServerEulaCommand::Accept => {
+                if json || !std::io::stdin().is_terminal() {
+                    anyhow::bail!(
+                        "EULA acceptance requires an interactive terminal; review {MINECRAFT_EULA_REFERENCE}"
+                    );
+                }
+                println!("Review the Minecraft EULA: {MINECRAFT_EULA_REFERENCE}");
+                print!("Type {EULA_CONFIRMATION_PHRASE} to accept: ");
+                std::io::stdout().flush()?;
+                let mut phrase = String::new();
+                std::io::stdin().read_line(&mut phrase)?;
+                if phrase.trim_end() != EULA_CONFIRMATION_PHRASE {
+                    anyhow::bail!("EULA consent was not recorded");
+                }
+                let status = app.accept_server_eula()?;
+                print_eula_status(&status, false);
+            }
+            ServerEulaCommand::Revoke => {
+                app.revoke_server_eula()?;
+                print_eula_status(&app.server_eula_status(), json);
+            }
+        },
+        ServerCommand::Start { id, java } => {
+            run_server_foreground(app, *id, java.clone(), json).await?;
+        }
+        ServerCommand::Stop { id } => {
+            print_control_response(app.stop_server(*id).await?, json);
+        }
+        ServerCommand::Restart { id } => {
+            print_control_response(app.restart_server(*id).await?, json);
+        }
+        ServerCommand::Kill { id } => {
+            print_control_response(app.kill_server(*id).await?, json);
+        }
+        ServerCommand::Console { id, command } => {
+            print_control_response(app.send_server_console(*id, command.clone()).await?, json);
+        }
+        ServerCommand::Output { id, lines } => {
+            let snapshot = app.server_output(*id, *lines)?;
+            if json {
+                print_json(&serde_json::json!({
+                    "server_id": id,
+                    "capture_health": format!("{:?}", snapshot.health),
+                    "retention": {
+                        "removed_segments": snapshot.retention.removed_segments,
+                        "removed_bytes": snapshot.retention.removed_bytes,
+                        "removed_lines": snapshot.retention.removed_lines,
+                        "earliest_retained_at": snapshot.retention.earliest_retained_at,
+                    },
+                    "lines": snapshot.lines.iter().map(captured_line_json).collect::<Vec<_>>(),
+                }));
+            } else {
+                for line in snapshot.lines {
+                    print_captured_line(&line);
+                }
+            }
+        }
+        ServerCommand::Recover { command } => match command {
+            ServerRecoverCommand::Status { id } => print_server_status(app, *id, json)?,
+            ServerRecoverCommand::Clear { id } => {
+                app.recover_server_runtime(*id)?;
+                if json {
+                    print_json(&serde_json::json!({ "server_id": id, "cleared": true }));
+                } else {
+                    println!("cleared proven-stale runtime state for {id}");
+                }
+            }
+        },
         ServerCommand::Open { id, folder, print } => {
             let path = if *print {
                 app.server_folder(*id, *folder)?
@@ -909,7 +1167,14 @@ fn run_server_command(app: &App, command: &ServerCommand, json: bool) -> anyhow:
                 FileDisposition::Remove
             };
             app.delete_server(*id, files)?;
-            println!("deleted {id}");
+            if json {
+                print_json(&serde_json::json!({
+                    "deleted": id.to_string(),
+                    "files": if *keep_files { "kept" } else { "removed" },
+                }));
+            } else {
+                println!("deleted {id}");
+            }
         }
     }
     Ok(())
@@ -1426,7 +1691,10 @@ fn list_servers(app: &App, json: bool) -> anyhow::Result<()> {
     let records = app.list_servers()?;
 
     if json {
-        let values: Vec<_> = records.iter().map(server_json).collect();
+        let values = records
+            .iter()
+            .map(|record| server_status_json(app, record.id))
+            .collect::<anyhow::Result<Vec<_>>>()?;
         print_json(&serde_json::Value::Array(values));
         return Ok(());
     }
@@ -1873,7 +2141,7 @@ async fn run_java_command(app: &App, command: &JavaCommand, json: bool) -> anyho
                 .plan_java(
                     minecraft,
                     &JavaPlanRequest {
-                        instance: *instance,
+                        target: instance.map_or(JavaTarget::VersionOnly, JavaTarget::Client),
                         explicit_path: java_path.clone(),
                         install_if_missing: *install,
                     },
@@ -3252,7 +3520,319 @@ fn print_server(record: &ServerRecord, json: bool) {
         println!("minecraft: {}", record.minecraft_version);
         println!("loader:    {}", record.loader);
         println!("root:      {}", record.root.display());
-        println!("eula:      {}", record.eula_accepted);
+        println!("installed: {}", record.installation.is_installed());
+    }
+}
+
+async fn run_server_foreground(
+    app: &App,
+    id: ServerId,
+    java: Option<PathBuf>,
+    json: bool,
+) -> anyhow::Result<()> {
+    let (observer, events) = ServerObserver::channel();
+    let mut events = events;
+    let printer = tokio::spawn(async move {
+        while let Some(event) = events.recv().await {
+            match event {
+                ServerEvent::Started { pid } => {
+                    if json {
+                        print_json(&serde_json::json!({ "event": "started", "pid": pid }));
+                    } else {
+                        eprintln!("server started as pid {pid}");
+                    }
+                }
+                ServerEvent::Output(line) => {
+                    if json {
+                        print_json(&serde_json::json!({
+                            "event": "output",
+                            "line": captured_line_json(&line),
+                        }));
+                    } else {
+                        print_captured_line(&line);
+                    }
+                }
+                ServerEvent::Warning(warning) => print_server_warning(&warning, json),
+                ServerEvent::CapturePruned(retention) => {
+                    if json {
+                        print_json(&serde_json::json!({
+                            "event": "capture_pruned",
+                            "removed_segments": retention.removed_segments,
+                            "removed_bytes": retention.removed_bytes,
+                            "removed_lines": retention.removed_lines,
+                        }));
+                    } else {
+                        eprintln!(
+                            "capture pruned {} segments ({} bytes)",
+                            retention.removed_segments, retention.removed_bytes
+                        );
+                    }
+                }
+                ServerEvent::CaptureUnavailable { detail } => {
+                    if json {
+                        print_json(&serde_json::json!({
+                            "event": "capture_unavailable",
+                            "detail": detail,
+                        }));
+                    } else {
+                        eprintln!("durable capture unavailable: {detail}");
+                    }
+                }
+                ServerEvent::Exited(exit) if json => {
+                    print_json(&serde_json::json!({
+                        "event": "exited",
+                        "code": exit.code,
+                        "signal": exit.signal,
+                    }));
+                }
+                _ => {}
+            }
+        }
+    });
+
+    let start = app.start_server(id, java, &observer);
+    tokio::pin!(start);
+    let outcome = tokio::select! {
+        result = &mut start => result,
+        signal = tokio::signal::ctrl_c() => {
+            signal?;
+            if let Err(error) = app.stop_server(id).await {
+                eprintln!("graceful stop was not confirmed: {error}");
+            }
+            start.await
+        }
+    };
+    tokio::task::yield_now().await;
+    printer.abort();
+    let exit = outcome?;
+    if !json {
+        match (exit.code, exit.signal) {
+            (Some(code), _) => println!("server exited with code {code}"),
+            (_, Some(signal)) => println!("server exited from signal {signal}"),
+            _ => println!("server exited"),
+        }
+    }
+    Ok(())
+}
+
+fn print_server_warning(warning: &ServerWarning, json: bool) {
+    match warning {
+        ServerWarning::OfflineModeExposed => {
+            if json {
+                print_json(&serde_json::json!({
+                    "event": "warning",
+                    "kind": "offline_mode_exposed",
+                }));
+            } else {
+                eprintln!("warning: offline mode is exposed beyond the local machine");
+            }
+        }
+        ServerWarning::PortUnavailable {
+            address,
+            port,
+            detail,
+        } => {
+            if json {
+                print_json(&serde_json::json!({
+                    "event": "warning",
+                    "kind": "port_unavailable",
+                    "address": address,
+                    "port": port,
+                    "detail": detail,
+                }));
+            } else {
+                eprintln!(
+                    "warning: {address}:{port} was unavailable during the advisory check: {detail}"
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+fn print_server_status(app: &App, id: ServerId, json: bool) -> anyhow::Result<()> {
+    let status = app.server_status(id)?;
+    let persistence = persistence_name(&status.persistence);
+    let runtime = runtime_name(&status.runtime);
+    let capture = app.server_output(id, 0)?;
+    if json {
+        print_json(&server_status_json_from_parts(&status, &capture));
+    } else {
+        print_server(&status.record, false);
+        println!("persistence: {persistence}");
+        println!("runtime:     {runtime}");
+        println!("capture:     {}", capture_health_name(&capture.health));
+        if let RuntimeClassification::Orphaned { child } = &status.runtime {
+            println!("orphan pid:  {}", child.pid);
+            println!("executable:  {}", child.executable.display());
+            println!("action:      terminate this process with explicit operating-system tools");
+        }
+    }
+    Ok(())
+}
+
+fn server_status_json(app: &App, id: ServerId) -> anyhow::Result<serde_json::Value> {
+    let status = app.server_status(id)?;
+    let capture = app.server_output(id, 0)?;
+    Ok(server_status_json_from_parts(&status, &capture))
+}
+
+fn server_status_json_from_parts(
+    status: &ephervex_core::ServerStatus,
+    capture: &ephervex_core::CaptureSnapshot,
+) -> serde_json::Value {
+    serde_json::json!({
+        "server": server_json(&status.record),
+        "persistence_health": persistence_name(&status.persistence),
+        "installation_state": if status.record.installation.is_installed() { "installed" } else { "not_installed" },
+        "runtime_classification": runtime_name(&status.runtime),
+        "capture_health": capture_health_name(&capture.health),
+        "retention": {
+            "removed_segments": capture.retention.removed_segments,
+            "removed_bytes": capture.retention.removed_bytes,
+            "removed_lines": capture.retention.removed_lines,
+            "earliest_retained_at": capture.retention.earliest_retained_at,
+        },
+    })
+}
+
+fn persistence_name(health: &ServerPersistenceHealth) -> &'static str {
+    match health {
+        ServerPersistenceHealth::Healthy => "healthy",
+        ServerPersistenceHealth::IndexOutOfSync => "index_out_of_sync",
+        ServerPersistenceHealth::MissingRoot => "missing_root",
+        ServerPersistenceHealth::MetadataMissing => "metadata_missing",
+        ServerPersistenceHealth::MetadataCorrupt => "metadata_corrupt",
+        ServerPersistenceHealth::MetadataUnsupported => "metadata_unsupported",
+        ServerPersistenceHealth::IdentityConflict => "identity_conflict",
+    }
+}
+
+fn runtime_name(runtime: &RuntimeClassification) -> &'static str {
+    match runtime {
+        RuntimeClassification::Stopped => "stopped",
+        RuntimeClassification::Controlled { .. } => "controlled",
+        RuntimeClassification::UnknownRunning { .. } => "unknown_running",
+        RuntimeClassification::Orphaned { .. } => "orphaned",
+        RuntimeClassification::ProvenStale { .. } => "proven_stale",
+    }
+}
+
+fn capture_health_name(health: &CaptureHealth) -> &'static str {
+    match health {
+        CaptureHealth::Available => "available",
+        CaptureHealth::Unavailable { .. } => "unavailable",
+    }
+}
+
+fn print_eula_status(status: &EulaStatus, json: bool) {
+    match status {
+        EulaStatus::NotAccepted => {
+            if json {
+                print_json(
+                    &serde_json::json!({ "status": "not_accepted", "reference": MINECRAFT_EULA_REFERENCE }),
+                );
+            } else {
+                println!("not accepted ({MINECRAFT_EULA_REFERENCE})");
+            }
+        }
+        EulaStatus::Accepted {
+            accepted_at,
+            reference,
+        } => {
+            if json {
+                print_json(&serde_json::json!({
+                    "status": "accepted",
+                    "accepted_at": accepted_at,
+                    "reference": reference,
+                }));
+            } else {
+                println!("accepted at {accepted_at} ({reference})");
+            }
+        }
+        EulaStatus::Malformed => {
+            if json {
+                print_json(&serde_json::json!({ "status": "malformed" }));
+            } else {
+                println!("malformed; revoke or accept again interactively");
+            }
+        }
+    }
+}
+
+fn print_control_response(response: ControlResponse, json: bool) {
+    if json {
+        print_json(
+            &serde_json::to_value(response)
+                .unwrap_or_else(|_| serde_json::json!({ "status": "invalid_response" })),
+        );
+    } else {
+        match response {
+            ControlResponse::Running => println!("running"),
+            ControlResponse::Accepted => println!("accepted"),
+            ControlResponse::Exited(exit) => println!("exited: {exit:?}"),
+            ControlResponse::Restarted { pid } => println!("restarted as pid {pid}"),
+            ControlResponse::Refused(detail) => println!("refused: {detail}"),
+        }
+    }
+}
+
+fn print_server_commit(record: &ServerRecord, warnings: &[ServerCommitWarning], json: bool) {
+    if json {
+        let mut value = server_json(record);
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "warnings".to_owned(),
+                serde_json::Value::Array(
+                    warnings
+                        .iter()
+                        .map(|warning| match warning {
+                            ServerCommitWarning::IndexOutOfSync { detail } => serde_json::json!({
+                                "kind": "index_out_of_sync",
+                                "detail": detail,
+                            }),
+                        })
+                        .collect(),
+                ),
+            );
+        }
+        print_json(&value);
+        return;
+    }
+    print_server(record, false);
+    for warning in warnings {
+        match warning {
+            ServerCommitWarning::IndexOutOfSync { detail } => {
+                eprintln!("server committed, but its query index is out of sync: {detail}");
+            }
+        }
+    }
+}
+
+fn captured_line_json(line: &CapturedLine) -> serde_json::Value {
+    serde_json::json!({
+        "timestamp": line.timestamp,
+        "stream": line.stream,
+        "text": line.text,
+        "truncated": line.truncated,
+        "omitted_bytes": line.omitted_bytes,
+    })
+}
+
+fn print_captured_line(line: &CapturedLine) {
+    if line.truncated {
+        println!(
+            "{} [{}] {} [truncated; {} bytes omitted]",
+            line.timestamp,
+            serde_json::to_value(line.stream)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .unwrap_or_else(|| "output".to_owned()),
+            line.text,
+            line.omitted_bytes
+        );
+    } else {
+        println!("{} {}", line.timestamp, line.text);
     }
 }
 
@@ -3300,8 +3880,14 @@ fn server_json(record: &ServerRecord) -> serde_json::Value {
         "root": record.root,
         "linked_client_id": record.linked_client_id.map(|id| id.to_string()),
         "network": record.network,
-        "eula_accepted": record.eula_accepted,
+        "installation": record.installation,
+        "source": record.source,
+        "java_override": record.java_override,
+        "jvm_override": record.jvm_override,
+        "attention": record.attention,
         "created_at": record.created_at,
+        "updated_at": record.updated_at,
+        "last_started_at": record.last_started_at,
     })
 }
 

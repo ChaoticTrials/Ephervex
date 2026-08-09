@@ -19,3 +19,4 @@ so the reasoning trail survives.
 | [0011](0011-shared-launch-stores.md) | Everything a launch can re-download is launcher-level, including natives | Accepted |
 | [0012](0012-provider-neutral-pack-recipe.md) | Provider-neutral recipes are the pack import boundary | Accepted |
 | [0013](0013-managed-mods-are-recipe-entries.md) | Mods installed through a provider are recipe entries | Accepted |
+| [0014](0014-dedicated-server-authority-and-supervision.md) | Dedicated server authority and conservative supervision | Accepted |

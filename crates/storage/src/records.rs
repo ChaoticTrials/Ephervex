@@ -14,7 +14,8 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 use ephervex_model::{
-    AttentionReason, ImportSourceKind, InstanceId, LoaderSelection, ServerId, StorageClass,
+    AttentionReason, ImportSourceKind, InstanceId, LoaderSelection, ServerId, ServerInstallation,
+    StorageClass,
 };
 use serde::{Deserialize, Serialize};
 
@@ -158,12 +159,12 @@ pub struct ServerRecord {
     pub linked_client_id: Option<InstanceId>,
     pub minecraft_version: String,
     pub loader: LoaderSelection,
+    /// A server is launchable only after its base installation has been fully
+    /// published. Existing pre-installation records migrate to `NotInstalled`.
+    #[serde(default)]
+    pub installation: ServerInstallation,
     #[serde(default)]
     pub network: ServerNetworkSettings,
-    /// Whether `eula=true` may be written for this server. Never set on the
-    /// user's behalf.
-    #[serde(default)]
-    pub eula_accepted: bool,
     #[serde(default)]
     pub source: ImportSource,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -244,12 +245,22 @@ impl NewClient {
 
 /// The request to create a server.
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServerCreationSource {
+    /// An independently selected exact Minecraft and loader combination.
+    Standalone {
+        minecraft_version: String,
+        loader: LoaderSelection,
+    },
+    /// Derive the exact selection from an existing client record.
+    LinkedClient { client_id: InstanceId },
+}
+
+/// The request to create a server.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewServer {
     pub name: String,
     pub storage: StorageClass,
-    pub minecraft_version: String,
-    pub loader: LoaderSelection,
-    pub linked_client_id: Option<InstanceId>,
+    pub creation: ServerCreationSource,
     pub network: ServerNetworkSettings,
     pub source: ImportSource,
     pub attention: Vec<AttentionReason>,
@@ -265,9 +276,10 @@ impl NewServer {
         Self {
             name: name.into(),
             storage: StorageClass::default_for_new_instance(),
-            minecraft_version: minecraft_version.into(),
-            loader,
-            linked_client_id: None,
+            creation: ServerCreationSource::Standalone {
+                minecraft_version: minecraft_version.into(),
+                loader,
+            },
             network: ServerNetworkSettings::default(),
             source: ImportSource::manual(),
             attention: Vec::new(),
@@ -282,9 +294,23 @@ impl NewServer {
 
     /// Links this server to a client instance.
     #[must_use]
-    pub const fn linked_to(mut self, client: InstanceId) -> Self {
-        self.linked_client_id = Some(client);
+    pub fn linked_to(mut self, client: InstanceId) -> Self {
+        self.creation = ServerCreationSource::LinkedClient { client_id: client };
         self
+    }
+
+    /// Creates a linked-base request without accepting a redundant version
+    /// selection from the caller.
+    #[must_use]
+    pub fn linked(name: impl Into<String>, client_id: InstanceId) -> Self {
+        Self {
+            name: name.into(),
+            storage: StorageClass::default_for_new_instance(),
+            creation: ServerCreationSource::LinkedClient { client_id },
+            network: ServerNetworkSettings::default(),
+            source: ImportSource::manual(),
+            attention: Vec::new(),
+        }
     }
 
     #[must_use]
@@ -360,6 +386,30 @@ pub enum FileDisposition {
     /// Remove the index row only, leaving the directory on disk. Used by
     /// reconciliation and by "forget without deleting".
     Keep,
+}
+
+/// A canonical server mutation that committed even if its SQLite mirror did not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerCommit<T> {
+    pub record: T,
+    pub warnings: Vec<ServerCommitWarning>,
+}
+
+impl<T> ServerCommit<T> {
+    #[must_use]
+    pub const fn clean(record: T) -> Self {
+        Self {
+            record,
+            warnings: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServerCommitWarning {
+    /// Metadata or root publication succeeded, but the query index needs
+    /// reconciliation from the canonical record.
+    IndexOutOfSync { detail: String },
 }
 
 #[cfg(test)]
