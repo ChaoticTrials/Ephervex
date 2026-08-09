@@ -130,7 +130,10 @@ impl App {
     /// dedicated-server installation and EULA handling. Import retains the
     /// recipe that operation needs, and [`Self::pack_recipe`] exposes it
     /// without requiring the original archive.
-    #[instrument(skip(self, request, reporter, cancel), fields(archive = %request.archive.display()))]
+    #[instrument(
+        skip(self, request, reporter, cancel),
+        fields(archive = %request.archive.display(), operation = %reporter.id())
+    )]
     pub async fn import_pack(
         &self,
         request: &ImportRequest,

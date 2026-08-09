@@ -180,6 +180,30 @@ instance-duplicate-skipped-links = { $count ->
 instance-folder-unavailable = That folder does not exist yet.
 .action = { $folder } appears once the game has written it, and Ephervex will not create an empty one that suggests otherwise.
 
+## Logs and crash reports
+#
+# File names, paths, byte counts, and the text of a log or crash report are
+# shown exactly as written and are never translated.
+
+diagnostics-nothing-recorded = Nothing has been written here yet.
+
+# $returned and $total are byte counts.
+diagnostics-window-truncated = Showing { $returned } of { $total } bytes.
+diagnostics-window-lossy = Some bytes are not text and were replaced so the rest stays readable.
+
+diagnostics-search-no-matches = Nothing in this part of the file matches.
+# $matches is how many matches were shown before the limit stopped the search.
+diagnostics-search-truncated = Stopped after { $matches } matches. Narrow the search or raise the limit to see more.
+
+error-diagnostics-directory-unreadable = That log folder could not be read.
+.action = Check the folder and its permissions.
+error-diagnostics-file-missing = That file is no longer there.
+.action = Logs rotate and crash reports can be deleted. Refresh the list and try again.
+error-diagnostics-file-unreadable = That file could not be read.
+.action = Check the file and its permissions.
+error-diagnostics-file-refused = Ephervex will not open that file.
+.action = Only regular files inside the instance's, the server's, or the launcher's own log and crash-report folders can be opened.
+
 ## Global Minecraft preferences 
 
 preferences-none-managed = No global Minecraft preferences are applied to new instances.
@@ -546,7 +570,12 @@ launch-connect-reusing-server = Reusing linked server { $server }.
 launch-connect-waiting = Waiting for the server at { $target }…
 launch-connect-ready = The server is ready at { $target }.
 
-operation-installing-minecraft = Installing Minecraft
+operation-launching-minecraft = Launching Minecraft
+operation-starting-server = Starting the server
+
+# $operation identifies one background task. It is shown so a user can find the
+# same task in the launcher log, and is never translated.
+operation-identifier = Operation { $operation }
 
 ## Launch errors 
 

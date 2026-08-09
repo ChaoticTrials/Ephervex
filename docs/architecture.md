@@ -35,7 +35,7 @@ prevents UI code from acquiring storage or provider policy accidentally.
 | Crate | Responsibility |
 |---|---|
 | `ephervex-model` | Typed IDs, account and instance values, loader selections, hashes, storage classes, and operation progress |
-| `ephervex-storage` | XDG paths, versioned configuration, SQLite migrations and registry, instance metadata, reconciliation, launch locks, duplication, and folder layout |
+| `ephervex-storage` | XDG paths, versioned configuration, SQLite migrations and registry, instance metadata, reconciliation, launch locks, duplication, folder layout, and bounded diagnostic-file discovery and reading |
 | `ephervex-i18n` | Fluent resources, locale selection, typed arguments, and message lookup |
 | `ephervex-download` | HTTP policy, bounded concurrency, retry classification, cancellation, hash verification, atomic publication, metadata caching, and shared cache layout |
 | `ephervex-minecraft` | Mojang/Piston metadata, rule evaluation, artifact planning, Vanilla installation, command construction, process control, and log parsing |
@@ -324,6 +324,51 @@ logs use redacted forms. User-facing errors are localized at the frontend;
 lower layers retain technical context without including response bodies,
 authorization headers, tokens, or sensitive query parameters.
 
+The launcher's own log file records the same events stderr shows and is subject
+to the same rule. Browsing a game log does not copy its contents anywhere:
+diagnostic reads return text to the caller and are not themselves logged.
+Diagnostic files are never uploaded, and no paste service is integrated.
+
+## Logs, crash reports, and launcher diagnostics
+
+Client instances, servers, and the launcher each expose their logs and, for the
+first two, their crash reports through one application service. Callers name a
+scope and an entry name; they never build a path (ADR 0016).
+
+```text
+scope (instance id | server id | launcher)
+   │
+   ├── owned directory        <instance>/minecraft/logs, <server>/server/logs,
+   │                          the matching crash-reports directories, and
+   │                          <state>/logs/launcher
+   ├── listing                newest first, name descending as the tie-break;
+   │                          crash reports carry a best-effort summary
+   ▼
+entry name
+   ├── open / refresh         bounded window, tail for logs, head for reports
+   ├── search                 over the window's text; never writes
+   ├── copy path              resolved, contained, never joined by a frontend
+   └── open folder            the same folder actions instance management uses
+```
+
+Reads are bounded by a byte budget and a hard ceiling. A window reports the
+file's size, how much it covered, whether it was truncated, and whether bytes
+had to be replaced to make text of them. A file that rotated, was truncated, or
+was replaced between two reads yields a new window or a typed "no longer there",
+never a stale or partial value presented as current.
+
+Entry resolution refuses anything that is not one regular file inside the owned
+directory: a name with a separator or `..`, a symbolic link, a non-file entry,
+and a directory that resolves outside the root that owns it.
+
+The launcher appends its own `tracing` events to a plain-text file per day under
+the state root, bounded by segment size and retained-file count, and browsable
+through the same surface. Long-running operations — launching, starting a
+server, importing a pack, installing mods — carry an operation id in their span
+and report it to the user, which is how a run is located in that file. A
+dedicated server's captured process output remains separate (ADR 0014): it is a
+live console history, not a file the server wrote.
+
 ## Configuration, localization, and errors
 
 The configuration schema is versioned. Unknown keys are preserved so an older
@@ -344,8 +389,9 @@ The supported scope includes Linux, Minecraft release versions from 1.12.2
 onward, Vanilla, Forge, NeoForge, Modrinth pack import, Modrinth mod browsing
 with dependency resolution, and linked-server reconstruction from retained
 recipes, plus launching a linked client directly into a local managed server.
-The GUI, CurseForge browsing, CurseForge and Prism import, mod updates and
-removal, and full server GUI/log views are unavailable. Fabric, Quilt,
+Logs, crash reports, and launcher diagnostics are inspectable through
+`ephervex-core` and the CLI. The GUI, CurseForge browsing, CurseForge and Prism
+import, and mod updates and removal are unavailable. Fabric, Quilt,
 snapshots, Windows, and macOS are
 outside the supported scope recorded in ADR 0008.
 

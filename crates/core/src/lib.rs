@@ -25,6 +25,7 @@
 pub mod account;
 pub mod app;
 pub mod connection;
+pub mod diagnostics;
 pub mod error;
 pub mod import;
 pub mod instance;
@@ -39,6 +40,10 @@ pub use connection::{
     ConnectError, DEFAULT_SERVER_READINESS_TIMEOUT, LaunchAndConnectAvailability,
     LaunchAndConnectEvent, LaunchAndConnectObserver, LaunchAndConnectOptions,
     LaunchAndConnectOutcome, ServerPreparation,
+};
+pub use diagnostics::{
+    DEFAULT_DIAGNOSTIC_BYTES, DiagnosticCatalog, DiagnosticRequest, DiagnosticScope,
+    DiagnosticSearch, DiagnosticSection,
 };
 pub use error::{CoreError, CoreResult};
 pub use import::{ImportRequest, ImportedPack};
@@ -139,9 +144,11 @@ pub use ephervex_server::{
 };
 pub use ephervex_storage::{
     AccountConfig, ApiConfig, CONFIG_SCHEMA_VERSION, ClientFolder, ClientRecord, Config,
-    DUPLICATE_NAME_SUFFIX, DuplicateClient, DuplicatedClient, EulaConfig, FileDisposition,
-    ImportSource, JavaConfig, LaunchState, MissingFolder, NetworkAccess, NewClient, NewServer,
-    PathError, Paths, PreferenceSetting, ReconciledRecord, ReconciliationReport, RecordRef,
-    SECRET_KEY_MARKERS, ServerCommit, ServerCommitWarning, ServerDefaults, ServerFolder,
-    ServerNetworkSettings, ServerRecord, ServerRootConflict, StorageError, running_state,
+    CrashSummary, DUPLICATE_NAME_SUFFIX, DiagnosticEntry, DiagnosticError, DiagnosticKind,
+    DuplicateClient, DuplicatedClient, EulaConfig, FileDisposition, ImportSource, JavaConfig,
+    LaunchState, MAX_SEARCH_MATCHES, MAX_VIEW_BYTES, MissingFolder, NetworkAccess, NewClient,
+    NewServer, PathError, Paths, PreferenceSetting, ReconciledRecord, ReconciliationReport,
+    RecordRef, SECRET_KEY_MARKERS, SearchMatch, SearchOptions, SearchOutcome, ServerCommit,
+    ServerCommitWarning, ServerDefaults, ServerFolder, ServerNetworkSettings, ServerRecord,
+    ServerRootConflict, StorageError, TextAnchor, TextView, running_state,
 };

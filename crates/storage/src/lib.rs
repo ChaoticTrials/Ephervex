@@ -29,6 +29,7 @@
 
 pub mod config;
 pub(crate) mod copy;
+pub mod diagnostics;
 pub mod folders;
 pub mod index;
 pub mod lock;
@@ -44,6 +45,11 @@ mod test_support;
 pub use config::{
     AccountConfig, AccountLookup, ApiConfig, CONFIG_SCHEMA_VERSION, Config, ConfigError,
     EulaConfig, JavaConfig, NetworkAccess, PreferenceSetting, SECRET_KEY_MARKERS, ServerDefaults,
+};
+pub use diagnostics::{
+    CrashSummary, DEFAULT_VIEW_BYTES, DiagnosticEntry, DiagnosticError, DiagnosticKind,
+    MAX_SEARCH_MATCHES, MAX_VIEW_BYTES, OwnedDirectory, Refusal, SearchMatch, SearchOptions,
+    SearchOutcome, TextAnchor, TextView,
 };
 pub use folders::{ClientFolder, MissingFolder, ServerFolder};
 pub use index::{Index, IndexError, MIGRATIONS, Migration, MigrationOutcome, apply_migrations};
@@ -72,6 +78,9 @@ pub enum StorageError {
     /// The per-instance launch lock.
     #[error(transparent)]
     Lock(#[from] LockError),
+    /// Discovering or reading a log or crash report.
+    #[error(transparent)]
+    Diagnostics(#[from] DiagnosticError),
 }
 
 impl StorageError {
@@ -83,6 +92,7 @@ impl StorageError {
             Self::Registry(error) => error.message_id(),
             Self::Path(error) => error.message_id(),
             Self::Lock(error) => error.message_id(),
+            Self::Diagnostics(error) => error.message_id(),
         }
     }
 }

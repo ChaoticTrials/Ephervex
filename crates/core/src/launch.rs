@@ -43,7 +43,7 @@ use ephervex_minecraft::{
     GameExit, GameProcess, Installation, JvmOptions, LaunchCommand, LaunchError, LaunchEvent,
     LaunchFeatures, LaunchObserver, LaunchSettings, Platform, PlayerIdentity, VersionMetadata,
 };
-use ephervex_model::{InstanceId, Operation};
+use ephervex_model::{InstanceId, Operation, OperationId};
 use ephervex_storage::{ClientRecord, LaunchLock, LaunchState};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument};
@@ -72,6 +72,12 @@ pub struct LaunchOptions {
 /// What a launch did.
 #[derive(Debug)]
 pub struct LaunchOutcome {
+    /// The id every launcher log line for this launch carries.
+    ///
+    /// Shown to the user so a report of "it failed" can be turned into the
+    /// events that describe why, without asking anybody to correlate
+    /// timestamps by hand.
+    pub operation: OperationId,
     pub instance: InstanceId,
     pub minecraft_version: String,
     /// Which runtime ran it, and why that one.
@@ -125,7 +131,6 @@ impl App {
     /// `LaunchError::AuthenticationRequired`, and `required_java_major()` with
     /// `managed_java_would_help()` is its `MissingJava`; there is one definition
     /// of each rather than a second one that could drift.
-    #[instrument(skip(self, options, observer, cancel), fields(instance = %instance))]
     pub async fn launch(
         &mut self,
         instance: InstanceId,
@@ -133,8 +138,46 @@ impl App {
         observer: &LaunchObserver,
         cancel: &CancellationToken,
     ) -> CoreResult<LaunchOutcome> {
-        let outcome = self.launch_inner(instance, options, observer, cancel).await;
+        // One operation for the whole launch, including the downloads it makes:
+        // the reporter is the workspace's single progress abstraction, and its
+        // id is what ties this span's log lines to what the user was shown.
+        // Created out here so the span below can carry the id from the moment it
+        // opens, which is what puts it on every line the launch produces.
+        let reporter = OperationReporter::new(
+            "operation-launching-minecraft",
+            true,
+            std::sync::Arc::new(DownloadProgress {
+                observer: observer.clone(),
+            }),
+        );
+        self.launch_operation(instance, options, observer, cancel, &reporter)
+            .await
+    }
+
+    #[instrument(
+        name = "launch",
+        skip(self, options, observer, cancel, reporter),
+        fields(instance = %instance, operation = %reporter.id())
+    )]
+    async fn launch_operation(
+        &mut self,
+        instance: InstanceId,
+        options: &LaunchOptions,
+        observer: &LaunchObserver,
+        cancel: &CancellationToken,
+        reporter: &OperationReporter,
+    ) -> CoreResult<LaunchOutcome> {
+        let outcome = self
+            .launch_inner(instance, options, observer, cancel, reporter)
+            .await;
         if let Err(error) = &outcome {
+            // Logged inside the span, so the technical detail a user pastes
+            // into a report is findable by the id they were shown.
+            tracing::warn!(
+                message_id = error.message_id(),
+                detail = %error,
+                "launch failed"
+            );
             observer.emit(LaunchEvent::Failed {
                 message_id: error.message_id(),
                 detail: error.to_string(),
@@ -149,8 +192,11 @@ impl App {
         options: &LaunchOptions,
         observer: &LaunchObserver,
         cancel: &CancellationToken,
+        reporter: &OperationReporter,
     ) -> CoreResult<LaunchOutcome> {
-        observer.emit(LaunchEvent::Preparing);
+        observer.emit(LaunchEvent::Preparing {
+            operation: reporter.id(),
+        });
 
         let mut record = self.client(instance)?;
 
@@ -181,7 +227,7 @@ impl App {
                 &metadata,
                 &java.runtime.executable,
                 options,
-                observer,
+                reporter,
                 cancel,
             )
             .await?;
@@ -203,6 +249,7 @@ impl App {
         )?;
 
         let mut outcome = LaunchOutcome {
+            operation: reporter.id(),
             instance,
             minecraft_version: record.minecraft_version.clone(),
             java: Box::new(java),
@@ -244,24 +291,23 @@ impl App {
     }
 
     /// Downloads and unpacks everything the version needs.
+    ///
+    /// Reports into the launch's own operation rather than starting a second
+    /// one, so the progress a user watches and the id in the log are the same
+    /// operation.
     async fn install_version(
         &self,
         record: &ClientRecord,
         metadata: &VersionMetadata,
         java: &std::path::Path,
         options: &LaunchOptions,
-        observer: &LaunchObserver,
+        reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<InstalledClient> {
+        // The installer sets the step as it works — the version and stage it is
+        // fetching — and those labels are technical values rather than message
+        // ids, so nothing is set here that would be shown untranslated.
         let context = options.features.rule_context(Platform::host());
-
-        let reporter = OperationReporter::new(
-            "operation-installing-minecraft",
-            true,
-            std::sync::Arc::new(DownloadProgress {
-                observer: observer.clone(),
-            }),
-        );
         Ok(self
             .loaders()?
             .provider(record.loader.kind)
@@ -271,7 +317,7 @@ impl App {
                 parent: metadata,
                 java,
                 context: &context,
-                reporter: &reporter,
+                reporter,
                 cancel,
             })
             .await?)

@@ -30,7 +30,7 @@
 
 use std::process::Stdio;
 
-use ephervex_model::Operation;
+use ephervex_model::{Operation, OperationId};
 use tokio::io::{AsyncBufReadExt as _, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
@@ -96,7 +96,10 @@ impl GameExit {
 #[non_exhaustive]
 pub enum LaunchEvent {
     /// Resolving metadata, choosing a runtime, refreshing the session.
-    Preparing,
+    ///
+    /// Carries the id every launcher log line for this launch is tagged with,
+    /// so a frontend can show it before anything has had a chance to fail.
+    Preparing { operation: OperationId },
     /// A snapshot of the download operation. The workspace's one progress
     /// abstraction rather than a second shape invented here.
     Downloading(Box<Operation>),

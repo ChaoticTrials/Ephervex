@@ -700,9 +700,41 @@ mod tests {
             "launch-exited-with-signal",
             "launch-dry-run",
             "launch-command-redacted",
-            "operation-installing-minecraft",
+            "operation-launching-minecraft",
+            "operation-identifier",
         ] {
             assert!(has(id), "missing message id: {id}");
+        }
+    }
+
+    #[test]
+    fn every_message_id_the_diagnostics_browser_needs_exists() {
+        // `ephervex-storage` owns no `i18n.toml`, so `DiagnosticError` is
+        // checked here. A log browser that renders a placeholder where the
+        // reason should be is a log browser nobody can act on.
+        for id in [
+            "error-diagnostics-directory-unreadable",
+            "error-diagnostics-file-missing",
+            "error-diagnostics-file-unreadable",
+            "error-diagnostics-file-refused",
+            "diagnostics-nothing-recorded",
+            "diagnostics-window-truncated",
+            "diagnostics-window-lossy",
+            "diagnostics-search-no-matches",
+            "diagnostics-search-truncated",
+        ] {
+            assert!(has(id), "missing message id: {id}");
+        }
+        for id in [
+            "error-diagnostics-directory-unreadable",
+            "error-diagnostics-file-missing",
+            "error-diagnostics-file-unreadable",
+            "error-diagnostics-file-refused",
+        ] {
+            assert!(
+                has_attribute(id, "action"),
+                "a diagnostics failure needs a next step: {id}"
+            );
         }
     }
 

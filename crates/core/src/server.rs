@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use chrono::Utc;
 use ephervex_download::{CacheLayout, DownloadManager, DownloaderConfig, OperationReporter};
 use ephervex_model::{
-    AttentionReason, ImportSourceKind, JavaOverride, JvmSettings, ServerId, ServerInstallation,
-    ServerLaunch, ServerRelativePath,
+    AttentionReason, ImportSourceKind, JavaOverride, JvmSettings, OperationId, ServerId,
+    ServerInstallation, ServerLaunch, ServerRelativePath,
 };
 use ephervex_pack::{
     OptionalSelection, PackError, PackRecipe, ServerMaterializeRequest, SourceStore,
@@ -79,6 +79,9 @@ pub(super) struct PreparedServerStart {
     command: ServerCommand,
     root: PathBuf,
     capture: PathBuf,
+    /// The id every launcher log line for this start carries, kept so the
+    /// supervision that follows the preparation logs under the same one.
+    operation: OperationId,
 }
 
 impl App {
@@ -415,6 +418,29 @@ impl App {
         explicit_java: Option<PathBuf>,
         observer: &ServerObserver,
     ) -> CoreResult<PreparedServerStart> {
+        // Silent because a server start reports through `ServerObserver` rather
+        // than through a progress bar; the reporter is here for its id, which
+        // is the workspace's one way of naming an operation. Created before the
+        // span so every line the preparation logs carries it.
+        let operation = OperationReporter::silent("operation-starting-server").id();
+        self.prepare_server_start_operation(id, explicit_java, observer, operation)
+            .await
+    }
+
+    #[tracing::instrument(
+        name = "prepare_server_start",
+        skip(self, explicit_java, observer),
+        fields(server = %id, operation = %operation)
+    )]
+    async fn prepare_server_start_operation(
+        &self,
+        id: ServerId,
+        explicit_java: Option<PathBuf>,
+        observer: &ServerObserver,
+        operation: OperationId,
+    ) -> CoreResult<PreparedServerStart> {
+        observer.emit(ephervex_server::ServerEvent::Preparing { operation });
+
         let mut record = self.canonical_server_for_mutation(id)?;
         refuse_if_running(&record)?;
         let launch = record
@@ -443,11 +469,11 @@ impl App {
         let _commit = self
             .registry_for_services()
             .update_server_committed(&mut record)?;
-        let capture = self.paths().logs_dir().join("servers").join(id.to_string());
         Ok(PreparedServerStart {
             command,
             root: record.root,
-            capture,
+            capture: self.paths().server_capture_dir(id),
+            operation,
         })
     }
 
@@ -455,13 +481,21 @@ impl App {
         prepared: PreparedServerStart,
         observer: &ServerObserver,
     ) -> CoreResult<ephervex_server::ServerExit> {
-        Ok(ServerSupervisor::run(
+        let operation = prepared.operation;
+        let exit = ServerSupervisor::run(
             &prepared.command,
             &prepared.root,
             &prepared.capture,
             observer,
         )
-        .await?)
+        .await;
+        match &exit {
+            Ok(exit) => {
+                tracing::info!(%operation, code = ?exit.code, signal = ?exit.signal, "server exited");
+            }
+            Err(error) => tracing::warn!(%operation, %error, "server supervision failed"),
+        }
+        Ok(exit?)
     }
 
     pub async fn stop_server(&self, id: ServerId) -> CoreResult<ControlResponse> {
@@ -495,12 +529,7 @@ impl App {
 
     pub fn server_output(&self, id: ServerId, limit: usize) -> CoreResult<CaptureSnapshot> {
         let record = self.server(id)?;
-        let directory = self
-            .paths()
-            .logs_dir()
-            .join("servers")
-            .join(record.id.to_string());
-        read_capture_snapshot(&directory, limit)
+        read_capture_snapshot(&self.paths().server_capture_dir(record.id), limit)
     }
 
     pub(super) fn canonical_server_for_mutation(&self, id: ServerId) -> CoreResult<ServerRecord> {

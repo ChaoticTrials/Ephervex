@@ -239,7 +239,7 @@ impl App {
 /// A launcher on a headless machine still knows where the folder is, and the
 /// caller has the path — refusing the whole operation because no file manager
 /// answered would be worse than saying so in the log.
-fn open_folder(path: &Path) {
+pub(crate) fn open_folder(path: &Path) {
     if let Err(error) = open::that_detached(path) {
         warn!(
             path = %path.display(),

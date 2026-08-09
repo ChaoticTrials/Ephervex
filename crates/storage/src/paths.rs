@@ -300,6 +300,27 @@ impl Paths {
         self.state.join("logs")
     }
 
+    /// `$XDG_STATE_HOME/ephervex/logs/launcher/`, where the launcher's own
+    /// diagnostics are written.
+    ///
+    /// A subdirectory rather than the log root because the root also holds the
+    /// per-server output capture, and browsing the launcher's log should not
+    /// mean paging past every server's directory.
+    #[must_use]
+    pub fn launcher_logs_dir(&self) -> PathBuf {
+        self.logs_dir().join("launcher")
+    }
+
+    /// Where one server's captured process output is kept.
+    ///
+    /// Under the state root rather than inside the server directory: the
+    /// capture must survive a server whose files are being reinstalled, and a
+    /// temporary server's output is worth keeping after the OS clears its root.
+    #[must_use]
+    pub fn server_capture_dir(&self, id: ServerId) -> PathBuf {
+        self.logs_dir().join("servers").join(id.to_string())
+    }
+
     /// `<temp>/ephervex/instances/`.
     #[must_use]
     pub fn temporary_instances_dir(&self) -> PathBuf {
@@ -371,6 +392,7 @@ impl Paths {
             self.installer_cache_dir(),
             self.natives_cache_dir(),
             self.logs_dir(),
+            self.launcher_logs_dir(),
             self.temporary_instances_dir(),
             self.temporary_servers_dir(),
         ] {
@@ -557,6 +579,21 @@ mod tests {
         assert_eq!(paths.shared_dir(), Path::new("/example/data/shared"));
         assert_eq!(paths.icons_dir(), Path::new("/example/data/icons"));
         assert_eq!(paths.logs_dir(), Path::new("/example/state/logs"));
+        assert_eq!(
+            paths.launcher_logs_dir(),
+            Path::new("/example/state/logs/launcher")
+        );
+    }
+
+    #[test]
+    fn launcher_and_server_diagnostics_do_not_share_a_directory() {
+        // Both live under the state log root, and neither may list the other's
+        // files when a user browses one of them.
+        let paths = Paths::rooted_at("/example");
+        let server = paths.server_capture_dir(ServerId::new());
+        assert!(server.starts_with(paths.logs_dir()));
+        assert!(paths.launcher_logs_dir().starts_with(paths.logs_dir()));
+        assert!(!server.starts_with(paths.launcher_logs_dir()));
     }
 
     #[test]

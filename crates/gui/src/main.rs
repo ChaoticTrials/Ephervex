@@ -8,7 +8,16 @@
 //! requirements, is exercised by every build. See ADR 0001.
 
 fn main() {
-    ephervex_core::init_tracing(ephervex_core::DEFAULT_LOG_DIRECTIVES);
+    // Resolved before anything else so the launcher's own log file exists from
+    // the first event. A frontend that cannot resolve its state directory still
+    // starts and logs to stderr.
+    let launcher_logs = ephervex_core::Paths::from_environment()
+        .ok()
+        .map(|paths| paths.launcher_logs_dir());
+    ephervex_core::init_tracing(
+        ephervex_core::DEFAULT_LOG_DIRECTIVES,
+        launcher_logs.as_deref(),
+    );
     // Touching the Slint runtime keeps the dependency load-bearing so toolchain
     // and backend compatibility remain part of normal builds.
     let _ui_platform_ready = slint::SharedString::from(ephervex_model::APP_NAME);

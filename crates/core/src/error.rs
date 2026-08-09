@@ -301,6 +301,15 @@ fn storage_failing_path(error: &StorageError) -> Option<PathBuf> {
         StorageError::Registry(inner) => registry_failing_path(inner),
         StorageError::Path(inner) => path_failing_path(inner),
         StorageError::Lock(inner) => inner.failing_path(),
+        // Always about a file or a directory: naming it is most of what makes
+        // a diagnostics failure actionable.
+        StorageError::Diagnostics(inner) => Some(inner.failing_path()),
+    }
+}
+
+impl From<ephervex_storage::DiagnosticError> for CoreError {
+    fn from(error: ephervex_storage::DiagnosticError) -> Self {
+        Self::Storage(StorageError::Diagnostics(error))
     }
 }
 

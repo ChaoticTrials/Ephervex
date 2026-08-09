@@ -42,7 +42,10 @@ The CLI currently supports:
 - exact Vanilla, Forge, and NeoForge dedicated-server installation, typed
   properties and network settings, explicit global EULA consent, foreground
   supervision, console control, conservative recovery, and bounded diagnostic
-  capture.
+  capture; and
+- log and crash-report browsing for client instances, servers, and Ephervex
+  itself, with newest-first crash reports, summaries, bounded reading, search,
+  copy-friendly paths, and folder actions.
 
 ## Current limitations
 
@@ -54,6 +57,8 @@ The CLI currently supports:
 - Ephervex targets Linux, release versions of Minecraft 1.12.2 and newer, and
   Vanilla, Forge, and NeoForge. Fabric, Quilt, snapshots, Windows, and macOS are
   outside the current supported scope.
+- Logs and crash reports are inspected locally. Ephervex does not upload them
+  and integrates no paste service.
 - Dedicated servers are supervised in the foreground. Abrupt supervisor
   termination can leave an orphaned Java process; Ephervex reports verified
   identity and requires explicit operating-system termination rather than

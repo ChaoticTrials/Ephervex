@@ -235,6 +235,10 @@ impl App {
     /// Starts or reuses the linked server, waits for its bounded TCP readiness,
     /// then invokes the ordinary client launch with direct-connect features.
     #[allow(clippy::too_many_arguments)]
+    // The two halves of this flow each open their own operation; naming both
+    // records here is what lets a launcher log show which client was waiting on
+    // which server between them.
+    #[tracing::instrument(skip_all, fields(instance = %client_id, server = %server_id))]
     pub async fn launch_and_connect(
         &mut self,
         client_id: InstanceId,

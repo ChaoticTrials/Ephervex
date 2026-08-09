@@ -21,23 +21,27 @@ use ephervex_core::{
     AccountStatus, AccountSummary, ApiSettings, App, ArgumentForm, Artifact, AssetIndexRef,
     AuthEvent, AuthObserver, CancellationToken, CaptureHealth, CapturedLine, ClientFolder,
     ClientRecord, Compatibility, Config, ControlResponse, CoreError, CreatedClient,
-    CredentialStorage, DEFAULT_SEARCH_LIMIT, DuplicateClient, EULA_CONFIRMATION_PHRASE,
-    Entitlements, EulaStatus, FileDisposition, Freshness, ImportRequest, ImportedPack,
-    IncompatibilityReason, InstalledMods, JavaPathChoice, JavaPlan, JavaPlanRequest, JavaRuntime,
-    JavaTarget, LaunchAndConnectEvent, LaunchAndConnectObserver, LaunchAndConnectOptions,
-    LaunchAndConnectOutcome, LaunchEvent, LaunchFeatures, LaunchObserver, LaunchOptions,
-    LaunchOutcome, LaunchState, LoginFlow, LoginOptions, LoginRequest, MINECRAFT_EULA_REFERENCE,
-    ManagedInstallation, ManagedMod, ModInstallPlan, ModInstallRequest, ModProjectDetails,
-    ModSearchQuery, ModSearchResults, NetworkAccess, NewClient, NewServer, OperationReporter,
-    OptionalSelection, OutputLine, PackAnalysis, PackRecipe, PackSide, Paths, PlanWarning,
-    PlannedMod, PreferenceApplication, PreferenceKey, ReconciliationReport, ReleaseListing,
-    RequirementBasis, RuntimeClassification, RuntimeInventory, SecretString, ServerCommitWarning,
-    ServerCreateOptions, ServerEvent, ServerFolder, ServerNetworkSettings, ServerObserver,
-    ServerPersistenceHealth, ServerRecord, ServerWarning, Session, SideRequirement,
-    VersionMetadata, VersionRecord,
+    CredentialStorage, DEFAULT_DIAGNOSTIC_BYTES, DEFAULT_SEARCH_LIMIT, DiagnosticEntry,
+    DiagnosticKind, DiagnosticRequest, DiagnosticScope, DiagnosticSearch, DuplicateClient,
+    EULA_CONFIRMATION_PHRASE, Entitlements, EulaStatus, FileDisposition, Freshness, ImportRequest,
+    ImportedPack, IncompatibilityReason, InstalledMods, JavaPathChoice, JavaPlan, JavaPlanRequest,
+    JavaRuntime, JavaTarget, LaunchAndConnectEvent, LaunchAndConnectObserver,
+    LaunchAndConnectOptions, LaunchAndConnectOutcome, LaunchEvent, LaunchFeatures, LaunchObserver,
+    LaunchOptions, LaunchOutcome, LaunchState, LoginFlow, LoginOptions, LoginRequest,
+    MAX_SEARCH_MATCHES, MINECRAFT_EULA_REFERENCE, ManagedInstallation, ManagedMod, ModInstallPlan,
+    ModInstallRequest, ModProjectDetails, ModSearchQuery, ModSearchResults, NetworkAccess,
+    NewClient, NewServer, OperationReporter, OptionalSelection, OutputLine, PackAnalysis,
+    PackRecipe, PackSide, Paths, PlanWarning, PlannedMod, PreferenceApplication, PreferenceKey,
+    ReconciliationReport, ReleaseListing, RequirementBasis, RuntimeClassification,
+    RuntimeInventory, SearchOptions, SecretString, ServerCommitWarning, ServerCreateOptions,
+    ServerEvent, ServerFolder, ServerNetworkSettings, ServerObserver, ServerPersistenceHealth,
+    ServerRecord, ServerWarning, Session, SideRequirement, TextAnchor, TextView, VersionMetadata,
+    VersionRecord,
 };
 use ephervex_i18n::Arg as MessageArg;
-use ephervex_model::{InstanceId, LoaderKind, LoaderSelection, ServerId, StorageClass};
+use ephervex_model::{
+    InstanceId, LoaderKind, LoaderSelection, OperationId, ServerId, StorageClass,
+};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -115,6 +119,11 @@ enum Command {
     Mod {
         #[command(subcommand)]
         command: ModCommand,
+    },
+    /// Inspect launcher, client, and server logs and crash reports.
+    Logs {
+        #[command(subcommand)]
+        command: LogsCommand,
     },
     /// Import a modpack archive into a client instance.
     Import(ImportArgs),
@@ -474,6 +483,120 @@ enum InstanceCommand {
 }
 
 #[derive(Debug, Subcommand)]
+enum LogsCommand {
+    /// List the log or crash-report files that exist, newest first.
+    List {
+        #[command(flatten)]
+        scope: DiagnosticScopeArgs,
+        #[command(flatten)]
+        kind: DiagnosticKindArgs,
+    },
+    /// Print part of one log or crash report.
+    ///
+    /// Logs are shown from their end and crash reports from their beginning,
+    /// which is where each keeps the part worth reading first. Large files are
+    /// read in a bounded window rather than whole.
+    Show {
+        /// The file name, as listed by `ephervex logs list`.
+        name: String,
+        #[command(flatten)]
+        scope: DiagnosticScopeArgs,
+        #[command(flatten)]
+        kind: DiagnosticKindArgs,
+        /// Read the beginning of the file rather than its end.
+        #[arg(long)]
+        head: bool,
+        /// How many bytes to read.
+        #[arg(long, default_value_t = DEFAULT_DIAGNOSTIC_BYTES)]
+        bytes: u64,
+        /// Print the file's full path instead of its contents.
+        #[arg(long)]
+        path: bool,
+    },
+    /// Find text in one log or crash report.
+    ///
+    /// Reads the same bounded window `show` does and searches it. The file is
+    /// never modified.
+    Search {
+        /// The file name, as listed by `ephervex logs list`.
+        name: String,
+        /// The text to find.
+        query: String,
+        #[command(flatten)]
+        scope: DiagnosticScopeArgs,
+        #[command(flatten)]
+        kind: DiagnosticKindArgs,
+        /// Match capitalization exactly.
+        #[arg(long)]
+        case_sensitive: bool,
+        /// Search the beginning of the file rather than its end.
+        #[arg(long)]
+        head: bool,
+        /// How many bytes to search.
+        #[arg(long, default_value_t = DEFAULT_DIAGNOSTIC_BYTES)]
+        bytes: u64,
+        /// Stop after this many matches.
+        #[arg(long, default_value_t = MAX_SEARCH_MATCHES)]
+        limit: usize,
+    },
+    /// Open the folder holding these files in the desktop's file manager.
+    Open {
+        #[command(flatten)]
+        scope: DiagnosticScopeArgs,
+        #[command(flatten)]
+        kind: DiagnosticKindArgs,
+        /// Print the path without handing it to a file manager.
+        #[arg(long)]
+        print: bool,
+    },
+}
+
+/// Whose diagnostics to inspect. Exactly one is required.
+#[derive(Debug, Args)]
+#[group(required = true, multiple = false)]
+struct DiagnosticScopeArgs {
+    /// A client instance's own logs and crash reports.
+    #[arg(long)]
+    instance: Option<InstanceId>,
+    /// A server's own logs and crash reports.
+    #[arg(long)]
+    server: Option<ServerId>,
+    /// Ephervex's own log.
+    #[arg(long)]
+    launcher: bool,
+}
+
+impl DiagnosticScopeArgs {
+    fn scope(&self) -> anyhow::Result<DiagnosticScope> {
+        match (self.instance, self.server, self.launcher) {
+            (Some(instance), None, false) => Ok(DiagnosticScope::Client(instance)),
+            (None, Some(server), false) => Ok(DiagnosticScope::Server(server)),
+            (None, None, true) => Ok(DiagnosticScope::Launcher),
+            // Unreachable while the argument group holds; refused rather than
+            // guessed, because guessing would inspect the wrong instance.
+            _ => anyhow::bail!("choose exactly one of --instance, --server, or --launcher"),
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+struct DiagnosticKindArgs {
+    /// Work on crash reports rather than logs.
+    #[arg(long)]
+    crash_reports: bool,
+}
+
+impl DiagnosticKindArgs {
+    const fn kind(&self) -> DiagnosticKind {
+        if self.crash_reports {
+            DiagnosticKind::CrashReport
+        } else {
+            DiagnosticKind::Log
+        }
+    }
+}
+
+#[derive(Debug, Subcommand)]
 enum ServersCommand {
     /// List every indexed server.
     List,
@@ -773,7 +896,16 @@ impl From<LoaderArg> for LoaderKind {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    ephervex_core::init_tracing(ephervex_core::DEFAULT_LOG_DIRECTIVES);
+    // Resolved before anything else so the launcher's own log file exists from
+    // the first event. A run that cannot resolve its state directory still
+    // works and logs to stderr only.
+    let launcher_logs = Paths::from_environment()
+        .ok()
+        .map(|paths| paths.launcher_logs_dir());
+    ephervex_core::init_tracing(
+        ephervex_core::DEFAULT_LOG_DIRECTIVES,
+        launcher_logs.as_deref(),
+    );
 
     match run(&cli) {
         Ok(()) => ExitCode::SUCCESS,
@@ -870,6 +1002,11 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
             // executor, for the same reason the Minecraft commands do.
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(run_mod_command(&app, command, cli.json))
+        }
+        Command::Logs { command } => {
+            // Reading a file and listing a directory need no executor.
+            let app = open_app()?;
+            run_logs_command(&app, command, cli.json)
         }
         Command::Import(args) => {
             let app = open_app()?;
@@ -1191,6 +1328,234 @@ async fn run_server_command(
     Ok(())
 }
 
+// ----------------------------------------------------------------- diagnostics
+
+/// Logs and crash reports through the CLI.
+///
+/// Every command names a file by the name the listing showed and never by a
+/// path: which directory that name is resolved in, and whether it may be opened
+/// at all, are decisions `ephervex-core` makes. That is also what makes the
+/// same commands work for a client, a server, and the launcher itself without
+/// this file knowing where any of them keep anything.
+fn run_logs_command(app: &App, command: &LogsCommand, json: bool) -> anyhow::Result<()> {
+    match command {
+        LogsCommand::List { scope, kind } => {
+            let entries = app.diagnostic_entries(scope.scope()?, kind.kind())?;
+            print_diagnostic_entries(&entries, json);
+        }
+        LogsCommand::Show {
+            name,
+            scope,
+            kind,
+            head,
+            bytes,
+            path,
+        } => {
+            let scope = scope.scope()?;
+            let kind = kind.kind();
+            if *path {
+                let resolved = app.diagnostic_path(scope, kind, name)?;
+                if json {
+                    print_json(&serde_json::json!({ "name": name, "path": resolved }));
+                } else {
+                    println!("{}", resolved.display());
+                }
+                return Ok(());
+            }
+
+            let view = app.read_diagnostic(&request(scope, kind, name, *head, *bytes))?;
+            if json {
+                print_json(&serde_json::json!({
+                    "name": name,
+                    "path": view.path,
+                    "anchor": view.anchor.as_str(),
+                    "file_bytes": view.file_bytes,
+                    "returned_bytes": view.returned_bytes,
+                    "truncated": view.truncated,
+                    "lossy": view.lossy,
+                    "read_at": view.read_at,
+                    "text": view.text,
+                }));
+            } else {
+                print!("{}", view.text);
+                std::io::stdout().flush()?;
+                report_window(&view);
+            }
+        }
+        LogsCommand::Search {
+            name,
+            query,
+            scope,
+            kind,
+            case_sensitive,
+            head,
+            bytes,
+            limit,
+        } => {
+            let found = app.search_diagnostic(
+                &request(scope.scope()?, kind.kind(), name, *head, *bytes),
+                query,
+                &SearchOptions {
+                    case_sensitive: *case_sensitive,
+                    limit: *limit,
+                },
+            )?;
+            print_diagnostic_search(&found, json)?;
+        }
+        LogsCommand::Open { scope, kind, print } => {
+            let scope = scope.scope()?;
+            let kind = kind.kind();
+            let path = if *print {
+                app.diagnostic_folder(scope, kind)?
+            } else {
+                app.open_diagnostic_folder(scope, kind)?
+            };
+            print_folder(path.as_deref(), kind.as_str(), json)?;
+        }
+    }
+    Ok(())
+}
+
+/// Builds the read request the show and search commands share.
+///
+/// `--head` reads the beginning; without it each kind's natural end is used.
+fn request(
+    scope: DiagnosticScope,
+    kind: DiagnosticKind,
+    name: &str,
+    head: bool,
+    bytes: u64,
+) -> DiagnosticRequest<'_> {
+    let request = DiagnosticRequest::new(scope, kind, name).with_budget(bytes);
+    if head {
+        request.with_anchor(TextAnchor::Head)
+    } else {
+        request
+    }
+}
+
+fn print_diagnostic_entries(entries: &[DiagnosticEntry], json: bool) {
+    if json {
+        print_json(&serde_json::Value::Array(
+            entries.iter().map(diagnostic_entry_json).collect(),
+        ));
+        return;
+    }
+    if entries.is_empty() {
+        println!("{}", ephervex_i18n::lookup("diagnostics-nothing-recorded"));
+        return;
+    }
+    for entry in entries {
+        let modified = entry.modified.map(|at| at.to_rfc3339()).unwrap_or_default();
+        let headline = entry
+            .summary
+            .as_ref()
+            .and_then(ephervex_core::CrashSummary::headline)
+            .unwrap_or_default();
+        println!(
+            "{}\t{}\t{}\t{}",
+            entry.name, entry.size_bytes, modified, headline
+        );
+    }
+}
+
+fn diagnostic_entry_json(entry: &DiagnosticEntry) -> serde_json::Value {
+    serde_json::json!({
+        "name": entry.name,
+        "path": entry.path,
+        "kind": entry.kind.as_str(),
+        "size_bytes": entry.size_bytes,
+        "modified": entry.modified,
+        "summary": entry.summary.as_ref().map(|summary| serde_json::json!({
+            "comment": summary.comment,
+            "reported_at": summary.reported_at,
+            "description": summary.description,
+            "failure": summary.failure,
+            "excerpt": summary.excerpt,
+        })),
+    })
+}
+
+fn print_diagnostic_search(found: &DiagnosticSearch, json: bool) -> anyhow::Result<()> {
+    if json {
+        print_json(&serde_json::json!({
+            "path": found.view.path,
+            "lines_searched": found.outcome.lines_searched,
+            "truncated": found.outcome.truncated,
+            "matches": found.outcome.matches.iter().map(|found| serde_json::json!({
+                "line_number": found.line_number,
+                "line": found.line,
+                "line_truncated": found.line_truncated,
+                "start": found.start,
+                "end": found.end,
+            })).collect::<Vec<_>>(),
+        }));
+        return Ok(());
+    }
+
+    for matched in &found.outcome.matches {
+        println!("{}:{}", matched.line_number, matched.line);
+    }
+    std::io::stdout().flush()?;
+    if found.outcome.matches.is_empty() {
+        eprintln!("{}", ephervex_i18n::lookup("diagnostics-search-no-matches"));
+    } else if found.outcome.truncated {
+        eprintln!(
+            "{}",
+            ephervex_i18n::lookup_args(
+                "diagnostics-search-truncated",
+                [(
+                    "matches",
+                    MessageArg::from(
+                        i64::try_from(found.outcome.matches.len()).unwrap_or(i64::MAX)
+                    )
+                )]
+            )
+        );
+    }
+    report_window(&found.view);
+    Ok(())
+}
+
+/// Says what part of the file was actually shown.
+///
+/// On stderr because the text itself is data: `ephervex logs show` can be piped
+/// into a pager or a file without the commentary landing in it.
+fn report_window(view: &TextView) {
+    if view.truncated {
+        eprintln!(
+            "{}",
+            ephervex_i18n::lookup_args(
+                "diagnostics-window-truncated",
+                [
+                    (
+                        "returned",
+                        MessageArg::from(i64::try_from(view.returned_bytes).unwrap_or(i64::MAX))
+                    ),
+                    (
+                        "total",
+                        MessageArg::from(i64::try_from(view.file_bytes).unwrap_or(i64::MAX))
+                    ),
+                ]
+            )
+        );
+    }
+    if view.lossy {
+        eprintln!("{}", ephervex_i18n::lookup("diagnostics-window-lossy"));
+    }
+}
+
+/// Shows the id that ties what the user is watching to the launcher log.
+fn print_operation_id(operation: OperationId) {
+    eprintln!(
+        "{}",
+        ephervex_i18n::lookup_args(
+            "operation-identifier",
+            [("operation", MessageArg::from(operation.to_string()))]
+        )
+    );
+}
+
 // ---------------------------------------------------------------- preferences
 
 /// Global Minecraft preferences through the CLI.
@@ -1492,6 +1857,7 @@ fn print_connect_event(event: LaunchAndConnectEvent) {
 fn report_connected_launch(outcome: &LaunchAndConnectOutcome, json: bool) {
     if json {
         let value = serde_json::json!({
+            "operation": outcome.launch.operation.to_string(),
             "instance": outcome.client.to_string(),
             "server": outcome.server.to_string(),
             "connection_target": outcome.target.to_string(),
@@ -1529,7 +1895,10 @@ struct LaunchProgressPrinter {
 impl LaunchProgressPrinter {
     fn print(&mut self, event: &LaunchEvent, json: bool) {
         match event {
-            LaunchEvent::Preparing => eprintln!("{}", ephervex_i18n::lookup("launch-preparing")),
+            LaunchEvent::Preparing { operation } => {
+                eprintln!("{}", ephervex_i18n::lookup("launch-preparing"));
+                print_operation_id(*operation);
+            }
             LaunchEvent::Downloading(operation) => self.print_progress(operation),
             LaunchEvent::Starting(command) => {
                 eprintln!("{}", ephervex_i18n::lookup("launch-starting"));
@@ -1617,6 +1986,7 @@ fn exit_message(code: Option<i32>, signal: Option<i32>) -> String {
 fn report_launch(outcome: &LaunchOutcome, json: bool) {
     if json {
         let value = serde_json::json!({
+            "operation": outcome.operation.to_string(),
             "instance": outcome.instance.to_string(),
             "minecraft_version": outcome.minecraft_version,
             "java": outcome.java.runtime.executable,
@@ -3657,6 +4027,16 @@ async fn run_server_foreground(
     let printer = tokio::spawn(async move {
         while let Some(event) = events.recv().await {
             match event {
+                ServerEvent::Preparing { operation } => {
+                    if json {
+                        print_json(&serde_json::json!({
+                            "event": "preparing",
+                            "operation": operation.to_string(),
+                        }));
+                    } else {
+                        print_operation_id(operation);
+                    }
+                }
                 ServerEvent::Started { pid } => {
                     if json {
                         print_json(&serde_json::json!({ "event": "started", "pid": pid }));

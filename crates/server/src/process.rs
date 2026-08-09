@@ -6,6 +6,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
+use ephervex_model::OperationId;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -41,11 +42,22 @@ pub struct ServerExit {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum ServerEvent {
-    Started { pid: u32 },
+    /// Validating the record, the EULA, the network settings, and Java.
+    ///
+    /// Carries the id every launcher log line for this start is tagged with, so
+    /// a frontend can show it before the process exists.
+    Preparing {
+        operation: OperationId,
+    },
+    Started {
+        pid: u32,
+    },
     Output(CapturedLine),
     Warning(ServerWarning),
     CapturePruned(crate::CaptureRetention),
-    CaptureUnavailable { detail: String },
+    CaptureUnavailable {
+        detail: String,
+    },
     Exited(ServerExit),
 }
 

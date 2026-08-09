@@ -189,7 +189,10 @@ impl App {
     }
 
     /// Installs a mod and everything it requires.
-    #[instrument(skip(self, request, reporter, cancel), fields(instance = %instance, project = %request.project))]
+    #[instrument(
+        skip(self, request, reporter, cancel),
+        fields(instance = %instance, project = %request.project, operation = %reporter.id())
+    )]
     pub async fn install_mods(
         &self,
         instance: InstanceId,
