@@ -65,13 +65,17 @@ pub use import::{
     MaterializeRequest, MaterializedPack, PackAnalysis, analyze, has_retained_recipe, materialize,
     retained_recipe,
 };
-pub use install::{AppliedLayer, FileInstall, MaterializedFiles, apply_overrides, install_files};
+pub use install::{
+    AppliedLayer, FileInstall, MaterializedFiles, MaterializedServerRecipe,
+    ServerMaterializeRequest, apply_overrides, apply_retained_overrides, install_files,
+    materialize_server_recipe,
+};
 pub use managed::{MODS_DIR, ManagedModInstall, ManagedModInstallation, install_managed};
 pub use path::{RESERVED_METADATA_DIR, safe_file_name};
 pub use policy::PackPolicy;
 pub use recipe::{
     ManagedMod, OptionalComponent, OptionalSelection, OverrideLayer, OverrideScope, PackFileRecipe,
-    PackRecipe, PackSide, ProviderFileIdentity, ProviderRecipeMetadata, RECIPE_VERSION, SidePlan,
-    SideRequirement,
+    PackRecipe, PackSide, ProviderFileIdentity, ProviderRecipeMetadata, RECIPE_VERSION,
+    ServerReconstructionPlan, SidePlan, SideRequirement,
 };
 pub use store::{RECIPE_FILE, SourceStore, provider_directory};

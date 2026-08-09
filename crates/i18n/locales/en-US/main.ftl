@@ -87,6 +87,20 @@ attention-unsupported-launch-customization = The source used launch settings Eph
 attention-ignored-unsafe-customization = An imported command or hook was found and deliberately not run: { $detail }
 attention-best-effort-server-conversion = This server was generated from a client instance and may still contain client-only mods.
 attention-manual-download-required = Some files must be downloaded manually: { $detail }
+attention-unknown-server-applicability = Server applicability is undeclared for { $path }; the file was omitted until explicitly confirmed.
+
+error-pack-recipe-missing = The client no longer has the retained recipe needed to create its server.
+.action = Restore the client's launcher metadata. The original pack archive is not used as a fallback.
+error-pack-retained-layer-unavailable = The retained { $scope } override layer is unavailable.
+.action = Restore { $path } from the client instance's retained launcher source.
+error-pack-unknown-server-selection = The confirmed path is not an unknown-server entry in the retained recipe.
+.action = Inspect the retained recipe and pass an exact logical path shown as unknown for the server.
+error-pack-recipe-target-mismatch = The retained recipe does not match the linked client's exact Minecraft or loader version.
+.action = Restore matching client metadata and recipe data. Ephervex will not substitute versions.
+error-pack-recipe-destination-collision = Two selected recipe files use the same server path.
+.action = Fix the retained desired state; Ephervex will not choose one file to overwrite the other.
+error-pack-recipe-destination-occupied = A selected recipe file would overwrite part of the installed server.
+.action = Fix the retained recipe path collision; Ephervex will not overwrite the base server silently.
 
 ## Configuration errors 
 

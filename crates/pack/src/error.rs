@@ -164,6 +164,36 @@ pub enum PackError {
         supported: u32,
     },
 
+    /// A linked imported client no longer has the retained recipe required to
+    /// reconstruct its server without the original archive.
+    #[error("the client has no retained pack recipe at {path}")]
+    RecipeMissing { path: PathBuf },
+
+    /// A retained override layer named by the recipe is absent or unusable.
+    #[error("the retained {scope} override layer is unavailable at {path}")]
+    RetainedLayerUnavailable { scope: &'static str, path: PathBuf },
+
+    /// A caller tried to confirm an entry that is not unknown on the server.
+    #[error("`{path}` is not a recipe entry with unknown server applicability")]
+    UnknownServerSelection { path: PathBuf },
+
+    /// The recipe and linked client disagree about their exact target.
+    #[error("the retained recipe target does not match the linked client")]
+    RecipeTargetMismatch {
+        client_minecraft: String,
+        recipe_minecraft: String,
+        client_loader: String,
+        recipe_loader: String,
+    },
+
+    /// Two selected recipe entries claim one server path.
+    #[error("two selected recipe files both install as `{path}`")]
+    RecipeDestinationCollision { path: PathBuf },
+
+    /// A selected recipe file would overwrite a file from the base server.
+    #[error("the selected recipe file would overwrite {path}")]
+    RecipeDestinationOccupied { path: PathBuf },
+
     /// A file was recorded as a managed mod without the identity that makes it
     /// one. A record nothing can re-resolve is worse than no record.
     #[error("`{path}` cannot be recorded as a managed mod without a provider and project")]
@@ -233,6 +263,12 @@ impl PackError {
             Self::RecipeUnreadable { .. } => "error-pack-recipe-unreadable",
             Self::RecipeInvalid { .. } => "error-pack-recipe-invalid",
             Self::RecipeUnsupportedVersion { .. } => "error-pack-recipe-unsupported-version",
+            Self::RecipeMissing { .. } => "error-pack-recipe-missing",
+            Self::RetainedLayerUnavailable { .. } => "error-pack-retained-layer-unavailable",
+            Self::UnknownServerSelection { .. } => "error-pack-unknown-server-selection",
+            Self::RecipeTargetMismatch { .. } => "error-pack-recipe-target-mismatch",
+            Self::RecipeDestinationCollision { .. } => "error-pack-recipe-destination-collision",
+            Self::RecipeDestinationOccupied { .. } => "error-pack-recipe-destination-occupied",
             Self::ManagedIdentityMissing { .. } => "error-mod-managed-identity-missing",
             Self::ManagedVersionConflict { .. } => "error-mod-already-installed",
             Self::DestinationOccupied { .. } => "error-mod-destination-occupied",
@@ -256,6 +292,11 @@ impl PackError {
             | Self::RecipeUnreadable { path, .. }
             | Self::RecipeInvalid { path, .. }
             | Self::RecipeUnsupportedVersion { path, .. }
+            | Self::RecipeMissing { path }
+            | Self::RetainedLayerUnavailable { path, .. }
+            | Self::UnknownServerSelection { path }
+            | Self::RecipeDestinationCollision { path }
+            | Self::RecipeDestinationOccupied { path }
             | Self::DestinationOccupied { path } => Some(path.clone()),
             _ => None,
         }
@@ -322,6 +363,20 @@ impl PackError {
             } => vec![
                 ("found", found.to_string()),
                 ("supported", supported.to_string()),
+            ],
+            Self::RetainedLayerUnavailable { scope, .. } => {
+                vec![("scope", (*scope).to_owned())]
+            }
+            Self::RecipeTargetMismatch {
+                client_minecraft,
+                recipe_minecraft,
+                client_loader,
+                recipe_loader,
+            } => vec![
+                ("client_minecraft", client_minecraft.clone()),
+                ("recipe_minecraft", recipe_minecraft.clone()),
+                ("client_loader", client_loader.clone()),
+                ("recipe_loader", recipe_loader.clone()),
             ],
             _ => Vec::new(),
         }
@@ -411,6 +466,28 @@ mod tests {
             },
             PackError::FileDownloadsMissing {
                 path: "mods/a.jar".to_owned(),
+            },
+            PackError::RecipeMissing {
+                path: PathBuf::from("/instance/.launcher/source/recipe.json"),
+            },
+            PackError::RetainedLayerUnavailable {
+                scope: "server",
+                path: PathBuf::from("/instance/.launcher/source/modrinth/server-overrides"),
+            },
+            PackError::UnknownServerSelection {
+                path: PathBuf::from("mods/not-unknown.jar"),
+            },
+            PackError::RecipeTargetMismatch {
+                client_minecraft: "1.20.1".to_owned(),
+                recipe_minecraft: "1.20.2".to_owned(),
+                client_loader: "Forge 47.2.0".to_owned(),
+                recipe_loader: "Forge 48.0.0".to_owned(),
+            },
+            PackError::RecipeDestinationCollision {
+                path: PathBuf::from("mods/same.jar"),
+            },
+            PackError::RecipeDestinationOccupied {
+                path: PathBuf::from("/server/minecraft_server.jar"),
             },
             PackError::ManagedIdentityMissing {
                 path: "mods/a.jar".to_owned(),

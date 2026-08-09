@@ -34,6 +34,7 @@
 //! The instance still owns its own copy of every mod: `mods/`, `config/`, and
 //! overrides are instance-local.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use ephervex_download::{
@@ -44,9 +45,11 @@ use ephervex_model::Hash;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument, warn};
 
-use crate::archive::PackArchive;
+use crate::archive::{ExtractionLimits, ExtractionReport, PackArchive};
 use crate::error::{PackError, PackResult};
+use crate::path::{contained_join, is_reserved, safe_relative_path};
 use crate::recipe::{OptionalSelection, OverrideLayer, PackFileRecipe, PackRecipe, PackSide};
+use crate::store::SourceStore;
 
 /// What materializing one side of a pack produced.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -82,6 +85,30 @@ pub struct FileInstall<'a> {
     pub cancel: &'a CancellationToken,
 }
 
+/// One linked-server reconstruction request.
+#[derive(Debug, Clone, Copy)]
+pub struct ServerMaterializeRequest<'a> {
+    pub recipe: &'a PackRecipe,
+    /// Unknown-server entries explicitly confirmed for this creation only.
+    pub confirmed_unknown: &'a OptionalSelection,
+    pub game_dir: &'a Path,
+    pub client_source_dir: &'a Path,
+    pub server_source_dir: &'a Path,
+    pub manager: &'a DownloadManager,
+    pub cache: &'a CacheLayout,
+    pub reporter: &'a OperationReporter,
+    pub cancel: &'a CancellationToken,
+}
+
+/// What reconstructing a linked server from retained desired state produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaterializedServerRecipe {
+    pub files: MaterializedFiles,
+    pub layers: Vec<AppliedLayer>,
+    pub recipe_path: PathBuf,
+    pub unconfirmed_unknown: Vec<PathBuf>,
+}
+
 /// Downloads and installs the pack files one side needs.
 ///
 /// Fetching is [`fetch_all`]'s job, so this and managed-mod installation share
@@ -100,11 +127,113 @@ pub async fn install_files(request: FileInstall<'_>) -> PackResult<MaterializedF
     } = request;
 
     let wanted = recipe.files_for(side, selection);
-    let mut report = MaterializedFiles {
-        skipped: recipe
-            .files
+    install_selected_files(
+        &recipe.files,
+        &wanted,
+        game_dir,
+        manager,
+        cache,
+        reporter,
+        cancel,
+    )
+    .await
+}
+
+/// Reconstructs server-applicable content without reading the source archive
+/// or the mutable client game directory.
+///
+/// The caller must supply a staging game directory. This function writes
+/// several ordered layers and intentionally relies on the owning server-create
+/// transaction to discard that staging root if any step fails.
+#[instrument(skip_all, fields(game_dir = %request.game_dir.display()))]
+pub async fn materialize_server_recipe(
+    request: ServerMaterializeRequest<'_>,
+) -> PackResult<MaterializedServerRecipe> {
+    let ServerMaterializeRequest {
+        recipe,
+        confirmed_unknown,
+        game_dir,
+        client_source_dir,
+        server_source_dir,
+        manager,
+        cache,
+        reporter,
+        cancel,
+    } = request;
+    let plan = recipe.server_reconstruction_plan(confirmed_unknown)?;
+    for layer in &plan.layers {
+        let Some(relative) = &layer.retained_at else {
+            return Err(PackError::RetainedLayerUnavailable {
+                scope: layer.scope.as_str(),
+                path: client_source_dir.to_path_buf(),
+            });
+        };
+        validate_retained_root(
+            &SourceStore::new(client_source_dir),
+            relative,
+            layer.scope.as_str(),
+        )?;
+    }
+
+    let files = install_selected_files(
+        &recipe.files,
+        &plan.files,
+        game_dir,
+        manager,
+        cache,
+        reporter,
+        cancel,
+    )
+    .await?;
+    let client_store = SourceStore::new(client_source_dir);
+    let layers = apply_retained_overrides(&client_store, recipe, PackSide::Server, game_dir)?;
+    remove_retained_eula(game_dir)?;
+    let server_store = SourceStore::new(server_source_dir);
+    copy_server_source(&client_store, &server_store, recipe, &plan.layers)?;
+    let recipe_path = server_store.write_recipe(recipe)?;
+
+    Ok(MaterializedServerRecipe {
+        files,
+        layers,
+        recipe_path,
+        unconfirmed_unknown: plan
+            .unconfirmed_unknown
             .iter()
-            .filter(|file| !file.is_installed_on(side, selection))
+            .map(|file| file.logical_path.clone())
+            .collect(),
+    })
+}
+
+/// EULA consent is launcher-global and explicit. A retained pack file is not a
+/// consent record, regardless of whether it says `true` or `false`.
+fn remove_retained_eula(game_dir: &Path) -> PackResult<()> {
+    let path = game_dir.join("eula.txt");
+    match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_dir() => {
+            std::fs::remove_dir_all(&path).map_err(|source| PackError::Unwritable { path, source })
+        }
+        Ok(_) => {
+            std::fs::remove_file(&path).map_err(|source| PackError::Unwritable { path, source })
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(PackError::Unwritable { path, source }),
+    }
+}
+
+async fn install_selected_files(
+    all: &[PackFileRecipe],
+    wanted: &[&PackFileRecipe],
+    game_dir: &Path,
+    manager: &DownloadManager,
+    cache: &CacheLayout,
+    reporter: &OperationReporter,
+    cancel: &CancellationToken,
+) -> PackResult<MaterializedFiles> {
+    preflight_destinations(wanted, game_dir)?;
+    let mut report = MaterializedFiles {
+        skipped: all
+            .iter()
+            .filter(|file| !wanted.iter().any(|wanted| std::ptr::eq(*wanted, *file)))
             .map(|file| file.logical_path.clone())
             .collect(),
         ..MaterializedFiles::default()
@@ -113,7 +242,7 @@ pub async fn install_files(request: FileInstall<'_>) -> PackResult<MaterializedF
         return Ok(report);
     }
 
-    let outcomes = fetch_all(&wanted, cache, manager, reporter, cancel).await?;
+    let outcomes = fetch_all(wanted, cache, manager, reporter, cancel).await?;
 
     for (file, outcome) in wanted.iter().zip(outcomes.iter()) {
         if cancel.is_cancelled() {
@@ -135,6 +264,46 @@ pub async fn install_files(request: FileInstall<'_>) -> PackResult<MaterializedF
         "installed the pack's files"
     );
     Ok(report)
+}
+
+fn preflight_destinations(wanted: &[&PackFileRecipe], game_dir: &Path) -> PackResult<()> {
+    let mut claimed = BTreeSet::new();
+    for file in wanted {
+        let raw = file
+            .logical_path
+            .to_str()
+            .ok_or_else(|| PackError::EntryPathUnsafe {
+                entry: file.display_name(),
+            })?;
+        let safe = safe_relative_path(raw.as_bytes(), 0)
+            .filter(|path| !path.as_os_str().is_empty())
+            .ok_or_else(|| PackError::EntryPathUnsafe {
+                entry: file.display_name(),
+            })?;
+        if safe != file.logical_path {
+            return Err(PackError::EntryPathUnsafe {
+                entry: file.display_name(),
+            });
+        }
+        if is_reserved(&safe) {
+            return Err(PackError::EntryReserved {
+                entry: file.display_name(),
+            });
+        }
+        if !claimed.insert(file.logical_path.as_path()) {
+            return Err(PackError::RecipeDestinationCollision {
+                path: file.logical_path.clone(),
+            });
+        }
+        let destination =
+            contained_join(game_dir, &safe).ok_or_else(|| PackError::EntryPathUnsafe {
+                entry: file.display_name(),
+            })?;
+        if destination.exists() {
+            return Err(PackError::RecipeDestinationOccupied { path: destination });
+        }
+    }
+    Ok(())
 }
 
 /// Fetches every file into the verified shared cache.
@@ -339,6 +508,325 @@ pub fn apply_overrides(
         });
     }
     Ok(applied)
+}
+
+/// Applies retained common and side-specific layers in established precedence
+/// order, rejecting missing layers and every link or special filesystem entry.
+pub fn apply_retained_overrides(
+    store: &SourceStore,
+    recipe: &PackRecipe,
+    side: PackSide,
+    game_dir: &Path,
+) -> PackResult<Vec<AppliedLayer>> {
+    let mut applied = Vec::new();
+    let limits = ExtractionLimits::default();
+    let mut spent = ExtractionReport::default();
+    for layer in recipe.layers_for(side) {
+        let relative =
+            layer
+                .retained_at
+                .as_ref()
+                .ok_or_else(|| PackError::RetainedLayerUnavailable {
+                    scope: layer.scope.as_str(),
+                    path: store.dir().to_path_buf(),
+                })?;
+        let source = validate_retained_root(store, relative, layer.scope.as_str())?;
+        let report = copy_retained_tree(&source, game_dir, &limits, &mut spent)?;
+        applied.push(AppliedLayer {
+            layer: layer.clone(),
+            files: report.files,
+        });
+    }
+    Ok(applied)
+}
+
+fn validate_retained_root(
+    store: &SourceStore,
+    relative: &Path,
+    scope: &'static str,
+) -> PackResult<PathBuf> {
+    let raw = relative
+        .to_str()
+        .ok_or_else(|| PackError::RetainedLayerUnavailable {
+            scope,
+            path: store.resolve(relative),
+        })?;
+    let safe = safe_relative_path(raw.as_bytes(), 0).filter(|path| !path.as_os_str().is_empty());
+    let Some(safe) = safe else {
+        return Err(PackError::RetainedLayerUnavailable {
+            scope,
+            path: store.resolve(relative),
+        });
+    };
+    let source =
+        contained_join(store.dir(), &safe).ok_or_else(|| PackError::RetainedLayerUnavailable {
+            scope,
+            path: store.resolve(relative),
+        })?;
+    let metadata =
+        std::fs::symlink_metadata(&source).map_err(|_| PackError::RetainedLayerUnavailable {
+            scope,
+            path: source.clone(),
+        })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(PackError::RetainedLayerUnavailable {
+            scope,
+            path: source,
+        });
+    }
+    let canonical_store =
+        std::fs::canonicalize(store.dir()).map_err(|_| PackError::RetainedLayerUnavailable {
+            scope,
+            path: store.dir().to_path_buf(),
+        })?;
+    let canonical_source =
+        std::fs::canonicalize(&source).map_err(|_| PackError::RetainedLayerUnavailable {
+            scope,
+            path: source.clone(),
+        })?;
+    if !canonical_source.starts_with(canonical_store) {
+        return Err(PackError::RetainedLayerUnavailable {
+            scope,
+            path: source,
+        });
+    }
+    Ok(source)
+}
+
+fn copy_retained_tree(
+    source: &Path,
+    destination: &Path,
+    limits: &ExtractionLimits,
+    spent: &mut ExtractionReport,
+) -> PackResult<ExtractionReport> {
+    let mut report = ExtractionReport::default();
+    copy_retained_directory(source, source, destination, limits, spent, &mut report)?;
+    Ok(report)
+}
+
+fn copy_retained_directory(
+    root: &Path,
+    source: &Path,
+    destination: &Path,
+    limits: &ExtractionLimits,
+    spent: &mut ExtractionReport,
+    report: &mut ExtractionReport,
+) -> PackResult<()> {
+    std::fs::create_dir_all(destination).map_err(|source| PackError::Unwritable {
+        path: destination.to_path_buf(),
+        source,
+    })?;
+    for entry in std::fs::read_dir(source).map_err(|error| PackError::Unwritable {
+        path: source.to_path_buf(),
+        source: error,
+    })? {
+        let entry = entry.map_err(|error| PackError::Unwritable {
+            path: source.to_path_buf(),
+            source: error,
+        })?;
+        let from = entry.path();
+        copy_retained_entry(root, &from, destination, limits, spent, report)?;
+    }
+    Ok(())
+}
+
+fn copy_retained_entry(
+    root: &Path,
+    from: &Path,
+    destination: &Path,
+    limits: &ExtractionLimits,
+    spent: &mut ExtractionReport,
+    report: &mut ExtractionReport,
+) -> PackResult<()> {
+    let relative = from
+        .strip_prefix(root)
+        .map_err(|_| PackError::EntryPathUnsafe {
+            entry: from.display().to_string(),
+        })?;
+    let raw = relative
+        .to_str()
+        .ok_or_else(|| PackError::EntryPathUnsafe {
+            entry: relative.display().to_string(),
+        })?;
+    if safe_relative_path(raw.as_bytes(), 0).as_deref() != Some(relative) {
+        return Err(PackError::EntryPathUnsafe {
+            entry: raw.to_owned(),
+        });
+    }
+    if is_reserved(relative) {
+        return Err(PackError::EntryReserved {
+            entry: raw.to_owned(),
+        });
+    }
+    let kind = std::fs::symlink_metadata(from)
+        .map_err(|source| PackError::Unwritable {
+            path: from.to_path_buf(),
+            source,
+        })?
+        .file_type();
+    let to = destination.join(relative);
+    if kind.is_symlink() {
+        return Err(PackError::EntryTypeUnsupported {
+            entry: raw.to_owned(),
+            kind: "symlink",
+        });
+    }
+    if kind.is_dir() {
+        let entries = spent
+            .files
+            .saturating_add(spent.directories)
+            .saturating_add(1);
+        if entries > limits.max_entries {
+            return Err(PackError::LimitExceeded {
+                limit: "entry-count",
+                allowed: limits.max_entries,
+                reached: entries,
+            });
+        }
+        spent.directories = spent.directories.saturating_add(1);
+        report.directories = report.directories.saturating_add(1);
+        std::fs::create_dir_all(&to)
+            .map_err(|source| PackError::Unwritable { path: to, source })?;
+        copy_retained_directory(root, from, destination, limits, spent, report)?;
+        return Ok(());
+    }
+    if !kind.is_file() {
+        return Err(PackError::EntryTypeUnsupported {
+            entry: raw.to_owned(),
+            kind: "special file",
+        });
+    }
+    let size = std::fs::metadata(from)
+        .map_err(|source| PackError::Unwritable {
+            path: from.to_path_buf(),
+            source,
+        })?
+        .len();
+    charge_retained_file(size, limits, spent)?;
+    if let Some(parent) = to.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| PackError::Unwritable {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    std::fs::copy(from, &to).map_err(|source| PackError::Unwritable { path: to, source })?;
+    report.files = report.files.saturating_add(1);
+    report.bytes = report.bytes.saturating_add(size);
+    Ok(())
+}
+
+fn charge_retained_file(
+    size: u64,
+    limits: &ExtractionLimits,
+    spent: &mut ExtractionReport,
+) -> PackResult<()> {
+    let entries = spent
+        .files
+        .saturating_add(spent.directories)
+        .saturating_add(1);
+    let bytes = spent.bytes.saturating_add(size);
+    for (limit, allowed, reached) in [
+        ("entry-count", limits.max_entries, entries),
+        ("entry-size", limits.max_entry_bytes, size),
+        ("total-size", limits.max_total_bytes, bytes),
+    ] {
+        if reached > allowed {
+            return Err(PackError::LimitExceeded {
+                limit,
+                allowed,
+                reached,
+            });
+        }
+    }
+    spent.files = spent.files.saturating_add(1);
+    spent.bytes = bytes;
+    Ok(())
+}
+
+fn copy_server_source(
+    client: &SourceStore,
+    server: &SourceStore,
+    recipe: &PackRecipe,
+    layers: &[&OverrideLayer],
+) -> PackResult<()> {
+    let limits = ExtractionLimits::default();
+    let mut spent = ExtractionReport::default();
+    for layer in layers {
+        let relative =
+            layer
+                .retained_at
+                .as_ref()
+                .ok_or_else(|| PackError::RetainedLayerUnavailable {
+                    scope: layer.scope.as_str(),
+                    path: client.dir().to_path_buf(),
+                })?;
+        let source = validate_retained_root(client, relative, layer.scope.as_str())?;
+        copy_retained_tree(&source, &server.resolve(relative), &limits, &mut spent)?;
+    }
+    if let Some(relative) = &recipe.provider_metadata.manifest_file {
+        let raw = relative
+            .to_str()
+            .ok_or_else(|| PackError::EntryPathUnsafe {
+                entry: relative.display().to_string(),
+            })?;
+        let safe = safe_relative_path(raw.as_bytes(), 0)
+            .filter(|path| !path.as_os_str().is_empty())
+            .ok_or_else(|| PackError::EntryPathUnsafe {
+                entry: relative.display().to_string(),
+            })?;
+        if safe != *relative {
+            return Err(PackError::EntryPathUnsafe {
+                entry: relative.display().to_string(),
+            });
+        }
+        let source =
+            contained_join(client.dir(), &safe).ok_or_else(|| PackError::EntryPathUnsafe {
+                entry: relative.display().to_string(),
+            })?;
+        let kind = std::fs::symlink_metadata(&source).map_err(|source_error| {
+            PackError::RecipeUnreadable {
+                path: source.clone(),
+                source: source_error,
+            }
+        })?;
+        if kind.file_type().is_symlink() || !kind.is_file() {
+            return Err(PackError::EntryTypeUnsupported {
+                entry: relative.display().to_string(),
+                kind: "non-regular retained manifest",
+            });
+        }
+        let canonical_client = std::fs::canonicalize(client.dir()).map_err(|source_error| {
+            PackError::RecipeUnreadable {
+                path: client.dir().to_path_buf(),
+                source: source_error,
+            }
+        })?;
+        let canonical_source =
+            std::fs::canonicalize(&source).map_err(|source_error| PackError::RecipeUnreadable {
+                path: source.clone(),
+                source: source_error,
+            })?;
+        if !canonical_source.starts_with(canonical_client) {
+            return Err(PackError::EntryPathUnsafe {
+                entry: relative.display().to_string(),
+            });
+        }
+        let destination =
+            contained_join(server.dir(), &safe).ok_or_else(|| PackError::EntryPathUnsafe {
+                entry: relative.display().to_string(),
+            })?;
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| PackError::Unwritable {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        std::fs::copy(&source, &destination).map_err(|source| PackError::Unwritable {
+            path: destination,
+            source,
+        })?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

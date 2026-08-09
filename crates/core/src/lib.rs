@@ -119,9 +119,10 @@ pub use ephervex_options::{
 };
 pub use ephervex_pack::{
     AppliedLayer, ExtractionLimits, ManagedMod, ManagedModInstallation, MaterializedFiles,
-    MaterializedPack, ModOrigin, OptionalComponent, OptionalSelection, OverrideLayer,
-    OverrideScope, PackAnalysis, PackError, PackFileRecipe, PackFormat, PackPolicy, PackRecipe,
-    PackSide, ProviderFileIdentity, ProviderRecipeMetadata, SidePlan, SideRequirement,
+    MaterializedPack, MaterializedServerRecipe, ModOrigin, OptionalComponent, OptionalSelection,
+    OverrideLayer, OverrideScope, PackAnalysis, PackError, PackFileRecipe, PackFormat, PackPolicy,
+    PackRecipe, PackSide, ProviderFileIdentity, ProviderRecipeMetadata, ServerReconstructionPlan,
+    SidePlan, SideRequirement,
 };
 pub use ephervex_server::{
     CaptureHealth, CaptureRetention, CapturedLine, ControlAction, ControlResponse,

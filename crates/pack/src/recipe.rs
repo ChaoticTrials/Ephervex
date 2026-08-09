@@ -531,6 +531,61 @@ impl PackRecipe {
         }
     }
 
+    /// Plans reproducible server content from recorded desired state.
+    ///
+    /// Required files are automatic, unsupported files are excluded, and an
+    /// optional file is included only when the recipe records an affirmative
+    /// choice. `Unknown` is deliberately stricter: a choice made for the
+    /// client is not proof that an undeclared server side is safe, so it is
+    /// included only when this server-creation request explicitly confirms the
+    /// path. Unconfirmed entries are returned for actionable diagnostics.
+    pub fn server_reconstruction_plan(
+        &self,
+        confirmed_unknown: &OptionalSelection,
+    ) -> PackResult<ServerReconstructionPlan<'_>> {
+        let unknown_paths: BTreeSet<&Path> = self
+            .files
+            .iter()
+            .filter(|file| file.server == SideRequirement::Unknown)
+            .map(|file| file.logical_path.as_path())
+            .collect();
+        for path in confirmed_unknown.paths() {
+            if !unknown_paths.contains(path) {
+                return Err(PackError::UnknownServerSelection {
+                    path: path.to_path_buf(),
+                });
+            }
+        }
+
+        let mut files = Vec::new();
+        let mut unconfirmed_unknown = Vec::new();
+        for file in &self.files {
+            match file.server {
+                SideRequirement::Required => files.push(file),
+                SideRequirement::Optional => {
+                    if file.selected == Some(true) {
+                        files.push(file);
+                    }
+                }
+                SideRequirement::Unsupported => {}
+                SideRequirement::Unknown
+                    if confirmed_unknown.includes(&file.logical_path, None) =>
+                {
+                    files.push(file);
+                }
+                SideRequirement::Unknown => unconfirmed_unknown.push(file),
+            }
+        }
+
+        Ok(ServerReconstructionPlan {
+            files,
+            layers: self.layers_for(PackSide::Server),
+            minecraft_version: &self.minecraft_version,
+            loader: &self.loader,
+            unconfirmed_unknown,
+        })
+    }
+
     /// Records what the user chose for the optional files of one side.
     ///
     /// Stored on the file rather than in a side table so that a recipe copied
@@ -775,6 +830,26 @@ pub struct SidePlan<'a> {
     pub layers: Vec<&'a OverrideLayer>,
     pub minecraft_version: &'a str,
     pub loader: &'a LoaderSelection,
+}
+
+/// The conservative, provider-neutral plan used to reconstruct a server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerReconstructionPlan<'a> {
+    pub files: Vec<&'a PackFileRecipe>,
+    pub layers: Vec<&'a OverrideLayer>,
+    pub minecraft_version: &'a str,
+    pub loader: &'a LoaderSelection,
+    /// Files omitted because their provider declared no server applicability
+    /// and this creation request did not explicitly confirm them.
+    pub unconfirmed_unknown: Vec<&'a PackFileRecipe>,
+}
+
+impl ServerReconstructionPlan<'_> {
+    /// Whether every override layer needed for reconstruction is retained.
+    #[must_use]
+    pub fn layers_are_retained(&self) -> bool {
+        self.layers.iter().all(|layer| layer.is_retained())
+    }
 }
 
 impl SidePlan<'_> {

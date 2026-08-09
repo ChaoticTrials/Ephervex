@@ -584,6 +584,11 @@ struct CreateServerArgs {
     /// Use this Java executable for installation.
     #[arg(long)]
     java: Option<PathBuf>,
+    /// Include a managed file whose server applicability is undeclared.
+    ///
+    /// Repeatable and matched against the retained recipe's logical paths.
+    #[arg(long = "include-unknown", value_name = "PATH", requires = "client")]
+    include_unknown: Vec<PathBuf>,
     #[command(flatten)]
     storage: StorageArgs,
 }
@@ -1020,6 +1025,7 @@ async fn run_server_command(
                     &ServerCreateOptions {
                         java_path: args.java.clone(),
                         install_java_if_missing: true,
+                        confirmed_unknown: OptionalSelection::of(args.include_unknown.clone()),
                     },
                     &CancellationToken::new(),
                 )
@@ -1033,6 +1039,7 @@ async fn run_server_command(
                     &ServerCreateOptions {
                         java_path: java.clone(),
                         install_java_if_missing: true,
+                        confirmed_unknown: OptionalSelection::none(),
                     },
                     &CancellationToken::new(),
                 )
@@ -3521,6 +3528,13 @@ fn print_server(record: &ServerRecord, json: bool) {
         println!("loader:    {}", record.loader);
         println!("root:      {}", record.root.display());
         println!("installed: {}", record.installation.is_installed());
+        for reason in &record.attention {
+            if let ephervex_model::AttentionReason::UnknownServerApplicability(path) = reason {
+                eprintln!(
+                    "server applicability is unknown for {path}; it was omitted (use --include-unknown {path} to confirm it on a new server)"
+                );
+            }
+        }
     }
 }
 

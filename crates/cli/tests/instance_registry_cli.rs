@@ -262,3 +262,17 @@ fn linked_server_creation_rejects_an_independent_version_selection() {
             .is_empty()
     );
 }
+
+#[test]
+fn linked_server_creation_exposes_only_explicit_unknown_content_confirmation() {
+    let sandbox = Sandbox::new();
+    let help = sandbox.run(&["server", "create", "--help"]);
+    assert!(help.status.success());
+    let stdout = String::from_utf8_lossy(&help.stdout);
+    assert!(stdout.contains("--client <CLIENT>"), "help was:\n{stdout}");
+    assert!(
+        stdout.contains("--include-unknown <PATH>"),
+        "help was:\n{stdout}"
+    );
+    assert!(!stdout.contains("source archive"), "help was:\n{stdout}");
+}

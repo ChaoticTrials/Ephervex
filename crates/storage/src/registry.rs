@@ -1348,6 +1348,23 @@ mod tests {
     }
 
     #[test]
+    fn a_linked_server_preserves_the_clients_exact_minecraft_and_loader_versions() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let loader = LoaderSelection::exact(LoaderKind::NeoForge, "21.1.172");
+        let client = registry
+            .create_client(NewClient::new("client", "1.21.1", loader.clone()))
+            .expect("create client");
+
+        let server = registry
+            .prepare_server(NewServer::linked("server", client.id))
+            .expect("prepare linked server");
+        assert_eq!(server.minecraft_version, "1.21.1");
+        assert_eq!(server.loader, loader);
+        assert_eq!(server.linked_client_id, Some(client.id));
+    }
+
+    #[test]
     fn a_new_server_is_explicitly_not_installed() {
         let environment = TestEnvironment::new();
         let registry = environment.registry();

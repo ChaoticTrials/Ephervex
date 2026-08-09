@@ -59,6 +59,9 @@ pub enum AttentionReason {
     BestEffortServerConversion,
     /// Files could not be fetched automatically and need manual download.
     ManualDownloadRequired(String),
+    /// A managed file had no declared server applicability and was omitted
+    /// until the user explicitly confirms it for a server creation.
+    UnknownServerApplicability(String),
 }
 
 #[cfg(test)]

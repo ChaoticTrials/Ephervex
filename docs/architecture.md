@@ -99,12 +99,28 @@ typed standalone selection or linked client
    ▼
 hidden sibling root
    ├── server/ base installation
+   ├── linked recipe files from shared verified downloads
+   ├── retained common overrides, then server overrides
    ├── managed network properties
+   ├── retained provider-neutral recipe state
    └── .launcher/server.json
               │ atomic directory rename
               ▼
         published server ──▶ SQLite query index
 ```
+
+A linked server reads the client's retained recipe and retained override
+layers. It never scans or copies the mutable client game directory, so manually
+added jars and local debugging changes remain unmanaged. Required content is
+included, unsupported content is excluded, and optional content follows the
+recorded choice. Entries with undeclared server applicability require explicit
+confirmation for the current creation and otherwise become actionable server
+attention reasons. The original pack archive is not consulted.
+
+Base installation, recipe files, overrides, managed network properties, source
+retention, and canonical metadata all land in the same hidden sibling root.
+The final rename remains the sole publication point; failure at any earlier
+step removes the staged root and cannot leave an indexed complete server.
 
 Runtime Java precedence is operation-specific path, server override, global
 preferred path, then compatible discovered or managed runtime. Minimum memory,
@@ -296,11 +312,11 @@ stderr so machine-readable output remains valid.
 ## Supported scope and known boundaries
 
 The supported scope includes Linux, Minecraft release versions from 1.12.2
-onward, Vanilla, Forge, NeoForge, Modrinth pack import, and Modrinth mod
-browsing with dependency resolution. The GUI, CurseForge browsing, CurseForge
-and Prism import, mod updates and removal, recipe materialization into servers,
-and full server GUI/log views are unavailable. Fabric, Quilt, snapshots,
-Windows, and macOS are
+onward, Vanilla, Forge, NeoForge, Modrinth pack import, Modrinth mod browsing
+with dependency resolution, and linked-server reconstruction from retained
+recipes. The GUI, CurseForge browsing, CurseForge and Prism import, mod updates
+and removal, and full server GUI/log views are unavailable. Fabric, Quilt,
+snapshots, Windows, and macOS are
 outside the supported scope recorded in ADR 0008.
 
 ## Verification

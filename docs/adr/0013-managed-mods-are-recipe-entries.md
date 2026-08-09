@@ -61,6 +61,23 @@ Replacing it is a mod update, which this build does not implement, and an upsert
 would have to decide the fate of the old, differently-named jar. Making the
 invariant structural means no code path can leave two jars for one project.
 
+When a linked server is reconstructed, side applicability follows a stricter
+operation-specific policy:
+
+- server-required entries are included;
+- server-unsupported entries are excluded;
+- optional entries are included only when the retained recipe records an
+  affirmative selection; and
+- `Unknown` entries are omitted unless the current server-creation request
+  explicitly confirms their logical paths.
+
+An old affirmative selection is not sufficient for `Unknown`. The recipe has
+one recorded selection per file, and that selection may have been made while
+materializing the client. Treating it as server confirmation would turn an
+undeclared server side into an accidental requirement. Omitted unknown entries
+remain visible as server attention reasons, so conservative reconstruction is
+diagnosable rather than silent.
+
 ## Consequences
 
 - Side planning and "Create Server" work unchanged: they read the recipe, and a
@@ -73,8 +90,7 @@ invariant structural means no code path can leave two jars for one project.
   build something that never existed.
 - Adding a provider adds a `ModProvider` variant and a translation; it does not
   change the recipe, the installer, or the retained-source layout.
-- Base server creation does not consume or materialize this recipe. It installs
-  only the exact supported Minecraft and loader base selected directly or
-  derived from a linked client. Recipe materialization is the later operation
-  that must decide how undeclared server applicability is handled; this ADR
-  continues to preserve `SideRequirement::Unknown` without interpreting it.
+- Standalone server creation installs only the exact selected base. Linked
+  server creation installs that same base and then materializes this recipe in
+  the same staging transaction, using the conservative applicability policy
+  above.

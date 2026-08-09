@@ -5,8 +5,13 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
+use ephervex_download::{CacheLayout, DownloadManager, DownloaderConfig, OperationReporter};
 use ephervex_model::{
-    JavaOverride, JvmSettings, ServerId, ServerInstallation, ServerLaunch, ServerRelativePath,
+    AttentionReason, ImportSourceKind, JavaOverride, JvmSettings, ServerId, ServerInstallation,
+    ServerLaunch, ServerRelativePath,
+};
+use ephervex_pack::{
+    OptionalSelection, PackError, PackRecipe, ServerMaterializeRequest, SourceStore,
 };
 use ephervex_server::{
     CaptureHealth, CaptureRetention, CapturedLine, ControlAction, ControlResponse,
@@ -31,6 +36,9 @@ const EULA_FILE: &str = "eula.txt";
 pub struct ServerCreateOptions {
     pub java_path: Option<PathBuf>,
     pub install_java_if_missing: bool,
+    /// Recipe entries whose server applicability is undeclared but which the
+    /// caller explicitly confirms for this creation.
+    pub confirmed_unknown: OptionalSelection,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,6 +83,7 @@ impl App {
         cancel: &CancellationToken,
     ) -> CoreResult<ServerCommit<ServerRecord>> {
         let mut record = self.registry_for_services().prepare_server(request)?;
+        let linked_recipe = self.linked_server_recipe(&mut record, &options.confirmed_unknown)?;
         let staging = staging_root(&record.root);
         if staging.exists() {
             return Err(storage_io(
@@ -112,6 +121,20 @@ impl App {
         record.installation = ServerInstallation::Installed {
             launch: normalize_launch(&target, &installed.launch)?,
         };
+        if let Some((client_source, recipe)) = linked_recipe {
+            let server_source = ephervex_storage::metadata::source_dir(&staging);
+            let unconfirmed_unknown = self
+                .materialize_linked_server_recipe(
+                    &recipe,
+                    &client_source,
+                    &target,
+                    &server_source,
+                    options,
+                    cancel,
+                )
+                .await?;
+            add_unknown_attention(&mut record, unconfirmed_unknown);
+        }
         merge_network_file(&target.join(SERVER_PROPERTIES_FILE), &record.network)?;
         let committed = self
             .registry_for_services()
@@ -134,6 +157,15 @@ impl App {
         }
         let target = ephervex_storage::metadata::server_game_dir(&record.root);
         ensure_empty_directory(&target)?;
+        let linked_recipe = self.linked_server_recipe(&mut record, &options.confirmed_unknown)?;
+        let server_source = ephervex_storage::metadata::source_dir(&record.root);
+        if linked_recipe.is_some() {
+            ensure_empty_directory(&server_source)?;
+        }
+        let cleanup = InstallationCleanup::new(
+            target.clone(),
+            linked_recipe.as_ref().map(|_| server_source.clone()),
+        );
         let java = self
             .plan_java(
                 &record.minecraft_version,
@@ -156,10 +188,106 @@ impl App {
         record.installation = ServerInstallation::Installed {
             launch: normalize_launch(&target, &installed.launch)?,
         };
+        if let Some((client_source, recipe)) = linked_recipe {
+            let unconfirmed_unknown = self
+                .materialize_linked_server_recipe(
+                    &recipe,
+                    &client_source,
+                    &target,
+                    &server_source,
+                    options,
+                    cancel,
+                )
+                .await?;
+            add_unknown_attention(&mut record, unconfirmed_unknown);
+        }
         merge_network_file(&target.join(SERVER_PROPERTIES_FILE), &record.network)?;
-        Ok(self
+        let committed = self
             .registry_for_services()
-            .update_server_committed(&mut record)?)
+            .update_server_committed(&mut record)?;
+        cleanup.disarm();
+        Ok(committed)
+    }
+
+    fn linked_server_recipe(
+        &self,
+        record: &mut ServerRecord,
+        confirmed_unknown: &OptionalSelection,
+    ) -> CoreResult<Option<(PathBuf, PackRecipe)>> {
+        let Some(client_id) = record.linked_client_id else {
+            return Ok(None);
+        };
+        let client = self.client(client_id)?;
+        let source = ephervex_storage::metadata::source_dir(&client.root);
+        let store = SourceStore::new(&source);
+        let recipe = if store.has_recipe() {
+            store.read_recipe()?
+        } else if client.source.kind == ImportSourceKind::Manual {
+            PackRecipe::for_manual_instance(
+                client.name.clone(),
+                client.minecraft_version.clone(),
+                client.loader.clone(),
+            )
+        } else {
+            return Err(PackError::RecipeMissing {
+                path: store.recipe_path(),
+            }
+            .into());
+        };
+        if recipe.minecraft_version != client.minecraft_version || recipe.loader != client.loader {
+            return Err(PackError::RecipeTargetMismatch {
+                client_minecraft: client.minecraft_version,
+                recipe_minecraft: recipe.minecraft_version,
+                client_loader: client.loader.to_string(),
+                recipe_loader: recipe.loader.to_string(),
+            }
+            .into());
+        }
+        record.source = client.source;
+
+        // Validate confirmations and retention before Java probing or loader
+        // installation can do expensive work.
+        let plan = recipe.server_reconstruction_plan(confirmed_unknown)?;
+        if let Some(layer) = plan.layers.iter().find(|layer| !layer.is_retained()) {
+            return Err(PackError::RetainedLayerUnavailable {
+                scope: layer.scope.as_str(),
+                path: source,
+            }
+            .into());
+        }
+        Ok(Some((store.dir().to_path_buf(), recipe)))
+    }
+
+    async fn materialize_linked_server_recipe(
+        &self,
+        recipe: &PackRecipe,
+        client_source: &Path,
+        target: &Path,
+        server_source: &Path,
+        options: &ServerCreateOptions,
+        cancel: &CancellationToken,
+    ) -> CoreResult<Vec<PathBuf>> {
+        let manager = DownloadManager::new(DownloaderConfig {
+            http: self.http_config(),
+            ..DownloaderConfig::default()
+        })
+        .map_err(|source| PackError::DownloadFailed {
+            path: recipe.original_name.clone(),
+            source: Box::new(source),
+        })?;
+        let materialized = ephervex_pack::materialize_server_recipe(ServerMaterializeRequest {
+            recipe,
+            confirmed_unknown: &options.confirmed_unknown,
+            game_dir: target,
+            client_source_dir: client_source,
+            server_source_dir: server_source,
+            manager: &manager,
+            cache: &CacheLayout::new(self.paths().cache_dir()),
+            reporter: &OperationReporter::silent("server-content"),
+            cancel,
+        })
+        .await?;
+        Ok(materialized.unconfirmed_unknown)
     }
 
     pub fn server_status(&self, id: ServerId) -> CoreResult<ServerStatus> {
@@ -387,6 +515,14 @@ fn normalize_launch(
         ephervex_loaders::ServerLaunch::Jar { .. } => ServerLaunch::Jar { path },
         ephervex_loaders::ServerLaunch::ArgFile { .. } => ServerLaunch::ArgFile { path },
     })
+}
+
+fn add_unknown_attention(record: &mut ServerRecord, paths: Vec<PathBuf>) {
+    for path in paths {
+        record.add_attention(AttentionReason::UnknownServerApplicability(
+            path.to_string_lossy().into_owned(),
+        ));
+    }
 }
 
 fn network_properties(settings: &ServerNetworkSettings) -> CoreResult<NetworkProperties> {
@@ -710,6 +846,37 @@ struct StagingCleanup {
     armed: std::cell::Cell<bool>,
 }
 
+struct InstallationCleanup {
+    game_dir: PathBuf,
+    source_dir: Option<PathBuf>,
+    armed: std::cell::Cell<bool>,
+}
+
+impl InstallationCleanup {
+    fn new(game_dir: PathBuf, source_dir: Option<PathBuf>) -> Self {
+        Self {
+            game_dir,
+            source_dir,
+            armed: std::cell::Cell::new(true),
+        }
+    }
+
+    fn disarm(&self) {
+        self.armed.set(false);
+    }
+}
+
+impl Drop for InstallationCleanup {
+    fn drop(&mut self) {
+        if self.armed.get() {
+            let _ = std::fs::remove_dir_all(&self.game_dir);
+            if let Some(source_dir) = &self.source_dir {
+                let _ = std::fs::remove_dir_all(source_dir);
+            }
+        }
+    }
+}
+
 impl StagingCleanup {
     fn new(path: PathBuf) -> Self {
         Self {
@@ -885,5 +1052,79 @@ mod tests {
             ephervex_server::ServerEvent::Warning(ServerWarning::PortUnavailable { port: warned, .. })
                 if warned == port
         ));
+    }
+
+    #[test]
+    fn an_imported_client_without_its_retained_recipe_is_refused_before_publication() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = test_app(directory.path());
+        let client = app
+            .registry_for_services()
+            .create_client(
+                ephervex_storage::NewClient::new("imported", "1.20.1", LoaderSelection::vanilla())
+                    .with_source(ephervex_storage::ImportSource::imported(
+                        ImportSourceKind::ModrinthPack,
+                        "deleted.mrpack",
+                    )),
+            )
+            .expect("client");
+        let mut server = app
+            .registry_for_services()
+            .prepare_server(NewServer::linked("linked", client.id))
+            .expect("prepare");
+
+        let error = app
+            .linked_server_recipe(&mut server, &OptionalSelection::none())
+            .expect_err("missing desired state is not an empty pack");
+        assert!(matches!(
+            error,
+            CoreError::Pack(PackError::RecipeMissing { .. })
+        ));
+        assert!(app.list_servers().expect("servers").is_empty());
+        assert!(!server.root.exists());
+    }
+
+    #[test]
+    fn a_failed_staged_creation_rolls_back_every_materialization_stage() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        for (index, artifact) in [
+            "server/minecraft_server.jar",
+            "server/mods/managed.jar",
+            "server/config/from-server-override.toml",
+            ".launcher/source/recipe.json",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let final_root = directory.path().join(format!("server-{index}"));
+            let staging = staging_root(&final_root);
+            let cleanup = StagingCleanup::new(staging.clone());
+            let path = staging.join(artifact);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+            std::fs::write(&path, b"partial").expect("write partial stage");
+
+            drop(cleanup);
+            assert!(
+                !staging.exists(),
+                "staging survived failure after {artifact}"
+            );
+            assert!(!final_root.exists(), "partial server was published");
+        }
+    }
+
+    #[test]
+    fn a_failed_install_of_a_scaffolded_linked_server_restores_empty_state() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let game = directory.path().join("root/server");
+        let source = directory.path().join("root/.launcher/source");
+        let cleanup = InstallationCleanup::new(game.clone(), Some(source.clone()));
+        std::fs::create_dir_all(&game).expect("game");
+        std::fs::create_dir_all(&source).expect("source");
+        std::fs::write(game.join("base.jar"), b"base").expect("base");
+        std::fs::write(source.join("recipe.json"), b"partial").expect("recipe");
+
+        drop(cleanup);
+        assert!(!game.exists());
+        assert!(!source.exists());
     }
 }
