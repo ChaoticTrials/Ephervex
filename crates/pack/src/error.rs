@@ -282,6 +282,47 @@ impl PackError {
                 ("requested", requested.clone()),
             ],
             Self::DestinationCollision { name } => vec![("name", name.clone())],
+            // Names the detected format so the user is told what the file
+            // *is*, rather than only that it is not importable.
+            Self::FormatUnsupported { format } => vec![("format", format.to_string())],
+            Self::ManifestMissing { entry } => vec![("entry", (*entry).to_owned())],
+
+            Self::ManifestUnsupportedVersion {
+                entry,
+                found,
+                supported,
+            } => vec![
+                ("entry", (*entry).to_owned()),
+                ("found", found.to_string()),
+                ("supported", supported.to_string()),
+            ],
+            Self::GameUnsupported { game } => vec![("game", game.clone())],
+            Self::LoaderAmbiguous { first, second } => {
+                vec![("first", first.clone()), ("second", second.clone())]
+            }
+            Self::ManifestInvalid { entry, .. }
+            | Self::EntryPathUnsafe { entry }
+            | Self::EntryReserved { entry }
+            | Self::EntryTypeUnsupported { entry, .. } => vec![("entry", entry.clone())],
+            Self::LimitExceeded {
+                limit,
+                allowed,
+                reached,
+            } => vec![
+                ("limit", (*limit).to_owned()),
+                ("allowed", allowed.to_string()),
+                ("reached", reached.to_string()),
+            ],
+            Self::FileHashesMissing { path }
+            | Self::FileDownloadsMissing { path }
+            | Self::DownloadUrlRejected { path, .. }
+            | Self::DownloadFailed { path, .. } => vec![("file", path.clone())],
+            Self::RecipeUnsupportedVersion {
+                found, supported, ..
+            } => vec![
+                ("found", found.to_string()),
+                ("supported", supported.to_string()),
+            ],
             _ => Vec::new(),
         }
     }
@@ -314,10 +355,13 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
 
-    #[test]
-    fn every_message_id_is_bundled_in_the_english_resource() {
-        // An id with no message renders as a placeholder in the user's face.
-        for error in [
+    /// One of each variant whose message takes arguments, plus the plain ones.
+    ///
+    /// Hand-maintained, and the only hand-maintained part: `message_id` matches
+    /// every variant explicitly, so a new one fails to compile until it is
+    /// handled there. Listing it here is what puts it in front of these tests.
+    fn every_variant() -> Vec<PackError> {
+        vec![
             PackError::Unreadable {
                 path: PathBuf::from("/tmp/a.mrpack"),
                 source: std::io::Error::other("x"),
@@ -384,12 +428,60 @@ mod tests {
                 name: "mods/a.jar".to_owned(),
             },
             PackError::Canceled,
-        ] {
+        ]
+    }
+
+    /// Everything the frontend supplies for one failure: the dedicated
+    /// accessors plus whatever the variant states for itself.
+    fn supplied_args(error: &PackError) -> Vec<(&'static str, String)> {
+        let mut supplied = error.message_args();
+        if let Some(path) = error.failing_path() {
+            supplied.push(("path", path.display().to_string()));
+        }
+        if let Some(loader) = error.unsupported_loader() {
+            supplied.push(("loader", loader.to_owned()));
+        }
+        supplied
+    }
+
+    #[test]
+    fn every_message_id_is_bundled_in_the_english_resource() {
+        // An id with no message renders as a placeholder in the user's face.
+        for error in every_variant() {
             assert!(
                 ephervex_i18n::has(error.message_id()),
                 "missing message id: {}",
                 error.message_id()
             );
+        }
+    }
+
+    #[test]
+    fn every_message_and_next_step_renders_with_the_arguments_its_error_supplies() {
+        // A message naming a value its error does not supply renders a literal
+        // `{$…}`, or costs the user the sentence telling them what to do next.
+        for error in every_variant() {
+            let args = supplied_args(&error);
+            let supplied: Vec<(&str, ephervex_i18n::Arg<'_>)> = args
+                .iter()
+                .map(|(key, value)| (*key, ephervex_i18n::Arg::from(value.as_str())))
+                .collect();
+
+            let summary = ephervex_i18n::lookup_args(error.message_id(), supplied.clone());
+            assert!(
+                !summary.contains("{$"),
+                "`{}` has an unsupplied argument: {summary}",
+                error.message_id()
+            );
+            if let Some(action) =
+                ephervex_i18n::lookup_attribute_args(error.message_id(), "action", supplied)
+            {
+                assert!(
+                    !action.contains("{$"),
+                    "the next step for `{}` has an unsupplied argument: {action}",
+                    error.message_id()
+                );
+            }
         }
     }
 
