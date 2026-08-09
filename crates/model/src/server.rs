@@ -1,8 +1,30 @@
-//! Provider-neutral dedicated-server installation values.
+//! Provider-neutral dedicated-server installation and connection values.
 
+use std::net::{IpAddr, SocketAddr};
+use std::num::NonZeroU16;
 use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Deserializer, Serialize};
+
+/// The validated destination for a direct local-server connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ConnectionTarget {
+    pub address: IpAddr,
+    pub port: NonZeroU16,
+}
+
+impl ConnectionTarget {
+    #[must_use]
+    pub const fn socket_address(self) -> SocketAddr {
+        SocketAddr::new(self.address, self.port.get())
+    }
+}
+
+impl std::fmt::Display for ConnectionTarget {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.socket_address().fmt(formatter)
+    }
+}
 
 /// A path beneath a server's game directory.
 ///
@@ -116,6 +138,15 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
+
+    #[test]
+    fn ipv6_connection_targets_render_without_host_port_ambiguity() {
+        let target = ConnectionTarget {
+            address: "::1".parse().expect("address"),
+            port: NonZeroU16::new(25_565).expect("port"),
+        };
+        assert_eq!(target.to_string(), "[::1]:25565");
+    }
 
     #[test]
     fn server_launch_paths_reject_absolute_paths_and_traversal() {

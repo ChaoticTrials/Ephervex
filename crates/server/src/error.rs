@@ -48,6 +48,13 @@ pub enum ServerError {
     InvalidControlResponse,
     #[error("the server base is not installed")]
     NotInstalled,
+    #[error("the server did not accept connections at {target} within {timeout_seconds} seconds")]
+    ReadinessTimeout {
+        target: String,
+        timeout_seconds: u64,
+    },
+    #[error("waiting for the server was canceled")]
+    ReadinessCanceled,
     #[error("canonical server persistence is unhealthy: {reason}")]
     PersistenceUnhealthy { reason: &'static str },
 }
@@ -70,7 +77,23 @@ impl ServerError {
             Self::ProcessIo(_) => "error-server-process-io",
             Self::InvalidControlResponse => "error-server-control-response-invalid",
             Self::NotInstalled => "error-server-not-installed",
+            Self::ReadinessTimeout { .. } => "error-server-readiness-timeout",
+            Self::ReadinessCanceled => "error-server-readiness-canceled",
             Self::PersistenceUnhealthy { .. } => "error-server-persistence-unhealthy",
+        }
+    }
+
+    #[must_use]
+    pub fn message_args(&self) -> Vec<(&'static str, String)> {
+        match self {
+            Self::ReadinessTimeout {
+                target,
+                timeout_seconds,
+            } => vec![
+                ("target", target.clone()),
+                ("timeout_seconds", timeout_seconds.to_string()),
+            ],
+            _ => Vec::new(),
         }
     }
 

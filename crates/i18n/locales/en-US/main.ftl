@@ -541,6 +541,10 @@ launch-dry-run = Prepared the launch without starting Minecraft.
 # The command line is shown with the access token replaced, always
 #.
 launch-command-redacted = The access token is not shown.
+launch-connect-starting-server = Starting linked server { $server }…
+launch-connect-reusing-server = Reusing linked server { $server }.
+launch-connect-waiting = Waiting for the server at { $target }…
+launch-connect-ready = The server is ready at { $target }.
 
 operation-installing-minecraft = Installing Minecraft
 
@@ -855,5 +859,22 @@ error-server-process-io = Communication with the server process failed.
 error-server-control-response-invalid = The server control channel returned an invalid response.
 error-server-not-installed = This server's base installation is not complete.
 .action = Install the exact selected Minecraft and loader versions before starting it.
+error-server-readiness-timeout = The server did not accept connections at { $target } within { $timeout_seconds } seconds.
+.action = Inspect the server output and network settings, then try again when the server can finish starting.
+error-server-readiness-canceled = Waiting for the server was canceled.
+.action = Start the operation again when you are ready.
 error-server-persistence-unhealthy = This server's canonical metadata is unhealthy or conflicted.
 .action = Inspect server status and resolve missing, corrupt, unsupported, or duplicate metadata before changing or starting it.
+
+error-connect-server-not-linked = Server { $server } is not linked to a client.
+.action = Choose a server created from the client you want to launch.
+error-connect-relationship-mismatch = Server { $server } is linked to client { $linked_client }, not { $requested_client }.
+.action = Launch the exact client recorded by the server link.
+error-connect-target-mismatch = The client uses Minecraft { $client_minecraft } with { $client_loader }; the server uses Minecraft { $server_minecraft } with { $server_loader }.
+.action = Restore matching canonical metadata. Ephervex will not substitute versions or loaders.
+error-connect-runtime-uncertain = Ephervex cannot safely reuse or replace the recorded process for server { $server }.
+.action = Inspect server status and resolve the unknown or orphaned runtime before connecting.
+error-connect-server-stopped-before-ready = Server { $server } stopped before it accepted connections.
+.action = Inspect the server output and correct the startup failure before launching the client.
+error-connect-supervisor-lost = Supervision for server { $server } ended unexpectedly.
+.action = Inspect server status before trying again.

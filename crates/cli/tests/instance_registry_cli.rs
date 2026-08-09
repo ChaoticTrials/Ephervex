@@ -276,3 +276,16 @@ fn linked_server_creation_exposes_only_explicit_unknown_content_confirmation() {
     );
     assert!(!stdout.contains("source archive"), "help was:\n{stdout}");
 }
+
+#[test]
+fn client_launch_offers_one_linked_server_connection_option() {
+    let sandbox = Sandbox::new();
+    let help = sandbox.run(&["launch", "--help"]);
+    assert!(help.status.success());
+    let stdout = String::from_utf8_lossy(&help.stdout);
+    assert!(stdout.contains("--server <SERVER>"), "help was:\n{stdout}");
+    assert!(
+        stdout.contains("Start or reuse this linked server"),
+        "help was:\n{stdout}"
+    );
+}

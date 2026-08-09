@@ -20,3 +20,4 @@ so the reasoning trail survives.
 | [0012](0012-provider-neutral-pack-recipe.md) | Provider-neutral recipes are the pack import boundary | Accepted |
 | [0013](0013-managed-mods-are-recipe-entries.md) | Mods installed through a provider are recipe entries | Accepted |
 | [0014](0014-dedicated-server-authority-and-supervision.md) | Dedicated server authority and conservative supervision | Accepted |
+| [0015](0015-linked-client-direct-connect.md) | Linked client direct connection uses canonical lifecycle services | Accepted |

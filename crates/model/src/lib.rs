@@ -25,5 +25,8 @@ pub use java::{JavaOverride, JvmSettings};
 pub use loader::{LoaderKind, LoaderSelection, LoaderVersionMode};
 pub use mods::{ModOrigin, ModProvider};
 pub use operation::{Operation, OperationStatus, Progress};
-pub use server::{InvalidServerRelativePath, ServerInstallation, ServerLaunch, ServerRelativePath};
+pub use server::{
+    ConnectionTarget, InvalidServerRelativePath, ServerInstallation, ServerLaunch,
+    ServerRelativePath,
+};
 pub use storage::StorageClass;

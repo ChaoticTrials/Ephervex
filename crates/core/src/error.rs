@@ -20,6 +20,8 @@ use ephervex_pack::PackError;
 use ephervex_server::ServerError;
 use ephervex_storage::StorageError;
 
+use crate::ConnectError;
+
 /// Anything an application service can fail with.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -79,6 +81,10 @@ pub enum CoreError {
     /// Dedicated-server properties, consent, process, or capture lifecycle.
     #[error(transparent)]
     Server(#[from] ServerError),
+
+    /// Validating and preparing a linked client/server launch.
+    #[error(transparent)]
+    Connect(#[from] ConnectError),
 }
 
 impl CoreError {
@@ -104,6 +110,7 @@ impl CoreError {
             Self::Pack(error) => error.message_id(),
             Self::ModPlatform(error) => error.message_id(),
             Self::Server(error) => error.message_id(),
+            Self::Connect(error) => error.message_id(),
         }
     }
 
@@ -118,6 +125,8 @@ impl CoreError {
         match self {
             Self::Pack(error) => error.message_args(),
             Self::ModPlatform(error) => error.message_args(),
+            Self::Server(error) => error.message_args(),
+            Self::Connect(error) => error.message_args(),
             _ => Vec::new(),
         }
     }
@@ -154,6 +163,7 @@ impl CoreError {
             Self::Launch(error) => error.is_cancellation(),
             Self::Pack(error) => error.is_cancellation(),
             Self::ModPlatform(error) => error.is_cancellation(),
+            Self::Server(ServerError::ReadinessCanceled) => true,
             _ => false,
         }
     }
@@ -243,7 +253,8 @@ impl CoreError {
             | Self::Preference(_)
             | Self::ModPlatform(_)
             | Self::Pack(_)
-            | Self::Server(_) => None,
+            | Self::Server(_)
+            | Self::Connect(_) => None,
         }
     }
 
@@ -277,7 +288,7 @@ impl CoreError {
             // usefully be pointed at. A rejected preference value is about a
             // setting, not a file either, and a catalog failure is about a
             // project rather than anything on disk.
-            Self::Auth(_) | Self::Preference(_) | Self::ModPlatform(_) => None,
+            Self::Auth(_) | Self::Preference(_) | Self::ModPlatform(_) | Self::Connect(_) => None,
         }
     }
 }
@@ -417,6 +428,41 @@ mod tests {
             MinecraftError::UnknownVersion { id: String::new() }.message_id(),
             MinecraftError::VersionMetadataCorrupt { id: String::new() }.message_id(),
             ephervex_storage::PathError::NoHomeDirectory.message_id(),
+            ServerError::ReadinessTimeout {
+                target: "127.0.0.1:25565".to_owned(),
+                timeout_seconds: 120,
+            }
+            .message_id(),
+            ServerError::ReadinessCanceled.message_id(),
+            ConnectError::ServerNotLinked {
+                server: ephervex_model::ServerId::new(),
+            }
+            .message_id(),
+            ConnectError::RelationshipMismatch {
+                server: ephervex_model::ServerId::new(),
+                requested_client: ephervex_model::InstanceId::new(),
+                linked_client: ephervex_model::InstanceId::new(),
+            }
+            .message_id(),
+            ConnectError::TargetMismatch {
+                client_minecraft: "1.20.1".to_owned(),
+                server_minecraft: "1.20.2".to_owned(),
+                client_loader: "Forge 47.4.0".to_owned(),
+                server_loader: "Forge 48.0.0".to_owned(),
+            }
+            .message_id(),
+            ConnectError::RuntimeUncertain {
+                server: ephervex_model::ServerId::new(),
+            }
+            .message_id(),
+            ConnectError::ServerStoppedBeforeReady {
+                server: ephervex_model::ServerId::new(),
+            }
+            .message_id(),
+            ConnectError::SupervisorLost {
+                server: ephervex_model::ServerId::new(),
+            }
+            .message_id(),
         ] {
             assert!(ephervex_i18n::has(id), "missing message id: {id}");
         }

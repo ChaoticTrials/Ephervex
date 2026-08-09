@@ -45,7 +45,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use ephervex_model::{APP_ID, APP_VERSION};
+use ephervex_model::{APP_ID, APP_VERSION, ConnectionTarget};
 use tracing::debug;
 
 use crate::arguments::{ArgumentForm, ArgumentGroup};
@@ -176,6 +176,7 @@ impl std::fmt::Debug for PlayerIdentity {
 pub struct LaunchFeatures {
     flags: BTreeMap<String, bool>,
     values: BTreeMap<String, String>,
+    direct_connect: Option<ConnectionTarget>,
 }
 
 impl LaunchFeatures {
@@ -200,6 +201,21 @@ impl LaunchFeatures {
             .insert("resolution_width".to_owned(), width.to_string());
         self.values
             .insert("resolution_height".to_owned(), height.to_string());
+        self
+    }
+
+    /// Joins one server immediately after startup.
+    ///
+    /// Modern metadata receives Mojang's Quick Play feature and value. Older
+    /// releases use the long-standing `--server` and `--port` game arguments
+    /// in [`build_command`], so both paths remain in the normal launch layer.
+    #[must_use]
+    pub fn direct_connect(mut self, target: ConnectionTarget) -> Self {
+        self.flags
+            .insert("is_quick_play_multiplayer".to_owned(), true);
+        self.values
+            .insert("quickPlayMultiplayer".to_owned(), target.to_string());
+        self.direct_connect = Some(target);
         self
     }
 
@@ -432,6 +448,17 @@ pub fn build_command(
     // 6. The game arguments.
     for value in expand(metadata.arguments.group(&ArgumentGroup::Game), &context) {
         arguments.push(argument(&substitute(&value, &values)?, &values));
+    }
+    if let Some(target) = settings.features.direct_connect
+        && !arguments
+            .iter()
+            .skip(jvm_argument_count + 1)
+            .any(|argument| argument.value == "--quickPlayMultiplayer")
+    {
+        arguments.push(plain("--server".to_owned()));
+        arguments.push(plain(target.address.to_string()));
+        arguments.push(plain("--port".to_owned()));
+        arguments.push(plain(target.port.to_string()));
     }
 
     debug!(
@@ -900,6 +927,68 @@ mod tests {
         assert!(game.contains(&"--demo".to_owned()));
         assert_eq!(pair(&game, "--width"), Some("1280".to_owned()));
         assert_eq!(pair(&game, "--height"), Some("720".to_owned()));
+    }
+
+    #[test]
+    fn modern_quick_play_receives_one_unambiguous_direct_connect_argument() {
+        let mut connected = settings(offline());
+        connected.features = LaunchFeatures::none().direct_connect(ConnectionTarget {
+            address: "::1".parse().expect("address"),
+            port: std::num::NonZeroU16::new(25_566).expect("port"),
+        });
+        let command = command("1.20.1.json", &connected);
+        let game: Vec<String> = command.game_arguments().map(str::to_owned).collect();
+
+        assert_eq!(
+            game.iter()
+                .filter(|argument| argument.as_str() == "--quickPlayMultiplayer")
+                .count(),
+            1
+        );
+        assert_eq!(
+            pair(&game, "--quickPlayMultiplayer"),
+            Some("[::1]:25566".to_owned())
+        );
+        assert!(!game.iter().any(|argument| argument == "--server"));
+        assert!(!game.iter().any(|argument| argument == "--port"));
+    }
+
+    #[test]
+    fn legacy_direct_connect_arguments_appear_once_in_the_game_layer() {
+        let mut connected = settings(microsoft());
+        connected.features = LaunchFeatures::none().direct_connect(ConnectionTarget {
+            address: "127.0.0.1".parse().expect("address"),
+            port: std::num::NonZeroU16::new(25_567).expect("port"),
+        });
+        let command = command("1.12.2.json", &connected);
+        let game: Vec<String> = command.game_arguments().map(str::to_owned).collect();
+
+        assert_eq!(
+            game.iter()
+                .filter(|argument| argument.as_str() == "--server")
+                .count(),
+            1
+        );
+        assert_eq!(
+            game.iter()
+                .filter(|argument| argument.as_str() == "--port")
+                .count(),
+            1
+        );
+        assert_eq!(pair(&game, "--server"), Some("127.0.0.1".to_owned()));
+        assert_eq!(pair(&game, "--port"), Some("25567".to_owned()));
+        assert_eq!(pair(&game, "--userType"), Some("msa".to_owned()));
+        assert_eq!(
+            command.java,
+            PathBuf::from("/usr/lib/jvm/java-21/bin/java"),
+            "direct connect does not select another runtime"
+        );
+        assert!(command.jvm_arguments().all(|argument| {
+            argument != "--server"
+                && argument != "--port"
+                && argument != "127.0.0.1"
+                && argument != "25567"
+        }));
     }
 
     #[test]

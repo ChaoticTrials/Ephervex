@@ -24,8 +24,9 @@ use ephervex_core::{
     CredentialStorage, DEFAULT_SEARCH_LIMIT, DuplicateClient, EULA_CONFIRMATION_PHRASE,
     Entitlements, EulaStatus, FileDisposition, Freshness, ImportRequest, ImportedPack,
     IncompatibilityReason, InstalledMods, JavaPathChoice, JavaPlan, JavaPlanRequest, JavaRuntime,
-    JavaTarget, LaunchEvent, LaunchFeatures, LaunchObserver, LaunchOptions, LaunchOutcome,
-    LaunchState, LoginFlow, LoginOptions, LoginRequest, MINECRAFT_EULA_REFERENCE,
+    JavaTarget, LaunchAndConnectEvent, LaunchAndConnectObserver, LaunchAndConnectOptions,
+    LaunchAndConnectOutcome, LaunchEvent, LaunchFeatures, LaunchObserver, LaunchOptions,
+    LaunchOutcome, LaunchState, LoginFlow, LoginOptions, LoginRequest, MINECRAFT_EULA_REFERENCE,
     ManagedInstallation, ManagedMod, ModInstallPlan, ModInstallRequest, ModProjectDetails,
     ModSearchQuery, ModSearchResults, NetworkAccess, NewClient, NewServer, OperationReporter,
     OptionalSelection, OutputLine, PackAnalysis, PackRecipe, PackSide, Paths, PlanWarning,
@@ -127,6 +128,9 @@ enum Command {
 struct LaunchArgs {
     /// The client instance to launch.
     id: InstanceId,
+    /// Start or reuse this linked server and connect the client to it.
+    #[arg(long, value_name = "SERVER")]
+    server: Option<ServerId>,
     /// Use this Java runtime instead of the selected one.
     #[arg(long)]
     java_path: Option<PathBuf>,
@@ -1392,15 +1396,119 @@ async fn run_launch(app: &mut App, args: &LaunchArgs, json: bool) -> anyhow::Res
         }
     });
 
-    let outcome = app.launch(args.id, &options, &observer, &cancel).await;
+    let connected = if let Some(server) = args.server {
+        let (connect_observer, mut connect_events) = LaunchAndConnectObserver::channel();
+        let connect_printer = tokio::spawn(async move {
+            while let Some(event) = connect_events.recv().await {
+                print_connect_event(event);
+            }
+        });
+        let outcome = app
+            .launch_and_connect(
+                args.id,
+                server,
+                &LaunchAndConnectOptions {
+                    launch: options.clone(),
+                    ..LaunchAndConnectOptions::default()
+                },
+                &connect_observer,
+                &ServerObserver::silent(),
+                &observer,
+                &cancel,
+            )
+            .await;
+        drop(connect_observer);
+        let _ = connect_printer.await;
+        Some(outcome)
+    } else {
+        None
+    };
+    let outcome = match connected {
+        Some(outcome) => outcome.map(ConnectedLaunch::Linked),
+        None => app
+            .launch(args.id, &options, &observer, &cancel)
+            .await
+            .map(ConnectedLaunch::Client),
+    };
     // The printer ends when every sender is gone, so this drop is what lets it
     // finish rather than hang.
     drop(observer);
     let _ = printer.await;
 
-    let outcome = outcome?;
-    report_launch(&outcome, json);
+    match outcome? {
+        ConnectedLaunch::Client(outcome) => report_launch(&outcome, json),
+        ConnectedLaunch::Linked(outcome) => report_connected_launch(&outcome, json),
+    }
     Ok(())
+}
+
+enum ConnectedLaunch {
+    Client(LaunchOutcome),
+    Linked(LaunchAndConnectOutcome),
+}
+
+fn print_connect_event(event: LaunchAndConnectEvent) {
+    match event {
+        LaunchAndConnectEvent::StartingServer { server } => {
+            eprintln!(
+                "{}",
+                ephervex_i18n::lookup_args(
+                    "launch-connect-starting-server",
+                    [("server", MessageArg::from(server.to_string()))],
+                )
+            );
+        }
+        LaunchAndConnectEvent::ReusingServer { server } => {
+            eprintln!(
+                "{}",
+                ephervex_i18n::lookup_args(
+                    "launch-connect-reusing-server",
+                    [("server", MessageArg::from(server.to_string()))],
+                )
+            );
+        }
+        LaunchAndConnectEvent::WaitingForServer { target } => {
+            eprintln!(
+                "{}",
+                ephervex_i18n::lookup_args(
+                    "launch-connect-waiting",
+                    [("target", MessageArg::from(target.to_string()))],
+                )
+            );
+        }
+        LaunchAndConnectEvent::ServerReady { target } => {
+            eprintln!(
+                "{}",
+                ephervex_i18n::lookup_args(
+                    "launch-connect-ready",
+                    [("target", MessageArg::from(target.to_string()))],
+                )
+            );
+        }
+        _ => {}
+    }
+}
+
+fn report_connected_launch(outcome: &LaunchAndConnectOutcome, json: bool) {
+    if json {
+        let value = serde_json::json!({
+            "instance": outcome.client.to_string(),
+            "server": outcome.server.to_string(),
+            "connection_target": outcome.target.to_string(),
+            "server_started": outcome.server_started,
+            "minecraft_version": outcome.launch.minecraft_version,
+            "java": outcome.launch.java.runtime.executable,
+            "account": outcome.launch.account,
+            "authenticated": outcome.launch.authenticated,
+            "command": outcome.launch.command.redacted_arguments(),
+            "dry_run": outcome.launch.exit.is_none(),
+            "exit_code": outcome.launch.exit.and_then(|exit| exit.code),
+            "exit_signal": outcome.launch.exit.and_then(|exit| exit.signal),
+        });
+        print_json(&value);
+    } else {
+        report_launch(&outcome.launch, false);
+    }
 }
 
 /// Renders launch events, keeping download progress to one line per decile.

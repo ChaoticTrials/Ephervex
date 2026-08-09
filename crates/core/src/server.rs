@@ -73,6 +73,14 @@ pub struct CaptureSnapshot {
     pub retention: CaptureRetention,
 }
 
+/// A fully validated server start whose process ownership can move onto the
+/// application's supervision task.
+pub(super) struct PreparedServerStart {
+    command: ServerCommand,
+    root: PathBuf,
+    capture: PathBuf,
+}
+
 impl App {
     /// Builds and installs a complete server in a hidden sibling before the
     /// final root is published.
@@ -395,6 +403,18 @@ impl App {
         explicit_java: Option<PathBuf>,
         observer: &ServerObserver,
     ) -> CoreResult<ephervex_server::ServerExit> {
+        let prepared = self
+            .prepare_server_start(id, explicit_java, observer)
+            .await?;
+        Self::run_prepared_server(prepared, observer).await
+    }
+
+    pub(super) async fn prepare_server_start(
+        &self,
+        id: ServerId,
+        explicit_java: Option<PathBuf>,
+        observer: &ServerObserver,
+    ) -> CoreResult<PreparedServerStart> {
         let mut record = self.canonical_server_for_mutation(id)?;
         refuse_if_running(&record)?;
         let launch = record
@@ -424,7 +444,24 @@ impl App {
             .registry_for_services()
             .update_server_committed(&mut record)?;
         let capture = self.paths().logs_dir().join("servers").join(id.to_string());
-        Ok(ServerSupervisor::run(&command, &record.root, &capture, observer).await?)
+        Ok(PreparedServerStart {
+            command,
+            root: record.root,
+            capture,
+        })
+    }
+
+    pub(super) async fn run_prepared_server(
+        prepared: PreparedServerStart,
+        observer: &ServerObserver,
+    ) -> CoreResult<ephervex_server::ServerExit> {
+        Ok(ServerSupervisor::run(
+            &prepared.command,
+            &prepared.root,
+            &prepared.capture,
+            observer,
+        )
+        .await?)
     }
 
     pub async fn stop_server(&self, id: ServerId) -> CoreResult<ControlResponse> {
@@ -466,7 +503,7 @@ impl App {
         read_capture_snapshot(&directory, limit)
     }
 
-    fn canonical_server_for_mutation(&self, id: ServerId) -> CoreResult<ServerRecord> {
+    pub(super) fn canonical_server_for_mutation(&self, id: ServerId) -> CoreResult<ServerRecord> {
         let indexed = self.server(id)?;
         if duplicate_server_roots(self, id).len() > 1 {
             return Err(ephervex_server::ServerError::PersistenceUnhealthy {
@@ -484,6 +521,12 @@ impl App {
         }
         canonical.root = indexed.root;
         Ok(canonical)
+    }
+
+    pub(super) fn server_connection_target(
+        record: &ServerRecord,
+    ) -> CoreResult<ephervex_model::ConnectionTarget> {
+        Ok(network_properties(&record.network)?.connection_target()?)
     }
 }
 

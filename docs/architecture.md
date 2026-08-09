@@ -145,6 +145,35 @@ JSON Lines segments provide durable combined output. Retention and write
 failures are observable events; pipe draining continues when durable capture
 is unavailable.
 
+## Linked client direct-connect flow
+
+```text
+client ID + server ID
+   │ exact canonical relationship and target validation
+   ├── stopped server ──▶ existing start service ──▶ foreground supervisor
+   └── controlled server ─────────────────────────▶ reuse
+                                      │
+                         bounded TCP readiness
+                                      │
+                                      ▼
+                         existing client launch service
+                                      │
+                    Quick Play or legacy game arguments
+```
+
+Core derives a client destination from typed server network settings rather
+than from frontend assumptions or by rewriting `server.properties`. Localhost
+and IPv4 wildcard binds use `127.0.0.1`; an IPv6 wildcard uses `::1`; a
+specific custom bind remains exact. The configured nonzero port is preserved.
+
+Only a controlled server is reusable. A stopped or proven-stale server goes
+through the ordinary start service and its EULA, Java, persistence, capture,
+and process-ownership rules. Readiness is a successful TCP connection within a
+bounded deadline while core also observes supervisor exit or loss of a
+controlled runtime. Once ready, the ordinary client launch pipeline supplies
+account identity, Java, exact loader metadata, artifacts, locking, and process
+capture. Client failure or exit sends no server stop action (ADR 0015).
+
 ## Launch data flow
 
 ```text
@@ -314,8 +343,9 @@ stderr so machine-readable output remains valid.
 The supported scope includes Linux, Minecraft release versions from 1.12.2
 onward, Vanilla, Forge, NeoForge, Modrinth pack import, Modrinth mod browsing
 with dependency resolution, and linked-server reconstruction from retained
-recipes. The GUI, CurseForge browsing, CurseForge and Prism import, mod updates
-and removal, and full server GUI/log views are unavailable. Fabric, Quilt,
+recipes, plus launching a linked client directly into a local managed server.
+The GUI, CurseForge browsing, CurseForge and Prism import, mod updates and
+removal, and full server GUI/log views are unavailable. Fabric, Quilt,
 snapshots, Windows, and macOS are
 outside the supported scope recorded in ADR 0008.
 

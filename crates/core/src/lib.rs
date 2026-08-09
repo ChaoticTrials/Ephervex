@@ -24,6 +24,7 @@
 
 pub mod account;
 pub mod app;
+pub mod connection;
 pub mod error;
 pub mod import;
 pub mod instance;
@@ -34,6 +35,11 @@ pub mod server;
 
 pub use account::{AccountStatus, AccountSummary, ApiSettings, LoginOptions, TOKEN_REFRESH_MARGIN};
 pub use app::{App, JavaPlan, JavaPlanRequest, JavaTarget, global_java_settings};
+pub use connection::{
+    ConnectError, DEFAULT_SERVER_READINESS_TIMEOUT, LaunchAndConnectAvailability,
+    LaunchAndConnectEvent, LaunchAndConnectObserver, LaunchAndConnectOptions,
+    LaunchAndConnectOutcome, ServerPreparation,
+};
 pub use error::{CoreError, CoreResult};
 pub use import::{ImportRequest, ImportedPack};
 pub use instance::{CreatedClient, global_minecraft_preferences};
@@ -112,7 +118,9 @@ pub use ephervex_mod_platform::{
     ModSearchResults, ModVersionInfo, OptionalCandidate, PlanWarning, PlannedMod, ReleaseChannel,
     SideSupport,
 };
-pub use ephervex_model::{JavaOverride, JvmSettings, ServerInstallation, ServerRelativePath};
+pub use ephervex_model::{
+    ConnectionTarget, JavaOverride, JvmSettings, ServerInstallation, ServerRelativePath,
+};
 pub use ephervex_options::{
     GlobalMinecraftPreferences, GuiScalePreference, InvalidPreferenceValue, LoadedPreferences,
     Managed, OPTIONS_FILE_NAME, PreferenceApplication, PreferenceKey, PreferenceValue, WindowSize,

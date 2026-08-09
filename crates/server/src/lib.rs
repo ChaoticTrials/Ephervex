@@ -5,6 +5,7 @@
 //! primitives with storage, loader installation, and Java selection.
 
 pub mod capture;
+mod connection;
 mod error;
 pub mod eula;
 pub mod process;
@@ -16,6 +17,8 @@ pub use capture::{
     CaptureRetention, CaptureStream, CapturedLine, MAX_CAPTURE_LINE_BYTES, MAX_RING_BYTES,
     MAX_RING_LINES, OutputCapture, ServerOutputEvent,
 };
+pub use connection::wait_for_server_readiness;
+pub use ephervex_model::ConnectionTarget;
 pub use error::{ServerError, ServerResult};
 pub use eula::{
     EULA_CONFIRMATION_PHRASE, EulaConsentRecord, EulaStatus, MINECRAFT_EULA_REFERENCE,
