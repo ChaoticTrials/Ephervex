@@ -12,12 +12,31 @@ repository.workspace = true
 name = "ephervex-gui"
 path = "src/main.rs"
 
-[lints]
-workspace = true
+# Slint's generated component bindings contain audited framework-level unsafe
+# code even when the application's Rust contains none. Keep the workspace's
+# other lint policy here while allowing those generated bindings to compile.
+[lints.rust]
+unsafe_code = "allow"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+doc_markdown = "allow"
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+dbg_macro = "warn"
+todo = "warn"
 
 [dependencies]
 # A frontend depends on `ephervex-core` and nothing below it.
-# No provider crate — storage, download, minecraft, loaders, … — belongs in
+# No provider crate (storage, download, Minecraft, loaders, and so on) belongs in
 # this list. If a screen needs something core does not expose, the fix is to
 # add a service to core, not a dependency here.
 slint.workspace = true
@@ -25,5 +44,8 @@ ephervex-core.workspace = true
 ephervex-model.workspace = true
 ephervex-i18n.workspace = true
 tokio.workspace = true
+chrono.workspace = true
+copypasta.workspace = true
+rfd.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

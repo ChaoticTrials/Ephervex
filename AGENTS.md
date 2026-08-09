@@ -35,6 +35,19 @@ These instructions apply to the entire repository unless a more specific `AGENTS
 - Prefer spellings such as `behavior`, `color`, `favor`, `initialize`, `optimize`, `normalize`, `serialize`, `canceled`, `canceling`, `labeled`, `license`, and `center`.
 - Do not mechanically alter third-party API names, dependency methods, protocol fields, quoted upstream text, fixture payloads, URLs, hashes, or identifiers whose spelling is defined externally. Keep exact upstream spellings at integration boundaries.
 
+### Writing style
+
+- Use US English in all Ephervex-owned content.
+- Prefer plain technical-software punctuation and concise, natural wording.
+- Use straight ASCII quotes (`"` and `'`), not typographic/smart quotes.
+- Use three ASCII periods (`...`), not the Unicode ellipsis (`…`).
+- Avoid em dashes (`—`) and similarly editorial punctuation when a comma,
+  colon, parentheses, or separate sentence reads naturally.
+- Avoid marketing-like, overly polished, or AI-characteristic prose. Write like
+  a concise developer tool.
+- Preserve exact upstream, protocol, API, filesystem, and user-provided text
+  even when it does not follow these conventions.
+
 ## Rust and API quality
 
 - Prefer typed domain models over loosely related strings and booleans when invalid combinations can otherwise be represented.

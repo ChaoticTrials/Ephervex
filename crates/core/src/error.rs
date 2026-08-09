@@ -39,6 +39,12 @@ pub enum CoreError {
     #[error(transparent)]
     Java(#[from] JavaError),
 
+    /// Global JVM memory settings cannot produce a valid Java command.
+    #[error(
+        "java memory settings are invalid: minimum {minimum_mib} MiB, maximum {maximum_mib} MiB"
+    )]
+    JavaSettingsInvalid { minimum_mib: u32, maximum_mib: u32 },
+
     /// Forge/NeoForge discovery and installation.
     #[error(transparent)]
     Loader(#[from] LoaderError),
@@ -99,6 +105,7 @@ impl CoreError {
             Self::Storage(error) => error.message_id(),
             Self::Minecraft(error) => error.message_id(),
             Self::Java(error) => error.message_id(),
+            Self::JavaSettingsInvalid { .. } => "error-java-settings-invalid",
             Self::Loader(error) => error.message_id(),
             // Not `const`: this one chooses between message ids on the HTTP
             // status, so that a temporary outage and a permanent refusal do not
@@ -127,6 +134,13 @@ impl CoreError {
             Self::ModPlatform(error) => error.message_args(),
             Self::Server(error) => error.message_args(),
             Self::Connect(error) => error.message_args(),
+            Self::JavaSettingsInvalid {
+                minimum_mib,
+                maximum_mib,
+            } => vec![
+                ("minimum", minimum_mib.to_string()),
+                ("maximum", maximum_mib.to_string()),
+            ],
             _ => Vec::new(),
         }
     }
@@ -245,6 +259,7 @@ impl CoreError {
         match self {
             Self::Java(error) => error.required_major(),
             Self::Storage(_)
+            | Self::JavaSettingsInvalid { .. }
             | Self::Minecraft(_)
             | Self::Loader(_)
             | Self::Auth(_)
@@ -288,7 +303,11 @@ impl CoreError {
             // usefully be pointed at. A rejected preference value is about a
             // setting, not a file either, and a catalog failure is about a
             // project rather than anything on disk.
-            Self::Auth(_) | Self::Preference(_) | Self::ModPlatform(_) | Self::Connect(_) => None,
+            Self::Auth(_)
+            | Self::JavaSettingsInvalid { .. }
+            | Self::Preference(_)
+            | Self::ModPlatform(_)
+            | Self::Connect(_) => None,
         }
     }
 }

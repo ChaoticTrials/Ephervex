@@ -139,8 +139,9 @@ pub use ephervex_pack::{
 };
 pub use ephervex_server::{
     CaptureHealth, CaptureRetention, CapturedLine, ControlAction, ControlResponse,
-    EULA_CONFIRMATION_PHRASE, EulaStatus, MINECRAFT_EULA_REFERENCE, PropertiesDocument,
-    RuntimeClassification, ServerEvent, ServerExit, ServerObserver, ServerWarning,
+    EULA_CONFIRMATION_PHRASE, EulaStatus, MINECRAFT_EULA_REFERENCE, ProcessEvidence, ProcessRole,
+    PropertiesDocument, RuntimeClassification, RuntimeEvidence, ServerEvent, ServerExit,
+    ServerObserver, ServerWarning,
 };
 pub use ephervex_storage::{
     AccountConfig, ApiConfig, CONFIG_SCHEMA_VERSION, ClientFolder, ClientRecord, Config,

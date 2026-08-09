@@ -345,7 +345,10 @@ error-java-managed-runtime-unusable = The downloaded Java runtime could not be s
 error-java-managed-cache-key-invalid = The Java runtime could not be given a safe location in the cache.
 
 error-java-io = A file needed for the Java runtime could not be written.
-.action = Check free space and permissions on { $path }.
+    .action = Check free space and permissions on { $path }.
+
+error-java-settings-invalid = Java memory settings are invalid: minimum { $minimum } MiB, maximum { $maximum } MiB.
+    .action = Use positive values and make the maximum at least the minimum.
 
 error-java-probe-not-executable = That Java program could not be started.
 
@@ -572,6 +575,9 @@ launch-connect-ready = The server is ready at { $target }.
 
 operation-launching-minecraft = Launching Minecraft
 operation-starting-server = Starting the server
+operation-importing-pack = Importing modpack
+operation-installing-mods = Installing mods
+operation-creating-server = Creating server
 
 # $operation identifies one background task. It is shown so a user can find the
 # same task in the launcher log, and is never translated.

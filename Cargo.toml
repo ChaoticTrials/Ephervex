@@ -6,7 +6,7 @@ members = ["crates/*"]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
-license = "UNLICENSED"
+license = "Apache-2.0"
 publish = false
 repository = "https://github.com/ChaoticTrials/ephervex"
 
@@ -59,6 +59,7 @@ async-trait = "0.1.91"
 # crate's SIMD path, which this workspace has no throughput reason to want.
 base64 = { version = "0.23.1", default-features = false, features = ["std"] }
 chrono = { version = "0.4.45", features = ["serde"] }
+copypasta = "0.10.2"
 clap = { version = "4.6.6", features = ["derive"] }
 directories = "6.0.0"
 flate2 = "1.1.9"
@@ -81,6 +82,7 @@ open = "5.4.1"
 # `application/x-www-form-urlencoded`, which is the one body shape the identity
 # platform accepts there.
 reqwest = { version = "0.13.4", default-features = false, features = ["form", "gzip", "http2", "json", "rustls", "stream", "system-proxy"] }
+rfd = "0.17.2"
 quick-xml = { version = "0.38.4", features = ["serialize"] }
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 rust-embed = "8.12.0"

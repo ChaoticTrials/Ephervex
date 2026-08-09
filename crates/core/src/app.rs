@@ -467,6 +467,31 @@ impl App {
         global_java_settings(&self.config().java)
     }
 
+    /// Replaces global Java discovery and JVM defaults after validating the
+    /// memory range as one coherent setting.
+    pub fn set_java_settings(&mut self, settings: &GlobalJavaSettings) -> CoreResult<()> {
+        if settings.min_memory_mib == 0
+            || settings.max_memory_mib == 0
+            || settings.min_memory_mib > settings.max_memory_mib
+        {
+            return Err(crate::CoreError::JavaSettingsInvalid {
+                minimum_mib: settings.min_memory_mib,
+                maximum_mib: settings.max_memory_mib,
+            });
+        }
+        self.mutate_config(|config| {
+            config.java.auto_detect = settings.auto_detect;
+            config.java.auto_download = settings.auto_download;
+            config.java.min_memory_mib = settings.min_memory_mib;
+            config.java.max_memory_mib = settings.max_memory_mib;
+            config.java.jvm_args.clone_from(&settings.jvm_args);
+            config.java.preferred_path = settings
+                .preferred_path
+                .as_ref()
+                .map_or_else(String::new, |path| path.to_string_lossy().into_owned());
+        })
+    }
+
     /// Works out which runtime would run a given Minecraft version, and why.
     ///
     /// This call resolves the requirement, applies the configured override layers,

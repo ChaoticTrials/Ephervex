@@ -1,16 +1,11 @@
 //! Ephervex desktop GUI.
 //!
-//! This binary defines the frontend boundary and does not provide a functional
-//! interface. It depends on `ephervex-core` and nothing below it, and it must
-//! never depend on `ephervex-cli`.
-//!
-//! Slint is a dependency so the real graph, including its native backend
-//! requirements, is exercised by every build. See ADR 0001.
+//! The frontend owns presentation and event routing only. All launcher work is
+//! delegated to the application services in `ephervex-core`.
 
-fn main() {
-    // Resolved before anything else so the launcher's own log file exists from
-    // the first event. A frontend that cannot resolve its state directory still
-    // starts and logs to stderr.
+use slint::ComponentHandle as _;
+
+fn main() -> Result<(), slint::PlatformError> {
     let launcher_logs = ephervex_core::Paths::from_environment()
         .ok()
         .map(|paths| paths.launcher_logs_dir());
@@ -18,13 +13,16 @@ fn main() {
         ephervex_core::DEFAULT_LOG_DIRECTIVES,
         launcher_logs.as_deref(),
     );
-    // Touching the Slint runtime keeps the dependency load-bearing so toolchain
-    // and backend compatibility remain part of normal builds.
-    let _ui_platform_ready = slint::SharedString::from(ephervex_model::APP_NAME);
+
+    let ui = ephervex_gui::ui::AppWindow::new()?;
+    ui.set_app_version(ephervex_model::APP_VERSION.into());
+    ui.set_license_text(include_str!("../../../LICENSE").into());
+    let _controller = ephervex_gui::controller::attach(&ui);
+
     tracing::info!(
-        "{} {} — GUI is provided by the GUI",
+        "starting {} {} desktop interface",
         ephervex_model::APP_NAME,
         ephervex_model::APP_VERSION
     );
-    println!("The Ephervex GUI is unavailable in this build. Use the `ephervex` CLI.");
+    ui.run()
 }
