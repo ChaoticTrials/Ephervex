@@ -13,3 +13,8 @@
 # IDE
 /.idea/
 /.vscode/
+
+# Development cache for the Minecraft options tooling: client JARs, Mojang
+# metadata, analyzer output, and the generated remote feed.
+/tools/minecraft-options/.cache/
+__pycache__/
