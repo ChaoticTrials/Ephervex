@@ -22,15 +22,19 @@
 //! preferences either.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use ephervex_download::OperationReporter;
+use ephervex_minecraft::LanguageCatalog;
 use ephervex_model::{InstanceId, ServerId};
 use ephervex_options::{
-    GlobalMinecraftPreferences, LoadedPreferences, PreferenceApplication, PreferenceKey,
-    PreferenceValue,
+    GlobalMinecraftPreferences, LanguageAvailability, LoadedPreferences, OptionsCompatibility,
+    PreferenceApplication, PreferenceKey, PreferenceValue,
 };
 use ephervex_storage::{
     ClientFolder, ClientRecord, Config, DuplicateClient, DuplicatedClient, ServerFolder,
 };
+use tokio_util::sync::CancellationToken;
 use tracing::{instrument, warn};
 
 use crate::app::App;
@@ -51,6 +55,35 @@ pub fn global_minecraft_preferences(config: &Config) -> LoadedPreferences {
             .iter()
             .map(|(name, setting)| (name.as_str(), setting.enabled, setting.value.as_str())),
     )
+}
+
+/// Everything preference application needs that does not come from the
+/// instance itself.
+///
+/// Resolved once, before anything is published, because both of its parts can
+/// need the network and neither may be allowed to fail a creation. Holding them
+/// in one value keeps the actual application a synchronous, offline step.
+#[derive(Debug, Clone)]
+pub struct PreferenceContext {
+    /// How the target release stores each setting.
+    pub compatibility: Arc<OptionsCompatibility>,
+    /// Whether the target release is known to offer the configured language.
+    pub language: LanguageAvailability,
+}
+
+impl PreferenceContext {
+    /// The bundled baseline with nothing verified about languages.
+    ///
+    /// What a caller gets with no network and no cache, and the honest starting
+    /// point: the compatibility this build shipped with, and no claim at all
+    /// about which languages a release offers.
+    #[must_use]
+    pub fn offline() -> Self {
+        Self {
+            compatibility: Arc::new(OptionsCompatibility::bundled()),
+            language: LanguageAvailability::Unverified,
+        }
+    }
 }
 
 /// A newly created client instance, and what was applied to it.
@@ -111,16 +144,155 @@ impl App {
         })
     }
 
+    // -- generated options compatibility ----------------------------------
+
+    /// The options compatibility knowledge currently in effect.
+    ///
+    /// Reads whatever has been loaded, and falls back to the baseline compiled
+    /// into this build. Never touches the network, so a settings screen can ask
+    /// it freely.
+    #[must_use]
+    pub fn minecraft_options(&self) -> Arc<OptionsCompatibility> {
+        if let Ok(loaded) = self.options_slot().read()
+            && let Some(compatibility) = loaded.as_ref()
+        {
+            return Arc::clone(compatibility);
+        }
+        let compatibility = Arc::new(OptionsCompatibility::bundled());
+        if let Ok(mut slot) = self.options_slot().write() {
+            slot.get_or_insert_with(|| Arc::clone(&compatibility));
+        }
+        compatibility
+    }
+
+    /// The compatibility knowledge including anything already cached, without
+    /// touching the network.
+    ///
+    /// Loads the cached feed document once and keeps it for the process, so a
+    /// profile that has refreshed before stays on the newer data offline.
+    pub async fn cached_minecraft_options(&self) -> Arc<OptionsCompatibility> {
+        if let Ok(loaded) = self.options_slot().read()
+            && let Some(compatibility) = loaded.as_ref()
+        {
+            return Arc::clone(compatibility);
+        }
+        let cached = match self.options_feed() {
+            Ok(feed) => feed.cached().await,
+            Err(error) => {
+                warn!(%error, "could not read the cached Minecraft options data");
+                None
+            }
+        };
+        let compatibility = Arc::new(OptionsCompatibility::resolve(cached));
+        if let Ok(mut slot) = self.options_slot().write() {
+            *slot = Some(Arc::clone(&compatibility));
+        }
+        compatibility
+    }
+
+    /// Refreshes the published options compatibility data, best effort.
+    ///
+    /// A refresh failure is logged and nothing else: the launcher carries on
+    /// with the cached document or the bundled baseline, which is the whole
+    /// reason a baseline is compiled in. A document that does not fully
+    /// validate never replaces the last known-good cache.
+    #[instrument(skip(self))]
+    pub async fn refresh_minecraft_options(&self) -> Arc<OptionsCompatibility> {
+        let feed = match self.options_feed() {
+            Ok(feed) => feed,
+            Err(error) => {
+                warn!(%error, "could not build the Minecraft options feed client");
+                return self.minecraft_options();
+            }
+        };
+
+        if !feed.is_fresh().await {
+            let reporter = OperationReporter::silent("minecraft-options-feed");
+            if let Err(error) = feed.refresh(&reporter, &CancellationToken::new()).await {
+                warn!(
+                    %error,
+                    "could not refresh the published Minecraft options data; using what is already available"
+                );
+            }
+        }
+
+        let compatibility = Arc::new(OptionsCompatibility::resolve(feed.cached().await));
+        if let Ok(mut slot) = self.options_slot().write() {
+            *slot = Some(Arc::clone(&compatibility));
+        }
+        compatibility
+    }
+
+    /// One release's language catalog, from Mojang's own metadata.
+    ///
+    /// Resolves and caches it when the network allows, and falls back to
+    /// whatever was cached before. `None` means nothing is known about that
+    /// release's languages, which is a usable answer: it simply leaves the
+    /// managed language preference unapplied.
+    #[instrument(skip(self))]
+    pub async fn minecraft_language_catalog(
+        &self,
+        minecraft_version: &str,
+    ) -> Option<LanguageCatalog> {
+        let catalogs = self
+            .languages()
+            .inspect_err(|error| warn!(%error, "could not build the language catalog reader"))
+            .ok()?;
+        let reporter = OperationReporter::silent("minecraft-language-catalog");
+        match catalogs
+            .resolve(minecraft_version, &reporter, &CancellationToken::new())
+            .await
+        {
+            Ok(catalog) => Some(catalog),
+            Err(error) => {
+                warn!(
+                    version = minecraft_version,
+                    %error,
+                    "could not resolve the language catalog; falling back to whatever is cached"
+                );
+                catalogs.cached(minecraft_version).await
+            }
+        }
+    }
+
+    /// Resolves everything preference application needs for one release.
+    ///
+    /// Uses the compatibility data that is already loaded or cached rather than
+    /// refreshing the feed: creating an instance should not wait on a metadata
+    /// host, and [`Self::minecraft_releases`] already refreshes it at the point
+    /// a user is choosing a version. Every step is best effort, and the worst
+    /// outcome is the bundled baseline plus an unverified language, which
+    /// applies fewer preferences and writes nothing it cannot vouch for.
+    pub async fn preference_context(&self, minecraft_version: &str) -> PreferenceContext {
+        let compatibility = self.cached_minecraft_options().await;
+        let loaded = self.minecraft_preferences();
+        let language = match loaded.preferences.language.get() {
+            // Nothing to verify: the language is not managed, so no catalog is
+            // fetched for it either.
+            None => LanguageAvailability::Unverified,
+            Some(code) => match self.minecraft_language_catalog(minecraft_version).await {
+                Some(catalog) if catalog.contains(code) => LanguageAvailability::Verified,
+                Some(_) => LanguageAvailability::Absent,
+                None => LanguageAvailability::Unverified,
+            },
+        };
+        PreferenceContext {
+            compatibility,
+            language,
+        }
+    }
+
     /// Applies the global preferences to one instance's `options.txt`.
     ///
     /// Called once, from [`Self::create_client`]. Public because Modrinth pack import's
     /// importer needs to call it at a *different* point in the same creation —
     /// after the pack's own overrides have been laid down, preserving the required
     /// ordering — and not because an instance's preferences are ever refreshed.
-    #[instrument(skip(self, record), fields(instance = %record.id))]
+    #[instrument(skip(self, record, context), fields(instance = %record.id))]
     pub fn apply_global_preferences(
         &self,
         record: &ClientRecord,
+        context: &PreferenceContext,
     ) -> CoreResult<PreferenceApplication> {
         let loaded = self.minecraft_preferences();
         for rejected in &loaded.rejected {
@@ -130,6 +302,8 @@ impl App {
             &ephervex_storage::metadata::client_game_dir(&record.root),
             &record.minecraft_version,
             &loaded.preferences,
+            &context.compatibility,
+            context.language,
         )?)
     }
 

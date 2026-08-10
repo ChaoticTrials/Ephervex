@@ -13,12 +13,18 @@ workspace = true
 
 [dependencies]
 ephervex-model.workspace = true
-# Choosing a version adapter is a Minecraft version comparison, and
-# `MinecraftVersionId` already implements both published numbering schemes.
-ephervex-minecraft.workspace = true
+# The remote compatibility feed is an ordinary download: one HTTP policy, one
+# retry policy, one atomic metadata cache. A second fetch path here would opt
+# out of all three.
+ephervex-download.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+wiremock.workspace = true

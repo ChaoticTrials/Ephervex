@@ -47,7 +47,7 @@ pub use diagnostics::{
 };
 pub use error::{CoreError, CoreResult};
 pub use import::{ImportRequest, ImportedPack};
-pub use instance::{CreatedClient, global_minecraft_preferences};
+pub use instance::{CreatedClient, PreferenceContext, global_minecraft_preferences};
 pub use launch::{LaunchOptions, LaunchOutcome};
 pub use logging::{DEFAULT_LOG_DIRECTIVES, init_tracing};
 pub use mods::{InstalledMods, ModInstallRequest};
@@ -107,9 +107,10 @@ pub use ephervex_minecraft::LaunchObserver;
 pub use ephervex_minecraft::{
     ArgumentEntry, ArgumentForm, ArgumentGroup, Arguments, Artifact, AssetIndexRef,
     ExcludedLibrary, ExclusionReason, GameExit, Installation, InstallationPlan, JavaRequirement,
-    LatestVersions, LaunchCommand, LaunchError, LaunchEvent, LaunchFeatures, Library, LogRecord,
-    LoggingConfig, MINIMUM_SUPPORTED_VERSION, MinecraftVersionId, OutputLine, OutputStream,
-    Platform, PlayerIdentity, ReleaseListing, ReleaseType, VersionMetadata, VersionRecord,
+    LanguageCatalog, LanguageEntry, LatestVersions, LaunchCommand, LaunchError, LaunchEvent,
+    LaunchFeatures, Library, LogRecord, LoggingConfig, MINIMUM_SUPPORTED_VERSION,
+    MinecraftVersionId, OutputLine, OutputStream, Platform, PlayerIdentity, ReleaseListing,
+    ReleaseType, VersionMetadata, VersionRecord,
 };
 /// The mod catalog's data types, re-exported so a frontend can render a search
 /// result and a dependency plan without naming `ephervex-mod-platform`.
@@ -127,8 +128,10 @@ pub use ephervex_model::{
     ConnectionTarget, JavaOverride, JvmSettings, ServerInstallation, ServerRelativePath,
 };
 pub use ephervex_options::{
-    GlobalMinecraftPreferences, GuiScalePreference, InvalidPreferenceValue, LoadedPreferences,
-    Managed, OPTIONS_FILE_NAME, PreferenceApplication, PreferenceKey, PreferenceValue, WindowSize,
+    CompatibilitySource, GlobalMinecraftPreferences, GuiScalePreference, InvalidPreferenceValue,
+    LanguageAvailability, LoadedPreferences, Managed, OPTIONS_FILE_NAME, OptionsCompatibility,
+    PreferenceApplication, PreferenceKey, PreferenceSupport, PreferenceValue, SkipReason,
+    SkippedPreference, WindowSize,
 };
 pub use ephervex_pack::{
     AppliedLayer, ExtractionLimits, ManagedMod, ManagedModInstallation, MaterializedFiles,

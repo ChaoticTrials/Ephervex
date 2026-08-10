@@ -38,11 +38,11 @@ prevents UI code from acquiring storage or provider policy accidentally.
 | `ephervex-storage` | XDG paths, versioned configuration, SQLite migrations and registry, instance metadata, reconciliation, launch locks, duplication, folder layout, and bounded diagnostic-file discovery and reading |
 | `ephervex-i18n` | Fluent resources, locale selection, typed arguments, and message lookup |
 | `ephervex-download` | HTTP policy, bounded concurrency, retry classification, cancellation, hash verification, atomic publication, metadata caching, and shared cache layout |
-| `ephervex-minecraft` | Mojang/Piston metadata, rule evaluation, artifact planning, Vanilla installation, command construction, process control, and log parsing |
+| `ephervex-minecraft` | Mojang/Piston metadata, per-release language catalogs, rule evaluation, artifact planning, Vanilla installation, command construction, process control, and log parsing |
 | `ephervex-java` | Local runtime discovery, version probing, compatibility rules, runtime selection, and managed Adoptium installation |
 | `ephervex-auth` | Microsoft, Xbox, and Minecraft Services authentication; offline identities; account sessions; keyring and memory-only credentials |
 | `ephervex-loaders` | Vanilla, Forge, and NeoForge metadata resolution and client/server installation |
-| `ephervex-options` | Line-preserving `options.txt` parsing and version-aware application of global preferences |
+| `ephervex-options` | Line-preserving `options.txt` parsing, the generated per-release compatibility dataset and its remote feed, and version-aware application of global preferences |
 | `ephervex-pack` | Format detection, hardened archive handling, provider-neutral recipes, Modrinth parsing, optional selection, materialization, and managed-mod installation |
 | `ephervex-mod-platform` | Modrinth project/version catalog, compatibility verdicts, and provider-neutral dependency resolution |
 | `ephervex-server` | Dedicated-server properties, EULA enforcement, process identity, foreground supervision, control channel, and bounded capture |
@@ -173,6 +173,43 @@ bounded deadline while core also observes supervisor exit or loss of a
 controlled runtime. Once ready, the ordinary client launch pipeline supplies
 account identity, Java, exact loader metadata, artifacts, locking, and process
 capture. Client failure or exit sends no server stop action (ADR 0015).
+
+## Minecraft settings compatibility
+
+Global Minecraft preferences are normalized values, never a copied
+`options.txt`. Turning one into a line of a particular release's file needs
+proof of what that release stores, which is generated rather than written
+(ADR 0017).
+
+```text
+official client JAR
+   │ tools/minecraft-options/update.py, static analysis, never executed
+   ▼
+canonical settings + schema families + release mapping
+   ├── committed at crates/options/data/minecraft-options.json, compiled in
+   └── published to the remote options feed
+              │ validated whole, then cached atomically
+              ▼
+   valid newer cached feed ──▶ else bundled baseline
+              │
+              ▼
+   canonical preference + exact release
+      ├── authoritative representation ──▶ written
+      ├── unsupported ─────────────────────▶ skipped, reported
+      └── unknown ─────────────────────────▶ skipped, reported
+```
+
+Releases share a schema family only when their extracted representations are
+identical; a version number never establishes equivalence. A release the dataset
+does not name is unknown for every setting, which keeps it fully usable while
+receiving no managed preference writes. Values outside a release's proven domain
+are skipped and reported rather than clamped, and unknown and mod-added lines
+always survive an edit.
+
+The set of languages a release offers is Mojang's data, resolved from that
+release's own `pack.mcmeta` asset object and cached per release alongside the
+version manifest. Without a catalog the managed language preference is not
+applied rather than applied on an assumption.
 
 ## Launch data flow
 

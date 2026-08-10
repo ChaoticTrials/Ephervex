@@ -47,6 +47,7 @@
 //! | [`catalog`] | [`VersionCatalog`] — fetching and caching, on top of `ephervex-download` |
 //! | [`platform`] | the OS, architecture, and OS version a launch targets, in Mojang's spelling |
 //! | [`assets`] | the asset index, and the objects it names |
+//! | [`language`] | per-release language catalogs, from Mojang's own asset metadata |
 //! | [`install`] | [`InstallationPlan`] — every path and artifact — and fetching them |
 //! | [`natives`] | unpacking pre-1.19 classifier jars within extraction limits |
 //! | [`launch`] | classpath, argument rules, and placeholder substitution |
@@ -73,6 +74,7 @@ pub mod assets;
 pub mod catalog;
 pub mod error;
 pub mod install;
+pub mod language;
 pub mod launch;
 pub mod library;
 pub mod log;
@@ -95,6 +97,7 @@ pub use install::{
     ASSET_RESOURCE_BASE, ExcludedLibrary, ExclusionReason, Installation, InstallationPlan,
     PlannedArtifact, PlannedLogging, PlannedNatives, VanillaInstaller,
 };
+pub use language::{LANGUAGE_METADATA_OBJECT, LanguageCatalog, LanguageCatalogs, LanguageEntry};
 pub use launch::{
     JvmOptions, LEGACY_JVM_ARGUMENTS, LaunchCommand, LaunchFeatures, LaunchSettings,
     OFFLINE_ACCESS_TOKEN, PlayerIdentity, build_command,

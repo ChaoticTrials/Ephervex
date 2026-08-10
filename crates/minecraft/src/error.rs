@@ -85,6 +85,18 @@ pub enum MinecraftError {
         source: std::io::Error,
     },
 
+    /// The release's own language catalog could not be resolved.
+    ///
+    /// Distinct from a metadata failure because the consequence is narrow and
+    /// never fatal: an instance is still created and launched, and only the
+    /// managed language preference is left unapplied.
+    #[error("the language catalog for minecraft `{id}` could not be resolved")]
+    LanguageCatalogUnavailable { id: String },
+
+    /// An asset index document could not be used.
+    #[error(transparent)]
+    AssetIndex(#[from] crate::assets::AssetIndexError),
+
     /// A required part of an otherwise valid document is missing.
     #[error(transparent)]
     IncompleteMetadata(#[from] VersionMetadataError),
@@ -114,6 +126,10 @@ impl MinecraftError {
             Self::VersionMetadataCorrupt { .. } => "error-minecraft-version-metadata-corrupt",
             Self::VersionMetadataInvalid { .. } => "error-minecraft-version-metadata-invalid",
             Self::VersionMetadataUnreadable { .. } => "error-minecraft-version-metadata-unreadable",
+            Self::LanguageCatalogUnavailable { .. } => {
+                "error-minecraft-language-catalog-unavailable"
+            }
+            Self::AssetIndex(_) => "error-minecraft-asset-index-invalid",
             Self::IncompleteMetadata(_) => "error-minecraft-metadata-incomplete",
             Self::Url(_) => "error-minecraft-metadata-url-invalid",
             Self::CacheKey(_) => "error-minecraft-cache-key-invalid",

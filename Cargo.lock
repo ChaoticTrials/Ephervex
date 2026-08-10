@@ -1722,12 +1722,17 @@ dependencies = [
 name = "ephervex-options"
 version = "0.1.0"
 dependencies = [
- "ephervex-minecraft",
+ "ephervex-download",
  "ephervex-model",
+ "reqwest",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.19",
+ "tokio",
+ "tokio-util",
  "tracing",
+ "wiremock",
 ]
 
 [[package]]

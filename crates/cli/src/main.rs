@@ -35,8 +35,8 @@ use ephervex_core::{
     ReconciliationReport, ReleaseListing, RequirementBasis, RuntimeClassification,
     RuntimeInventory, SearchOptions, SecretString, ServerCommitWarning, ServerCreateOptions,
     ServerEvent, ServerFolder, ServerNetworkSettings, ServerObserver, ServerPersistenceHealth,
-    ServerRecord, ServerWarning, Session, SideRequirement, TextAnchor, TextView, VersionMetadata,
-    VersionRecord,
+    ServerRecord, ServerWarning, Session, SideRequirement, SkipReason, TextAnchor, TextView,
+    VersionMetadata, VersionRecord,
 };
 use ephervex_i18n::Arg as MessageArg;
 use ephervex_model::{
@@ -3912,43 +3912,67 @@ fn print_created_instance(app: &App, created: &CreatedClient, json: bool) -> any
             )
         );
     }
-    // A preference this release has no setting for is skipped, and silence
-    // would look like a bug.
+    // A preference that was not written is reported with the reason, and
+    // silence would look like a bug. "This release has no such setting" and
+    // "nobody has established what this release does" are different answers
+    // and get different sentences.
+    let version = created.record.minecraft_version.as_str();
     for key in &applied.unsupported {
-        eprintln!(
-            "{}",
-            ephervex_i18n::lookup_args(
-                "preferences-unsupported-for-version",
-                [
-                    ("preference", MessageArg::from(key.as_str())),
-                    (
-                        "version",
-                        MessageArg::from(created.record.minecraft_version.as_str())
-                    ),
-                ]
-            )
-        );
+        print_preference_note("preferences-unsupported-for-version", *key, version);
+    }
+    for key in &applied.unknown {
+        print_preference_note("preferences-unverified-for-version", *key, version);
+    }
+    for skipped in &applied.skipped {
+        let message = match skipped.reason {
+            SkipReason::LanguageUnverified => "preferences-language-unverified",
+            SkipReason::LanguageAbsent => "preferences-language-absent",
+            _ => "preferences-value-not-applied",
+        };
+        print_preference_note(message, skipped.key, version);
     }
     Ok(())
+}
+
+/// Prints one "this preference was not applied" line.
+fn print_preference_note(message: &str, key: PreferenceKey, version: &str) {
+    eprintln!(
+        "{}",
+        ephervex_i18n::lookup_args(
+            message,
+            [
+                ("preference", MessageArg::from(key.as_str())),
+                ("version", MessageArg::from(version)),
+            ]
+        )
+    );
 }
 
 fn preferences_applied_json(applied: Option<&PreferenceApplication>) -> serde_json::Value {
     applied.map_or(serde_json::Value::Null, |applied| {
         serde_json::json!({
-                    "adapter": applied.adapter,
-                    "created_file": applied.created_file,
-                    "applied": applied
-        .applied
-        .iter()
-        .map(|key| key.as_str())
-        .collect::<Vec<_>>(),
-                    "unsupported": applied
-        .unsupported
-        .iter()
-        .map(|key| key.as_str())
-        .collect::<Vec<_>>(),
+            "schema": applied.schema,
+            "source": applied.source.as_str(),
+            "created_file": applied.created_file,
+            "applied": preference_names(&applied.applied),
+            "unsupported": preference_names(&applied.unsupported),
+            "unknown": preference_names(&applied.unknown),
+            "skipped": applied
+                .skipped
+                .iter()
+                .map(|skipped| {
+                    serde_json::json!({
+                        "preference": skipped.key.as_str(),
+                        "reason": skipped.reason.as_str(),
+                    })
                 })
+                .collect::<Vec<_>>(),
+        })
     })
+}
+
+fn preference_names(keys: &[PreferenceKey]) -> Vec<&'static str> {
+    keys.iter().map(|key| key.as_str()).collect()
 }
 
 /// Prints the outcome of an open-folder action.

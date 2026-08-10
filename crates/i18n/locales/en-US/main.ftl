@@ -219,6 +219,18 @@ preferences-applied = Applied { $count ->
        *[other] { $count } global preferences
     } to the new instance.
 preferences-unsupported-for-version = Minecraft { $version } has no setting for { $preference }, so it was not applied.
+# "Unknown" is not "unsupported": nobody has established what this release does
+# with the setting, which is what happens the day a Minecraft release appears.
+preferences-unverified-for-version = How Minecraft { $version } stores { $preference } has not been verified, so it was not applied.
+preferences-value-not-applied = Minecraft { $version } cannot store the configured { $preference }, so it was not applied.
+preferences-language-unverified = The languages Minecraft { $version } offers could not be checked, so { $preference } was not applied.
+preferences-language-absent = Minecraft { $version } does not offer that language, so { $preference } was not applied.
+
+error-options-compatibility-invalid = The Minecraft settings compatibility data could not be used.
+.action = Ephervex is using the data it shipped with. No settings file was changed.
+
+error-options-feed-unavailable = The published Minecraft settings compatibility data could not be updated.
+.action = Ephervex is using the data it already has. Newly released Minecraft versions may not receive managed settings until this succeeds.
 
 error-options-unreadable = The instance's Minecraft settings file could not be read.
 .action = Check that { $path } is readable. Ephervex will not replace a settings file it could not read first.
@@ -277,6 +289,11 @@ error-minecraft-version-metadata-invalid = The metadata for that Minecraft versi
 
 error-minecraft-version-metadata-unreadable = The cached metadata for that Minecraft version could not be read.
 .action = Check permissions on { $path }, or delete the file so Ephervex fetches it again.
+
+error-minecraft-language-catalog-unavailable = The list of languages that Minecraft version offers could not be resolved.
+.action = The instance is unaffected. Ephervex leaves the managed language setting alone rather than claiming a language the release may not have.
+
+error-minecraft-asset-index-invalid = That version's asset index could not be understood.
 
 error-minecraft-metadata-incomplete = That version's metadata is missing something a launch needs.
 .action = Mod-loader version files extend an exact vanilla parent rather than standing alone. Ephervex refuses a raw or mismatched child document.

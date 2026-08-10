@@ -115,9 +115,15 @@ fn one_global_preference_reaches_two_minecraft_versions_without_copying_a_file()
         );
     }
 
-    // The adapters are chosen per release, and the report says which.
-    assert_eq!(legacy["preferences"]["adapter"], "minecraft-1.12");
-    assert_eq!(modern["preferences"]["adapter"], "minecraft-1.18");
+    // Each release resolves to its own schema family, and the report says
+    // which one and where the knowledge came from.
+    let legacy_schema = legacy["preferences"]["schema"].as_str().expect("a schema");
+    let modern_schema = modern["preferences"]["schema"].as_str().expect("a schema");
+    assert_ne!(
+        legacy_schema, modern_schema,
+        "two eras this far apart do not share one representation"
+    );
+    assert_eq!(legacy["preferences"]["source"], "bundled");
     assert!(
         legacy["preferences"]["created_file"]
             .as_bool()
@@ -162,25 +168,33 @@ fn editing_one_instance_mutates_neither_the_settings_nor_another_instance() {
 
 #[test]
 fn a_preference_a_release_cannot_express_is_reported_rather_than_written() {
-    // `overrideWidth`/`overrideHeight` exist in 1.12.x and nowhere
-    // after it. Writing them into a modern instance would add two keys the
-    // game never reads.
+    // Simulation distance arrived with 1.18. Writing it into a 1.12.2 instance
+    // would add a key that release never reads, and the static analysis proves
+    // the absence rather than inferring it, so it is reported as unsupported
+    // and not as unknown.
     let sandbox = Sandbox::new();
-    sandbox.json(&["--json", "preferences", "set", "window_size", "1600x900"]);
+    sandbox.json(&["--json", "preferences", "set", "simulation_distance", "10"]);
 
     let legacy = sandbox.create("Legacy", "1.12.2");
     let modern = sandbox.create("Modern", "1.20.1");
 
-    assert!(options_of(&legacy).contains("overrideWidth:1600"));
-    assert!(!options_of(&modern).contains("overrideWidth"));
+    assert!(!options_of(&legacy).contains("simulationDistance"));
+    assert!(options_of(&modern).contains("simulationDistance:10"));
 
-    let unsupported = modern["preferences"]["unsupported"]
+    let unsupported = legacy["preferences"]["unsupported"]
         .as_array()
         .expect("array");
     assert_eq!(unsupported.len(), 1);
-    assert_eq!(unsupported[0], "window_size");
+    assert_eq!(unsupported[0], "simulation_distance");
     assert!(
-        legacy["preferences"]["unsupported"]
+        legacy["preferences"]["unknown"]
+            .as_array()
+            .expect("array")
+            .is_empty(),
+        "a proven absence is not the same answer as an unanswered question"
+    );
+    assert!(
+        modern["preferences"]["unsupported"]
             .as_array()
             .expect("array")
             .is_empty()

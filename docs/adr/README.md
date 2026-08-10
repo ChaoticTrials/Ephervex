@@ -22,3 +22,4 @@ so the reasoning trail survives.
 | [0014](0014-dedicated-server-authority-and-supervision.md) | Dedicated server authority and conservative supervision | Accepted |
 | [0015](0015-linked-client-direct-connect.md) | Linked client direct connection uses canonical lifecycle services | Accepted |
 | [0016](0016-diagnostics-are-bounded-read-only-windows.md) | Diagnostics are bounded, read-only windows over launcher-owned roots | Accepted |
+| [0017](0017-options-compatibility-is-generated-data.md) | options.txt compatibility is generated data, distributed separately from the application | Accepted |

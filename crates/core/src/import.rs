@@ -188,7 +188,8 @@ impl App {
         // the managed global keys are applied *after* the pack's own
         // overrides, so a pack's `options.txt` survives except where the user
         // has explicitly asked the launcher to manage a key.
-        let preferences = match self.apply_global_preferences(&record) {
+        let context = self.preference_context(&record.minecraft_version).await;
+        let preferences = match self.apply_global_preferences(&record, &context) {
             Ok(applied) => Some(applied),
             Err(error) => {
                 warn!(

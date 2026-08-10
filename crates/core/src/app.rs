@@ -15,7 +15,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, RwLock};
 
-use crate::instance::CreatedClient;
+use crate::instance::{CreatedClient, PreferenceContext};
 use ephervex_download::{
     CacheLayout, DownloadManager, DownloaderConfig, MetadataCacheError, OperationReporter,
 };
@@ -28,10 +28,11 @@ use ephervex_loaders::{
     InstalledServer, LoaderError, LoaderRegistry, LoaderVersionListing, ServerInstallRequest,
 };
 use ephervex_minecraft::{
-    MinecraftError, MinecraftVersionId, ReleaseListing, VERSION_MANIFEST_CACHE_KEY, VersionCatalog,
-    VersionMetadata,
+    LanguageCatalogs, MinecraftError, MinecraftVersionId, ReleaseListing,
+    VERSION_MANIFEST_CACHE_KEY, VersionCatalog, VersionMetadata,
 };
 use ephervex_model::{InstanceId, LoaderKind, LoaderVersionMode, ServerId};
+use ephervex_options::{OptionsCompatibility, OptionsFeed};
 use ephervex_storage::{
     ClientRecord, Config, FileDisposition, JavaConfig, NewClient, Paths, ReconciliationReport,
     Registry, ServerRecord, Storage,
@@ -165,6 +166,17 @@ pub struct App {
     /// HTTP client and a TLS stack, which `ephervex instance list` has no
     /// business paying for.
     minecraft: OnceLock<VersionCatalog>,
+    /// Per-release language catalogs, built on first use for the same reason as
+    /// the version catalog: it holds an HTTP client.
+    languages: OnceLock<LanguageCatalogs>,
+    /// The remote options compatibility feed, built on first use.
+    options_feed: OnceLock<OptionsFeed>,
+    /// The active options compatibility knowledge.
+    ///
+    /// `RwLock` rather than `OnceLock` because a successful feed refresh has to
+    /// be able to replace it mid-process, and `None` until something asks: a
+    /// command that only lists instances has no reason to parse a dataset.
+    options: RwLock<Option<Arc<OptionsCompatibility>>>,
     loaders: OnceLock<LoaderRegistry>,
     /// The mod catalog, built on first use for the same reason as the two
     /// above: constructing it builds an HTTP client and a TLS stack, and
@@ -197,6 +209,9 @@ impl App {
         Ok(Self {
             storage: ephervex_storage::open_from_environment()?,
             minecraft: OnceLock::new(),
+            languages: OnceLock::new(),
+            options_feed: OnceLock::new(),
+            options: RwLock::new(None),
             loaders: OnceLock::new(),
             mods: OnceLock::new(),
             java: RwLock::new(None),
@@ -213,6 +228,9 @@ impl App {
         Ok(Self {
             storage: ephervex_storage::open(paths)?,
             minecraft: OnceLock::new(),
+            languages: OnceLock::new(),
+            options_feed: OnceLock::new(),
+            options: RwLock::new(None),
             loaders: OnceLock::new(),
             mods: OnceLock::new(),
             java: RwLock::new(None),
@@ -264,7 +282,11 @@ impl App {
     #[instrument(skip(self, request))]
     pub async fn create_client_reporting(&self, request: NewClient) -> CoreResult<CreatedClient> {
         let validation = self.validate_client_target(&request).await;
-        self.publish_client_after_validation(request, validation)
+        // Resolved before anything is published, and best effort throughout: a
+        // language catalog that cannot be read must not stop an instance being
+        // created.
+        let preferences = self.preference_context(&request.minecraft_version).await;
+        self.publish_client_after_validation(request, validation, &preferences)
     }
 
     /// Validates the exact game and loader selection without publishing any
@@ -302,14 +324,19 @@ impl App {
         &self,
         request: NewClient,
         validation: CoreResult<()>,
+        context: &PreferenceContext,
     ) -> CoreResult<CreatedClient> {
         validation?;
-        self.publish_client(request)
+        self.publish_client(request, context)
     }
 
-    fn publish_client(&self, request: NewClient) -> CoreResult<CreatedClient> {
+    fn publish_client(
+        &self,
+        request: NewClient,
+        context: &PreferenceContext,
+    ) -> CoreResult<CreatedClient> {
         let record = self.registry().create_client(request)?;
-        let preferences = match self.apply_global_preferences(&record) {
+        let preferences = match self.apply_global_preferences(&record, context) {
             Ok(applied) => Some(applied),
             Err(error) => {
                 warn!(
@@ -328,7 +355,9 @@ impl App {
 
     #[cfg(test)]
     pub(crate) fn create_client_for_test(&self, request: NewClient) -> CoreResult<ClientRecord> {
-        Ok(self.publish_client(request)?.record)
+        Ok(self
+            .publish_client(request, &PreferenceContext::offline())?
+            .record)
     }
 
     /// Fetches one client instance.
@@ -379,12 +408,18 @@ impl App {
     /// network, out of a fresh cache, or out of a stale one because Mojang
     /// could not be reached. A frontend is expected to show that distinction
     /// rather than a spinner.
+    /// The published options compatibility data is refreshed alongside the
+    /// list, because this is the one operation whose whole job is finding out
+    /// what Mojang has published lately. Both refreshes are TTL-gated and
+    /// neither can fail the listing.
     #[instrument(skip(self))]
     pub async fn minecraft_releases(&self) -> CoreResult<ReleaseListing> {
         let catalog = self.minecraft()?;
-        Ok(catalog
+        let listing = catalog
             .supported_releases(&Self::reporter(), &CancellationToken::new())
-            .await?)
+            .await?;
+        self.refresh_minecraft_options().await;
+        Ok(listing)
     }
 
     /// One supported release's complete metadata.
@@ -776,6 +811,50 @@ impl App {
     /// can fail, and a launcher that refuses to open because the HTTP client
     /// could not be built would be unable to show the user their existing
     /// instances — which is precisely what it should still be able to do
+    /// Per-release language catalogs, on the same download manager and cache
+    /// root as everything else.
+    pub(crate) fn languages(&self) -> CoreResult<&LanguageCatalogs> {
+        if let Some(catalogs) = self.languages.get() {
+            return Ok(catalogs);
+        }
+        let catalog = self.minecraft()?.clone();
+        let manager = DownloadManager::new(DownloaderConfig::default()).map_err(|source| {
+            MinecraftError::ManifestUnavailable {
+                source: MetadataCacheError::Unavailable {
+                    key: VERSION_MANIFEST_CACHE_KEY.to_owned(),
+                    source: Box::new(source),
+                },
+            }
+        })?;
+        let catalogs =
+            LanguageCatalogs::new(catalog, manager, CacheLayout::new(self.paths().cache_dir()));
+        Ok(self.languages.get_or_init(|| catalogs))
+    }
+
+    /// The remote options compatibility feed.
+    pub(crate) fn options_feed(&self) -> CoreResult<&OptionsFeed> {
+        if let Some(feed) = self.options_feed.get() {
+            return Ok(feed);
+        }
+        let manager = DownloadManager::new(DownloaderConfig::default()).map_err(|source| {
+            MinecraftError::ManifestUnavailable {
+                source: MetadataCacheError::Unavailable {
+                    key: VERSION_MANIFEST_CACHE_KEY.to_owned(),
+                    source: Box::new(source),
+                },
+            }
+        })?;
+        let feed = OptionsFeed::new(manager, CacheLayout::new(self.paths().cache_dir()))
+            .map_err(MinecraftError::from)?;
+        Ok(self.options_feed.get_or_init(|| feed))
+    }
+
+    /// The active options compatibility knowledge, without any I/O beyond
+    /// reading what is already loaded.
+    pub(crate) fn options_slot(&self) -> &RwLock<Option<Arc<OptionsCompatibility>>> {
+        &self.options
+    }
+
     fn minecraft(&self) -> CoreResult<&VersionCatalog> {
         if let Some(catalog) = self.minecraft.get() {
             return Ok(catalog);
@@ -930,7 +1009,8 @@ mod tests {
         }
         .into());
 
-        let result = app.publish_client_after_validation(request, validation);
+        let result =
+            app.publish_client_after_validation(request, validation, &PreferenceContext::offline());
 
         assert!(result.is_err());
         assert!(app.list_clients().expect("list").is_empty());

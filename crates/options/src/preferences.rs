@@ -83,12 +83,16 @@ impl GuiScalePreference {
     /// refused when a preference is set, not silently clamped.
     pub const MAXIMUM_FIXED: u32 = 4;
 
-    /// The value Minecraft stores for this scale.
+    /// The number Minecraft stores for this scale.
+    ///
+    /// A number rather than a string: how it is written is the target
+    /// release's business, and this type has no way to know which release it is
+    /// destined for.
     #[must_use]
-    pub fn option_value(self) -> String {
+    pub const fn option_number(self) -> i64 {
         match self {
-            Self::Auto => "0".to_owned(),
-            Self::Fixed(scale) => scale.to_string(),
+            Self::Auto => 0,
+            Self::Fixed(scale) => scale as i64,
         }
     }
 }
@@ -634,8 +638,8 @@ mod tests {
             parse(PreferenceKey::GuiScale, "0").expect("valid"),
             PreferenceValue::GuiScale(GuiScalePreference::Auto)
         );
-        assert_eq!(GuiScalePreference::Auto.option_value(), "0");
-        assert_eq!(GuiScalePreference::Fixed(2).option_value(), "2");
+        assert_eq!(GuiScalePreference::Auto.option_number(), 0);
+        assert_eq!(GuiScalePreference::Fixed(2).option_number(), 2);
     }
 
     #[test]
