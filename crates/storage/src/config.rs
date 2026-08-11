@@ -614,6 +614,14 @@ impl Config {
                 .ok_or(AccountLookup::Unknown);
         }
 
+        if let Ok(requested_id) = uuid::Uuid::parse_str(reference)
+            && let Some(stored_id) = self.accounts.keys().find(|stored_id| {
+                uuid::Uuid::parse_str(stored_id).is_ok_and(|candidate| candidate == requested_id)
+            })
+        {
+            return Ok(stored_id);
+        }
+
         let matches: Vec<&str> = self
             .accounts
             .iter()
@@ -1232,6 +1240,17 @@ reference = ""
             Ok("069a79f4-44e9-4726-a5be-fca90e38aaf5")
         );
         assert_eq!(config.find_account("nobody"), Err(AccountLookup::Unknown));
+
+        config.remember_account(
+            "8667ba71b85a4004af54457a9734eed7",
+            "Compact",
+            AccountKind::Microsoft,
+            "t",
+        );
+        assert_eq!(
+            config.find_account("8667ba71-b85a-4004-af54-457a9734eed7"),
+            Ok("8667ba71b85a4004af54457a9734eed7")
+        );
     }
 
     #[test]

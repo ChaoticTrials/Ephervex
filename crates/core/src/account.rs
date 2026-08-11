@@ -287,7 +287,16 @@ impl App {
 
     /// Resolves a UUID or display name to exactly one account.
     pub fn resolve_account(&self, reference: &str) -> CoreResult<Uuid> {
-        let id = self.config().find_account(reference).map_err(|lookup| {
+        let id = self.resolve_account_key(reference)?;
+        Uuid::parse_str(id).map_err(|_| {
+            CoreError::Auth(AuthError::AccountUnknown {
+                reference: reference.to_owned(),
+            })
+        })
+    }
+
+    fn resolve_account_key(&self, reference: &str) -> CoreResult<&str> {
+        self.config().find_account(reference).map_err(|lookup| {
             CoreError::Auth(match lookup {
                 AccountLookup::Unknown => AuthError::AccountUnknown {
                     reference: reference.to_owned(),
@@ -296,11 +305,6 @@ impl App {
                     reference: reference.to_owned(),
                     matches,
                 },
-            })
-        })?;
-        Uuid::parse_str(id).map_err(|_| {
-            CoreError::Auth(AuthError::AccountUnknown {
-                reference: reference.to_owned(),
             })
         })
     }
@@ -443,8 +447,12 @@ impl App {
     /// Makes an account the default a launch uses.
     #[instrument(skip(self))]
     pub fn set_default_account(&mut self, reference: &str) -> CoreResult<AccountSummary> {
-        let id = self.resolve_account(reference)?;
-        let key = id.to_string();
+        let key = self.resolve_account_key(reference)?.to_owned();
+        let id = Uuid::parse_str(&key).map_err(|_| {
+            CoreError::Auth(AuthError::AccountUnknown {
+                reference: reference.to_owned(),
+            })
+        })?;
         self.mutate_config(|config| {
             config.set_active_account(&key);
         })?;
@@ -475,8 +483,12 @@ impl App {
     /// account precisely so removing one cannot disturb another.
     #[instrument(skip(self))]
     pub fn remove_account(&mut self, reference: &str) -> CoreResult<Option<AccountSummary>> {
-        let id = self.resolve_account(reference)?;
-        let key = id.to_string();
+        let key = self.resolve_account_key(reference)?.to_owned();
+        let id = Uuid::parse_str(&key).map_err(|_| {
+            CoreError::Auth(AuthError::AccountUnknown {
+                reference: reference.to_owned(),
+            })
+        })?;
         let kind = self
             .config()
             .accounts
@@ -947,6 +959,43 @@ mod tests {
         assert!(
             app.set_default_account("069a79f4-44e9-4726-a5be-fca90e38aaf5")
                 .is_ok()
+        );
+    }
+
+    #[test]
+    fn canonical_row_id_resolves_an_account_stored_with_a_compact_uuid() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        app.add_offline_account("DefaultPlayer").expect("added");
+        app.mutate_config(|config| {
+            config.remember_account(
+                "069a79f444e94726a5befca90e38aaf5",
+                "MelanX",
+                AccountKind::Microsoft,
+                "2026-08-08T12:00:00Z",
+            );
+        })
+        .expect("seed Microsoft account");
+
+        let row = app
+            .accounts()
+            .expect("visible accounts")
+            .into_iter()
+            .find(|account| account.name == "MelanX")
+            .expect("Microsoft account row");
+        let row_id = row.id.to_string();
+
+        let selected = app
+            .set_default_account(&row_id)
+            .expect("make default by row id");
+        assert_eq!(selected.id, row.id);
+        assert!(selected.is_default);
+        app.remove_account(&row_id).expect("remove by row id");
+        assert!(
+            app.accounts()
+                .expect("remaining accounts")
+                .iter()
+                .all(|account| account.id != row.id)
         );
     }
 

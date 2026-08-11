@@ -32,6 +32,7 @@ type CancellationRegistry = Arc<Mutex<HashMap<String, CancellationToken>>>;
 pub enum Command {
     Refresh,
     LoadMinecraftReleases,
+    WarmLanguageCatalog(String),
     LoadLoaderVersions {
         form: String,
         loader: LoaderKind,
@@ -396,6 +397,9 @@ fn run_worker(
                 }
                 Err(error) => send_modal_error(&events, &error),
             },
+            Command::WarmLanguageCatalog(minecraft) => {
+                warm_language_catalog(app.paths().clone(), &minecraft);
+            }
             Command::LoadLoaderVersions {
                 form,
                 loader,
@@ -964,6 +968,40 @@ fn run_worker(
                 }
             }
         }
+    }
+}
+
+fn warm_language_catalog(paths: Paths, minecraft: &str) {
+    let version = minecraft.to_owned();
+    if let Err(error) = thread::Builder::new()
+        .name("ephervex-language-catalog".to_owned())
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    tracing::warn!(%error, %version, "could not start language catalog warming");
+                    return;
+                }
+            };
+            let app = match App::open_at(paths) {
+                Ok(app) => app,
+                Err(error) => {
+                    tracing::warn!(%error, %version, "could not open language catalog cache");
+                    return;
+                }
+            };
+            if runtime
+                .block_on(app.minecraft_language_catalog(&version))
+                .is_none()
+            {
+                tracing::debug!(%version, "language catalog was not available to warm");
+            }
+        })
+    {
+        tracing::warn!(%error, %minecraft, "could not schedule language catalog warming");
     }
 }
 

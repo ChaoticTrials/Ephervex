@@ -48,8 +48,12 @@ pub fn attach(ui: &AppWindow) -> Controller {
         let window = ui.window();
         let logical_width = f64::from(window.size().width) / f64::from(window.scale_factor());
         let show_inspector = logical_width >= 1180.0;
+        let compact_layout = !show_inspector;
         if ui.get_show_inspector() != show_inspector {
             ui.set_show_inspector(show_inspector);
+        }
+        if ui.get_compact_layout() != compact_layout {
+            ui.set_compact_layout(compact_layout);
         }
         for event in poll_receiver.borrow_mut().try_iter() {
             apply_event(&ui, event, &poll_activities);
@@ -80,13 +84,74 @@ fn register_i18n(ui: &AppWindow) {
     });
 }
 
-#[allow(clippy::too_many_lines)]
 fn register_callbacks(ui: &AppWindow, commands: &Sender<Command>) {
+    register_catalog_actions(ui, commands);
+    register_client_actions(ui, commands);
+
+    let sender = commands.clone();
+    ui.on_submit_create_server(
+        move |name, client, minecraft, loader, loader_version, persistent| {
+            let client = if client.is_empty() {
+                None
+            } else {
+                backend::parse_instance_id(&client)
+            };
+            send(
+                &sender,
+                Command::CreateServer {
+                    name: name.into(),
+                    client,
+                    minecraft: minecraft.into(),
+                    loader: loader.into(),
+                    loader_version: loader_version.into(),
+                    persistent,
+                },
+            );
+        },
+    );
+
+    let sender = commands.clone();
+    ui.on_select_server(move |_| send(&sender, Command::Refresh));
+
+    register_server_actions(ui, commands);
+    register_diagnostics(ui, commands);
+    register_settings(ui, commands);
+
+    let weak = ui.as_weak();
+    ui.on_copy_text(move |text| {
+        let copied = ClipboardContext::new()
+            .and_then(|mut clipboard| clipboard.set_contents(text.into()))
+            .is_ok();
+        if let Some(ui) = weak.upgrade() {
+            ui.invoke_present_toast(
+                if copied {
+                    lookup("gui-clipboard-copied")
+                } else {
+                    lookup("gui-clipboard-unavailable")
+                }
+                .into(),
+                !copied,
+            );
+        }
+    });
+
+    let sender = commands.clone();
+    ui.on_cancel_operation(move |id| send(&sender, Command::CancelOperation(id.into())));
+}
+
+fn register_catalog_actions(ui: &AppWindow, commands: &Sender<Command>) {
     let sender = commands.clone();
     ui.on_refresh(move || send(&sender, Command::Refresh));
 
     let sender = commands.clone();
     ui.on_request_version_catalog(move || send(&sender, Command::LoadMinecraftReleases));
+
+    let sender = commands.clone();
+    ui.on_warm_language_catalog(move |minecraft| {
+        if !minecraft.is_empty() {
+            send(&sender, Command::WarmLanguageCatalog(minecraft.into()));
+        }
+    });
 
     let sender = commands.clone();
     ui.on_request_loader_catalog(move |form, loader, minecraft| {
@@ -106,7 +171,9 @@ fn register_callbacks(ui: &AppWindow, commands: &Sender<Command>) {
             );
         }
     });
+}
 
+fn register_client_actions(ui: &AppWindow, commands: &Sender<Command>) {
     let sender = commands.clone();
     ui.on_submit_create_instance(move |name, minecraft, loader, loader_version, persistent| {
         send(
@@ -191,6 +258,10 @@ fn register_callbacks(ui: &AppWindow, commands: &Sender<Command>) {
         }
     });
 
+    register_mod_actions(ui, commands);
+}
+
+fn register_mod_actions(ui: &AppWindow, commands: &Sender<Command>) {
     let sender = commands.clone();
     ui.on_search_mods(move |instance, query| {
         if let Some(instance) = backend::parse_instance_id(&instance) {
@@ -229,71 +300,10 @@ fn register_callbacks(ui: &AppWindow, commands: &Sender<Command>) {
             );
         }
     });
-
-    let sender = commands.clone();
-    ui.on_submit_create_server(
-        move |name, client, minecraft, loader, loader_version, persistent| {
-            let client = if client.is_empty() {
-                None
-            } else {
-                backend::parse_instance_id(&client)
-            };
-            send(
-                &sender,
-                Command::CreateServer {
-                    name: name.into(),
-                    client,
-                    minecraft: minecraft.into(),
-                    loader: loader.into(),
-                    loader_version: loader_version.into(),
-                    persistent,
-                },
-            );
-        },
-    );
-
-    let sender = commands.clone();
-    ui.on_select_server(move |_| send(&sender, Command::Refresh));
-
-    register_server_actions(ui, commands);
-    register_diagnostics(ui, commands);
-    register_settings(ui, commands);
-
-    let weak = ui.as_weak();
-    ui.on_copy_text(move |text| {
-        let copied = ClipboardContext::new()
-            .and_then(|mut clipboard| clipboard.set_contents(text.into()))
-            .is_ok();
-        if let Some(ui) = weak.upgrade() {
-            ui.set_toast_error(!copied);
-            ui.set_toast_text(
-                if copied {
-                    lookup("gui-clipboard-copied")
-                } else {
-                    lookup("gui-clipboard-unavailable")
-                }
-                .into(),
-            );
-        }
-    });
-
-    let sender = commands.clone();
-    ui.on_cancel_operation(move |id| send(&sender, Command::CancelOperation(id.into())));
 }
 
-#[allow(clippy::too_many_lines)]
 fn register_server_actions(ui: &AppWindow, commands: &Sender<Command>) {
-    let weak = ui.as_weak();
-    ui.on_validate_server_properties(move |access, address, port, max_players| {
-        if let Some(ui) = weak.upgrade() {
-            let port = validate_port(&port);
-            let address = validate_ip(&address, access == "Custom");
-            let players = validate_player_count(&max_players);
-            ui.set_property_port_error(port.message.into());
-            ui.set_property_address_error(address.message.into());
-            ui.set_property_max_players_error(players.into());
-        }
-    });
+    register_server_property_actions(ui, commands);
 
     let sender = commands.clone();
     ui.on_open_server_folder(move |id| {
@@ -353,6 +363,27 @@ fn register_server_actions(ui: &AppWindow, commands: &Sender<Command>) {
     });
 
     let sender = commands.clone();
+    ui.on_accept_eula(move || send(&sender, Command::AcceptEula));
+    let sender = commands.clone();
+    ui.on_revoke_eula(move || send(&sender, Command::RevokeEula));
+    let sender = commands.clone();
+    ui.on_open_eula_reference(move || send(&sender, Command::OpenEulaReference));
+}
+
+fn register_server_property_actions(ui: &AppWindow, commands: &Sender<Command>) {
+    let weak = ui.as_weak();
+    ui.on_validate_server_properties(move |access, address, port, max_players| {
+        if let Some(ui) = weak.upgrade() {
+            let port = validate_port(&port);
+            let address = validate_ip(&address, access == "Custom");
+            let players = validate_player_count(&max_players);
+            ui.set_property_port_error(port.message.into());
+            ui.set_property_address_error(address.message.into());
+            ui.set_property_max_players_error(players.into());
+        }
+    });
+
+    let sender = commands.clone();
     let weak = ui.as_weak();
     ui.on_save_server_properties(
         move |id,
@@ -388,8 +419,10 @@ fn register_server_actions(ui: &AppWindow, commands: &Sender<Command>) {
             };
             if !max_players_valid || !difficulty_valid || !gamemode_valid {
                 if let Some(ui) = weak.upgrade() {
-                    ui.set_toast_error(true);
-                    ui.set_toast_text(lookup("gui-server-property-values-invalid").into());
+                    ui.invoke_present_toast(
+                        lookup("gui-server-property-values-invalid").into(),
+                        true,
+                    );
                 }
                 return;
             }
@@ -411,13 +444,6 @@ fn register_server_actions(ui: &AppWindow, commands: &Sender<Command>) {
             );
         },
     );
-
-    let sender = commands.clone();
-    ui.on_accept_eula(move || send(&sender, Command::AcceptEula));
-    let sender = commands.clone();
-    ui.on_revoke_eula(move || send(&sender, Command::RevokeEula));
-    let sender = commands.clone();
-    ui.on_open_eula_reference(move || send(&sender, Command::OpenEulaReference));
 }
 
 fn validate_player_count(value: &str) -> String {
@@ -547,8 +573,7 @@ fn register_settings(ui: &AppWindow, commands: &Sender<Command>) {
                 Ok(memory) => memory,
                 Err(message) => {
                     if let Some(ui) = weak.upgrade() {
-                        ui.set_toast_error(true);
-                        ui.set_toast_text(message.into());
+                        ui.invoke_present_toast(message.into(), true);
                     }
                     return;
                 }
@@ -597,54 +622,13 @@ fn parse_java_memory(minimum: &str, maximum: &str) -> Result<(u32, u32), String>
 fn apply_event(ui: &AppWindow, event: Event, activities: &Rc<RefCell<Vec<ActivityData>>>) {
     match event {
         Event::Snapshot(snapshot) => apply_snapshot(ui, snapshot),
-        Event::MinecraftReleases(versions) => {
-            if !versions.is_empty() {
-                let create_current = ui.get_create_minecraft();
-                let server_current = ui.get_create_server_minecraft();
-                if !versions
-                    .iter()
-                    .any(|version| version == create_current.as_str())
-                {
-                    ui.set_create_minecraft(versions[0].clone().into());
-                }
-                if !versions
-                    .iter()
-                    .any(|version| version == server_current.as_str())
-                {
-                    ui.set_create_server_minecraft(versions[0].clone().into());
-                }
-            }
-            ui.set_minecraft_releases(model(
-                versions.into_iter().map(SharedString::from).collect(),
-            ));
-        }
+        Event::MinecraftReleases(versions) => apply_minecraft_releases(ui, versions),
         Event::LoaderVersions {
             form,
             loader,
             minecraft,
             versions,
-        } => {
-            let label = loader.to_string();
-            let current_matches = if form == "server" {
-                ui.get_create_server_loader() == label
-                    && ui.get_create_server_minecraft() == minecraft
-            } else {
-                ui.get_create_loader() == label && ui.get_create_minecraft() == minecraft
-            };
-            if !current_matches {
-                return;
-            }
-            let rows = model(versions.iter().cloned().map(SharedString::from).collect());
-            if form == "server" {
-                ui.set_create_server_loader_versions(rows);
-                ui.set_create_server_loader_version(
-                    versions.first().cloned().unwrap_or_default().into(),
-                );
-            } else {
-                ui.set_create_loader_versions(rows);
-                ui.set_create_loader_version(versions.first().cloned().unwrap_or_default().into());
-            }
-        }
+        } => apply_loader_versions(ui, &form, loader, &minecraft, &versions),
         Event::ManagedMods(rows) => ui.set_managed_mods(model(managed_mod_rows(rows))),
         Event::ModResults(rows) => ui.set_mod_results(model(mod_search_rows(rows))),
         Event::ModPlan(plan) => {
@@ -689,8 +673,7 @@ fn apply_event(ui: &AppWindow, event: Event, activities: &Rc<RefCell<Vec<Activit
             apply_activities(ui, &activities.borrow());
         }
         Event::Toast { message, error } => {
-            ui.set_toast_text(message.into());
-            ui.set_toast_error(error);
+            ui.invoke_present_toast(message.into(), error);
         }
         Event::ModalError(message) => ui.set_modal_error(message.into()),
         Event::CloseModal => {
@@ -712,12 +695,88 @@ fn apply_event(ui: &AppWindow, event: Event, activities: &Rc<RefCell<Vec<Activit
     }
 }
 
-#[allow(clippy::too_many_lines)]
+fn apply_minecraft_releases(ui: &AppWindow, versions: Vec<String>) {
+    if !versions.is_empty() {
+        let create_current = ui.get_create_minecraft();
+        let server_current = ui.get_create_server_minecraft();
+        if !versions
+            .iter()
+            .any(|version| version == create_current.as_str())
+        {
+            ui.set_create_minecraft(versions[0].clone().into());
+        }
+        if !versions
+            .iter()
+            .any(|version| version == server_current.as_str())
+        {
+            ui.set_create_server_minecraft(versions[0].clone().into());
+        }
+    }
+    ui.set_minecraft_releases(model(
+        versions.into_iter().map(SharedString::from).collect(),
+    ));
+}
+
+fn apply_loader_versions(
+    ui: &AppWindow,
+    form: &str,
+    loader: ephervex_model::LoaderKind,
+    minecraft: &str,
+    versions: &[String],
+) {
+    let label = loader.to_string();
+    let current_matches = if form == "server" {
+        ui.get_create_server_loader() == label && ui.get_create_server_minecraft() == minecraft
+    } else {
+        ui.get_create_loader() == label && ui.get_create_minecraft() == minecraft
+    };
+    if !current_matches {
+        return;
+    }
+    let rows = model(versions.iter().cloned().map(SharedString::from).collect());
+    if form == "server" {
+        ui.set_create_server_loader_versions(rows);
+        ui.set_create_server_loader_version(versions.first().cloned().unwrap_or_default().into());
+    } else {
+        ui.set_create_loader_versions(rows);
+        ui.set_create_loader_version(versions.first().cloned().unwrap_or_default().into());
+    }
+}
+
 fn apply_snapshot(ui: &AppWindow, snapshot: Snapshot) {
+    let Snapshot {
+        instances,
+        servers,
+        accounts,
+        preferences,
+        settings,
+        eula,
+    } = snapshot;
+    apply_instance_snapshot(ui, instances);
+    apply_server_snapshot(ui, servers);
+    ui.set_accounts(model(account_rows(accounts)));
+    ui.set_preferences(model(preference_rows(preferences)));
+    ui.set_storage_root(settings.storage_root.into());
+    ui.set_persistent_root(settings.persistent_root.into());
+    ui.set_microsoft_client_id(settings.microsoft_client_id.into());
+    ui.set_user_agent(settings.user_agent.into());
+    ui.set_java_auto_detect(settings.java_auto_detect);
+    ui.set_java_auto_download(settings.java_auto_download);
+    ui.set_java_memory_min(settings.java_memory_min.to_string().into());
+    ui.set_java_memory_max(settings.java_memory_max.to_string().into());
+    ui.set_java_preferred_path(settings.java_preferred_path.into());
+    ui.set_eula_accepted(eula.accepted);
+    ui.set_eula_status(eula.status.into());
+    ui.set_loading(false);
+    ui.set_status_message(lookup("gui-ready").into());
+}
+
+fn apply_instance_snapshot(
+    ui: &AppWindow,
+    instances: Vec<crate::presentation::InstancePresentation>,
+) {
     let previous_instance = ui.get_selected_instance_id();
-    let previous_server = ui.get_selected_server_id();
-    let mut instance_rows = snapshot
-        .instances
+    let mut instance_rows = instances
         .into_iter()
         .map(|item| InstanceRow {
             id: item.id.into(),
@@ -770,9 +829,11 @@ fn apply_snapshot(ui: &AppWindow, snapshot: Snapshot) {
         ui.set_selected_instance_index(-1);
     }
     ui.set_instances(model(instance_rows));
+}
 
-    let mut server_rows = snapshot
-        .servers
+fn apply_server_snapshot(ui: &AppWindow, servers: Vec<crate::presentation::ServerPresentation>) {
+    let previous_server = ui.get_selected_server_id();
+    let mut server_rows = servers
         .into_iter()
         .map(|item| ServerRow {
             id: item.id.into(),
@@ -820,21 +881,6 @@ fn apply_snapshot(ui: &AppWindow, snapshot: Snapshot) {
         ui.set_selected_server_index(-1);
     }
     ui.set_servers(model(server_rows));
-    ui.set_accounts(model(account_rows(snapshot.accounts)));
-    ui.set_preferences(model(preference_rows(snapshot.preferences)));
-    ui.set_storage_root(snapshot.settings.storage_root.into());
-    ui.set_persistent_root(snapshot.settings.persistent_root.into());
-    ui.set_microsoft_client_id(snapshot.settings.microsoft_client_id.into());
-    ui.set_user_agent(snapshot.settings.user_agent.into());
-    ui.set_java_auto_detect(snapshot.settings.java_auto_detect);
-    ui.set_java_auto_download(snapshot.settings.java_auto_download);
-    ui.set_java_memory_min(snapshot.settings.java_memory_min.to_string().into());
-    ui.set_java_memory_max(snapshot.settings.java_memory_max.to_string().into());
-    ui.set_java_preferred_path(snapshot.settings.java_preferred_path.into());
-    ui.set_eula_accepted(snapshot.eula.accepted);
-    ui.set_eula_status(snapshot.eula.status.into());
-    ui.set_loading(false);
-    ui.set_status_message(lookup("gui-ready").into());
 }
 
 fn apply_server_workspace(ui: &AppWindow, workspace: ServerWorkspaceData) {
@@ -1145,6 +1191,60 @@ mod tests {
         assert!(source.contains("model: root.create-server-loader-versions"));
         assert!(!source.contains("text <=> root.create-minecraft"));
         assert!(!source.contains("text <=> root.create-loader-version"));
+        assert!(source.contains("changed create-minecraft"));
+        assert!(source.contains("root.warm-language-catalog(root.create-minecraft)"));
+    }
+
+    #[test]
+    fn account_row_actions_use_the_stable_id_instead_of_presentation_data() {
+        let rows = account_rows(vec![AccountData {
+            id: "069a79f4-44e9-4726-a5be-fca90e38aaf5".to_owned(),
+            name: "MelanX".to_owned(),
+            kind: "Microsoft".to_owned(),
+            is_default: false,
+            credential_state: "Credential stored securely".to_owned(),
+        }]);
+        assert_eq!(rows[0].id, "069a79f4-44e9-4726-a5be-fca90e38aaf5");
+        assert_eq!(rows[0].name, "MelanX");
+
+        let source = include_str!("ui.rs");
+        assert!(source.contains("root.set-default-account(account.id)"));
+        assert!(source.contains("root.remove-account(account.id)"));
+        assert!(!source.contains("root.set-default-account(account.name)"));
+        assert!(!source.contains("root.remove-account(account.name)"));
+    }
+
+    #[test]
+    fn context_menus_expose_entity_actions_without_redundant_inspector_deletion() {
+        let source = include_str!("ui.rs");
+        for label in [
+            "gui-open-workspace",
+            "gui-launch",
+            "gui-open-folder",
+            "gui-create-linked-server",
+            "gui-duplicate-instance",
+            "gui-delete-instance",
+            "gui-open-server-workspace",
+            "gui-restart",
+            "gui-force-kill",
+            "gui-delete-server",
+        ] {
+            assert!(source.contains(label), "missing context action {label}");
+        }
+        assert_eq!(source.matches("ContextMenuArea {").count(), 3);
+    }
+
+    #[test]
+    fn console_and_diagnostic_text_use_native_read_only_selection() {
+        let source = include_str!("ui.rs");
+        assert!(source.contains("accessible-read-only: true"));
+        assert!(source.contains("read-only: true"));
+        assert!(source.contains("selectable-input.copy()"));
+        assert!(source.contains("selectable-input.select-all()"));
+        assert!(source.contains(
+            "SelectableText { vertical-stretch: 1; border-radius: 8px; border-width: 1px; border-color: Theme.border; text: root.console-text; }"
+        ));
+        assert!(source.contains("SelectableText { text: root.diagnostic-content; }"));
     }
 
     #[test]
@@ -1158,7 +1258,7 @@ mod tests {
             syntax: "field of view in degrees, 30 to 110".to_owned(),
         }]);
 
-        assert_eq!(rows[0].numeric_value, 70.0);
+        assert!((rows[0].numeric_value - 70.0).abs() < f32::EPSILON);
         assert_eq!(rows[0].value, "70");
     }
 }
