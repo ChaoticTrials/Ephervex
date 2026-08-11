@@ -489,6 +489,15 @@ fn preferences_are_stored_in_the_configuration_file_and_survive_a_restart() {
     assert!(text.contains("de_de"), "{text}");
 
     // A separate process reads it back, which is the whole point of storing it.
-    let record = sandbox.create("Localized", "1.20.1");
-    assert!(options_of(&record).contains("lang:de_de"));
+    // Creation behavior with no cached language catalog is covered in core;
+    // this persistence test needs no production metadata request.
+    let shown = sandbox.json(&["--json", "preferences", "show"]);
+    let language = shown["preferences"]
+        .as_array()
+        .expect("array")
+        .iter()
+        .find(|entry| entry["preference"] == "language")
+        .expect("language listed");
+    assert_eq!(language["managed"], true);
+    assert_eq!(language["value"], "de_de");
 }

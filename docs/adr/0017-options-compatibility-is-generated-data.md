@@ -55,6 +55,11 @@ JARs, committed as data, and distributed separately from the application**.
    same conclusion. Being a hotfix never makes a release equivalent to its
    predecessor; only the extraction does.
 
+   The setting registry is cumulative because historical families retain stable
+   references. A separate current canonical id list comes from the newest
+   supported release, so a historical setting that disappeared does not remain
+   current by accident.
+
 4. **Bundled baseline plus a remote feed.** The dataset ships compiled into the
    binary, so a fresh offline installation understands every release verified
    when that build shipped. A newer validated copy may come from a remote feed,
@@ -77,18 +82,21 @@ JARs, committed as data, and distributed separately from the application**.
    new user-facing preference remains an application release.
 
 7. **Validated whole, then cached atomically.** A document is parsed and fully
-   validated before anything is kept. A corrupt, truncated, incompatible, or
-   inconsistent publish never replaces the last known-good cache, and a refresh
-   failure is logged rather than raised — it must not become a startup failure
-   or stop an instance being created.
+   validated before anything is kept. Its revision must also be newer than the
+   last known-good cache; an older revision is a rollback, and an equal revision
+   with different content is a collision. A corrupt, truncated, incompatible,
+   inconsistent, rolled-back, or colliding publish never replaces the cache.
+   Refresh failure is logged rather than raised; it must not become a startup
+   failure or stop an instance being created.
 
 8. **Language catalogs are Mojang's, not Ephervex's.** The set of languages a
    release offers comes from that release's own `pack.mcmeta` asset object and
    is cached per release, exactly like the version manifest. It is not bundled
    and not in the feed: duplicating it would create a second authority for
-   something Mojang owns. When no catalog is available the language preference
-   is simply not applied, because claiming support Ephervex cannot verify writes
-   a code the game silently falls back from.
+   something Mojang owns. Creation and import only consult an already-cached
+   catalog. When none is available the language preference is simply not
+   applied, because claiming support Ephervex cannot verify writes a code the
+   game silently falls back from.
 
 ## Consequences
 

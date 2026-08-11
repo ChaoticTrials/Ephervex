@@ -282,11 +282,12 @@ impl App {
     #[instrument(skip(self, request))]
     pub async fn create_client_reporting(&self, request: NewClient) -> CoreResult<CreatedClient> {
         let validation = self.validate_client_target(&request).await;
-        // Resolved before anything is published, and best effort throughout: a
-        // language catalog that cannot be read must not stop an instance being
-        // created.
-        let preferences = self.preference_context(&request.minecraft_version).await;
-        self.publish_client_after_validation(request, validation, &preferences)
+        let preferences = after_successful_validation(
+            validation,
+            self.preference_context(&request.minecraft_version),
+        )
+        .await?;
+        self.publish_client(request, &preferences)
     }
 
     /// Validates the exact game and loader selection without publishing any
@@ -320,6 +321,7 @@ impl App {
         Ok(())
     }
 
+    #[cfg(test)]
     fn publish_client_after_validation(
         &self,
         request: NewClient,
@@ -980,6 +982,14 @@ impl App {
     }
 }
 
+async fn after_successful_validation<T>(
+    validation: CoreResult<()>,
+    optional_work: impl std::future::Future<Output = T>,
+) -> CoreResult<T> {
+    validation?;
+    Ok(optional_work.await)
+}
+
 fn loader_build_is_available(listing: &LoaderVersionListing, selected: &str) -> bool {
     listing.builds.iter().any(|build| build.version == selected)
 }
@@ -990,6 +1000,7 @@ mod tests {
     use ephervex_model::{LoaderSelection, StorageClass};
 
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     fn app_rooted_at(base: &std::path::Path) -> App {
         App::open_at(Paths::rooted_at(base)).expect("app should open against a temporary root")
@@ -1020,6 +1031,22 @@ mod tests {
                 .count(),
             0
         );
+    }
+
+    #[tokio::test]
+    async fn failed_target_validation_does_not_start_optional_metadata_work() {
+        let started = AtomicBool::new(false);
+        let validation = Err(MinecraftError::UnknownVersion {
+            id: "invalid".to_owned(),
+        }
+        .into());
+        let result = after_successful_validation(validation, async {
+            started.store(true, Ordering::SeqCst);
+        })
+        .await;
+
+        assert!(result.is_err());
+        assert!(!started.load(Ordering::SeqCst));
     }
 
     #[test]

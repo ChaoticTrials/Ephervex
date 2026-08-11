@@ -52,10 +52,14 @@ fn reporter() -> OperationReporter {
 /// adopting it is observable.
 fn published() -> String {
     let bundled = OptionsDataset::bundled();
-    let text = include_str!("../data/minecraft-options.json");
-    text.replacen(
+    published_revision(bundled.revision + 1)
+}
+
+fn published_revision(revision: u32) -> String {
+    let bundled = OptionsDataset::bundled();
+    include_str!("../data/minecraft-options.json").replacen(
         &format!("\"revision\": {}", bundled.revision),
-        &format!("\"revision\": {}", bundled.revision + 1),
+        &format!("\"revision\": {revision}"),
         1,
     )
 }
@@ -295,4 +299,159 @@ async fn a_gist_without_the_expected_file_is_refused_rather_than_guessed_at() {
         .await
         .expect_err("no file, no dataset");
     assert!(error.to_string().contains(FEED_FILE), "{error}");
+}
+
+#[tokio::test]
+async fn a_document_source_refreshes_from_its_exact_configured_host() {
+    let server = MockServer::start().await;
+    mount(&server, RAW_PATH, published()).await;
+    let cache = tempfile::tempdir().expect("temp dir");
+    let feed = OptionsFeed::from_source(
+        manager(),
+        CacheLayout::new(cache.path()),
+        FeedSource::Document {
+            url: format!("{}{RAW_PATH}", server.uri()),
+        },
+    )
+    .expect("document feed builds")
+    .with_allowlist(DomainAllowlist::for_loopback_tests("127.0.0.1"));
+
+    let refreshed = feed
+        .refresh(&reporter(), &CancellationToken::new())
+        .await
+        .expect("the direct document is adopted");
+    assert_eq!(refreshed.revision, OptionsDataset::bundled().revision + 1);
+}
+
+#[tokio::test]
+async fn a_plaintext_document_source_is_refused_before_any_request() {
+    let server = MockServer::start().await;
+    let cache = tempfile::tempdir().expect("temp dir");
+    let feed = OptionsFeed::from_source(
+        manager(),
+        CacheLayout::new(cache.path()),
+        FeedSource::Document {
+            url: format!("{}{RAW_PATH}", server.uri()),
+        },
+    )
+    .expect("the URL is syntactically valid");
+
+    let error = feed
+        .refresh(&reporter(), &CancellationToken::new())
+        .await
+        .expect_err("production document sources require HTTPS");
+    assert!(error.to_string().contains("not permitted"), "{error}");
+    assert_eq!(server.received_requests().await.expect("requests").len(), 0);
+}
+
+async fn refresh_revision(
+    cache: &tempfile::TempDir,
+    revision: u32,
+) -> Result<OptionsDataset, String> {
+    let server = MockServer::start().await;
+    mount(
+        &server,
+        GIST_PATH,
+        gist_with_content(&published_revision(revision)),
+    )
+    .await;
+    feed(&server, cache)
+        .refresh(&reporter(), &CancellationToken::new())
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tokio::test]
+async fn a_remote_rollback_preserves_cached_revision_three() {
+    let cache = tempfile::tempdir().expect("temp dir");
+    refresh_revision(&cache, 3)
+        .await
+        .expect("revision 3 cached");
+    let error = refresh_revision(&cache, 2)
+        .await
+        .expect_err("revision 2 is a rollback");
+    assert!(error.contains("older than cached revision 3"), "{error}");
+    let offline = MockServer::start().await;
+    assert_eq!(
+        feed(&offline, &cache)
+            .cached()
+            .await
+            .expect("cached")
+            .revision,
+        3
+    );
+}
+
+#[tokio::test]
+async fn an_identical_remote_revision_is_a_safe_no_op() {
+    let cache = tempfile::tempdir().expect("temp dir");
+    refresh_revision(&cache, 3)
+        .await
+        .expect("revision 3 cached");
+    let repeated = refresh_revision(&cache, 3)
+        .await
+        .expect("identical revision accepted");
+    assert_eq!(repeated.revision, 3);
+    let offline = MockServer::start().await;
+    assert_eq!(
+        feed(&offline, &cache)
+            .cached()
+            .await
+            .expect("cached")
+            .revision,
+        3
+    );
+}
+
+#[tokio::test]
+async fn different_content_cannot_reuse_a_cached_revision() {
+    let cache = tempfile::tempdir().expect("temp dir");
+    refresh_revision(&cache, 3)
+        .await
+        .expect("revision 3 cached");
+    let changed = published_revision(3).replacen(
+        "\"category\": \"Controls\"",
+        "\"category\": \"Gameplay\"",
+        1,
+    );
+    assert_ne!(changed, published_revision(3));
+    let server = MockServer::start().await;
+    mount(&server, GIST_PATH, gist_with_content(&changed)).await;
+    let error = feed(&server, &cache)
+        .refresh(&reporter(), &CancellationToken::new())
+        .await
+        .expect_err("revision collision must be refused");
+    assert!(error.to_string().contains("reused revision 3"), "{error}");
+    assert_eq!(
+        feed(&server, &cache)
+            .cached()
+            .await
+            .expect("cached")
+            .revision,
+        3
+    );
+}
+
+#[tokio::test]
+async fn a_newer_remote_revision_replaces_the_cached_dataset() {
+    let cache = tempfile::tempdir().expect("temp dir");
+    refresh_revision(&cache, 3)
+        .await
+        .expect("revision 3 cached");
+    assert_eq!(
+        refresh_revision(&cache, 4)
+            .await
+            .expect("revision 4 adopted")
+            .revision,
+        4
+    );
+    let offline = MockServer::start().await;
+    assert_eq!(
+        feed(&offline, &cache)
+            .cached()
+            .await
+            .expect("cached")
+            .revision,
+        4
+    );
 }

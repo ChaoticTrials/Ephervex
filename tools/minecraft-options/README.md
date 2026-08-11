@@ -57,17 +57,19 @@ None of this is needed to build, test, or run Ephervex.
 | `test_dataset.py` | Offline tests: `python3 -m unittest discover -s tools/minecraft-options` |
 | `.cache/` | Untracked development cache: JARs, Mojang metadata, analysis output, generated feed |
 
-`analyze_options.py` and `fetch_language_catalogs.py` are carried verbatim.
-Their output is the input to every fingerprint in the committed dataset, so
-rewriting them would move schema ids that releases already point at.
+Analyzer output is the input to every fingerprint in the committed dataset, so
+changes to extraction must be evidence-driven and followed by regeneration and
+validation.
 
 ## What the dataset says, and what it deliberately does not
 
 The committed dataset lives at `crates/options/data/minecraft-options.json` and
-is embedded in the application. Its three parts are kept apart on purpose:
+is embedded in the application. Its four parts are kept apart on purpose:
 
-- **canonical settings** - stable ids for every setting the research recovered,
-  independent of any release's obfuscated field names;
+- **setting registry** - cumulative stable ids retained for every current and
+  historical schema;
+- **current canonical setting ids** - only settings present in the newest
+  supported release;
 - **schema families** - one deduplicated per-release representation of every
   canonical setting, identified by a content-derived fingerprint;
 - **release mapping** - which release uses which family.
@@ -94,7 +96,8 @@ as one of those becomes *unknown* here, at generation time. No expression is
 ever written into the dataset, so nothing downstream has to evaluate one.
 
 The dataset carries no language catalogs. Those are Mojang-owned volatile data
-that the application fetches and caches per release at runtime; duplicating them
+that the application fetches and caches per release during explicit metadata
+browsing; creation and import use only an existing cache. Duplicating catalogs
 here would create a second authority for something Mojang owns.
 
 ## Adding a release, and when an application release is needed

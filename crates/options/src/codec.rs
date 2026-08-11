@@ -19,11 +19,12 @@
 //!
 //! # Why encoding can fail
 //!
-//! A release's proven domain is part of its representation. Minecraft 26.2
-//! accepts a simulation distance of 2 to 5; a preference of 12 is not something
-//! to clamp into range, because a clamp writes a setting the user never chose.
-//! It is [`Unrepresentable::OutOfRange`], the preference is skipped, and the
-//! caller is told which one and why.
+//! A release's proven domain is part of its representation. A preference that
+//! falls outside a fixed proven domain is not clamped, because a clamp writes a
+//! setting the user never chose. It is [`Unrepresentable::OutOfRange`], the
+//! preference is skipped, and the caller is told which one and why. A domain
+//! selected through runtime branches stays open in the codec rather than being
+//! misreported as one fixed range.
 
 use std::fmt;
 

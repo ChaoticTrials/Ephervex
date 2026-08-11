@@ -6,10 +6,12 @@ Minecraft release store this setting in options.txt". It ships bundled with the
 application and is also the exact document published to the remote options
 feed, so one builder produces both and the two can never disagree in shape.
 
-Three things are kept apart on purpose:
+Four things are kept apart on purpose:
 
-* **canonical settings** - stable ids for the settings the research recovered,
-  independent of any release's obfuscated field names;
+* **setting registry** - cumulative stable ids required by every historical
+  schema, independent of any release's obfuscated field names;
+* **current canonical setting ids** - only the settings present in the newest
+  supported release;
 * **schema families** - one deduplicated per-release representation of every
   canonical setting, identified by a content-derived fingerprint;
 * **release mapping** - which release uses which family.
@@ -100,7 +102,7 @@ def codec_for(setting: dict[str, Any], code_space: str | None) -> dict[str, Any]
     `None` means the representation was not established, which the caller turns
     into *unknown* rather than into a guess.
     """
-    if setting.get("confidence") != "high" or setting.get("type_confidence") != "high":
+    if representation_issue(setting, code_space) is not None:
         return None
 
     kind = setting.get("type")
@@ -122,6 +124,57 @@ def codec_for(setting: dict[str, Any], code_space: str | None) -> dict[str, Any]
         return _enum_codec(setting)
     # `special` covers the Gson-serialised list settings, whose representation
     # Ephervex has no reason to reproduce.
+    return None
+
+
+def representation_issue(setting: dict[str, Any], code_space: str | None) -> str | None:
+    """Why this extraction cannot be represented authoritatively, if any."""
+    if setting.get("confidence") != "high" or setting.get("type_confidence") != "high":
+        return "the analyzer could not establish its codec"
+
+    kind = setting.get("type")
+    if kind == "key_binding" and code_space not in ("lwjgl2", "glfw"):
+        return "the key binding code space is unknown"
+    if kind in ("integer", "number"):
+        encoding = setting.get("file_encoding") or ""
+        if encoding != "decimal integer" and not encoding.startswith("decimal floating point"):
+            return "the numeric file encoding is unknown"
+        transform = setting.get("value_to_storage")
+        if transform and not (_AFFINE.match(transform) or _OFFSET.match(transform)):
+            return "unrecognized storage transform"
+        if transform and (match := _AFFINE.match(transform)) and _number(match.group(2)) == 0:
+            return "storage transform has a zero scale"
+        contradiction = _default_domain_contradiction(setting)
+        if contradiction:
+            return contradiction
+    if kind == "enum":
+        allowed = setting.get("allowed_values") or {}
+        if setting.get("domain_confidence") != "high" or not allowed.get("values"):
+            return "the enum domain is unknown"
+        if allowed.get("persisted_form") not in ("integer_id", "string_token"):
+            return "the enum persisted form is unknown"
+    if kind == "special" or kind not in (
+        "boolean", "string", "key_binding", "integer", "number", "enum"
+    ):
+        return "the persisted type is not supported by this build"
+    return None
+
+
+def _default_domain_contradiction(setting: dict[str, Any]) -> str | None:
+    """Reject mutually impossible high-confidence direct-persistence evidence."""
+    if (
+        setting.get("default_confidence") != "high"
+        or setting.get("domain_confidence") != "high"
+        or setting.get("value_to_storage")
+        or not isinstance(setting.get("default"), (int, float))
+        or isinstance(setting.get("default"), bool)
+    ):
+        return None
+    numeric = setting.get("numeric") or {}
+    default = setting["default"]
+    minimum, maximum = numeric.get("min"), numeric.get("max")
+    if minimum is not None and default < minimum or maximum is not None and default > maximum:
+        return f"contradictory evidence: default {default} is outside persisted domain {minimum}..{maximum}"
     return None
 
 
@@ -185,8 +238,8 @@ def _enum_codec(setting: dict[str, Any]) -> dict[str, Any] | None:
 # ------------------------------------------------------------------- building
 
 
-def canonical_settings(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Stable canonical setting definitions across every analyzed release.
+def registry_settings(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Stable registry definitions across every analyzed release.
 
     Ids come from the canonical release, which is deobfuscated and therefore
     has real field names. A key that only older releases had keeps its
@@ -278,7 +331,8 @@ def _representation_table(schemas: dict[str, dict[str, Any]]) -> list[dict[str, 
 
 
 def assemble(
-    settings: list[dict[str, Any]],
+    setting_registry: list[dict[str, Any]],
+    current_canonical_setting_ids: list[str],
     canonical_version: str,
     releases: dict[str, dict[str, Any]],
     revision: int,
@@ -294,7 +348,8 @@ def assemble(
         "format_version": FORMAT_VERSION,
         "revision": revision,
         "canonical_minecraft_version": canonical_version,
-        "settings": settings,
+        "setting_registry": setting_registry,
+        "current_canonical_setting_ids": current_canonical_setting_ids,
         "representations": table,
         "schemas": [
             {
@@ -350,7 +405,12 @@ def merge(
     """
     changes: list[dict[str, str]] = []
 
-    settings: list[dict[str, Any]] = list(previous["settings"]) if previous else []
+    setting_registry: list[dict[str, Any]] = (
+        list(previous.get("setting_registry", previous.get("settings", []))) if previous else []
+    )
+    current_canonical_setting_ids: list[str] = (
+        list(previous.get("current_canonical_setting_ids", [])) if previous else []
+    )
     canonical_version = previous["canonical_minecraft_version"] if previous else None
     schemas: dict[str, dict[str, Any]] = expand(previous) if previous else {}
     mapping: dict[str, str] = (
@@ -361,32 +421,51 @@ def merge(
 
     analysed = sorted(analysed, key=lambda record: version_key(record["minecraft_version"]))
     if analysed:
-        by_key = {entry["key"]: entry for entry in settings}
-        taken = {entry["id"] for entry in settings}
-        for entry in canonical_settings(analysed):
+        newest = analysed[-1]["minecraft_version"]
+        refresh_current_definitions = (
+            canonical_version is None
+            or version_key(newest) >= version_key(canonical_version)
+        )
+        by_key = {entry["key"]: entry for entry in setting_registry}
+        taken = {entry["id"] for entry in setting_registry}
+        for entry in registry_settings(analysed):
             established = by_key.get(entry["key"])
             if established is not None:
                 # An id, once committed, is what every schema already refers to.
-                # Only the description travels forward.
-                established.update({field: entry[field] for field in entry if field != "id"})
+                # Descriptions travel only from the canonical release forward;
+                # re-analyzing history must not make old metadata current.
+                if refresh_current_definitions:
+                    established.update({field: entry[field] for field in entry if field != "id"})
                 continue
             if entry["id"] in taken:
                 raise DatasetError(f"canonical id `{entry['id']}` is already used by another key")
             by_key[entry["key"]] = dict(entry)
             taken.add(entry["id"])
             changes.append({"kind": "setting-added", "detail": entry["id"]})
-        settings = sorted(by_key.values(), key=lambda entry: entry["id"])
+        setting_registry = sorted(by_key.values(), key=lambda entry: entry["id"])
 
-        newest = analysed[-1]["minecraft_version"]
         if canonical_version is None or version_key(newest) > version_key(canonical_version):
             canonical_version = newest
+            current_keys = {setting["persisted_key"] for setting in analysed[-1]["settings"]}
+            current_canonical_setting_ids = sorted(
+                entry["id"] for entry in setting_registry if entry["key"] in current_keys
+            )
+        elif newest == canonical_version:
+            current_keys = {setting["persisted_key"] for setting in analysed[-1]["settings"]}
+            current_canonical_setting_ids = sorted(
+                entry["id"] for entry in setting_registry if entry["key"] in current_keys
+            )
 
-    if not settings:
+    if not setting_registry:
         raise DatasetError("no canonical release was analysed and no dataset was supplied")
+    if not current_canonical_setting_ids:
+        # Migration from the unpublished original shape. The selected canonical
+        # release supplies the real current set on the first normal regeneration.
+        current_canonical_setting_ids = sorted(entry["id"] for entry in setting_registry)
 
     for record in analysed:
         version = record["minecraft_version"]
-        schema = schema_for(record, settings)
+        schema = schema_for(record, setting_registry)
         schema_id = fingerprint(schema)
         existing = mapping.get(version)
         if existing == schema_id:
@@ -409,8 +488,15 @@ def merge(
     schemas = {schema_id: schema for schema_id, schema in schemas.items() if schema_id in live}
 
     revision = previous["revision"] if previous else 1
-    document = assemble(settings, canonical_version, {"schemas": schemas, "mapping": mapping}, revision)
-    if previous is not None and not equivalent(previous, document):
+    document = assemble(
+        setting_registry,
+        current_canonical_setting_ids,
+        canonical_version,
+        {"schemas": schemas, "mapping": mapping},
+        revision,
+    )
+    unpublished_shape_migration = previous is not None and "setting_registry" not in previous
+    if previous is not None and not unpublished_shape_migration and not equivalent(previous, document):
         document["revision"] = previous["revision"] + 1
     return document, changes
 
@@ -435,12 +521,21 @@ def validate(document: dict[str, Any]) -> None:
     if not isinstance(document.get("revision"), int) or document["revision"] < 1:
         raise DatasetError("revision must be a positive integer")
 
-    ids = {entry["id"] for entry in document["settings"]}
-    if len(ids) != len(document["settings"]):
-        raise DatasetError("duplicate canonical setting id")
-    missing = [required for required in REQUIRED_CANONICAL_IDS if required not in ids]
+    registry = document["setting_registry"]
+    ids = {entry["id"] for entry in registry}
+    if len(ids) != len(registry):
+        raise DatasetError("duplicate setting registry id")
+    current = document["current_canonical_setting_ids"]
+    if len(set(current)) != len(current):
+        raise DatasetError("duplicate current canonical setting id")
+    unknown_current = sorted(set(current) - ids)
+    if unknown_current:
+        raise DatasetError(
+            f"current canonical settings are absent from the registry: {', '.join(unknown_current)}"
+        )
+    missing = [required for required in REQUIRED_CANONICAL_IDS if required not in current]
     if missing:
-        raise DatasetError(f"canonical settings missing from the dataset: {', '.join(missing)}")
+        raise DatasetError(f"current canonical settings missing from the dataset: {', '.join(missing)}")
 
     table = document["representations"]
     for schema in document["schemas"]:

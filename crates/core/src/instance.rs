@@ -60,9 +60,8 @@ pub fn global_minecraft_preferences(config: &Config) -> LoadedPreferences {
 /// Everything preference application needs that does not come from the
 /// instance itself.
 ///
-/// Resolved once, before anything is published, because both of its parts can
-/// need the network and neither may be allowed to fail a creation. Holding them
-/// in one value keeps the actual application a synchronous, offline step.
+/// Resolved once, after target validation and before anything is published.
+/// Only existing caches are consulted, so application remains an offline step.
 #[derive(Debug, Clone)]
 pub struct PreferenceContext {
     /// How the target release stores each setting.
@@ -268,9 +267,12 @@ impl App {
         let loaded = self.minecraft_preferences();
         let language = match loaded.preferences.language.get() {
             // Nothing to verify: the language is not managed, so no catalog is
-            // fetched for it either.
+            // read for it either.
             None => LanguageAvailability::Unverified,
-            Some(code) => match self.minecraft_language_catalog(minecraft_version).await {
+            Some(code) => match self
+                .cached_minecraft_language_catalog(minecraft_version)
+                .await
+            {
                 Some(catalog) if catalog.contains(code) => LanguageAvailability::Verified,
                 Some(_) => LanguageAvailability::Absent,
                 None => LanguageAvailability::Unverified,
@@ -280,6 +282,20 @@ impl App {
             compatibility,
             language,
         }
+    }
+
+    /// Cached language knowledge for creation/import preference application.
+    /// This deliberately never calls `resolve`, because that method may fetch
+    /// Mojang metadata and instance publication must not wait for it.
+    async fn cached_minecraft_language_catalog(
+        &self,
+        minecraft_version: &str,
+    ) -> Option<LanguageCatalog> {
+        let catalogs = self
+            .languages()
+            .inspect_err(|error| warn!(%error, "could not build the language catalog reader"))
+            .ok()?;
+        catalogs.cached(minecraft_version).await
     }
 
     /// Applies the global preferences to one instance's `options.txt`.
@@ -556,6 +572,17 @@ mod tests {
                 .contains("enormous"),
             "a refused value must not reach the configuration file"
         );
+    }
+
+    #[tokio::test]
+    async fn creation_preferences_use_no_language_network_when_the_catalog_is_missing() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        app.set_minecraft_preference(PreferenceKey::Language, "de_de")
+            .expect("set language");
+
+        let context = app.preference_context("26.2").await;
+        assert_eq!(context.language, LanguageAvailability::Unverified);
     }
 
     #[test]

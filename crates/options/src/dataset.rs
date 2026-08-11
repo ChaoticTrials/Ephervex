@@ -2,7 +2,7 @@
 //!
 //! # What it answers
 //!
-//! One question, for every canonical setting and every Minecraft release
+//! One question, for every registered setting and every Minecraft release
 //! Ephervex offers: *what exactly does this release store, and was that ever
 //! proven?* Everything else in this crate is downstream of that answer.
 //!
@@ -50,9 +50,9 @@ pub const DATASET_FORMAT_VERSION: u32 = 1;
 /// understands every release that was verified when this build shipped.
 const BUNDLED_DATASET: &str = include_str!("../data/minecraft-options.json");
 
-/// One canonical setting, named independently of any release's own field names.
+/// One stable setting definition retained for current and historical schemas.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct CanonicalSetting {
+pub struct RegistrySetting {
     /// The stable id schemas refer to.
     pub id: String,
     /// The persisted key the canonical release uses. Individual releases may
@@ -104,7 +104,11 @@ pub struct OptionsDataset {
     pub revision: u32,
     /// The release the canonical setting definitions were taken from.
     pub canonical_minecraft_version: String,
-    pub settings: Vec<CanonicalSetting>,
+    /// Cumulative stable definitions required by every retained schema.
+    pub setting_registry: Vec<RegistrySetting>,
+    /// Settings present in [`Self::canonical_minecraft_version`]. Historical
+    /// registry entries that disappeared from the current release are absent.
+    pub current_canonical_setting_ids: Vec<String>,
     pub representations: Vec<Representation>,
     pub schemas: Vec<SchemaFamily>,
     pub releases: Vec<ReleaseMapping>,
@@ -216,7 +220,17 @@ impl OptionsDataset {
     /// Whether this dataset names a canonical setting at all.
     #[must_use]
     pub fn knows_setting(&self, setting: &str) -> bool {
-        self.settings.iter().any(|entry| entry.id == setting)
+        self.setting_registry
+            .iter()
+            .any(|entry| entry.id == setting)
+    }
+
+    /// Whether a setting is part of the newest release's canonical set.
+    #[must_use]
+    pub fn is_current_canonical_setting(&self, setting: &str) -> bool {
+        self.current_canonical_setting_ids
+            .iter()
+            .any(|entry| entry == setting)
     }
 
     /// The releases this dataset can answer for, in its own order.
@@ -235,16 +249,7 @@ impl OptionsDataset {
             ));
         }
 
-        let ids: BTreeSet<&str> = self
-            .settings
-            .iter()
-            .map(|entry| entry.id.as_str())
-            .collect();
-        if ids.len() != self.settings.len() {
-            return Err(inconsistent(
-                "two canonical settings share one id".to_owned(),
-            ));
-        }
+        let ids = self.validated_setting_ids()?;
 
         for representation in &self.representations {
             if representation.key.is_empty()
@@ -287,6 +292,12 @@ impl OptionsDataset {
                 }
             }
             for setting in &schema.unsupported {
+                if !ids.contains(setting.as_str()) {
+                    return Err(inconsistent(format!(
+                        "schema `{}` names unknown unsupported setting `{setting}`",
+                        schema.id
+                    )));
+                }
                 if schema.supported.contains_key(setting) {
                     return Err(inconsistent(format!(
                         "schema `{}` calls `{setting}` both supported and unsupported",
@@ -318,6 +329,38 @@ impl OptionsDataset {
         }
         Ok(())
     }
+
+    fn validated_setting_ids(&self) -> Result<BTreeSet<&str>, DatasetError> {
+        let ids: BTreeSet<&str> = self
+            .setting_registry
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect();
+        if ids.len() != self.setting_registry.len() {
+            return Err(DatasetError::Inconsistent {
+                detail: "two setting registry entries share one id".to_owned(),
+            });
+        }
+
+        let current: BTreeSet<&str> = self
+            .current_canonical_setting_ids
+            .iter()
+            .map(String::as_str)
+            .collect();
+        if current.len() != self.current_canonical_setting_ids.len() {
+            return Err(DatasetError::Inconsistent {
+                detail: "a current canonical setting is declared twice".to_owned(),
+            });
+        }
+        if let Some(unknown) = current.iter().find(|setting| !ids.contains(**setting)) {
+            return Err(DatasetError::Inconsistent {
+                detail: format!(
+                    "current canonical setting `{unknown}` is absent from the registry"
+                ),
+            });
+        }
+        Ok(ids)
+    }
 }
 
 #[cfg(test)]
@@ -333,7 +376,8 @@ mod tests {
               "format_version": 1,
               "revision": 3,
               "canonical_minecraft_version": "26.2",
-              "settings": [{{"id":"fov","key":"fov","type":"integer","category":"Video","translation_key":"options.fov","manageable":true}}],
+              "setting_registry": [{{"id":"fov","key":"fov","type":"integer","category":"Video","translation_key":"options.fov","manageable":true}}],
+              "current_canonical_setting_ids": ["fov"],
               "representations": [{{"key":"fov","codec":{{"kind":"decimal","min":30,"max":110}}}}],
               "schemas": [{{"id":"aaaaaaaaaaaaaaaa","supported":{{"fov":0}},"unsupported":[]}}],
               "releases": [{{"minecraft_version":"26.2","schema":"aaaaaaaaaaaaaaaa"}}]
@@ -453,6 +497,19 @@ mod tests {
         assert_eq!(representation.key, "fov");
         assert!(dataset.knows_setting("fov"));
         assert!(!dataset.knows_setting("guiScale"));
+        assert!(dataset.is_current_canonical_setting("fov"));
         assert_eq!(dataset.mapped_releases().collect::<Vec<_>>(), ["26.2"]);
+    }
+
+    #[test]
+    fn a_historical_registry_setting_is_not_implicitly_current() {
+        let historical = document("")
+            .replace(
+                r#"{"id":"fov","key":"fov","type":"integer","category":"Video","translation_key":"options.fov","manageable":true}"#,
+                r#"{"id":"fov","key":"fov","type":"integer","category":"Video","translation_key":"options.fov","manageable":true},{"id":"touchscreen","key":"touchscreen","type":"boolean","category":"Controls","translation_key":"options.touchscreen","manageable":true}"#,
+            );
+        let dataset = OptionsDataset::parse(&historical).expect("valid historical registry entry");
+        assert!(dataset.knows_setting("touchscreen"));
+        assert!(!dataset.is_current_canonical_setting("touchscreen"));
     }
 }

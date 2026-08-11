@@ -497,25 +497,21 @@ mod tests {
     }
 
     #[test]
-    fn a_value_outside_the_releases_proven_domain_is_skipped_with_a_reason() {
+    fn the_default_simulation_distance_is_representable_in_26_2() {
         let base = tempfile::tempdir().expect("temp dir");
         let game = base.path().to_path_buf();
         let preferences = GlobalMinecraftPreferences {
-            render_distance: Managed::apply(32),
-            simulation_distance: Managed::apply(32),
+            simulation_distance: Managed::apply(12),
             ..GlobalMinecraftPreferences::default()
         };
 
-        // 1.21.9 narrowed the simulation distance value set; render distance
-        // still spans 2..32 there.
         let report = apply(&game, "26.2", &preferences);
-        assert_eq!(report.applied, vec![PreferenceKey::RenderDistance]);
-        assert_eq!(
-            report.skipped,
-            vec![SkippedPreference {
-                key: PreferenceKey::SimulationDistance,
-                reason: SkipReason::OutOfRange
-            }]
+        assert_eq!(report.applied, vec![PreferenceKey::SimulationDistance]);
+        assert!(report.skipped.is_empty());
+        assert!(
+            std::fs::read_to_string(game.join(OPTIONS_FILE_NAME))
+                .expect("options")
+                .contains("simulationDistance:12")
         );
     }
 

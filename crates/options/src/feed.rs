@@ -37,6 +37,7 @@ use ephervex_download::{
 use reqwest::Url;
 use serde::Deserialize;
 use tokio::fs;
+use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tokio_util::sync::CancellationToken as Cancel;
 
@@ -164,6 +165,14 @@ pub enum FeedError {
         #[from]
         source: DatasetError,
     },
+    /// A valid publish tried to reuse an existing revision for different data.
+    #[error("the Minecraft options feed reused revision {revision} for different content")]
+    RevisionCollision { revision: u32 },
+    /// A valid publish is older than the last known-good cached document.
+    #[error(
+        "the Minecraft options feed revision {incoming} is older than cached revision {cached}"
+    )]
+    Rollback { incoming: u32, cached: u32 },
     /// The validated document could not be cached. The dataset is still
     /// returned; only the saving failed.
     #[error("the Minecraft options data could not be cached")]
@@ -206,6 +215,7 @@ pub struct OptionsFeed {
     source: FeedSource,
     allowlist: DomainAllowlist,
     key: MetadataKey,
+    refresh_lock: std::sync::Arc<Mutex<()>>,
 }
 
 impl OptionsFeed {
@@ -223,6 +233,16 @@ impl OptionsFeed {
         layout: CacheLayout,
         source: FeedSource,
     ) -> Result<Self, UrlPolicyError> {
+        let allowlist = match &source {
+            FeedSource::Gist { .. } => DomainAllowlist::new(FEED_HOSTS.iter().copied()),
+            FeedSource::Document { .. } => {
+                let entry = source.entry_url()?;
+                let host = entry.host_str().ok_or_else(|| UrlPolicyError::Malformed {
+                    url: source.describe(),
+                })?;
+                DomainAllowlist::new([host])
+            }
+        };
         Ok(Self {
             cache: MetadataCache::new(layout.clone()),
             key: MetadataKey::new(OPTIONS_FEED_CACHE_KEY).map_err(|_| {
@@ -230,10 +250,11 @@ impl OptionsFeed {
                     url: OPTIONS_FEED_CACHE_KEY.to_owned(),
                 }
             })?,
-            allowlist: DomainAllowlist::new(FEED_HOSTS.iter().copied()),
+            allowlist,
             manager,
             layout,
             source,
+            refresh_lock: std::sync::Arc::new(Mutex::new(())),
         })
     }
 
@@ -270,6 +291,7 @@ impl OptionsFeed {
                     %error,
                     "discarding the cached Minecraft options feed; it is no longer usable"
                 );
+                self.cache.invalidate(&self.key).await;
                 None
             }
         }
@@ -277,10 +299,14 @@ impl OptionsFeed {
 
     /// Whether the cached copy is recent enough that a refresh would be waste.
     pub async fn is_fresh(&self) -> bool {
-        self.cache
-            .peek(&self.key)
-            .await
-            .is_some_and(|entry| !entry.freshness().is_stale())
+        let Some(entry) = self.cache.peek(&self.key).await else {
+            return false;
+        };
+        if OptionsDataset::parse(entry.json()).is_err() {
+            self.cache.invalidate(&self.key).await;
+            return false;
+        }
+        !entry.freshness().is_stale()
     }
 
     /// Fetches, validates, and — only then — caches the published dataset.
@@ -293,6 +319,10 @@ impl OptionsFeed {
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> Result<OptionsDataset, FeedError> {
+        // Revision comparison and publication are one critical section. Two
+        // concurrent refreshes must not let a slower older response overwrite
+        // a newer response that finished first.
+        let _refresh = self.refresh_lock.lock().await;
         let entry = self.source.entry_url()?;
         self.allowlist.validate_url(&entry)?;
 
@@ -303,6 +333,22 @@ impl OptionsFeed {
         };
 
         let dataset = OptionsDataset::parse(&text)?;
+        if let Some(cached) = self.cached().await {
+            if dataset.revision < cached.revision {
+                return Err(FeedError::Rollback {
+                    incoming: dataset.revision,
+                    cached: cached.revision,
+                });
+            }
+            if dataset.revision == cached.revision {
+                if dataset == cached {
+                    return Ok(cached);
+                }
+                return Err(FeedError::RevisionCollision {
+                    revision: dataset.revision,
+                });
+            }
+        }
         // Cached only now, after the document has been read and validated in
         // full. Anything that failed above never reaches this line, which is
         // what keeps the last known-good copy safe from a bad publish.

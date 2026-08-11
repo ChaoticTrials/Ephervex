@@ -26,6 +26,8 @@ def setting(
     transform: str | None = None,
     allowed: dict | None = None,
     encoding: str | None = None,
+    default: int | float | None = None,
+    default_confidence: str = "unknown",
 ) -> dict:
     written = {
         "boolean": "lowercase true/false",
@@ -49,6 +51,8 @@ def setting(
         "numeric": numeric,
         "value_to_storage": transform,
         "allowed_values": allowed,
+        "default": default,
+        "default_confidence": default_confidence,
     }
 
 
@@ -142,6 +146,18 @@ class CodecDerivation(unittest.TestCase):
     def test_a_low_confidence_extraction_is_never_promoted_to_a_representation(self):
         self.assertIsNone(dataset.codec_for(setting("a", confidence="medium"), "glfw"))
 
+    def test_a_high_confidence_default_outside_a_direct_persisted_domain_is_contradictory(self):
+        contradictory = setting(
+            "simulationDistance",
+            kind="integer",
+            numeric={"min": 2, "max": 5},
+            domain_confidence="high",
+            default=12,
+            default_confidence="high",
+        )
+        self.assertIsNone(dataset.codec_for(contradictory, "glfw"))
+        self.assertIn("contradictory evidence", dataset.representation_issue(contradictory, "glfw"))
+
 
 class Fingerprints(unittest.TestCase):
     def test_identical_content_yields_one_family_and_different_content_does_not(self):
@@ -191,7 +207,25 @@ class Merging(unittest.TestCase):
         with_extra = REQUIRED + [setting("touchscreen")]
         first, _ = dataset.merge(None, [release("1.20.1", with_extra)])
         second, _ = dataset.merge(first, [release("26.2", REQUIRED)])
-        self.assertIn("touchscreen", {entry["id"] for entry in second["settings"]})
+        self.assertIn("touchscreen", {entry["id"] for entry in second["setting_registry"]})
+        self.assertNotIn("touchscreen", second["current_canonical_setting_ids"])
+
+    def test_a_new_current_setting_is_data_without_becoming_a_compiled_preference(self):
+        discovered = REQUIRED + [setting("newCurrentOption")]
+        document, _ = dataset.merge(None, [release("26.2", discovered)])
+        self.assertIn("newCurrentOption", document["current_canonical_setting_ids"])
+        self.assertNotIn("newCurrentOption", dataset.REQUIRED_CANONICAL_IDS)
+
+    def test_reanalyzing_history_does_not_replace_current_registry_metadata(self):
+        current = copy.deepcopy(REQUIRED)
+        current[5]["translation_key"] = "options.currentFov"
+        document, _ = dataset.merge(None, [release("26.2", current)])
+
+        historical = copy.deepcopy(REQUIRED)
+        historical[5]["translation_key"] = "options.oldFov"
+        updated, _ = dataset.merge(document, [release("1.20.1", historical)])
+        fov = next(entry for entry in updated["setting_registry"] if entry["id"] == "fov")
+        self.assertEqual(fov["translation_key"], "options.currentFov")
 
     def test_a_key_missing_from_a_complete_extraction_is_unsupported_not_unknown(self):
         without = [entry for entry in REQUIRED if entry["persisted_key"] != "simulationDistance"]
@@ -221,7 +255,15 @@ class Validation(unittest.TestCase):
 
     def test_a_dataset_missing_a_setting_this_build_manages_is_refused(self):
         broken = self.build()
-        broken["settings"] = [entry for entry in broken["settings"] if entry["id"] != "fov"]
+        broken["current_canonical_setting_ids"] = [
+            entry for entry in broken["current_canonical_setting_ids"] if entry != "fov"
+        ]
+        with self.assertRaises(dataset.DatasetError):
+            dataset.validate(broken)
+
+    def test_a_current_setting_must_exist_in_the_cumulative_registry(self):
+        broken = self.build()
+        broken["current_canonical_setting_ids"].append("futureOption")
         with self.assertRaises(dataset.DatasetError):
             dataset.validate(broken)
 

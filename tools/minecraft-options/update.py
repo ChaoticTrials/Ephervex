@@ -123,21 +123,28 @@ def client_jar(entry: dict[str, Any], cache: Path) -> Path:
 # ------------------------------------------------------------------ analysing
 
 
-def run_analyzer(cache: Path) -> Path:
-    """Runs the static analyzer over every JAR in the development cache."""
-    output = cache / "analysis"
+def analyzer_command(jar: Path, output: Path, assets_cache: Path) -> list[str]:
+    """The deterministic command for analyzing exactly one selected client JAR."""
+    return [
+        sys.executable,
+        str(TOOL_DIR / "analyze_options.py"),
+        "--root",
+        str(jar.parent),
+        "--input-jar",
+        str(jar),
+        "--output",
+        str(output),
+        "--assets-cache",
+        str(assets_cache),
+    ]
+
+
+def run_analyzer(cache: Path, jar: Path) -> Path:
+    """Runs the static analyzer over only the selected client JAR."""
+    output = cache / "analysis" / jar.stem
     output.mkdir(parents=True, exist_ok=True)
     completed = subprocess.run(  # noqa: S603
-        [
-            sys.executable,
-            str(TOOL_DIR / "analyze_options.py"),
-            "--root",
-            str(cache / "jars"),
-            "--output",
-            str(output),
-            "--assets-cache",
-            str(cache / "assets-cache"),
-        ],
+        analyzer_command(jar, output, cache / "assets-cache"),
         check=False,
     )
     if completed.returncode != 0:
@@ -210,8 +217,15 @@ def summarize(
         if previous
         else {}
     )
-    settings_before = {entry["id"] for entry in previous["settings"]} if previous else set()
-    settings_now = {entry["id"] for entry in document["settings"]}
+    settings_before = (
+        {
+            entry["id"]
+            for entry in previous.get("setting_registry", previous.get("settings", []))
+        }
+        if previous
+        else set()
+    )
+    settings_now = {entry["id"] for entry in document["setting_registry"]}
 
     established = set(before.values())
     for record in records:
@@ -251,23 +265,52 @@ def summarize(
             else f"language catalog: {catalog.get('status')}"
         )
 
+    review = application_review_reasons(records, document)
     remapped = [change for change in changes if change["kind"] != "release-unchanged"]
     if previous is None:
         lines.append("bundled dataset created")
     elif not remapped and settings_now == settings_before:
-        lines.append("bundled dataset unchanged; no Ephervex application update required")
+        lines.append("bundled dataset unchanged")
     else:
         lines.append(
             f"bundled dataset revision {previous['revision']} -> {document['revision']}"
         )
+    if review:
+        lines.append("Ephervex application review/update required:")
+        lines.extend(f"  {setting_id}: {reason}" for setting_id, reason in review)
+    elif previous is not None:
         lines.append("no Ephervex application update required for a mapping-only change")
     return lines
 
 
 def schema_for_extras(record: dict[str, Any], document: dict[str, Any]) -> list[str]:
     """Persisted keys this release has that no canonical definition covers."""
-    known = {entry["key"] for entry in document["settings"]}
+    known = {entry["key"] for entry in document["setting_registry"]}
     return sorted({setting["persisted_key"] for setting in record["settings"]} - known)
+
+
+def application_review_reasons(
+    records: list[dict[str, Any]], document: dict[str, Any]
+) -> list[tuple[str, str]]:
+    """Managed canonical ids the selected release cannot safely encode."""
+    registry = {entry["key"]: entry["id"] for entry in document["setting_registry"]}
+    reasons: list[tuple[str, str]] = []
+    for record in records:
+        code_space = record.get("keybinding_code_space")
+        by_id = {
+            registry[setting["persisted_key"]]: setting
+            for setting in record["settings"]
+            if setting["persisted_key"] in registry
+        }
+        for setting_id in dataset.REQUIRED_CANONICAL_IDS:
+            setting = by_id.get(setting_id)
+            if setting is None:
+                reasons.append((setting_id, "the analyzer did not recover the setting"))
+                continue
+            issue = dataset.representation_issue(setting, code_space)
+            if issue is not None:
+                reasons.append((setting_id, issue))
+    return sorted(set(reasons))
 
 
 def main() -> int:
@@ -309,8 +352,8 @@ def main() -> int:
             document = manifest(cache, args.refresh_manifest or bool(args.latest))
             entry = select_release(document, args.version)
             print(f"[update] selected release {entry['id']}", flush=True)
-            client_jar(entry, cache)
-            analysis = run_analyzer(cache)
+            jar = client_jar(entry, cache)
+            analysis = run_analyzer(cache, jar)
             catalog = refresh_language_catalog(cache, entry["id"])
             records = normalized_records(analysis, {entry["id"]})
 

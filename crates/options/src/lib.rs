@@ -68,7 +68,7 @@ pub use compatibility::{
     ResolvedField,
 };
 pub use dataset::{
-    CanonicalSetting, DATASET_FORMAT_VERSION, DatasetError, OptionsDataset, ReleaseMapping,
+    DATASET_FORMAT_VERSION, DatasetError, OptionsDataset, RegistrySetting, ReleaseMapping,
     Representation, SchemaFamily,
 };
 pub use error::OptionsError;

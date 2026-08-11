@@ -185,7 +185,7 @@ proof of what that release stores, which is generated rather than written
 official client JAR
    │ tools/minecraft-options/update.py, static analysis, never executed
    ▼
-canonical settings + schema families + release mapping
+stable setting registry + current canonical ids + schema families + release mapping
    ├── committed at crates/options/data/minecraft-options.json, compiled in
    └── published to the remote options feed
               │ validated whole, then cached atomically
@@ -209,7 +209,9 @@ always survive an edit.
 The set of languages a release offers is Mojang's data, resolved from that
 release's own `pack.mcmeta` asset object and cached per release alongside the
 version manifest. Without a catalog the managed language preference is not
-applied rather than applied on an assumption.
+applied rather than applied on an assumption. Instance creation and pack import
+consult only an already-cached catalog; release/catalog browsing performs the
+network refresh.
 
 ## Launch data flow
 

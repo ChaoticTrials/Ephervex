@@ -1111,7 +1111,21 @@ def analyse_option_window(dis: Disassembler, window: list[Insn], option_class: s
                         args = [const_num(x) for x in window[idx + 1:j]]
                         args = [v for v in args if v is not None]
                         params = split_descriptor(r2[2])[0]
-                        if "Ljava/util/function/IntSupplier;" in params and args:
+                        branches = any(
+                            x.op.startswith("if") or x.op in ("goto", "goto_w")
+                            for x in window[idx + 1:j]
+                        )
+                        if r2[2] in ("(II)V", "(IIZ)V") and branches:
+                            value_set = {
+                                "kind": "dynamic_int_range",
+                                "min": None,
+                                "max": None,
+                                "class": cls,
+                                "descriptor": r2[2],
+                                "note": "integer range bounds are selected by runtime branches; "
+                                        "the persisted type is static but one fixed domain is not",
+                            }
+                        elif "Ljava/util/function/IntSupplier;" in params and args:
                             value_set = {"kind": "lazy_max_int_range", "min": int(args[0]),
                                          "max": None, "hard_cap": int(args[-1]) if len(args) > 1 else None,
                                          "class": cls,
@@ -1201,10 +1215,11 @@ def analyse_option_window(dis: Disassembler, window: list[Insn], option_class: s
             record["allowed_values"] = {"source_enum_class": enum_class, "persisted_form": "unknown",
                                         "values": None}
     elif value_set and value_set["kind"] in ("int_range", "clamping_lazy_max_int_range",
-                                             "lazy_max_int_range"):
+                                             "lazy_max_int_range", "dynamic_int_range"):
         record["type"] = "integer"
-        record["numeric"] = {"min": value_set["min"], "max": value_set["max"], "step": 1,
-                             "clamped": True}
+        if value_set["kind"] != "dynamic_int_range":
+            record["numeric"] = {"min": value_set["min"], "max": value_set["max"], "step": 1,
+                                 "clamped": True}
         if value_set.get("note"):
             record["notes"].append(value_set["note"])
         record["file_encoding"] = "decimal integer"
@@ -2743,13 +2758,26 @@ def report(inventory: list[dict[str, Any]], latest: dict[str, Any] | None,
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path("."), help="Directory recursively containing input JARs")
+    parser.add_argument(
+        "--input-jar",
+        type=Path,
+        help="analyze exactly this JAR instead of discovering every JAR under --root",
+    )
     parser.add_argument("--output", type=Path, default=Path(__file__).resolve().parent / "output")
     parser.add_argument("--assets-cache", type=Path,
                         default=Path(__file__).resolve().parent / "assets-cache",
                         help="Offline language-catalog cache populated by fetch_language_catalogs.py")
     args = parser.parse_args()
     root, out = args.root.resolve(), args.output.resolve()
-    jars = discover(root, Path(__file__).resolve().parent)
+    jars = (
+        [args.input_jar.resolve()]
+        if args.input_jar is not None
+        else discover(root, Path(__file__).resolve().parent)
+    )
+    if args.input_jar is not None and (
+        not jars[0].is_file() or jars[0].suffix.lower() != ".jar"
+    ):
+        parser.error(f"--input-jar is not a JAR file: {jars[0]}")
     inventory: list[dict[str, Any]] = []
     print(f"[analyzer] inventory: {len(jars)} JARs", flush=True)
     for index, path in enumerate(jars, 1):
@@ -2801,7 +2829,8 @@ def main() -> int:
         stable_json(out / "compatibility-matrix.json", {"error": "No canonical release"})
         stable_json(out / "languages.json", {"error": "No canonical release"})
 
-    cmd = f"python3 {Path(__file__).resolve()} --root {root} --output {out}"
+    selected = f" --input-jar {jars[0]}" if args.input_jar is not None else ""
+    cmd = f"python3 {Path(__file__).resolve()} --root {root}{selected} --output {out}"
     (out / "report.md").write_text(
         report(inventory, latest_norm, normalized_supported, languages, changes, matrix, crosscheck, cmd),
         encoding="utf-8")
