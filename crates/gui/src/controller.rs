@@ -1235,6 +1235,15 @@ mod tests {
     }
 
     #[test]
+    fn wide_forms_and_server_details_use_hard_readability_bounds() {
+        let source = include_str!("ui.rs");
+        assert!(source.contains("width: min(parent.width, 980px)"));
+        assert!(source.contains("width: min(parent.width, 1050px)"));
+        assert!(!source.contains("max-width: 980px"));
+        assert!(!source.contains("max-width: 1050px"));
+    }
+
+    #[test]
     fn console_and_diagnostic_text_use_native_read_only_selection() {
         let source = include_str!("ui.rs");
         assert!(source.contains("accessible-read-only: true"));
