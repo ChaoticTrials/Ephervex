@@ -43,8 +43,9 @@ pub mod registry;
 mod test_support;
 
 pub use config::{
-    AccountConfig, AccountLookup, ApiConfig, CONFIG_SCHEMA_VERSION, Config, ConfigError,
-    EulaConfig, JavaConfig, NetworkAccess, PreferenceSetting, SECRET_KEY_MARKERS, ServerDefaults,
+    AccountConfig, AccountLookup, ApiConfig, ApplicationDisplayConfig, ApplicationTextScale,
+    CONFIG_SCHEMA_VERSION, Config, ConfigError, EulaConfig, JavaConfig, NetworkAccess,
+    PreferenceSetting, SECRET_KEY_MARKERS, ServerDefaults, TechnicalTextSize,
 };
 pub use diagnostics::{
     CrashSummary, DEFAULT_VIEW_BYTES, DiagnosticEntry, DiagnosticError, DiagnosticKind,

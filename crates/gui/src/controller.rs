@@ -18,7 +18,7 @@ use crate::backend::{
 use crate::presentation::{parse_network, validate_ip, validate_port};
 use crate::ui::{
     AccountRow, ActivityRow, AppWindow, DiagnosticRow, GuiI18n, InstanceRow, JavaRow, ModRow,
-    ModSearchRow, PendingEntityRow, PreferenceRow, ServerRow,
+    ModSearchRow, PendingEntityRow, PreferenceRow, ServerRow, Theme,
 };
 
 pub struct Controller {
@@ -685,6 +685,8 @@ fn register_diagnostics(ui: &AppWindow, commands: &Sender<Command>) {
 }
 
 fn register_settings(ui: &AppWindow, commands: &Sender<Command>) {
+    register_display_settings(ui, commands);
+
     let sender = commands.clone();
     ui.on_add_offline_account(move |name| {
         if !name.trim().is_empty() {
@@ -711,9 +713,18 @@ fn register_settings(ui: &AppWindow, commands: &Sender<Command>) {
     });
 
     let sender = commands.clone();
+    ui.on_reset_microsoft_client_id(move || send(&sender, Command::ResetMicrosoftClientId));
+    let sender = commands.clone();
+    ui.on_reset_user_agent(move || send(&sender, Command::ResetUserAgent));
+
+    let sender = commands.clone();
     ui.on_save_storage_settings(move |root| {
         send(&sender, Command::SaveStorageRoot(root.into()));
     });
+    let sender = commands.clone();
+    ui.on_choose_storage_root(move || send(&sender, Command::PickStorageRoot));
+    let sender = commands.clone();
+    ui.on_reset_storage_root(move || send(&sender, Command::SaveStorageRoot(String::new())));
 
     let sender = commands.clone();
     ui.on_refresh_java(move || send(&sender, Command::RefreshJava));
@@ -761,6 +772,32 @@ fn register_settings(ui: &AppWindow, commands: &Sender<Command>) {
     ui.on_reset_preference(move |key| {
         if let Some(key) = ephervex_core::PreferenceKey::parse(&key) {
             send(&sender, Command::ResetPreference(key));
+        }
+    });
+}
+
+fn register_display_settings(ui: &AppWindow, commands: &Sender<Command>) {
+    let sender = commands.clone();
+    let weak = ui.as_weak();
+    ui.on_save_display_settings(move |text_scale, technical_text_size| {
+        let settings = u16::try_from(text_scale)
+            .ok()
+            .and_then(ephervex_core::ApplicationTextScale::from_percent)
+            .zip(
+                u16::try_from(technical_text_size)
+                    .ok()
+                    .and_then(ephervex_core::TechnicalTextSize::from_pixels),
+            );
+        if let Some((text_scale, technical_text_size)) = settings {
+            send(
+                &sender,
+                Command::SaveDisplaySettings {
+                    text_scale,
+                    technical_text_size,
+                },
+            );
+        } else if let Some(ui) = weak.upgrade() {
+            ui.invoke_present_toast(lookup("gui-display-settings-invalid").into(), true);
         }
     });
 }
@@ -859,6 +896,9 @@ fn apply_event(
             }
             ui.set_import_analysis(summary.into());
             ui.set_modal_error(SharedString::default());
+        }
+        Event::StorageRootPicked(path) => {
+            ui.set_persistent_root(path.display().to_string().into());
         }
     }
 }
@@ -1022,8 +1062,18 @@ fn apply_snapshot(ui: &AppWindow, snapshot: Snapshot) {
     ui.set_preferences(model(preference_rows(preferences)));
     ui.set_storage_root(settings.storage_root.into());
     ui.set_persistent_root(settings.persistent_root.into());
+    ui.set_default_persistent_root(settings.default_persistent_root.into());
+    ui.set_persistent_root_is_custom(settings.persistent_root_origin.is_override());
     ui.set_microsoft_client_id(settings.microsoft_client_id.into());
+    ui.set_effective_microsoft_client_id(settings.effective_microsoft_client_id.into());
+    ui.set_microsoft_client_id_is_custom(settings.microsoft_client_id_origin.is_override());
     ui.set_user_agent(settings.user_agent.into());
+    ui.set_effective_user_agent(settings.effective_user_agent.into());
+    ui.set_user_agent_is_custom(settings.user_agent_origin.is_override());
+    ui.set_application_text_scale(i32::from(settings.text_scale_percent));
+    ui.set_technical_text_size(i32::from(settings.technical_text_size_pixels));
+    ui.global::<Theme>()
+        .set_text_scale(f32::from(settings.text_scale_percent) / 100.0);
     ui.set_java_auto_detect(settings.java_auto_detect);
     ui.set_java_auto_download(settings.java_auto_download);
     ui.set_java_memory_min(settings.java_memory_min.to_string().into());
@@ -1672,9 +1722,36 @@ mod tests {
         assert!(source.contains("selectable-input.copy()"));
         assert!(source.contains("selectable-input.select-all()"));
         assert!(source.contains(
-            "SelectableText { vertical-stretch: 1; border-radius: 8px; border-width: 1px; border-color: Theme.border; text: root.console-text; }"
+            "SelectableText { vertical-stretch: 1; border-radius: 8px; border-width: 1px; border-color: Theme.border; text: root.console-text; font-size: root.technical-text-size * 1px; }"
         ));
-        assert!(source.contains("SelectableText { text: root.diagnostic-content; }"));
+        assert!(source.contains(
+            "SelectableText { text: root.diagnostic-content; font-size: root.technical-text-size * 1px; }"
+        ));
+    }
+
+    #[test]
+    fn application_display_settings_use_shared_typography_and_separate_technical_text() {
+        let source = include_str!("ui.rs");
+        assert!(source.contains("in-out property <float> text-scale: 1"));
+        assert!(source.contains("default-font-size: Theme.body-size"));
+        assert!(source.contains("callback save-display-settings(int, int)"));
+        assert!(source.contains("root.technical-text-size * 1px"));
+        assert!(!source.contains("They do not change Minecraft's GUI scale"));
+    }
+
+    #[test]
+    fn provider_and_storage_resets_use_explicit_application_callbacks() {
+        let source = include_str!("ui.rs");
+        let backend = include_str!("backend.rs");
+        assert!(source.contains("callback reset-microsoft-client-id()"));
+        assert!(source.contains("callback reset-user-agent()"));
+        assert!(source.contains("callback choose-storage-root()"));
+        assert!(source.contains("callback reset-storage-root()"));
+        assert!(source.contains("root.effective-microsoft-client-id"));
+        assert!(source.contains("root.effective-user-agent"));
+        assert!(source.contains("root.default-persistent-root"));
+        assert!(backend.contains(".pick_folder()"));
+        assert!(backend.contains("Event::StorageRootPicked(path)"));
     }
 
     #[test]

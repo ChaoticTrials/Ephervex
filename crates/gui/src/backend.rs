@@ -40,6 +40,7 @@ pub enum Command {
     },
     CancelOperation(String),
     PickImport,
+    PickStorageRoot,
     CreateClient {
         request_id: String,
         name: String,
@@ -135,7 +136,13 @@ pub enum Command {
         client_id: String,
         user_agent: String,
     },
+    ResetMicrosoftClientId,
+    ResetUserAgent,
     SaveStorageRoot(String),
+    SaveDisplaySettings {
+        text_scale: ephervex_core::ApplicationTextScale,
+        technical_text_size: ephervex_core::TechnicalTextSize,
+    },
     RefreshJava,
     SaveJavaSettings {
         auto_detect: bool,
@@ -180,12 +187,34 @@ pub struct PreferenceData {
     pub syntax: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SettingOrigin {
+    #[default]
+    Default,
+    Override,
+}
+
+impl SettingOrigin {
+    #[must_use]
+    pub const fn is_override(self) -> bool {
+        matches!(self, Self::Override)
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct SettingsData {
     pub storage_root: String,
     pub persistent_root: String,
+    pub default_persistent_root: String,
+    pub persistent_root_origin: SettingOrigin,
     pub microsoft_client_id: String,
+    pub effective_microsoft_client_id: String,
+    pub microsoft_client_id_origin: SettingOrigin,
     pub user_agent: String,
+    pub effective_user_agent: String,
+    pub user_agent_origin: SettingOrigin,
+    pub text_scale_percent: u16,
+    pub technical_text_size_pixels: u16,
     pub java_auto_detect: bool,
     pub java_auto_download: bool,
     pub java_memory_min: u32,
@@ -313,6 +342,7 @@ pub enum Event {
         suggested_name: String,
         summary: String,
     },
+    StorageRootPicked(PathBuf),
 }
 
 #[derive(Debug, Clone)]
@@ -451,6 +481,14 @@ fn run_worker(
                         }
                         Err(error) => send_modal_error(&events, &error),
                     }
+                }
+            }
+            Command::PickStorageRoot => {
+                if let Some(path) = rfd::FileDialog::new()
+                    .set_title(lookup("gui-choose-persistent-root"))
+                    .pick_folder()
+                {
+                    let _ = events.send(Event::StorageRootPicked(path));
                 }
             }
             Command::CreateClient {
@@ -913,6 +951,26 @@ fn run_worker(
                     Err(error) => send_error(&events, &error),
                 }
             }
+            Command::ResetMicrosoftClientId => match app.set_microsoft_client_id(None) {
+                Ok(()) => {
+                    let _ = events.send(Event::Toast {
+                        message: lookup("gui-client-id-reset"),
+                        error: false,
+                    });
+                    send_snapshot(&app, &events);
+                }
+                Err(error) => send_error(&events, &error),
+            },
+            Command::ResetUserAgent => match app.set_custom_user_agent(None) {
+                Ok(()) => {
+                    let _ = events.send(Event::Toast {
+                        message: lookup("gui-user-agent-reset"),
+                        error: false,
+                    });
+                    send_snapshot(&app, &events);
+                }
+                Err(error) => send_error(&events, &error),
+            },
             Command::SaveStorageRoot(root) => {
                 let path = nonempty(&root).map(Path::new);
                 match app.set_persistent_instance_root(path) {
@@ -926,6 +984,19 @@ fn run_worker(
                     Err(error) => send_error(&events, &error),
                 }
             }
+            Command::SaveDisplaySettings {
+                text_scale,
+                technical_text_size,
+            } => match app.set_application_display_settings(text_scale, technical_text_size) {
+                Ok(()) => {
+                    let _ = events.send(Event::Toast {
+                        message: lookup("gui-display-settings-saved"),
+                        error: false,
+                    });
+                    send_snapshot(&app, &events);
+                }
+                Err(error) => send_error(&events, &error),
+            },
             Command::RefreshJava => match runtime.block_on(app.refresh_java_runtimes()) {
                 Ok(inventory) => {
                     let rows = inventory
@@ -1102,28 +1173,53 @@ fn snapshot(app: &App) -> Result<Snapshot, CoreError> {
             "some configured Minecraft preferences are invalid"
         );
     }
-    let api = app.api_settings()?;
-    let java = app.java_settings();
     Ok(Snapshot {
         instances: instance_rows,
         servers: server_rows,
         accounts,
         preferences,
-        settings: SettingsData {
-            storage_root: app.paths().persistent_instances_dir().display().to_string(),
-            persistent_root: app.config().persistent_instance_root.clone(),
-            microsoft_client_id: api.microsoft_client_id,
-            user_agent: api.user_agent,
-            java_auto_detect: java.auto_detect,
-            java_auto_download: java.auto_download,
-            java_memory_min: java.min_memory_mib,
-            java_memory_max: java.max_memory_mib,
-            java_preferred_path: java
-                .preferred_path
-                .map_or_else(String::new, |path| path.display().to_string()),
-        },
+        settings: application_settings(app)?,
         eula: eula_data(&app.server_eula_status()),
     })
+}
+
+fn application_settings(app: &App) -> Result<SettingsData, CoreError> {
+    let api = app.api_settings()?;
+    let display = app.application_display_settings();
+    let storage = app.persistent_storage_settings();
+    let java = app.java_settings();
+    Ok(SettingsData {
+        storage_root: storage.effective_root.display().to_string(),
+        persistent_root: storage
+            .configured_root
+            .as_deref()
+            .map_or_else(String::new, |path| path.display().to_string()),
+        default_persistent_root: storage.default_root.display().to_string(),
+        persistent_root_origin: origin(storage.configured_root.is_some()),
+        microsoft_client_id_origin: origin(api.microsoft_client_id_is_custom),
+        user_agent_origin: origin(!api.user_agent.is_empty()),
+        microsoft_client_id: api.microsoft_client_id,
+        effective_microsoft_client_id: api.effective_microsoft_client_id,
+        user_agent: api.user_agent,
+        effective_user_agent: api.effective_user_agent,
+        text_scale_percent: display.text_scale.percent(),
+        technical_text_size_pixels: display.technical_text_size.pixels(),
+        java_auto_detect: java.auto_detect,
+        java_auto_download: java.auto_download,
+        java_memory_min: java.min_memory_mib,
+        java_memory_max: java.max_memory_mib,
+        java_preferred_path: java
+            .preferred_path
+            .map_or_else(String::new, |path| path.display().to_string()),
+    })
+}
+
+const fn origin(is_override: bool) -> SettingOrigin {
+    if is_override {
+        SettingOrigin::Override
+    } else {
+        SettingOrigin::Default
+    }
 }
 
 fn preference_data(

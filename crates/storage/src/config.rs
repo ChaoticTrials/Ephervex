@@ -149,6 +149,89 @@ impl JavaConfig {
     }
 }
 
+/// Ephervex interface text scaling, independent of Minecraft's GUI scale.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ApplicationTextScale {
+    Compact,
+    #[default]
+    Default,
+    Comfortable,
+    Large,
+}
+
+impl ApplicationTextScale {
+    /// The percentage applied to Ephervex-owned interface typography.
+    #[must_use]
+    pub const fn percent(self) -> u16 {
+        match self {
+            Self::Compact => 90,
+            Self::Default => 100,
+            Self::Comfortable => 110,
+            Self::Large => 125,
+        }
+    }
+
+    /// Resolves one of the bounded values accepted by application settings.
+    #[must_use]
+    pub const fn from_percent(percent: u16) -> Option<Self> {
+        match percent {
+            90 => Some(Self::Compact),
+            100 => Some(Self::Default),
+            110 => Some(Self::Comfortable),
+            125 => Some(Self::Large),
+            _ => None,
+        }
+    }
+}
+
+/// Monospace size used by Ephervex diagnostics and server-console surfaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TechnicalTextSize {
+    Compact,
+    #[default]
+    Default,
+    Comfortable,
+    Large,
+}
+
+impl TechnicalTextSize {
+    /// The logical pixel size used by selectable technical text controls.
+    #[must_use]
+    pub const fn pixels(self) -> u16 {
+        match self {
+            Self::Compact => 11,
+            Self::Default => 12,
+            Self::Comfortable => 14,
+            Self::Large => 16,
+        }
+    }
+
+    /// Resolves one of the bounded values accepted by application settings.
+    #[must_use]
+    pub const fn from_pixels(pixels: u16) -> Option<Self> {
+        match pixels {
+            11 => Some(Self::Compact),
+            12 => Some(Self::Default),
+            14 => Some(Self::Comfortable),
+            16 => Some(Self::Large),
+            _ => None,
+        }
+    }
+}
+
+/// Display preferences for Ephervex itself.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ApplicationDisplayConfig {
+    pub text_scale: ApplicationTextScale,
+    pub technical_text_size: TechnicalTextSize,
+    /// Keys this build does not know about. See [`Config::unknown`].
+    #[serde(flatten)]
+    pub unknown: toml::Table,
+}
+
 /// One managed Minecraft preference.
 ///
 /// `enabled` is separate from `value` on purpose: a preference the launcher
@@ -329,6 +412,7 @@ pub struct Config {
     /// value rather than a flag that two rows could both claim. One account
     /// ships, but the shape does not foreclose a second.
     pub active_account: String,
+    pub display: ApplicationDisplayConfig,
     pub java: JavaConfig,
     /// Managed Minecraft preferences, keyed by preference name. An open map
     /// rather than a fixed struct because the set of managed keys grows with
@@ -360,6 +444,7 @@ impl Default for Config {
             language: "en-US".to_owned(),
             persistent_instance_root: String::new(),
             active_account: String::new(),
+            display: ApplicationDisplayConfig::default(),
             java: JavaConfig::default(),
             minecraft_preferences: BTreeMap::new(),
             server_defaults: ServerDefaults::default(),
@@ -731,6 +816,10 @@ schema_version = 1
 language = "en-US"
 persistent_instance_root = ""
 
+[display]
+text_scale = "default"
+technical_text_size = "default"
+
 [java]
 auto_detect = true
 auto_download = true
@@ -761,6 +850,8 @@ reference = ""
         let config = Config::default();
         assert_eq!(config.schema_version, CONFIG_SCHEMA_VERSION);
         assert_eq!(config.language, "en-US");
+        assert_eq!(config.display.text_scale.percent(), 100);
+        assert_eq!(config.display.technical_text_size.pixels(), 12);
         // Test servers are for testing mods, not for being reachable.
         assert!(!config.server_defaults.online_mode);
         assert_eq!(
@@ -803,6 +894,35 @@ reference = ""
             Config::default()
         );
         assert!(!path.exists(), "loading must not create the file");
+    }
+
+    #[test]
+    fn configuration_without_display_settings_loads_current_application_defaults() {
+        let legacy = DEFAULT_CONFIG_EXAMPLE
+            .lines()
+            .filter(|line| {
+                !matches!(
+                    *line,
+                    "[display]" | "text_scale = \"default\"" | "technical_text_size = \"default\""
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let parsed = Config::from_toml_str(&legacy).expect("legacy configuration parses");
+        assert_eq!(parsed.display, ApplicationDisplayConfig::default());
+    }
+
+    #[test]
+    fn application_display_choices_round_trip_without_affecting_minecraft_preferences() {
+        let mut config = Config::default();
+        config.display.text_scale = ApplicationTextScale::Large;
+        config.display.technical_text_size = TechnicalTextSize::Comfortable;
+
+        let text = config.to_toml_string().expect("serialize");
+        let parsed = Config::from_toml_str(&text).expect("re-parse");
+        assert_eq!(parsed.display, config.display);
+        assert!(parsed.minecraft_preferences.is_empty());
     }
 
     #[test]

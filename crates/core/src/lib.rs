@@ -35,7 +35,10 @@ pub mod mods;
 pub mod server;
 
 pub use account::{AccountStatus, AccountSummary, ApiSettings, LoginOptions, TOKEN_REFRESH_MARGIN};
-pub use app::{App, JavaPlan, JavaPlanRequest, JavaTarget, global_java_settings};
+pub use app::{
+    App, ApplicationDisplaySettings, JavaPlan, JavaPlanRequest, JavaTarget,
+    PersistentStorageSettings, global_java_settings,
+};
 pub use connection::{
     ConnectError, DEFAULT_SERVER_READINESS_TIMEOUT, LaunchAndConnectAvailability,
     LaunchAndConnectEvent, LaunchAndConnectObserver, LaunchAndConnectOptions,
@@ -147,12 +150,13 @@ pub use ephervex_server::{
     ServerObserver, ServerWarning,
 };
 pub use ephervex_storage::{
-    AccountConfig, ApiConfig, CONFIG_SCHEMA_VERSION, ClientFolder, ClientRecord, Config,
-    CrashSummary, DUPLICATE_NAME_SUFFIX, DiagnosticEntry, DiagnosticError, DiagnosticKind,
-    DuplicateClient, DuplicatedClient, EulaConfig, FileDisposition, ImportSource, JavaConfig,
-    LaunchState, MAX_SEARCH_MATCHES, MAX_VIEW_BYTES, MissingFolder, NetworkAccess, NewClient,
-    NewServer, PathError, Paths, PreferenceSetting, ReconciledRecord, ReconciliationReport,
-    RecordRef, SECRET_KEY_MARKERS, SearchMatch, SearchOptions, SearchOutcome, ServerCommit,
-    ServerCommitWarning, ServerDefaults, ServerFolder, ServerNetworkSettings, ServerRecord,
-    ServerRootConflict, StorageError, TextAnchor, TextView, running_state,
+    AccountConfig, ApiConfig, ApplicationDisplayConfig, ApplicationTextScale,
+    CONFIG_SCHEMA_VERSION, ClientFolder, ClientRecord, Config, CrashSummary, DUPLICATE_NAME_SUFFIX,
+    DiagnosticEntry, DiagnosticError, DiagnosticKind, DuplicateClient, DuplicatedClient,
+    EulaConfig, FileDisposition, ImportSource, JavaConfig, LaunchState, MAX_SEARCH_MATCHES,
+    MAX_VIEW_BYTES, MissingFolder, NetworkAccess, NewClient, NewServer, PathError, Paths,
+    PreferenceSetting, ReconciledRecord, ReconciliationReport, RecordRef, SECRET_KEY_MARKERS,
+    SearchMatch, SearchOptions, SearchOutcome, ServerCommit, ServerCommitWarning, ServerDefaults,
+    ServerFolder, ServerNetworkSettings, ServerRecord, ServerRootConflict, StorageError,
+    TechnicalTextSize, TextAnchor, TextView, running_state,
 };

@@ -9,6 +9,19 @@ slint::slint! {
     }
 
     export global Theme {
+        in-out property <float> text-scale: 1;
+        out property <length> caption-size: 11px * text-scale;
+        out property <length> label-size: 12px * text-scale;
+        out property <length> body-size: 13px * text-scale;
+        out property <length> row-heading-size: 14px * text-scale;
+        out property <length> section-size: 16px * text-scale;
+        out property <length> heading-size: 17px * text-scale;
+        out property <length> item-title-size: 18px * text-scale;
+        out property <length> brand-size: 20px * text-scale;
+        out property <length> workspace-title-size: 23px * text-scale;
+        out property <length> about-title-size: 24px * text-scale;
+        out property <length> diagnostics-title-size: 25px * text-scale;
+        out property <length> page-title-size: 27px * text-scale;
         out property <color> background: #101315;
         out property <color> surface: #171b1e;
         out property <color> elevated: #1e2428;
@@ -154,14 +167,14 @@ slint::slint! {
 
     component BodyText inherits Text {
         color: Theme.text-secondary;
-        font-size: 13px;
+        font-size: Theme.body-size;
         vertical-alignment: center;
         vertical-stretch: 0;
     }
 
     component Heading inherits Text {
         color: Theme.text;
-        font-size: 17px;
+        font-size: Theme.heading-size;
         font-weight: 600;
         vertical-alignment: center;
         horizontal-stretch: 0;
@@ -170,7 +183,7 @@ slint::slint! {
 
     component Eyebrow inherits Text {
         color: Theme.text-muted;
-        font-size: 11px;
+        font-size: Theme.caption-size;
         font-weight: 600;
         letter-spacing: 0.7px;
         vertical-stretch: 0;
@@ -181,7 +194,7 @@ slint::slint! {
         in property <string> subtitle;
         spacing: 5px;
         horizontal-stretch: 1;
-        Heading { text: root.title; font-size: 27px; }
+        Heading { text: root.title; font-size: Theme.page-title-size; }
         if root.subtitle != "" : BodyText {
             text: root.subtitle;
             color: Theme.text-secondary;
@@ -193,7 +206,7 @@ slint::slint! {
         in property <string> title;
         in property <string> detail;
         spacing: 4px;
-        Heading { text: root.title; font-size: 16px; }
+        Heading { text: root.title; font-size: Theme.section-size; }
         if root.detail != "" : BodyText {
             text: root.detail;
             color: Theme.text-muted;
@@ -226,7 +239,7 @@ slint::slint! {
         label := Text {
             text: root.text;
             color: !root.enabled ? Theme.text-muted : root.tone == "danger" ? #fff0f1 : Theme.text;
-            font-size: 13px;
+            font-size: Theme.body-size;
             font-weight: root.tone == "primary" ? 600 : 400;
             horizontal-alignment: center;
             vertical-alignment: center;
@@ -273,7 +286,7 @@ slint::slint! {
         input := TextInput {
             x: 11px; width: parent.width - 22px; height: parent.height;
             color: root.enabled ? Theme.text : Theme.text-muted;
-            font-size: 13px;
+            font-size: Theme.body-size;
             enabled: root.enabled;
             input-type: root.input-type;
             single-line: true;
@@ -285,14 +298,14 @@ slint::slint! {
             x: 11px; width: parent.width - 22px; height: parent.height;
             text: root.placeholder;
             color: Theme.text-muted;
-            font-size: 13px;
+            font-size: Theme.body-size;
             vertical-alignment: center;
         }
     }
 
     component FieldLabel inherits Text {
         color: Theme.text-secondary;
-        font-size: 12px;
+        font-size: Theme.label-size;
     }
 
     component SelectableText inherits Rectangle {
@@ -389,7 +402,7 @@ slint::slint! {
         label := Text {
             text: root.text;
             color: root.tone-color;
-            font-size: 11px;
+            font-size: Theme.caption-size;
             font-weight: 600;
             horizontal-alignment: center;
             vertical-alignment: center;
@@ -412,7 +425,7 @@ slint::slint! {
             alignment: center;
             padding-left: 16px; padding-right: 12px; spacing: 13px;
             Image { source: root.icon; width: 22px; height: 22px; image-fit: contain; }
-            Text { text: root.label; color: root.selected ? Theme.accent : Theme.text-secondary; font-size: 14px; vertical-alignment: center; }
+            Text { text: root.label; color: root.selected ? Theme.accent : Theme.text-secondary; font-size: Theme.row-heading-size; vertical-alignment: center; }
         }
         area := TouchArea { clicked => { root.clicked(); } }
     }
@@ -436,7 +449,7 @@ slint::slint! {
             x: 16px; width: parent.width - 26px; height: parent.height;
             text: root.label;
             color: root.selected ? Theme.accent : Theme.text-secondary;
-            font-size: 13px;
+            font-size: Theme.body-size;
             font-weight: root.selected ? 600 : 400;
             vertical-alignment: center;
         }
@@ -458,7 +471,7 @@ slint::slint! {
         label := Text {
             text: root.text;
             color: root.selected ? Theme.text : Theme.text-secondary;
-            font-size: 13px;
+            font-size: Theme.body-size;
             font-weight: root.selected ? 600 : 400;
             horizontal-alignment: center;
             vertical-alignment: center;
@@ -526,7 +539,7 @@ slint::slint! {
                 width: root.compact ? 170px : 245px;
                 spacing: 4px;
                 HorizontalLayout { spacing: 8px;
-                    Heading { text: item.label; font-size: 14px; }
+                    Heading { text: item.label; font-size: Theme.row-heading-size; }
                     if item.customized : Pill { text: GuiI18n.text("gui-customized"); tone-color: Theme.accent-secondary; }
                 }
                 BodyText { text: item.syntax; color: Theme.text-muted; wrap: word-wrap; }
@@ -596,7 +609,7 @@ slint::slint! {
         background: Theme.elevated;
         Rectangle { x: 0px; y: 0px; width: 4px; height: parent.height; background: root.error ? Theme.danger : Theme.success; border-radius: 3px; }
         HorizontalLayout { padding-left: 16px; padding-right: 10px; padding-top: 10px; padding-bottom: 10px; spacing: 10px; alignment: center;
-            VerticalLayout { horizontal-stretch: 1; spacing: 3px; Heading { text: root.error ? GuiI18n.text("gui-notification-error") : GuiI18n.text("gui-notification-complete"); font-size: 13px; } toast-message := BodyText { text: root.message; color: Theme.text-secondary; wrap: word-wrap; } }
+            VerticalLayout { horizontal-stretch: 1; spacing: 3px; Heading { text: root.error ? GuiI18n.text("gui-notification-error") : GuiI18n.text("gui-notification-complete"); font-size: Theme.body-size; } toast-message := BodyText { text: root.message; color: Theme.text-secondary; wrap: word-wrap; } }
             IconButton { icon: @image-url("../../../assets/icons/close.svg"); accessible-name: GuiI18n.text("gui-dismiss-notification"); width: 32px; height: 32px; clicked => { root.dismiss(); } }
         }
     }
@@ -611,10 +624,10 @@ slint::slint! {
         background: Theme.surface;
         HorizontalLayout { padding: 14px; spacing: 14px;
             VerticalLayout { horizontal-stretch: 1; spacing: 4px;
-                Heading { text: item.title; font-size: 14px; }
+                Heading { text: item.title; font-size: Theme.row-heading-size; }
                 BodyText { text: item.entity; color: Theme.text; wrap: word-wrap; }
                 detail-text := BodyText { text: item.detail; visible: item.detail != ""; wrap: word-wrap; }
-                BodyText { text: item.id + " | " + item.time; color: Theme.text-muted; font-family: "monospace"; font-size: 11px; }
+                BodyText { text: item.id + " | " + item.time; color: Theme.text-muted; font-family: "monospace"; font-size: Theme.caption-size; }
                 if item.active && !item.indeterminate : Rectangle { height: 4px; border-radius: 2px; background: Theme.border; Rectangle { width: parent.width * item.progress; height: parent.height; border-radius: 2px; background: Theme.accent; } }
             }
             VerticalLayout { width: 112px; alignment: start; spacing: 8px;
@@ -663,7 +676,7 @@ slint::slint! {
                 width: 224px; alignment: center; spacing: 7px;
                 HorizontalLayout {
                     alignment: center; spacing: 7px;
-                    BodyText { text: item.storage; color: item.storage-kind == "temporary" ? Theme.warning : Theme.success; font-size: 11px; }
+                    BodyText { text: item.storage; color: item.storage-kind == "temporary" ? Theme.warning : Theme.success; font-size: Theme.caption-size; }
                     Pill { text: item.state; tone-color: item.state-kind == "running" ? Theme.success : item.state-kind == "starting" ? Theme.warning : Theme.text-secondary; }
                     if item.needs-attention : Pill { text: GuiI18n.text("gui-attention"); tone-color: Theme.danger; }
                 }
@@ -727,7 +740,7 @@ slint::slint! {
                 width: 224px; alignment: center; spacing: 7px;
                 HorizontalLayout {
                     alignment: center; spacing: 7px;
-                    BodyText { text: item.storage; color: item.storage-kind == "temporary" ? Theme.warning : Theme.success; font-size: 11px; }
+                    BodyText { text: item.storage; color: item.storage-kind == "temporary" ? Theme.warning : Theme.success; font-size: Theme.caption-size; }
                     Pill { text: item.state; tone-color: item.state-kind == "running" ? Theme.success : item.state-kind == "stopped" ? Theme.text-secondary : Theme.warning; }
                 }
                 HorizontalLayout { alignment: center; spacing: 7px;
@@ -778,7 +791,7 @@ slint::slint! {
                 LoaderGlyph { kind: item.loader-kind; }
                 VerticalLayout {
                     spacing: 4px;
-                    Heading { text: item.name; font-size: 18px; }
+                    Heading { text: item.name; font-size: Theme.item-title-size; }
                     BodyText { text: GuiI18n.values("gui-target-summary", item.minecraft, item.loader); color: Theme.text-muted; }
                 }
             }
@@ -812,6 +825,7 @@ slint::slint! {
         min-width: 980px;
         min-height: 680px;
         background: Theme.background;
+        default-font-size: Theme.body-size;
 
         in property <image> logo: @image-url("../../../assets/logo.png");
         in-out property <int> page: 0;
@@ -911,8 +925,16 @@ slint::slint! {
         in-out property <string> eula-status;
         in-out property <string> offline-account-name;
         in-out property <string> microsoft-client-id;
+        in-out property <string> effective-microsoft-client-id;
+        in-out property <bool> microsoft-client-id-is-custom;
         in-out property <string> user-agent;
+        in-out property <string> effective-user-agent;
+        in-out property <bool> user-agent-is-custom;
         in-out property <string> persistent-root;
+        in-out property <string> default-persistent-root;
+        in-out property <bool> persistent-root-is-custom;
+        in-out property <int> application-text-scale: 100;
+        in-out property <int> technical-text-size: 12;
         in-out property <string> java-memory-min: "512";
         in-out property <string> java-memory-max: "4096";
         in-out property <string> java-preferred-path;
@@ -962,7 +984,12 @@ slint::slint! {
         callback remove-account(string);
         callback begin-microsoft-login();
         callback save-api-settings(string, string);
+        callback reset-microsoft-client-id();
+        callback reset-user-agent();
         callback save-storage-settings(string);
+        callback choose-storage-root();
+        callback reset-storage-root();
+        callback save-display-settings(int, int);
         callback refresh-java();
         callback save-java-settings(bool, bool, string, string, string);
         callback save-preference(string, string);
@@ -1014,7 +1041,7 @@ slint::slint! {
                 HorizontalLayout {
                     alignment: center; padding-left: 20px; padding-right: 20px; spacing: 14px;
                     Image { source: root.logo; width: 36px; height: 36px; image-fit: contain; accessible-label: GuiI18n.text("gui-logo-accessible"); }
-                    Heading { text: "Ephervex"; font-size: 20px; width: 180px; }
+                    Heading { text: "Ephervex"; font-size: Theme.brand-size; width: 180px; }
                     Rectangle { horizontal-stretch: 1; }
                     if root.page == 0 && root.workspace == "" : AppButton { text: GuiI18n.text("gui-import-modpack"); clicked => { root.modal = "import"; } }
                     if root.page == 0 && root.workspace == "" : AppButton { text: GuiI18n.text("gui-new-instance"); tone: "primary"; min-width: 148px; clicked => { root.modal-error = ""; root.request-version-catalog(); root.warm-language-catalog(root.create-minecraft); root.modal = "create-instance"; } }
@@ -1038,7 +1065,7 @@ slint::slint! {
                         NavItem { icon: @image-url("../../../assets/icons/nav-activity.svg"); label: GuiI18n.text("gui-activity"); selected: root.page == 3; clicked => { root.page = 3; root.workspace = ""; } }
                         NavItem { icon: @image-url("../../../assets/icons/nav-settings.svg"); label: GuiI18n.text("gui-settings"); selected: root.page == 4; clicked => { root.page = 4; root.workspace = ""; root.workspace-tab = "General"; } }
                         Rectangle { vertical-stretch: 1; }
-                        BodyText { text: GuiI18n.text("gui-tagline"); color: Theme.text-muted; font-size: 11px; wrap: word-wrap; }
+                        BodyText { text: GuiI18n.text("gui-tagline"); color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
                     }
                 }
 
@@ -1112,7 +1139,7 @@ slint::slint! {
                     horizontal-stretch: 1; background: Theme.background;
                     VerticalLayout {
                         padding: 22px; spacing: 14px;
-                        HorizontalLayout { spacing: 12px; AppButton { text: GuiI18n.text("gui-back-instances"); clicked => { root.workspace = ""; } } Heading { text: root.selected-instance-index >= 0 ? root.instances[root.selected-instance-index].name : GuiI18n.text("gui-instance"); font-size: 23px; } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-launch"); tone: "primary"; enabled: root.selected-instance-index >= 0 && root.instances[root.selected-instance-index].can-launch; clicked => { root.launch-client(root.selected-instance-id); } } }
+                        HorizontalLayout { spacing: 12px; AppButton { text: GuiI18n.text("gui-back-instances"); clicked => { root.workspace = ""; } } Heading { text: root.selected-instance-index >= 0 ? root.instances[root.selected-instance-index].name : GuiI18n.text("gui-instance"); font-size: Theme.workspace-title-size; } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-launch"); tone: "primary"; enabled: root.selected-instance-index >= 0 && root.instances[root.selected-instance-index].can-launch; clicked => { root.launch-client(root.selected-instance-id); } } }
                         HorizontalLayout {
                             spacing: 4px;
                             WorkspaceTab { text: GuiI18n.text("gui-instance-tab-overview"); selected: root.workspace-tab == "Overview"; clicked => { root.workspace-tab = "Overview"; } }
@@ -1137,13 +1164,13 @@ slint::slint! {
                             Rectangle { width: 42%; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface;
                                 VerticalLayout { padding: 16px; spacing: 10px; Heading { text: GuiI18n.text("gui-managed-mods"); } BodyText { text: GuiI18n.text("gui-managed-mods-detail"); wrap: word-wrap; }
                                     if root.managed-mods.length == 0 : EmptyState { title: GuiI18n.text("gui-no-managed-mods"); message: GuiI18n.text("gui-no-managed-mods-detail"); }
-                                    ScrollView { VerticalLayout { spacing: 8px; for mod in root.managed-mods : Rectangle { height: 70px; border-radius: 6px; border-width: 1px; border-color: Theme.border; background: Theme.background; VerticalLayout { padding: 10px; Heading { text: mod.title; font-size: 14px; } BodyText { text: mod.version + " | " + mod.provider + " | " + mod.origin; } } } } }
+                                    ScrollView { VerticalLayout { spacing: 8px; for mod in root.managed-mods : Rectangle { height: 70px; border-radius: 6px; border-width: 1px; border-color: Theme.border; background: Theme.background; VerticalLayout { padding: 10px; Heading { text: mod.title; font-size: Theme.row-heading-size; } BodyText { text: mod.version + " | " + mod.provider + " | " + mod.origin; } } } } }
                                 }
                             }
                             Rectangle { horizontal-stretch: 1; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface;
                                 VerticalLayout { padding: 16px; spacing: 10px; Heading { text: GuiI18n.text("gui-add-modrinth-mods"); } BodyText { text: GuiI18n.text("gui-modrinth-compatibility"); wrap: word-wrap; }
                                     HorizontalLayout { TextField { text <=> root.mod-query; placeholder: GuiI18n.text("gui-search-compatible-mods"); input-type: InputType.search; horizontal-stretch: 1; accepted => { root.search-mods(root.selected-instance-id, root.mod-query); } } AppButton { text: GuiI18n.text("gui-search"); tone: "primary"; clicked => { root.search-mods(root.selected-instance-id, root.mod-query); } } }
-                                    ScrollView { VerticalLayout { spacing: 8px; for mod in root.mod-results : Rectangle { height: 92px; border-radius: 6px; border-width: 1px; border-color: Theme.border; background: Theme.background; HorizontalLayout { padding: 10px; VerticalLayout { Heading { text: mod.title; font-size: 14px; } BodyText { text: mod.description; wrap: word-wrap; } BodyText { text: GuiI18n.values("gui-mod-result-meta", mod.author, mod.downloads); color: Theme.text-muted; } } AppButton { text: GuiI18n.text("gui-review"); clicked => { root.review-mod(root.selected-instance-id, mod.project-id); } } } } } }
+                                    ScrollView { VerticalLayout { spacing: 8px; for mod in root.mod-results : Rectangle { height: 92px; border-radius: 6px; border-width: 1px; border-color: Theme.border; background: Theme.background; HorizontalLayout { padding: 10px; VerticalLayout { Heading { text: mod.title; font-size: Theme.row-heading-size; } BodyText { text: mod.description; wrap: word-wrap; } BodyText { text: GuiI18n.values("gui-mod-result-meta", mod.author, mod.downloads); color: Theme.text-muted; } } AppButton { text: GuiI18n.text("gui-review"); clicked => { root.review-mod(root.selected-instance-id, mod.project-id); } } } } } }
                                 }
                             }
                         }
@@ -1198,7 +1225,7 @@ slint::slint! {
 
                 if root.page == 1 && root.workspace == "server" : Rectangle { horizontal-stretch: 1; background: Theme.background;
                     VerticalLayout { padding: 22px; spacing: 14px;
-                        HorizontalLayout { spacing: 12px; AppButton { text: GuiI18n.text("gui-back-servers"); clicked => { root.workspace = ""; } } Heading { text: root.selected-server-index >= 0 ? root.servers[root.selected-server-index].name : GuiI18n.text("gui-server"); font-size: 23px; } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-restart"); enabled: root.selected-server-index >= 0 && root.servers[root.selected-server-index].can-restart; clicked => { root.server-restart(root.selected-server-id); } } AppButton { text: root.selected-server-index >= 0 && root.servers[root.selected-server-index].can-stop ? GuiI18n.text("gui-stop") : GuiI18n.text("gui-start"); tone: "primary"; enabled: root.selected-server-index >= 0 && (root.servers[root.selected-server-index].can-start || root.servers[root.selected-server-index].can-stop); clicked => { if root.servers[root.selected-server-index].can-stop { root.server-stop(root.selected-server-id); } else { root.server-start(root.selected-server-id); } } } }
+                        HorizontalLayout { spacing: 12px; AppButton { text: GuiI18n.text("gui-back-servers"); clicked => { root.workspace = ""; } } Heading { text: root.selected-server-index >= 0 ? root.servers[root.selected-server-index].name : GuiI18n.text("gui-server"); font-size: Theme.workspace-title-size; } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-restart"); enabled: root.selected-server-index >= 0 && root.servers[root.selected-server-index].can-restart; clicked => { root.server-restart(root.selected-server-id); } } AppButton { text: root.selected-server-index >= 0 && root.servers[root.selected-server-index].can-stop ? GuiI18n.text("gui-stop") : GuiI18n.text("gui-start"); tone: "primary"; enabled: root.selected-server-index >= 0 && (root.servers[root.selected-server-index].can-start || root.servers[root.selected-server-index].can-stop); clicked => { if root.servers[root.selected-server-index].can-stop { root.server-stop(root.selected-server-id); } else { root.server-start(root.selected-server-id); } } } }
                         HorizontalLayout { spacing: 8px;
                             WorkspaceTab { text: GuiI18n.text("gui-instance-tab-overview"); selected: root.workspace-tab == "Overview"; clicked => { root.workspace-tab = "Overview"; } }
                             WorkspaceTab { text: GuiI18n.text("gui-server-tab-console"); selected: root.workspace-tab == "Console"; clicked => { root.workspace-tab = "Console"; } }
@@ -1216,7 +1243,7 @@ slint::slint! {
                         } } HorizontalLayout { spacing: 8px; AppButton { text: GuiI18n.text("gui-open-folder"); clicked => { root.open-server-folder(root.selected-server-id); } } AppButton { text: GuiI18n.text("gui-view-logs"); clicked => { root.page = 2; root.load-diagnostics("server", root.selected-server-id, "log"); } } if root.servers[root.selected-server-index].linked-client-id != "" : AppButton { text: GuiI18n.text("gui-launch-client-connect"); tone: "primary"; clicked => { root.launch-and-connect(root.servers[root.selected-server-index].linked-client-id, root.selected-server-id); } } } } }
                         if root.workspace-tab == "Console" : VerticalLayout { spacing: 10px;
                             HorizontalLayout { BodyText { text: GuiI18n.value("gui-bounded-output", root.servers[root.selected-server-index].state); color: root.servers[root.selected-server-index].can-send-command ? Theme.success : Theme.text-secondary; } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-restart"); enabled: root.servers[root.selected-server-index].can-restart; clicked => { root.server-restart(root.selected-server-id); } } AppButton { text: GuiI18n.text("gui-stop"); enabled: root.servers[root.selected-server-index].can-stop; clicked => { root.server-stop(root.selected-server-id); } } AppButton { text: GuiI18n.text("gui-kill"); tone: "danger"; enabled: root.servers[root.selected-server-index].can-kill; clicked => { root.modal = "kill"; } } }
-                            SelectableText { vertical-stretch: 1; border-radius: 8px; border-width: 1px; border-color: Theme.border; text: root.console-text; }
+                            SelectableText { vertical-stretch: 1; border-radius: 8px; border-width: 1px; border-color: Theme.border; text: root.console-text; font-size: root.technical-text-size * 1px; }
                             HorizontalLayout { TextField { text <=> root.console-command; placeholder: root.servers[root.selected-server-index].can-send-command ? GuiI18n.text("gui-enter-server-command") : GuiI18n.text("gui-start-server-command"); enabled: root.servers[root.selected-server-index].can-send-command; horizontal-stretch: 1; accepted => { root.server-console(root.selected-server-id, root.console-command); root.console-command = ""; } } AppButton { text: GuiI18n.text("gui-send"); tone: "primary"; enabled: root.servers[root.selected-server-index].can-send-command && root.console-command != ""; clicked => { root.server-console(root.selected-server-id, root.console-command); root.console-command = ""; } } }
                         }
                         if root.workspace-tab == "Properties" : ScrollView { VerticalLayout { alignment: start; width: min(parent.width, 1100px); spacing: 14px;
@@ -1251,7 +1278,7 @@ slint::slint! {
                                         if root.compact-layout : VerticalLayout { padding: 8px; spacing: 6px; HorizontalLayout { Heading { text: root.diagnostic-title != "" ? root.diagnostic-title : GuiI18n.text("gui-select-diagnostic"); font-size: 14px; } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-copy"); enabled: root.diagnostic-content != ""; clicked => { root.copy-text(root.diagnostic-content); } } } HorizontalLayout { spacing: 8px; TextField { text <=> root.diagnostic-query; placeholder: GuiI18n.text("gui-search-loaded-content"); input-type: InputType.search; horizontal-stretch: 1; accepted => { root.search-diagnostic(root.selected-diagnostic-scope, root.selected-diagnostic-id, root.selected-diagnostic-kind, root.selected-diagnostic-name, root.diagnostic-query); } } AppButton { text: GuiI18n.text("gui-find"); enabled: root.selected-diagnostic-name != ""; clicked => { root.search-diagnostic(root.selected-diagnostic-scope, root.selected-diagnostic-id, root.selected-diagnostic-kind, root.selected-diagnostic-name, root.diagnostic-query); } } AppButton { text: GuiI18n.text("gui-folder"); enabled: root.selected-diagnostic-name != ""; clicked => { root.open-diagnostic-folder(root.selected-diagnostic-scope, root.selected-diagnostic-id, root.selected-diagnostic-kind); } } AppButton { text: GuiI18n.text("gui-refresh"); enabled: root.selected-diagnostic-name != ""; clicked => { root.refresh-diagnostic(root.selected-diagnostic-scope, root.selected-diagnostic-id, root.selected-diagnostic-kind, root.selected-diagnostic-name); } } } }
                                     }
                                     if root.diagnostic-content == "" : EmptyState { title: GuiI18n.text("gui-no-file-open"); message: GuiI18n.text("gui-no-file-open-detail"); }
-                                    if root.diagnostic-content != "" : SelectableText { text: root.diagnostic-content; }
+                                    if root.diagnostic-content != "" : SelectableText { text: root.diagnostic-content; font-size: root.technical-text-size * 1px; }
                                     if root.diagnostic-path != "" : Rectangle { height: 30px; background: Theme.surface; HorizontalLayout { padding-left: 10px; BodyText { text: root.diagnostic-path; color: Theme.text-muted; overflow: elide; } AppButton { text: GuiI18n.text("gui-copy-path"); min-width: 88px; height: 28px; clicked => { root.copy-text(root.diagnostic-path); } } } }
                                 }
                             }
@@ -1286,7 +1313,22 @@ slint::slint! {
                             title: root.workspace-tab == "General" ? GuiI18n.text("gui-settings-general") : root.workspace-tab == "Minecraft" ? GuiI18n.text("gui-settings-minecraft") : root.workspace-tab == "Java" ? GuiI18n.text("gui-settings-java") : root.workspace-tab == "Accounts" ? GuiI18n.text("gui-settings-accounts") : root.workspace-tab == "Providers & APIs" ? GuiI18n.text("gui-settings-providers") : root.workspace-tab == "Storage" ? GuiI18n.text("gui-settings-storage") : GuiI18n.text("gui-settings-about");
                             subtitle: root.workspace-tab == "Minecraft" ? GuiI18n.text("gui-minecraft-defaults-detail") : root.workspace-tab == "Java" ? GuiI18n.text("gui-java-detail") : root.workspace-tab == "Accounts" ? GuiI18n.text("gui-accounts-detail") : root.workspace-tab == "Providers & APIs" ? GuiI18n.text("gui-provider-detail") : root.workspace-tab == "Storage" ? GuiI18n.text("gui-storage-detail") : root.workspace-tab == "About & Licenses" ? GuiI18n.text("gui-tagline") : GuiI18n.text("gui-settings-detail");
                         }
-                        if root.workspace-tab == "General" : VerticalLayout { spacing: 12px; SectionTitle { title: GuiI18n.text("gui-application-behavior"); detail: ""; } Rectangle { height: 92px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface; HorizontalLayout { padding: 16px; VerticalLayout { spacing: 5px; Heading { text: GuiI18n.text("gui-desktop-scale"); font-size: 14px; } BodyText { text: GuiI18n.text("gui-desktop-scale-detail"); wrap: word-wrap; } } Pill { text: GuiI18n.text("gui-system"); tone-color: Theme.accent-secondary; } } } }
+                        if root.workspace-tab == "General" : VerticalLayout { spacing: 14px;
+                            SectionTitle { title: GuiI18n.text("gui-application-display"); detail: GuiI18n.text("gui-application-display-detail"); }
+                            Rectangle { height: root.application-text-scale >= 125 ? 124px : root.application-text-scale >= 110 ? 112px : 104px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface;
+                                HorizontalLayout { padding: 16px; spacing: 20px; alignment: center;
+                                    VerticalLayout { horizontal-stretch: 1; spacing: 5px; Heading { text: GuiI18n.text("gui-application-text-size"); font-size: Theme.row-heading-size; } BodyText { text: GuiI18n.text("gui-application-text-size-detail"); wrap: word-wrap; } }
+                                    ComboBox { width: 190px; model: [GuiI18n.text("gui-text-scale-90"), GuiI18n.text("gui-text-scale-100"), GuiI18n.text("gui-text-scale-110"), GuiI18n.text("gui-text-scale-125")]; current-index: root.application-text-scale == 90 ? 0 : root.application-text-scale == 110 ? 2 : root.application-text-scale == 125 ? 3 : 1; selected(value) => { root.application-text-scale = value == GuiI18n.text("gui-text-scale-90") ? 90 : value == GuiI18n.text("gui-text-scale-110") ? 110 : value == GuiI18n.text("gui-text-scale-125") ? 125 : 100; } }
+                                }
+                            }
+                            Rectangle { height: root.application-text-scale >= 125 ? 124px : root.application-text-scale >= 110 ? 112px : 104px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface;
+                                HorizontalLayout { padding: 16px; spacing: 20px; alignment: center;
+                                    VerticalLayout { horizontal-stretch: 1; spacing: 5px; Heading { text: GuiI18n.text("gui-technical-text-size"); font-size: Theme.row-heading-size; } BodyText { text: GuiI18n.text("gui-technical-text-size-detail"); wrap: word-wrap; } }
+                                    ComboBox { width: 190px; model: [GuiI18n.text("gui-technical-size-11"), GuiI18n.text("gui-technical-size-12"), GuiI18n.text("gui-technical-size-14"), GuiI18n.text("gui-technical-size-16")]; current-index: root.technical-text-size == 11 ? 0 : root.technical-text-size == 14 ? 2 : root.technical-text-size == 16 ? 3 : 1; selected(value) => { root.technical-text-size = value == GuiI18n.text("gui-technical-size-11") ? 11 : value == GuiI18n.text("gui-technical-size-14") ? 14 : value == GuiI18n.text("gui-technical-size-16") ? 16 : 12; } }
+                                }
+                            }
+                            HorizontalLayout { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-save-display-settings"); tone: "primary"; clicked => { root.save-display-settings(root.application-text-scale, root.technical-text-size); } } }
+                        }
                         if root.workspace-tab == "Minecraft" : VerticalLayout { spacing: 12px;
                             SectionTitle { title: GuiI18n.text("gui-display-gameplay-defaults"); detail: ""; }
                             for pref in root.preferences : PreferenceCard { item: pref; compact: root.compact-layout; save(key, value) => { root.save-preference(key, value); } reset(key) => { root.reset-preference(key); } }
@@ -1308,8 +1350,31 @@ slint::slint! {
                             if root.accounts.length == 0 : EmptyState { title: GuiI18n.text("gui-no-accounts"); message: GuiI18n.text("gui-no-accounts-detail"); }
                             for account in root.accounts : Rectangle { height: 78px; border-radius: 8px; border-width: account.is-default ? 2px : 1px; border-color: account.is-default ? Theme.accent : Theme.border; background: Theme.surface; HorizontalLayout { padding: 12px; spacing: 8px; VerticalLayout { Heading { text: account.name; font-size: 14px; } BodyText { text: account.kind + " | " + account.credential-state; } } if account.is-default : Pill { text: GuiI18n.text("gui-default"); tone-color: Theme.accent; } if !account.is-default : AppButton { text: GuiI18n.text("gui-make-default"); width: 130px; clicked => { root.set-default-account(account.id); } } AppButton { text: GuiI18n.text("gui-remove"); width: 110px; tone: "danger"; clicked => { root.remove-account(account.id); } } } }
                         }
-                        if root.workspace-tab == "Providers & APIs" : VerticalLayout { spacing: 12px; Text { text: GuiI18n.text("gui-microsoft-client-id"); color: Theme.text-secondary; font-size: 12px; } TextField { text <=> root.microsoft-client-id; placeholder: GuiI18n.text("gui-client-id-placeholder"); } Text { text: GuiI18n.text("gui-user-agent"); color: Theme.text-secondary; font-size: 12px; } TextField { text <=> root.user-agent; placeholder: GuiI18n.text("gui-user-agent-placeholder"); } HorizontalLayout { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-save-api-settings"); tone: "primary"; clicked => { root.save-api-settings(root.microsoft-client-id, root.user-agent); } } } BodyText { text: GuiI18n.text("gui-curseforge-unavailable"); color: Theme.text-muted; wrap: word-wrap; } }
-                        if root.workspace-tab == "Storage" : VerticalLayout { spacing: 12px; Text { text: GuiI18n.text("gui-storage-root"); color: Theme.text-secondary; font-size: 12px; } TextField { text <=> root.persistent-root; placeholder: root.storage-root; } HorizontalLayout { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-save-storage-root"); tone: "primary"; clicked => { root.save-storage-settings(root.persistent-root); } } } }
+                        if root.workspace-tab == "Providers & APIs" : VerticalLayout { spacing: 14px;
+                            SectionTitle { title: GuiI18n.text("gui-provider-identifiers"); detail: GuiI18n.text("gui-provider-identifiers-detail"); }
+                            Rectangle { height: 146px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface; VerticalLayout { padding: 16px; spacing: 8px;
+                                HorizontalLayout { Heading { text: GuiI18n.text("gui-microsoft-client-id"); font-size: Theme.row-heading-size; } Rectangle { horizontal-stretch: 1; } Pill { text: root.microsoft-client-id-is-custom ? GuiI18n.text("gui-override") : GuiI18n.text("gui-default"); tone-color: root.microsoft-client-id-is-custom ? Theme.accent : Theme.text-secondary; } }
+                                HorizontalLayout { spacing: 8px; TextField { text <=> root.microsoft-client-id; placeholder: GuiI18n.text("gui-no-override"); horizontal-stretch: 1; } if root.microsoft-client-id-is-custom : AppButton { text: GuiI18n.text("gui-reset-default"); clicked => { root.reset-microsoft-client-id(); } } }
+                                BodyText { text: GuiI18n.value(root.microsoft-client-id-is-custom ? "gui-effective-value" : "gui-effective-default", root.effective-microsoft-client-id); color: Theme.text-muted; wrap: word-wrap; }
+                            } }
+                            Rectangle { height: 146px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface; VerticalLayout { padding: 16px; spacing: 8px;
+                                HorizontalLayout { Heading { text: GuiI18n.text("gui-user-agent"); font-size: Theme.row-heading-size; } Rectangle { horizontal-stretch: 1; } Pill { text: root.user-agent-is-custom ? GuiI18n.text("gui-override") : GuiI18n.text("gui-default"); tone-color: root.user-agent-is-custom ? Theme.accent : Theme.text-secondary; } }
+                                HorizontalLayout { spacing: 8px; TextField { text <=> root.user-agent; placeholder: GuiI18n.text("gui-no-override"); horizontal-stretch: 1; } if root.user-agent-is-custom : AppButton { text: GuiI18n.text("gui-reset-default"); clicked => { root.reset-user-agent(); } } }
+                                BodyText { text: GuiI18n.value(root.user-agent-is-custom ? "gui-effective-value" : "gui-effective-default", root.effective-user-agent); color: Theme.text-muted; wrap: word-wrap; }
+                            } }
+                            HorizontalLayout { BodyText { text: GuiI18n.text("gui-curseforge-unavailable"); color: Theme.text-muted; wrap: word-wrap; } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-save-api-settings"); tone: "primary"; clicked => { root.save-api-settings(root.microsoft-client-id, root.user-agent); } } }
+                        }
+                        if root.workspace-tab == "Storage" : VerticalLayout { spacing: 14px;
+                            SectionTitle { title: GuiI18n.text("gui-persistent-storage"); detail: GuiI18n.text("gui-persistent-storage-detail"); }
+                            Rectangle { height: 164px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface; VerticalLayout { padding: 16px; spacing: 9px;
+                                HorizontalLayout { Heading { text: GuiI18n.text("gui-storage-root"); font-size: Theme.row-heading-size; } Rectangle { horizontal-stretch: 1; } Pill { text: root.persistent-root-is-custom ? GuiI18n.text("gui-custom-location") : GuiI18n.text("gui-default-location"); tone-color: root.persistent-root-is-custom ? Theme.accent : Theme.text-secondary; } }
+                                HorizontalLayout { spacing: 8px; TextField { text <=> root.persistent-root; placeholder: GuiI18n.text("gui-no-override"); horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-choose-folder"); clicked => { root.choose-storage-root(); } } }
+                                BodyText { text: GuiI18n.value("gui-effective-location", root.storage-root); color: Theme.text-secondary; overflow: elide; }
+                                BodyText { text: GuiI18n.value("gui-default-location-path", root.default-persistent-root); color: Theme.text-muted; overflow: elide; }
+                            } }
+                            HorizontalLayout { if root.persistent-root-is-custom : AppButton { text: GuiI18n.text("gui-reset-default"); clicked => { root.reset-storage-root(); } } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-save-storage-root"); tone: "primary"; clicked => { root.save-storage-settings(root.persistent-root); } } }
+                            BodyText { text: GuiI18n.text("gui-storage-change-future-only"); color: Theme.text-muted; wrap: word-wrap; }
+                        }
                         if root.workspace-tab == "About & Licenses" : VerticalLayout { alignment: start; spacing: 14px;
                             Image { source: root.logo; width: 92px; height: 92px; image-fit: contain; accessible-label: GuiI18n.text("gui-logo-accessible"); }
                             Heading { text: "Ephervex"; font-size: 24px; }

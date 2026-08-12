@@ -34,8 +34,8 @@ use ephervex_minecraft::{
 use ephervex_model::{InstanceId, LoaderKind, LoaderVersionMode, ServerId};
 use ephervex_options::{OptionsCompatibility, OptionsFeed};
 use ephervex_storage::{
-    ClientRecord, Config, FileDisposition, JavaConfig, NewClient, Paths, ReconciliationReport,
-    Registry, ServerRecord, Storage,
+    ApplicationTextScale, ClientRecord, Config, FileDisposition, JavaConfig, NewClient, Paths,
+    ReconciliationReport, Registry, ServerRecord, Storage, TechnicalTextSize,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{instrument, warn};
@@ -86,6 +86,21 @@ pub struct JavaPlan {
     pub jvm: EffectiveJvmSettings,
     /// Whether the runtime was downloaded during this call.
     pub installed_now: bool,
+}
+
+/// Ephervex interface display preferences exposed to frontends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ApplicationDisplaySettings {
+    pub text_scale: ApplicationTextScale,
+    pub technical_text_size: TechnicalTextSize,
+}
+
+/// Configured and resolved locations for persistent instances.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistentStorageSettings {
+    pub configured_root: Option<PathBuf>,
+    pub effective_root: PathBuf,
+    pub default_root: PathBuf,
 }
 
 /// Reads the global Java settings out of the configuration file's shape.
@@ -248,6 +263,41 @@ impl App {
     #[must_use]
     pub fn paths(&self) -> &Paths {
         self.storage.registry.paths()
+    }
+
+    /// Returns Ephervex interface preferences without involving Minecraft settings.
+    #[must_use]
+    pub const fn application_display_settings(&self) -> ApplicationDisplaySettings {
+        ApplicationDisplaySettings {
+            text_scale: self.storage.config.display.text_scale,
+            technical_text_size: self.storage.config.display.technical_text_size,
+        }
+    }
+
+    /// Persists the bounded text choices used by the desktop frontend.
+    pub fn set_application_display_settings(
+        &mut self,
+        text_scale: ApplicationTextScale,
+        technical_text_size: TechnicalTextSize,
+    ) -> CoreResult<()> {
+        self.mutate_config(|config| {
+            config.display.text_scale = text_scale;
+            config.display.technical_text_size = technical_text_size;
+        })
+    }
+
+    /// Returns the configured, effective, and default persistent roots.
+    #[must_use]
+    pub fn persistent_storage_settings(&self) -> PersistentStorageSettings {
+        PersistentStorageSettings {
+            configured_root: self.config().persistent_instance_root(),
+            effective_root: self.paths().persistent_instances_dir(),
+            default_root: self
+                .paths()
+                .clone()
+                .with_persistent_instance_root(None)
+                .persistent_instances_dir(),
+        }
     }
 
     /// Brings the index back in line with what is actually on disk.
@@ -1159,6 +1209,55 @@ mod tests {
         let mut app = reopened;
         app.set_persistent_instance_root(None).expect("clear");
         assert!(!app.paths().persistent_instance_root_is_overridden());
+    }
+
+    #[test]
+    fn application_display_settings_persist_without_managing_minecraft_preferences() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        assert_eq!(
+            app.application_display_settings(),
+            ApplicationDisplaySettings {
+                text_scale: ApplicationTextScale::Default,
+                technical_text_size: TechnicalTextSize::Default,
+            }
+        );
+
+        app.set_application_display_settings(
+            ApplicationTextScale::Large,
+            TechnicalTextSize::Comfortable,
+        )
+        .expect("save display settings");
+        assert!(app.config().minecraft_preferences.is_empty());
+
+        let reopened = app_rooted_at(base.path());
+        assert_eq!(
+            reopened.application_display_settings(),
+            ApplicationDisplaySettings {
+                text_scale: ApplicationTextScale::Large,
+                technical_text_size: TechnicalTextSize::Comfortable,
+            }
+        );
+    }
+
+    #[test]
+    fn persistent_storage_settings_distinguish_default_override_and_effective_root() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let custom = tempfile::tempdir().expect("custom root");
+        let mut app = app_rooted_at(base.path());
+        let defaults = app.persistent_storage_settings();
+        assert!(defaults.configured_root.is_none());
+        assert_eq!(defaults.effective_root, defaults.default_root);
+
+        app.set_persistent_instance_root(Some(custom.path()))
+            .expect("set root");
+        let overridden = app.persistent_storage_settings();
+        assert_eq!(overridden.configured_root.as_deref(), Some(custom.path()));
+        assert_eq!(overridden.effective_root, custom.path());
+        assert_eq!(overridden.default_root, defaults.default_root);
+
+        app.set_persistent_instance_root(None).expect("reset root");
+        assert_eq!(app.persistent_storage_settings(), defaults);
     }
 
     #[test]

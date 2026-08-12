@@ -705,7 +705,10 @@ mod tests {
         );
 
         app.set_custom_user_agent(None).expect("clear");
-        assert!(app.http_config().user_agent.starts_with("Ephervex/"));
+        let reset = app.api_settings().expect("settings");
+        assert!(reset.user_agent.is_empty());
+        assert!(reset.effective_user_agent.starts_with("Ephervex/"));
+        assert_eq!(app.http_config().user_agent, reset.effective_user_agent);
     }
 
     #[test]
