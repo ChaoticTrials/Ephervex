@@ -1238,9 +1238,17 @@ mod tests {
     fn wide_forms_and_server_details_use_hard_readability_bounds() {
         let source = include_str!("ui.rs");
         assert!(source.contains("width: min(parent.width, 980px)"));
-        assert!(source.contains("width: min(parent.width, 1050px)"));
+        assert!(source.contains("width: min(parent.width, 1100px)"));
         assert!(!source.contains("max-width: 980px"));
-        assert!(!source.contains("max-width: 1050px"));
+        assert!(!source.contains("max-width: 1100px"));
+    }
+
+    #[test]
+    fn settings_use_scrollable_reusable_preference_rows() {
+        let source = include_str!("ui.rs");
+        assert!(source.contains("component PreferenceCard inherits Rectangle"));
+        assert!(source.contains("for pref in root.preferences : PreferenceCard { item: pref;"));
+        assert!(source.contains("ScrollView { viewport-width: self.width;"));
     }
 
     #[test]
