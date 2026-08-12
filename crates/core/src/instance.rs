@@ -143,6 +143,19 @@ impl App {
         })
     }
 
+    /// Removes one global preference override and restores inherited behavior.
+    ///
+    /// This differs from [`Self::unmanage_minecraft_preference`], which keeps a
+    /// remembered value for command-line workflows that may enable it again.
+    /// A desktop reset removes the stored value so the typed default is shown
+    /// and future instances leave the corresponding `options.txt` key alone.
+    #[instrument(skip(self))]
+    pub fn reset_minecraft_preference(&mut self, key: PreferenceKey) -> CoreResult<()> {
+        self.mutate_config(|config| {
+            config.minecraft_preferences.remove(key.as_str());
+        })
+    }
+
     // -- generated options compatibility ----------------------------------
 
     /// The options compatibility knowledge currently in effect.
@@ -547,14 +560,19 @@ mod tests {
             "fov".to_owned(),
             ephervex_storage::PreferenceSetting::managed("very wide"),
         );
+        config.minecraft_preferences.insert(
+            "render_distance".to_owned(),
+            ephervex_storage::PreferenceSetting::managed("16"),
+        );
         config.save(app.paths()).expect("save");
 
         let app = app_rooted_at(base.path());
         assert_eq!(app.minecraft_preferences().rejected.len(), 1);
 
         let record = create(&app, "Still works", "1.20.1");
-        let options = options_of(&record).expect("the other preferences applied");
+        let options = options_of(&record).expect("the valid preference applied");
         assert!(!options.contains("fov"));
+        assert!(options.contains("renderDistance:16"));
     }
 
     #[test]
@@ -567,9 +585,7 @@ mod tests {
             .expect_err("must be refused");
         assert_eq!(error.message_id(), "error-options-preference-value-invalid");
         assert!(
-            !app.config().minecraft_preferences["gui_scale"]
-                .value
-                .contains("enormous"),
+            !app.config().minecraft_preferences.contains_key("gui_scale"),
             "a refused value must not reach the configuration file"
         );
     }
@@ -604,6 +620,33 @@ mod tests {
                 .unwrap_or_default()
                 .contains("renderDistance"),
             "an unmanaged preference is not written"
+        );
+    }
+
+    #[test]
+    fn resetting_a_preference_removes_the_override_and_restores_the_typed_default() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        app.set_minecraft_preference(PreferenceKey::RenderDistance, "16")
+            .expect("set");
+        app.reset_minecraft_preference(PreferenceKey::RenderDistance)
+            .expect("reset");
+
+        assert!(
+            !app.config()
+                .minecraft_preferences
+                .contains_key("render_distance")
+        );
+        let preferences = app.minecraft_preferences().preferences;
+        assert!(!preferences.render_distance.enabled);
+        assert_eq!(preferences.render_distance.value, 12);
+
+        let record = create(&app, "Inherited", "1.20.1");
+        assert!(
+            !options_of(&record)
+                .unwrap_or_default()
+                .contains("renderDistance"),
+            "reset must not write a default value into options.txt"
         );
     }
 

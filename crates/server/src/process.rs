@@ -199,6 +199,7 @@ async fn supervise_commands(
         let (mut child, mut stdin, readers, pid) = spawn_child(command, observer, capture)?;
         evidence.child = Some(capture_java_child(pid)?);
         write_runtime_evidence(server_root, evidence)?;
+        observer.emit(ServerEvent::Started { pid });
         for waiter in restart_waiters.drain(..) {
             let _ = waiter.send(ControlResponse::Restarted { pid });
         }
@@ -265,7 +266,6 @@ fn spawn_child(
             observer.clone(),
         )),
     ];
-    observer.emit(ServerEvent::Started { pid });
     Ok((child, stdin, readers, pid))
 }
 
@@ -628,6 +628,42 @@ mod tests {
                 .expect("stop"),
             ControlResponse::Exited(ServerExit { code: Some(0), .. })
         ));
+        assert_eq!(task.await.expect("join").expect("supervise").code, Some(0));
+    }
+
+    #[tokio::test]
+    async fn started_event_is_emitted_after_child_runtime_evidence_is_published() {
+        let root = tempfile::tempdir().expect("root");
+        std::fs::create_dir_all(root.path().join(".launcher")).expect("launcher");
+        let capture = tempfile::tempdir().expect("capture");
+        let command = ServerCommand {
+            java: PathBuf::from("/bin/sh"),
+            arguments: vec![
+                "-c".to_owned(),
+                "while read -r line; do [ \"$line\" = stop ] && exit 0; done".to_owned(),
+            ],
+            working_directory: root.path().join("server"),
+        };
+        let (observer, mut events) = ServerObserver::channel();
+        let server_root = root.path().to_path_buf();
+        let capture_path = capture.path().to_path_buf();
+        let task = tokio::spawn(async move {
+            ServerSupervisor::run(&command, &server_root, &capture_path, &observer).await
+        });
+
+        while let Some(event) = events.recv().await {
+            if matches!(event, ServerEvent::Started { .. }) {
+                break;
+            }
+        }
+        assert!(matches!(
+            classify_runtime(root.path()).expect("runtime classification"),
+            RuntimeClassification::Controlled { child: Some(_), .. }
+        ));
+
+        send_control(root.path(), &ControlAction::Stop)
+            .await
+            .expect("stop");
         assert_eq!(task.await.expect("join").expect("supervise").code, Some(0));
     }
 

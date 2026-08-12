@@ -27,6 +27,8 @@ pub struct InstancePresentation {
     pub linked_servers: usize,
     pub managed_mods: usize,
     pub needs_attention: bool,
+    pub state: String,
+    pub state_kind: &'static str,
     pub can_launch: bool,
     pub launch_and_connect: Vec<ConnectPresentation>,
 }
@@ -45,11 +47,16 @@ impl InstancePresentation {
         record: &ClientRecord,
         linked_servers: usize,
         managed_mods: usize,
-        launch_running: bool,
+        launch_state: Option<&ephervex_core::LaunchState>,
         connections: impl IntoIterator<
             Item = (ServerRecord, Result<LaunchAndConnectAvailability, String>),
         >,
     ) -> Self {
+        let (state, state_kind) = match launch_state {
+            Some(state) if state.game_pid.is_some() => (lookup("gui-state-running"), "running"),
+            Some(_) => (lookup("gui-state-starting"), "starting"),
+            None => (lookup("gui-state-ready"), "ready"),
+        };
         Self {
             id: record.id.to_string(),
             name: record.name.clone(),
@@ -63,7 +70,9 @@ impl InstancePresentation {
             linked_servers,
             managed_mods,
             needs_attention: record.needs_attention(),
-            can_launch: !launch_running && !record.needs_attention(),
+            state,
+            state_kind,
+            can_launch: launch_state.is_none() && !record.needs_attention(),
             launch_and_connect: connections
                 .into_iter()
                 .map(|(server, availability)| match availability {
@@ -134,13 +143,25 @@ impl ServerPresentation {
                 false,
                 false,
             ),
-            RuntimeClassification::Controlled { .. } => (
-                "running",
-                "gui-state-running",
-                "gui-state-controlled",
-                false,
-                false,
-            ),
+            RuntimeClassification::Controlled { child, .. } => {
+                if child.is_some() {
+                    (
+                        "running",
+                        "gui-state-running",
+                        "gui-state-controlled",
+                        false,
+                        false,
+                    )
+                } else {
+                    (
+                        "starting",
+                        "gui-state-starting",
+                        "gui-state-starting-detail",
+                        false,
+                        false,
+                    )
+                }
+            }
             RuntimeClassification::UnknownRunning { .. } => (
                 "unknown",
                 "gui-state-unknown",
@@ -507,7 +528,7 @@ mod tests {
             &client(StorageClass::Temporary, LoaderSelection::vanilla()),
             0,
             0,
-            false,
+            None,
             [],
         );
         assert_eq!(temporary.storage, "Temporary");
@@ -517,6 +538,28 @@ mod tests {
             [LoaderKind::Vanilla, LoaderKind::Forge, LoaderKind::NeoForge].map(loader_kind_name),
             ["vanilla", "forge", "neoforge"]
         );
+    }
+
+    #[test]
+    fn instance_runtime_state_is_independent_from_launch_action_availability() {
+        let record = client(StorageClass::Temporary, LoaderSelection::vanilla());
+        let preparing = ephervex_core::LaunchState {
+            owner_pid: std::process::id(),
+            owner_start_ticks: None,
+            game_pid: None,
+            since: Utc::now(),
+        };
+        let starting = InstancePresentation::from_record(&record, 0, 0, Some(&preparing), []);
+        assert_eq!(starting.state_kind, "starting");
+        assert!(!starting.can_launch);
+
+        let running = ephervex_core::LaunchState {
+            game_pid: Some(std::process::id()),
+            ..preparing
+        };
+        let running = InstancePresentation::from_record(&record, 0, 0, Some(&running), []);
+        assert_eq!(running.state_kind, "running");
+        assert!(!running.can_launch);
     }
 
     #[test]
@@ -534,7 +577,7 @@ mod tests {
             client_running: false,
         };
         let item =
-            InstancePresentation::from_record(&record, 1, 0, false, [(linked, Ok(availability))]);
+            InstancePresentation::from_record(&record, 1, 0, None, [(linked, Ok(availability))]);
         assert_eq!(item.launch_and_connect.len(), 1);
         assert!(item.launch_and_connect[0].enabled);
     }
@@ -553,6 +596,22 @@ mod tests {
         assert!(!uncertain.can_start);
         assert!(!uncertain.can_stop);
         assert!(uncertain.destructive_recovery);
+
+        let supervisor = super::super::test_support::process_evidence();
+        let starting =
+            ServerPresentation::from_status(&server(RuntimeClassification::Controlled {
+                supervisor: supervisor.clone(),
+                child: None,
+            }));
+        assert_eq!(starting.state_kind, "starting");
+
+        let mut child = supervisor;
+        child.role = ephervex_core::ProcessRole::JavaChild;
+        let running = ServerPresentation::from_status(&server(RuntimeClassification::Controlled {
+            supervisor: super::super::test_support::process_evidence(),
+            child: Some(child),
+        }));
+        assert_eq!(running.state_kind, "running");
     }
 
     #[test]

@@ -10,11 +10,11 @@ use std::thread;
 use chrono::{DateTime, Utc};
 use ephervex_core::{
     App, AuthEvent, AuthObserver, CancellationToken, ClientFolder, CoreError, DiagnosticKind,
-    DiagnosticRequest, DiagnosticScope, EulaStatus, ImportRequest, LaunchAndConnectObserver,
-    LaunchAndConnectOptions, LaunchEvent, LaunchObserver, LaunchOptions, LoginOptions,
-    ModInstallRequest, ModSearchQuery, NewClient, NewServer, OperationReporter, Paths,
-    PreferenceKey, ProgressSink, SearchOptions, ServerCreateOptions, ServerEvent, ServerFolder,
-    ServerNetworkSettings, ServerObserver,
+    DiagnosticRequest, DiagnosticScope, EulaStatus, GlobalMinecraftPreferences, ImportRequest,
+    LaunchAndConnectObserver, LaunchAndConnectOptions, LaunchEvent, LaunchObserver, LaunchOptions,
+    LoginOptions, ModInstallRequest, ModSearchQuery, NewClient, NewServer, OperationReporter,
+    Paths, PreferenceKey, ProgressSink, SearchOptions, ServerCreateOptions, ServerEvent,
+    ServerFolder, ServerNetworkSettings, ServerObserver,
 };
 use ephervex_i18n::{Arg, lookup, lookup_args, lookup_attribute, lookup_attribute_args};
 use ephervex_model::{
@@ -41,6 +41,7 @@ pub enum Command {
     CancelOperation(String),
     PickImport,
     CreateClient {
+        request_id: String,
         name: String,
         minecraft: String,
         loader: String,
@@ -82,6 +83,7 @@ pub enum Command {
         project: String,
     },
     CreateServer {
+        request_id: String,
         name: String,
         client: Option<InstanceId>,
         minecraft: String,
@@ -142,11 +144,11 @@ pub enum Command {
         maximum_mib: u32,
         preferred_path: String,
     },
-    SavePreference {
+    SetPreference {
         key: PreferenceKey,
         value: String,
-        enabled: bool,
     },
+    ResetPreference(PreferenceKey),
 }
 
 #[derive(Debug, Clone)]
@@ -173,7 +175,7 @@ pub struct PreferenceData {
     pub key: String,
     pub label: String,
     pub value: String,
-    pub enabled: bool,
+    pub customized: bool,
     pub kind: String,
     pub syntax: String,
 }
@@ -303,6 +305,9 @@ pub enum Event {
     },
     ModalError(String),
     CloseModal,
+    CreationFinished {
+        request_id: String,
+    },
     ImportAnalysis {
         path: PathBuf,
         suggested_name: String,
@@ -449,25 +454,39 @@ fn run_worker(
                 }
             }
             Command::CreateClient {
+                request_id,
                 name,
                 minecraft,
                 loader,
                 loader_version,
                 persistent,
-            } => match loader_selection(&loader, &loader_version).and_then(|loader| {
-                runtime.block_on(app.create_client_reporting(
-                    NewClient::new(name, minecraft, loader).with_storage(storage_class(persistent)),
-                ))
-            }) {
-                Ok(created) => {
-                    let _ = events.send(Event::CloseModal);
-                    let _ = events.send(Event::Toast {
-                        message: localized_value("gui-created-entity", &created.record.name),
-                        error: false,
-                    });
-                    send_snapshot(&app, &events);
+            } => match loader_selection(&loader, &loader_version) {
+                Ok(loader) => {
+                    let paths = app.paths().clone();
+                    let entity = name.clone();
+                    spawn_creation_operation(
+                        paths,
+                        &events,
+                        Arc::clone(&cancellations),
+                        request_id,
+                        "operation-creating-instance",
+                        entity,
+                        move |app, _reporter, _cancel| async move {
+                            app.create_client_reporting(
+                                NewClient::new(name, minecraft, loader)
+                                    .with_storage(storage_class(persistent)),
+                            )
+                            .await
+                            .map(|created| {
+                                localized_value("gui-created-entity", &created.record.name)
+                            })
+                        },
+                    );
                 }
-                Err(error) => send_modal_error(&events, &error),
+                Err(error) => {
+                    send_error(&events, &error);
+                    let _ = events.send(Event::CreationFinished { request_id });
+                }
             },
             Command::ImportPack {
                 archive,
@@ -670,6 +689,7 @@ fn run_worker(
                 );
             }
             Command::CreateServer {
+                request_id,
                 name,
                 client,
                 minecraft,
@@ -688,10 +708,11 @@ fn run_worker(
                 match request {
                     Ok(request) => {
                         let paths = app.paths().clone();
-                        spawn_async_operation(
+                        spawn_creation_operation(
                             paths,
                             &events,
                             Arc::clone(&cancellations),
+                            request_id,
                             "operation-creating-server",
                             request.name.clone(),
                             move |app, _reporter, cancel| async move {
@@ -710,7 +731,10 @@ fn run_worker(
                             },
                         );
                     }
-                    Err(error) => send_modal_error(&events, &error),
+                    Err(error) => {
+                        send_error(&events, &error);
+                        let _ = events.send(Event::CreationFinished { request_id });
+                    }
                 }
             }
             Command::StartServer(server) => {
@@ -946,16 +970,8 @@ fn run_worker(
                     Err(error) => send_error(&events, &error),
                 }
             }
-            Command::SavePreference {
-                key,
-                value,
-                enabled,
-            } => {
-                let result = if enabled {
-                    app.set_minecraft_preference(key, &value).map(|_| ())
-                } else {
-                    app.unmanage_minecraft_preference(key)
-                };
+            Command::SetPreference { key, value } => {
+                let result = app.set_minecraft_preference(key, &value).map(|_| ());
                 match result {
                     Ok(()) => {
                         let _ = events.send(Event::Toast {
@@ -967,6 +983,16 @@ fn run_worker(
                     Err(error) => send_error(&events, &error),
                 }
             }
+            Command::ResetPreference(key) => match app.reset_minecraft_preference(key) {
+                Ok(()) => {
+                    let _ = events.send(Event::Toast {
+                        message: lookup("gui-minecraft-default-reset"),
+                        error: false,
+                    });
+                    send_snapshot(&app, &events);
+                }
+                Err(error) => send_error(&events, &error),
+            },
         }
     }
 }
@@ -1030,12 +1056,12 @@ fn snapshot(app: &App) -> Result<Snapshot, CoreError> {
             (server, availability)
         });
         let managed_mods = app.managed_mods(record.id).map_or(0, |mods| mods.len());
-        let running = app.launch_state(record.id)?.is_some();
+        let launch_state = app.launch_state(record.id)?;
         instance_rows.push(InstancePresentation::from_record(
             &record,
             linked.len(),
             managed_mods,
-            running,
+            launch_state.as_ref(),
             connections,
         ));
     }
@@ -1065,16 +1091,10 @@ fn snapshot(app: &App) -> Result<Snapshot, CoreError> {
         })
         .collect();
     let loaded = app.minecraft_preferences();
+    let inherited = GlobalMinecraftPreferences::default();
     let preferences = PreferenceKey::ALL
         .iter()
-        .map(|key| PreferenceData {
-            key: key.as_str().to_owned(),
-            label: preference_label(*key),
-            value: loaded.preferences.value(*key).to_setting_value(),
-            enabled: loaded.preferences.is_managed(*key),
-            kind: preference_kind(*key).to_owned(),
-            syntax: key.value_syntax().to_owned(),
-        })
+        .map(|key| preference_data(*key, &loaded.preferences, &inherited))
         .collect();
     if !loaded.rejected.is_empty() {
         tracing::warn!(
@@ -1104,6 +1124,27 @@ fn snapshot(app: &App) -> Result<Snapshot, CoreError> {
         },
         eula: eula_data(&app.server_eula_status()),
     })
+}
+
+fn preference_data(
+    key: PreferenceKey,
+    preferences: &GlobalMinecraftPreferences,
+    inherited: &GlobalMinecraftPreferences,
+) -> PreferenceData {
+    let customized = preferences.is_managed(key);
+    PreferenceData {
+        key: key.as_str().to_owned(),
+        label: preference_label(key),
+        value: if customized {
+            preferences.value(key)
+        } else {
+            inherited.value(key)
+        }
+        .to_setting_value(),
+        customized,
+        kind: preference_kind(key).to_owned(),
+        syntax: key.value_syntax().to_owned(),
+    }
 }
 
 fn send_server_workspace(app: &App, server: ServerId, events: &Sender<Event>) {
@@ -1263,6 +1304,7 @@ fn spawn_launch(paths: Paths, events: &Sender<Event>, instance: InstanceId, enti
             let cancel = CancellationToken::new();
             let event_sender = events.clone();
             let entity_for_events = entity.clone();
+            let paths_for_events = paths.clone();
             let observed_operation = Arc::new(Mutex::new(None::<String>));
             let forwarded_operation = Arc::clone(&observed_operation);
             runtime.block_on(async move {
@@ -1272,6 +1314,7 @@ fn spawn_launch(paths: Paths, events: &Sender<Event>, instance: InstanceId, enti
                             &event_sender,
                             &entity_for_events,
                             &forwarded_operation,
+                            &paths_for_events,
                             event,
                         );
                     }
@@ -1342,6 +1385,7 @@ fn forward_launch_event(
     events: &Sender<Event>,
     entity: &str,
     observed_operation: &Mutex<Option<String>>,
+    paths: &Paths,
     event: LaunchEvent,
 ) {
     match event {
@@ -1359,6 +1403,7 @@ fn forward_launch_event(
                 true,
                 false,
             );
+            refresh_snapshot(paths, events);
         }
         LaunchEvent::Downloading(operation) => {
             send_operation(events, &operation, entity.to_owned(), false);
@@ -1368,6 +1413,7 @@ fn forward_launch_event(
                 message: localized_value("gui-starting-minecraft", entity),
                 error: false,
             });
+            refresh_snapshot(paths, events);
         }
         LaunchEvent::Failed { message_id, .. } => {
             let _ = events.send(Event::Toast {
@@ -1387,6 +1433,7 @@ fn spawn_server(paths: Paths, events: &Sender<Event>, server: ServerId, entity: 
             let (observer, mut receiver) = ServerObserver::channel();
             let event_sender = events.clone();
             let entity_for_events = entity.clone();
+            let paths_for_events = paths.clone();
             let observed_operation = Arc::new(Mutex::new(None::<String>));
             let forwarded_operation = Arc::clone(&observed_operation);
             runtime.block_on(async move {
@@ -1407,6 +1454,7 @@ fn spawn_server(paths: Paths, events: &Sender<Event>, server: ServerId, entity: 
                                     true,
                                     false,
                                 );
+                                refresh_snapshot(&paths_for_events, &event_sender);
                             }
                             ServerEvent::Started { .. } => {
                                 let _ = event_sender.send(Event::Toast {
@@ -1416,6 +1464,7 @@ fn spawn_server(paths: Paths, events: &Sender<Event>, server: ServerId, entity: 
                                     ),
                                     error: false,
                                 });
+                                refresh_snapshot(&paths_for_events, &event_sender);
                             }
                             ServerEvent::Warning(warning) => {
                                 let _ = event_sender.send(Event::Toast {
@@ -1584,6 +1633,12 @@ fn spawn_login(paths: Paths, events: &Sender<Event>) {
     });
 }
 
+fn refresh_snapshot(paths: &Paths, events: &Sender<Event>) {
+    if let Ok(app) = App::open_at(paths.clone()) {
+        send_snapshot(&app, events);
+    }
+}
+
 fn spawn_async_operation<F, Fut>(
     paths: Paths,
     events: &Sender<Event>,
@@ -1639,6 +1694,60 @@ fn spawn_async_operation<F, Fut>(
     );
 }
 
+fn spawn_creation_operation<F, Fut>(
+    paths: Paths,
+    events: &Sender<Event>,
+    cancellations: CancellationRegistry,
+    request_id: String,
+    title: &'static str,
+    entity: String,
+    operation: F,
+) where
+    F: FnOnce(App, OperationReporter, CancellationToken) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<String, CoreError>> + 'static,
+{
+    let failed_request_id = request_id.clone();
+    spawn_detached_with_setup_failure(
+        paths.clone(),
+        events.clone(),
+        move |events| {
+            let _ = events.send(Event::CreationFinished {
+                request_id: failed_request_id,
+            });
+        },
+        move |app, events, runtime| {
+            let sink = Arc::new(UiProgressSink {
+                events: events.clone(),
+                entity,
+                allow_cancel: false,
+            });
+            let reporter = OperationReporter::new(title, false, sink);
+            reporter.begin(Some(lookup("gui-activity-preparing-environment")));
+            let cancel = CancellationToken::new();
+            register_cancellation(&cancellations, &reporter, &cancel);
+            let result = runtime.block_on(operation(app, reporter.clone(), cancel));
+            remove_cancellation(&cancellations, &reporter);
+            match result {
+                Ok(message) => {
+                    reporter.finish(OperationStatus::Completed);
+                    let _ = events.send(Event::Toast {
+                        message,
+                        error: false,
+                    });
+                }
+                Err(error) => {
+                    reporter.finish(OperationStatus::Failed(localized_error(&error)));
+                    send_error(&events, &error);
+                }
+            }
+            let _ = events.send(Event::CreationFinished { request_id });
+            if let Ok(app) = App::open_at(paths) {
+                send_snapshot(&app, &events);
+            }
+        },
+    );
+}
+
 fn register_cancellation(
     cancellations: &CancellationRegistry,
     reporter: &OperationReporter,
@@ -1679,11 +1788,24 @@ fn spawn_detached(
     events: Sender<Event>,
     work: impl FnOnce(App, Sender<Event>, tokio::runtime::Runtime) + Send + 'static,
 ) {
+    spawn_detached_with_setup_failure(paths, events, |_| {}, work);
+}
+
+fn spawn_detached_with_setup_failure(
+    paths: Paths,
+    events: Sender<Event>,
+    setup_failed: impl FnOnce(&Sender<Event>) + Send + 'static,
+    work: impl FnOnce(App, Sender<Event>, tokio::runtime::Runtime) + Send + 'static,
+) {
     thread::spawn(move || {
+        let mut setup_failed = Some(setup_failed);
         let app = match App::open_at(paths) {
             Ok(app) => app,
             Err(error) => {
                 send_error(&events, &error);
+                if let Some(setup_failed) = setup_failed.take() {
+                    setup_failed(&events);
+                }
                 return;
             }
         };
@@ -1697,6 +1819,9 @@ fn spawn_detached(
                     message: localized_value("gui-background-operation-failed", &error.to_string()),
                     error: true,
                 });
+                if let Some(setup_failed) = setup_failed.take() {
+                    setup_failed(&events);
+                }
                 return;
             }
         };
@@ -2042,6 +2167,21 @@ mod tests {
         assert!(!rendered.contains("{$"));
         assert!(!rendered.contains("{ $"));
         assert!(rendered.contains("Expected"));
+    }
+
+    #[test]
+    fn unmanaged_remembered_values_are_presented_as_inherited_defaults() {
+        let loaded = GlobalMinecraftPreferences::from_settings([("render_distance", false, "16")]);
+        let inherited = GlobalMinecraftPreferences::default();
+
+        let row = preference_data(
+            PreferenceKey::RenderDistance,
+            &loaded.preferences,
+            &inherited,
+        );
+
+        assert!(!row.customized);
+        assert_eq!(row.value, "12");
     }
 
     #[test]

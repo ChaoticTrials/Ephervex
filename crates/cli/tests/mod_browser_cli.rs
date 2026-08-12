@@ -62,7 +62,7 @@ impl Sandbox {
         })
     }
 
-    /// Creates a NeoForge instance and returns its id and root.
+    /// Creates a Forge instance and returns its id and root.
     fn instance(&self) -> (String, PathBuf) {
         let created = self.json(&[
             "--json",
@@ -72,9 +72,9 @@ impl Sandbox {
             "--minecraft",
             "1.20.1",
             "--loader",
-            "neoforge",
+            "forge",
             "--loader-version",
-            "47.1.106",
+            "47.3.0",
         ]);
         let id = created["id"].as_str().expect("an id").to_owned();
         let root = PathBuf::from(created["root"].as_str().expect("a root"));
@@ -94,7 +94,7 @@ fn seed_recipe(root: &Path) {
           "source_kind": "manual",
           "original_name": "Mod browser check",
           "minecraft_version": "1.20.1",
-          "loader": {"kind": "neo_forge", "version": "47.1.106"},
+          "loader": {"kind": "forge", "version": "47.3.0"},
           "files": [
             {
               "logical_path": "mods/library-1.0.0.jar",
@@ -212,7 +212,7 @@ fn a_pack_declared_file_is_not_listed_as_a_provider_installed_mod() {
           "source_kind": "modrinth_pack",
           "original_name": "Imported Pack",
           "minecraft_version": "1.20.1",
-          "loader": {"kind": "neo_forge", "version": "47.1.106"},
+          "loader": {"kind": "forge", "version": "47.3.0"},
           "files": [
             {
               "logical_path": "mods/from-the-pack.jar",

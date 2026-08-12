@@ -1,6 +1,7 @@
 //! Slint callback registration and UI model updates.
 
 use std::cell::RefCell;
+use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::mpsc::Sender;
@@ -17,11 +18,74 @@ use crate::backend::{
 use crate::presentation::{parse_network, validate_ip, validate_port};
 use crate::ui::{
     AccountRow, ActivityRow, AppWindow, DiagnosticRow, GuiI18n, InstanceRow, JavaRow, ModRow,
-    ModSearchRow, PreferenceRow, ServerRow,
+    ModSearchRow, PendingEntityRow, PreferenceRow, ServerRow,
 };
 
 pub struct Controller {
     _poll_timer: Timer,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum CreationKey {
+    Client {
+        name: String,
+        minecraft: String,
+        loader: String,
+        loader_version: String,
+        persistent: bool,
+    },
+    Server {
+        name: String,
+        client: String,
+        minecraft: String,
+        loader: String,
+        loader_version: String,
+        persistent: bool,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct PendingCreation {
+    request_id: String,
+    key: CreationKey,
+    name: String,
+    target: String,
+    loader_kind: String,
+    storage: String,
+    storage_kind: String,
+    server: bool,
+}
+
+#[derive(Debug, Default)]
+struct CreationTracker {
+    next_id: u64,
+    keys: HashSet<CreationKey>,
+    pending: Vec<PendingCreation>,
+}
+
+impl CreationTracker {
+    fn accept(&mut self, key: CreationKey, mut pending: PendingCreation) -> Option<String> {
+        if !self.keys.insert(key.clone()) {
+            return None;
+        }
+        self.next_id = self.next_id.saturating_add(1);
+        let request_id = format!("creation-{}", self.next_id);
+        pending.request_id.clone_from(&request_id);
+        pending.key = key;
+        self.pending.push(pending);
+        Some(request_id)
+    }
+
+    fn finish(&mut self, request_id: &str) {
+        if let Some(index) = self
+            .pending
+            .iter()
+            .position(|pending| pending.request_id == request_id)
+        {
+            let pending = self.pending.remove(index);
+            self.keys.remove(&pending.key);
+        }
+    }
 }
 
 impl std::fmt::Debug for Controller {
@@ -34,12 +98,15 @@ pub fn attach(ui: &AppWindow) -> Controller {
     let backend = backend::spawn();
     let receiver = Rc::new(RefCell::new(backend.events));
     let activities = Rc::new(RefCell::new(Vec::<ActivityData>::new()));
+    let creations = Rc::new(RefCell::new(CreationTracker::default()));
     register_i18n(ui);
-    register_callbacks(ui, &backend.commands);
+    register_toasts(ui);
+    register_callbacks(ui, &backend.commands, Rc::clone(&creations));
 
     let weak = ui.as_weak();
     let poll_receiver = Rc::clone(&receiver);
     let poll_activities = Rc::clone(&activities);
+    let poll_creations = Rc::clone(&creations);
     let poll_timer = Timer::default();
     poll_timer.start(TimerMode::Repeated, Duration::from_millis(80), move || {
         let Some(ui) = weak.upgrade() else {
@@ -56,13 +123,35 @@ pub fn attach(ui: &AppWindow) -> Controller {
             ui.set_compact_layout(compact_layout);
         }
         for event in poll_receiver.borrow_mut().try_iter() {
-            apply_event(&ui, event, &poll_activities);
+            apply_event(&ui, event, &poll_activities, &poll_creations);
         }
     });
 
     Controller {
         _poll_timer: poll_timer,
     }
+}
+
+fn register_toasts(ui: &AppWindow) {
+    const MAX_QUEUED_TOASTS: usize = 12;
+
+    let queue = Rc::new(RefCell::new(VecDeque::<(SharedString, bool)>::new()));
+    let queued = Rc::clone(&queue);
+    ui.on_queue_toast(move |message, error| {
+        let mut queued = queued.borrow_mut();
+        if queued.len() == MAX_QUEUED_TOASTS {
+            queued.pop_front();
+        }
+        queued.push_back((message, error));
+    });
+
+    let weak = ui.as_weak();
+    ui.on_toast_slot_available(move || {
+        let next = queue.borrow_mut().pop_front();
+        if let (Some((message, error)), Some(ui)) = (next, weak.upgrade()) {
+            ui.invoke_present_toast(message, error);
+        }
+    });
 }
 
 fn register_i18n(ui: &AppWindow) {
@@ -84,13 +173,51 @@ fn register_i18n(ui: &AppWindow) {
     });
 }
 
-fn register_callbacks(ui: &AppWindow, commands: &Sender<Command>) {
+fn register_callbacks(
+    ui: &AppWindow,
+    commands: &Sender<Command>,
+    creations: Rc<RefCell<CreationTracker>>,
+) {
     register_catalog_actions(ui, commands);
-    register_client_actions(ui, commands);
+    register_client_actions(ui, commands, Rc::clone(&creations));
 
     let sender = commands.clone();
+    let weak = ui.as_weak();
     ui.on_submit_create_server(
         move |name, client, minecraft, loader, loader_version, persistent| {
+            let linked = !client.is_empty();
+            let key = CreationKey::Server {
+                name: name.trim().to_owned(),
+                client: client.as_str().to_owned(),
+                minecraft: if linked {
+                    String::new()
+                } else {
+                    minecraft.as_str().to_owned()
+                },
+                loader: if linked {
+                    String::new()
+                } else {
+                    loader.as_str().to_owned()
+                },
+                loader_version: if linked {
+                    String::new()
+                } else {
+                    loader_version.as_str().to_owned()
+                },
+                persistent,
+            };
+            let pending = pending_creation(&key);
+            let Some(request_id) = creations.borrow_mut().accept(key, pending) else {
+                if let Some(ui) = weak.upgrade() {
+                    ui.invoke_present_toast(lookup("gui-creation-already-running").into(), true);
+                }
+                return;
+            };
+            if let Some(ui) = weak.upgrade() {
+                ui.set_modal(SharedString::default());
+                ui.set_modal_error(SharedString::default());
+                apply_pending_creations(&ui, &creations.borrow());
+            }
             let client = if client.is_empty() {
                 None
             } else {
@@ -99,6 +226,7 @@ fn register_callbacks(ui: &AppWindow, commands: &Sender<Command>) {
             send(
                 &sender,
                 Command::CreateServer {
+                    request_id,
                     name: name.into(),
                     client,
                     minecraft: minecraft.into(),
@@ -173,12 +301,37 @@ fn register_catalog_actions(ui: &AppWindow, commands: &Sender<Command>) {
     });
 }
 
-fn register_client_actions(ui: &AppWindow, commands: &Sender<Command>) {
+fn register_client_actions(
+    ui: &AppWindow,
+    commands: &Sender<Command>,
+    creations: Rc<RefCell<CreationTracker>>,
+) {
     let sender = commands.clone();
+    let weak = ui.as_weak();
     ui.on_submit_create_instance(move |name, minecraft, loader, loader_version, persistent| {
+        let key = CreationKey::Client {
+            name: name.trim().to_owned(),
+            minecraft: minecraft.as_str().to_owned(),
+            loader: loader.as_str().to_owned(),
+            loader_version: loader_version.as_str().to_owned(),
+            persistent,
+        };
+        let pending = pending_creation(&key);
+        let Some(request_id) = creations.borrow_mut().accept(key, pending) else {
+            if let Some(ui) = weak.upgrade() {
+                ui.invoke_present_toast(lookup("gui-creation-already-running").into(), true);
+            }
+            return;
+        };
+        if let Some(ui) = weak.upgrade() {
+            ui.set_modal(SharedString::default());
+            ui.set_modal_error(SharedString::default());
+            apply_pending_creations(&ui, &creations.borrow());
+        }
         send(
             &sender,
             Command::CreateClient {
+                request_id,
                 name: name.into(),
                 minecraft: minecraft.into(),
                 loader: loader.into(),
@@ -592,16 +745,22 @@ fn register_settings(ui: &AppWindow, commands: &Sender<Command>) {
     );
 
     let sender = commands.clone();
-    ui.on_save_preference(move |key, value, enabled| {
+    ui.on_save_preference(move |key, value| {
         if let Some(key) = ephervex_core::PreferenceKey::parse(&key) {
             send(
                 &sender,
-                Command::SavePreference {
+                Command::SetPreference {
                     key,
                     value: value.into(),
-                    enabled,
                 },
             );
+        }
+    });
+
+    let sender = commands.clone();
+    ui.on_reset_preference(move |key| {
+        if let Some(key) = ephervex_core::PreferenceKey::parse(&key) {
+            send(&sender, Command::ResetPreference(key));
         }
     });
 }
@@ -619,7 +778,12 @@ fn parse_java_memory(minimum: &str, maximum: &str) -> Result<(u32, u32), String>
     }
 }
 
-fn apply_event(ui: &AppWindow, event: Event, activities: &Rc<RefCell<Vec<ActivityData>>>) {
+fn apply_event(
+    ui: &AppWindow,
+    event: Event,
+    activities: &Rc<RefCell<Vec<ActivityData>>>,
+    creations: &Rc<RefCell<CreationTracker>>,
+) {
     match event {
         Event::Snapshot(snapshot) => apply_snapshot(ui, snapshot),
         Event::MinecraftReleases(versions) => apply_minecraft_releases(ui, versions),
@@ -679,6 +843,10 @@ fn apply_event(ui: &AppWindow, event: Event, activities: &Rc<RefCell<Vec<Activit
         Event::CloseModal => {
             ui.set_modal(SharedString::default());
             ui.set_modal_error(SharedString::default());
+        }
+        Event::CreationFinished { request_id } => {
+            creations.borrow_mut().finish(&request_id);
+            apply_pending_creations(ui, &creations.borrow());
         }
         Event::ImportAnalysis {
             path,
@@ -743,6 +911,102 @@ fn apply_loader_versions(
     }
 }
 
+fn pending_creation(key: &CreationKey) -> PendingCreation {
+    let (name, target, loader_kind, persistent, server) = match key {
+        CreationKey::Client {
+            name,
+            minecraft,
+            loader,
+            loader_version,
+            persistent,
+        } => (
+            name.clone(),
+            creation_target(minecraft, loader, loader_version),
+            loader.to_ascii_lowercase(),
+            *persistent,
+            false,
+        ),
+        CreationKey::Server {
+            name,
+            client,
+            minecraft,
+            loader,
+            loader_version,
+            persistent,
+        } => (
+            name.clone(),
+            if client.is_empty() {
+                creation_target(minecraft, loader, loader_version)
+            } else {
+                lookup("gui-linked-client")
+            },
+            if client.is_empty() {
+                loader.to_ascii_lowercase()
+            } else {
+                "vanilla".to_owned()
+            },
+            *persistent,
+            true,
+        ),
+    };
+    PendingCreation {
+        request_id: String::new(),
+        key: key.clone(),
+        name,
+        target,
+        loader_kind,
+        storage: lookup(if persistent {
+            "gui-persistent"
+        } else {
+            "gui-temporary"
+        }),
+        storage_kind: if persistent {
+            "persistent"
+        } else {
+            "temporary"
+        }
+        .to_owned(),
+        server,
+    }
+}
+
+fn creation_target(minecraft: &str, loader: &str, loader_version: &str) -> String {
+    let loader = if loader_version.is_empty() {
+        loader.to_owned()
+    } else {
+        format!("{loader} {loader_version}")
+    };
+    lookup_args(
+        "gui-target-summary",
+        [
+            ("first", Arg::from(minecraft)),
+            ("second", Arg::from(loader)),
+        ],
+    )
+}
+
+fn apply_pending_creations(ui: &AppWindow, tracker: &CreationTracker) {
+    let rows = |server| {
+        tracker
+            .pending
+            .iter()
+            .filter(|pending| pending.server == server)
+            .map(|pending| PendingEntityRow {
+                id: pending.request_id.clone().into(),
+                name: pending.name.clone().into(),
+                target: pending.target.clone().into(),
+                loader_kind: pending.loader_kind.clone().into(),
+                storage: pending.storage.clone().into(),
+                storage_kind: pending.storage_kind.clone().into(),
+                state: lookup("gui-state-creating").into(),
+                server,
+            })
+            .collect::<Vec<_>>()
+    };
+    ui.set_pending_instances(model(rows(false)));
+    ui.set_pending_servers(model(rows(true)));
+}
+
 fn apply_snapshot(ui: &AppWindow, snapshot: Snapshot) {
     let Snapshot {
         instances,
@@ -792,6 +1056,8 @@ fn apply_instance_snapshot(
             linked_servers: to_i32(item.linked_servers),
             mods: to_i32(item.managed_mods),
             needs_attention: item.needs_attention,
+            state: item.state.into(),
+            state_kind: item.state_kind.into(),
             can_launch: item.can_launch,
             connect_server_id: item
                 .launch_and_connect
@@ -988,7 +1254,7 @@ fn preference_rows(rows: Vec<PreferenceData>) -> Vec<PreferenceRow> {
                 key: row.key.into(),
                 label: row.label.into(),
                 value: row.value.into(),
-                enabled: row.enabled,
+                customized: row.customized,
                 kind: row.kind.into(),
                 syntax: row.syntax.into(),
                 numeric_value,
@@ -1118,6 +1384,106 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_creation_is_rejected_until_the_original_request_finishes() {
+        let key = CreationKey::Client {
+            name: "Rendering Repro".to_owned(),
+            minecraft: "1.20.1".to_owned(),
+            loader: "Forge".to_owned(),
+            loader_version: "47.3.0".to_owned(),
+            persistent: false,
+        };
+        let mut tracker = CreationTracker::default();
+        let request = tracker.accept(key.clone(), pending_creation(&key));
+        assert!(request.is_some());
+        let request = request.unwrap_or_default();
+
+        assert!(
+            tracker
+                .accept(key.clone(), pending_creation(&key))
+                .is_none()
+        );
+        assert_eq!(tracker.pending.len(), 1);
+
+        tracker.finish(&request);
+        assert!(
+            tracker
+                .accept(key.clone(), pending_creation(&key))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn distinct_creation_requests_can_run_together() {
+        let first = CreationKey::Server {
+            name: "First Server".to_owned(),
+            client: "client-one".to_owned(),
+            minecraft: "1.20.1".to_owned(),
+            loader: "Forge".to_owned(),
+            loader_version: "47.3.0".to_owned(),
+            persistent: false,
+        };
+        let mut second = first.clone();
+        if let CreationKey::Server { name, .. } = &mut second {
+            *name = "Second Server".to_owned();
+        }
+        let mut tracker = CreationTracker::default();
+
+        assert!(
+            tracker
+                .accept(first.clone(), pending_creation(&first))
+                .is_some()
+        );
+        assert!(
+            tracker
+                .accept(second.clone(), pending_creation(&second))
+                .is_some()
+        );
+        assert_eq!(tracker.pending.len(), 2);
+    }
+
+    #[test]
+    fn linked_server_deduplication_ignores_hidden_standalone_target_fields() {
+        let normalize = |minecraft: &str, loader: &str, loader_version: &str| {
+            let client = "client-one";
+            let linked = !client.is_empty();
+            CreationKey::Server {
+                name: "Client One Server".to_owned(),
+                client: client.to_owned(),
+                minecraft: if linked {
+                    String::new()
+                } else {
+                    minecraft.to_owned()
+                },
+                loader: if linked {
+                    String::new()
+                } else {
+                    loader.to_owned()
+                },
+                loader_version: if linked {
+                    String::new()
+                } else {
+                    loader_version.to_owned()
+                },
+                persistent: false,
+            }
+        };
+        let first = normalize("1.20.1", "Forge", "47.3.0");
+        let same_request = normalize("26.2", "NeoForge", "21.0.0");
+        let mut tracker = CreationTracker::default();
+
+        assert!(
+            tracker
+                .accept(first.clone(), pending_creation(&first))
+                .is_some()
+        );
+        assert!(
+            tracker
+                .accept(same_request.clone(), pending_creation(&same_request))
+                .is_none()
+        );
+    }
+
+    #[test]
     fn in_memory_activity_is_bounded() {
         let mut rows = Vec::new();
         for index in 0..120 {
@@ -1235,6 +1601,53 @@ mod tests {
     }
 
     #[test]
+    fn card_workspace_actions_select_the_target_before_opening_it() {
+        let source = include_str!("ui.rs");
+        assert!(source.contains(
+            "open-workspace(id) => { root.selected-instance-id = id; root.selected-instance-index = index; root.select-instance(id); root.workspace = \"instance\";"
+        ));
+        assert!(source.contains(
+            "open-workspace(id) => { root.selected-server-id = id; root.selected-server-index = index; root.select-server(id); root.workspace = \"server\";"
+        ));
+        assert!(source.contains(
+            "card-area := TouchArea { width: parent.width - 250px; clicked => { root.choose(item.id); } double-clicked => { root.open-workspace(item.id); } }"
+        ));
+    }
+
+    #[test]
+    fn minecraft_preferences_customize_on_edit_and_reset_without_a_management_toggle() {
+        let source = include_str!("ui.rs");
+        let reset = "gui-reset";
+        assert!(source.contains(&format!(
+            r#"if item.customized : AppButton {{ text: GuiI18n.text("{reset}")"#
+        )));
+        assert!(source.contains(
+            "Toggle { checked: item.value == \"true\"; toggled(value) => { root.save(item.key"
+        ));
+        assert!(!source.contains("checked: item.enabled"));
+        assert!(!source.contains("enabled: item.enabled"));
+    }
+
+    #[test]
+    fn activity_details_wrap_in_cards_with_content_driven_height() {
+        let source = include_str!("ui.rs");
+        assert!(source.contains("component ActivityCard inherits Rectangle"));
+        assert!(source.contains("height: max(102px, detail-text.preferred-height + 82px)"));
+        assert!(source.contains("detail-text := BodyText { text: item.detail; visible: item.detail != \"\"; wrap: word-wrap; }"));
+    }
+
+    #[test]
+    fn global_navigation_keeps_diagnostics_contextual() {
+        let source = include_str!("ui.rs");
+        let logs = "gui-logs";
+        assert!(!source.contains(&format!(
+            r#"label: GuiI18n.text("{logs}"); selected: root.page == 2"#
+        )));
+        assert!(source.contains("root.load-diagnostics(\"client\""));
+        assert!(source.contains("root.load-diagnostics(\"server\""));
+    }
+
+    #[test]
     fn wide_forms_and_server_details_use_hard_readability_bounds() {
         let source = include_str!("ui.rs");
         assert!(source.contains("width: min(parent.width, 980px)"));
@@ -1270,7 +1683,7 @@ mod tests {
             key: "fov".to_owned(),
             label: "Field of View".to_owned(),
             value: "70".to_owned(),
-            enabled: true,
+            customized: true,
             kind: "slider".to_owned(),
             syntax: "field of view in degrees, 30 to 110".to_owned(),
         }]);

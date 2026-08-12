@@ -361,10 +361,7 @@ impl Default for Config {
             persistent_instance_root: String::new(),
             active_account: String::new(),
             java: JavaConfig::default(),
-            minecraft_preferences: BTreeMap::from([
-                ("gui_scale".to_owned(), PreferenceSetting::managed("auto")),
-                ("language".to_owned(), PreferenceSetting::managed("en_us")),
-            ]),
+            minecraft_preferences: BTreeMap::new(),
             server_defaults: ServerDefaults::default(),
             eula: EulaConfig::default(),
             api: ApiConfig::default(),
@@ -740,14 +737,6 @@ auto_download = true
 min_memory_mib = 512
 max_memory_mib = 4096
 jvm_args = []
-
-[minecraft_preferences.gui_scale]
-enabled = true
-value = "auto"
-
-[minecraft_preferences.language]
-enabled = true
-value = "en_us"
 
 [server_defaults]
 online_mode = false
@@ -1294,10 +1283,13 @@ reference = ""
         // An unmanaged key must be left alone in options.txt entirely, which is
         // not the same as managing it to its current value.
         let mut config = Config::default();
+        config
+            .minecraft_preferences
+            .insert("gui_scale".to_owned(), PreferenceSetting::managed("auto"));
         let gui_scale = config
             .minecraft_preferences
             .get_mut("gui_scale")
-            .expect("shipped by default");
+            .expect("inserted preference");
         assert!(gui_scale.enabled);
         gui_scale.enabled = false;
 
@@ -1305,5 +1297,15 @@ reference = ""
         let parsed = Config::from_toml_str(&text).expect("re-parse");
         assert!(!parsed.minecraft_preferences["gui_scale"].enabled);
         assert_eq!(parsed.minecraft_preferences["gui_scale"].value, "auto");
+    }
+
+    #[test]
+    fn fresh_configuration_has_no_minecraft_preference_overrides() {
+        let config = Config::default();
+        assert!(config.minecraft_preferences.is_empty());
+
+        let text = config.to_toml_string().expect("serialize");
+        let parsed = Config::from_toml_str(&text).expect("re-parse");
+        assert!(parsed.minecraft_preferences.is_empty());
     }
 }

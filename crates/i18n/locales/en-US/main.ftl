@@ -595,6 +595,7 @@ operation-starting-server = Starting the server
 operation-importing-pack = Importing modpack
 operation-installing-mods = Installing mods
 operation-creating-server = Creating server
+operation-creating-instance = Creating instance
 
 # $operation identifies one background task. It is shown so a user can find the
 # same task in the launcher log, and is never translated.
@@ -945,6 +946,15 @@ gui-logs = Logs
 gui-activity = Activity
 gui-settings = Settings
 gui-settings-detail = Application, runtime, account, provider, and storage defaults.
+gui-creation-already-running = This creation request is already in progress.
+gui-creation-pending-detail = Validation and preparation are in progress. The finished environment will appear here automatically.
+gui-customized = Customized
+gui-reset = Reset
+gui-minecraft-default-reset = Minecraft preference reset to inherited behavior.
+gui-state-creating = Creating
+gui-state-ready = Ready
+gui-state-starting = Starting
+gui-state-starting-detail = Preparing the runtime process
 gui-tagline = Spawn. Reproduce. Despawn.
 gui-all = All
 gui-temporary = Temporary

@@ -178,7 +178,10 @@ fn a_preference_a_release_cannot_express_is_reported_rather_than_written() {
     let legacy = sandbox.create("Legacy", "1.12.2");
     let modern = sandbox.create("Modern", "1.20.1");
 
-    assert!(!options_of(&legacy).contains("simulationDistance"));
+    assert!(
+        !options_path(&legacy).exists(),
+        "a release with no applicable overrides needs no launcher-written options file"
+    );
     assert!(options_of(&modern).contains("simulationDistance:10"));
 
     let unsupported = legacy["preferences"]["unsupported"]
@@ -216,7 +219,10 @@ fn a_bad_preference_value_is_refused_with_the_syntax_that_would_have_worked() {
 
     //...and nothing was stored, so instances created afterwards are unaffected.
     let record = sandbox.create("Unaffected", "1.20.1");
-    assert!(!options_of(&record).contains("guiScale:enormous"));
+    assert!(
+        !options_path(&record).exists(),
+        "a rejected override must not create an options file"
+    );
 }
 
 #[test]
@@ -227,7 +233,10 @@ fn unmanaging_a_preference_stops_applying_it_and_keeps_its_value() {
 
     sandbox.json(&["--json", "preferences", "unmanage", "render_distance"]);
     let after = sandbox.create("Unmanaged", "1.20.1");
-    assert!(!options_of(&after).contains("renderDistance"));
+    assert!(
+        !options_path(&after).exists(),
+        "an unmanaged-only configuration must leave options.txt to Minecraft"
+    );
 
     let shown = sandbox.json(&["--json", "preferences", "show"]);
     let entry = shown["preferences"]
