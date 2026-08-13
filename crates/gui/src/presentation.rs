@@ -127,6 +127,8 @@ pub struct ServerPresentation {
     pub can_restart: bool,
     pub can_kill: bool,
     pub can_send_command: bool,
+    pub can_connect: bool,
+    pub connect_reason: String,
     pub destructive_recovery: bool,
 }
 
@@ -211,6 +213,8 @@ impl ServerPresentation {
             can_restart: controlled,
             can_kill: controlled,
             can_send_command: controlled,
+            can_connect: false,
+            connect_reason: String::new(),
             destructive_recovery: uncertain,
         }
     }
@@ -509,6 +513,7 @@ mod tests {
                     },
                 },
                 network: ephervex_core::ServerNetworkSettings::default(),
+                operator_setup: None,
                 source: ImportSource::manual(),
                 java_override: None,
                 jvm_override: None,

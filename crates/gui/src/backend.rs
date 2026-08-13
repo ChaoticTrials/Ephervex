@@ -94,6 +94,7 @@ pub enum Command {
         loader: String,
         loader_version: String,
         persistent: bool,
+        port: Option<u16>,
     },
     StartServer(ServerId),
     StopServer(ServerId),
@@ -147,6 +148,11 @@ pub enum Command {
     SaveDisplaySettings {
         text_scale: ephervex_core::ApplicationTextScale,
         technical_text_size: ephervex_core::TechnicalTextSize,
+    },
+    SaveLinkedServerSettings {
+        show_globally: bool,
+        make_operator: bool,
+        operator_level: ephervex_model::OperatorPermissionLevel,
     },
     RefreshJava,
     SaveJavaSettings {
@@ -246,6 +252,7 @@ impl SettingOrigin {
 }
 
 #[derive(Debug, Clone, Default)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct SettingsData {
     pub storage_root: String,
     pub persistent_root: String,
@@ -259,6 +266,9 @@ pub struct SettingsData {
     pub user_agent_origin: SettingOrigin,
     pub text_scale_percent: u16,
     pub technical_text_size_pixels: u16,
+    pub show_linked_servers: bool,
+    pub make_default_account_operator: bool,
+    pub operator_permission_level: u8,
     pub java_auto_detect: bool,
     pub java_auto_download: bool,
     pub java_memory_min: u32,
@@ -779,6 +789,7 @@ fn run_worker(
                 loader,
                 loader_version,
                 persistent,
+                port,
             } => {
                 let request = if let Some(client) = client {
                     Ok(NewServer::linked(name, client).with_storage(storage_class(persistent)))
@@ -789,7 +800,12 @@ fn run_worker(
                     })
                 };
                 match request {
-                    Ok(request) => {
+                    Ok(mut request) => {
+                        if let Some(port) = port {
+                            let mut network = request.network.clone();
+                            network.port = port;
+                            request = request.with_network(network);
+                        }
                         let paths = app.paths().clone();
                         spawn_creation_operation(
                             paths,
@@ -1048,6 +1064,24 @@ fn run_worker(
                 }
                 Err(error) => send_error(&events, &error),
             },
+            Command::SaveLinkedServerSettings {
+                show_globally,
+                make_operator,
+                operator_level,
+            } => {
+                let result =
+                    app.set_linked_server_settings(show_globally, make_operator, operator_level);
+                match result {
+                    Ok(()) => {
+                        let _ = events.send(Event::Toast {
+                            message: lookup("gui-server-defaults-saved"),
+                            error: false,
+                        });
+                        send_snapshot(&app, &events);
+                    }
+                    Err(error) => send_error(&events, &error),
+                }
+            }
             Command::RefreshJava => match runtime.block_on(app.refresh_java_runtimes()) {
                 Ok(inventory) => {
                     let rows = inventory
@@ -1164,6 +1198,7 @@ fn send_snapshot(app: &App, events: &Sender<Event>) {
 
 fn snapshot(app: &App) -> Result<Snapshot, CoreError> {
     let servers = app.list_servers()?;
+    let mut connection_states = std::collections::HashMap::new();
     let mut instance_rows = Vec::new();
     for record in app.list_clients()? {
         let linked = servers
@@ -1175,6 +1210,12 @@ fn snapshot(app: &App) -> Result<Snapshot, CoreError> {
             let availability = app
                 .launch_and_connect_availability(record.id, server.id)
                 .map_err(|error| localized_error(&error));
+            connection_states.insert(
+                server.id,
+                availability
+                    .as_ref()
+                    .is_ok_and(|availability| !availability.client_running),
+            );
             (server, availability)
         });
         let managed_mods = app.managed_mods(record.id).map_or(0, |mods| mods.len());
@@ -1190,7 +1231,9 @@ fn snapshot(app: &App) -> Result<Snapshot, CoreError> {
     let mut server_rows = Vec::new();
     for server in servers {
         let status = app.server_status(server.id)?;
-        server_rows.push(ServerPresentation::from_status(&status));
+        let mut presentation = ServerPresentation::from_status(&status);
+        presentation.can_connect = connection_states.get(&server.id).copied().unwrap_or(false);
+        server_rows.push(presentation);
     }
     let accounts = app
         .account_status()?
@@ -1239,6 +1282,7 @@ fn application_settings(app: &App) -> Result<SettingsData, CoreError> {
     let display = app.application_display_settings();
     let storage = app.persistent_storage_settings();
     let java = app.java_settings();
+    let server = app.server_application_settings();
     Ok(SettingsData {
         storage_root: storage.effective_root.display().to_string(),
         persistent_root: storage
@@ -1255,6 +1299,9 @@ fn application_settings(app: &App) -> Result<SettingsData, CoreError> {
         effective_user_agent: api.effective_user_agent,
         text_scale_percent: display.text_scale.percent(),
         technical_text_size_pixels: display.technical_text_size.pixels(),
+        show_linked_servers: display.show_linked_servers,
+        make_default_account_operator: server.make_default_account_operator,
+        operator_permission_level: server.operator_permission_level.value(),
         java_auto_detect: java.auto_detect,
         java_auto_download: java.auto_download,
         java_memory_min: java.min_memory_mib,
@@ -1796,6 +1843,9 @@ fn forward_server_event(
     }
 }
 
+// The three observers intentionally stay in one scope so their channel and
+// runtime ownership cannot drift apart from the combined operation.
+#[allow(clippy::too_many_lines)]
 fn spawn_connect(
     paths: Paths,
     events: &Sender<Event>,
@@ -1808,10 +1858,77 @@ fn spawn_connect(
         events.clone(),
         move |mut app, events, runtime| {
             runtime.block_on(async move {
-                let (connect_observer, _connect_events) = LaunchAndConnectObserver::channel();
-                let (server_observer, _server_events) = ServerObserver::channel();
-                let (launch_observer, _launch_events) = LaunchObserver::channel();
+                let (connect_observer, mut connect_events) = LaunchAndConnectObserver::channel();
+                let (server_observer, mut server_events) = ServerObserver::channel();
+                let (launch_observer, mut launch_events) = LaunchObserver::channel();
                 let cancel = CancellationToken::new();
+                let refresh_paths = paths.clone();
+                let refresh_events = events.clone();
+                let connect_forward = tokio::spawn(async move {
+                    while connect_events.recv().await.is_some() {
+                        refresh_snapshot(&refresh_paths, &refresh_events);
+                    }
+                });
+                let server_paths = paths.clone();
+                let server_event_sender = events.clone();
+                let server_entity = entity.clone();
+                let observed_operation = Arc::new(Mutex::new(None::<String>));
+                let forwarded_operation = Arc::clone(&observed_operation);
+                let server_forward = tokio::spawn(async move {
+                    while let Some(event) = server_events.recv().await {
+                        if let ServerEvent::Output(line) = event {
+                            let mut lines = vec![LiveLogLine::Server(line)];
+                            while lines.len() < 256 {
+                                match server_events.try_recv() {
+                                    Ok(ServerEvent::Output(line)) => {
+                                        lines.push(LiveLogLine::Server(line));
+                                    }
+                                    Ok(other) => forward_server_event(
+                                        &server_event_sender,
+                                        &server_entity,
+                                        &server_paths,
+                                        &forwarded_operation,
+                                        server,
+                                        other,
+                                    ),
+                                    Err(_) => break,
+                                }
+                            }
+                            let _ = server_event_sender.send(Event::LiveLog(LiveLogUpdate {
+                                source: LiveLogSource::Server(server),
+                                reset: false,
+                                missing: false,
+                                source_truncated: false,
+                                lines,
+                            }));
+                        } else {
+                            forward_server_event(
+                                &server_event_sender,
+                                &server_entity,
+                                &server_paths,
+                                &forwarded_operation,
+                                server,
+                                event,
+                            );
+                        }
+                    }
+                });
+                let launch_paths = paths.clone();
+                let launch_event_sender = events.clone();
+                let launch_entity = entity.clone();
+                let launch_operation = Arc::new(Mutex::new(None::<String>));
+                let forwarded_launch_operation = Arc::clone(&launch_operation);
+                let launch_forward = tokio::spawn(async move {
+                    while let Some(event) = launch_events.recv().await {
+                        forward_launch_event(
+                            &launch_event_sender,
+                            &launch_entity,
+                            &forwarded_launch_operation,
+                            &launch_paths,
+                            event,
+                        );
+                    }
+                });
                 let result = app
                     .launch_and_connect(
                         client,
@@ -1823,6 +1940,11 @@ fn spawn_connect(
                         &cancel,
                     )
                     .await;
+                drop(connect_observer);
+                drop(server_observer);
+                drop(launch_observer);
+                connect_forward.abort();
+                let _ = launch_forward.await;
                 match result {
                     Ok(outcome) => send_activity_state(
                         &events,
@@ -1836,6 +1958,13 @@ fn spawn_connect(
                     ),
                     Err(error) => send_error(&events, &error),
                 }
+                if let Ok(app) = App::open_at(paths.clone()) {
+                    send_snapshot(&app, &events);
+                }
+                // If this operation started the server, its supervisor is a
+                // task on this runtime. Keep the runtime alive until that
+                // server exits instead of canceling it when the client closes.
+                let _ = server_forward.await;
                 if let Ok(app) = App::open_at(paths) {
                     send_snapshot(&app, &events);
                 }
@@ -2471,5 +2600,16 @@ mod tests {
         ));
         remove_cancellation(&registry, &reporter);
         assert!(registry.lock().is_ok_and(|entries| entries.is_empty()));
+    }
+
+    #[test]
+    fn launch_and_connect_keeps_runtime_and_live_state_forwarding_owned() {
+        let source = include_str!("backend.rs");
+        assert!(source.contains("let (launch_observer, mut launch_events)"));
+        assert!(source.contains("let (server_observer, mut server_events)"));
+        assert!(source.contains("while lines.len() < 256"));
+        assert!(source.contains("let _ = launch_forward.await"));
+        assert!(source.contains("let _ = server_forward.await"));
+        assert!(source.matches("send_snapshot(&app, &events)").count() >= 2);
     }
 }

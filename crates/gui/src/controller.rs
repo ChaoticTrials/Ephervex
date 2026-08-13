@@ -43,6 +43,7 @@ enum CreationKey {
         loader: String,
         loader_version: String,
         persistent: bool,
+        port: Option<u16>,
     },
 }
 
@@ -56,6 +57,7 @@ struct PendingCreation {
     storage: String,
     storage_kind: String,
     server: bool,
+    linked_client_id: String,
 }
 
 #[derive(Debug, Default)]
@@ -531,8 +533,20 @@ fn register_callbacks(
     let sender = commands.clone();
     let weak = ui.as_weak();
     ui.on_submit_create_server(
-        move |name, client, minecraft, loader, loader_version, persistent| {
+        move |name, client, minecraft, loader, loader_version, persistent, automatic_port, port| {
             let linked = !client.is_empty();
+            let port = if automatic_port {
+                None
+            } else {
+                let validation = validate_port(&port);
+                if !validation.valid {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.set_modal_error(validation.message.into());
+                    }
+                    return;
+                }
+                port.parse::<u16>().ok()
+            };
             let key = CreationKey::Server {
                 name: name.trim().to_owned(),
                 client: client.as_str().to_owned(),
@@ -552,6 +566,7 @@ fn register_callbacks(
                     loader_version.as_str().to_owned()
                 },
                 persistent,
+                port,
             };
             let pending = pending_creation(&key);
             let Some(request_id) = creations.borrow_mut().accept(key, pending) else {
@@ -580,6 +595,7 @@ fn register_callbacks(
                     loader: loader.into(),
                     loader_version: loader_version.into(),
                     persistent,
+                    port,
                 },
             );
         },
@@ -660,6 +676,7 @@ fn register_client_actions(
 ) {
     let sender = commands.clone();
     let weak = ui.as_weak();
+    let submit_creations = Rc::clone(&creations);
     ui.on_submit_create_instance(move |name, minecraft, loader, loader_version, persistent| {
         let key = CreationKey::Client {
             name: name.trim().to_owned(),
@@ -669,7 +686,7 @@ fn register_client_actions(
             persistent,
         };
         let pending = pending_creation(&key);
-        let Some(request_id) = creations.borrow_mut().accept(key, pending) else {
+        let Some(request_id) = submit_creations.borrow_mut().accept(key, pending) else {
             if let Some(ui) = weak.upgrade() {
                 ui.invoke_present_toast(lookup("gui-creation-already-running").into(), true);
             }
@@ -678,7 +695,7 @@ fn register_client_actions(
         if let Some(ui) = weak.upgrade() {
             ui.set_modal(SharedString::default());
             ui.set_modal_error(SharedString::default());
-            apply_pending_creations(&ui, &creations.borrow());
+            apply_pending_creations(&ui, &submit_creations.borrow());
         }
         send(
             &sender,
@@ -708,8 +725,7 @@ fn register_client_actions(
         );
     });
 
-    let sender = commands.clone();
-    ui.on_select_instance(move |_| send(&sender, Command::Refresh));
+    register_instance_selection(ui, commands, creations);
 
     let sender = commands.clone();
     ui.on_launch_client(move |id| {
@@ -807,6 +823,27 @@ fn register_mod_actions(ui: &AppWindow, commands: &Sender<Command>) {
     });
 }
 
+fn register_instance_selection(
+    ui: &AppWindow,
+    commands: &Sender<Command>,
+    creations: Rc<RefCell<CreationTracker>>,
+) {
+    let sender = commands.clone();
+    let weak = ui.as_weak();
+    ui.on_select_instance(move |id| {
+        if let Some(ui) = weak.upgrade() {
+            let linked = ui
+                .get_servers()
+                .iter()
+                .filter(|row| row.linked_client_id == id)
+                .collect::<Vec<_>>();
+            ui.set_linked_servers(model(linked));
+            apply_pending_creations(&ui, &creations.borrow());
+        }
+        send(&sender, Command::Refresh);
+    });
+}
+
 fn register_server_actions(ui: &AppWindow, commands: &Sender<Command>) {
     register_server_property_actions(ui, commands);
 
@@ -818,7 +855,13 @@ fn register_server_actions(ui: &AppWindow, commands: &Sender<Command>) {
     });
 
     let sender = commands.clone();
+    let weak = ui.as_weak();
     ui.on_load_server_workspace(move |id| {
+        if let Some(ui) = weak.upgrade() {
+            let index = ui.get_servers().iter().position(|row| row.id == id);
+            ui.set_selected_server_id(id.clone());
+            ui.set_selected_server_index(index.map_or(-1, to_i32));
+        }
         if let Some(id) = backend::parse_server_id(&id) {
             send(&sender, Command::LoadServerWorkspace(id));
         }
@@ -1040,6 +1083,26 @@ fn register_settings(ui: &AppWindow, commands: &Sender<Command>) {
     register_display_settings(ui, commands);
 
     let sender = commands.clone();
+    let weak = ui.as_weak();
+    ui.on_save_linked_server_settings(move |show, make_operator, level| {
+        let level = u8::try_from(level)
+            .ok()
+            .and_then(ephervex_model::OperatorPermissionLevel::from_value);
+        if let Some(operator_level) = level {
+            send(
+                &sender,
+                Command::SaveLinkedServerSettings {
+                    show_globally: show,
+                    make_operator,
+                    operator_level,
+                },
+            );
+        } else if let Some(ui) = weak.upgrade() {
+            ui.invoke_present_toast(lookup("gui-operator-level-invalid").into(), true);
+        }
+    });
+
+    let sender = commands.clone();
     ui.on_add_offline_account(move |name| {
         if !name.trim().is_empty() {
             send(&sender, Command::AddOfflineAccount(name.into()));
@@ -1174,7 +1237,10 @@ fn apply_event(
     creations: &Rc<RefCell<CreationTracker>>,
 ) {
     match event {
-        Event::Snapshot(snapshot) => apply_snapshot(ui, snapshot),
+        Event::Snapshot(snapshot) => {
+            apply_snapshot(ui, snapshot);
+            apply_pending_creations(ui, &creations.borrow());
+        }
         Event::MinecraftReleases(versions) => apply_minecraft_releases(ui, versions),
         Event::LoaderVersions {
             form,
@@ -1312,6 +1378,7 @@ fn pending_creation(key: &CreationKey) -> PendingCreation {
             loader,
             loader_version,
             persistent,
+            ..
         } => (
             name.clone(),
             creation_target(minecraft, loader, loader_version),
@@ -1326,6 +1393,7 @@ fn pending_creation(key: &CreationKey) -> PendingCreation {
             loader,
             loader_version,
             persistent,
+            ..
         } => (
             name.clone(),
             if client.is_empty() {
@@ -1360,6 +1428,10 @@ fn pending_creation(key: &CreationKey) -> PendingCreation {
         }
         .to_owned(),
         server,
+        linked_client_id: match key {
+            CreationKey::Server { client, .. } => client.clone(),
+            CreationKey::Client { .. } => String::new(),
+        },
     }
 }
 
@@ -1379,11 +1451,16 @@ fn creation_target(minecraft: &str, loader: &str, loader_version: &str) -> Strin
 }
 
 fn apply_pending_creations(ui: &AppWindow, tracker: &CreationTracker) {
-    let rows = |server| {
+    let rows = |server: bool, global: bool| {
         tracker
             .pending
             .iter()
-            .filter(|pending| pending.server == server)
+            .filter(|pending| {
+                pending.server == server
+                    && (!global
+                        || ui.get_show_linked_servers()
+                        || pending.linked_client_id.is_empty())
+            })
             .map(|pending| PendingEntityRow {
                 id: pending.request_id.clone().into(),
                 name: pending.name.clone().into(),
@@ -1393,11 +1470,21 @@ fn apply_pending_creations(ui: &AppWindow, tracker: &CreationTracker) {
                 storage_kind: pending.storage_kind.clone().into(),
                 state: lookup("gui-state-creating").into(),
                 server,
+                linked_client_id: pending.linked_client_id.clone().into(),
             })
             .collect::<Vec<_>>()
     };
-    ui.set_pending_instances(model(rows(false)));
-    ui.set_pending_servers(model(rows(true)));
+    ui.set_pending_instances(model(rows(false, false)));
+    ui.set_pending_servers(model(rows(true, true)));
+    let selected_instance = ui.get_selected_instance_id();
+    ui.set_linked_pending_servers(model(
+        rows(true, false)
+            .into_iter()
+            .filter(|row| {
+                !row.linked_client_id.is_empty() && row.linked_client_id == selected_instance
+            })
+            .collect(),
+    ));
 }
 
 fn apply_snapshot(ui: &AppWindow, snapshot: Snapshot) {
@@ -1409,6 +1496,9 @@ fn apply_snapshot(ui: &AppWindow, snapshot: Snapshot) {
         settings,
         eula,
     } = snapshot;
+    ui.set_show_linked_servers(settings.show_linked_servers);
+    ui.set_make_default_account_operator(settings.make_default_account_operator);
+    ui.set_operator_permission_level(i32::from(settings.operator_permission_level));
     apply_instance_snapshot(ui, instances);
     apply_server_snapshot(ui, servers);
     ui.set_accounts(model(account_rows(accounts)));
@@ -1501,35 +1591,15 @@ fn apply_instance_snapshot(
 }
 
 fn apply_server_snapshot(ui: &AppWindow, servers: Vec<crate::presentation::ServerPresentation>) {
-    let previous_server = ui.get_selected_server_id();
-    let mut server_rows = servers
-        .into_iter()
-        .map(|item| ServerRow {
-            id: item.id.into(),
-            name: item.name.into(),
-            minecraft: item.minecraft.into(),
-            loader: item.loader.into(),
-            loader_kind: item.loader_kind.into(),
-            storage: item.storage.into(),
-            storage_kind: item.storage_kind.into(),
-            relationship: item.relationship.into(),
-            linked_client_id: item.linked_client_id.into(),
-            state: item.state.into(),
-            state_kind: item.state_kind.into(),
-            state_detail: item.state_detail.into(),
-            address: item.address.into(),
-            path: item.path.into(),
-            installed: item.installed,
-            needs_attention: item.needs_attention,
-            can_start: item.can_start,
-            can_stop: item.can_stop,
-            can_restart: item.can_restart,
-            can_kill: item.can_kill,
-            can_send_command: item.can_send_command,
-        })
+    let previous_global_server = ui.get_selected_global_server_id();
+    let server_rows = servers.into_iter().map(server_row).collect::<Vec<_>>();
+    let mut global_rows = server_rows
+        .iter()
+        .filter(|row| server_is_globally_visible(row, ui.get_show_linked_servers()))
+        .cloned()
         .collect::<Vec<_>>();
     let query = ui.get_server_query().to_ascii_lowercase();
-    server_rows.retain(|row| {
+    global_rows.retain(|row| {
         row_matches(
             &query,
             [
@@ -1541,15 +1611,68 @@ fn apply_server_snapshot(ui: &AppWindow, servers: Vec<crate::presentation::Serve
             ],
         )
     });
-    let server_index = selected_index(&server_rows, &previous_server, |row| &row.id);
-    if let Some(index) = server_index {
-        ui.set_selected_server_id(server_rows[index].id.clone());
-        ui.set_selected_server_index(to_i32(index));
+    let global_index = global_selection_index(&global_rows, &previous_global_server);
+    if let Some(index) = global_index {
+        ui.set_selected_global_server_id(global_rows[index].id.clone());
+        ui.set_selected_global_server_index(to_i32(index));
     } else {
-        ui.set_selected_server_id(SharedString::default());
-        ui.set_selected_server_index(-1);
+        ui.set_selected_global_server_id(SharedString::default());
+        ui.set_selected_global_server_index(-1);
     }
+    let selected_instance = ui.get_selected_instance_id();
+    let linked_rows = server_rows
+        .iter()
+        .filter(|row| row.linked_client_id == selected_instance)
+        .cloned()
+        .collect::<Vec<_>>();
+    let workspace_server = ui.get_selected_server_id();
+    let workspace_index = server_rows
+        .iter()
+        .position(|row| row.id == workspace_server);
+    ui.set_selected_server_index(workspace_index.map_or(-1, to_i32));
     ui.set_servers(model(server_rows));
+    ui.set_global_servers(model(global_rows));
+    ui.set_linked_servers(model(linked_rows));
+}
+
+fn server_is_globally_visible(row: &ServerRow, show_linked_servers: bool) -> bool {
+    show_linked_servers || row.linked_client_id.is_empty()
+}
+
+fn global_selection_index(rows: &[ServerRow], previous: &str) -> Option<usize> {
+    if previous.is_empty() {
+        (!rows.is_empty()).then_some(0)
+    } else {
+        rows.iter().position(|row| row.id == previous)
+    }
+}
+
+fn server_row(item: crate::presentation::ServerPresentation) -> ServerRow {
+    ServerRow {
+        id: item.id.into(),
+        name: item.name.into(),
+        minecraft: item.minecraft.into(),
+        loader: item.loader.into(),
+        loader_kind: item.loader_kind.into(),
+        storage: item.storage.into(),
+        storage_kind: item.storage_kind.into(),
+        relationship: item.relationship.into(),
+        linked_client_id: item.linked_client_id.into(),
+        state: item.state.into(),
+        state_kind: item.state_kind.into(),
+        state_detail: item.state_detail.into(),
+        address: item.address.into(),
+        path: item.path.into(),
+        installed: item.installed,
+        needs_attention: item.needs_attention,
+        can_start: item.can_start,
+        can_stop: item.can_stop,
+        can_restart: item.can_restart,
+        can_kill: item.can_kill,
+        can_send_command: item.can_send_command,
+        can_connect: item.can_connect,
+        connect_reason: item.connect_reason.into(),
+    }
 }
 
 fn apply_server_workspace(ui: &AppWindow, workspace: ServerWorkspaceData) {
@@ -1816,6 +1939,7 @@ mod tests {
             loader: "Forge".to_owned(),
             loader_version: "47.3.0".to_owned(),
             persistent: false,
+            port: None,
         };
         let mut second = first.clone();
         if let CreationKey::Server { name, .. } = &mut second {
@@ -1860,6 +1984,7 @@ mod tests {
                     loader_version.to_owned()
                 },
                 persistent: false,
+                port: None,
             }
         };
         let first = normalize("1.20.1", "Forge", "47.3.0");
@@ -2002,7 +2127,7 @@ mod tests {
             "open-workspace(id) => { root.selected-instance-id = id; root.selected-instance-index = index; root.select-instance(id); root.workspace = \"instance\";"
         ));
         assert!(source.contains(
-            "open-workspace(id) => { root.selected-server-id = id; root.selected-server-index = index; root.select-server(id); root.workspace = \"server\";"
+            "open-workspace(id) => { root.selected-global-server-id = id; root.selected-global-server-index = index; root.selected-server-id = id; root.server-workspace-return-client = \"\"; root.select-server(id); root.workspace = \"server\";"
         ));
         assert!(source.contains(
             "card-area := TouchArea { width: parent.width - 250px; clicked => { root.choose(item.id); } double-clicked => { root.open-workspace(item.id); } }"
@@ -2138,6 +2263,37 @@ mod tests {
         assert!(source.contains("callback save-display-settings(int, int)"));
         assert!(source.contains("root.technical-text-size * 1px"));
         assert!(!source.contains("They do not change Minecraft's GUI scale"));
+    }
+
+    #[test]
+    fn global_server_visibility_defaults_to_standalone_and_can_include_linked_rows() {
+        let standalone = ServerRow {
+            id: "standalone".into(),
+            ..ServerRow::default()
+        };
+        let linked = ServerRow {
+            id: "linked".into(),
+            linked_client_id: "client".into(),
+            ..ServerRow::default()
+        };
+        assert!(server_is_globally_visible(&standalone, false));
+        assert!(!server_is_globally_visible(&linked, false));
+        assert!(server_is_globally_visible(&linked, true));
+        assert_eq!(
+            global_selection_index(std::slice::from_ref(&standalone), "linked"),
+            None,
+            "a hidden selected linked server must not retain a stale index"
+        );
+    }
+
+    #[test]
+    fn linked_server_workspace_and_pending_creation_remain_contextual() {
+        let source = include_str!("ui.rs");
+        assert!(source.contains("for server in root.linked-servers"));
+        assert!(source.contains("root.selected-server-id = server.id"));
+        assert!(source.contains("pending.linked-client-id == root.selected-instance-id"));
+        assert!(source.contains("root.server-workspace-return-client"));
+        assert!(source.contains("name + \" Server\""));
     }
 
     #[test]
