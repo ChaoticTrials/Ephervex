@@ -63,8 +63,8 @@ pub use reconcile::{
 pub use records::{
     ClientRecord, DUPLICATE_NAME_SUFFIX, DuplicateClient, DuplicatedClient, FileDisposition,
     ImportSource, JavaOverride, JvmSettings, NewClient, NewServer, ServerCommit,
-    ServerCommitWarning, ServerCreationSource, ServerNetworkSettings, ServerOperatorProfile,
-    ServerOperatorSetup, ServerPortSelection, ServerRecord,
+    ServerCommitWarning, ServerCreationSource, ServerNetworkSettings, ServerOperatorIdentity,
+    ServerOperatorProfile, ServerOperatorSetup, ServerPortSelection, ServerRecord,
 };
 pub use registry::{Registry, RegistryError};
 

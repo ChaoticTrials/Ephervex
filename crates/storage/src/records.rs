@@ -14,8 +14,8 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 use ephervex_model::{
-    AccountKind, AttentionReason, ImportSourceKind, InstanceId, LoaderSelection,
-    OperatorPermissionLevel, ServerId, ServerInstallation, StorageClass,
+    AttentionReason, ImportSourceKind, InstanceId, LoaderSelection, OperatorPermissionLevel,
+    ServerId, ServerInstallation, StorageClass,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -189,7 +189,22 @@ pub struct ServerRecord {
 pub struct ServerOperatorProfile {
     pub id: Uuid,
     pub name: String,
-    pub kind: AccountKind,
+    /// The identity form the server will assign to this player. This is
+    /// intentionally independent from the kind of Ephervex account that
+    /// supplied the player name.
+    #[serde(alias = "kind")]
+    pub identity: ServerOperatorIdentity,
+}
+
+/// How Minecraft authenticates the durable operator identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServerOperatorIdentity {
+    /// An authenticated profile UUID accepted by an online-mode server.
+    #[serde(alias = "microsoft")]
+    Online,
+    /// Minecraft's canonical name-derived UUID for an offline-mode server.
+    Offline,
 }
 
 /// Per-server operator intent copied from application defaults at creation.
@@ -491,6 +506,20 @@ mod tests {
             ServerPortSelection::Explicit(30_000)
         );
         assert_eq!(explicit.network.port, 30_000);
+    }
+
+    #[test]
+    fn legacy_operator_account_kind_deserializes_as_server_identity() {
+        let id = Uuid::new_v4();
+        let profile: ServerOperatorProfile = serde_json::from_str(&format!(
+            r#"{{"id":"{id}","name":"Developer","kind":"microsoft"}}"#
+        ))
+        .expect("legacy profile");
+        assert_eq!(profile.identity, ServerOperatorIdentity::Online);
+
+        let rendered = serde_json::to_string(&profile).expect("current profile");
+        assert!(rendered.contains(r#""identity":"online""#));
+        assert!(!rendered.contains(r#""kind""#));
     }
 
     #[test]

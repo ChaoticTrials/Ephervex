@@ -994,10 +994,10 @@ fn remove_tree(root: &Path) -> Result<(), RegistryError> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
-    use ephervex_model::{AccountKind, LoaderKind, OperatorPermissionLevel};
+    use ephervex_model::{LoaderKind, OperatorPermissionLevel};
 
     use crate::test_support::TestEnvironment;
-    use crate::{ServerOperatorProfile, ServerOperatorSetup};
+    use crate::{ServerOperatorIdentity, ServerOperatorProfile, ServerOperatorSetup};
 
     #[test]
     fn a_created_instance_is_readable_listable_and_on_disk() {
@@ -1389,7 +1389,7 @@ mod tests {
             profile: Some(ServerOperatorProfile {
                 id: uuid::Uuid::new_v4(),
                 name: "Developer".to_owned(),
-                kind: AccountKind::Microsoft,
+                identity: ServerOperatorIdentity::Online,
             }),
         });
         registry.update_server(&mut server).expect("update");

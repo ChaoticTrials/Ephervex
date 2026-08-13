@@ -158,7 +158,7 @@ pub use ephervex_storage::{
     MAX_VIEW_BYTES, MissingFolder, NetworkAccess, NewClient, NewServer, PathError, Paths,
     PreferenceSetting, ReconciledRecord, ReconciliationReport, RecordRef, SECRET_KEY_MARKERS,
     SearchMatch, SearchOptions, SearchOutcome, ServerCommit, ServerCommitWarning, ServerDefaults,
-    ServerFolder, ServerNetworkSettings, ServerOperatorProfile, ServerOperatorSetup,
-    ServerPortSelection, ServerRecord, ServerRootConflict, StorageError, TechnicalTextSize,
-    TextAnchor, TextView, running_state,
+    ServerFolder, ServerNetworkSettings, ServerOperatorIdentity, ServerOperatorProfile,
+    ServerOperatorSetup, ServerPortSelection, ServerRecord, ServerRootConflict, StorageError,
+    TechnicalTextSize, TextAnchor, TextView, running_state,
 };

@@ -22,8 +22,8 @@ use ephervex_server::{
 };
 use ephervex_storage::{
     FileDisposition, MetadataError, NetworkAccess, NewServer, RegistryError, ServerCommit,
-    ServerNetworkSettings, ServerOperatorProfile, ServerOperatorSetup, ServerPortSelection,
-    ServerRecord,
+    ServerNetworkSettings, ServerOperatorIdentity, ServerOperatorProfile, ServerOperatorSetup,
+    ServerPortSelection, ServerRecord,
 };
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -141,13 +141,21 @@ impl App {
         network: &ServerNetworkSettings,
     ) -> Option<ServerOperatorProfile> {
         let (id, account) = self.config().active_account_config()?;
-        if !operator_profile_matches_network(account.kind, network) {
-            return None;
-        }
+        let (id, identity) = if network.online_mode {
+            if account.kind != AccountKind::Microsoft {
+                return None;
+            }
+            (Uuid::parse_str(id).ok()?, ServerOperatorIdentity::Online)
+        } else {
+            (
+                ephervex_auth::offline_uuid(&account.name),
+                ServerOperatorIdentity::Offline,
+            )
+        };
         Some(ServerOperatorProfile {
-            id: Uuid::parse_str(id).ok()?,
+            id,
             name: account.name.clone(),
-            kind: account.kind,
+            identity,
         })
     }
 
@@ -521,18 +529,26 @@ impl App {
         eula.require_valid()?;
         let server_dir = ephervex_storage::metadata::server_game_dir(&record.root);
         merge_network_file(&server_dir.join(SERVER_PROPERTIES_FILE), &record.network)?;
-        if record
+        let incompatible_profile = record.operator_setup.as_ref().is_some_and(|setup| {
+            setup.profile.as_ref().is_some_and(|profile| {
+                !operator_profile_matches_network(profile.identity, &record.network)
+            })
+        });
+        let needs_profile = record
             .operator_setup
             .as_ref()
-            .is_some_and(|setup| setup.profile.is_none())
-            && let Some(profile) = self.default_operator_profile(&record.network)
-        {
+            .is_some_and(|setup| setup.profile.is_none() || incompatible_profile);
+        if needs_profile {
+            let profile = self.default_operator_profile(&record.network);
+            let should_persist = profile.is_some() || incompatible_profile;
             if let Some(setup) = record.operator_setup.as_mut() {
-                setup.profile = Some(profile);
+                setup.profile = profile;
             }
-            let _commit = self
-                .registry_for_services()
-                .update_server_committed(&mut record)?;
+            if should_persist {
+                let _commit = self
+                    .registry_for_services()
+                    .update_server_committed(&mut record)?;
+            }
         }
         materialize_operator_setup(&server_dir, &record.network, record.operator_setup.as_ref())?;
         materialize_eula_file(&server_dir.join(EULA_FILE), &eula)?;
@@ -802,7 +818,7 @@ fn materialize_operator_setup(
     let Some(profile) = setup.profile.as_ref() else {
         return Ok(());
     };
-    if !operator_profile_matches_network(profile.kind, network) {
+    if !operator_profile_matches_network(profile.identity, network) {
         return Ok(());
     }
     let path = server_dir.join(OPERATORS_FILE);
@@ -833,12 +849,12 @@ fn materialize_operator_setup(
 }
 
 const fn operator_profile_matches_network(
-    account_kind: AccountKind,
+    identity: ServerOperatorIdentity,
     network: &ServerNetworkSettings,
 ) -> bool {
     matches!(
-        (account_kind, network.online_mode),
-        (AccountKind::Offline, false) | (AccountKind::Microsoft, true)
+        (identity, network.online_mode),
+        (ServerOperatorIdentity::Offline, false) | (ServerOperatorIdentity::Online, true)
     )
 }
 
@@ -1156,6 +1172,14 @@ mod tests {
         App::open_at(Paths::rooted_at(base)).expect("open app")
     }
 
+    fn remember_active_account(app: &mut App, id: &str, name: &str, kind: AccountKind) {
+        app.mutate_config(|config| {
+            config.remember_account(id, name, kind, "2026-01-01T00:00:00Z");
+            assert!(config.set_active_account(id));
+        })
+        .expect("config");
+    }
+
     #[test]
     fn automatic_port_prefers_start_and_advances_past_unavailable_candidates() {
         let selected = select_available_port_with(
@@ -1222,60 +1246,58 @@ mod tests {
     }
 
     #[test]
-    fn operator_profile_is_not_fabricated_and_offline_identity_respects_online_mode() {
+    fn microsoft_account_uses_its_authenticated_uuid_for_online_mode() {
         let directory = tempfile::tempdir().expect("temp dir");
         let mut app = test_app(directory.path());
-        app.mutate_config(|config| {
-            config.remember_account(
-                "not-a-uuid",
-                "Unsafe",
-                AccountKind::Microsoft,
-                "2026-01-01T00:00:00Z",
-            );
-        })
-        .expect("config");
-        assert!(
-            app.default_operator_profile(&ServerNetworkSettings::default())
-                .is_none()
-        );
-
         let microsoft_id = Uuid::new_v4();
-        app.mutate_config(|config| {
-            config.remember_account(
-                &microsoft_id.to_string(),
-                "OnlineDeveloper",
-                AccountKind::Microsoft,
-                "2026-01-01T00:00:00Z",
-            );
-            assert!(config.set_active_account(&microsoft_id.to_string()));
-        })
-        .expect("config");
-        assert!(
-            app.default_operator_profile(&ServerNetworkSettings::default())
-                .is_none(),
-            "offline mode uses the name-derived UUID, not the online profile UUID"
+        remember_active_account(
+            &mut app,
+            &microsoft_id.to_string(),
+            "OnlineDeveloper",
+            AccountKind::Microsoft,
         );
-        assert_eq!(
-            app.default_operator_profile(&ServerNetworkSettings {
+        let profile = app
+            .default_operator_profile(&ServerNetworkSettings {
                 online_mode: true,
                 ..ServerNetworkSettings::default()
             })
-            .expect("online-compatible profile")
-            .id,
-            microsoft_id
-        );
+            .expect("authenticated profile");
 
+        assert_eq!(profile.id, microsoft_id);
+        assert_eq!(profile.identity, ServerOperatorIdentity::Online);
+    }
+
+    #[test]
+    fn microsoft_account_uses_its_name_derived_uuid_for_offline_mode() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let mut app = test_app(directory.path());
+        let microsoft_id = Uuid::new_v4();
+        remember_active_account(
+            &mut app,
+            &microsoft_id.to_string(),
+            "OnlineDeveloper",
+            AccountKind::Microsoft,
+        );
+        let profile = app
+            .default_operator_profile(&ServerNetworkSettings::default())
+            .expect("offline identity");
+
+        assert_eq!(profile.id, ephervex_auth::offline_uuid("OnlineDeveloper"));
+        assert_ne!(profile.id, microsoft_id);
+        assert_eq!(profile.identity, ServerOperatorIdentity::Offline);
+    }
+
+    #[test]
+    fn offline_account_resolves_only_for_offline_mode() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let mut app = test_app(directory.path());
         let offline_id = ephervex_auth::offline_uuid("Developer");
-        app.mutate_config(|config| {
-            config.remember_account(
-                &offline_id.to_string(),
-                "Developer",
-                AccountKind::Offline,
-                "2026-01-01T00:00:00Z",
-            );
-            assert!(config.set_active_account(&offline_id.to_string()));
-        })
-        .expect("config");
+        remember_active_account(
+            &mut app,
+            &offline_id.to_string(),
+            "Developer",
+            AccountKind::Offline,
+        );
         assert!(
             app.default_operator_profile(&ServerNetworkSettings {
                 online_mode: true,
@@ -1283,19 +1305,67 @@ mod tests {
             })
             .is_none()
         );
-        assert_eq!(
-            app.default_operator_profile(&ServerNetworkSettings::default())
-                .expect("offline-compatible profile")
-                .id,
-            offline_id
+        let profile = app
+            .default_operator_profile(&ServerNetworkSettings::default())
+            .expect("offline profile");
+        assert_eq!(profile.id, offline_id);
+        assert_eq!(profile.identity, ServerOperatorIdentity::Offline);
+    }
+
+    #[test]
+    fn malformed_or_missing_online_uuid_is_never_derived_from_the_name() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let mut app = test_app(directory.path());
+        let online = ServerNetworkSettings {
+            online_mode: true,
+            ..ServerNetworkSettings::default()
+        };
+        assert!(app.default_operator_profile(&online).is_none());
+
+        remember_active_account(&mut app, "not-a-uuid", "Unsafe", AccountKind::Microsoft);
+        assert!(app.default_operator_profile(&online).is_none());
+    }
+
+    #[test]
+    fn default_server_configuration_resolves_a_microsoft_account_for_operator_setup() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let mut app = test_app(directory.path());
+        let microsoft_id = Uuid::new_v4();
+        remember_active_account(
+            &mut app,
+            &microsoft_id.to_string(),
+            "DefaultDeveloper",
+            AccountKind::Microsoft,
         );
+        assert!(!app.config().server_defaults.online_mode);
+        assert!(app.config().server_defaults.make_default_account_operator);
+
+        let setup = app
+            .default_operator_setup(&ServerNetworkSettings::default())
+            .expect("enabled default intent");
+        let profile = setup.profile.expect("usable default profile");
+        assert_eq!(profile.id, ephervex_auth::offline_uuid("DefaultDeveloper"));
+        assert_eq!(profile.identity, ServerOperatorIdentity::Offline);
     }
 
     #[test]
     fn operator_setup_preserves_existing_entries_and_server_property_semantics() {
         let directory = tempfile::tempdir().expect("temp dir");
+        let mut app = test_app(directory.path());
+        let microsoft_id = Uuid::new_v4();
+        remember_active_account(
+            &mut app,
+            &microsoft_id.to_string(),
+            "OnlineDeveloper",
+            AccountKind::Microsoft,
+        );
+        let network = ServerNetworkSettings::default();
+        let profile = app
+            .default_operator_profile(&network)
+            .expect("offline identity from Microsoft account");
         let unrelated = Uuid::new_v4();
-        let selected = Uuid::new_v4();
+        let selected = profile.id;
+        assert_ne!(selected, microsoft_id);
         std::fs::write(
             directory.path().join(OPERATORS_FILE),
             format!(
@@ -1306,21 +1376,13 @@ mod tests {
         let properties = directory.path().join(SERVER_PROPERTIES_FILE);
         std::fs::write(&properties, "op-permission-level=2\nmotd=keep\n")
             .expect("properties fixture");
-        let network = ServerNetworkSettings {
-            online_mode: true,
-            ..ServerNetworkSettings::default()
-        };
         materialize_operator_setup(
             directory.path(),
             &network,
             Some(&ServerOperatorSetup {
                 permission_level: ephervex_model::OperatorPermissionLevel::from_value(4)
                     .expect("level"),
-                profile: Some(ServerOperatorProfile {
-                    id: selected,
-                    name: "Developer".to_owned(),
-                    kind: AccountKind::Microsoft,
-                }),
+                profile: Some(profile),
             }),
         )
         .expect("materialize");
@@ -1338,7 +1400,7 @@ mod tests {
                 .any(|entry| entry.uuid == unrelated)
         );
         assert!(operators.entries().iter().any(|entry| {
-            entry.uuid == selected && entry.level.value() == 4 && entry.name == "Developer"
+            entry.uuid == selected && entry.level.value() == 4 && entry.name == "OnlineDeveloper"
         }));
         let operator_json: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(directory.path().join(OPERATORS_FILE)).expect("ops"),
@@ -1358,7 +1420,7 @@ mod tests {
             profile: Some(ServerOperatorProfile {
                 id: Uuid::new_v4(),
                 name: "OnlineDeveloper".to_owned(),
-                kind: AccountKind::Microsoft,
+                identity: ServerOperatorIdentity::Online,
             }),
         };
 
