@@ -16,7 +16,8 @@ use std::io::{IsTerminal as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory as _, Parser, Subcommand, ValueEnum};
+use clap_complete::Shell;
 use ephervex_core::{
     AccountStatus, AccountSummary, ApiSettings, App, ArgumentForm, Artifact, AssetIndexRef,
     AuthEvent, AuthObserver, CancellationToken, CaptureHealth, CapturedLine, ClientFolder,
@@ -60,6 +61,12 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Generate a shell completion script on standard output.
+    Completions {
+        /// The shell to generate completions for.
+        #[arg(value_enum)]
+        shell: Shell,
+    },
     /// Show build information.
     Info,
     /// Show the resolved application directories.
@@ -896,9 +903,13 @@ impl From<LoaderArg> for LoaderKind {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    // Resolved before anything else so the launcher's own log file exists from
-    // the first event. A run that cannot resolve its state directory still
-    // works and logs to stderr only.
+    if let Command::Completions { shell } = &cli.command {
+        generate_completions(*shell);
+        return ExitCode::SUCCESS;
+    }
+    // Resolved before application work so the launcher's own log file exists
+    // from the first event. Completion generation returns before application
+    // logging is initialized so it does not create app logs or load config.
     let launcher_logs = Paths::from_environment()
         .ok()
         .map(|paths| paths.launcher_logs_dir());
@@ -916,8 +927,15 @@ fn main() -> ExitCode {
     }
 }
 
+fn generate_completions(shell: Shell) {
+    let mut command = Cli::command();
+    let binary_name = command.get_name().to_owned();
+    clap_complete::generate(shell, &mut command, binary_name, &mut std::io::stdout());
+}
+
 fn run(cli: &Cli) -> anyhow::Result<()> {
     match &cli.command {
+        Command::Completions { .. } => Ok(()),
         Command::Info => {
             show_info(cli.json);
             Ok(())

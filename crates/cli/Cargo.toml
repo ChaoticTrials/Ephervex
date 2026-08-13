@@ -24,6 +24,7 @@ ephervex-core.workspace = true
 ephervex-model.workspace = true
 ephervex-i18n.workspace = true
 clap.workspace = true
+clap_complete.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
