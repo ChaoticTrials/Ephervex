@@ -26,7 +26,7 @@ pub use loader::{LoaderKind, LoaderSelection, LoaderVersionMode};
 pub use mods::{ModOrigin, ModProvider};
 pub use operation::{Operation, OperationStatus, Progress};
 pub use server::{
-    ConnectionTarget, InvalidServerRelativePath, ServerInstallation, ServerLaunch,
-    ServerRelativePath,
+    ConnectionTarget, InvalidOperatorPermissionLevel, InvalidServerRelativePath,
+    OperatorPermissionLevel, ServerInstallation, ServerLaunch, ServerRelativePath,
 };
 pub use storage::StorageClass;

@@ -32,7 +32,8 @@ const CLIENT_COLUMNS: &str = "id, name, root, storage_class, minecraft_version, 
 
 const SERVER_COLUMNS: &str = "id, name, root, storage_class, linked_client_id, minecraft_version, \
      loader_kind, loader_version, network, eula_accepted, source_kind, source_reference, \
-     java_override, jvm_override, attention, created_at, updated_at, last_started_at, installation";
+     java_override, jvm_override, attention, created_at, updated_at, last_started_at, installation, \
+     operator_setup";
 
 /// Failures from registry operations.
 #[derive(Debug, thiserror::Error)]
@@ -465,6 +466,7 @@ impl Registry {
             loader,
             installation: ServerInstallation::NotInstalled,
             network: request.network,
+            operator_setup: None,
             source: request.source,
             java_override: None,
             jvm_override: None,
@@ -514,8 +516,8 @@ impl Registry {
              (id, name, root, storage_class, linked_client_id, minecraft_version, loader_kind,
               loader_version, network, eula_accepted, source_kind, source_reference,
               java_override, jvm_override, attention, created_at, updated_at, last_started_at,
-              installation)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+              installation, operator_setup)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 record.id.to_string(),
                 record.name,
@@ -535,6 +537,7 @@ impl Registry {
                 timestamp_to_sql(record.updated_at),
                 record.last_started_at.map(timestamp_to_sql),
                 to_json(&record.installation)?,
+                to_json_option(record.operator_setup.as_ref())?,
             ],
         )?;
         Ok(())
@@ -595,7 +598,8 @@ impl Registry {
                 minecraft_version = ?6, loader_kind = ?7, loader_version = ?8, network = ?9,
                 source_kind = ?10, source_reference = ?11,
                 java_override = ?12, jvm_override = ?13, attention = ?14,
-                updated_at = ?15, last_started_at = ?16, installation = ?17
+                updated_at = ?15, last_started_at = ?16, installation = ?17,
+                operator_setup = ?18
              WHERE id = ?1",
             params![
                 record.id.to_string(),
@@ -615,6 +619,7 @@ impl Registry {
                 timestamp_to_sql(record.updated_at),
                 record.last_started_at.map(timestamp_to_sql),
                 to_json(&record.installation)?,
+                to_json_option(record.operator_setup.as_ref())?,
             ],
         );
 
@@ -685,8 +690,8 @@ impl Registry {
              (id, name, root, storage_class, linked_client_id, minecraft_version, loader_kind,
               loader_version, network, eula_accepted, source_kind, source_reference,
               java_override, jvm_override, attention, created_at, updated_at, last_started_at,
-              installation)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+              installation, operator_setup)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 record.id.to_string(),
                 record.name,
@@ -706,6 +711,7 @@ impl Registry {
                 timestamp_to_sql(record.updated_at),
                 record.last_started_at.map(timestamp_to_sql),
                 to_json(&record.installation)?,
+                to_json_option(record.operator_setup.as_ref())?,
             ],
         )?;
         Ok(())
@@ -782,6 +788,7 @@ fn server_from_row(row: &Row<'_>) -> rusqlite::Result<Result<ServerRecord, Index
     let updated_at: String = row.get(16)?;
     let last_started_at: Option<String> = row.get(17)?;
     let installation: String = row.get(18)?;
+    let operator_setup: Option<String> = row.get(19)?;
 
     let record = (|| {
         Ok(ServerRecord {
@@ -800,6 +807,7 @@ fn server_from_row(row: &Row<'_>) -> rusqlite::Result<Result<ServerRecord, Index
             },
             installation: from_json::<ServerInstallation>(&installation, "servers.installation")?,
             network: from_json::<ServerNetworkSettings>(&network, "servers.network")?,
+            operator_setup: from_json_option(operator_setup.as_deref(), "servers.operator_setup")?,
             source: ImportSource {
                 kind: source_kind_from_sql(&source_kind)?,
                 reference: row.get(11).unwrap_or_default(),
@@ -986,9 +994,10 @@ fn remove_tree(root: &Path) -> Result<(), RegistryError> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
-    use ephervex_model::LoaderKind;
+    use ephervex_model::{AccountKind, LoaderKind, OperatorPermissionLevel};
 
     use crate::test_support::TestEnvironment;
+    use crate::{ServerOperatorProfile, ServerOperatorSetup};
 
     #[test]
     fn a_created_instance_is_readable_listable_and_on_disk() {
@@ -1362,6 +1371,34 @@ mod tests {
         assert_eq!(server.minecraft_version, "1.21.1");
         assert_eq!(server.loader, loader);
         assert_eq!(server.linked_client_id, Some(client.id));
+    }
+
+    #[test]
+    fn server_operator_intent_round_trips_through_metadata_and_index() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let mut server = registry
+            .create_server(NewServer::new(
+                "operator setup",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create server");
+        server.operator_setup = Some(ServerOperatorSetup {
+            permission_level: OperatorPermissionLevel::from_value(3).expect("level"),
+            profile: Some(ServerOperatorProfile {
+                id: uuid::Uuid::new_v4(),
+                name: "Developer".to_owned(),
+                kind: AccountKind::Microsoft,
+            }),
+        });
+        registry.update_server(&mut server).expect("update");
+
+        assert_eq!(registry.server(server.id).expect("indexed"), server);
+        assert_eq!(
+            metadata::read_server_metadata(&server.root).expect("metadata"),
+            server
+        );
     }
 
     #[test]

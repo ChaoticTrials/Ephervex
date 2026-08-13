@@ -38,7 +38,7 @@ pub mod server;
 pub use account::{AccountStatus, AccountSummary, ApiSettings, LoginOptions, TOKEN_REFRESH_MARGIN};
 pub use app::{
     App, ApplicationDisplaySettings, JavaPlan, JavaPlanRequest, JavaTarget,
-    PersistentStorageSettings, global_java_settings,
+    PersistentStorageSettings, ServerApplicationSettings, global_java_settings,
 };
 pub use connection::{
     ConnectError, DEFAULT_SERVER_READINESS_TIMEOUT, LaunchAndConnectAvailability,
@@ -158,6 +158,7 @@ pub use ephervex_storage::{
     MAX_VIEW_BYTES, MissingFolder, NetworkAccess, NewClient, NewServer, PathError, Paths,
     PreferenceSetting, ReconciledRecord, ReconciliationReport, RecordRef, SECRET_KEY_MARKERS,
     SearchMatch, SearchOptions, SearchOutcome, ServerCommit, ServerCommitWarning, ServerDefaults,
-    ServerFolder, ServerNetworkSettings, ServerRecord, ServerRootConflict, StorageError,
-    TechnicalTextSize, TextAnchor, TextView, running_state,
+    ServerFolder, ServerNetworkSettings, ServerOperatorProfile, ServerOperatorSetup,
+    ServerPortSelection, ServerRecord, ServerRootConflict, StorageError, TechnicalTextSize,
+    TextAnchor, TextView, running_state,
 };

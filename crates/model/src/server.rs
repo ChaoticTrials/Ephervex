@@ -6,6 +6,93 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Deserializer, Serialize};
 
+/// A Minecraft operator permission level.
+///
+/// Minecraft accepts the bounded integer domain 1 through 4. Keeping that
+/// range in the type prevents configuration and `ops.json` handling from
+/// disagreeing about whether an arbitrary integer is valid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct OperatorPermissionLevel(u8);
+
+impl OperatorPermissionLevel {
+    pub const MINIMUM: Self = Self(1);
+    pub const MAXIMUM: Self = Self(4);
+    pub const ALL: [Self; 4] = [Self(1), Self(2), Self(3), Self(4)];
+
+    /// Validates a Minecraft operator permission level.
+    pub const fn new(value: u8) -> Result<Self, InvalidOperatorPermissionLevel> {
+        if value >= Self::MINIMUM.0 && value <= Self::MAXIMUM.0 {
+            Ok(Self(value))
+        } else {
+            Err(InvalidOperatorPermissionLevel { value })
+        }
+    }
+
+    /// Resolves a raw Minecraft permission value when it is in range.
+    #[must_use]
+    pub const fn from_value(value: u8) -> Option<Self> {
+        if value >= Self::MINIMUM.0 && value <= Self::MAXIMUM.0 {
+            Some(Self(value))
+        } else {
+            None
+        }
+    }
+
+    #[must_use]
+    pub const fn value(self) -> u8 {
+        self.0
+    }
+
+    #[must_use]
+    pub const fn get(self) -> u8 {
+        self.value()
+    }
+}
+
+impl Default for OperatorPermissionLevel {
+    fn default() -> Self {
+        Self::MAXIMUM
+    }
+}
+
+impl TryFrom<u8> for OperatorPermissionLevel {
+    type Error = InvalidOperatorPermissionLevel;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<OperatorPermissionLevel> for u8 {
+    fn from(value: OperatorPermissionLevel) -> Self {
+        value.get()
+    }
+}
+
+impl<'de> Deserialize<'de> for OperatorPermissionLevel {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = u8::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
+
+impl std::fmt::Display for OperatorPermissionLevel {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+/// A value outside Minecraft's operator permission level domain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("operator permission level {value} is outside the valid range 1 through 4")]
+pub struct InvalidOperatorPermissionLevel {
+    pub value: u8,
+}
+
 /// The validated destination for a direct local-server connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ConnectionTarget {
@@ -163,5 +250,34 @@ mod tests {
             serde_json::from_str::<ServerLaunch>(r#"{"kind":"jar","path":"../../outside.jar"}"#)
                 .expect_err("traversal must not deserialize");
         assert!(error.to_string().contains("must be relative"));
+    }
+
+    #[test]
+    fn operator_permission_levels_accept_exactly_the_minecraft_domain() {
+        assert!(OperatorPermissionLevel::new(0).is_err());
+        assert!(OperatorPermissionLevel::from_value(0).is_none());
+        assert_eq!(
+            OperatorPermissionLevel::ALL.map(OperatorPermissionLevel::value),
+            [1, 2, 3, 4]
+        );
+        assert!(OperatorPermissionLevel::new(5).is_err());
+        assert!(OperatorPermissionLevel::from_value(5).is_none());
+        assert_eq!(
+            OperatorPermissionLevel::from_value(4),
+            Some(OperatorPermissionLevel::default())
+        );
+        assert_eq!(OperatorPermissionLevel::default().value(), 4);
+    }
+
+    #[test]
+    fn operator_permission_levels_serialize_as_bounded_integers() {
+        let level = OperatorPermissionLevel::new(3).expect("level");
+        assert_eq!(serde_json::to_string(&level).expect("serialize"), "3");
+        assert_eq!(
+            serde_json::from_str::<OperatorPermissionLevel>("3").expect("deserialize"),
+            level
+        );
+        assert!(serde_json::from_str::<OperatorPermissionLevel>("0").is_err());
+        assert!(serde_json::from_str::<OperatorPermissionLevel>("5").is_err());
     }
 }

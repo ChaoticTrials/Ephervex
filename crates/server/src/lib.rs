@@ -8,6 +8,7 @@ pub mod capture;
 mod connection;
 mod error;
 pub mod eula;
+pub mod operators;
 pub mod process;
 pub mod properties;
 pub mod runtime;
@@ -24,6 +25,7 @@ pub use eula::{
     EULA_CONFIRMATION_PHRASE, EulaConsentRecord, EulaStatus, MINECRAFT_EULA_REFERENCE,
     accepted_record, materialize_eula_file, revoked_record,
 };
+pub use operators::{OperatorEntry, OperatorUpdate, OperatorsDocument, OperatorsDocumentError};
 pub use process::{
     ControlAction, ControlResponse, ServerCommand, ServerEvent, ServerExit, ServerObserver,
     ServerSupervisor, ServerWarning, send_control,

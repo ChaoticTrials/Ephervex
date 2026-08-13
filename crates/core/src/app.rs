@@ -31,7 +31,9 @@ use ephervex_minecraft::{
     LanguageCatalogs, MinecraftError, MinecraftVersionId, ReleaseListing,
     VERSION_MANIFEST_CACHE_KEY, VersionCatalog, VersionMetadata,
 };
-use ephervex_model::{InstanceId, LoaderKind, LoaderVersionMode, ServerId};
+use ephervex_model::{
+    InstanceId, LoaderKind, LoaderVersionMode, OperatorPermissionLevel, ServerId,
+};
 use ephervex_options::{OptionsCompatibility, OptionsFeed};
 use ephervex_storage::{
     ApplicationTextScale, ClientRecord, Config, FileDisposition, JavaConfig, NewClient, Paths,
@@ -93,6 +95,14 @@ pub struct JavaPlan {
 pub struct ApplicationDisplaySettings {
     pub text_scale: ApplicationTextScale,
     pub technical_text_size: TechnicalTextSize,
+    pub show_linked_servers: bool,
+}
+
+/// Defaults applied to new Ephervex-managed development servers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServerApplicationSettings {
+    pub make_default_account_operator: bool,
+    pub operator_permission_level: OperatorPermissionLevel,
 }
 
 /// Configured and resolved locations for persistent instances.
@@ -271,7 +281,56 @@ impl App {
         ApplicationDisplaySettings {
             text_scale: self.storage.config.display.text_scale,
             technical_text_size: self.storage.config.display.technical_text_size,
+            show_linked_servers: self.storage.config.display.show_linked_servers,
         }
+    }
+
+    /// Persists whether linked servers are included in the global Servers list.
+    pub fn set_show_linked_servers(&mut self, show: bool) -> CoreResult<()> {
+        self.mutate_config(|config| config.display.show_linked_servers = show)
+    }
+
+    /// Returns defaults used for operator setup on newly created servers.
+    #[must_use]
+    pub const fn server_application_settings(&self) -> ServerApplicationSettings {
+        ServerApplicationSettings {
+            make_default_account_operator: self
+                .storage
+                .config
+                .server_defaults
+                .make_default_account_operator,
+            operator_permission_level: self
+                .storage
+                .config
+                .server_defaults
+                .operator_permission_level,
+        }
+    }
+
+    /// Persists defaults for future server operator setup.
+    pub fn set_server_operator_defaults(
+        &mut self,
+        make_default_account_operator: bool,
+        operator_permission_level: OperatorPermissionLevel,
+    ) -> CoreResult<()> {
+        self.mutate_config(|config| {
+            config.server_defaults.make_default_account_operator = make_default_account_operator;
+            config.server_defaults.operator_permission_level = operator_permission_level;
+        })
+    }
+
+    /// Persists the linked-server presentation and creation defaults together.
+    pub fn set_linked_server_settings(
+        &mut self,
+        show_globally: bool,
+        make_default_account_operator: bool,
+        operator_permission_level: OperatorPermissionLevel,
+    ) -> CoreResult<()> {
+        self.mutate_config(|config| {
+            config.display.show_linked_servers = show_globally;
+            config.server_defaults.make_default_account_operator = make_default_account_operator;
+            config.server_defaults.operator_permission_level = operator_permission_level;
+        })
     }
 
     /// Persists the bounded text choices used by the desktop frontend.
@@ -1220,6 +1279,7 @@ mod tests {
             ApplicationDisplaySettings {
                 text_scale: ApplicationTextScale::Default,
                 technical_text_size: TechnicalTextSize::Default,
+                show_linked_servers: false,
             }
         );
 
@@ -1236,8 +1296,32 @@ mod tests {
             ApplicationDisplaySettings {
                 text_scale: ApplicationTextScale::Large,
                 technical_text_size: TechnicalTextSize::Comfortable,
+                show_linked_servers: false,
             }
         );
+    }
+
+    #[test]
+    fn linked_server_visibility_and_operator_defaults_persist_additively() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        app.set_show_linked_servers(true).expect("visibility");
+        app.set_server_operator_defaults(
+            false,
+            OperatorPermissionLevel::from_value(2).expect("level"),
+        )
+        .expect("operator defaults");
+
+        let reopened = app_rooted_at(base.path());
+        assert!(reopened.application_display_settings().show_linked_servers);
+        assert_eq!(
+            reopened.server_application_settings(),
+            ServerApplicationSettings {
+                make_default_account_operator: false,
+                operator_permission_level: OperatorPermissionLevel::from_value(2).expect("level"),
+            }
+        );
+        assert!(reopened.config().minecraft_preferences.is_empty());
     }
 
     #[test]

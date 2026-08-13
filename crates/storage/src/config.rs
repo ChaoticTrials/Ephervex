@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use ephervex_model::AccountKind;
+use ephervex_model::{AccountKind, OperatorPermissionLevel};
 
 use crate::paths::{PathError, Paths};
 
@@ -227,6 +227,8 @@ impl TechnicalTextSize {
 pub struct ApplicationDisplayConfig {
     pub text_scale: ApplicationTextScale,
     pub technical_text_size: TechnicalTextSize,
+    /// Whether linked servers also appear in the global Servers list.
+    pub show_linked_servers: bool,
     /// Keys this build does not know about. See [`Config::unknown`].
     #[serde(flatten)]
     pub unknown: toml::Table,
@@ -275,6 +277,11 @@ pub struct ServerDefaults {
     pub online_mode: bool,
     pub network_access: NetworkAccess,
     pub port: u16,
+    /// Apply the selected account to new development servers when its identity
+    /// is valid for the server's authentication mode.
+    pub make_default_account_operator: bool,
+    /// Permission level written to the new server's individual operator entry.
+    pub operator_permission_level: OperatorPermissionLevel,
     /// Keys this build does not know about. See [`Config::unknown`].
     #[serde(flatten)]
     pub unknown: toml::Table,
@@ -286,6 +293,8 @@ impl Default for ServerDefaults {
             online_mode: false,
             network_access: NetworkAccess::Localhost,
             port: 25565,
+            make_default_account_operator: true,
+            operator_permission_level: OperatorPermissionLevel::default(),
             unknown: toml::Table::new(),
         }
     }
@@ -737,6 +746,7 @@ impl Config {
         // boolean, which is exactly the non-secret metadata ADR 0004 allows.
         find_secret_key(&self.unknown, "")
             .or_else(|| find_secret_key(&self.java.unknown, "java"))
+            .or_else(|| find_secret_key(&self.display.unknown, "display"))
             .or_else(|| find_secret_key(&self.server_defaults.unknown, "server_defaults"))
             .or_else(|| find_secret_key(&self.eula.unknown, "eula"))
             // `[api]` is the table a hand edit is most likely to put a
@@ -749,6 +759,7 @@ impl Config {
         for (table, prefix) in [
             (&mut self.unknown, ""),
             (&mut self.java.unknown, "java"),
+            (&mut self.display.unknown, "display"),
             (&mut self.server_defaults.unknown, "server_defaults"),
             (&mut self.eula.unknown, "eula"),
             (&mut self.api.unknown, "api"),
@@ -819,6 +830,7 @@ persistent_instance_root = ""
 [display]
 text_scale = "default"
 technical_text_size = "default"
+show_linked_servers = false
 
 [java]
 auto_detect = true
@@ -831,6 +843,8 @@ jvm_args = []
 online_mode = false
 network_access = "localhost"
 port = 25565
+make_default_account_operator = true
+operator_permission_level = 4
 
 [eula]
 accepted = false
@@ -903,7 +917,10 @@ reference = ""
             .filter(|line| {
                 !matches!(
                     *line,
-                    "[display]" | "text_scale = \"default\"" | "technical_text_size = \"default\""
+                    "[display]"
+                        | "text_scale = \"default\""
+                        | "technical_text_size = \"default\""
+                        | "show_linked_servers = false"
                 )
             })
             .collect::<Vec<_>>()
@@ -911,6 +928,9 @@ reference = ""
 
         let parsed = Config::from_toml_str(&legacy).expect("legacy configuration parses");
         assert_eq!(parsed.display, ApplicationDisplayConfig::default());
+        assert!(!parsed.display.show_linked_servers);
+        assert!(parsed.server_defaults.make_default_account_operator);
+        assert_eq!(parsed.server_defaults.operator_permission_level.value(), 4);
     }
 
     #[test]
@@ -918,10 +938,14 @@ reference = ""
         let mut config = Config::default();
         config.display.text_scale = ApplicationTextScale::Large;
         config.display.technical_text_size = TechnicalTextSize::Comfortable;
-
+        config.display.show_linked_servers = true;
+        config.server_defaults.make_default_account_operator = false;
+        config.server_defaults.operator_permission_level =
+            OperatorPermissionLevel::from_value(2).expect("valid level");
         let text = config.to_toml_string().expect("serialize");
         let parsed = Config::from_toml_str(&text).expect("re-parse");
         assert_eq!(parsed.display, config.display);
+        assert_eq!(parsed.server_defaults, config.server_defaults);
         assert!(parsed.minecraft_preferences.is_empty());
     }
 
@@ -970,7 +994,15 @@ reference = ""
     #[test]
     fn unknown_keys_inside_known_tables_also_survive() {
         let text = DEFAULT_CONFIG_EXAMPLE
-            .replace("jvm_args = []", "jvm_args = []\nfuture_java_option = \"x\"");
+            .replace("jvm_args = []", "jvm_args = []\nfuture_java_option = \"x\"")
+            .replace(
+                "show_linked_servers = false",
+                "show_linked_servers = false\nfuture_display_option = \"y\"",
+            )
+            .replace(
+                "operator_permission_level = 4",
+                "operator_permission_level = 4\nfuture_server_option = \"z\"",
+            );
         let config = Config::from_toml_str(&text).expect("parse");
         assert_eq!(
             config
@@ -980,12 +1012,30 @@ reference = ""
                 .and_then(toml::Value::as_str),
             Some("x")
         );
-        assert!(
+        assert_eq!(
             config
-                .to_toml_string()
-                .expect("serialize")
-                .contains("future_java_option")
+                .display
+                .unknown
+                .get("future_display_option")
+                .and_then(toml::Value::as_str),
+            Some("y")
         );
+        assert_eq!(
+            config
+                .server_defaults
+                .unknown
+                .get("future_server_option")
+                .and_then(toml::Value::as_str),
+            Some("z")
+        );
+        let rewritten = config.to_toml_string().expect("serialize");
+        for key in [
+            "future_java_option",
+            "future_display_option",
+            "future_server_option",
+        ] {
+            assert!(rewritten.contains(key));
+        }
     }
 
     #[test]

@@ -14,10 +14,11 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 use ephervex_model::{
-    AttentionReason, ImportSourceKind, InstanceId, LoaderSelection, ServerId, ServerInstallation,
-    StorageClass,
+    AccountKind, AttentionReason, ImportSourceKind, InstanceId, LoaderSelection,
+    OperatorPermissionLevel, ServerId, ServerInstallation, StorageClass,
 };
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::config::NetworkAccess;
 
@@ -165,6 +166,10 @@ pub struct ServerRecord {
     pub installation: ServerInstallation,
     #[serde(default)]
     pub network: ServerNetworkSettings,
+    /// Operator setup captured when this server was created. A missing profile
+    /// keeps the intent pending until a suitable default account exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_setup: Option<ServerOperatorSetup>,
     #[serde(default)]
     pub source: ImportSource,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -177,6 +182,22 @@ pub struct ServerRecord {
     pub updated_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_started_at: Option<DateTime<Utc>>,
+}
+
+/// A profile whose identity may be written to a Minecraft operator file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerOperatorProfile {
+    pub id: Uuid,
+    pub name: String,
+    pub kind: AccountKind,
+}
+
+/// Per-server operator intent copied from application defaults at creation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerOperatorSetup {
+    pub permission_level: OperatorPermissionLevel,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<ServerOperatorProfile>,
 }
 
 impl ServerRecord {
@@ -262,8 +283,17 @@ pub struct NewServer {
     pub storage: StorageClass,
     pub creation: ServerCreationSource,
     pub network: ServerNetworkSettings,
+    pub port_selection: ServerPortSelection,
     pub source: ImportSource,
     pub attention: Vec<AttentionReason>,
+}
+
+/// Whether core should choose a free port or preserve the caller's exact port.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ServerPortSelection {
+    #[default]
+    Automatic,
+    Explicit(u16),
 }
 
 impl NewServer {
@@ -281,6 +311,7 @@ impl NewServer {
                 loader,
             },
             network: ServerNetworkSettings::default(),
+            port_selection: ServerPortSelection::Automatic,
             source: ImportSource::manual(),
             attention: Vec::new(),
         }
@@ -308,6 +339,7 @@ impl NewServer {
             storage: StorageClass::default_for_new_instance(),
             creation: ServerCreationSource::LinkedClient { client_id },
             network: ServerNetworkSettings::default(),
+            port_selection: ServerPortSelection::Automatic,
             source: ImportSource::manual(),
             attention: Vec::new(),
         }
@@ -315,6 +347,7 @@ impl NewServer {
 
     #[must_use]
     pub fn with_network(mut self, network: ServerNetworkSettings) -> Self {
+        self.port_selection = ServerPortSelection::Explicit(network.port);
         self.network = network;
         self
     }
@@ -440,6 +473,24 @@ mod tests {
 
         network.online_mode = true;
         assert!(!network.is_unauthenticated_and_exposed());
+    }
+
+    #[test]
+    fn explicit_server_ports_are_distinct_from_automatic_defaults() {
+        let automatic = NewServer::new("automatic", "1.20.1", LoaderSelection::vanilla());
+        assert_eq!(automatic.port_selection, ServerPortSelection::Automatic);
+
+        let explicit = NewServer::new("custom", "1.20.1", LoaderSelection::vanilla()).with_network(
+            ServerNetworkSettings {
+                port: 30_000,
+                ..ServerNetworkSettings::default()
+            },
+        );
+        assert_eq!(
+            explicit.port_selection,
+            ServerPortSelection::Explicit(30_000)
+        );
+        assert_eq!(explicit.network.port, 30_000);
     }
 
     #[test]

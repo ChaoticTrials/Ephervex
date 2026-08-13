@@ -7,21 +7,23 @@ use std::path::{Path, PathBuf};
 use chrono::Utc;
 use ephervex_download::{CacheLayout, DownloadManager, DownloaderConfig, OperationReporter};
 use ephervex_model::{
-    AttentionReason, ImportSourceKind, JavaOverride, JvmSettings, OperationId, ServerId,
-    ServerInstallation, ServerLaunch, ServerRelativePath,
+    AccountKind, AttentionReason, ImportSourceKind, JavaOverride, JvmSettings, OperationId,
+    ServerId, ServerInstallation, ServerLaunch, ServerRelativePath,
 };
 use ephervex_pack::{
     OptionalSelection, PackError, PackRecipe, ServerMaterializeRequest, SourceStore,
 };
 use ephervex_server::{
     CaptureHealth, CaptureRetention, CapturedLine, ControlAction, ControlResponse,
-    EulaConsentRecord, EulaStatus, NetworkProperties, PropertiesDocument, RuntimeClassification,
-    ServerBind, ServerCommand, ServerObserver, ServerSupervisor, ServerWarning, accepted_record,
-    classify_runtime, clear_stale_runtime, materialize_eula_file, revoked_record, send_control,
+    EulaConsentRecord, EulaStatus, NetworkProperties, OperatorsDocument, PropertiesDocument,
+    RuntimeClassification, ServerBind, ServerCommand, ServerObserver, ServerSupervisor,
+    ServerWarning, accepted_record, classify_runtime, clear_stale_runtime, materialize_eula_file,
+    revoked_record, send_control,
 };
 use ephervex_storage::{
     FileDisposition, MetadataError, NetworkAccess, NewServer, RegistryError, ServerCommit,
-    ServerNetworkSettings, ServerRecord,
+    ServerNetworkSettings, ServerOperatorProfile, ServerOperatorSetup, ServerPortSelection,
+    ServerRecord,
 };
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -31,6 +33,9 @@ use crate::{CoreError, CoreResult};
 
 const SERVER_PROPERTIES_FILE: &str = "server.properties";
 const EULA_FILE: &str = "eula.txt";
+const OPERATORS_FILE: &str = "ops.json";
+const DEFAULT_SERVER_PORT: u16 = 25_565;
+const AUTOMATIC_PORT_CANDIDATES: usize = 100;
 
 #[derive(Debug, Clone, Default)]
 pub struct ServerCreateOptions {
@@ -85,15 +90,78 @@ pub(super) struct PreparedServerStart {
 }
 
 impl App {
+    fn resolve_creation_network(&self, request: &mut NewServer) -> CoreResult<()> {
+        match request.port_selection {
+            ServerPortSelection::Explicit(port) => {
+                request.network.port = port;
+                let _ = network_properties(&request.network)?;
+            }
+            ServerPortSelection::Automatic => {
+                let defaults = &self.config().server_defaults;
+                request.network = ServerNetworkSettings {
+                    online_mode: defaults.online_mode,
+                    access: defaults.network_access,
+                    bind_address: None,
+                    port: DEFAULT_SERVER_PORT,
+                };
+                let properties = network_properties(&request.network)?;
+                let address = bind_address(&properties.bind);
+                let assigned = self
+                    .list_servers()?
+                    .into_iter()
+                    .map(|server| server.network.port)
+                    .collect::<std::collections::HashSet<_>>();
+                request.network.port = select_available_port_with(
+                    address,
+                    DEFAULT_SERVER_PORT,
+                    AUTOMATIC_PORT_CANDIDATES,
+                    |port| assigned.contains(&port),
+                    |socket| TcpListener::bind(socket).map(drop),
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn default_operator_setup(
+        &self,
+        network: &ServerNetworkSettings,
+    ) -> Option<ServerOperatorSetup> {
+        let defaults = &self.config().server_defaults;
+        defaults
+            .make_default_account_operator
+            .then(|| ServerOperatorSetup {
+                permission_level: defaults.operator_permission_level,
+                profile: self.default_operator_profile(network),
+            })
+    }
+
+    fn default_operator_profile(
+        &self,
+        network: &ServerNetworkSettings,
+    ) -> Option<ServerOperatorProfile> {
+        let (id, account) = self.config().active_account_config()?;
+        if !operator_profile_matches_network(account.kind, network) {
+            return None;
+        }
+        Some(ServerOperatorProfile {
+            id: Uuid::parse_str(id).ok()?,
+            name: account.name.clone(),
+            kind: account.kind,
+        })
+    }
+
     /// Builds and installs a complete server in a hidden sibling before the
     /// final root is published.
     pub async fn create_server(
         &self,
-        request: NewServer,
+        mut request: NewServer,
         options: &ServerCreateOptions,
         cancel: &CancellationToken,
     ) -> CoreResult<ServerCommit<ServerRecord>> {
+        self.resolve_creation_network(&mut request)?;
         let mut record = self.registry_for_services().prepare_server(request)?;
+        record.operator_setup = self.default_operator_setup(&record.network);
         let linked_recipe = self.linked_server_recipe(&mut record, &options.confirmed_unknown)?;
         let staging = staging_root(&record.root);
         if staging.exists() {
@@ -147,6 +215,7 @@ impl App {
             add_unknown_attention(&mut record, unconfirmed_unknown);
         }
         merge_network_file(&target.join(SERVER_PROPERTIES_FILE), &record.network)?;
+        materialize_operator_setup(&target, &record.network, record.operator_setup.as_ref())?;
         let committed = self
             .registry_for_services()
             .publish_staged_server(&record, &staging)?;
@@ -452,6 +521,20 @@ impl App {
         eula.require_valid()?;
         let server_dir = ephervex_storage::metadata::server_game_dir(&record.root);
         merge_network_file(&server_dir.join(SERVER_PROPERTIES_FILE), &record.network)?;
+        if record
+            .operator_setup
+            .as_ref()
+            .is_some_and(|setup| setup.profile.is_none())
+            && let Some(profile) = self.default_operator_profile(&record.network)
+        {
+            if let Some(setup) = record.operator_setup.as_mut() {
+                setup.profile = Some(profile);
+            }
+            let _commit = self
+                .registry_for_services()
+                .update_server_committed(&mut record)?;
+        }
+        materialize_operator_setup(&server_dir, &record.network, record.operator_setup.as_ref())?;
         materialize_eula_file(&server_dir.join(EULA_FILE), &eula)?;
         emit_network_advisories(&record.network, observer)?;
         let java = self
@@ -630,6 +713,45 @@ fn network_properties(settings: &ServerNetworkSettings) -> CoreResult<NetworkPro
     })
 }
 
+const fn bind_address(bind: &ServerBind) -> IpAddr {
+    match bind {
+        ServerBind::Localhost => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        ServerBind::AllInterfaces => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        ServerBind::Custom(address) => *address,
+    }
+}
+
+fn select_available_port_with(
+    address: IpAddr,
+    start: u16,
+    candidates: usize,
+    is_assigned: impl Fn(u16) -> bool,
+    mut try_bind: impl FnMut(SocketAddr) -> std::io::Result<()>,
+) -> CoreResult<u16> {
+    for offset in 0..candidates {
+        let Some(port) = u16::try_from(offset)
+            .ok()
+            .and_then(|offset| start.checked_add(offset))
+        else {
+            break;
+        };
+        if port == 0 || is_assigned(port) {
+            continue;
+        }
+        // The listener is deliberately dropped by the caller's bind check.
+        // Another process can claim the port before Minecraft starts, so the
+        // normal start-time advisory remains authoritative for that race.
+        if try_bind(SocketAddr::new(address, port)).is_ok() {
+            return Ok(port);
+        }
+    }
+    Err(ephervex_server::ServerError::InvalidProperty {
+        key: "server-port".to_owned(),
+        reason: "no available port was found in the automatic search range",
+    }
+    .into())
+}
+
 fn merge_network_file(path: &Path, network: &ServerNetworkSettings) -> CoreResult<()> {
     let mut document = read_properties(path)?;
     document.merge_network(&network_properties(network)?)?;
@@ -656,11 +778,7 @@ fn emit_network_advisories_with(
             ServerWarning::OfflineModeExposed,
         ));
     }
-    let address = match properties.bind {
-        ServerBind::Localhost => IpAddr::V4(Ipv4Addr::LOCALHOST),
-        ServerBind::AllInterfaces => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-        ServerBind::Custom(address) => address,
-    };
+    let address = bind_address(&properties.bind);
     if let Err(error) = check_port(SocketAddr::new(address, properties.port)) {
         observer.emit(ephervex_server::ServerEvent::Warning(
             ServerWarning::PortUnavailable {
@@ -671,6 +789,57 @@ fn emit_network_advisories_with(
         ));
     }
     Ok(())
+}
+
+fn materialize_operator_setup(
+    server_dir: &Path,
+    network: &ServerNetworkSettings,
+    setup: Option<&ServerOperatorSetup>,
+) -> CoreResult<()> {
+    let Some(setup) = setup else {
+        return Ok(());
+    };
+    let Some(profile) = setup.profile.as_ref() else {
+        return Ok(());
+    };
+    if !operator_profile_matches_network(profile.kind, network) {
+        return Ok(());
+    }
+    let path = server_dir.join(OPERATORS_FILE);
+    let mut document = match std::fs::read_to_string(&path) {
+        Ok(text) => {
+            OperatorsDocument::parse(&text).map_err(|source| ephervex_server::ServerError::Io {
+                path: path.clone(),
+                source: std::io::Error::new(std::io::ErrorKind::InvalidData, source),
+            })?
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => OperatorsDocument::default(),
+        Err(source) => {
+            return Err(ephervex_server::ServerError::Io {
+                path: path.clone(),
+                source,
+            }
+            .into());
+        }
+    };
+    document.upsert(profile.id, &profile.name, setup.permission_level);
+    let rendered = document
+        .render()
+        .map_err(|source| ephervex_server::ServerError::Io {
+            path: path.clone(),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, source),
+        })?;
+    atomic_write(&path, rendered.as_bytes())
+}
+
+const fn operator_profile_matches_network(
+    account_kind: AccountKind,
+    network: &ServerNetworkSettings,
+) -> bool {
+    matches!(
+        (account_kind, network.online_mode),
+        (AccountKind::Offline, false) | (AccountKind::Microsoft, true)
+    )
 }
 
 fn read_properties(path: &Path) -> CoreResult<PropertiesDocument> {
@@ -985,6 +1154,222 @@ mod tests {
 
     fn test_app(base: &Path) -> App {
         App::open_at(Paths::rooted_at(base)).expect("open app")
+    }
+
+    #[test]
+    fn automatic_port_prefers_start_and_advances_past_unavailable_candidates() {
+        let selected = select_available_port_with(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            25_565,
+            8,
+            |port| port == 25_565,
+            |address| {
+                if address.port() == 25_566 {
+                    Err(std::io::Error::new(std::io::ErrorKind::AddrInUse, "busy"))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .expect("candidate");
+        assert_eq!(selected, 25_567);
+
+        let preferred = select_available_port_with(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            25_565,
+            1,
+            |_| false,
+            |_| Ok(()),
+        )
+        .expect("preferred");
+        assert_eq!(preferred, 25_565);
+    }
+
+    #[test]
+    fn automatic_port_search_is_bounded_without_wrapping() {
+        let attempts = std::cell::Cell::new(0usize);
+        let error = select_available_port_with(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            u16::MAX - 1,
+            100,
+            |_| false,
+            |_| {
+                attempts.set(attempts.get() + 1);
+                Err(std::io::Error::new(std::io::ErrorKind::AddrInUse, "busy"))
+            },
+        )
+        .expect_err("bounded exhaustion");
+        assert!(matches!(error, CoreError::Server(_)));
+        assert_eq!(attempts.get(), 2);
+    }
+
+    #[test]
+    fn automatic_port_uses_a_real_loopback_bind_check() {
+        let occupied = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind fixture");
+        let port = occupied.local_addr().expect("address").port();
+        if port > u16::MAX - 100 {
+            return;
+        }
+        let selected = select_available_port_with(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            port,
+            100,
+            |_| false,
+            |address| TcpListener::bind(address).map(drop),
+        )
+        .expect("next port");
+        assert!(selected > port);
+    }
+
+    #[test]
+    fn operator_profile_is_not_fabricated_and_offline_identity_respects_online_mode() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let mut app = test_app(directory.path());
+        app.mutate_config(|config| {
+            config.remember_account(
+                "not-a-uuid",
+                "Unsafe",
+                AccountKind::Microsoft,
+                "2026-01-01T00:00:00Z",
+            );
+        })
+        .expect("config");
+        assert!(
+            app.default_operator_profile(&ServerNetworkSettings::default())
+                .is_none()
+        );
+
+        let microsoft_id = Uuid::new_v4();
+        app.mutate_config(|config| {
+            config.remember_account(
+                &microsoft_id.to_string(),
+                "OnlineDeveloper",
+                AccountKind::Microsoft,
+                "2026-01-01T00:00:00Z",
+            );
+            assert!(config.set_active_account(&microsoft_id.to_string()));
+        })
+        .expect("config");
+        assert!(
+            app.default_operator_profile(&ServerNetworkSettings::default())
+                .is_none(),
+            "offline mode uses the name-derived UUID, not the online profile UUID"
+        );
+        assert_eq!(
+            app.default_operator_profile(&ServerNetworkSettings {
+                online_mode: true,
+                ..ServerNetworkSettings::default()
+            })
+            .expect("online-compatible profile")
+            .id,
+            microsoft_id
+        );
+
+        let offline_id = ephervex_auth::offline_uuid("Developer");
+        app.mutate_config(|config| {
+            config.remember_account(
+                &offline_id.to_string(),
+                "Developer",
+                AccountKind::Offline,
+                "2026-01-01T00:00:00Z",
+            );
+            assert!(config.set_active_account(&offline_id.to_string()));
+        })
+        .expect("config");
+        assert!(
+            app.default_operator_profile(&ServerNetworkSettings {
+                online_mode: true,
+                ..ServerNetworkSettings::default()
+            })
+            .is_none()
+        );
+        assert_eq!(
+            app.default_operator_profile(&ServerNetworkSettings::default())
+                .expect("offline-compatible profile")
+                .id,
+            offline_id
+        );
+    }
+
+    #[test]
+    fn operator_setup_preserves_existing_entries_and_server_property_semantics() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let unrelated = Uuid::new_v4();
+        let selected = Uuid::new_v4();
+        std::fs::write(
+            directory.path().join(OPERATORS_FILE),
+            format!(
+                r#"[{{"uuid":"{unrelated}","name":"Existing","level":2,"bypassesPlayerLimit":true,"extension":"keep"}}]"#
+            ),
+        )
+        .expect("fixture");
+        let properties = directory.path().join(SERVER_PROPERTIES_FILE);
+        std::fs::write(&properties, "op-permission-level=2\nmotd=keep\n")
+            .expect("properties fixture");
+        let network = ServerNetworkSettings {
+            online_mode: true,
+            ..ServerNetworkSettings::default()
+        };
+        materialize_operator_setup(
+            directory.path(),
+            &network,
+            Some(&ServerOperatorSetup {
+                permission_level: ephervex_model::OperatorPermissionLevel::from_value(4)
+                    .expect("level"),
+                profile: Some(ServerOperatorProfile {
+                    id: selected,
+                    name: "Developer".to_owned(),
+                    kind: AccountKind::Microsoft,
+                }),
+            }),
+        )
+        .expect("materialize");
+        merge_network_file(&properties, &network).expect("network merge");
+
+        let operators = OperatorsDocument::parse(
+            &std::fs::read_to_string(directory.path().join(OPERATORS_FILE)).expect("ops"),
+        )
+        .expect("parse");
+        assert_eq!(operators.entries().len(), 2);
+        assert!(
+            operators
+                .entries()
+                .iter()
+                .any(|entry| entry.uuid == unrelated)
+        );
+        assert!(operators.entries().iter().any(|entry| {
+            entry.uuid == selected && entry.level.value() == 4 && entry.name == "Developer"
+        }));
+        let operator_json: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(directory.path().join(OPERATORS_FILE)).expect("ops"),
+        )
+        .expect("JSON");
+        assert_eq!(operator_json[0]["extension"], "keep");
+        let properties = std::fs::read_to_string(properties).expect("properties");
+        assert!(properties.contains("op-permission-level=2"));
+        assert!(properties.contains("motd=keep"));
+    }
+
+    #[test]
+    fn operator_setup_waits_when_the_profile_does_not_match_the_authentication_mode() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let setup = ServerOperatorSetup {
+            permission_level: ephervex_model::OperatorPermissionLevel::default(),
+            profile: Some(ServerOperatorProfile {
+                id: Uuid::new_v4(),
+                name: "OnlineDeveloper".to_owned(),
+                kind: AccountKind::Microsoft,
+            }),
+        };
+
+        materialize_operator_setup(
+            directory.path(),
+            &ServerNetworkSettings::default(),
+            Some(&setup),
+        )
+        .expect("incompatible intent remains pending");
+
+        assert!(!directory.path().join(OPERATORS_FILE).exists());
     }
 
     #[tokio::test]
