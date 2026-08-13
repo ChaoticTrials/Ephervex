@@ -45,6 +45,7 @@ use tracing::instrument;
 
 use crate::app::App;
 use crate::error::CoreResult;
+use crate::live_diagnostics::{IncrementalLogTail, TailUpdate, TailedLine};
 
 /// Whose diagnostics are being inspected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -119,6 +120,23 @@ pub struct DiagnosticSearch {
     pub outcome: SearchOutcome,
 }
 
+/// Incremental state for one client's `latest.log`.
+///
+/// The path remains private so frontends keep using the name-addressed core
+/// boundary. Every poll revalidates the file before the tailer opens it.
+#[derive(Debug)]
+pub struct ClientLogTail {
+    instance: InstanceId,
+    tail: IncrementalLogTail,
+}
+
+impl ClientLogTail {
+    /// Emits an unterminated final line after the client has stopped.
+    pub fn finish_partial_line(&mut self) -> Option<TailedLine> {
+        self.tail.finish_partial_line()
+    }
+}
+
 /// How much of a file one read returns, when the caller has no opinion.
 pub const DEFAULT_DIAGNOSTIC_BYTES: u64 = DEFAULT_VIEW_BYTES;
 
@@ -172,6 +190,39 @@ impl<'a> DiagnosticRequest<'a> {
 }
 
 impl App {
+    /// Creates incremental state for one client's current `latest.log`.
+    pub fn client_log_tail(&self, instance: InstanceId) -> CoreResult<ClientLogTail> {
+        let directory =
+            self.diagnostic_directory(DiagnosticScope::Client(instance), DiagnosticKind::Log)?;
+        Ok(ClientLogTail {
+            instance,
+            tail: IncrementalLogTail::with_default_limits(directory.path().join("latest.log")),
+        })
+    }
+
+    /// Reads only bytes appended since the previous poll.
+    ///
+    /// A missing `latest.log` is normal before launch and around rotation, so
+    /// it produces a quiet missing update rather than a user-facing error.
+    pub fn poll_client_log(&self, state: &mut ClientLogTail) -> CoreResult<TailUpdate> {
+        let directory = self
+            .diagnostic_directory(DiagnosticScope::Client(state.instance), DiagnosticKind::Log)?;
+        match directory.resolve("latest.log") {
+            Ok(_) => state.tail.poll().map_err(|source| {
+                ephervex_storage::DiagnosticError::Unreadable {
+                    path: state.tail.path().to_path_buf(),
+                    source,
+                }
+                .into()
+            }),
+            Err(ephervex_storage::DiagnosticError::Missing { .. }) => Ok(TailUpdate {
+                missing: true,
+                ..TailUpdate::default()
+            }),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     /// Lists the logs and crash reports one scope currently has.
     #[instrument(skip(self))]
     pub fn diagnostics(&self, scope: DiagnosticScope) -> CoreResult<DiagnosticCatalog> {

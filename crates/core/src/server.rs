@@ -855,24 +855,28 @@ fn read_capture_snapshot(directory: &Path, limit: usize) -> CoreResult<CaptureSn
         }
     }
     files.sort();
-    let mut lines = Vec::new();
-    for path in files {
+    let mut lines = Vec::with_capacity(limit.min(2_000));
+    'segments: for path in files.into_iter().rev() {
+        if lines.len() == limit {
+            break;
+        }
         let body = std::fs::read(&path).map_err(|source| ephervex_server::ServerError::Io {
             path: path.clone(),
             source,
         })?;
         for line in body
-            .split(|byte| *byte == b'\n')
+            .rsplit(|byte| *byte == b'\n')
             .filter(|line| !line.is_empty())
         {
             if let Ok(captured) = serde_json::from_slice::<CapturedLine>(line) {
                 lines.push(captured);
+                if lines.len() == limit {
+                    break 'segments;
+                }
             }
         }
     }
-    if lines.len() > limit {
-        lines.drain(..lines.len() - limit);
-    }
+    lines.reverse();
     let retention_path = directory.join(ephervex_server::CAPTURE_INDEX_FILE);
     let retention = std::fs::read(&retention_path)
         .ok()
@@ -1124,6 +1128,54 @@ mod tests {
             ephervex_server::ServerEvent::Warning(ServerWarning::PortUnavailable { port: warned, .. })
                 if warned == port
         ));
+    }
+
+    #[test]
+    fn capture_snapshot_reads_newest_records_without_reordering_them() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let captured = |text: &str| CapturedLine {
+            timestamp: Utc::now(),
+            stream: ephervex_server::CaptureStream::Stdout,
+            text: text.to_owned(),
+            truncated: false,
+            omitted_bytes: 0,
+        };
+        let segment = |name: &str, lines: &[CapturedLine]| {
+            let mut body = Vec::new();
+            for line in lines {
+                serde_json::to_writer(&mut body, line).expect("serialize capture");
+                body.push(b'\n');
+            }
+            std::fs::write(directory.path().join(name), body).expect("write capture segment");
+        };
+        segment(
+            "capture-20260813T120000-old.jsonl",
+            &[captured("old one"), captured("old two")],
+        );
+        segment(
+            "capture-20260813T130000-new.jsonl",
+            &[
+                captured("new one"),
+                captured("new two"),
+                captured("new three"),
+            ],
+        );
+
+        let snapshot = read_capture_snapshot(directory.path(), 2).expect("snapshot");
+        assert_eq!(
+            snapshot
+                .lines
+                .iter()
+                .map(|line| line.text.as_str())
+                .collect::<Vec<_>>(),
+            ["new two", "new three"]
+        );
+        assert!(
+            read_capture_snapshot(directory.path(), 0)
+                .expect("metadata-only snapshot")
+                .lines
+                .is_empty()
+        );
     }
 
     #[test]

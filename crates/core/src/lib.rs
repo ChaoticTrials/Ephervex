@@ -30,6 +30,7 @@ pub mod error;
 pub mod import;
 pub mod instance;
 pub mod launch;
+pub mod live_diagnostics;
 pub mod logging;
 pub mod mods;
 pub mod server;
@@ -45,7 +46,7 @@ pub use connection::{
     LaunchAndConnectOutcome, ServerPreparation,
 };
 pub use diagnostics::{
-    DEFAULT_DIAGNOSTIC_BYTES, DiagnosticCatalog, DiagnosticRequest, DiagnosticScope,
+    ClientLogTail, DEFAULT_DIAGNOSTIC_BYTES, DiagnosticCatalog, DiagnosticRequest, DiagnosticScope,
     DiagnosticSearch, DiagnosticSection,
 };
 pub use error::{CoreError, CoreResult};
