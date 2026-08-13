@@ -8,17 +8,19 @@ use std::sync::mpsc::Sender;
 use std::time::Duration;
 
 use copypasta::{ClipboardContext, ClipboardProvider as _};
+use ephervex_core::live_diagnostics::{LogFilter, LogLevel, RetainedLog};
 use ephervex_i18n::{Arg, lookup, lookup_args};
-use slint::{ComponentHandle as _, ModelRc, SharedString, Timer, TimerMode, VecModel};
+use slint::{ComponentHandle as _, Model as _, ModelRc, SharedString, Timer, TimerMode, VecModel};
 
 use crate::backend::{
     self, AccountData, ActivityData, Command, DiagnosticContent, DiagnosticData, Event, JavaData,
-    ManagedModData, ModSearchData, PreferenceData, ServerWorkspaceData, Snapshot,
+    LiveLogLine, LiveLogSource, LiveLogUpdate, ManagedModData, ModSearchData, PreferenceData,
+    ServerWorkspaceData, Snapshot,
 };
 use crate::presentation::{parse_network, validate_ip, validate_port};
 use crate::ui::{
-    AccountRow, ActivityRow, AppWindow, DiagnosticRow, GuiI18n, InstanceRow, JavaRow, ModRow,
-    ModSearchRow, PendingEntityRow, PreferenceRow, ServerRow, Theme,
+    AccountRow, ActivityRow, AppWindow, DiagnosticRow, GuiI18n, InstanceRow, JavaRow, LogChunk,
+    ModRow, ModSearchRow, PendingEntityRow, PreferenceRow, ServerRow, Theme,
 };
 
 pub struct Controller {
@@ -63,6 +65,335 @@ struct CreationTracker {
     pending: Vec<PendingCreation>,
 }
 
+struct LiveViewerState {
+    active: Option<LiveLogSource>,
+    history: RetainedLog,
+    chunks: Rc<VecModel<LogChunk>>,
+    filter: LogFilter,
+    source_truncated: bool,
+    pending_lines: usize,
+    search_query: String,
+}
+
+impl Default for LiveViewerState {
+    fn default() -> Self {
+        Self {
+            active: None,
+            history: RetainedLog::with_default_limits(),
+            chunks: Rc::new(VecModel::default()),
+            filter: LogFilter::default(),
+            source_truncated: false,
+            pending_lines: 0,
+            search_query: String::new(),
+        }
+    }
+}
+
+impl LiveViewerState {
+    fn activate(&mut self, source: LiveLogSource) {
+        if self.active != Some(source) {
+            self.active = Some(source);
+            self.history.clear();
+            self.source_truncated = false;
+            self.pending_lines = 0;
+            self.search_query.clear();
+        }
+    }
+
+    fn deactivate(&mut self) {
+        self.active = None;
+        self.pending_lines = 0;
+    }
+
+    fn apply(&mut self, update: LiveLogUpdate) -> bool {
+        if self.active != Some(update.source) {
+            return false;
+        }
+        if update.reset {
+            self.history.clear();
+            self.pending_lines = 0;
+            self.source_truncated = false;
+        }
+        self.source_truncated |= update.source_truncated;
+        let added = update.lines.len();
+        for line in update.lines {
+            match line {
+                LiveLogLine::Client(line) => self.history.append_tailed_line(line),
+                LiveLogLine::Server(line) => self.history.append_captured(line),
+            }
+        }
+        self.pending_lines = self.pending_lines.saturating_add(added);
+        update.reset || update.missing || update.source_truncated || added > 0
+    }
+}
+
+fn register_live_viewer(
+    ui: &AppWindow,
+    commands: &Sender<Command>,
+    live_viewer: &Rc<RefCell<LiveViewerState>>,
+) {
+    ui.set_log_chunks(ModelRc::from(Rc::clone(&live_viewer.borrow().chunks)));
+
+    let sender = commands.clone();
+    let weak = ui.as_weak();
+    let open_state = Rc::clone(live_viewer);
+    ui.on_open_live_log(move |kind, id| {
+        let source = match kind.as_str() {
+            "client" => backend::parse_instance_id(&id).map(LiveLogSource::Client),
+            "server" => backend::parse_server_id(&id).map(LiveLogSource::Server),
+            _ => None,
+        };
+        let Some(source) = source else {
+            return;
+        };
+        open_state.borrow_mut().activate(source);
+        if let Some(ui) = weak.upgrade() {
+            ui.set_log_query(SharedString::default());
+            ui.set_log_follow(true);
+            render_live_viewer(&ui, &mut open_state.borrow_mut());
+        }
+        send(&sender, Command::OpenLiveLog(source));
+    });
+
+    let sender = commands.clone();
+    let close_state = Rc::clone(live_viewer);
+    ui.on_close_live_log(move || {
+        close_state.borrow_mut().deactivate();
+        send(&sender, Command::CloseLiveLog);
+    });
+
+    let weak = ui.as_weak();
+    let filter_state = Rc::clone(live_viewer);
+    ui.on_set_log_level(move |level, enabled| {
+        let mut state = filter_state.borrow_mut();
+        if level == "all" {
+            state.filter.set_all(enabled);
+        } else if let Some(level) = parse_log_level_name(&level) {
+            state.filter.set(level, enabled);
+        }
+        if let Some(ui) = weak.upgrade() {
+            render_live_viewer(&ui, &mut state);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let search_state = Rc::clone(live_viewer);
+    ui.on_search_live_log(move |query| {
+        let mut state = search_state.borrow_mut();
+        state.search_query = query.into();
+        if let Some(ui) = weak.upgrade() {
+            render_live_viewer(&ui, &mut state);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let follow_state = Rc::clone(live_viewer);
+    ui.on_live_log_follow_changed(move |follow| {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        let mut state = follow_state.borrow_mut();
+        if follow {
+            render_live_viewer(&ui, &mut state);
+        } else {
+            state.pending_lines = 0;
+            ui.set_log_pending_lines(0);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let copy_state = Rc::clone(live_viewer);
+    ui.on_copy_live_log(move || {
+        let content = copy_state.borrow().history.text();
+        if let Some(ui) = weak.upgrade() {
+            copy_to_clipboard(&ui, content);
+        }
+    });
+}
+
+fn parse_log_level_name(value: &str) -> Option<LogLevel> {
+    match value {
+        "trace" => Some(LogLevel::Trace),
+        "debug" => Some(LogLevel::Debug),
+        "info" => Some(LogLevel::Info),
+        "warn" => Some(LogLevel::Warn),
+        "error" => Some(LogLevel::Error),
+        "fatal" => Some(LogLevel::Fatal),
+        "other" => Some(LogLevel::Other),
+        _ => None,
+    }
+}
+
+struct LogPresentation {
+    chunks: Vec<LogChunk>,
+    content_columns: usize,
+    match_count: usize,
+}
+
+fn build_log_presentation(state: &LiveViewerState) -> LogPresentation {
+    const CHUNK_BYTES: usize = 32 * 1024;
+
+    let mut chunks = Vec::new();
+    let mut content_columns = 80_usize;
+    let visible_records = if state.search_query.is_empty() {
+        state
+            .history
+            .filtered_records(&state.filter)
+            .collect::<Vec<_>>()
+    } else {
+        state.history.search(&state.search_query)
+    };
+    let match_count = visible_records.len();
+
+    for record in visible_records {
+        let mut text = record.text.clone();
+        if let Some(truncation) = record.truncation {
+            text.push('\n');
+            text.push_str(&lookup_args(
+                "gui-log-bytes-omitted",
+                [("count", Arg::from(truncation.omitted_bytes))],
+            ));
+        }
+        content_columns = content_columns.max(
+            record
+                .text
+                .lines()
+                .map(|line| line.chars().count())
+                .max()
+                .unwrap_or(0),
+        );
+        push_record_chunks(&mut chunks, text, record.level, CHUNK_BYTES);
+    }
+    LogPresentation {
+        chunks,
+        content_columns,
+        match_count,
+    }
+}
+
+fn push_record_chunks(
+    chunks: &mut Vec<LogChunk>,
+    mut text: String,
+    level: LogLevel,
+    max_bytes: usize,
+) {
+    while text.len() > max_bytes {
+        let mut split = max_bytes;
+        while !text.is_char_boundary(split) {
+            split -= 1;
+        }
+        if let Some(newline) = text[..split].rfind('\n') {
+            split = newline;
+        }
+        if split == 0 {
+            split = max_bytes.min(text.len());
+            while !text.is_char_boundary(split) {
+                split -= 1;
+            }
+        }
+        let mut remainder = text.split_off(split);
+        chunks.push(LogChunk {
+            text: text.into(),
+            level: level.as_str().into(),
+        });
+        if remainder.starts_with('\n') {
+            remainder.remove(0);
+        }
+        text = remainder;
+    }
+    chunks.push(LogChunk {
+        text: text.into(),
+        level: level.as_str().into(),
+    });
+}
+
+fn same_chunk(left: &LogChunk, right: &LogChunk) -> bool {
+    left.text == right.text && left.level == right.level
+}
+
+fn sync_log_chunks(model: &VecModel<LogChunk>, chunks: Vec<LogChunk>) -> bool {
+    let current = (0..model.row_count())
+        .filter_map(|index| model.row_data(index))
+        .collect::<Vec<_>>();
+    if current.len() == chunks.len()
+        && current
+            .iter()
+            .zip(&chunks)
+            .all(|(left, right)| same_chunk(left, right))
+    {
+        return false;
+    }
+
+    if let Some(first) = chunks.first() {
+        for start in 0..current.len() {
+            if !same_chunk(&current[start], first) {
+                continue;
+            }
+            let overlap = (current.len() - start).min(chunks.len());
+            if current[start..start + overlap]
+                .iter()
+                .zip(&chunks[..overlap])
+                .all(|(left, right)| same_chunk(left, right))
+                && overlap == current.len() - start
+            {
+                for _ in 0..start {
+                    model.remove(0);
+                }
+                for chunk in chunks.into_iter().skip(overlap) {
+                    model.push(chunk);
+                }
+                return true;
+            }
+        }
+    }
+
+    let common_prefix = current
+        .iter()
+        .zip(&chunks)
+        .take_while(|(left, right)| same_chunk(left, right))
+        .count();
+    while model.row_count() > common_prefix {
+        model.remove(model.row_count() - 1);
+    }
+    for chunk in chunks.into_iter().skip(common_prefix) {
+        model.push(chunk);
+    }
+    true
+}
+
+fn render_live_viewer(ui: &AppWindow, state: &mut LiveViewerState) {
+    let presentation = build_log_presentation(state);
+
+    let status = if state.search_query.is_empty() {
+        lookup_args(
+            "gui-retained-log-records",
+            [("count", Arg::from(state.history.len()))],
+        )
+    } else {
+        lookup_args(
+            "gui-live-log-search-matches",
+            [("count", Arg::from(presentation.match_count))],
+        )
+    };
+    let chunks_changed = sync_log_chunks(&state.chunks, presentation.chunks);
+    ui.set_log_has_content(!state.history.is_empty());
+    ui.set_log_status(status.into());
+    ui.set_log_history_truncated(state.source_truncated || state.history.history_truncated());
+    ui.set_log_pending_lines(0);
+    ui.set_log_content_columns(to_i32(presentation.content_columns.min(10_000)));
+    ui.set_log_trace_enabled(state.filter.is_enabled(LogLevel::Trace));
+    ui.set_log_debug_enabled(state.filter.is_enabled(LogLevel::Debug));
+    ui.set_log_info_enabled(state.filter.is_enabled(LogLevel::Info));
+    ui.set_log_warn_enabled(state.filter.is_enabled(LogLevel::Warn));
+    ui.set_log_error_enabled(state.filter.is_enabled(LogLevel::Error));
+    ui.set_log_fatal_enabled(state.filter.is_enabled(LogLevel::Fatal));
+    ui.set_log_other_enabled(state.filter.is_enabled(LogLevel::Other));
+    if chunks_changed {
+        ui.set_log_revision(ui.get_log_revision().saturating_add(1));
+    }
+    state.pending_lines = 0;
+}
+
 impl CreationTracker {
     fn accept(&mut self, key: CreationKey, mut pending: PendingCreation) -> Option<String> {
         if !self.keys.insert(key.clone()) {
@@ -99,14 +430,16 @@ pub fn attach(ui: &AppWindow) -> Controller {
     let receiver = Rc::new(RefCell::new(backend.events));
     let activities = Rc::new(RefCell::new(Vec::<ActivityData>::new()));
     let creations = Rc::new(RefCell::new(CreationTracker::default()));
+    let live_viewer = Rc::new(RefCell::new(LiveViewerState::default()));
     register_i18n(ui);
     register_toasts(ui);
-    register_callbacks(ui, &backend.commands, Rc::clone(&creations));
+    register_callbacks(ui, &backend.commands, Rc::clone(&creations), &live_viewer);
 
     let weak = ui.as_weak();
     let poll_receiver = Rc::clone(&receiver);
     let poll_activities = Rc::clone(&activities);
     let poll_creations = Rc::clone(&creations);
+    let poll_live_viewer = Rc::clone(&live_viewer);
     let poll_timer = Timer::default();
     poll_timer.start(TimerMode::Repeated, Duration::from_millis(80), move || {
         let Some(ui) = weak.upgrade() else {
@@ -122,8 +455,21 @@ pub fn attach(ui: &AppWindow) -> Controller {
         if ui.get_compact_layout() != compact_layout {
             ui.set_compact_layout(compact_layout);
         }
+        let mut live_dirty = false;
         for event in poll_receiver.borrow_mut().try_iter() {
-            apply_event(&ui, event, &poll_activities, &poll_creations);
+            match event {
+                Event::LiveLog(update) => {
+                    live_dirty |= poll_live_viewer.borrow_mut().apply(update);
+                }
+                other => apply_event(&ui, other, &poll_activities, &poll_creations),
+            }
+        }
+        if live_dirty {
+            if ui.get_log_follow() {
+                render_live_viewer(&ui, &mut poll_live_viewer.borrow_mut());
+            } else {
+                ui.set_log_pending_lines(to_i32(poll_live_viewer.borrow().pending_lines));
+            }
         }
     });
 
@@ -177,6 +523,7 @@ fn register_callbacks(
     ui: &AppWindow,
     commands: &Sender<Command>,
     creations: Rc<RefCell<CreationTracker>>,
+    live_viewer: &Rc<RefCell<LiveViewerState>>,
 ) {
     register_catalog_actions(ui, commands);
     register_client_actions(ui, commands, Rc::clone(&creations));
@@ -243,28 +590,33 @@ fn register_callbacks(
 
     register_server_actions(ui, commands);
     register_diagnostics(ui, commands);
+    register_live_viewer(ui, commands, live_viewer);
     register_settings(ui, commands);
 
     let weak = ui.as_weak();
     ui.on_copy_text(move |text| {
-        let copied = ClipboardContext::new()
-            .and_then(|mut clipboard| clipboard.set_contents(text.into()))
-            .is_ok();
         if let Some(ui) = weak.upgrade() {
-            ui.invoke_present_toast(
-                if copied {
-                    lookup("gui-clipboard-copied")
-                } else {
-                    lookup("gui-clipboard-unavailable")
-                }
-                .into(),
-                !copied,
-            );
+            copy_to_clipboard(&ui, text.into());
         }
     });
 
     let sender = commands.clone();
     ui.on_cancel_operation(move |id| send(&sender, Command::CancelOperation(id.into())));
+}
+
+fn copy_to_clipboard(ui: &AppWindow, text: String) {
+    let copied = ClipboardContext::new()
+        .and_then(|mut clipboard| clipboard.set_contents(text))
+        .is_ok();
+    ui.invoke_present_toast(
+        if copied {
+            lookup("gui-clipboard-copied")
+        } else {
+            lookup("gui-clipboard-unavailable")
+        }
+        .into(),
+        !copied,
+    );
 }
 
 fn register_catalog_actions(ui: &AppWindow, commands: &Sender<Command>) {
@@ -846,6 +1198,7 @@ fn apply_event(
             ui.set_modal_error(SharedString::default());
         }
         Event::ServerWorkspace(workspace) => apply_server_workspace(ui, workspace),
+        Event::LiveLog(_) => {}
         Event::Diagnostics {
             rows,
             scope,
@@ -1200,14 +1553,6 @@ fn apply_server_snapshot(ui: &AppWindow, servers: Vec<crate::presentation::Serve
 }
 
 fn apply_server_workspace(ui: &AppWindow, workspace: ServerWorkspaceData) {
-    ui.set_console_text(workspace.console_lines.join("\n").into());
-    ui.set_console_lines(model(
-        workspace
-            .console_lines
-            .into_iter()
-            .map(SharedString::from)
-            .collect(),
-    ));
     ui.set_property_motd(workspace.motd.into());
     ui.set_property_max_players(workspace.max_players.into());
     ui.set_property_difficulty(workspace.difficulty.into());
@@ -1647,7 +1992,7 @@ mod tests {
         ] {
             assert!(source.contains(label), "missing context action {label}");
         }
-        assert_eq!(source.matches("ContextMenuArea {").count(), 3);
+        assert!(source.matches("ContextMenuArea {").count() >= 3);
     }
 
     #[test]
@@ -1721,12 +2066,68 @@ mod tests {
         assert!(source.contains("read-only: true"));
         assert!(source.contains("selectable-input.copy()"));
         assert!(source.contains("selectable-input.select-all()"));
-        assert!(source.contains(
-            "SelectableText { vertical-stretch: 1; border-radius: 8px; border-width: 1px; border-color: Theme.border; text: root.console-text; font-size: root.technical-text-size * 1px; }"
-        ));
+        assert!(source.contains("component LiveLogViewer inherits Rectangle"));
+        assert!(source.contains("chunk-input.copy()"));
+        assert!(source.contains("chunk-input.select-all()"));
+        assert!(source.contains("root.copy-live-log()"));
         assert!(source.contains(
             "SelectableText { text: root.diagnostic-content; font-size: root.technical-text-size * 1px; }"
         ));
+    }
+
+    #[test]
+    fn large_live_history_uses_bounded_production_filter_and_chunk_updates() {
+        let source = LiveLogSource::Client(ephervex_model::InstanceId::new());
+        let mut state = LiveViewerState::default();
+        state.activate(source);
+
+        for batch in 0..100 {
+            let lines = (0..100)
+                .map(|line| {
+                    let index = batch * 100 + line;
+                    let level = if index % 25 == 0 { "ERROR" } else { "INFO" };
+                    LiveLogLine::Client(ephervex_core::live_diagnostics::TailedLine {
+                        text: format!(
+                            "[16:{:02}:{:02}] [Server thread/{level}] [large_fixture/]: event {index:05}",
+                            (index / 60) % 60,
+                            index % 60
+                        ),
+                        truncation: None,
+                    })
+                })
+                .collect();
+            assert!(state.apply(LiveLogUpdate {
+                source,
+                reset: batch == 0,
+                missing: false,
+                source_truncated: false,
+                lines,
+            }));
+            let presentation = build_log_presentation(&state);
+            sync_log_chunks(&state.chunks, presentation.chunks);
+        }
+
+        assert_eq!(state.history.len(), 4_000);
+        assert!(state.history.history_truncated());
+        assert_eq!(state.chunks.row_count(), 4_000);
+
+        state.filter.set_all(false);
+        state.filter.set(LogLevel::Error, true);
+        let errors = build_log_presentation(&state);
+        assert_eq!(errors.match_count, 160);
+        assert!(
+            errors
+                .chunks
+                .iter()
+                .all(|chunk| chunk.level == "error" && chunk.text.contains("/ERROR]"))
+        );
+        sync_log_chunks(&state.chunks, errors.chunks);
+        assert_eq!(state.chunks.row_count(), 160);
+
+        state.search_query = "event 09999".to_owned();
+        let search = build_log_presentation(&state);
+        assert_eq!(search.match_count, 1);
+        assert!(search.chunks[0].text.contains("event 09999"));
     }
 
     #[test]

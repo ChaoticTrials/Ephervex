@@ -3,11 +3,14 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::str::FromStr as _;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use ephervex_core::live_diagnostics::TailedLine;
 use ephervex_core::{
     App, AuthEvent, AuthObserver, CancellationToken, ClientFolder, CoreError, DiagnosticKind,
     DiagnosticRequest, DiagnosticScope, EulaStatus, GlobalMinecraftPreferences, ImportRequest,
@@ -101,6 +104,8 @@ pub enum Command {
         command: String,
     },
     LoadServerWorkspace(ServerId),
+    OpenLiveLog(LiveLogSource),
+    CloseLiveLog,
     SaveServerProperties {
         server: ServerId,
         network: ServerNetworkSettings,
@@ -156,6 +161,45 @@ pub enum Command {
         value: String,
     },
     ResetPreference(PreferenceKey),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LiveLogSource {
+    Client(InstanceId),
+    Server(ServerId),
+}
+
+impl LiveLogSource {
+    #[must_use]
+    pub const fn kind(self) -> &'static str {
+        match self {
+            Self::Client(_) => "client",
+            Self::Server(_) => "server",
+        }
+    }
+
+    #[must_use]
+    pub fn id(self) -> String {
+        match self {
+            Self::Client(id) => id.to_string(),
+            Self::Server(id) => id.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum LiveLogLine {
+    Client(TailedLine),
+    Server(ephervex_core::CapturedLine),
+}
+
+#[derive(Debug, Clone)]
+pub struct LiveLogUpdate {
+    pub source: LiveLogSource,
+    pub reset: bool,
+    pub missing: bool,
+    pub source_truncated: bool,
+    pub lines: Vec<LiveLogLine>,
 }
 
 #[derive(Debug, Clone)]
@@ -284,7 +328,6 @@ pub struct DiagnosticContent {
 
 #[derive(Debug, Clone)]
 pub struct ServerWorkspaceData {
-    pub console_lines: Vec<String>,
     pub motd: String,
     pub max_players: String,
     pub difficulty: String,
@@ -318,6 +361,7 @@ pub enum Event {
     ModResults(Vec<ModSearchData>),
     ModPlan(ModPlanData),
     ServerWorkspace(ServerWorkspaceData),
+    LiveLog(LiveLogUpdate),
     Diagnostics {
         rows: Vec<DiagnosticData>,
         scope: String,
@@ -417,6 +461,7 @@ fn run_worker(
         send_error(&events, &error);
     }
     send_snapshot(&app, &events);
+    let live_log_generation = Arc::new(AtomicU64::new(0));
 
     for command in commands {
         match command {
@@ -819,6 +864,12 @@ fn run_worker(
                 send_server_workspace(&app, server, &events);
             }
             Command::LoadServerWorkspace(server) => send_server_workspace(&app, server, &events),
+            Command::OpenLiveLog(source) => {
+                open_live_log(&app, source, &events, &live_log_generation);
+            }
+            Command::CloseLiveLog => {
+                live_log_generation.fetch_add(1, Ordering::Relaxed);
+            }
             Command::SaveServerProperties {
                 server,
                 network,
@@ -1247,25 +1298,7 @@ fn send_server_workspace(app: &App, server: ServerId, events: &Sender<Event>) {
     let result = (|| {
         let record = app.server(server)?;
         let properties = app.server_properties(server)?;
-        let capture = app.server_output(server, 500)?;
         Ok::<_, CoreError>(ServerWorkspaceData {
-            console_lines: capture
-                .lines
-                .into_iter()
-                .map(|line| {
-                    format!(
-                        "{} [{:?}] {}{}",
-                        line.timestamp.format("%H:%M:%S"),
-                        line.stream,
-                        line.text,
-                        if line.truncated {
-                            " ... [truncated]"
-                        } else {
-                            ""
-                        }
-                    )
-                })
-                .collect(),
             motd: properties
                 .get("motd")
                 .unwrap_or_else(|| lookup("gui-default-motd")),
@@ -1292,6 +1325,96 @@ fn send_server_workspace(app: &App, server: ServerId, events: &Sender<Event>) {
             let message = localized_error(&error);
             let _ = events.send(Event::DiagnosticUnavailable(message.clone()));
             send_error(events, &error);
+        }
+    }
+}
+
+fn open_live_log(
+    app: &App,
+    source: LiveLogSource,
+    events: &Sender<Event>,
+    generation: &Arc<AtomicU64>,
+) {
+    let current_generation = generation.fetch_add(1, Ordering::Relaxed).saturating_add(1);
+    match source {
+        LiveLogSource::Server(server) => match app.server_output(server, 2_001) {
+            Ok(mut capture) => {
+                let bounded = capture.lines.len() > 2_000;
+                if bounded {
+                    capture.lines.remove(0);
+                }
+                let source_truncated = capture.retention.removed_lines > 0 || bounded;
+                let _ = events.send(Event::LiveLog(LiveLogUpdate {
+                    source,
+                    reset: true,
+                    missing: false,
+                    source_truncated,
+                    lines: capture.lines.into_iter().map(LiveLogLine::Server).collect(),
+                }));
+            }
+            Err(error) => send_error(events, &error),
+        },
+        LiveLogSource::Client(instance) => {
+            let mut tail = match app.client_log_tail(instance) {
+                Ok(tail) => tail,
+                Err(error) => {
+                    send_error(events, &error);
+                    return;
+                }
+            };
+            let paths = app.paths().clone();
+            let events = events.clone();
+            let generation = Arc::clone(generation);
+            if let Err(error) = thread::Builder::new()
+                .name("ephervex-client-log-tail".to_owned())
+                .spawn(move || {
+                    let app = match App::open_at(paths) {
+                        Ok(app) => app,
+                        Err(error) => {
+                            send_error(&events, &error);
+                            return;
+                        }
+                    };
+                    let mut first = true;
+                    while generation.load(Ordering::Relaxed) == current_generation {
+                        match app.poll_client_log(&mut tail) {
+                            Ok(mut update) => {
+                                if app
+                                    .launch_state(instance)
+                                    .is_ok_and(|state| state.is_none())
+                                    && let Some(line) = tail.finish_partial_line()
+                                {
+                                    update.lines.push(line);
+                                }
+                                let has_update = first
+                                    || update.reset
+                                    || !update.lines.is_empty()
+                                    || update.skipped_bytes > 0;
+                                if has_update {
+                                    let _ = events.send(Event::LiveLog(LiveLogUpdate {
+                                        source,
+                                        reset: first || update.reset,
+                                        missing: update.missing,
+                                        source_truncated: update.skipped_bytes > 0,
+                                        lines: update
+                                            .lines
+                                            .into_iter()
+                                            .map(LiveLogLine::Client)
+                                            .collect(),
+                                    }));
+                                }
+                                first = false;
+                            }
+                            Err(error) => {
+                                tracing::warn!(%error, "client latest.log tail poll failed");
+                            }
+                        }
+                        thread::sleep(Duration::from_millis(120));
+                    }
+                })
+            {
+                tracing::error!(%error, "could not start the client latest.log tail");
+            }
         }
     }
 }
@@ -1535,40 +1658,40 @@ fn spawn_server(paths: Paths, events: &Sender<Event>, server: ServerId, entity: 
             runtime.block_on(async move {
                 let forward = tokio::spawn(async move {
                     while let Some(event) = receiver.recv().await {
-                        match event {
-                            ServerEvent::Preparing { operation } => {
-                                if let Ok(mut observed) = forwarded_operation.lock() {
-                                    *observed = Some(operation.to_string());
-                                }
-                                send_activity_state(
-                                    &event_sender,
-                                    operation.to_string(),
-                                    &lookup("gui-activity-starting-server"),
-                                    &entity_for_events,
-                                    &lookup("gui-activity-validating-server"),
-                                    "running",
-                                    true,
-                                    false,
-                                );
-                                refresh_snapshot(&paths_for_events, &event_sender);
-                            }
-                            ServerEvent::Started { .. } => {
-                                let _ = event_sender.send(Event::Toast {
-                                    message: localized_value(
-                                        "gui-server-running",
+                        if let ServerEvent::Output(line) = event {
+                            let mut lines = vec![LiveLogLine::Server(line)];
+                            while lines.len() < 256 {
+                                match receiver.try_recv() {
+                                    Ok(ServerEvent::Output(line)) => {
+                                        lines.push(LiveLogLine::Server(line));
+                                    }
+                                    Ok(other) => forward_server_event(
+                                        &event_sender,
                                         &entity_for_events,
+                                        &paths_for_events,
+                                        &forwarded_operation,
+                                        server,
+                                        other,
                                     ),
-                                    error: false,
-                                });
-                                refresh_snapshot(&paths_for_events, &event_sender);
+                                    Err(_) => break,
+                                }
                             }
-                            ServerEvent::Warning(warning) => {
-                                let _ = event_sender.send(Event::Toast {
-                                    message: server_warning_message(&warning),
-                                    error: false,
-                                });
-                            }
-                            _ => {}
+                            let _ = event_sender.send(Event::LiveLog(LiveLogUpdate {
+                                source: LiveLogSource::Server(server),
+                                reset: false,
+                                missing: false,
+                                source_truncated: false,
+                                lines,
+                            }));
+                        } else {
+                            forward_server_event(
+                                &event_sender,
+                                &entity_for_events,
+                                &paths_for_events,
+                                &forwarded_operation,
+                                server,
+                                event,
+                            );
                         }
                     }
                 });
@@ -1620,6 +1743,57 @@ fn spawn_server(paths: Paths, events: &Sender<Event>, server: ServerId, entity: 
             });
         },
     );
+}
+
+fn forward_server_event(
+    events: &Sender<Event>,
+    entity: &str,
+    paths: &Paths,
+    observed_operation: &Mutex<Option<String>>,
+    server: ServerId,
+    event: ServerEvent,
+) {
+    match event {
+        ServerEvent::Preparing { operation } => {
+            if let Ok(mut observed) = observed_operation.lock() {
+                *observed = Some(operation.to_string());
+            }
+            send_activity_state(
+                events,
+                operation.to_string(),
+                &lookup("gui-activity-starting-server"),
+                entity,
+                &lookup("gui-activity-validating-server"),
+                "running",
+                true,
+                false,
+            );
+            refresh_snapshot(paths, events);
+        }
+        ServerEvent::Started { .. } => {
+            let _ = events.send(Event::Toast {
+                message: localized_value("gui-server-running", entity),
+                error: false,
+            });
+            refresh_snapshot(paths, events);
+        }
+        ServerEvent::CapturePruned(_) | ServerEvent::CaptureUnavailable { .. } => {
+            let _ = events.send(Event::LiveLog(LiveLogUpdate {
+                source: LiveLogSource::Server(server),
+                reset: false,
+                missing: false,
+                source_truncated: true,
+                lines: Vec::new(),
+            }));
+        }
+        ServerEvent::Warning(warning) => {
+            let _ = events.send(Event::Toast {
+                message: server_warning_message(&warning),
+                error: false,
+            });
+        }
+        _ => {}
+    }
 }
 
 fn spawn_connect(

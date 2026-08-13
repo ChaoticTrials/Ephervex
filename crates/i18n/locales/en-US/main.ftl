@@ -1121,6 +1121,41 @@ gui-folder = Folder
 gui-no-file-open = No file open
 gui-no-file-open-detail = Choose a log or crash report. Ephervex reads a bounded, safe text window through diagnostics services.
 gui-copy-path = Copy Path
+gui-filter-all-levels = Show all log levels
+gui-filter-info = Show INFO records
+gui-filter-warn = Show WARN records
+gui-filter-error = Show ERROR records
+gui-filter-debug = Show DEBUG records
+gui-filter-trace = Show TRACE records
+gui-filter-fatal = Show FATAL records
+gui-filter-other = Show unclassified records
+gui-log-level-other = Other
+gui-wrap-lines = Wrap Lines
+gui-following = Following
+gui-pause-following = Pause following new output
+gui-jump-latest = Jump to Latest
+gui-copy-retained = Copy Retained
+gui-search-retained-logs = Search all retained logs...
+gui-new-log-lines = { $count ->
+    [one] 1 new line
+   *[other] { $count } new lines
+}
+gui-retained-history-truncated = Older output is outside this retained view.
+gui-no-log-output = No output yet
+gui-no-log-output-detail = Ephervex will show new output here as it is written.
+gui-log-output-block = Read-only log output
+gui-log-bytes-omitted = [... { $count } bytes omitted]
+gui-retained-log-records = { $count ->
+    [one] 1 retained record
+   *[other] { $count } retained records
+}
+gui-live-log-search-matches = { $count ->
+    [one] 1 match in retained output
+   *[other] { $count } matches in retained output
+}
+gui-live-latest-log = Live / Latest Log
+gui-crash-reports = Crash Reports
+gui-log-files = Log Files
 gui-activity-detail = Current and recent work while Ephervex is running. Activity is not persisted across application restarts.
 gui-no-recent-activity = No recent activity
 gui-no-recent-activity-detail = Creation, imports, installations, launches, and server work will appear here.

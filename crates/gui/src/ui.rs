@@ -1,5 +1,5 @@
 slint::slint! {
-    import { AboutSlint, ComboBox, ScrollView, Slider, Spinner } from "std-widgets.slint";
+    import { AboutSlint, ComboBox, ListView, ScrollView, Slider, Spinner } from "std-widgets.slint";
 
     export global GuiI18n {
         pure callback text(string) -> string;
@@ -112,6 +112,11 @@ slint::slint! {
         modified: string,
         size: string,
         summary: string,
+    }
+
+    export struct LogChunk {
+        text: string,
+        level: string,
     }
 
     export struct ActivityRow {
@@ -272,6 +277,7 @@ slint::slint! {
     component TextField inherits Rectangle {
         in-out property <string> text <=> input.text;
         in property <string> placeholder;
+        in property <string> accessible-name: placeholder;
         in property <bool> enabled: true;
         in property <bool> invalid: false;
         in property <InputType> input-type: InputType.text;
@@ -283,6 +289,9 @@ slint::slint! {
         border-width: 1px;
         border-color: invalid ? Theme.danger : input.has-focus ? Theme.accent : Theme.border;
         background: Theme.background;
+        accessible-role: text-input;
+        accessible-label: accessible-name;
+        accessible-enabled: enabled;
         input := TextInput {
             x: 11px; width: parent.width - 22px; height: parent.height;
             color: root.enabled ? Theme.text : Theme.text-muted;
@@ -340,6 +349,146 @@ slint::slint! {
                     font-family: root.font-family;
                     font-size: root.font-size;
                     page-height: selectable-scroll.visible-height;
+                }
+            }
+        }
+    }
+
+    component FilterChip inherits Rectangle {
+        in property <string> text;
+        in property <string> accessible-name: text;
+        in property <bool> selected;
+        callback clicked();
+        height: 28px;
+        width: label.preferred-width + 18px;
+        horizontal-stretch: 0;
+        border-radius: 5px;
+        border-width: 1px;
+        border-color: selected ? Theme.accent : Theme.border;
+        background: selected ? #244a4e : area.has-hover ? Theme.elevated : transparent;
+        accessible-role: checkbox;
+        accessible-label: accessible-name;
+        accessible-checked: selected;
+        accessible-action-default => { root.clicked(); }
+        label := Text {
+            text: root.text;
+            color: root.selected ? Theme.accent : Theme.text-secondary;
+            font-size: Theme.caption-size;
+            font-weight: root.selected ? 600 : 400;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        area := TouchArea { clicked => { root.clicked(); } }
+    }
+
+    component LiveLogViewer inherits Rectangle {
+        in property <[LogChunk]> chunks;
+        in property <bool> has-content;
+        in property <string> status;
+        in property <bool> history-truncated;
+        in property <int> pending-lines;
+        in property <int> content-columns: 80;
+        in property <length> font-size: 12px;
+        in-out property <string> query;
+        in-out property <bool> wrap-lines;
+        in-out property <bool> follow;
+        in property <bool> trace-enabled;
+        in property <bool> debug-enabled;
+        in property <bool> info-enabled;
+        in property <bool> warn-enabled;
+        in property <bool> error-enabled;
+        in property <bool> fatal-enabled;
+        in property <bool> other-enabled;
+        in property <int> revision;
+        callback set-level(string, bool);
+        callback search(string);
+        callback copy();
+        callback follow-changed(bool);
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: Theme.border;
+        background: rgb(11, 14, 16);
+
+        VerticalLayout {
+            spacing: 0px;
+            Rectangle {
+                height: 42px;
+                background: Theme.surface;
+                HorizontalLayout {
+                    padding-left: 10px; padding-right: 10px; spacing: 6px; alignment: center;
+                    all-levels := FilterChip { text: GuiI18n.text("gui-all"); accessible-name: GuiI18n.text("gui-filter-all-levels"); selected: root.trace-enabled && root.debug-enabled && root.info-enabled && root.warn-enabled && root.error-enabled && root.fatal-enabled && root.other-enabled; clicked => { root.set-level("all", !all-levels.selected); } }
+                    FilterChip { text: "INFO"; accessible-name: GuiI18n.text("gui-filter-info"); selected: root.info-enabled; clicked => { root.set-level("info", !root.info-enabled); } }
+                    FilterChip { text: "WARN"; accessible-name: GuiI18n.text("gui-filter-warn"); selected: root.warn-enabled; clicked => { root.set-level("warn", !root.warn-enabled); } }
+                    FilterChip { text: "ERROR"; accessible-name: GuiI18n.text("gui-filter-error"); selected: root.error-enabled; clicked => { root.set-level("error", !root.error-enabled); } }
+                    FilterChip { text: "DEBUG"; accessible-name: GuiI18n.text("gui-filter-debug"); selected: root.debug-enabled; clicked => { root.set-level("debug", !root.debug-enabled); } }
+                    FilterChip { text: "TRACE"; accessible-name: GuiI18n.text("gui-filter-trace"); selected: root.trace-enabled; clicked => { root.set-level("trace", !root.trace-enabled); } }
+                    FilterChip { text: "FATAL"; accessible-name: GuiI18n.text("gui-filter-fatal"); selected: root.fatal-enabled; clicked => { root.set-level("fatal", !root.fatal-enabled); } }
+                    FilterChip { text: GuiI18n.text("gui-log-level-other"); accessible-name: GuiI18n.text("gui-filter-other"); selected: root.other-enabled; clicked => { root.set-level("other", !root.other-enabled); } }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+            }
+            Rectangle {
+                height: 44px;
+                background: Theme.surface;
+                HorizontalLayout {
+                    padding-left: 10px; padding-right: 10px; spacing: 8px; alignment: center;
+                    TextField { text <=> root.query; placeholder: GuiI18n.text("gui-search-retained-logs"); input-type: InputType.search; width: 230px; accepted => { root.search(root.query); } accessible-label: GuiI18n.text("gui-search-retained-logs"); }
+                    AppButton { text: GuiI18n.text("gui-find"); min-width: 62px; clicked => { root.search(root.query); } }
+                    FilterChip { text: GuiI18n.text("gui-wrap-lines"); accessible-name: GuiI18n.text("gui-wrap-lines"); selected: root.wrap-lines; clicked => { root.wrap-lines = !root.wrap-lines; } }
+                    FilterChip { text: root.follow ? GuiI18n.text("gui-following") : GuiI18n.text("gui-jump-latest"); accessible-name: root.follow ? GuiI18n.text("gui-pause-following") : GuiI18n.text("gui-jump-latest"); selected: root.follow; clicked => { root.follow = !root.follow; root.follow-changed(root.follow); } }
+                    AppButton { text: GuiI18n.text("gui-copy-retained"); min-width: 104px; enabled: root.has-content; clicked => { root.copy(); } }
+                    Rectangle { horizontal-stretch: 1; }
+                    if root.pending-lines > 0 : BodyText { text: GuiI18n.count("gui-new-log-lines", root.pending-lines); color: Theme.accent; font-size: Theme.caption-size; }
+                }
+            }
+            if root.status != "" || root.history-truncated : Rectangle {
+                height: 28px;
+                background: Theme.background;
+                HorizontalLayout {
+                    padding-left: 10px; padding-right: 10px; spacing: 12px;
+                    BodyText { text: root.status; color: Theme.text-muted; font-size: Theme.caption-size; }
+                    if root.history-truncated : BodyText { text: GuiI18n.text("gui-retained-history-truncated"); color: Theme.warning; font-size: Theme.caption-size; }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+            }
+            if root.chunks.length == 0 : Rectangle { background: rgb(11, 14, 16); VerticalLayout { alignment: center; spacing: 6px; Text { text: GuiI18n.text("gui-no-log-output"); color: Theme.text; font-size: Theme.heading-size; horizontal-alignment: center; } BodyText { text: GuiI18n.text("gui-no-log-output-detail"); horizontal-alignment: center; } } }
+            if root.chunks.length > 0 : output := ListView {
+                viewport-width: root.wrap-lines ? self.visible-width : max(self.visible-width, root.content-columns * root.font-size * 0.62 + 24px);
+                private property <int> observed-revision: root.revision;
+                changed observed-revision => {
+                    if root.follow {
+                        self.viewport-y = min(0px, self.visible-height - self.viewport-height);
+                    }
+                }
+                for chunk in root.chunks : Rectangle {
+                    width: output.viewport-width;
+                    height: chunk-input.preferred-height + 8px;
+                    background: transparent;
+                    forward-focus: chunk-input;
+                    accessible-role: text-input;
+                    accessible-read-only: true;
+                    accessible-value: chunk.text;
+                    ContextMenuArea {
+                        Menu {
+                            MenuItem { title: GuiI18n.text("gui-copy"); enabled: chunk.text != ""; activated => { chunk-input.copy(); } }
+                            MenuItem { title: GuiI18n.text("gui-select-all"); enabled: chunk.text != ""; activated => { chunk-input.select-all(); } }
+                        }
+                        chunk-input := TextInput {
+                            x: 10px; y: 4px;
+                            width: root.wrap-lines ? output.visible-width - 20px : max(output.visible-width - 20px, self.preferred-width);
+                            height: self.preferred-height;
+                            text: chunk.text;
+                            color: chunk.level == "error" || chunk.level == "fatal" ? #ef9a9f : chunk.level == "warn" ? Theme.warning : chunk.level == "debug" || chunk.level == "trace" ? Theme.text-muted : Theme.text-secondary;
+                            selection-background-color: Theme.accent;
+                            selection-foreground-color: Theme.background;
+                            read-only: true;
+                            single-line: false;
+                            wrap: root.wrap-lines ? word-wrap : no-wrap;
+                            font-family: "monospace";
+                            font-size: root.font-size;
+                            accessible-label: GuiI18n.text("gui-log-output-block");
+                        }
+                    }
                 }
             }
         }
@@ -840,8 +989,23 @@ slint::slint! {
         in-out property <[PreferenceRow]> preferences;
         in-out property <[PendingEntityRow]> pending-instances;
         in-out property <[PendingEntityRow]> pending-servers;
-        in-out property <[string]> console-lines;
-        in-out property <string> console-text;
+        in-out property <[LogChunk]> log-chunks;
+        in-out property <bool> log-has-content: false;
+        in-out property <string> log-status;
+        in-out property <string> log-query;
+        in-out property <bool> log-wrap-lines: false;
+        in-out property <bool> log-follow: true;
+        in-out property <bool> log-history-truncated: false;
+        in-out property <int> log-pending-lines: 0;
+        in-out property <int> log-content-columns: 80;
+        in-out property <int> log-revision: 0;
+        in-out property <bool> log-trace-enabled: true;
+        in-out property <bool> log-debug-enabled: true;
+        in-out property <bool> log-info-enabled: true;
+        in-out property <bool> log-warn-enabled: true;
+        in-out property <bool> log-error-enabled: true;
+        in-out property <bool> log-fatal-enabled: true;
+        in-out property <bool> log-other-enabled: true;
         in-out property <string> selected-instance-id;
         in-out property <string> selected-server-id;
         in-out property <int> selected-instance-index: -1;
@@ -967,6 +1131,12 @@ slint::slint! {
         callback server-restart(string);
         callback server-kill(string);
         callback server-console(string, string);
+        callback open-live-log(string, string);
+        callback close-live-log();
+        callback copy-live-log();
+        callback set-log-level(string, bool);
+        callback search-live-log(string);
+        callback live-log-follow-changed(bool);
         callback load-server-workspace(string);
         callback save-server-properties(string, string, string, string, string, bool, bool, bool, bool, string, string, string);
         callback validate-server-properties(string, string, string, string);
@@ -1060,10 +1230,10 @@ slint::slint! {
                     border-color: Theme.border;
                     VerticalLayout {
                         padding: 14px; spacing: 8px;
-                        NavItem { icon: @image-url("../../../assets/icons/nav-instances.svg"); label: GuiI18n.text("gui-instances"); selected: root.page == 0; clicked => { root.page = 0; root.workspace = ""; } }
-                        NavItem { icon: @image-url("../../../assets/icons/nav-servers.svg"); label: GuiI18n.text("gui-servers"); selected: root.page == 1; clicked => { root.page = 1; root.workspace = ""; } }
-                        NavItem { icon: @image-url("../../../assets/icons/nav-activity.svg"); label: GuiI18n.text("gui-activity"); selected: root.page == 3; clicked => { root.page = 3; root.workspace = ""; } }
-                        NavItem { icon: @image-url("../../../assets/icons/nav-settings.svg"); label: GuiI18n.text("gui-settings"); selected: root.page == 4; clicked => { root.page = 4; root.workspace = ""; root.workspace-tab = "General"; } }
+                        NavItem { icon: @image-url("../../../assets/icons/nav-instances.svg"); label: GuiI18n.text("gui-instances"); selected: root.page == 0; clicked => { root.close-live-log(); root.page = 0; root.workspace = ""; } }
+                        NavItem { icon: @image-url("../../../assets/icons/nav-servers.svg"); label: GuiI18n.text("gui-servers"); selected: root.page == 1; clicked => { root.close-live-log(); root.page = 1; root.workspace = ""; } }
+                        NavItem { icon: @image-url("../../../assets/icons/nav-activity.svg"); label: GuiI18n.text("gui-activity"); selected: root.page == 3; clicked => { root.close-live-log(); root.page = 3; root.workspace = ""; } }
+                        NavItem { icon: @image-url("../../../assets/icons/nav-settings.svg"); label: GuiI18n.text("gui-settings"); selected: root.page == 4; clicked => { root.close-live-log(); root.page = 4; root.workspace = ""; root.workspace-tab = "General"; } }
                         Rectangle { vertical-stretch: 1; }
                         BodyText { text: GuiI18n.text("gui-tagline"); color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
                     }
@@ -1131,7 +1301,7 @@ slint::slint! {
                         open-folder(id) => { root.open-client-folder(id); }
                         workspace(id) => { root.workspace = "instance"; root.workspace-tab = "Overview"; root.load-instance-workspace(id); }
                         create-server(id, name) => { root.create-server-client-id = id; root.create-server-name = name + " Server"; root.modal = "create-server"; }
-                        diagnostics(id) => { root.page = 2; root.load-diagnostics("client", id, "log"); }
+                        diagnostics(id) => { root.workspace = "instance"; root.workspace-tab = "Logs"; root.selected-diagnostic-kind = "log"; root.load-instance-workspace(id); root.open-live-log("client", id); }
                     }
                 }
 
@@ -1139,13 +1309,13 @@ slint::slint! {
                     horizontal-stretch: 1; background: Theme.background;
                     VerticalLayout {
                         padding: 22px; spacing: 14px;
-                        HorizontalLayout { spacing: 12px; AppButton { text: GuiI18n.text("gui-back-instances"); clicked => { root.workspace = ""; } } Heading { text: root.selected-instance-index >= 0 ? root.instances[root.selected-instance-index].name : GuiI18n.text("gui-instance"); font-size: Theme.workspace-title-size; } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-launch"); tone: "primary"; enabled: root.selected-instance-index >= 0 && root.instances[root.selected-instance-index].can-launch; clicked => { root.launch-client(root.selected-instance-id); } } }
+                        HorizontalLayout { spacing: 12px; AppButton { text: GuiI18n.text("gui-back-instances"); clicked => { root.close-live-log(); root.workspace = ""; } } Heading { text: root.selected-instance-index >= 0 ? root.instances[root.selected-instance-index].name : GuiI18n.text("gui-instance"); font-size: Theme.workspace-title-size; } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-launch"); tone: "primary"; enabled: root.selected-instance-index >= 0 && root.instances[root.selected-instance-index].can-launch; clicked => { root.launch-client(root.selected-instance-id); } } }
                         HorizontalLayout {
                             spacing: 4px;
-                            WorkspaceTab { text: GuiI18n.text("gui-instance-tab-overview"); selected: root.workspace-tab == "Overview"; clicked => { root.workspace-tab = "Overview"; } }
-                            WorkspaceTab { text: GuiI18n.text("gui-instance-tab-mods"); selected: root.workspace-tab == "Mods"; clicked => { root.workspace-tab = "Mods"; } }
-                            WorkspaceTab { text: GuiI18n.text("gui-instance-tab-minecraft-settings"); selected: root.workspace-tab == "Minecraft Settings"; clicked => { root.workspace-tab = "Minecraft Settings"; } }
-                            WorkspaceTab { text: GuiI18n.text("gui-instance-tab-logs"); selected: false; clicked => { root.page = 2; root.load-diagnostics("client", root.selected-instance-id, "log"); } }
+                            WorkspaceTab { text: GuiI18n.text("gui-instance-tab-overview"); selected: root.workspace-tab == "Overview"; clicked => { root.close-live-log(); root.workspace-tab = "Overview"; } }
+                            WorkspaceTab { text: GuiI18n.text("gui-instance-tab-mods"); selected: root.workspace-tab == "Mods"; clicked => { root.close-live-log(); root.workspace-tab = "Mods"; } }
+                            WorkspaceTab { text: GuiI18n.text("gui-instance-tab-minecraft-settings"); selected: root.workspace-tab == "Minecraft Settings"; clicked => { root.close-live-log(); root.workspace-tab = "Minecraft Settings"; } }
+                            WorkspaceTab { text: GuiI18n.text("gui-instance-tab-logs"); selected: root.workspace-tab == "Logs"; clicked => { root.workspace-tab = "Logs"; root.selected-diagnostic-kind = "log"; root.open-live-log("client", root.selected-instance-id); } }
                             Rectangle { horizontal-stretch: 1; }
                         }
                         Divider { }
@@ -1175,6 +1345,17 @@ slint::slint! {
                             }
                         }
                         if root.workspace-tab == "Minecraft Settings" : EmptyState { title: GuiI18n.text("gui-instance-settings-unavailable"); message: GuiI18n.text("gui-instance-settings-unavailable-detail"); primary-text: GuiI18n.text("gui-open-global-defaults"); primary => { root.page = 4; root.workspace = ""; root.workspace-tab = "Minecraft"; } }
+                        if root.workspace-tab == "Logs" : VerticalLayout { spacing: 9px;
+                            HorizontalLayout { spacing: 8px; FilterChip { text: GuiI18n.text("gui-live-latest-log"); accessible-name: GuiI18n.text("gui-live-latest-log"); selected: root.selected-diagnostic-kind != "crash-report"; clicked => { root.selected-diagnostic-kind = "log"; root.open-live-log("client", root.selected-instance-id); } } FilterChip { text: GuiI18n.text("gui-crash-reports"); accessible-name: GuiI18n.text("gui-crash-reports"); selected: root.selected-diagnostic-kind == "crash-report"; clicked => { root.close-live-log(); root.selected-diagnostic-kind = "crash-report"; root.load-diagnostics("client", root.selected-instance-id, "crash-report"); } } Rectangle { horizontal-stretch: 1; } }
+                            if root.selected-diagnostic-kind != "crash-report" : LiveLogViewer {
+                                chunks: root.log-chunks; has-content: root.log-has-content; status: root.log-status; history-truncated: root.log-history-truncated; pending-lines: root.log-pending-lines; content-columns: root.log-content-columns; font-size: root.technical-text-size * 1px; query <=> root.log-query; wrap-lines <=> root.log-wrap-lines; follow <=> root.log-follow; trace-enabled: root.log-trace-enabled; debug-enabled: root.log-debug-enabled; info-enabled: root.log-info-enabled; warn-enabled: root.log-warn-enabled; error-enabled: root.log-error-enabled; fatal-enabled: root.log-fatal-enabled; other-enabled: root.log-other-enabled; revision: root.log-revision;
+                                set-level(level, enabled) => { root.set-log-level(level, enabled); } search(query) => { root.search-live-log(query); } copy => { root.copy-live-log(); } follow-changed(follow) => { root.live-log-follow-changed(follow); }
+                            }
+                            if root.selected-diagnostic-kind == "crash-report" : VerticalLayout { spacing: 8px;
+                                HorizontalLayout { BodyText { text: GuiI18n.count("gui-diagnostic-files-count", root.diagnostics.length); } Rectangle { horizontal-stretch: 1; } TextField { text <=> root.diagnostic-query; placeholder: GuiI18n.text("gui-search-loaded-content"); input-type: InputType.search; width: 250px; accepted => { root.search-diagnostic("client", root.selected-instance-id, "crash-report", root.selected-diagnostic-name, root.diagnostic-query); } } AppButton { text: GuiI18n.text("gui-find"); enabled: root.selected-diagnostic-name != ""; clicked => { root.search-diagnostic("client", root.selected-instance-id, "crash-report", root.selected-diagnostic-name, root.diagnostic-query); } } AppButton { text: GuiI18n.text("gui-folder"); clicked => { root.open-diagnostic-folder("client", root.selected-instance-id, "crash-report"); } } }
+                                HorizontalLayout { spacing: 10px; Rectangle { width: 270px; background: Theme.surface; border-radius: 8px; border-width: 1px; border-color: Theme.border; ScrollView { VerticalLayout { padding: 8px; spacing: 5px; for item in root.diagnostics : Rectangle { height: 66px; background: Theme.background; border-radius: 6px; border-width: item.name == root.selected-diagnostic-name ? 2px : 1px; border-color: item.name == root.selected-diagnostic-name ? Theme.accent : Theme.border; VerticalLayout { padding: 8px; Text { text: item.name; color: Theme.warning; overflow: elide; } BodyText { text: item.summary != "" ? item.summary : item.size; overflow: elide; font-size: Theme.caption-size; } } TouchArea { clicked => { root.selected-diagnostic-name = item.name; root.open-diagnostic("client", root.selected-instance-id, "crash-report", item.name); } } } } } } Rectangle { horizontal-stretch: 1; background: rgb(11, 14, 16); border-radius: 8px; border-width: 1px; border-color: Theme.border; VerticalLayout { if root.diagnostic-content == "" : EmptyState { title: GuiI18n.text("gui-no-file-open"); message: GuiI18n.text("gui-no-file-open-detail"); } if root.diagnostic-content != "" : SelectableText { text: root.diagnostic-content; font-size: root.technical-text-size * 1px; } if root.diagnostic-content != "" : AppButton { text: GuiI18n.text("gui-copy"); clicked => { root.copy-text(root.diagnostic-content); } } } } }
+                            }
+                        }
                     }
                 }
 
@@ -1215,7 +1396,7 @@ slint::slint! {
                             if root.servers[root.selected-server-index].linked-client-id != "" : AppButton { text: GuiI18n.text("gui-launch-client-connect"); clicked => { root.launch-and-connect(root.servers[root.selected-server-index].linked-client-id, root.selected-server-id); } }
                             HorizontalLayout { spacing: 8px;
                                 AppButton { text: GuiI18n.text("gui-open-folder"); clicked => { root.open-server-folder(root.selected-server-id); } }
-                                AppButton { text: GuiI18n.text("gui-view-logs"); clicked => { root.page = 2; root.load-diagnostics("server", root.selected-server-id, "log"); } }
+                                AppButton { text: GuiI18n.text("gui-view-logs"); clicked => { root.workspace = "server"; root.workspace-tab = "Logs"; root.selected-diagnostic-kind = "log"; root.load-server-workspace(root.selected-server-id); root.load-diagnostics("server", root.selected-server-id, "log"); } }
                             }
                             Divider { }
                             AppButton { text: GuiI18n.text("gui-force-kill"); tone: "danger"; enabled: root.servers[root.selected-server-index].can-kill; clicked => { root.modal = "kill"; } }
@@ -1225,12 +1406,12 @@ slint::slint! {
 
                 if root.page == 1 && root.workspace == "server" : Rectangle { horizontal-stretch: 1; background: Theme.background;
                     VerticalLayout { padding: 22px; spacing: 14px;
-                        HorizontalLayout { spacing: 12px; AppButton { text: GuiI18n.text("gui-back-servers"); clicked => { root.workspace = ""; } } Heading { text: root.selected-server-index >= 0 ? root.servers[root.selected-server-index].name : GuiI18n.text("gui-server"); font-size: Theme.workspace-title-size; } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-restart"); enabled: root.selected-server-index >= 0 && root.servers[root.selected-server-index].can-restart; clicked => { root.server-restart(root.selected-server-id); } } AppButton { text: root.selected-server-index >= 0 && root.servers[root.selected-server-index].can-stop ? GuiI18n.text("gui-stop") : GuiI18n.text("gui-start"); tone: "primary"; enabled: root.selected-server-index >= 0 && (root.servers[root.selected-server-index].can-start || root.servers[root.selected-server-index].can-stop); clicked => { if root.servers[root.selected-server-index].can-stop { root.server-stop(root.selected-server-id); } else { root.server-start(root.selected-server-id); } } } }
+                        HorizontalLayout { spacing: 12px; AppButton { text: GuiI18n.text("gui-back-servers"); clicked => { root.close-live-log(); root.workspace = ""; } } Heading { text: root.selected-server-index >= 0 ? root.servers[root.selected-server-index].name : GuiI18n.text("gui-server"); font-size: Theme.workspace-title-size; } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-restart"); enabled: root.selected-server-index >= 0 && root.servers[root.selected-server-index].can-restart; clicked => { root.server-restart(root.selected-server-id); } } AppButton { text: root.selected-server-index >= 0 && root.servers[root.selected-server-index].can-stop ? GuiI18n.text("gui-stop") : GuiI18n.text("gui-start"); tone: "primary"; enabled: root.selected-server-index >= 0 && (root.servers[root.selected-server-index].can-start || root.servers[root.selected-server-index].can-stop); clicked => { if root.servers[root.selected-server-index].can-stop { root.server-stop(root.selected-server-id); } else { root.server-start(root.selected-server-id); } } } }
                         HorizontalLayout { spacing: 8px;
-                            WorkspaceTab { text: GuiI18n.text("gui-instance-tab-overview"); selected: root.workspace-tab == "Overview"; clicked => { root.workspace-tab = "Overview"; } }
-                            WorkspaceTab { text: GuiI18n.text("gui-server-tab-console"); selected: root.workspace-tab == "Console"; clicked => { root.workspace-tab = "Console"; } }
-                            WorkspaceTab { text: GuiI18n.text("gui-server-tab-properties"); selected: root.workspace-tab == "Properties"; clicked => { root.workspace-tab = "Properties"; } }
-                            WorkspaceTab { text: GuiI18n.text("gui-instance-tab-logs"); selected: false; clicked => { root.page = 2; root.load-diagnostics("server", root.selected-server-id, "log"); } }
+                            WorkspaceTab { text: GuiI18n.text("gui-instance-tab-overview"); selected: root.workspace-tab == "Overview"; clicked => { root.close-live-log(); root.workspace-tab = "Overview"; } }
+                            WorkspaceTab { text: GuiI18n.text("gui-server-tab-console"); selected: root.workspace-tab == "Console"; clicked => { root.workspace-tab = "Console"; root.open-live-log("server", root.selected-server-id); } }
+                            WorkspaceTab { text: GuiI18n.text("gui-server-tab-properties"); selected: root.workspace-tab == "Properties"; clicked => { root.close-live-log(); root.workspace-tab = "Properties"; } }
+                            WorkspaceTab { text: GuiI18n.text("gui-instance-tab-logs"); selected: root.workspace-tab == "Logs"; clicked => { root.close-live-log(); root.workspace-tab = "Logs"; root.selected-diagnostic-kind = "log"; root.load-diagnostics("server", root.selected-server-id, "log"); } }
                             Rectangle { horizontal-stretch: 1; }
                         }
                         Divider { }
@@ -1240,11 +1421,18 @@ slint::slint! {
                             HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-network"); } BodyText { text: root.servers[root.selected-server-index].address; } }
                             HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-storage"); } BodyText { text: root.servers[root.selected-server-index].storage; } }
                             HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-relationship"); } BodyText { text: root.servers[root.selected-server-index].relationship; } }
-                        } } HorizontalLayout { spacing: 8px; AppButton { text: GuiI18n.text("gui-open-folder"); clicked => { root.open-server-folder(root.selected-server-id); } } AppButton { text: GuiI18n.text("gui-view-logs"); clicked => { root.page = 2; root.load-diagnostics("server", root.selected-server-id, "log"); } } if root.servers[root.selected-server-index].linked-client-id != "" : AppButton { text: GuiI18n.text("gui-launch-client-connect"); tone: "primary"; clicked => { root.launch-and-connect(root.servers[root.selected-server-index].linked-client-id, root.selected-server-id); } } } } }
+                        } } HorizontalLayout { spacing: 8px; AppButton { text: GuiI18n.text("gui-open-folder"); clicked => { root.open-server-folder(root.selected-server-id); } } AppButton { text: GuiI18n.text("gui-view-logs"); clicked => { root.workspace-tab = "Logs"; root.selected-diagnostic-kind = "log"; root.load-diagnostics("server", root.selected-server-id, "log"); } } if root.servers[root.selected-server-index].linked-client-id != "" : AppButton { text: GuiI18n.text("gui-launch-client-connect"); tone: "primary"; clicked => { root.launch-and-connect(root.servers[root.selected-server-index].linked-client-id, root.selected-server-id); } } } } }
                         if root.workspace-tab == "Console" : VerticalLayout { spacing: 10px;
                             HorizontalLayout { BodyText { text: GuiI18n.value("gui-bounded-output", root.servers[root.selected-server-index].state); color: root.servers[root.selected-server-index].can-send-command ? Theme.success : Theme.text-secondary; } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-restart"); enabled: root.servers[root.selected-server-index].can-restart; clicked => { root.server-restart(root.selected-server-id); } } AppButton { text: GuiI18n.text("gui-stop"); enabled: root.servers[root.selected-server-index].can-stop; clicked => { root.server-stop(root.selected-server-id); } } AppButton { text: GuiI18n.text("gui-kill"); tone: "danger"; enabled: root.servers[root.selected-server-index].can-kill; clicked => { root.modal = "kill"; } } }
-                            SelectableText { vertical-stretch: 1; border-radius: 8px; border-width: 1px; border-color: Theme.border; text: root.console-text; font-size: root.technical-text-size * 1px; }
+                            LiveLogViewer {
+                                chunks: root.log-chunks; has-content: root.log-has-content; status: root.log-status; history-truncated: root.log-history-truncated; pending-lines: root.log-pending-lines; content-columns: root.log-content-columns; font-size: root.technical-text-size * 1px; query <=> root.log-query; wrap-lines <=> root.log-wrap-lines; follow <=> root.log-follow; trace-enabled: root.log-trace-enabled; debug-enabled: root.log-debug-enabled; info-enabled: root.log-info-enabled; warn-enabled: root.log-warn-enabled; error-enabled: root.log-error-enabled; fatal-enabled: root.log-fatal-enabled; other-enabled: root.log-other-enabled; revision: root.log-revision;
+                                set-level(level, enabled) => { root.set-log-level(level, enabled); } search(query) => { root.search-live-log(query); } copy => { root.copy-live-log(); } follow-changed(follow) => { root.live-log-follow-changed(follow); }
+                            }
                             HorizontalLayout { TextField { text <=> root.console-command; placeholder: root.servers[root.selected-server-index].can-send-command ? GuiI18n.text("gui-enter-server-command") : GuiI18n.text("gui-start-server-command"); enabled: root.servers[root.selected-server-index].can-send-command; horizontal-stretch: 1; accepted => { root.server-console(root.selected-server-id, root.console-command); root.console-command = ""; } } AppButton { text: GuiI18n.text("gui-send"); tone: "primary"; enabled: root.servers[root.selected-server-index].can-send-command && root.console-command != ""; clicked => { root.server-console(root.selected-server-id, root.console-command); root.console-command = ""; } } }
+                        }
+                        if root.workspace-tab == "Logs" : VerticalLayout { spacing: 8px;
+                            HorizontalLayout { spacing: 8px; FilterChip { text: GuiI18n.text("gui-log-files"); accessible-name: GuiI18n.text("gui-log-files"); selected: root.selected-diagnostic-kind != "crash-report"; clicked => { root.selected-diagnostic-kind = "log"; root.load-diagnostics("server", root.selected-server-id, "log"); } } FilterChip { text: GuiI18n.text("gui-crash-reports"); accessible-name: GuiI18n.text("gui-crash-reports"); selected: root.selected-diagnostic-kind == "crash-report"; clicked => { root.selected-diagnostic-kind = "crash-report"; root.load-diagnostics("server", root.selected-server-id, "crash-report"); } } Rectangle { horizontal-stretch: 1; } TextField { text <=> root.diagnostic-query; placeholder: GuiI18n.text("gui-search-loaded-content"); input-type: InputType.search; width: 250px; accepted => { root.search-diagnostic("server", root.selected-server-id, root.selected-diagnostic-kind, root.selected-diagnostic-name, root.diagnostic-query); } } AppButton { text: GuiI18n.text("gui-find"); enabled: root.selected-diagnostic-name != ""; clicked => { root.search-diagnostic("server", root.selected-server-id, root.selected-diagnostic-kind, root.selected-diagnostic-name, root.diagnostic-query); } } AppButton { text: GuiI18n.text("gui-folder"); clicked => { root.open-diagnostic-folder("server", root.selected-server-id, root.selected-diagnostic-kind); } } }
+                            HorizontalLayout { spacing: 10px; Rectangle { width: 280px; background: Theme.surface; border-radius: 8px; border-width: 1px; border-color: Theme.border; VerticalLayout { padding: 8px; spacing: 5px; BodyText { text: GuiI18n.count("gui-diagnostic-files-count", root.diagnostics.length); } ScrollView { VerticalLayout { spacing: 5px; for item in root.diagnostics : Rectangle { height: 66px; background: Theme.background; border-radius: 6px; border-width: item.name == root.selected-diagnostic-name ? 2px : 1px; border-color: item.name == root.selected-diagnostic-name ? Theme.accent : Theme.border; VerticalLayout { padding: 8px; Text { text: item.name; color: item.kind == "crash-report" ? Theme.warning : Theme.text; overflow: elide; } BodyText { text: item.summary != "" ? item.summary : item.size; overflow: elide; font-size: Theme.caption-size; } } TouchArea { clicked => { root.selected-diagnostic-name = item.name; root.open-diagnostic("server", root.selected-server-id, root.selected-diagnostic-kind, item.name); } } } } } } } Rectangle { horizontal-stretch: 1; background: rgb(11, 14, 16); border-radius: 8px; border-width: 1px; border-color: Theme.border; VerticalLayout { if root.diagnostic-content == "" : EmptyState { title: GuiI18n.text("gui-no-file-open"); message: GuiI18n.text("gui-no-file-open-detail"); } if root.diagnostic-content != "" : SelectableText { text: root.diagnostic-content; font-size: root.technical-text-size * 1px; } if root.diagnostic-content != "" : AppButton { text: GuiI18n.text("gui-copy"); clicked => { root.copy-text(root.diagnostic-content); } } } } }
                         }
                         if root.workspace-tab == "Properties" : ScrollView { VerticalLayout { alignment: start; width: min(parent.width, 1100px); spacing: 14px;
                             Heading { text: GuiI18n.text("gui-network"); } BodyText { text: GuiI18n.text("gui-network-detail"); wrap: word-wrap; }
@@ -1257,32 +1445,6 @@ slint::slint! {
                             Rectangle { height: 84px; border-radius: 8px; border-width: 1px; border-color: root.eula-accepted ? Theme.success : Theme.warning; background: Theme.surface; HorizontalLayout { padding: 14px; VerticalLayout { Heading { text: GuiI18n.text("gui-server-eula"); font-size: 14px; } BodyText { text: root.eula-status; wrap: word-wrap; } } AppButton { text: root.eula-accepted ? GuiI18n.text("gui-eula-review") : GuiI18n.text("gui-eula-review-accept"); clicked => { root.modal = "eula"; } } } }
                             HorizontalLayout { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-save-changes"); tone: "primary"; enabled: root.servers[root.selected-server-index].state-kind == "stopped"; clicked => { root.save-server-properties(root.selected-server-id, root.property-motd, root.property-max-players, root.property-difficulty, root.property-gamemode, root.property-allow-flight, root.property-pvp, root.property-allowlist, root.property-online-mode, root.property-access, root.property-address, root.property-port); } } }
                         } }
-                    }
-                }
-
-                // Logs and crash reports.
-                if root.page == 2 : Rectangle { horizontal-stretch: 1; background: Theme.background;
-                    VerticalLayout { padding: 20px; spacing: 12px;
-                        if !root.compact-layout : HorizontalLayout { Heading { text: GuiI18n.text("gui-logs-crash-reports"); font-size: 25px; } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-client"); clicked => { if root.selected-instance-id != "" { root.load-diagnostics("client", root.selected-instance-id, "log"); } } } AppButton { text: GuiI18n.text("gui-server-source"); clicked => { if root.selected-server-id != "" { root.load-diagnostics("server", root.selected-server-id, "log"); } } } AppButton { text: GuiI18n.text("gui-launcher"); tone: root.selected-diagnostic-scope == "launcher" ? "primary" : "secondary"; clicked => { root.load-diagnostics("launcher", "", "log"); } } }
-                        if root.compact-layout : VerticalLayout { spacing: 8px; Heading { text: GuiI18n.text("gui-logs-crash-reports"); font-size: 25px; } HorizontalLayout { spacing: 8px; AppButton { text: GuiI18n.text("gui-client"); clicked => { if root.selected-instance-id != "" { root.load-diagnostics("client", root.selected-instance-id, "log"); } } } AppButton { text: GuiI18n.text("gui-server-source"); clicked => { if root.selected-server-id != "" { root.load-diagnostics("server", root.selected-server-id, "log"); } } } AppButton { text: GuiI18n.text("gui-launcher"); tone: root.selected-diagnostic-scope == "launcher" ? "primary" : "secondary"; clicked => { root.load-diagnostics("launcher", "", "log"); } } Rectangle { horizontal-stretch: 1; } } }
-                        HorizontalLayout { spacing: 12px;
-                            Rectangle { width: 300px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface; VerticalLayout { padding: 10px; spacing: 7px;
-                                HorizontalLayout { BodyText { text: GuiI18n.count("gui-diagnostic-files-count", root.diagnostics.length); } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-refresh"); clicked => { root.load-diagnostics(root.selected-diagnostic-scope, root.selected-diagnostic-id, root.selected-diagnostic-kind); } } }
-                                if root.diagnostics.length == 0 : EmptyState { title: GuiI18n.text("gui-no-diagnostics"); message: GuiI18n.text("gui-no-diagnostics-detail"); }
-                                ScrollView { VerticalLayout { spacing: 5px; for item in root.diagnostics : Rectangle { height: 76px; border-radius: 6px; border-width: item.name == root.selected-diagnostic-name ? 2px : 1px; border-color: item.name == root.selected-diagnostic-name ? Theme.accent : Theme.border; background: Theme.background; VerticalLayout { padding: 8px; Text { text: GuiI18n.value(item.kind == "crash-report" ? "gui-crash-name" : "gui-log-name", item.name); color: item.kind == "crash-report" ? Theme.warning : Theme.text; font-size: 13px; overflow: elide; } BodyText { text: item.entity + " | " + item.modified; font-size: 11px; } BodyText { text: item.summary != "" ? item.summary : item.size; color: Theme.text-muted; font-size: 11px; overflow: elide; } } TouchArea { clicked => { root.selected-diagnostic-name = item.name; root.selected-diagnostic-scope = item.scope-kind; root.selected-diagnostic-id = item.scope-id; root.selected-diagnostic-kind = item.kind; root.open-diagnostic(item.scope-kind, item.scope-id, item.kind, item.name); } } } } }
-                            } }
-                            Rectangle { horizontal-stretch: 1; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: rgb(11, 14, 16);
-                                VerticalLayout { spacing: 0px;
-                                    Rectangle { height: root.compact-layout ? 96px : 52px; background: Theme.surface;
-                                        if !root.compact-layout : HorizontalLayout { padding-left: 10px; padding-right: 10px; spacing: 8px; Heading { text: root.diagnostic-title != "" ? root.diagnostic-title : GuiI18n.text("gui-select-diagnostic"); font-size: 14px; } Rectangle { horizontal-stretch: 1; } TextField { text <=> root.diagnostic-query; placeholder: GuiI18n.text("gui-search-loaded-content"); input-type: InputType.search; width: 250px; accepted => { root.search-diagnostic(root.selected-diagnostic-scope, root.selected-diagnostic-id, root.selected-diagnostic-kind, root.selected-diagnostic-name, root.diagnostic-query); } } AppButton { text: GuiI18n.text("gui-find"); enabled: root.selected-diagnostic-name != ""; clicked => { root.search-diagnostic(root.selected-diagnostic-scope, root.selected-diagnostic-id, root.selected-diagnostic-kind, root.selected-diagnostic-name, root.diagnostic-query); } } AppButton { text: GuiI18n.text("gui-copy"); enabled: root.diagnostic-content != ""; clicked => { root.copy-text(root.diagnostic-content); } } AppButton { text: GuiI18n.text("gui-folder"); enabled: root.selected-diagnostic-name != ""; clicked => { root.open-diagnostic-folder(root.selected-diagnostic-scope, root.selected-diagnostic-id, root.selected-diagnostic-kind); } } AppButton { text: GuiI18n.text("gui-refresh"); enabled: root.selected-diagnostic-name != ""; clicked => { root.refresh-diagnostic(root.selected-diagnostic-scope, root.selected-diagnostic-id, root.selected-diagnostic-kind, root.selected-diagnostic-name); } } }
-                                        if root.compact-layout : VerticalLayout { padding: 8px; spacing: 6px; HorizontalLayout { Heading { text: root.diagnostic-title != "" ? root.diagnostic-title : GuiI18n.text("gui-select-diagnostic"); font-size: 14px; } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-copy"); enabled: root.diagnostic-content != ""; clicked => { root.copy-text(root.diagnostic-content); } } } HorizontalLayout { spacing: 8px; TextField { text <=> root.diagnostic-query; placeholder: GuiI18n.text("gui-search-loaded-content"); input-type: InputType.search; horizontal-stretch: 1; accepted => { root.search-diagnostic(root.selected-diagnostic-scope, root.selected-diagnostic-id, root.selected-diagnostic-kind, root.selected-diagnostic-name, root.diagnostic-query); } } AppButton { text: GuiI18n.text("gui-find"); enabled: root.selected-diagnostic-name != ""; clicked => { root.search-diagnostic(root.selected-diagnostic-scope, root.selected-diagnostic-id, root.selected-diagnostic-kind, root.selected-diagnostic-name, root.diagnostic-query); } } AppButton { text: GuiI18n.text("gui-folder"); enabled: root.selected-diagnostic-name != ""; clicked => { root.open-diagnostic-folder(root.selected-diagnostic-scope, root.selected-diagnostic-id, root.selected-diagnostic-kind); } } AppButton { text: GuiI18n.text("gui-refresh"); enabled: root.selected-diagnostic-name != ""; clicked => { root.refresh-diagnostic(root.selected-diagnostic-scope, root.selected-diagnostic-id, root.selected-diagnostic-kind, root.selected-diagnostic-name); } } } }
-                                    }
-                                    if root.diagnostic-content == "" : EmptyState { title: GuiI18n.text("gui-no-file-open"); message: GuiI18n.text("gui-no-file-open-detail"); }
-                                    if root.diagnostic-content != "" : SelectableText { text: root.diagnostic-content; font-size: root.technical-text-size * 1px; }
-                                    if root.diagnostic-path != "" : Rectangle { height: 30px; background: Theme.surface; HorizontalLayout { padding-left: 10px; BodyText { text: root.diagnostic-path; color: Theme.text-muted; overflow: elide; } AppButton { text: GuiI18n.text("gui-copy-path"); min-width: 88px; height: 28px; clicked => { root.copy-text(root.diagnostic-path); } } } }
-                                }
-                            }
-                        }
                     }
                 }
 
