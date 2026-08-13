@@ -4,12 +4,12 @@
 
 ## Context
 
-Modrinth, CurseForge, and Prism describe the same eventual instance through
-different manifests. Their names for loaders, file identities, optional files,
+Modrinth and CurseForge describe the same eventual instance through different
+manifests. Their names for loaders, file identities, optional files,
 client/server applicability, and physical override directories do not line up.
-Letting those shapes flow past parsing would require a Modrinth installer, a
-CurseForge installer, and a Prism installer, followed by three versions of
-"Create Server" that could drift in selection and layering behavior.
+Letting those shapes flow past parsing would require separate installers and
+separate versions of "Create Server" that could drift in selection and layering
+behavior.
 
 A client import also has to preserve enough information to build its server
 after the original archive has been deleted. Copying the
@@ -46,7 +46,7 @@ the mutable client directory, is the source for subsequent side planning.
 
 ## Consequences
 
-- CurseForge and Prism import add provider translations without adding another
+- CurseForge import adds a provider translation without adding another
   installer, selection engine, or server planner.
 - The server plan survives process restart and deletion of the original pack.
 - Optional files default off unless a human selection was recorded; `None` and

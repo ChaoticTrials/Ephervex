@@ -30,8 +30,8 @@ observable interoperable formats.
   superseding this one, and requires no code rewrite.
 - Third-party license terms that constrain distribution must be reviewed before
   any public release. Slint's terms (ADR 0001) are the known one.
-- Import formats are implemented from their specifications — the Modrinth pack
-  format, the CurseForge export structure, Prism's documented `instance.cfg` and
-  `mmc-pack.json` layout — not from reading another launcher's parser.
-- Interoperating with a format is not derivation. Reading a Prism export is
-  fine; lifting Prism's code to do it is not.
+- Import formats are implemented from their specifications, such as the
+  Modrinth pack format and CurseForge export structure, not from reading
+  another launcher's parser.
+- Interoperating with a documented format is not derivation, but this decision
+  does not commit Ephervex to supporting any particular launcher export.

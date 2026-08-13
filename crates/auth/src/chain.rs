@@ -302,8 +302,8 @@ impl AccountProvider for MicrosoftAccountProvider {
 /// Reads the CurseForge API key out of a credential store.
 ///
 /// Authentication owns this access because all credentials share the same
-/// secure store. Prism and CurseForge importers consume the key, while the
-/// settings surface writes it. It must never reach `config.toml`.
+/// secure store. CurseForge integrations consume the key, while the settings
+/// surface writes it. It must never reach `config.toml`.
 pub fn curseforge_api_key(store: &dyn CredentialStore) -> AuthResult<Option<SecretString>> {
     store.load(&CredentialKey::CurseForgeApiKey)
 }

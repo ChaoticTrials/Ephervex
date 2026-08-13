@@ -33,7 +33,7 @@ automatic public server hosting.
   account is an addition rather than a redesign.
 - Excluded things must fail *clearly*, never approximately. A pack requiring
   Fabric produces an unsupported-loader error; it does not get imported with a
-  guessed loader. A Prism export with an unsupported component is marked "needs
+  guessed loader. An imported launch customization is refused or marked "needs
   attention" rather than presented as faithfully runnable.
 - The 1.12.2 floor and release-only filter are enforced from Mojang's metadata
   `type` field, not from filename patterns — so the calendar-style versioning

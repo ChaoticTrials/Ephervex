@@ -1,6 +1,6 @@
 [package]
 name = "ephervex-pack"
-description = "Hardened archive extraction, pack recipes, and Modrinth/CurseForge/Prism importers."
+description = "Hardened archive extraction, provider-neutral pack recipes, and Modrinth pack import."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

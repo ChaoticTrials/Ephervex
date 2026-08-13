@@ -429,8 +429,8 @@ onward, Vanilla, Forge, NeoForge, Modrinth pack import, Modrinth mod browsing
 with dependency resolution, and linked-server reconstruction from retained
 recipes, plus launching a linked client directly into a local managed server.
 Logs, crash reports, and launcher diagnostics are inspectable through
-`ephervex-core` and the CLI. The GUI, CurseForge browsing, CurseForge and Prism
-import, and mod updates and removal are unavailable. Fabric, Quilt,
+`ephervex-core` and the CLI. The GUI, CurseForge browsing and pack import, and
+mod updates and removal are unavailable. Fabric, Quilt,
 snapshots, Windows, and macOS are
 outside the supported scope recorded in ADR 0008.
 

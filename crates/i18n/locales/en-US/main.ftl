@@ -4,7 +4,7 @@
 # application must exist here, and `fl!()` checks that at compile time.
 #
 # Rules for anything added below:
-#   * Provider names (Modrinth, CurseForge, Forge, NeoForge, Prism), technical
+#   * Provider names (Modrinth, CurseForge, Forge, NeoForge), technical
 #     ids, filesystem paths, version strings, and Minecraft log text stay
 #     untranslated. They are passed in as arguments, never baked into a message.
 #   * Message ids are stable. Rewording English is free; renaming an id breaks

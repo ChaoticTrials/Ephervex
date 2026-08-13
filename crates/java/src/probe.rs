@@ -73,8 +73,8 @@ pub struct ProbeReport {
 
 /// Runs a JVM and reads back what it says about itself.
 ///
-/// Nothing about the executable is trusted before this point: a path from a
-/// Prism export, a `PATH` entry, or a user's settings field is just a path
+/// Nothing about the executable is trusted before this point: a path from an
+/// imported archive, a `PATH` entry, or a user's settings field is just a path
 /// until a JVM at the other end answers.
 pub async fn probe(executable: &Path) -> Result<ProbeReport, ProbeError> {
     let properties = run(executable, &PROPERTY_ARGS).await?;

@@ -5,12 +5,12 @@
 //! An archive entry name is attacker-controlled text. The rules for turning one
 //! into a path — refuse absolute paths, refuse `..`, refuse Windows drive
 //! prefixes, refuse NUL, refuse anything that escapes the extraction root — are
-//! the same whether the archive is a Modrinth `.mrpack`, a CurseForge ZIP, a
-//! Prism export, or the JDK tarball `ephervex-java` unpacks. Written once per
-//! reader they would be four sets of rules to keep in step, and the one that
-//! gets forgotten is the one with the vulnerability. `ephervex-java`'s tar
-//! reader therefore calls into this module rather than carrying its own copy,
-//! which is exactly what its Java runtime support documentation asked Modrinth pack import to do.
+//! the same whether the archive is a Modrinth `.mrpack`, a CurseForge ZIP,
+//! another provider's archive, or the JDK tarball `ephervex-java` unpacks.
+//! Written once per reader they would be four sets of rules to keep in step,
+//! and the one that gets forgotten is the one with the vulnerability.
+//! `ephervex-java`'s tar reader therefore calls into this module rather than
+//! carrying its own copy.
 //!
 //! Everything here is **lexical**: it describes where an archive *says* an entry
 //! goes. `fs::canonicalize` is deliberately not used, because it follows the

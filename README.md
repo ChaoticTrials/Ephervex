@@ -50,7 +50,7 @@ The CLI currently supports:
 ## Current limitations
 
 - The Slint GUI does not provide a functional interface; use the `ephervex` CLI.
-- CurseForge and Prism pack import are not available.
+- CurseForge pack ZIP import is not yet available.
 - Microsoft sign-in requires a suitable Azure application registration and
   Microsoft approval for the Minecraft Services API. Offline accounts do not
   require either.

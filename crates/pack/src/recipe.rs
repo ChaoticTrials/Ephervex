@@ -14,10 +14,10 @@
 //!
 //! # Why this model has no Modrinth in it
 //!
-//! Provider-specific formats are not the shape of the problem. CurseForge
-//! names files by project and file id and resolves their addresses
-//! through an API; Prism has no file list at all and carries a component list
-//! instead. All three have to land in the same normalized structure, because
+//! Provider-specific formats are not the shape of the problem. Modrinth names
+//! files by logical path and supplies download addresses, while CurseForge
+//! names files by project and file id and resolves their addresses through an
+//! API. Both have to land in the same normalized structure, because
 //! everything downstream — the installer, "Create Server", the instance UI —
 //! is written against this type and must not learn a provider's vocabulary.
 //!
@@ -1097,8 +1097,8 @@ mod tests {
     #[test]
     fn the_normalized_model_names_no_provider_in_its_own_fields() {
         // A regression guard for the rule this module exists to keep: the
-        // moment a Modrinth-shaped field appears here, CurseForge and Prism
-        // have to fake one.
+        // moment a Modrinth-shaped field appears here, CurseForge and other
+        // providers have to fake one.
         let json = serde_json::to_value(recipe()).expect("serialize");
         let object = json.as_object().expect("object");
         for key in object.keys() {

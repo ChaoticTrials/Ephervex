@@ -45,10 +45,10 @@ pub enum CredentialKey {
     MicrosoftRefreshToken(Uuid),
     /// The user's CurseForge API key.
     ///
-    /// Nothing in authentication reads this; the Prism and CurseForge importers do. It belongs here
-    /// because it belongs in the same API settings group as the Client ID, and
-    /// because the one thing that must be true of it from the start is that it
-    /// never reaches `config.toml`.
+    /// Nothing in authentication reads this; CurseForge integrations do. It
+    /// belongs here because it belongs in the same API settings group as the
+    /// Client ID, and because the one thing that must be true of it from the
+    /// start is that it never reaches `config.toml`.
     CurseForgeApiKey,
 }
 

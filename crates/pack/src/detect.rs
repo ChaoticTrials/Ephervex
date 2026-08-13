@@ -8,10 +8,10 @@
 //! archive *contains*, so a `.mrpack` renamed to `.zip` and a CurseForge export
 //! renamed to `.mrpack` are both identified correctly.
 //!
-//! The other formats are still recognized here even though only Modrinth packs
-//! are supported. "This is an unsupported CurseForge pack" is more useful than
-//! "this is not a pack," and the recognizer is provider-independent plumbing
-//! that other importers can extend rather than replace.
+//! Other formats are still recognized here even though only Modrinth packs are
+//! supported. A precise unsupported-format error is more useful than "this is
+//! not a pack." Recognition does not make that format part of the supported
+//! import scope, and the recognizer remains provider-independent plumbing.
 
 use std::fmt;
 use std::path::Path;

@@ -24,6 +24,7 @@ pub enum ImportSourceKind {
     Manual,
     ModrinthPack,
     CurseForgePack,
+    /// Retained for metadata compatibility. Current imports reject this format.
     PrismExport,
 }
 
@@ -41,7 +42,7 @@ impl fmt::Display for ImportSourceKind {
 /// Why an instance needs the user's attention.
 ///
 /// The launcher never pretends an instance is faithfully runnable when it is
-/// not. Unsupported Prism customizations, missing persistent roots, and
+/// not. Unsupported imported customizations, missing persistent roots, and
 /// best-effort server conversions all surface here rather than being silently
 /// approximated.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

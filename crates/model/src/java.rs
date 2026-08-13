@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 /// A specific Java runtime pinned to one instance.
 ///
 /// Imported archives may *name* a Java path; that path is never trusted or
-/// executed just because it appeared in a Prism export.
+/// executed just because it appeared in an imported archive.
 /// A value here means the user chose it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JavaOverride {
