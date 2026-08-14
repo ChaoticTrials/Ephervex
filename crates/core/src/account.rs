@@ -170,9 +170,7 @@ impl App {
     pub fn set_microsoft_client_id(&mut self, client_id: Option<&str>) -> CoreResult<()> {
         let value = client_id.map(str::trim).unwrap_or_default();
         if !value.is_empty() && Uuid::parse_str(value).is_err() {
-            return Err(CoreError::Auth(AuthError::ClientIdInvalid {
-                client_id: value.to_owned(),
-            }));
+            return Err(CoreError::Auth(AuthError::ClientIdInvalid));
         }
         self.mutate_config(|config| value.clone_into(&mut config.api.microsoft_client_id))
     }
@@ -180,6 +178,15 @@ impl App {
     /// Sets the advanced User-Agent override, or clears it.
     pub fn set_custom_user_agent(&mut self, user_agent: Option<&str>) -> CoreResult<()> {
         let value = user_agent.map(str::trim).unwrap_or_default().to_owned();
+        if !value.is_empty() {
+            ephervex_download::build_client(&ephervex_download::HttpConfig {
+                user_agent: value.clone(),
+                ..ephervex_download::HttpConfig::default()
+            })
+            .map_err(|source| AuthError::ClientBuild {
+                source: Box::new(source),
+            })?;
+        }
         self.mutate_config(|config| config.api.user_agent = value)
     }
 
@@ -709,6 +716,33 @@ mod tests {
         assert!(reset.user_agent.is_empty());
         assert!(reset.effective_user_agent.starts_with("Ephervex/"));
         assert_eq!(app.http_config().user_agent, reset.effective_user_agent);
+    }
+
+    #[test]
+    fn invalid_api_identifiers_are_refused_without_echoing_or_persisting_them() {
+        const CREDENTIAL: &str = "UNIQUE-CREDENTIAL-MATERIAL";
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+
+        let error = app
+            .set_microsoft_client_id(Some(CREDENTIAL))
+            .expect_err("not a GUID");
+        assert!(!format!("{error:?} {error}").contains(CREDENTIAL));
+
+        app.set_custom_user_agent(Some("ValidAgent/1.0"))
+            .expect("valid agent");
+        let error = app
+            .set_custom_user_agent(Some("bad\r\nagent"))
+            .expect_err("header controls are invalid");
+        assert_eq!(
+            app.api_settings().expect("settings").user_agent,
+            "ValidAgent/1.0",
+            "a rejected value must not replace the usable configuration"
+        );
+        assert!(matches!(
+            error,
+            CoreError::Auth(AuthError::ClientBuild { .. })
+        ));
     }
 
     #[test]

@@ -47,6 +47,34 @@ pub const SECRET_KEY_MARKERS: &[&str] = &[
     "access_key",
 ];
 
+/// Location-only TOML diagnostics.
+///
+/// The upstream parser error retains and renders the complete offending input
+/// line. Configuration is credential-adjacent, so carrying that error through
+/// CLI or GUI source chains could disclose a malformed secret before the
+/// normal key filter gets a chance to remove it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConfigParseError {
+    line: Option<usize>,
+    column: Option<usize>,
+}
+
+impl std::fmt::Display for ConfigParseError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match (self.line, self.column) {
+            (Some(line), Some(column)) => {
+                write!(
+                    formatter,
+                    "TOML parse error at line {line}, column {column}"
+                )
+            }
+            _ => formatter.write_str("TOML parse error"),
+        }
+    }
+}
+
+impl std::error::Error for ConfigParseError {}
+
 /// Failures reading or writing the configuration file.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -62,7 +90,7 @@ pub enum ConfigError {
     Invalid {
         path: PathBuf,
         #[source]
-        source: Box<toml::de::Error>,
+        source: ConfigParseError,
     },
     /// The file could not be written.
     #[error("could not write the configuration file {path}")]
@@ -507,7 +535,7 @@ impl Config {
         let document: toml::Table =
             toml::from_str(text).map_err(|source| ConfigError::Invalid {
                 path: PathBuf::new(),
-                source: Box::new(source),
+                source: sanitized_parse_error(text, &source),
             })?;
 
         let found = document
@@ -527,7 +555,7 @@ impl Config {
                 .try_into()
                 .map_err(|source: toml::de::Error| ConfigError::Invalid {
                     path: PathBuf::new(),
-                    source: Box::new(source),
+                    source: sanitized_parse_error(text, &source),
                 })?;
 
         // A previous version, a hand edit, or a third-party tool may have left
@@ -556,27 +584,40 @@ impl Config {
     /// leaves the previous configuration intact instead of a truncated one.
     pub fn save_to(&self, path: &Path) -> Result<(), ConfigError> {
         let text = self.to_toml_string()?;
-        let temporary = path.with_extension("toml.tmp");
+        let mut temporary_name = path.as_os_str().to_os_string();
+        temporary_name.push(format!(".tmp.{}", uuid::Uuid::new_v4()));
+        let temporary = PathBuf::from(temporary_name);
 
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
+        let mut options = std::fs::OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut file = options
             .open(&temporary)
             .map_err(|source| ConfigError::Unwritable {
                 path: temporary.clone(),
                 source,
             })?;
-        file.write_all(text.as_bytes())
+        let result = file
+            .write_all(text.as_bytes())
             .and_then(|()| file.sync_all())
             .map_err(|source| ConfigError::Unwritable {
                 path: temporary.clone(),
                 source,
-            })?;
-        std::fs::rename(&temporary, path).map_err(|source| ConfigError::Unwritable {
-            path: path.to_path_buf(),
-            source,
-        })?;
+            })
+            .and_then(|()| {
+                std::fs::rename(&temporary, path).map_err(|source| ConfigError::Unwritable {
+                    path: path.to_path_buf(),
+                    source,
+                })
+            });
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temporary);
+        }
+        result?;
         if let Some(parent) = path.parent() {
             std::fs::File::open(parent)
                 .and_then(|directory| directory.sync_all())
@@ -745,14 +786,32 @@ impl Config {
         // secret. Checking them anyway would flag a future `api_key_present`
         // boolean, which is exactly the non-secret metadata ADR 0004 allows.
         find_secret_key(&self.unknown, "")
-            .or_else(|| find_secret_key(&self.java.unknown, "java"))
-            .or_else(|| find_secret_key(&self.display.unknown, "display"))
-            .or_else(|| find_secret_key(&self.server_defaults.unknown, "server_defaults"))
-            .or_else(|| find_secret_key(&self.eula.unknown, "eula"))
+            .map(|found| found.reported)
+            .or_else(|| find_secret_key(&self.java.unknown, "java").map(|found| found.reported))
+            .or_else(|| {
+                find_secret_key(&self.display.unknown, "display").map(|found| found.reported)
+            })
+            .or_else(|| {
+                find_secret_key(&self.server_defaults.unknown, "server_defaults")
+                    .map(|found| found.reported)
+            })
+            .or_else(|| find_secret_key(&self.eula.unknown, "eula").map(|found| found.reported))
             // `[api]` is the table a hand edit is most likely to put a
             // CurseForge key into, since that is where the settings screen
             // shows the field.
-            .or_else(|| find_secret_key(&self.api.unknown, "api"))
+            .or_else(|| find_secret_key(&self.api.unknown, "api").map(|found| found.reported))
+            .or_else(|| {
+                self.minecraft_preferences
+                    .keys()
+                    .find(|key| looks_like_secret_key(key))
+                    .map(|_| "minecraft_preferences.<redacted>".to_owned())
+            })
+            .or_else(|| {
+                self.accounts
+                    .keys()
+                    .find(|key| looks_like_secret_key(key))
+                    .map(|_| "accounts.<redacted>".to_owned())
+            })
     }
 
     fn strip_secret_looking_keys(&mut self) {
@@ -764,34 +823,81 @@ impl Config {
             (&mut self.eula.unknown, "eula"),
             (&mut self.api.unknown, "api"),
         ] {
-            while let Some(key) = find_secret_key(table, prefix) {
-                let leaf = key.rsplit('.').next().unwrap_or(&key).to_owned();
-                // Never log the value, only that a key was discarded.
+            while let Some(found) = find_secret_key(table, prefix) {
+                // The key can itself contain credential material, so neither
+                // the value nor the untrusted key is safe to log.
                 tracing::warn!(
-                    key = %key,
                     "discarding a credential-looking key from the configuration file; \
                      secrets belong in the system keyring"
                 );
-                remove_nested(table, &leaf);
+                remove_nested(table, &found.leaf);
             }
+        }
+
+        let preference_count = self.minecraft_preferences.len();
+        self.minecraft_preferences
+            .retain(|key, _| !looks_like_secret_key(key));
+        let account_count = self.accounts.len();
+        self.accounts.retain(|key, _| !looks_like_secret_key(key));
+        if self.minecraft_preferences.len() != preference_count
+            || self.accounts.len() != account_count
+        {
+            tracing::warn!(
+                "discarding a credential-looking key from the configuration file; \
+                 secrets belong in the system keyring"
+            );
         }
     }
 }
 
+fn sanitized_parse_error(text: &str, error: &toml::de::Error) -> ConfigParseError {
+    let Some(offset) = error
+        .span()
+        .map(|span| span.start)
+        .filter(|offset| *offset <= text.len())
+    else {
+        return ConfigParseError {
+            line: None,
+            column: None,
+        };
+    };
+    let before = &text[..offset];
+    let line = before.bytes().filter(|byte| *byte == b'\n').count() + 1;
+    let column = before
+        .rsplit_once('\n')
+        .map_or(before, |(_, current)| current)
+        .chars()
+        .count()
+        + 1;
+    ConfigParseError {
+        line: Some(line),
+        column: Some(column),
+    }
+}
+
 /// Finds the first key at any depth whose name matches [`SECRET_KEY_MARKERS`].
-fn find_secret_key(table: &toml::Table, prefix: &str) -> Option<String> {
+struct SecretKeyMatch {
+    reported: String,
+    leaf: String,
+}
+
+fn find_secret_key(table: &toml::Table, prefix: &str) -> Option<SecretKeyMatch> {
     for (key, value) in table {
         let path = if prefix.is_empty() {
             key.clone()
         } else {
             format!("{prefix}.{key}")
         };
-        let lowered = key.to_ascii_lowercase();
-        if SECRET_KEY_MARKERS
-            .iter()
-            .any(|marker| lowered.contains(marker))
-        {
-            return Some(path);
+        if looks_like_secret_key(key) {
+            let reported = if prefix.is_empty() {
+                "<redacted>".to_owned()
+            } else {
+                format!("{prefix}.<redacted>")
+            };
+            return Some(SecretKeyMatch {
+                reported,
+                leaf: key.clone(),
+            });
         }
         if let toml::Value::Table(nested) = value {
             if let Some(found) = find_secret_key(nested, &path) {
@@ -800,6 +906,13 @@ fn find_secret_key(table: &toml::Table, prefix: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn looks_like_secret_key(key: &str) -> bool {
+    let lowered = key.to_ascii_lowercase();
+    SECRET_KEY_MARKERS
+        .iter()
+        .any(|marker| lowered.contains(marker))
 }
 
 /// Removes a key by leaf name at any depth, pruning tables that become empty.
@@ -963,8 +1076,39 @@ reference = ""
         assert!(paths.config_file().is_file());
         assert_eq!(Config::load_or_default(&paths).expect("load"), config);
 
-        // The temporary file used for the atomic rename must not survive.
-        assert!(!paths.config_file().with_extension("toml.tmp").exists());
+        // No unique temporary file used for the atomic rename may survive.
+        assert!(
+            std::fs::read_dir(paths.config_dir())
+                .expect("config directory")
+                .filter_map(Result::ok)
+                .all(|entry| !entry.file_name().to_string_lossy().contains(".tmp."))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn configuration_publication_ignores_predictable_symlinks_and_creates_a_private_file() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir().expect("temp dir");
+        let path = directory.path().join("config.toml");
+        let sentinel = directory.path().join("sentinel");
+        std::fs::write(&sentinel, "keep").expect("sentinel");
+        std::os::unix::fs::symlink(&sentinel, path.with_extension("toml.tmp"))
+            .expect("plant old staging symlink");
+
+        Config::default().save_to(&path).expect("save");
+
+        assert_eq!(
+            std::fs::read_to_string(&sentinel).expect("sentinel"),
+            "keep"
+        );
+        let mode = std::fs::metadata(&path)
+            .expect("config metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     #[test]
@@ -1064,6 +1208,20 @@ reference = ""
             other => panic!("unexpected error: {other:?}"),
         }
         assert_eq!(error.message_id(), "error-config-invalid");
+    }
+
+    #[test]
+    fn malformed_configuration_diagnostics_do_not_echo_credential_material() {
+        const CREDENTIAL: &str = "UNIQUE-CREDENTIAL-MATERIAL";
+        let text = format!("refresh_token = \"{CREDENTIAL}\" trailing");
+        let error = Config::from_toml_str(&text).expect_err("invalid TOML");
+        let rendered = format!("{error:?} {error}");
+        assert!(!rendered.contains(CREDENTIAL));
+        assert!(!rendered.contains("refresh_token"));
+        let ConfigError::Invalid { source, .. } = error else {
+            panic!("unexpected error");
+        };
+        assert!(source.to_string().contains("line 1"));
     }
 
     #[test]
@@ -1188,6 +1346,36 @@ reference = ""
                 .to_toml_string()
                 .expect("serialize")
                 .contains("notreal")
+        );
+    }
+
+    #[test]
+    fn credential_looking_dynamic_map_keys_are_never_persisted() {
+        let text = format!(
+            "{DEFAULT_CONFIG_EXAMPLE}\n\
+             [minecraft_preferences.refresh_token_embedded_secret]\n\
+             enabled = true\nvalue = \"notreal\"\n\
+             [accounts.api_key_embedded_secret]\nname = \"notreal\"\n"
+        );
+        let loaded = Config::from_toml_str(&text).expect("parse");
+        assert!(loaded.minecraft_preferences.is_empty());
+        assert!(loaded.accounts.is_empty());
+        let rewritten = loaded.to_toml_string().expect("serialize");
+        assert!(!rewritten.contains("embedded_secret"));
+        assert!(!rewritten.contains("notreal"));
+
+        let mut config = Config::default();
+        config.minecraft_preferences.insert(
+            "refresh_token_embedded_secret".to_owned(),
+            PreferenceSetting::managed("notreal"),
+        );
+        let error = config
+            .to_toml_string()
+            .expect_err("a dynamic credential key must be refused");
+        assert!(matches!(error, ConfigError::SecretRejected { .. }));
+        assert!(
+            !error.to_string().contains("embedded_secret"),
+            "the untrusted key must be redacted from the error"
         );
     }
 

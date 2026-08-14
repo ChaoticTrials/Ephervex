@@ -491,7 +491,9 @@ impl GlobalMinecraftPreferences {
             let Some(key) = PreferenceKey::parse(name) else {
                 // A key from a newer build. Storage keeps it in the file; this
                 // layer simply has nothing to do with it.
-                tracing::debug!(preference = name, "ignoring an unknown managed preference");
+                // An open configuration-map key is untrusted and can itself
+                // contain credential material, so do not copy it into logs.
+                tracing::debug!("ignoring an unknown managed preference");
                 continue;
             };
             match PreferenceValue::parse(key, value) {

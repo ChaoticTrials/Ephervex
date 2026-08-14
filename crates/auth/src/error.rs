@@ -48,8 +48,8 @@ pub enum AuthError {
     /// Refused at the settings boundary rather than at sign-in: Microsoft's own
     /// rejection arrives several requests into a login and blames the tenant,
     /// which sends the user looking in the wrong place.
-    #[error("`{client_id}` is not a well-formed microsoft application id")]
-    ClientIdInvalid { client_id: String },
+    #[error("the configured microsoft application id is not well-formed")]
+    ClientIdInvalid,
 
     /// An endpoint base could not be parsed as a URL.
     #[error("`{url}` is not a usable authentication endpoint")]
@@ -334,7 +334,7 @@ impl AuthError {
     pub fn message_id(&self) -> &'static str {
         match self {
             Self::ClientIdMissing => "error-auth-client-id-missing",
-            Self::ClientIdInvalid { .. } => "error-auth-client-id-invalid",
+            Self::ClientIdInvalid => "error-auth-client-id-invalid",
             Self::EndpointUnusable { .. } => "error-auth-endpoint-unusable",
             Self::ClientBuild { .. } | Self::Transport { .. } => "error-auth-unreachable",
             Self::HttpStatus { status, .. } => {
