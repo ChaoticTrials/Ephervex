@@ -836,6 +836,111 @@ mod tests {
         );
     }
 
+    // -- reconstructing catalog identity ----------------------------------
+
+    fn identity_of(address: &str) -> Option<ProviderFileIdentity> {
+        provider_identity(&[address.to_owned()])
+    }
+
+    #[test]
+    fn a_catalog_address_yields_the_project_and_version_it_names() {
+        let identity =
+            identity_of("https://cdn.modrinth.com/data/lfHFW1mp/versions/GKQEbfSt/journeymap.jar")
+                .expect("an identity");
+        assert_eq!(
+            identity.provider,
+            Some(ephervex_model::ModProvider::Modrinth)
+        );
+        assert_eq!(identity.project_id.as_deref(), Some("lfHFW1mp"));
+        assert_eq!(identity.version_id.as_deref(), Some("GKQEbfSt"));
+        assert_eq!(
+            identity.file_id, None,
+            "Modrinth has no file id apart from the version, and one is not invented"
+        );
+    }
+
+    #[test]
+    fn a_version_number_in_the_version_position_is_not_recorded_as_a_version_id() {
+        // Older pack tooling wrote the human version number here. Anything that
+        // is not shaped like a catalog id leaves the release unproven.
+        for segment in ["1.4.2", "5.9.18", "20240115", "v2", "GKQEbfSt-beta"] {
+            let identity = identity_of(&format!(
+                "https://cdn.modrinth.com/data/lfHFW1mp/versions/{segment}/mod.jar"
+            ))
+            .expect("the project is still proven");
+            assert_eq!(identity.project_id.as_deref(), Some("lfHFW1mp"));
+            assert_eq!(
+                identity.version_id, None,
+                "`{segment}` is not a catalog id and must not be recorded as one"
+            );
+        }
+    }
+
+    #[test]
+    fn an_address_that_is_not_the_catalogs_own_proves_nothing_about_the_catalog() {
+        // Every one of these is a permitted download host. None of them says
+        // anything about a Modrinth project.
+        for address in [
+            "https://github.com/example/mod/releases/download/v1/lfHFW1mp.jar",
+            "https://raw.githubusercontent.com/example/mod/main/data/lfHFW1mp/versions/GKQEbfSt/mod.jar",
+            "https://gitlab.com/example/mod/-/raw/main/mod.jar",
+        ] {
+            assert_eq!(identity_of(address), None, "{address} proved too much");
+        }
+    }
+
+    #[test]
+    fn an_address_that_is_not_shaped_like_an_artifact_path_proves_nothing() {
+        for address in [
+            "https://cdn.modrinth.com/mod.jar",
+            "https://cdn.modrinth.com/other/lfHFW1mp/versions/GKQEbfSt/mod.jar",
+            "https://cdn.modrinth.com/data/not-an-id/versions/GKQEbfSt/mod.jar",
+            "not a url at all",
+        ] {
+            assert_eq!(identity_of(address), None, "{address} proved too much");
+        }
+    }
+
+    #[test]
+    fn a_mirror_alongside_the_catalog_does_not_hide_the_catalogs_own_address() {
+        let identity = provider_identity(&[
+            "https://github.com/example/mod/releases/download/v1/mod.jar".to_owned(),
+            "https://cdn.modrinth.com/data/lfHFW1mp/versions/GKQEbfSt/mod.jar".to_owned(),
+        ])
+        .expect("an identity");
+        assert_eq!(identity.version_id.as_deref(), Some("GKQEbfSt"));
+    }
+
+    #[test]
+    fn reconstruction_fills_gaps_and_overwrites_nothing() {
+        let mut recipe = parse_index(&index(
+            r#"{"minecraft": "1.20.1"}"#,
+            &file_entry("mods/a.jar", r#"{"client":"required","server":"required"}"#),
+        ))
+        .expect("valid")
+        .recipe;
+
+        // The fixture's own address names project `AABB`, which is not a
+        // catalog id, so parsing recorded nothing for it.
+        assert_eq!(recipe.files[0].identity, None);
+
+        recipe.files[0].downloads =
+            vec!["https://cdn.modrinth.com/data/lfHFW1mp/versions/GKQEbfSt/a.jar".to_owned()];
+        reconcile_identities(&mut recipe);
+        assert_eq!(
+            recipe.files[0]
+                .identity
+                .as_ref()
+                .and_then(|it| it.version_id.as_deref()),
+            Some("GKQEbfSt")
+        );
+
+        // A second pass changes nothing, and a recorded identity survives one.
+        let after_first = recipe.clone();
+        reconcile_identities(&mut recipe);
+        assert_eq!(recipe, after_first, "reconstruction is idempotent");
+    }
+
     #[test]
     fn a_document_that_is_not_json_names_the_manifest_it_came_from() {
         let error = parse_index("{not json").expect_err("must refuse");

@@ -404,7 +404,11 @@ impl PackFileRecipe {
         }
         Some(RecordedMod {
             logical_path: self.logical_path.clone(),
-            file_name: self.logical_path.file_name()?.to_string_lossy().into_owned(),
+            file_name: self
+                .logical_path
+                .file_name()?
+                .to_string_lossy()
+                .into_owned(),
             origin: self.origin,
             identity: self
                 .identity

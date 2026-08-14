@@ -382,8 +382,12 @@ impl ManagedModSnapshot {
                 description: project.description.clone(),
                 version_name: version.map(|version| version.name.clone()),
                 version_number: version.map(|version| version.version_number.clone()),
-                game_versions: version.map(|version| version.game_versions.clone()).unwrap_or_default(),
-                loaders: version.map(|version| version.loaders.clone()).unwrap_or_default(),
+                game_versions: version
+                    .map(|version| version.game_versions.clone())
+                    .unwrap_or_default(),
+                loaders: version
+                    .map(|version| version.loaders.clone())
+                    .unwrap_or_default(),
                 client_side: project.client_side,
                 server_side: project.server_side,
             });
@@ -1070,5 +1074,497 @@ mod tests {
                 "`{hostile}` should not be able to name a destination"
             );
         }
+    }
+
+    // -- the managed mod view ---------------------------------------------
+
+    /// One recorded mod, with as much identity as the caller says it has.
+    fn recorded(name: &str, origin: ModOrigin, identity: ModIdentity) -> RecordedMod {
+        RecordedMod {
+            logical_path: PathBuf::from("mods").join(name),
+            file_name: name.to_owned(),
+            origin,
+            identity,
+            hashes: vec![
+                Hash::new(
+                    HashAlgorithm::Sha1,
+                    "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+                )
+                .expect("valid sha1"),
+            ],
+            size: Some(1024),
+            client: SideRequirement::Required,
+            server: SideRequirement::Unknown,
+        }
+    }
+
+    fn version_identity(project: &str, version: &str) -> ModIdentity {
+        ModIdentity::Version {
+            provider: ModProvider::Modrinth,
+            project_id: project.to_owned(),
+            version_id: version.to_owned(),
+            file_id: None,
+        }
+    }
+
+    /// A game directory holding exactly the named jars.
+    fn game_dir_with(jars: &[&str]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::create_dir_all(dir.path().join("mods")).expect("mods dir");
+        for jar in jars {
+            std::fs::write(dir.path().join("mods").join(jar), b"jar").expect("write jar");
+        }
+        dir
+    }
+
+    fn snapshot_of(entries: Vec<ManagedModEntry>) -> ManagedModSnapshot {
+        ManagedModSnapshot {
+            instance: InstanceId::new(),
+            source: None,
+            mods: entries,
+            metadata: MetadataAvailability::Local,
+        }
+    }
+
+    fn catalog_project(id: &str, title: &str, icon_url: Option<&str>) -> ModProject {
+        ModProject {
+            provider: ModProvider::Modrinth,
+            id: id.to_owned(),
+            slug: Some(title.to_ascii_lowercase()),
+            title: title.to_owned(),
+            description: format!("{title}, from a fixture"),
+            author: Some("a team".to_owned()),
+            client_side: SideSupport::Required,
+            server_side: SideSupport::Unsupported,
+            icon_url: icon_url.map(ToOwned::to_owned),
+        }
+    }
+
+    fn catalog_version(id: &str, project: &str, number: &str) -> ModVersionInfo {
+        ModVersionInfo {
+            provider: ModProvider::Modrinth,
+            id: id.to_owned(),
+            project_id: project.to_owned(),
+            name: format!("Release {number}"),
+            version_number: number.to_owned(),
+            channel: ReleaseChannel::Release,
+            game_versions: vec!["1.20.1".to_owned()],
+            loaders: vec!["neoforge".to_owned()],
+            published_at: chrono::Utc::now(),
+            file: ModFile {
+                file_name: "fixture.jar".to_owned(),
+                url: "https://cdn.modrinth.com/data/AAAAAAAA/versions/BBBBBBBB/fixture.jar"
+                    .to_owned(),
+                size: Some(10),
+                hashes: Vec::new(),
+            },
+            dependencies: Vec::new(),
+        }
+    }
+
+    // -- the whole path, from an imported instance to the view -------------
+
+    /// The pack index an offline import can be driven with: no files to fetch,
+    /// so nothing here contacts Modrinth.
+    fn offline_index() -> Vec<u8> {
+        br#"{
+            "formatVersion": 1,
+            "game": "minecraft",
+            "versionId": "3.2.1",
+            "name": "Reproduction Pack",
+            "files": [],
+            "dependencies": {"minecraft": "1.20.1", "neoforge": "47.1.106"}
+        }"#
+        .to_vec()
+    }
+
+    fn mrpack(path: &Path) {
+        use std::io::Write as _;
+        let file = std::fs::File::create(path).expect("create archive");
+        let mut writer = zip::ZipWriter::new(file);
+        let options: zip::write::FileOptions<'_, ()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        writer
+            .start_file("modrinth.index.json", options)
+            .expect("start index");
+        writer.write_all(&offline_index()).expect("write index");
+        writer.finish().expect("finish archive");
+    }
+
+    /// The recipe entry a pack import writes for one of its own mods.
+    fn pack_mod(name: &str, project: &str, version: &str) -> PackFileRecipe {
+        PackFileRecipe {
+            logical_path: PathBuf::from("mods").join(name),
+            hashes: vec![
+                Hash::new(
+                    HashAlgorithm::Sha1,
+                    "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+                )
+                .expect("valid sha1"),
+            ],
+            downloads: vec![format!(
+                "https://cdn.modrinth.com/data/{project}/versions/{version}/{name}"
+            )],
+            size: Some(4096),
+            client: SideRequirement::Required,
+            server: SideRequirement::Required,
+            selected: None,
+            origin: ModOrigin::PackDeclared,
+            identity: None,
+        }
+    }
+
+    /// Imports an offline pack and gives its instance the mods a pack with
+    /// downloadable files would have left behind.
+    ///
+    /// The files are placed and recorded directly because an ordinary test run
+    /// must not fetch anything; everything after that point — reading the
+    /// retained recipe, reconstructing identity, checking the game directory —
+    /// is the production path.
+    async fn imported_instance(base: &Path, jars_on_disk: &[&str]) -> (App, InstanceId) {
+        let archive_dir = tempfile::tempdir().expect("temp dir");
+        let archive = archive_dir.path().join("pack.mrpack");
+        mrpack(&archive);
+
+        let app = App::open_at(ephervex_storage::Paths::rooted_at(base)).expect("app opens");
+        let imported = app
+            .import_pack(
+                &crate::import::ImportRequest::new(&archive),
+                &OperationReporter::silent("test-import"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("import the pack");
+        let instance = imported.record.id;
+
+        let store = SourceStore::new(ephervex_storage::metadata::source_dir(
+            &imported.record.root,
+        ));
+        let mut recipe = store.read_recipe().expect("the retained recipe");
+        recipe
+            .files
+            .push(pack_mod("journeymap.jar", "lfHFW1mp", "GKQEbfSt"));
+        recipe
+            .files
+            .push(pack_mod("architectury.jar", "lhGA9TYQ", "Va9L5Nqe"));
+        store.write_recipe(&recipe).expect("write the recipe");
+
+        let mods_dir =
+            ephervex_storage::metadata::client_game_dir(&imported.record.root).join("mods");
+        std::fs::create_dir_all(&mods_dir).expect("mods dir");
+        for jar in jars_on_disk {
+            std::fs::write(mods_dir.join(jar), b"jar").expect("write jar");
+        }
+
+        // Reopened rather than reused, so nothing below is reading state this
+        // function happened to leave in memory.
+        let app = App::open_at(ephervex_storage::Paths::rooted_at(base)).expect("app reopens");
+        (app, instance)
+    }
+
+    #[tokio::test]
+    async fn an_imported_packs_mods_reach_the_view_a_frontend_reads() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, instance) =
+            imported_instance(base.path(), &["journeymap.jar", "architectury.jar"]).await;
+
+        let snapshot = app.managed_mod_snapshot(instance).expect("snapshot");
+
+        assert_eq!(snapshot.len(), 2, "the pack's mods are the instance's mods");
+        assert!(
+            snapshot.mods.iter().all(ManagedModEntry::is_pack_owned),
+            "and they are visibly the pack's"
+        );
+        assert_eq!(
+            snapshot.mods[0].identity,
+            version_identity("lfHFW1mp", "GKQEbfSt"),
+            "identity is reconstructed from the pack's own addresses on the way in"
+        );
+        assert_eq!(snapshot.metadata, MetadataAvailability::Local);
+        assert_eq!(snapshot.missing().count(), 0);
+
+        let source = snapshot
+            .source
+            .expect("an imported instance names its pack");
+        assert_eq!(source.kind, ImportSourceKind::ModrinthPack);
+        assert_eq!(source.name, "Reproduction Pack");
+        assert_eq!(source.version.as_deref(), Some("3.2.1"));
+    }
+
+    #[tokio::test]
+    async fn a_pack_mod_deleted_from_the_game_directory_is_flagged_not_dropped() {
+        let base = tempfile::tempdir().expect("temp dir");
+        // Bisecting a crash by deleting a jar is the workflow this launcher is
+        // for. The instance still wants the mod, and says so.
+        let (app, instance) = imported_instance(base.path(), &["journeymap.jar"]).await;
+
+        let snapshot = app.managed_mod_snapshot(instance).expect("snapshot");
+
+        assert_eq!(snapshot.len(), 2);
+        let missing: Vec<&str> = snapshot
+            .missing()
+            .map(|entry| entry.file_name.as_str())
+            .collect();
+        assert_eq!(missing, vec!["architectury.jar"]);
+        assert!(snapshot.mods[1].identity.is_fully_resolved());
+    }
+
+    #[tokio::test]
+    async fn a_jar_nobody_recorded_is_left_alone_rather_than_adopted() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, instance) = imported_instance(
+            base.path(),
+            &[
+                "journeymap.jar",
+                "architectury.jar",
+                "local-debug-build.jar",
+            ],
+        )
+        .await;
+
+        let snapshot = app.managed_mod_snapshot(instance).expect("snapshot");
+
+        assert_eq!(
+            snapshot.len(),
+            2,
+            "a jar the user dropped in is not given an invented record"
+        );
+        assert!(
+            !snapshot
+                .mods
+                .iter()
+                .any(|entry| entry.file_name == "local-debug-build.jar")
+        );
+        assert!(
+            ephervex_storage::metadata::client_game_dir(&app.client(instance).unwrap().root)
+                .join("mods/local-debug-build.jar")
+                .is_file(),
+            "and it is still there"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_instance_that_was_never_imported_has_an_empty_view_rather_than_an_error() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, instance) = imported_instance(base.path(), &[]).await;
+        let store = SourceStore::new(ephervex_storage::metadata::source_dir(
+            &app.client(instance).expect("record").root,
+        ));
+        std::fs::remove_file(store.dir().join(ephervex_pack::RECIPE_FILE)).expect("remove recipe");
+
+        let snapshot = app.managed_mod_snapshot(instance).expect("snapshot");
+        assert!(snapshot.is_empty());
+        assert_eq!(snapshot.source, None);
+    }
+
+    #[test]
+    fn a_recorded_mod_whose_jar_is_gone_is_reported_rather_than_forgotten() {
+        let dir = game_dir_with(&["present.jar"]);
+        let present = ManagedModEntry::from_recorded(
+            recorded(
+                "present.jar",
+                ModOrigin::PackDeclared,
+                version_identity("AAAAAAAA", "BBBBBBBB"),
+            ),
+            dir.path(),
+        );
+        let gone = ManagedModEntry::from_recorded(
+            recorded(
+                "gone.jar",
+                ModOrigin::PackDeclared,
+                version_identity("CCCCCCCC", "DDDDDDDD"),
+            ),
+            dir.path(),
+        );
+
+        assert_eq!(present.presence, ModPresence::Installed);
+        assert_eq!(gone.presence, ModPresence::Missing);
+        assert!(
+            gone.presence.needs_attention(),
+            "the instance wants a mod it does not have, which is worth saying"
+        );
+        assert_eq!(
+            gone.identity,
+            version_identity("CCCCCCCC", "DDDDDDDD"),
+            "a missing file loses none of what the instance recorded about it"
+        );
+    }
+
+    #[test]
+    fn provider_metadata_fills_in_the_display_fields_of_the_mods_it_names() {
+        let dir = game_dir_with(&["jei.jar"]);
+        let mut snapshot = snapshot_of(vec![ManagedModEntry::from_recorded(
+            recorded(
+                "jei.jar",
+                ModOrigin::UserSelected,
+                version_identity("u6dRKJwZ", "Orv4ObRj"),
+            ),
+            dir.path(),
+        )]);
+
+        let icons = BTreeMap::from([(
+            "u6dRKJwZ".to_owned(),
+            PathBuf::from("/cache/artwork/jei.png"),
+        )]);
+        snapshot.apply(&ModDetailIndex::new(
+            vec![catalog_project("u6dRKJwZ", "Just Enough Items", None)],
+            vec![catalog_version("Orv4ObRj", "u6dRKJwZ", "15.2.0.27")],
+            icons,
+        ));
+
+        let entry = &snapshot.mods[0];
+        assert_eq!(entry.display_name(), "Just Enough Items");
+        assert_eq!(entry.installed_version(), Some("15.2.0.27"));
+        let details = entry.details.as_ref().expect("details");
+        assert_eq!(details.author.as_deref(), Some("a team"));
+        assert_eq!(details.game_versions, vec!["1.20.1".to_owned()]);
+        assert_eq!(details.loaders, vec!["neoforge".to_owned()]);
+        assert_eq!(details.server_side, SideSupport::Unsupported);
+        assert_eq!(entry.icon, Some(PathBuf::from("/cache/artwork/jei.png")));
+    }
+
+    #[test]
+    fn a_mod_the_catalog_says_nothing_about_keeps_its_row_and_invents_nothing() {
+        let dir = game_dir_with(&["mystery.jar", "jei.jar"]);
+        let mut snapshot = snapshot_of(vec![
+            ManagedModEntry::from_recorded(
+                recorded(
+                    "mystery.jar",
+                    ModOrigin::PackDeclared,
+                    ModIdentity::Unresolved,
+                ),
+                dir.path(),
+            ),
+            ManagedModEntry::from_recorded(
+                recorded(
+                    "jei.jar",
+                    ModOrigin::UserSelected,
+                    version_identity("u6dRKJwZ", "Orv4ObRj"),
+                ),
+                dir.path(),
+            ),
+        ]);
+
+        // A response that covers neither of them: one has no project to look
+        // up, and the other's project is simply absent from the answer.
+        snapshot.apply(&ModDetailIndex::default());
+
+        assert_eq!(snapshot.len(), 2, "both mods are still installed");
+        for entry in &snapshot.mods {
+            assert!(entry.details.is_none());
+            assert!(entry.icon.is_none());
+            assert_eq!(
+                entry.installed_version(),
+                None,
+                "no version is claimed that the launcher cannot prove"
+            );
+        }
+        assert_eq!(
+            snapshot.mods[0].display_name(),
+            "mystery.jar",
+            "a file name is an acceptable label and nothing more"
+        );
+        assert_eq!(snapshot.mods[0].identity.provider(), None);
+    }
+
+    #[test]
+    fn a_known_project_with_an_unknown_release_gets_a_title_but_no_version() {
+        let dir = game_dir_with(&["older.jar"]);
+        let mut snapshot = snapshot_of(vec![ManagedModEntry::from_recorded(
+            recorded(
+                "older.jar",
+                ModOrigin::PackDeclared,
+                ModIdentity::Project {
+                    provider: ModProvider::Modrinth,
+                    project_id: "lfHFW1mp".to_owned(),
+                },
+            ),
+            dir.path(),
+        )]);
+
+        snapshot.apply(&ModDetailIndex::new(
+            vec![catalog_project("lfHFW1mp", "JourneyMap", None)],
+            vec![catalog_version("GKQEbfSt", "lfHFW1mp", "5.9.18")],
+            BTreeMap::new(),
+        ));
+
+        let entry = &snapshot.mods[0];
+        assert_eq!(entry.display_name(), "JourneyMap");
+        assert_eq!(
+            entry.installed_version(),
+            None,
+            "the catalog knows a release; nothing proves it is the installed one"
+        );
+        assert!(entry.is_pack_owned());
+    }
+
+    #[test]
+    fn artwork_that_never_arrives_costs_the_row_nothing() {
+        let dir = game_dir_with(&["jei.jar"]);
+        let mut snapshot = snapshot_of(vec![ManagedModEntry::from_recorded(
+            recorded(
+                "jei.jar",
+                ModOrigin::UserSelected,
+                version_identity("u6dRKJwZ", "Orv4ObRj"),
+            ),
+            dir.path(),
+        )]);
+
+        // The project publishes an icon and the fetch produced nothing.
+        snapshot.apply(&ModDetailIndex::new(
+            vec![catalog_project(
+                "u6dRKJwZ",
+                "Just Enough Items",
+                Some("https://cdn.modrinth.com/data/u6dRKJwZ/icon.png"),
+            )],
+            vec![catalog_version("Orv4ObRj", "u6dRKJwZ", "15.2.0.27")],
+            BTreeMap::new(),
+        ));
+
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot.mods[0].icon, None);
+        assert_eq!(snapshot.mods[0].display_name(), "Just Enough Items");
+    }
+
+    #[test]
+    fn only_projects_this_provider_can_resolve_are_asked_about() {
+        let dir = game_dir_with(&[]);
+        let snapshot = snapshot_of(vec![
+            ManagedModEntry::from_recorded(
+                recorded(
+                    "a.jar",
+                    ModOrigin::PackDeclared,
+                    version_identity("AAAAAAAA", "1111aaaa"),
+                ),
+                dir.path(),
+            ),
+            ManagedModEntry::from_recorded(
+                recorded(
+                    "b.jar",
+                    ModOrigin::PackDeclared,
+                    ModIdentity::Project {
+                        provider: ModProvider::Modrinth,
+                        project_id: "AAAAAAAA".to_owned(),
+                    },
+                ),
+                dir.path(),
+            ),
+            ManagedModEntry::from_recorded(
+                recorded("c.jar", ModOrigin::PackDeclared, ModIdentity::Unresolved),
+                dir.path(),
+            ),
+        ]);
+
+        assert_eq!(
+            snapshot.identified_project_ids(ModProvider::Modrinth),
+            vec!["AAAAAAAA".to_owned()],
+            "one project, asked for once, however many jars point at it"
+        );
+        assert_eq!(
+            snapshot.identified_version_ids(ModProvider::Modrinth),
+            vec!["1111aaaa".to_owned()],
+            "a mod with no proven release contributes no version to look up"
+        );
+        assert_eq!(snapshot.missing().count(), 3);
     }
 }
