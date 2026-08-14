@@ -1804,7 +1804,7 @@ slint::slint! {
                         if root.mod-removal-dependencies.length > 0 : BodyText { text: GuiI18n.count("gui-mod-remove-dependencies", root.mod-removal-dependencies.length); wrap: word-wrap; }
                         if root.mod-removal-dependencies.length > 0 : Rectangle {
                             vertical-stretch: 1; border-radius: 6px; border-width: 1px; border-color: Theme.border; background: Theme.background;
-                            ScrollView { viewport-width: self.width; VerticalLayout { padding: 9px; spacing: 3px; for name in root.mod-removal-dependencies : Text { text: name; color: Theme.text-secondary; font-size: Theme.label-size; overflow: elide; } } }
+                            ScrollView { viewport-width: self.width; VerticalLayout { alignment: start; padding: 9px; spacing: 4px; for name in root.mod-removal-dependencies : Text { text: name; color: Theme.text-secondary; font-size: Theme.label-size; height: 20px; overflow: elide; } } }
                         }
                         if root.mod-removal-dependencies.length == 0 && !root.mod-removal-unprovable : BodyText { text: GuiI18n.text("gui-mod-remove-no-dependencies"); color: Theme.text-muted; wrap: word-wrap; }
                         if root.mod-removal-unprovable : BodyText { text: GuiI18n.text("gui-mod-remove-dependencies-unprovable"); color: Theme.text-muted; wrap: word-wrap; }
