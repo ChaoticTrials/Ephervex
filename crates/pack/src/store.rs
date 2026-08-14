@@ -164,7 +164,10 @@ impl SourceStore {
             });
         }
 
-        serde_json::from_value(envelope).map_err(|source| PackError::RecipeInvalid { path, source })
+        let mut recipe: PackRecipe = serde_json::from_value(envelope)
+            .map_err(|source| PackError::RecipeInvalid { path, source })?;
+        crate::import::reconcile_identities(&mut recipe);
+        Ok(recipe)
     }
 
     /// Keeps a provider's manifest byte for byte, returning its path relative

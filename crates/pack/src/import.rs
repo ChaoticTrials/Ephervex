@@ -161,6 +161,26 @@ pub fn parse_with(
     }
 }
 
+/// Fills in provider identity a stored recipe did not record.
+///
+/// The second dispatch point, and it exists for the same reason as
+/// [`parse_with`]: only a provider's own module knows what its metadata proves.
+/// A recipe written before pack files carried an identity is not re-imported
+/// and is not rewritten — it is completed on the way in, deterministically,
+/// from the addresses it already holds. Recorded identities are left alone.
+///
+/// A recipe whose source is not a provider pack has nothing to reconstruct: a
+/// hand-made instance's entries were written by an installation that already
+/// knew exactly what it was installing.
+pub(crate) fn reconcile_identities(recipe: &mut PackRecipe) {
+    match recipe.source_kind {
+        ImportSourceKind::ModrinthPack => modrinth::reconcile_identities(recipe),
+        ImportSourceKind::CurseForgePack
+        | ImportSourceKind::PrismExport
+        | ImportSourceKind::Manual => {}
+    }
+}
+
 /// Everything an import wants to know once the files are on disk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MaterializedPack {

@@ -82,6 +82,7 @@ pub(super) fn hit_project(raw: RawHit) -> ModProject {
         author: raw.author,
         client_side: raw.client_side.into(),
         server_side: raw.server_side.into(),
+        icon_url: icon_url(raw.icon_url),
     }
 }
 
@@ -98,7 +99,18 @@ pub(super) fn project(raw: RawProject) -> ModProject {
         author: None,
         client_side: raw.client_side.into(),
         server_side: raw.server_side.into(),
+        icon_url: icon_url(raw.icon_url),
     }
+}
+
+/// The project's icon address, if it published a usable one.
+///
+/// Modrinth sends `null` for a project with no icon and, for a handful of older
+/// projects, an empty string. Both mean the same thing and both become `None`,
+/// so nothing downstream has to treat `""` as an address.
+fn icon_url(raw: Option<String>) -> Option<String> {
+    raw.map(|url| url.trim().to_owned())
+        .filter(|url| !url.is_empty())
 }
 
 /// One project, refused unless it is actually a mod.

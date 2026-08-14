@@ -104,6 +104,38 @@ impl ModOrigin {
     pub const fn is_explicit_choice(self) -> bool {
         matches!(self, Self::UserSelected | Self::SelectedOptionalDependency)
     }
+
+    /// Whether the imported pack, rather than a later decision in this
+    /// instance, is what put this file here.
+    ///
+    /// The distinction outlives display: a pack-owned mod's version is part of
+    /// the pack, so changing it independently is a different operation from
+    /// changing one the user installed themselves, and the frontend must not
+    /// offer the two as though they were the same.
+    #[must_use]
+    pub const fn is_pack_owned(self) -> bool {
+        matches!(self, Self::PackDeclared)
+    }
+
+    /// Whether this file is here only because something else needed it.
+    #[must_use]
+    pub const fn is_dependency(self) -> bool {
+        matches!(
+            self,
+            Self::RequiredDependency | Self::SelectedOptionalDependency
+        )
+    }
+
+    /// The `ephervex-i18n` message id naming this origin to a user.
+    #[must_use]
+    pub const fn message_id(self) -> &'static str {
+        match self {
+            Self::PackDeclared => "mod-origin-pack-declared",
+            Self::UserSelected => "mod-origin-user-selected",
+            Self::RequiredDependency => "mod-origin-required-dependency",
+            Self::SelectedOptionalDependency => "mod-origin-selected-optional-dependency",
+        }
+    }
 }
 
 #[cfg(test)]

@@ -218,6 +218,102 @@ impl ProviderFileIdentity {
     pub fn project(&self) -> Option<(ModProvider, &str)> {
         Some((self.provider?, self.project_id.as_deref()?))
     }
+
+    /// How much of this file the launcher can actually prove.
+    #[must_use]
+    pub fn resolution(&self) -> ModIdentity {
+        match (self.provider, self.project_id.as_deref()) {
+            (Some(provider), Some(project_id)) => match self.version_id.as_deref() {
+                Some(version_id) => ModIdentity::Version {
+                    provider,
+                    project_id: project_id.to_owned(),
+                    version_id: version_id.to_owned(),
+                    file_id: self.file_id.clone(),
+                },
+                None => ModIdentity::Project {
+                    provider,
+                    project_id: project_id.to_owned(),
+                },
+            },
+            _ => ModIdentity::Unresolved,
+        }
+    }
+}
+
+/// How completely a mod's provider identity is known.
+///
+/// The three states are what stop a partially identified file from being
+/// presented as a fully resolvable one. A `.mrpack` imported by an older build,
+/// a pack whose download address names a project but not a version, and a jar
+/// with no provenance at all are three different situations, and each has a
+/// different honest answer to "which version is this?".
+///
+/// Nothing here is ever inferred from a file name: a name is a label, not a
+/// catalog entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModIdentity {
+    /// Provider, project, and the exact catalog version are all known, so the
+    /// mod can be looked up again without reading the jar.
+    Version {
+        provider: ModProvider,
+        project_id: String,
+        version_id: String,
+        /// The provider's own file id, where it has one distinct from the
+        /// version. Modrinth does not; CurseForge will.
+        file_id: Option<String>,
+    },
+    /// The project is known but the exact version is not. Enough to say what
+    /// the mod *is*, never enough to claim which release is installed.
+    Project {
+        provider: ModProvider,
+        project_id: String,
+    },
+    /// Nothing the launcher can re-resolve. The file is still installed and
+    /// still belongs to the instance; only its provenance is unknown.
+    Unresolved,
+}
+
+impl ModIdentity {
+    /// The catalog this mod resolves against, when one is known.
+    #[must_use]
+    pub const fn provider(&self) -> Option<ModProvider> {
+        match self {
+            Self::Version { provider, .. } | Self::Project { provider, .. } => Some(*provider),
+            Self::Unresolved => None,
+        }
+    }
+
+    #[must_use]
+    pub fn project_id(&self) -> Option<&str> {
+        match self {
+            Self::Version { project_id, .. } | Self::Project { project_id, .. } => Some(project_id),
+            Self::Unresolved => None,
+        }
+    }
+
+    #[must_use]
+    pub fn version_id(&self) -> Option<&str> {
+        match self {
+            Self::Version { version_id, .. } => Some(version_id),
+            Self::Project { .. } | Self::Unresolved => None,
+        }
+    }
+
+    /// Whether an exact catalog version is known.
+    #[must_use]
+    pub const fn is_fully_resolved(&self) -> bool {
+        matches!(self, Self::Version { .. })
+    }
+
+    /// A stable identifier for `--json` output and frontend state.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Version { .. } => "version",
+            Self::Project { .. } => "project",
+            Self::Unresolved => "unresolved",
+        }
+    }
 }
 
 /// One file the pack declares (the project's `PackFileRecipe`).
@@ -285,6 +381,42 @@ impl PackFileRecipe {
         }
     }
 
+    /// Whether this entry describes a jar in the game's `mods/` directory.
+    ///
+    /// A direct child of `mods/`, which is what a mod loader reads. A pack's
+    /// configs, resource packs, and shader packs are files the instance needs
+    /// and are not mods, and a nested path under `mods/` is not something any
+    /// supported loader loads.
+    #[must_use]
+    pub fn is_mod_file(&self) -> bool {
+        self.logical_path.parent() == Some(Path::new(crate::managed::MODS_DIR))
+            && self.logical_path.file_name().is_some()
+    }
+
+    /// This entry as a mod of the instance, if it is one.
+    ///
+    /// Returns nothing for a file that is not a jar in `mods/`, so a pack's
+    /// config file never appears in a mod list.
+    #[must_use]
+    pub fn recorded_mod(&self) -> Option<RecordedMod> {
+        if !self.is_mod_file() {
+            return None;
+        }
+        Some(RecordedMod {
+            logical_path: self.logical_path.clone(),
+            file_name: self.logical_path.file_name()?.to_string_lossy().into_owned(),
+            origin: self.origin,
+            identity: self
+                .identity
+                .as_ref()
+                .map_or(ModIdentity::Unresolved, ProviderFileIdentity::resolution),
+            hashes: self.hashes.clone(),
+            size: self.size,
+            client: self.client,
+            server: self.server,
+        })
+    }
+
     /// The managed mod this entry records, if it is one.
     ///
     /// A file qualifies only when it names a provider, a project, *and* a
@@ -308,6 +440,33 @@ impl PackFileRecipe {
             origin: self.origin,
         })
     }
+}
+
+/// One mod in an instance's desired state, however much is known about it.
+///
+/// The difference from [`ManagedMod`] is deliberate. `ManagedMod` answers "what
+/// can the mod browser re-resolve", so it exists only for a fully identified
+/// mod. This answers "what mods does this instance have", which has to include
+/// the ones whose provider identity is partial or absent — a pack's own files,
+/// and anything imported before identity was recorded. Leaving those out is
+/// what made imported pack mods invisible.
+///
+/// Every field is either recorded fact or absent. Nothing here is derived from
+/// a file name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordedMod {
+    /// Where the jar lives, relative to the game directory.
+    pub logical_path: PathBuf,
+    /// The jar's own name. A label, and explicitly not evidence of identity.
+    pub file_name: String,
+    /// Why this mod belongs to the instance.
+    pub origin: ModOrigin,
+    /// How much of its provider identity is proven.
+    pub identity: ModIdentity,
+    pub hashes: Vec<Hash>,
+    pub size: Option<u64>,
+    pub client: SideRequirement,
+    pub server: SideRequirement,
 }
 
 /// A mod this instance installed through a provider.
@@ -629,6 +788,27 @@ impl PackRecipe {
             override_layers: Vec::new(),
             provider_metadata: ProviderRecipeMetadata::new(ImportSourceKind::Manual, None),
         }
+    }
+
+    /// Every mod this instance's client actually has, in recipe order.
+    ///
+    /// The list a mod view is built from. It covers the pack's own mods and
+    /// the ones installed later through the browser alike, because they are the
+    /// same thing to a user looking at `mods/` — what tells them apart is
+    /// [`RecordedMod::origin`], not whether they appear at all.
+    ///
+    /// A mod the pack declares but that this client did not take is left out:
+    /// an unselected optional file is not installed, and listing it would
+    /// claim a jar that is not there. The recorded selection is what decides
+    /// that, so this is a pure function of the recipe and never reads `mods/`.
+    #[must_use]
+    pub fn recorded_mods(&self) -> Vec<RecordedMod> {
+        let selection = OptionalSelection::none();
+        self.files
+            .iter()
+            .filter(|file| file.is_installed_on(PackSide::Client, &selection))
+            .filter_map(PackFileRecipe::recorded_mod)
+            .collect()
     }
 
     /// Every mod installed through a provider, in recipe order.

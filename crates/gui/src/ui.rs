@@ -91,9 +91,17 @@ slint::slint! {
     export struct ModRow {
         project-id: string,
         title: string,
+        file-name: string,
         version: string,
+        version-known: bool,
         provider: string,
         origin: string,
+        origin-kind: string,
+        compatibility: string,
+        author: string,
+        icon: image,
+        missing: bool,
+        pack-owned: bool,
     }
 
     export struct ModSearchRow {
@@ -654,6 +662,71 @@ slint::slint! {
         if root.server : Image { x: 11px; y: 11px; width: 30px; height: 30px; source: @image-url("../../../assets/icons/semantic-server.svg"); image-fit: contain; }
     }
 
+    // A mod's artwork, or the same shape without it. The rectangle is drawn
+    // whether or not an icon arrived, so a list whose images are still loading
+    // — or that will never get any — has the same layout as one whose images
+    // are all present.
+    component ModArtwork inherits Rectangle {
+        in property <image> icon;
+        in property <string> origin-kind;
+        property <color> tone: root.origin-kind == "pack" ? Theme.accent-secondary : root.origin-kind == "dependency" ? Theme.text-muted : Theme.accent;
+        width: 44px; height: 44px;
+        border-radius: 7px;
+        border-width: 1px;
+        border-color: root.tone.with-alpha(0.45);
+        background: root.tone.with-alpha(0.1);
+        clip: true;
+        if root.icon.width > 0 : Image { x: 3px; y: 3px; width: 38px; height: 38px; source: root.icon; image-fit: contain; }
+        if root.icon.width == 0 : Image { x: 10px; y: 10px; width: 24px; height: 24px; source: @image-url("../../../assets/icons/environment-generic.svg"); image-fit: contain; colorize: root.tone; }
+    }
+
+    // One row of the Managed Mods list.
+    //
+    // Two lines of text and one badge. The provenance badge is the only badge:
+    // everything else that distinguishes a row — an unknown version, a missing
+    // file, the artwork's tone — is said in the place it belongs rather than
+    // added as another chip.
+    component ModCard inherits Rectangle {
+        in property <ModRow> item;
+        height: 78px;
+        border-radius: 6px;
+        border-width: 1px;
+        border-color: root.item.missing ? Theme.warning.with-alpha(0.6) : Theme.border;
+        background: Theme.background;
+        HorizontalLayout {
+            padding: 10px; spacing: 11px;
+            VerticalLayout { alignment: center; ModArtwork { icon: root.item.icon; origin-kind: root.item.origin-kind; } }
+            VerticalLayout {
+                alignment: center; spacing: 3px; horizontal-stretch: 1;
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: root.item.title;
+                        color: Theme.text;
+                        font-size: Theme.row-heading-size;
+                        font-weight: 600;
+                        overflow: elide;
+                        horizontal-stretch: 1;
+                        vertical-alignment: center;
+                    }
+                    VerticalLayout { alignment: center; Pill { text: root.item.origin; tone-color: root.item.origin-kind == "pack" ? Theme.accent-secondary : root.item.origin-kind == "dependency" ? Theme.text-muted : Theme.accent; } }
+                }
+                Text {
+                    text: root.item.version + " | " + root.item.provider;
+                    color: root.item.version-known ? Theme.text-secondary : Theme.text-muted;
+                    font-size: Theme.label-size;
+                    overflow: elide;
+                }
+                Text {
+                    text: root.item.missing ? GuiI18n.text("gui-mod-file-missing") : root.item.compatibility != "" ? root.item.compatibility : root.item.file-name;
+                    color: root.item.missing ? Theme.warning : Theme.text-muted;
+                    font-size: Theme.caption-size;
+                    overflow: elide;
+                }
+            }
+        }
+    }
+
     component EmptyState inherits Rectangle {
         in property <string> title;
         in property <string> message;
@@ -988,6 +1061,8 @@ slint::slint! {
         in-out property <[ServerRow]> global-servers;
         in-out property <[ServerRow]> linked-servers;
         in-out property <[ModRow]> managed-mods;
+        // Empty unless something has to be said about how complete the list is.
+        in-out property <string> managed-mods-notice;
         in-out property <[ModSearchRow]> mod-results;
         in-out property <[DiagnosticRow]> diagnostics;
         in-out property <[ActivityRow]> activities;
@@ -1364,8 +1439,9 @@ slint::slint! {
                             spacing: 16px;
                             Rectangle { width: 42%; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface;
                                 VerticalLayout { padding: 16px; spacing: 10px; Heading { text: GuiI18n.text("gui-managed-mods"); } BodyText { text: GuiI18n.text("gui-managed-mods-detail"); wrap: word-wrap; }
+                                    if root.managed-mods-notice != "" : BodyText { text: root.managed-mods-notice; color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
                                     if root.managed-mods.length == 0 : EmptyState { title: GuiI18n.text("gui-no-managed-mods"); message: GuiI18n.text("gui-no-managed-mods-detail"); }
-                                    ScrollView { VerticalLayout { spacing: 8px; for mod in root.managed-mods : Rectangle { height: 70px; border-radius: 6px; border-width: 1px; border-color: Theme.border; background: Theme.background; VerticalLayout { padding: 10px; Heading { text: mod.title; font-size: Theme.row-heading-size; } BodyText { text: mod.version + " | " + mod.provider + " | " + mod.origin; } } } } }
+                                    ScrollView { viewport-width: self.width; VerticalLayout { spacing: 8px; for mod in root.managed-mods : ModCard { item: mod; } } }
                                 }
                             }
                             Rectangle { horizontal-stretch: 1; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface;

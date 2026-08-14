@@ -58,6 +58,9 @@ pub enum ContentStore {
     Downloads,
     /// Cached provider metadata with timestamps.
     Metadata,
+    /// Project artwork fetched from a provider: decoration for a list, never
+    /// something the launcher installs or executes.
+    Artwork,
     /// Natives unpacked from the pre-1.19 classifier jars, and the scratch
     /// directory 1.19-and-later releases extract into at run time.
     ///
@@ -80,6 +83,7 @@ impl ContentStore {
             Self::InstallerCache => "installer-cache",
             Self::Downloads => "downloads",
             Self::Metadata => "metadata",
+            Self::Artwork => "artwork",
             Self::Natives => "natives",
         }
     }
@@ -384,6 +388,31 @@ impl CacheLayout {
     /// `.jar` from a `.tar.gz`. Two files with the same bytes therefore share
     /// one cache entry, which is exactly what makes disposable instances cheap.
     ///
+    /// Where one provider project's artwork is cached.
+    ///
+    /// Keyed by provider and project id rather than by content hash, because a
+    /// provider publishes no hash for an icon and there is nothing to verify
+    /// against. That is also why artwork has a store of its own: everything in
+    /// [`ContentStore::Downloads`] is addressed by a digest that was checked,
+    /// and putting an unverifiable file among them would blur a distinction
+    /// worth keeping sharp.
+    ///
+    /// Both segments are validated, so a provider id that arrived from an API
+    /// response cannot climb out of the store or name a hidden file.
+    pub fn project_artwork(
+        &self,
+        provider: &str,
+        project_id: &str,
+        extension: &FileExtension,
+    ) -> Result<PathBuf, CacheKeyError> {
+        let provider = safe_segment(provider.trim())?;
+        let project = safe_segment(project_id.trim())?;
+        Ok(self
+            .store_root(ContentStore::Artwork)
+            .join(provider)
+            .join(format!("{project}.{}", extension.as_str())))
+    }
+
     /// Sharding on the first two hex characters keeps directory sizes
     /// reasonable; a flat directory with tens of thousands of entries is slow
     /// to list on some filesystems and unpleasant to inspect by hand.

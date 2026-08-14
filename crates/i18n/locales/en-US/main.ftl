@@ -708,6 +708,13 @@ pack-requirement-unsupported = Not supported
 # Ephervex has nothing to go on and does not guess on their behalf.
 pack-requirement-unknown = Not stated
 
+# Why a mod belongs to an instance. Kept distinct because they are different
+# things to look at and, later, different things to change.
+mod-origin-pack-declared = From pack
+mod-origin-user-selected = Installed
+mod-origin-required-dependency = Dependency
+mod-origin-selected-optional-dependency = Optional dependency
+
 error-pack-archive-unreadable = The pack file could not be read.
 .action = Check that { $path } exists and is readable.
 
@@ -1032,9 +1039,15 @@ gui-open-diagnostics = View Diagnostics
 gui-temporary-lifecycle = Temporary instances remain until the operating system clears its temporary storage. Converting an existing instance in place is not available from the current application service.
 gui-persistent-lifecycle = This instance is stored under the persistent instance root.
 gui-managed-mods = Managed Mods
-gui-managed-mods-detail = Only mods installed through Ephervex are shown as managed.
+gui-managed-mods-detail = Every mod this instance is recorded as having, including the ones its pack brought.
 gui-no-managed-mods = No managed mods
 gui-no-managed-mods-detail = Manual JARs are not adopted or modified.
+# Shown when the mod's exact release cannot be proven from what Ephervex
+# recorded. The file is installed; only its version is unknown.
+gui-mod-version-unknown = Version not recorded
+gui-mod-provider-unknown = No provider
+gui-mod-file-missing = File missing from mods folder
+gui-mod-metadata-offline = Showing recorded state only; Modrinth could not be reached.
 gui-add-modrinth-mods = Add Mods from Modrinth
 gui-modrinth-compatibility = Search results are constrained to this instance's exact Minecraft version and loader.
 gui-search-compatible-mods = Search compatible mods...

@@ -67,6 +67,12 @@ pub struct ModProject {
     pub author: Option<String>,
     pub client_side: SideSupport,
     pub server_side: SideSupport,
+    /// Where the project's icon is published, when it has one.
+    ///
+    /// An address, not an image: fetching it is a decision for a caller that
+    /// knows about caches and download policy, and a project with no icon is an
+    /// ordinary state rather than a failure.
+    pub icon_url: Option<String>,
 }
 
 /// One file belonging to a version — the one this launcher would install.

@@ -38,8 +38,8 @@ use crate::detect::MODRINTH_INDEX;
 use crate::error::{PackError, PackResult};
 use crate::path::{is_reserved, safe_relative_path};
 use crate::recipe::{
-    OverrideLayer, OverrideScope, PackFileRecipe, PackRecipe, ProviderRecipeMetadata,
-    RECIPE_VERSION, SideRequirement,
+    OverrideLayer, OverrideScope, PackFileRecipe, PackRecipe, ProviderFileIdentity,
+    ProviderRecipeMetadata, RECIPE_VERSION, SideRequirement,
 };
 
 /// The `.mrpack` revision this build implements.
@@ -289,6 +289,7 @@ fn normalize_file(
     }
 
     let environment = file.env.unwrap_or_default();
+    let identity = provider_identity(&downloads);
     Ok(PackFileRecipe {
         logical_path,
         hashes,
@@ -299,12 +300,96 @@ fn normalize_file(
         selected: None,
         // The pack asked for this file; nobody browsed for it.
         origin: ModOrigin::PackDeclared,
-        // A Modrinth pack index identifies its files by hash and address only.
-        // Leaving this `None` rather than inventing an id is what keeps the
-        // normalized model honest for the providers that do have one — and what
-        // keeps a pack file from being mistaken for a managed mod.
-        identity: None,
+        identity,
     })
+}
+
+/// The catalog identity a pack's own download addresses prove, if any.
+///
+/// A `modrinth.index.json` has no project or version fields: the format
+/// identifies a file by path, hashes, and download address. The address is
+/// nevertheless authoritative provider data, because Modrinth's own CDN lays
+/// its artifacts out as
+/// `https://cdn.modrinth.com/data/<project>/versions/<version>/<file>`, and the
+/// pack tooling writes those addresses from the catalog entries it resolved.
+/// Reading the ids back out is therefore reconstruction, not inference — unlike
+/// a file name, which proves nothing and is never consulted here.
+///
+/// Two restrictions keep it that way:
+///
+/// * only an address on Modrinth's own CDN counts. A pack may legitimately host
+///   a file on one of the other permitted mirrors, and a `github.com` URL says
+///   nothing about a Modrinth project;
+/// * the version segment is accepted only when it is shaped like a Modrinth id.
+///   Older packs put a human version *number* there, and recording "1.2.3" as a
+///   version id would produce a record nothing can look up. Those files keep
+///   their project and stay honestly version-less.
+#[must_use]
+pub fn provider_identity(downloads: &[String]) -> Option<ProviderFileIdentity> {
+    downloads.iter().find_map(|address| {
+        let url = ephervex_download::Url::parse(address.trim()).ok()?;
+        if url.host_str() != Some(MODRINTH_CDN_HOST) {
+            return None;
+        }
+
+        let mut segments = url.path_segments()?;
+        if segments.next()? != "data" {
+            return None;
+        }
+        let project_id = catalog_id(segments.next()?)?.to_owned();
+        let version_id = (segments.next() == Some("versions"))
+            .then(|| segments.next().and_then(catalog_id).map(ToOwned::to_owned))
+            .flatten();
+
+        Some(ProviderFileIdentity {
+            provider: Some(ephervex_model::ModProvider::Modrinth),
+            project_id: Some(project_id),
+            version_id,
+            // Modrinth has no file id distinct from the version id, and
+            // duplicating the version into this field would invent a second
+            // identifier for the same thing.
+            file_id: None,
+        })
+    })
+}
+
+/// The host whose layout the reconstruction above is defined against.
+const MODRINTH_CDN_HOST: &str = "cdn.modrinth.com";
+
+/// The exact shape of a Modrinth catalog id: eight base62 characters.
+///
+/// Checked rather than assumed, because the same URL position can hold a
+/// human-written version number in packs built by older tooling. Requiring at
+/// least one letter rejects an all-digit release date such as `20240115`, which
+/// is a plausible version number and would otherwise be recorded as an id the
+/// catalog has never heard of.
+fn catalog_id(segment: &str) -> Option<&str> {
+    const ID_LENGTH: usize = 8;
+    let looks_like_an_id = segment.len() == ID_LENGTH
+        && segment.chars().all(|c| c.is_ascii_alphanumeric())
+        && segment.chars().any(|c| c.is_ascii_alphabetic());
+    looks_like_an_id.then_some(segment)
+}
+
+/// Fills in the provider identity of a recipe read back from disk.
+///
+/// A recipe written before pack files carried an identity records the same
+/// authoritative download addresses, so the same reconstruction applies to it —
+/// which is what lets an instance imported by an earlier build show its pack's
+/// mods without being re-imported, and without a destructive migration.
+///
+/// Idempotent, and never overwrites: an identity that is already recorded was
+/// written by an import or an installation and outranks anything derived here.
+pub(crate) fn reconcile_identities(recipe: &mut PackRecipe) {
+    for file in &mut recipe.files {
+        if file
+            .identity
+            .as_ref()
+            .is_none_or(ProviderFileIdentity::is_empty)
+        {
+            file.identity = provider_identity(&file.downloads);
+        }
+    }
 }
 
 /// Keeps the hashes this launcher can actually verify, in a stable order.

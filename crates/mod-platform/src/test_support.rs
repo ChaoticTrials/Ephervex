@@ -120,5 +120,6 @@ pub(crate) fn project(id: &str) -> ModProject {
         author: Some("someone".to_owned()),
         client_side: SideSupport::Required,
         server_side: SideSupport::Required,
+        icon_url: None,
     }
 }

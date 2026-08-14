@@ -45,6 +45,8 @@ pub(super) struct RawHit {
     pub(super) client_side: RawSide,
     #[serde(default)]
     pub(super) server_side: RawSide,
+    #[serde(default)]
+    pub(super) icon_url: Option<String>,
 }
 
 /// One project as the project endpoints report it.
@@ -63,6 +65,8 @@ pub(super) struct RawProject {
     pub(super) client_side: RawSide,
     #[serde(default)]
     pub(super) server_side: RawSide,
+    #[serde(default)]
+    pub(super) icon_url: Option<String>,
 }
 
 fn default_project_type() -> String {

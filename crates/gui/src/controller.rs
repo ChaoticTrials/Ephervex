@@ -2,7 +2,7 @@
 
 use std::cell::RefCell;
 use std::collections::{HashSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::mpsc::Sender;
 use std::time::Duration;
@@ -10,7 +10,9 @@ use std::time::Duration;
 use copypasta::{ClipboardContext, ClipboardProvider as _};
 use ephervex_core::live_diagnostics::{LogFilter, LogLevel, RetainedLog};
 use ephervex_i18n::{Arg, lookup, lookup_args};
-use slint::{ComponentHandle as _, Model as _, ModelRc, SharedString, Timer, TimerMode, VecModel};
+use slint::{
+    ComponentHandle as _, Image, Model as _, ModelRc, SharedString, Timer, TimerMode, VecModel,
+};
 
 use crate::backend::{
     self, AccountData, ActivityData, Command, DiagnosticContent, DiagnosticData, Event, JavaData,
@@ -1248,7 +1250,10 @@ fn apply_event(
             minecraft,
             versions,
         } => apply_loader_versions(ui, &form, loader, &minecraft, &versions),
-        Event::ManagedMods(rows) => ui.set_managed_mods(model(managed_mod_rows(rows))),
+        Event::ManagedMods(data) => {
+            ui.set_managed_mods(model(managed_mod_rows(data.mods)));
+            ui.set_managed_mods_notice(data.notice.into());
+        }
         Event::ModResults(rows) => ui.set_mod_results(model(mod_search_rows(rows))),
         Event::ModPlan(plan) => {
             ui.set_mod_plan_instance(plan.instance.into());
@@ -1786,11 +1791,35 @@ fn managed_mod_rows(rows: Vec<ManagedModData>) -> Vec<ModRow> {
         .map(|row| ModRow {
             project_id: row.project_id.into(),
             title: row.title.into(),
+            file_name: row.file_name.into(),
             version: row.version.into(),
+            version_known: row.version_known,
             provider: row.provider.into(),
             origin: row.origin.into(),
+            origin_kind: row.origin_kind.into(),
+            compatibility: row.compatibility.into(),
+            author: row.author.into(),
+            icon: cached_image(&row.icon),
+            missing: row.missing,
+            pack_owned: row.pack_owned,
         })
         .collect()
+}
+
+/// Loads an image the application service already put in its cache.
+///
+/// The path comes from `ephervex-core`, which is the only thing that decides
+/// what may be fetched and where it lands; an empty path means there is no
+/// artwork, and an unreadable file is the same thing to a list that has a
+/// fallback. Neither is worth interrupting the user over.
+fn cached_image(path: &str) -> Image {
+    if path.is_empty() {
+        return Image::default();
+    }
+    Image::load_from_path(Path::new(path)).unwrap_or_else(|error| {
+        tracing::debug!(%path, ?error, "cached mod artwork could not be decoded");
+        Image::default()
+    })
 }
 
 fn mod_search_rows(rows: Vec<ModSearchData>) -> Vec<ModSearchRow> {

@@ -74,8 +74,8 @@ pub use managed::{MODS_DIR, ManagedModInstall, ManagedModInstallation, install_m
 pub use path::{RESERVED_METADATA_DIR, safe_file_name};
 pub use policy::PackPolicy;
 pub use recipe::{
-    ManagedMod, OptionalComponent, OptionalSelection, OverrideLayer, OverrideScope, PackFileRecipe,
-    PackRecipe, PackSide, ProviderFileIdentity, ProviderRecipeMetadata, RECIPE_VERSION,
-    ServerReconstructionPlan, SidePlan, SideRequirement,
+    ManagedMod, ModIdentity, OptionalComponent, OptionalSelection, OverrideLayer, OverrideScope,
+    PackFileRecipe, PackRecipe, PackSide, ProviderFileIdentity, ProviderRecipeMetadata,
+    RECIPE_VERSION, RecordedMod, ServerReconstructionPlan, SidePlan, SideRequirement,
 };
 pub use store::{RECIPE_FILE, SourceStore, provider_directory};

@@ -54,7 +54,10 @@ pub use import::{ImportRequest, ImportedPack};
 pub use instance::{CreatedClient, PreferenceContext, global_minecraft_preferences};
 pub use launch::{LaunchOptions, LaunchOutcome};
 pub use logging::{DEFAULT_LOG_DIRECTIVES, init_tracing};
-pub use mods::{InstalledMods, ModInstallRequest};
+pub use mods::{
+    InstalledMods, InstancePackSource, ManagedModEntry, ManagedModSnapshot, MetadataAvailability,
+    ModDetails, ModInstallRequest, ModPresence,
+};
 pub use server::{CaptureSnapshot, ServerCreateOptions, ServerPersistenceHealth, ServerStatus};
 
 /// Cancellation, re-exported because the services take one.
@@ -139,10 +142,10 @@ pub use ephervex_options::{
 };
 pub use ephervex_pack::{
     AppliedLayer, ExtractionLimits, ManagedMod, ManagedModInstallation, MaterializedFiles,
-    MaterializedPack, MaterializedServerRecipe, ModOrigin, OptionalComponent, OptionalSelection,
-    OverrideLayer, OverrideScope, PackAnalysis, PackError, PackFileRecipe, PackFormat, PackPolicy,
-    PackRecipe, PackSide, ProviderFileIdentity, ProviderRecipeMetadata, ServerReconstructionPlan,
-    SidePlan, SideRequirement,
+    MaterializedPack, MaterializedServerRecipe, ModIdentity, ModOrigin, OptionalComponent,
+    OptionalSelection, OverrideLayer, OverrideScope, PackAnalysis, PackError, PackFileRecipe,
+    PackFormat, PackPolicy, PackRecipe, PackSide, ProviderFileIdentity, ProviderRecipeMetadata,
+    RecordedMod, ServerReconstructionPlan, SidePlan, SideRequirement,
 };
 pub use ephervex_server::{
     CaptureHealth, CaptureRetention, CapturedLine, ControlAction, ControlResponse,

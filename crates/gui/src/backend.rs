@@ -15,13 +15,15 @@ use ephervex_core::{
     App, AuthEvent, AuthObserver, CancellationToken, ClientFolder, CoreError, DiagnosticKind,
     DiagnosticRequest, DiagnosticScope, EulaStatus, GlobalMinecraftPreferences, ImportRequest,
     LaunchAndConnectObserver, LaunchAndConnectOptions, LaunchEvent, LaunchObserver, LaunchOptions,
-    LoginOptions, ModInstallRequest, ModSearchQuery, NewClient, NewServer, OperationReporter,
-    Paths, PreferenceKey, ProgressSink, SearchOptions, ServerCreateOptions, ServerEvent,
-    ServerFolder, ServerNetworkSettings, ServerObserver,
+    LoginOptions, ManagedModEntry, ManagedModSnapshot, MetadataAvailability, ModDetails,
+    ModInstallRequest, ModSearchQuery, NewClient, NewServer, OperationReporter, Paths,
+    PreferenceKey, ProgressSink, SearchOptions, ServerCreateOptions, ServerEvent, ServerFolder,
+    ServerNetworkSettings, ServerObserver,
 };
 use ephervex_i18n::{Arg, lookup, lookup_args, lookup_attribute, lookup_attribute_args};
 use ephervex_model::{
-    InstanceId, LoaderKind, LoaderSelection, Operation, OperationStatus, ServerId, StorageClass,
+    InstanceId, LoaderKind, LoaderSelection, ModOrigin, Operation, OperationStatus, ServerId,
+    StorageClass,
 };
 
 use crate::presentation::{
@@ -282,13 +284,43 @@ pub struct EulaData {
     pub status: String,
 }
 
+/// One row of the Managed Mods list.
+///
+/// Everything here is already resolved to display text by the presentation
+/// layer, and everything that could be absent is either a localized fallback or
+/// an empty string that the view is expected to skip. No field is invented: an
+/// unknown version says so rather than borrowing the file name.
 #[derive(Debug, Clone)]
 pub struct ManagedModData {
     pub project_id: String,
+    /// The project title, or the jar's file name when nothing better is known.
     pub title: String,
+    /// The jar's own name, shown as the secondary line when it differs.
+    pub file_name: String,
     pub version: String,
+    pub version_known: bool,
     pub provider: String,
     pub origin: String,
+    /// `pack`, `user`, `dependency`, for the row's accent.
+    pub origin_kind: String,
+    /// Minecraft versions and loaders the installed release declares, when the
+    /// provider reported them.
+    pub compatibility: String,
+    pub author: String,
+    /// A cached icon file, or empty for the fallback glyph.
+    pub icon: String,
+    /// The jar the instance is recorded as having is not in `mods/`.
+    pub missing: bool,
+    pub pack_owned: bool,
+}
+
+/// The Managed Mods list plus whatever has to be said about how complete it is.
+#[derive(Debug, Clone, Default)]
+pub struct ManagedModsData {
+    pub mods: Vec<ManagedModData>,
+    /// A localized note when provider metadata could not be fetched, empty
+    /// otherwise. Never a reason to withhold the list.
+    pub notice: String,
 }
 
 #[derive(Debug, Clone)]
@@ -367,7 +399,7 @@ pub enum Event {
         minecraft: String,
         versions: Vec<String>,
     },
-    ManagedMods(Vec<ManagedModData>),
+    ManagedMods(ManagedModsData),
     ModResults(Vec<ModSearchData>),
     ModPlan(ModPlanData),
     ServerWorkspace(ServerWorkspaceData),
@@ -696,23 +728,39 @@ fn run_worker(
                 }
             }
             Command::LoadInstanceWorkspace(instance) => {
-                let mods = app.managed_mods(instance).map(|mods| {
-                    mods.into_iter()
-                        .map(|item| ManagedModData {
-                            project_id: item.project_id,
-                            title: item.file_name,
-                            version: item.version_id,
-                            provider: item.provider.to_string(),
-                            origin: item.origin.as_str().replace('_', " "),
-                        })
-                        .collect()
-                });
-                match mods {
-                    Ok(mods) => {
-                        let _ = events.send(Event::ManagedMods(mods));
+                // The durable view first, so the list is on screen before
+                // anything talks to a provider. Enrichment then replaces it
+                // with the same mods plus their titles and artwork; a failure
+                // there leaves what is already shown standing.
+                match app.managed_mod_snapshot(instance) {
+                    Ok(snapshot) => {
+                        let _ = events.send(Event::ManagedMods(managed_mods_data(&snapshot)));
                     }
-                    Err(error) => send_error(&events, &error),
+                    Err(error) => {
+                        send_error(&events, &error);
+                        continue;
+                    }
                 }
+
+                let paths = app.paths().clone();
+                spawn_detached(paths, events.clone(), move |app, events, runtime| {
+                    let enriched = runtime.block_on(app.enriched_managed_mods(
+                        instance,
+                        &OperationReporter::silent("managed-mods"),
+                        &CancellationToken::new(),
+                    ));
+                    match enriched {
+                        Ok(snapshot) => {
+                            let _ = events.send(Event::ManagedMods(managed_mods_data(&snapshot)));
+                        }
+                        // Enrichment is decoration. The list the user is
+                        // already looking at is correct without it, so this
+                        // is logged rather than shown as a failed operation.
+                        Err(error) => {
+                            tracing::warn!(%error, "managed mod metadata could not be loaded");
+                        }
+                    }
+                });
             }
             Command::SearchMods { instance, query } => {
                 let paths = app.paths().clone();
@@ -2364,6 +2412,86 @@ fn localized_error(error: &CoreError) -> String {
 
 fn localized_value(message_id: &str, value: &str) -> String {
     lookup_args(message_id, [("value", Arg::from(value))])
+}
+
+/// Turns the application service's mod view into rows.
+///
+/// The one place a managed mod becomes display text. Everything it reads is
+/// already decided by `ephervex-core`; nothing here inspects a recipe, parses a
+/// file name, or decides what a mod is.
+fn managed_mods_data(snapshot: &ManagedModSnapshot) -> ManagedModsData {
+    ManagedModsData {
+        mods: snapshot.mods.iter().map(managed_mod_data).collect(),
+        notice: match snapshot.metadata {
+            MetadataAvailability::Unavailable => lookup("gui-mod-metadata-offline"),
+            MetadataAvailability::Local | MetadataAvailability::Provider => String::new(),
+        },
+    }
+}
+
+fn managed_mod_data(entry: &ManagedModEntry) -> ManagedModData {
+    let details = entry.details.as_ref();
+    let title = entry.display_name().to_owned();
+    ManagedModData {
+        project_id: entry.identity.project_id().unwrap_or_default().to_owned(),
+        // The file name is the secondary line only when it adds something. For
+        // an unidentified mod the title already is the file name, and printing
+        // it twice would read as a bug.
+        file_name: if title == entry.file_name {
+            String::new()
+        } else {
+            entry.file_name.clone()
+        },
+        title,
+        version: entry
+            .installed_version()
+            .map_or_else(|| lookup("gui-mod-version-unknown"), ToOwned::to_owned),
+        version_known: entry.installed_version().is_some(),
+        provider: entry
+            .identity
+            .provider()
+            .map_or_else(|| lookup("gui-mod-provider-unknown"), |it| it.to_string()),
+        origin: lookup(entry.origin.message_id()),
+        origin_kind: origin_kind(entry.origin).to_owned(),
+        compatibility: details.map(compatibility_summary).unwrap_or_default(),
+        author: details
+            .and_then(|details| details.author.clone())
+            .unwrap_or_default(),
+        icon: entry
+            .icon
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        missing: entry.presence.needs_attention(),
+        pack_owned: entry.is_pack_owned(),
+    }
+}
+
+/// The row accent an origin gets. Three groups rather than four: an optional
+/// dependency and a required one are both "something else asked for this".
+fn origin_kind(origin: ModOrigin) -> &'static str {
+    if origin.is_pack_owned() {
+        "pack"
+    } else if origin.is_dependency() {
+        "dependency"
+    } else {
+        "user"
+    }
+}
+
+/// What the installed release declares it runs on, as one line.
+///
+/// Empty when the provider reported neither, which is what an entry whose exact
+/// version could not be resolved looks like.
+fn compatibility_summary(details: &ModDetails) -> String {
+    let versions = details.game_versions.join(", ");
+    let loaders = details.loaders.join(", ");
+    match (versions.is_empty(), loaders.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => versions,
+        (true, false) => loaders,
+        (false, false) => localized_values("gui-target-summary", &versions, &loaders),
+    }
 }
 
 fn localized_values(message_id: &str, first: &str, second: &str) -> String {
