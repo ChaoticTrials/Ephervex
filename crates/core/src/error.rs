@@ -109,6 +109,17 @@ pub enum CoreError {
         restriction: crate::mutation::MutationRestriction,
     },
 
+    /// A provider's project artwork cannot be shown.
+    ///
+    /// Never fatal and never propagated to a workspace: artwork is decoration,
+    /// so this is logged and the mod keeps its place in the list under the
+    /// generic icon. It is a typed error rather than a bare log line because
+    /// "the provider sent something this build cannot draw" is a real answer
+    /// with a real cause, and a caller that one day wants to show it should not
+    /// have to parse a message to find out which project it was about.
+    #[error("artwork for `{project}` cannot be displayed: {detail}")]
+    ArtworkUnusable { project: String, detail: String },
+
     /// The instance has no loader family to stay inside, so there is no version
     /// of one to change.
     ///
@@ -163,6 +174,7 @@ impl CoreError {
             Self::ModPlatform(error) => error.message_id(),
             Self::Server(error) => error.message_id(),
             Self::Connect(error) => error.message_id(),
+            Self::ArtworkUnusable { .. } => "error-artwork-unusable",
             Self::LoaderFamilyFixed { .. } => "error-loader-family-fixed",
             Self::LoaderChangeBlockedByMods { .. } => "error-loader-change-blocked-by-mods",
             Self::ModNotManaged { .. } => "error-mod-not-managed",
@@ -329,7 +341,8 @@ impl CoreError {
             | Self::ModMutationRestricted { .. }
             | Self::ModIdentityIncomplete { .. }
             | Self::LoaderFamilyFixed { .. }
-            | Self::LoaderChangeBlockedByMods { .. } => None,
+            | Self::LoaderChangeBlockedByMods { .. }
+            | Self::ArtworkUnusable { .. } => None,
         }
     }
 
@@ -372,7 +385,8 @@ impl CoreError {
             | Self::ModPlatform(_)
             | Self::Connect(_)
             | Self::LoaderFamilyFixed { .. }
-            | Self::LoaderChangeBlockedByMods { .. } => None,
+            | Self::LoaderChangeBlockedByMods { .. }
+            | Self::ArtworkUnusable { .. } => None,
         }
     }
 }

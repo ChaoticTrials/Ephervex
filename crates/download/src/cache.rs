@@ -89,6 +89,13 @@ impl ContentStore {
     }
 }
 
+/// The one format cached artwork is ever stored in.
+///
+/// Every desktop image decoder this launcher ships with reads PNG, which is the
+/// whole reason the cache normalizes to it rather than keeping what a provider
+/// happened to send.
+pub const ARTWORK_FORMAT: &str = "png";
+
 /// A file extension that is safe to append to a generated filename.
 ///
 /// Wrapping it in a type means an extension can only reach a path after being
@@ -397,20 +404,29 @@ impl CacheLayout {
     /// and putting an unverifiable file among them would blur a distinction
     /// worth keeping sharp.
     ///
+    /// # Why the name says nothing about where the image came from
+    ///
+    /// The extension is [`ARTWORK_FORMAT`] and never the source address's own.
+    /// A provider serves whatever it likes — WebP, GIF, JPEG — and the one
+    /// thing the cache promises is that what is *in* here can be displayed.
+    /// Naming an entry after its origin made that promise unkeepable: a
+    /// `.webp` entry is a file the desktop's decoder refuses, and it stays
+    /// refused every time it is read. One canonical name per project also means
+    /// a re-fetch replaces its predecessor instead of accumulating beside it.
+    ///
     /// Both segments are validated, so a provider id that arrived from an API
     /// response cannot climb out of the store or name a hidden file.
     pub fn project_artwork(
         &self,
         provider: &str,
         project_id: &str,
-        extension: &FileExtension,
     ) -> Result<PathBuf, CacheKeyError> {
         let provider = safe_segment(provider.trim())?;
         let project = safe_segment(project_id.trim())?;
         Ok(self
             .store_root(ContentStore::Artwork)
             .join(provider)
-            .join(format!("{project}.{}", extension.as_str())))
+            .join(format!("{project}.{ARTWORK_FORMAT}")))
     }
 
     /// Sharding on the first two hex characters keeps directory sizes

@@ -1569,6 +1569,7 @@ dependencies = [
  "ephervex-pack",
  "ephervex-server",
  "ephervex-storage",
+ "image",
  "open",
  "serde_json",
  "sysinfo",
@@ -1579,6 +1580,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "wiremock",
  "zip",
 ]
 
@@ -3212,6 +3214,9 @@ checksum = "e6506c6c10786659413faa717ceebcb8f70731c0a60cbae39795fdf114519c1a"
 dependencies = [
  "bytemuck",
  "byteorder-lite",
+ "color_quant",
+ "gif",
+ "image-webp",
  "moxcms",
  "num-traits",
  "png",

@@ -24,6 +24,7 @@ ephervex-pack.workspace = true
 ephervex-options.workspace = true
 ephervex-server.workspace = true
 ephervex-i18n.workspace = true
+image.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
@@ -40,3 +41,6 @@ tempfile.workspace = true
 # The import tests build `.mrpack` archives to import; nothing in this crate
 # reads an archive itself.
 zip.workspace = true
+# The artwork cache is driven against a loopback server, so no ordinary test
+# depends on a provider's CDN.
+wiremock.workspace = true

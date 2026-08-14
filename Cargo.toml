@@ -70,6 +70,12 @@ futures-util = "0.3.33"
 # must come from the kernel, never from a seeded userspace generator.
 getrandom = "0.4.3"
 hex = "0.4.3"
+# Provider artwork only. The codec list is exactly what a mod catalog serves as
+# a project icon on the decode side, plus PNG on the encode side, because PNG is
+# the one format every desktop image decoder this launcher ships with reads.
+# `default-features = false` keeps the rest of the format zoo, and its
+# dependencies, out of the build.
+image = { version = "0.25.9", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 i18n-embed = { version = "0.16.0", features = ["fluent-system", "desktop-requester"] }
 i18n-embed-fl = "0.10.1"
 keyring = "4.1.6"

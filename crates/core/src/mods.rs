@@ -33,8 +33,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use ephervex_download::{
-    CacheLayout, DomainAllowlist, DownloadManager, DownloadRequest, DownloaderConfig,
-    FileExtension, OperationReporter,
+    CacheLayout, DomainAllowlist, DownloadManager, DownloaderConfig, OperationReporter,
 };
 use ephervex_mod_platform::{
     AnnotatedVersion, InstallSelection, InstalledPolicy, InstalledProject, InstanceTarget,
@@ -49,7 +48,7 @@ use ephervex_pack::{
 };
 use ephervex_storage::ClientRecord;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, instrument, warn};
+use tracing::{info, instrument, warn};
 
 use crate::app::App;
 use crate::error::CoreResult;
@@ -423,62 +422,6 @@ impl ModDetailIndex {
     }
 }
 
-/// Puts one project's icon in the shared artwork cache and returns its path.
-///
-/// Already-cached artwork is served without a request. An icon has no published
-/// hash, so there is nothing to verify it against and nothing that would make
-/// re-fetching it more correct; what protects the launcher here is the same
-/// transport and host policy an untrusted pack's downloads are held to, plus a
-/// hard ceiling on the response.
-async fn artwork(
-    manager: &DownloadManager,
-    cache: &CacheLayout,
-    allowlist: &DomainAllowlist,
-    project: &ModProject,
-    icon_url: &str,
-    reporter: &OperationReporter,
-    cancel: &CancellationToken,
-) -> CoreResult<PathBuf> {
-    let url = allowlist
-        .validate(icon_url)
-        .map_err(|source| PackError::DownloadUrlRejected {
-            path: project.id.clone(),
-            source,
-        })?;
-
-    // The extension comes from the address's own path and is validated before
-    // it can name a file. A provider does not get to choose a destination.
-    let extension = url
-        .path()
-        .rsplit_once('.')
-        .map(|(_, extension)| extension)
-        .and_then(|extension| FileExtension::new(extension).ok())
-        .ok_or_else(|| PackError::EntryPathUnsafe {
-            entry: ephervex_download::redacted(&url),
-        })?;
-    let destination = cache
-        .project_artwork(project.provider.as_str(), &project.id, &extension)
-        .map_err(|error| PackError::EntryPathUnsafe {
-            entry: error.to_string(),
-        })?;
-    if destination.is_file() {
-        return Ok(destination);
-    }
-
-    manager
-        .download(
-            &DownloadRequest::new(url, destination.clone()).labeled(project.id.clone()),
-            reporter,
-            cancel,
-        )
-        .await
-        .map_err(|source| PackError::DownloadFailed {
-            path: project.id.clone(),
-            source: Box::new(source),
-        })?;
-    Ok(destination)
-}
-
 impl App {
     /// Searches a provider for mods that fit one instance.
     ///
@@ -804,13 +747,18 @@ impl App {
             if cancel.is_cancelled() {
                 break;
             }
-            match artwork(&manager, &cache, &allowlist, project, url, reporter, cancel).await {
+            match crate::artwork::cache_project_artwork(
+                &manager, &cache, &allowlist, project, url, reporter, cancel,
+            )
+            .await
+            {
                 Ok(path) => {
                     cached.insert(project.id.clone(), path);
                 }
-                Err(error) => {
-                    debug!(project = %project.id, %error, "no artwork for a managed mod");
-                }
+                // Decoration. A project whose image will not download, will not
+                // decode, or is too large to be an icon keeps its entry, its
+                // identity, and its place in the list.
+                Err(error) => crate::artwork::report_failure(&project.id, &error),
             }
         }
         cached

@@ -715,6 +715,8 @@ mod-restriction-dependency = Another mod requires this one, so its release follo
 mod-restriction-identity-unresolved = Ephervex cannot tell which project this file is, so it has nothing to look up.
 mod-restriction-version-unknown = Ephervex cannot tell which release is installed, so it will not guess what to replace.
 
+error-artwork-unusable = A mod's icon could not be shown.
+.action = The mod itself is unaffected; a generic icon is used instead.
 error-loader-family-fixed = { $loader } instances have no loader build to change.
 .action = Changing the loader itself is not supported; create an instance with the loader you want.
 error-loader-change-blocked-by-mods = { $count ->
