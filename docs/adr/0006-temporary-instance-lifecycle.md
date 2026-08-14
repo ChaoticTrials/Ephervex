@@ -15,7 +15,7 @@ exactly the moment it becomes interesting.
 
 ## Decision
 
-Temporary instances live under `std::env::temp_dir()/ephervex/instances/<uuid>/`
+Temporary instances live under `std::env::temp_dir()/ephervex-<uid>/instances/<uuid>/`
 and the operating system owns their cleanup.
 
 Specifically:

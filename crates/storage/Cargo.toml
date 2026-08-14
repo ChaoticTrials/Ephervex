@@ -17,6 +17,7 @@ serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
 rusqlite.workspace = true
+rustix.workspace = true
 directories.workspace = true
 chrono.workspace = true
 uuid.workspace = true

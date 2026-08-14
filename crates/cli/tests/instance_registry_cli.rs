@@ -115,7 +115,7 @@ fn the_cli_exercises_the_instance_registry_workflow() {
         "the temporary instance must live under TMPDIR, not a hardcoded /tmp: {}",
         temporary_root.display()
     );
-    std::fs::remove_dir_all(sandbox.tmpdir().join("ephervex").join("instances"))
+    std::fs::remove_dir_all(temporary_root.parent().expect("temporary instances root"))
         .expect("simulate the OS clearing its temporary directory");
 
     let report = sandbox.json(&["--json", "reconcile"]);
@@ -151,9 +151,12 @@ fn the_temporary_instance_root_follows_tmpdir() {
     let paths = sandbox.json(&["--json", "paths"]);
 
     let temporary_instances = PathBuf::from(paths["temporary_instances"].as_str().expect("path"));
+    assert!(temporary_instances.starts_with(sandbox.tmpdir()));
     assert_eq!(
-        temporary_instances,
-        sandbox.tmpdir().join("ephervex").join("instances")
+        temporary_instances
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str),
+        Some("instances")
     );
 
     //...and the XDG roots follow their variables too.

@@ -34,6 +34,9 @@ pub enum PathError {
         #[source]
         source: std::io::Error,
     },
+    /// The temporary root exists but cannot safely hold private instances.
+    #[error("the temporary directory {path} is unsafe: {reason}")]
+    UnsafeTemporaryDirectory { path: PathBuf, reason: &'static str },
 }
 
 impl PathError {
@@ -42,7 +45,9 @@ impl PathError {
     pub const fn message_id(&self) -> &'static str {
         match self {
             Self::NoHomeDirectory => "error-paths-no-home-directory",
-            Self::DirectoryCreation { .. } => "error-paths-directory-creation",
+            Self::DirectoryCreation { .. } | Self::UnsafeTemporaryDirectory { .. } => {
+                "error-paths-directory-creation"
+            }
         }
     }
 }
@@ -140,14 +145,18 @@ impl Paths {
         )
     }
 
-    /// The OS temporary root for this application.
+    /// The OS temporary root for this user and application.
     ///
     /// Always derived from [`std::env::temp_dir`], never from a hardcoded
     /// `/tmp` — that is what makes `TMPDIR` work, and it keeps the code honest
     /// about what it depends on (ADR 0003).
     #[must_use]
     pub fn os_temp_root() -> PathBuf {
-        std::env::temp_dir().join(APP_ID)
+        #[cfg(unix)]
+        let name = format!("{APP_ID}-{}", rustix::process::getuid().as_raw());
+        #[cfg(not(unix))]
+        let name = APP_ID;
+        std::env::temp_dir().join(name)
     }
 
     /// Overrides where persistent instances are stored.
@@ -192,7 +201,7 @@ impl Paths {
         &self.state
     }
 
-    /// `<temp>/ephervex/`, where `<temp>` is [`std::env::temp_dir`].
+    /// `<temp>/ephervex-<uid>/`, where `<temp>` is [`std::env::temp_dir`].
     #[must_use]
     pub fn temp_dir(&self) -> &Path {
         &self.temp
@@ -321,13 +330,13 @@ impl Paths {
         self.logs_dir().join("servers").join(id.to_string())
     }
 
-    /// `<temp>/ephervex/instances/`.
+    /// `<temp>/ephervex-<uid>/instances/`.
     #[must_use]
     pub fn temporary_instances_dir(&self) -> PathBuf {
         self.temp.join("instances")
     }
 
-    /// `<temp>/ephervex/servers/`.
+    /// `<temp>/ephervex-<uid>/servers/`.
     ///
     /// Temporary servers live under the OS temp root for the same reason
     /// temporary instances do.
@@ -393,13 +402,76 @@ impl Paths {
             self.natives_cache_dir(),
             self.logs_dir(),
             self.launcher_logs_dir(),
-            self.temporary_instances_dir(),
-            self.temporary_servers_dir(),
         ] {
             create_dir_all(&directory)?;
         }
+        ensure_private_temporary_directory(&self.temp)?;
+        ensure_private_temporary_directory(&self.temporary_instances_dir())?;
+        ensure_private_temporary_directory(&self.temporary_servers_dir())?;
         Ok(())
     }
+}
+
+#[cfg(unix)]
+fn ensure_private_temporary_directory(path: &Path) -> Result<(), PathError> {
+    use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _};
+
+    if let Some(parent) = path.parent() {
+        create_dir_all(parent)?;
+    }
+
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => {}
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+            let mut builder = std::fs::DirBuilder::new();
+            builder.mode(0o700);
+            builder
+                .create(path)
+                .map_err(|source| PathError::DirectoryCreation {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
+        }
+        Err(source) => {
+            return Err(PathError::DirectoryCreation {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    }
+
+    let metadata =
+        std::fs::symlink_metadata(path).map_err(|source| PathError::DirectoryCreation {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(PathError::UnsafeTemporaryDirectory {
+            path: path.to_path_buf(),
+            reason: "it is not a real directory",
+        });
+    }
+    if metadata.uid() != rustix::process::getuid().as_raw() {
+        return Err(PathError::UnsafeTemporaryDirectory {
+            path: path.to_path_buf(),
+            reason: "it is owned by another user",
+        });
+    }
+
+    if metadata.mode() & 0o077 != 0 {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).map_err(
+            |source| PathError::DirectoryCreation {
+                path: path.to_path_buf(),
+                source,
+            },
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_private_temporary_directory(path: &Path) -> Result<(), PathError> {
+    create_dir_all(path)
 }
 
 /// `create_dir_all` with the path attached to the error, because "permission
@@ -469,6 +541,10 @@ mod tests {
         // proof that a different `TMPDIR` relocates instances lives in the CLI
         // integration test, which can set the variable in a child process
         // instead of mutating this one.
+        #[cfg(unix)]
+        let expected =
+            std::env::temp_dir().join(format!("{APP_ID}-{}", rustix::process::getuid().as_raw()));
+        #[cfg(not(unix))]
         let expected = std::env::temp_dir().join(APP_ID);
         assert_eq!(Paths::os_temp_root(), expected);
 
@@ -617,6 +693,49 @@ mod tests {
 
         // Idempotent: startup runs this on every launch.
         paths.ensure_base_directories().expect("second run");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn temporary_roots_are_private_to_the_current_user() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let base = tempfile::tempdir().expect("temp dir");
+        let paths = Paths::rooted_at(base.path());
+        paths.ensure_base_directories().expect("create dirs");
+
+        for directory in [
+            paths.temp_dir().to_path_buf(),
+            paths.temporary_instances_dir(),
+            paths.temporary_servers_dir(),
+        ] {
+            let mode = std::fs::symlink_metadata(&directory)
+                .expect("metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o700, "{directory:?} must be private");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_cannot_be_used_as_the_temporary_root() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let elsewhere = tempfile::tempdir().expect("outside dir");
+        let paths = Paths::from_roots(
+            base.path().join("config"),
+            base.path().join("data"),
+            base.path().join("cache"),
+            base.path().join("state"),
+            base.path().join("temp-link"),
+        );
+        std::os::unix::fs::symlink(elsewhere.path(), paths.temp_dir()).expect("symlink");
+
+        assert!(matches!(
+            paths.ensure_base_directories(),
+            Err(PathError::UnsafeTemporaryDirectory { .. })
+        ));
     }
 
     #[test]

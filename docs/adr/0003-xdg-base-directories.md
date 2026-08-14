@@ -23,11 +23,13 @@ Resolve all four roots through the `directories` crate, keyed on the single
 | Persistent data | `$XDG_DATA_HOME/ephervex/` (`instances/`, `servers/`, `java/`, `shared/`, `icons/`) |
 | Cache | `$XDG_CACHE_HOME/ephervex/` (`downloads/`, `metadata/`, `assets/`, `libraries/`, `installer-cache/`) |
 | State | `$XDG_STATE_HOME/ephervex/` (`launcher.sqlite`, `logs/`) |
-| Temporary instances | `std::env::temp_dir()/ephervex/instances/<uuid>/` |
+| Temporary instances | `std::env::temp_dir()/ephervex-<uid>/instances/<uuid>/` |
 
 The temporary root comes from `std::env::temp_dir()`, never from a hardcoded
 `/tmp` — that respects `TMPDIR` and keeps the code honest about what it depends
-on.
+on. The user-scoped application directory and its instance/server children are
+real directories owned by the current user with mode `0700`; symlinks and roots
+owned by another user are refused.
 
 The persistent instance root is user-overridable in settings; the other roots
 are not.

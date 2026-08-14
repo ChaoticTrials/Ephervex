@@ -153,6 +153,18 @@ fn reconcile_clients(
             storage: record.storage,
         };
 
+        if record.storage == StorageClass::Temporary
+            && record.root != registry.paths().instance_root(record.storage, record.id)
+        {
+            // Temporary roots are launcher-owned and UID-scoped. An older or
+            // tampered record pointing elsewhere must not bypass that boundary;
+            // forget it without deleting the path, which may belong to a user
+            // or to another account on the machine.
+            registry.delete_client(record.id, FileDisposition::Keep)?;
+            report.removed_stale_temporary.push(entry);
+            continue;
+        }
+
         if record.root.is_dir() {
             // The disk came back. Clearing the warning here is what stops a
             // remounted drive from leaving a permanent "needs attention" badge.
@@ -206,6 +218,14 @@ fn reconcile_servers(
             root: record.root.clone(),
             storage: record.storage,
         };
+
+        if record.storage == StorageClass::Temporary
+            && record.root != registry.paths().server_root(record.storage, record.id)
+        {
+            registry.delete_server(record.id, FileDisposition::Keep)?;
+            report.removed_stale_temporary.push(entry);
+            continue;
+        }
 
         if record.root.is_dir() {
             match metadata::read_server_metadata(&record.root) {
@@ -465,6 +485,37 @@ mod tests {
             .expect("persistent record is kept");
         assert!(kept.attention.contains(&AttentionReason::MissingRoot));
         assert!(report.needs_attention());
+    }
+
+    #[test]
+    fn temporary_records_outside_the_private_root_are_forgotten_without_deleting_files() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let mut client = registry
+            .create_client(NewClient::new(
+                "legacy",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create");
+        let original = client.root.clone();
+        let legacy = environment.base().join("data/legacy-temporary-client");
+        std::fs::rename(&original, &legacy).expect("move legacy root");
+        client.root.clone_from(&legacy);
+        registry
+            .update_client(&mut client)
+            .expect("store legacy path");
+
+        let report = reconcile(&registry).expect("reconcile");
+        assert_eq!(report.removed_stale_temporary.len(), 1);
+        assert!(
+            legacy.is_dir(),
+            "reconciliation must not delete an unowned root"
+        );
+        assert!(matches!(
+            registry.client(client.id),
+            Err(RegistryError::InstanceUnknown { .. })
+        ));
     }
 
     #[test]

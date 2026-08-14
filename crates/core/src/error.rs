@@ -392,7 +392,8 @@ fn index_failing_path(error: &ephervex_storage::IndexError) -> Option<PathBuf> {
 fn path_failing_path(error: &ephervex_storage::PathError) -> Option<PathBuf> {
     use ephervex_storage::PathError;
     match error {
-        PathError::DirectoryCreation { path, .. } => Some(path.clone()),
+        PathError::DirectoryCreation { path, .. }
+        | PathError::UnsafeTemporaryDirectory { path, .. } => Some(path.clone()),
         PathError::NoHomeDirectory => None,
     }
 }
