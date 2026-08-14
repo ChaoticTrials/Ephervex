@@ -220,7 +220,24 @@ impl LaunchLock {
         self.state.game_pid = Some(pid);
         let body = serde_json::to_vec_pretty(&self.state)
             .map_err(|error| LockError::unusable(&self.path, error.into()))?;
-        std::fs::write(&self.path, body).map_err(|error| LockError::unusable(&self.path, error))
+        let mut temporary_name = self.path.as_os_str().to_os_string();
+        temporary_name.push(format!(".tmp.{}", uuid::Uuid::new_v4()));
+        let temporary = PathBuf::from(temporary_name);
+        let result = (|| {
+            use std::io::Write as _;
+
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)?;
+            file.write_all(&body)?;
+            file.sync_all()?;
+            std::fs::rename(&temporary, &self.path)
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temporary);
+        }
+        result.map_err(|error| LockError::unusable(&self.path, error))
     }
 
     /// What this lock records.
@@ -237,6 +254,14 @@ impl LaunchLock {
 
 impl Drop for LaunchLock {
     fn drop(&mut self) {
+        let owns_path = read_state(&self.path).ok().flatten().is_some_and(|state| {
+            state.owner_pid == self.state.owner_pid
+                && state.owner_start_ticks == self.state.owner_start_ticks
+                && state.since == self.state.since
+        });
+        if !owns_path {
+            return;
+        }
         if let Err(error) = std::fs::remove_file(&self.path) {
             if error.kind() != std::io::ErrorKind::NotFound {
                 warn!(path = %self.path.display(), %error, "could not release the launch lock");
@@ -341,6 +366,44 @@ mod tests {
         let state = running_state(root.path()).expect("running");
         assert_eq!(state.game_pid, Some(4242));
         assert_eq!(state.owner_pid, std::process::id());
+    }
+
+    #[test]
+    fn recording_the_game_pid_publishes_complete_owner_evidence() {
+        let root = instance();
+        let mut held = LaunchLock::acquire(root.path()).expect("lock");
+        held.record_game_pid(4242).expect("record");
+
+        let body = std::fs::read(held.path()).expect("lock body");
+        let state: LaunchState = serde_json::from_slice(&body).expect("complete JSON");
+        assert_eq!(state, *held.state());
+        assert!(
+            std::fs::read_dir(held.path().parent().expect("parent"))
+                .expect("metadata directory")
+                .filter_map(Result::ok)
+                .all(|entry| !entry.file_name().to_string_lossy().contains(".tmp."))
+        );
+    }
+
+    #[test]
+    fn dropping_an_old_guard_does_not_remove_replacement_owner_evidence() {
+        let root = instance();
+        let held = LaunchLock::acquire(root.path()).expect("lock");
+        let replacement = LaunchState {
+            owner_pid: std::process::id(),
+            owner_start_ticks: process_start_ticks(std::process::id()),
+            game_pid: Some(99),
+            since: Utc::now(),
+        };
+        std::fs::write(
+            held.path(),
+            serde_json::to_vec_pretty(&replacement).expect("serialize"),
+        )
+        .expect("replace evidence");
+
+        let path = held.path().to_path_buf();
+        drop(held);
+        assert!(path.exists());
     }
 
     #[test]
