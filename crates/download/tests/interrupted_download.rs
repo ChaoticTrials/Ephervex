@@ -255,10 +255,18 @@ async fn an_interrupted_download_leaves_nothing_at_the_final_path() {
         .expect_err("the body is never delivered in full");
 
     assert!(!destination.exists());
-    let mut part = destination.as_os_str().to_os_string();
-    part.push(".part");
+    let prefix = format!(
+        "{}.part.",
+        destination
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .expect("file name")
+    );
     assert!(
-        !std::path::Path::new(&part).exists(),
+        std::fs::read_dir(destination.parent().expect("parent"))
+            .expect("read parent")
+            .filter_map(Result::ok)
+            .all(|entry| !entry.file_name().to_string_lossy().starts_with(&prefix)),
         "a partial file whose validator did not survive is useless and must be cleaned up"
     );
 }

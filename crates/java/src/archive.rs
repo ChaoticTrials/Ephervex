@@ -3,11 +3,11 @@
 //! # Where the rules live
 //!
 //! This module reads one archive shape — a gzipped tar from Adoptium — but the
-//! rules it applies to an entry name are not its own. [`safe_relative_path`],
-//! [`safe_link_target`], and [`walks_through_a_link`] come from
-//! `ephervex-pack`'s `path` module, which every importer and extractor in the
-//! workspace shares. Keeping one implementation prevents JDK and pack
-//! extraction from drifting into different security policies.
+//! rules it applies to an entry name are not its own. [`safe_relative_path`]
+//! and [`safe_link_target`] come from `ephervex-pack`'s `path` module, which
+//! every importer and extractor in the workspace shares. Keeping one lexical
+//! implementation prevents JDK and pack extraction from drifting into
+//! different security policies.
 //!
 //! What stays here is what is genuinely tar-specific: which entry *types* are
 //! acceptable, the extraction limits a JDK needs, and the permission bits.
@@ -26,10 +26,10 @@
 //! resolve the target lexically from the link's own directory and refuse it
 //! only if it climbs out of the extraction root.
 //!
-//! That resolution is lexical, though, so it describes where the archive
-//! *says* an entry goes. [`walks_through_a_link`] closes the gap: once an
-//! entry has become a symlink, nothing may be written through it, because a
-//! link that lands on the root relocates everything named beneath it.
+//! Lexical validation alone cannot see several links composing into an escape.
+//! This module therefore collects the complete tar link graph, rejects link
+//! destinations nested beneath another link, resolves targets through graph
+//! links, and creates links only after the entire graph is safe.
 //!
 //! # Limits
 //!
@@ -44,12 +44,13 @@
 //! makes the whole install useless, which is a failure mode worth stating out
 //! loud because it would otherwise only surface at launch.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
-use ephervex_pack::path::{safe_link_target, safe_relative_path, walks_through_a_link};
+use ephervex_pack::path::{safe_link_target, safe_relative_path};
 use flate2::read::GzDecoder;
 use tar::{Archive, EntryType};
 use tracing::{debug, instrument};
@@ -194,9 +195,10 @@ pub fn extract_tar_gz(
         bytes: 0,
     };
     let mut seen: u64 = 0;
-    // Paths this archive has already turned into symlinks. Nothing may be
-    // written through one: see [`links_created`].
-    let mut links_created: BTreeSet<PathBuf> = BTreeSet::new();
+    // Links are created only after the complete graph is known. Checking one
+    // target at a time is insufficient because several individually relative
+    // links can compose into an escape, including through a forward reference.
+    let mut pending_links = Vec::new();
 
     for entry in entries {
         let mut entry = entry.map_err(|source| ArchiveError::Unreadable {
@@ -219,17 +221,6 @@ pub fn extract_tar_gz(
             continue;
         };
 
-        // Every path check above is lexical, and a lexical check describes
-        // where the archive *says* an entry goes. Once an earlier entry has
-        // made one of its ancestors a symlink, that is no longer where it
-        // lands, and the check is measuring from the wrong place. Refusing to
-        // write through a link this archive created keeps the two in step.
-        if walks_through_a_link(&resolved.relative, &links_created) {
-            return Err(ArchiveError::UnsafePath {
-                entry: resolved.name,
-            });
-        }
-
         if entry.header().entry_type().is_dir() {
             std::fs::create_dir_all(&resolved.target).map_err(|source| {
                 ArchiveError::Unwritable {
@@ -242,14 +233,19 @@ pub fn extract_tar_gz(
         }
 
         if entry.header().entry_type().is_symlink() {
-            create_symlink(&entry, &resolved)?;
-            links_created.insert(resolved.relative);
-            report.symlinks += 1;
+            let target = validated_link_target(&entry, &resolved)?;
+            pending_links.push(PendingLink { resolved, target });
             continue;
         }
 
         report.bytes = extract_file(&mut entry, &resolved.target, report.bytes, limits)?;
         report.files += 1;
+    }
+
+    validate_link_graph(&pending_links)?;
+    for link in pending_links {
+        create_symlink(&link.resolved, &link.target)?;
+        report.symlinks += 1;
     }
 
     if report.files == 0 {
@@ -263,6 +259,11 @@ pub fn extract_tar_gz(
         "extracted an archive"
     );
     Ok(report)
+}
+
+struct PendingLink {
+    resolved: ResolvedEntry,
+    target: PathBuf,
 }
 
 /// One entry's validated destination.
@@ -322,10 +323,10 @@ fn resolve_entry<R: Read>(
 ///
 /// The link is written **relative**, exactly as the archive spells it, so the
 /// installed runtime can be moved without every link in `legal/` breaking.
-fn create_symlink<R: Read>(
+fn validated_link_target<R: Read>(
     entry: &tar::Entry<'_, R>,
     resolved: &ResolvedEntry,
-) -> Result<(), ArchiveError> {
+) -> Result<PathBuf, ArchiveError> {
     let raw = entry
         .link_name_bytes()
         .ok_or_else(|| ArchiveError::UnsafeEntryType {
@@ -339,6 +340,117 @@ fn create_symlink<R: Read>(
         });
     };
 
+    Ok(link)
+}
+
+fn validate_link_graph(links: &[PendingLink]) -> Result<(), ArchiveError> {
+    let mut graph = BTreeMap::new();
+    for link in links {
+        if graph
+            .insert(link.resolved.relative.clone(), link.target.clone())
+            .is_some()
+        {
+            return Err(ArchiveError::UnsafePath {
+                entry: link.resolved.name.clone(),
+            });
+        }
+    }
+
+    for link in links {
+        // Creating a link below another archive link follows that ancestor in
+        // the destination path before the new link is created. Reject the
+        // layout outright so the lexical parent used by target resolution is
+        // also the parent where the filesystem operation will land. The graph
+        // is complete here, so this covers forward references as well as links
+        // that appeared earlier in the tar stream.
+        if link
+            .resolved
+            .relative
+            .parent()
+            .into_iter()
+            .flat_map(Path::ancestors)
+            .any(|ancestor| graph.contains_key(ancestor))
+        {
+            return Err(ArchiveError::UnsafePath {
+                entry: link.resolved.name.clone(),
+            });
+        }
+
+        if !link_resolves_inside(&link.resolved.relative, &link.target, &graph) {
+            return Err(ArchiveError::UnsafePath {
+                entry: link.resolved.name.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+enum LinkComponent {
+    Normal(OsString),
+    Parent,
+}
+
+fn link_resolves_inside(
+    link_path: &Path,
+    target: &Path,
+    graph: &BTreeMap<PathBuf, PathBuf>,
+) -> bool {
+    let mut resolved: Vec<OsString> = link_path
+        .parent()
+        .into_iter()
+        .flat_map(Path::components)
+        .filter_map(|component| match component {
+            std::path::Component::Normal(value) => Some(value.to_os_string()),
+            _ => None,
+        })
+        .collect();
+    let mut remaining = link_components(target);
+    let mut visited = BTreeSet::new();
+
+    while let Some(component) = remaining.pop_front() {
+        match component {
+            LinkComponent::Parent => {
+                if resolved.pop().is_none() {
+                    return false;
+                }
+            }
+            LinkComponent::Normal(value) => {
+                let mut candidate: PathBuf = resolved.iter().collect();
+                candidate.push(&value);
+                if let Some(next_target) = graph.get(&candidate) {
+                    if !visited.insert(candidate) {
+                        return false;
+                    }
+                    let expansion = link_components(next_target);
+                    for nested in expansion.into_iter().rev() {
+                        remaining.push_front(nested);
+                    }
+                } else {
+                    resolved.push(value);
+                }
+            }
+        }
+    }
+    true
+}
+
+fn link_components(path: &Path) -> VecDeque<LinkComponent> {
+    path.components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(value) => {
+                Some(LinkComponent::Normal(value.to_os_string()))
+            }
+            std::path::Component::ParentDir => Some(LinkComponent::Parent),
+            std::path::Component::CurDir => None,
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                Some(LinkComponent::Parent)
+            }
+        })
+        .collect()
+}
+
+fn create_symlink(resolved: &ResolvedEntry, link: &Path) -> Result<(), ArchiveError> {
     if let Some(parent) = resolved.target.parent() {
         std::fs::create_dir_all(parent).map_err(|source| ArchiveError::Unwritable {
             path: parent.to_path_buf(),
@@ -351,7 +463,7 @@ fn create_symlink<R: Read>(
         // A previous entry may have created this path; a symlink over an
         // existing file fails rather than replacing it, which is the safer
         // default for an archive that names the same path twice.
-        std::os::unix::fs::symlink(&link, &resolved.target).map_err(|source| {
+        std::os::unix::fs::symlink(link, &resolved.target).map_err(|source| {
             ArchiveError::Unwritable {
                 path: resolved.target.clone(),
                 source,
@@ -619,6 +731,90 @@ mod tests {
             result.is_err(),
             "the escape attempt should be refused, not silently contained"
         );
+    }
+
+    #[test]
+    fn composed_links_cannot_resolve_outside_in_either_archive_order() {
+        for reverse in [false, true] {
+            let base = temp();
+            let archive = base.path().join("chain.tar.gz");
+            let root = base.path().join("root");
+            let mut links = vec![
+                ("jdk/d/l", EntryType::Symlink, "..", &b""[..]),
+                ("jdk/escape", EntryType::Symlink, "d/l/../outside", &b""[..]),
+            ];
+            if reverse {
+                links.reverse();
+            }
+            let mut entries = vec![("jdk/release", EntryType::Regular, "", &b"JAVA=21\n"[..])];
+            entries.extend(links);
+            tar_gz_entries(&archive, &entries);
+
+            let error = extract_tar_gz(&archive, &root, 1, &ExtractionLimits::default())
+                .expect_err("a composed link escape must be refused");
+            assert!(matches!(error, ArchiveError::UnsafePath { .. }));
+            assert!(
+                !root.join("escape").exists(),
+                "link creation must wait until the complete graph is validated"
+            );
+        }
+    }
+
+    #[test]
+    fn a_link_destination_below_another_link_is_refused_in_either_archive_order() {
+        for reverse in [false, true] {
+            let base = temp();
+            let archive = base.path().join("nested-destination.tar.gz");
+            let root = base.path().join("root");
+            let outside = base.path().join("outside");
+            let mut links = vec![
+                ("jdk/a", EntryType::Symlink, ".", &b""[..]),
+                ("jdk/a/b", EntryType::Symlink, "../outside", &b""[..]),
+            ];
+            if reverse {
+                links.reverse();
+            }
+            let mut entries = vec![("jdk/release", EntryType::Regular, "", &b"JAVA=21\n"[..])];
+            entries.extend(links);
+            tar_gz_entries(&archive, &entries);
+
+            let error = extract_tar_gz(&archive, &root, 1, &ExtractionLimits::default())
+                .expect_err("a link created through another link must be refused");
+            assert!(matches!(error, ArchiveError::UnsafePath { .. }));
+            assert!(
+                !outside.exists(),
+                "the link target must not escape the root"
+            );
+            assert!(
+                !root.join("a").exists(),
+                "no archive link may be created before graph validation"
+            );
+            assert!(
+                !root.join("b").exists(),
+                "the nested link must not be created at its effective path"
+            );
+        }
+    }
+
+    #[test]
+    fn cyclic_symlinks_are_refused_before_any_link_is_created() {
+        let base = temp();
+        let archive = base.path().join("cycle.tar.gz");
+        let root = base.path().join("root");
+        tar_gz_entries(
+            &archive,
+            &[
+                ("jdk/release", EntryType::Regular, "", b"JAVA=21\n"),
+                ("jdk/a", EntryType::Symlink, "b", b""),
+                ("jdk/b", EntryType::Symlink, "a", b""),
+            ],
+        );
+
+        let error = extract_tar_gz(&archive, &root, 1, &ExtractionLimits::default())
+            .expect_err("a link cycle must be refused");
+        assert!(matches!(error, ArchiveError::UnsafePath { .. }));
+        assert!(!root.join("a").exists());
+        assert!(!root.join("b").exists());
     }
 
     #[test]

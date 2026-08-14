@@ -6,7 +6,7 @@
 //! JDK archives. There is one implementation because there is one set of rules
 //! that must hold for all of them:
 //!
-//! - **Atomic finalization.** A download is written to `<destination>.part` and
+//! - **Atomic finalization.** A download is written to a unique partial sibling and
 //!   renamed into place only after verification. A partial artifact never
 //!   appears at a cache path, which is what entitles downstream consumers to treat
 //!   presence at that path as proof of a verified artifact.

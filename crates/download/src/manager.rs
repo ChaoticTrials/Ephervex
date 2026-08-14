@@ -8,7 +8,7 @@
 //!
 //! # The atomicity invariant
 //!
-//! A download is written to `<destination>.part` and only renamed into place
+//! A download is written to a unique `<destination>.part.<id>` sibling and only renamed into place
 //! after every supplied hash and size has been verified. A partial or corrupt
 //! artifact therefore never appears at the final path, and that is the
 //! invariant the whole shared-cache design rests on: downstream consumers check for a
@@ -18,8 +18,9 @@
 //! the destination's own directory precisely so the rename never crosses a
 //! filesystem boundary.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
 use ephervex_model::{Hash, OperationStatus, Progress};
@@ -28,8 +29,8 @@ use futures_util::stream::FuturesUnordered;
 use reqwest::header::{ACCEPT_RANGES, CONTENT_RANGE, ETAG, IF_RANGE, RANGE};
 use reqwest::{Client, Response, StatusCode, Url};
 use tokio::fs::{self, File, OpenOptions};
-use tokio::io::{AsyncSeekExt, AsyncWriteExt};
-use tokio::sync::Semaphore;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
 
@@ -43,6 +44,9 @@ use crate::verify::HashVerifier;
 /// Suffix for in-flight downloads. Kept in the destination directory so the
 /// finalizing rename is a same-filesystem operation.
 const PART_SUFFIX: &str = "part";
+
+type DestinationLocks = Mutex<HashMap<PathBuf, Weak<AsyncMutex<()>>>>;
+static DESTINATION_LOCKS: OnceLock<DestinationLocks> = OnceLock::new();
 
 /// Where an artifact came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -412,7 +416,10 @@ impl DownloadManager {
         let url_label = redacted(&request.url);
         check_transport(&request.url, self.config.http.allow_plaintext_http)?;
 
-        if let Some(cached) = already_cached(&request.destination, cursor).await {
+        let destination_lock = destination_lock(&request.destination);
+        let _destination_guard = destination_lock.lock().await;
+
+        if let Some(cached) = already_cached(request, cursor).await? {
             trace!(url = %url_label, path = %request.destination.display(), "artifact already cached");
             return Ok(cached);
         }
@@ -426,11 +433,11 @@ impl DownloadManager {
         // Re-check under the permit: a sibling transfer in the same batch may
         // have deposited the identical content-addressed artifact while this
         // one was queued.
-        if let Some(cached) = already_cached(&request.destination, cursor).await {
+        if let Some(cached) = already_cached(request, cursor).await? {
             return Ok(cached);
         }
 
-        let part = part_path(&request.destination);
+        let part = part_path(&request.destination, uuid::Uuid::new_v4());
         let mut state = ResumeState::new(&request.expected_hashes);
         let mut attempt: u32 = 0;
 
@@ -806,31 +813,82 @@ impl Transfer<'_, '_> {
 
 /// Reports an artifact that is already at its destination.
 ///
-/// No re-hashing: the atomicity invariant means nothing partial or unverified
-/// can be sitting at that path, so re-reading it would only cost I/O
+/// Expectations are checked again because logical cache paths and files copied
+/// in by older builds do not carry proof of which request verified them.
 async fn already_cached(
-    destination: &Path,
+    request: &DownloadRequest,
     cursor: &mut ProgressCursor<'_>,
-) -> Option<DownloadOutcome> {
-    let bytes = fs::metadata(destination)
-        .await
-        .ok()
-        .filter(std::fs::Metadata::is_file)?
-        .len();
+) -> Result<Option<DownloadOutcome>, DownloadError> {
+    let destination = &request.destination;
+    let metadata = match fs::symlink_metadata(destination).await {
+        Ok(metadata) if metadata.is_file() => metadata,
+        Ok(_) => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => return Err(DownloadError::io(destination, source)),
+    };
+    let bytes = metadata.len();
+    let size_matches = request
+        .expected_size
+        .is_none_or(|expected| expected == bytes);
+    let hashes_match = if request.expected_hashes.is_empty() {
+        true
+    } else {
+        let mut file = File::open(destination)
+            .await
+            .map_err(|source| DownloadError::io(destination, source))?;
+        let mut verifier = HashVerifier::new(&request.expected_hashes);
+        let mut buffer = vec![0; 64 * 1024];
+        loop {
+            let read = file
+                .read(&mut buffer)
+                .await
+                .map_err(|source| DownloadError::io(destination, source))?;
+            if read == 0 {
+                break;
+            }
+            verifier.update(&buffer[..read]);
+        }
+        verifier.finish().is_ok()
+    };
+
+    if !size_matches || !hashes_match {
+        warn!(path = %destination.display(), "discarding a cache entry that does not match its request");
+        fs::remove_file(destination)
+            .await
+            .map_err(|source| DownloadError::io(destination, source))?;
+        return Ok(None);
+    }
+
     cursor.report(bytes, Some(bytes));
-    Some(DownloadOutcome {
-        path: destination.to_path_buf(),
+    Ok(Some(DownloadOutcome {
+        path: destination.clone(),
         bytes,
         source: ArtifactSource::AlreadyCached,
-    })
+    }))
 }
 
-/// `<destination>.part`, in the destination's own directory.
-fn part_path(destination: &Path) -> PathBuf {
+/// A unique partial sibling in the destination's own directory.
+fn part_path(destination: &Path, id: uuid::Uuid) -> PathBuf {
     let mut name = destination.as_os_str().to_os_string();
     name.push(".");
     name.push(PART_SUFFIX);
+    name.push(".");
+    name.push(id.to_string());
     PathBuf::from(name)
+}
+
+fn destination_lock(destination: &Path) -> Arc<AsyncMutex<()>> {
+    let locks = DESTINATION_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut locks = locks
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(destination).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(AsyncMutex::new(()));
+    locks.insert(destination.to_path_buf(), Arc::downgrade(&lock));
+    lock
 }
 
 /// Waits, unless the caller cancels first.
@@ -919,10 +977,11 @@ mod tests {
 
     #[test]
     fn the_part_file_is_a_sibling_of_the_destination() {
-        let part = part_path(Path::new("/cache/ephervex/downloads/sha1/da/abc.jar"));
+        let id = uuid::Uuid::nil();
+        let part = part_path(Path::new("/cache/ephervex/downloads/sha1/da/abc.jar"), id);
         assert_eq!(
-            part,
-            PathBuf::from("/cache/ephervex/downloads/sha1/da/abc.jar.part")
+            part.file_name().and_then(std::ffi::OsStr::to_str),
+            Some("abc.jar.part.00000000-0000-0000-0000-000000000000")
         );
         assert_eq!(
             part.parent(),

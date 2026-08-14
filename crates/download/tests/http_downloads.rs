@@ -51,10 +51,19 @@ fn request(server: &MockServer, route: &str, destination: &std::path::Path) -> D
     DownloadRequest::new(url, destination)
 }
 
-fn part_of(destination: &std::path::Path) -> std::path::PathBuf {
-    let mut name = destination.as_os_str().to_os_string();
-    name.push(".part");
-    std::path::PathBuf::from(name)
+fn no_partial_siblings(destination: &std::path::Path) -> bool {
+    let Some(parent) = destination.parent() else {
+        return true;
+    };
+    let Some(name) = destination.file_name().and_then(std::ffi::OsStr::to_str) else {
+        return true;
+    };
+    let prefix = format!("{name}.part.");
+    std::fs::read_dir(parent).is_ok_and(|entries| {
+        entries
+            .filter_map(Result::ok)
+            .all(|entry| !entry.file_name().to_string_lossy().starts_with(&prefix))
+    })
 }
 
 #[tokio::test]
@@ -81,7 +90,7 @@ async fn a_successful_download_lands_at_the_destination_with_its_bytes_intact() 
     assert_eq!(outcome.bytes, BODY.len() as u64);
     assert_eq!(std::fs::read(&destination).expect("artifact exists"), BODY);
     assert!(
-        !part_of(&destination).exists(),
+        no_partial_siblings(&destination),
         "the.part file must be gone once the artifact is finalized"
     );
 }
@@ -299,7 +308,7 @@ async fn a_hash_mismatch_deletes_the_artifact_and_fails() {
         other => panic!("expected a hash mismatch, got {other:?}"),
     }
     assert!(!destination.exists(), "the bad artifact must be deleted");
-    assert!(!part_of(&destination).exists());
+    assert!(no_partial_siblings(&destination));
     assert_eq!(
         server
             .received_requests()
@@ -341,7 +350,7 @@ async fn a_partial_download_never_reaches_the_final_path() {
         !destination.exists(),
         "presence at a cache path is proof of a verified artifact and must stay that way"
     );
-    assert!(!part_of(&destination).exists());
+    assert!(no_partial_siblings(&destination));
     // The destination directory was created, so the absence above is a real
     // absence and not a missing parent.
     assert!(destination.parent().expect("has a parent").is_dir());
@@ -411,7 +420,7 @@ async fn a_canceled_download_leaves_no_file_behind() {
     assert!(matches!(error, DownloadError::Canceled { .. }));
     assert!(error.is_cancellation());
     assert!(!destination.exists());
-    assert!(!part_of(&destination).exists());
+    assert!(no_partial_siblings(&destination));
     assert_eq!(
         reporter.snapshot().status,
         OperationStatus::Canceled,
@@ -450,6 +459,43 @@ async fn an_already_cached_artifact_is_not_fetched_again() {
             .expect("recording enabled")
             .is_empty(),
         "a cached artifact must not produce a request"
+    );
+}
+
+#[tokio::test]
+async fn a_corrupt_cache_entry_is_reverified_and_replaced() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/artifact.jar"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(BODY))
+        .mount(&server)
+        .await;
+
+    let dir = TempDir::new().expect("temp dir");
+    let destination = dir.path().join("artifact.jar");
+    let wrong = vec![b'x'; BODY.len()];
+    std::fs::write(&destination, wrong).expect("seed corrupt cache");
+
+    let outcome = manager(RetryPolicy::none())
+        .download(
+            &request(&server, "/artifact.jar", &destination)
+                .verifying(sha1_of(BODY))
+                .sized(BODY.len() as u64),
+            &OperationReporter::silent("download"),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("the corrupt cache entry is replaced");
+
+    assert_eq!(outcome.source, ArtifactSource::Network);
+    assert_eq!(std::fs::read(&destination).expect("artifact"), BODY);
+    assert_eq!(
+        server
+            .received_requests()
+            .await
+            .expect("recording enabled")
+            .len(),
+        1
     );
 }
 
