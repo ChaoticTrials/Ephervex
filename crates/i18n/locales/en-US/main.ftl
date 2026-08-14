@@ -711,7 +711,7 @@ pack-requirement-unknown = Not stated
 # Why a mod belongs to an instance. Kept distinct because they are different
 # things to look at and, later, different things to change.
 mod-origin-pack-declared = From pack
-mod-origin-user-selected = Installed
+mod-origin-user-selected = Added
 mod-origin-required-dependency = Dependency
 mod-origin-selected-optional-dependency = Optional dependency
 
