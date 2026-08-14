@@ -355,6 +355,7 @@ async fn resolving_from_the_catalog_installs_the_mod_and_its_required_library() 
         loader_name: "neoforge",
         selection: &InstallSelection::new("FITSPROJ"),
         installed: &[],
+        installed_policy: ephervex_mod_platform::InstalledPolicy::Preserve,
         reporter: &reporter(),
         cancel: &CancellationToken::new(),
     })

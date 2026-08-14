@@ -1,0 +1,719 @@
+//! Changing what an instance's `mods/` directory is supposed to contain.
+//!
+//! # The problem this module exists to solve
+//!
+//! Installing a mod only ever adds. Changing one's version, or removing it,
+//! also *takes something away* — and the moment an operation deletes, the
+//! failure modes get worse than "nothing happened". The states worth naming:
+//!
+//! * both the old jar and the new one are in `mods/`, so the loader sees two
+//!   builds of one mod and the game does not start;
+//! * neither is there, so the instance lost a mod nobody asked to remove;
+//! * the files changed and the recipe did not, so "Create Server" builds
+//!   something that no longer matches the client.
+//!
+//! # The order that avoids all three
+//!
+//! ```text
+//! plan ──▶ fetch+verify ──▶ retire old jars ──▶ write new jars ──▶ write recipe
+//!                                  │                  │                 │
+//!                                  └────── undo ──────┴──── undo ───────┘
+//! ```
+//!
+//! Retiring is a *move*, not a delete: the old jar goes to `.launcher/retired/`
+//! inside the same instance, which is a rename on one filesystem and therefore
+//! atomic and instant. That is the whole trick. Every step before the recipe is
+//! published can be undone exactly — new files are removed, retired files are
+//! moved back — so a failure anywhere leaves the instance as it was, with its
+//! old jars present and its recipe describing them.
+//!
+//! Retiring comes *before* writing, which matters for the case that looks
+//! easiest: a project that keeps one file name across releases. Writing first
+//! would overwrite the old jar, and there would be nothing left to restore if a
+//! later step failed. Nothing is lost by the earlier move, because by then
+//! every replacement artifact is downloaded and verified in the shared cache —
+//! "ready" means verified, not written.
+//!
+//! Only after the recipe is on disk are the retired files deleted, and that
+//! deletion is allowed to fail: a leftover file in launcher-owned scratch is
+//! invisible to the game, whereas a leftover in `mods/` is a crash.
+//!
+//! # What this refuses to touch
+//!
+//! A jar Ephervex did not install. Retirement moves exactly the files the
+//! recipe records, so a local debug build sitting in `mods/` is not something
+//! any mutation can reach — the same rule the installer applies to
+//! destinations, applied to removals.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+
+use ephervex_download::{CacheLayout, DownloadManager, OperationReporter};
+use ephervex_model::ModProvider;
+use tokio_util::sync::CancellationToken;
+use tracing::{info, instrument, warn};
+
+use crate::error::{PackError, PackResult};
+use crate::install::{copy_into_instance, fetch_all};
+use crate::recipe::{PackFileRecipe, PackRecipe, ProviderFileIdentity};
+use crate::store::SourceStore;
+
+/// One provider project, which is how a mutation names what it acts on.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ManagedProject {
+    pub provider: ModProvider,
+    pub project_id: String,
+}
+
+impl ManagedProject {
+    #[must_use]
+    pub fn new(provider: ModProvider, project_id: impl Into<String>) -> Self {
+        Self {
+            provider,
+            project_id: project_id.into(),
+        }
+    }
+}
+
+/// What one mutation should make true of an instance.
+///
+/// Deliberately declarative. The caller says which mods the instance must have
+/// and which projects it must not, and this works out which files that implies
+/// writing, retiring, and leaving alone. A caller that had to say "delete this,
+/// then write that" would be deciding the order in which an instance can be
+/// left broken.
+#[derive(Debug)]
+pub struct ManagedMutation<'a> {
+    /// The instance's desired state, updated in place on success.
+    pub recipe: &'a mut PackRecipe,
+    /// Mods the instance must have afterwards, each carrying full provider
+    /// identity, hashes, and download addresses. An entry whose project is
+    /// already recorded replaces that record rather than joining it.
+    pub upserts: &'a [PackFileRecipe],
+    /// Projects the instance must not have afterwards.
+    pub removals: &'a [ManagedProject],
+    /// The directory the game runs in. Logical paths are relative to it.
+    pub game_dir: &'a Path,
+    /// Launcher-owned scratch inside the same instance, where replaced files
+    /// wait until the recipe is published.
+    pub retired_dir: &'a Path,
+    pub store: &'a SourceStore,
+    pub manager: &'a DownloadManager,
+    pub cache: &'a CacheLayout,
+    pub reporter: &'a OperationReporter,
+    pub cancel: &'a CancellationToken,
+}
+
+/// What a mutation did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ManagedMutationReport {
+    /// Mods the instance did not have before.
+    pub installed: Vec<PathBuf>,
+    /// Mods whose version changed.
+    pub replaced: Vec<ReplacedMod>,
+    /// Mods that are no longer part of the instance.
+    pub removed: Vec<PathBuf>,
+    /// Recorded mods whose jar had gone missing and was put back at the same
+    /// version. Repair, not a change: the recipe entry is unchanged.
+    pub repaired: Vec<PathBuf>,
+    /// Requested mods that were already installed at exactly the requested
+    /// version, so nothing was written for them.
+    pub unchanged: Vec<PathBuf>,
+    pub reused_from_cache: usize,
+    pub bytes: u64,
+}
+
+impl ManagedMutationReport {
+    /// Whether this mutation changed the instance at all.
+    #[must_use]
+    pub fn changed_anything(&self) -> bool {
+        !self.installed.is_empty()
+            || !self.replaced.is_empty()
+            || !self.removed.is_empty()
+            || !self.repaired.is_empty()
+    }
+}
+
+/// One mod that moved from one version to another.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplacedMod {
+    /// Where the new jar is.
+    pub logical_path: PathBuf,
+    /// Where the old one was. The same path when the version's file name did
+    /// not change, which is the case that most needs care: the new jar is
+    /// written over nothing, because the old one is retired first.
+    pub previous_path: PathBuf,
+    pub previous_version: Option<String>,
+    pub version: Option<String>,
+}
+
+/// What the pre-flight decided about one requested mod.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Action {
+    /// Nothing is recorded for this project: an ordinary install.
+    Install,
+    /// The same version is already recorded and its jar is present.
+    Unchanged,
+    /// The same version is recorded and its jar has gone missing.
+    Repair,
+    /// A different version is recorded. The old entry's path is carried so the
+    /// old jar can be retired even when the file name did not change.
+    Replace(Box<PackFileRecipe>),
+}
+
+/// Carries out one mutation.
+#[instrument(
+    skip_all,
+    fields(
+        game_dir = %request.game_dir.display(),
+        upserts = request.upserts.len(),
+        removals = request.removals.len(),
+    )
+)]
+pub async fn mutate_managed(request: ManagedMutation<'_>) -> PackResult<ManagedMutationReport> {
+    let ManagedMutation {
+        recipe,
+        upserts,
+        removals,
+        game_dir,
+        retired_dir,
+        store,
+        manager,
+        cache,
+        reporter,
+        cancel,
+    } = request;
+
+    // Nothing below this line runs until the whole desired state is known to be
+    // reachable: every destination safe, every removal something Ephervex
+    // actually installed.
+    let actions = plan(recipe, upserts, removals, game_dir)?;
+    let retirements = retirements(recipe, upserts, &actions, removals);
+
+    let mut report = ManagedMutationReport::default();
+    let pending: Vec<(&PackFileRecipe, &Action)> = upserts
+        .iter()
+        .zip(&actions)
+        .filter(|(file, action)| match action {
+            Action::Unchanged => {
+                report.unchanged.push(file.logical_path.clone());
+                false
+            }
+            _ => true,
+        })
+        .collect();
+
+    if pending.is_empty() && retirements.is_empty() {
+        info!("the instance already matches the requested mod state");
+        return Ok(report);
+    }
+
+    let wanted: Vec<&PackFileRecipe> = pending.iter().map(|(file, _)| *file).collect();
+    let fetched = if wanted.is_empty() {
+        Vec::new()
+    } else {
+        fetch_all(&wanted, cache, manager, reporter, cancel).await?
+    };
+
+    // Everything from here on can leave the instance changed, so each step
+    // records exactly what it did and the whole lot is undone on failure.
+    let mut journal = Journal::default();
+    let outcome = retire(&retirements, game_dir, retired_dir, &mut journal)
+        .and_then(|()| {
+            write_new_files(
+                &pending,
+                &fetched,
+                game_dir,
+                cancel,
+                &mut journal,
+                &mut report,
+            )
+        })
+        .and_then(|()| publish(recipe, upserts, &actions, removals, store));
+
+    if let Err(error) = outcome {
+        journal.undo();
+        return Err(error);
+    }
+
+    for retirement in &retirements {
+        if retirement.reason == RetirementReason::Removed {
+            report.removed.push(retirement.logical_path.clone());
+        }
+    }
+
+    // The recipe is on disk and agrees with `mods/`. What is left in the
+    // retired directory is scratch the game cannot see, so failing to delete it
+    // is worth a log line and nothing more.
+    journal.discard();
+
+    info!(
+        installed = report.installed.len(),
+        replaced = report.replaced.len(),
+        removed = report.removed.len(),
+        repaired = report.repaired.len(),
+        unchanged = report.unchanged.len(),
+        "mutated managed mods"
+    );
+    Ok(report)
+}
+
+/// Decides what to do with every requested mod, and refuses the whole mutation
+/// if any of it is unsafe.
+fn plan(
+    recipe: &PackRecipe,
+    upserts: &[PackFileRecipe],
+    removals: &[ManagedProject],
+    game_dir: &Path,
+) -> PackResult<Vec<Action>> {
+    // Two requested mods claiming one file name is a plan that cannot be
+    // carried out in any order.
+    let mut claimed: BTreeSet<&Path> = BTreeSet::new();
+    for file in upserts {
+        if !claimed.insert(file.logical_path.as_path()) {
+            return Err(PackError::DestinationCollision {
+                name: file.display_name(),
+            });
+        }
+    }
+
+    // A removal must name something Ephervex installed. Anything else is a jar
+    // the user owns, and no provider operation gets to delete one.
+    for removal in removals {
+        if recipe
+            .managed_project(removal.provider, &removal.project_id)
+            .is_none()
+        {
+            return Err(PackError::ManagedIdentityMissing {
+                path: removal.project_id.clone(),
+            });
+        }
+    }
+
+    // The paths this mutation frees. A new jar may land on one of them.
+    let freed: BTreeSet<PathBuf> = freed_paths(recipe, upserts, removals);
+
+    upserts
+        .iter()
+        .map(|file| action_for(recipe, file, game_dir, &freed))
+        .collect()
+}
+
+/// Every path this mutation vacates, whether by replacing a mod or removing it.
+fn freed_paths(
+    recipe: &PackRecipe,
+    upserts: &[PackFileRecipe],
+    removals: &[ManagedProject],
+) -> BTreeSet<PathBuf> {
+    let mut freed = BTreeSet::new();
+    for removal in removals {
+        if let Some(entry) = recipe.managed_project(removal.provider, &removal.project_id) {
+            freed.insert(entry.logical_path.clone());
+        }
+    }
+    for file in upserts {
+        let Some((provider, project_id)) = project_of(file) else {
+            continue;
+        };
+        if let Some(entry) = recipe.managed_project(provider, project_id) {
+            freed.insert(entry.logical_path.clone());
+        }
+    }
+    freed
+}
+
+/// What to do with one requested mod.
+fn action_for(
+    recipe: &PackRecipe,
+    file: &PackFileRecipe,
+    game_dir: &Path,
+    freed: &BTreeSet<PathBuf>,
+) -> PackResult<Action> {
+    let Some((provider, project_id)) = project_of(file) else {
+        return Err(PackError::ManagedIdentityMissing {
+            path: file.display_name(),
+        });
+    };
+
+    let destination = game_dir.join(&file.logical_path);
+    let existing = recipe.managed_project(provider, project_id);
+
+    match existing {
+        Some(entry) if version_of(entry) == version_of(file) => {
+            // The same mod at the same version. Present is a no-op; absent is a
+            // repair, which puts the recorded jar back without changing what is
+            // recorded.
+            if destination.is_file() {
+                Ok(Action::Unchanged)
+            } else {
+                Ok(Action::Repair)
+            }
+        }
+        Some(entry) => {
+            let entry = entry.clone();
+            // The new jar's own destination has to be free by the time it is
+            // written. It is free if nothing is there, or if this mutation is
+            // about to vacate it.
+            if destination.exists() && !freed.contains(&file.logical_path) {
+                return Err(PackError::DestinationOccupied { path: destination });
+            }
+            Ok(Action::Replace(Box::new(entry)))
+        }
+        None => {
+            if destination.exists() && !freed.contains(&file.logical_path) {
+                // A jar Ephervex did not put there. Almost always the local
+                // build the instance exists to test.
+                return Err(PackError::DestinationOccupied { path: destination });
+            }
+            Ok(Action::Install)
+        }
+    }
+}
+
+/// One file to move out of the game directory before the recipe is published.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Retirement {
+    logical_path: PathBuf,
+    /// What the report should call this: a removal, or the old half of a
+    /// replacement.
+    reason: RetirementReason,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RetirementReason {
+    Removed,
+    Replaced {
+        new_path: PathBuf,
+        previous_version: Option<String>,
+        version: Option<String>,
+    },
+}
+
+/// The files this mutation takes out of the game directory.
+fn retirements(
+    recipe: &PackRecipe,
+    upserts: &[PackFileRecipe],
+    actions: &[Action],
+    removals: &[ManagedProject],
+) -> Vec<Retirement> {
+    let mut retirements = Vec::new();
+    for (file, action) in upserts.iter().zip(actions) {
+        if let Action::Replace(previous) = action {
+            retirements.push(Retirement {
+                logical_path: previous.logical_path.clone(),
+                reason: RetirementReason::Replaced {
+                    new_path: file.logical_path.clone(),
+                    previous_version: version_of(previous).map(ToOwned::to_owned),
+                    version: version_of(file).map(ToOwned::to_owned),
+                },
+            });
+        }
+    }
+    for removal in removals {
+        if let Some(entry) = recipe.managed_project(removal.provider, &removal.project_id) {
+            retirements.push(Retirement {
+                logical_path: entry.logical_path.clone(),
+                reason: RetirementReason::Removed,
+            });
+        }
+    }
+    retirements
+}
+
+/// Everything this mutation has done that can still be undone.
+#[derive(Debug, Default)]
+struct Journal {
+    /// Files written into the game directory by this mutation.
+    created: Vec<PathBuf>,
+    /// Files moved out of the game directory by this mutation.
+    retired: Vec<Moved>,
+}
+
+#[derive(Debug, Clone)]
+struct Moved {
+    from: PathBuf,
+    to: PathBuf,
+}
+
+impl Journal {
+    /// Puts the instance back the way it was.
+    ///
+    /// New files go first and retired ones come back second, which is the only
+    /// order that works when a replacement reused its predecessor's file name:
+    /// restoring first would land on a path the new jar still occupies.
+    fn undo(&mut self) {
+        for path in self.created.drain(..) {
+            if let Err(error) = std::fs::remove_file(&path) {
+                warn!(
+                    path = %path.display(),
+                    %error,
+                    "could not remove a file left behind by a failed mutation"
+                );
+            }
+        }
+        for moved in self.retired.drain(..) {
+            if let Err(error) = std::fs::rename(&moved.to, &moved.from) {
+                warn!(
+                    path = %moved.from.display(),
+                    %error,
+                    "could not restore a mod set aside by a failed mutation"
+                );
+            }
+        }
+    }
+
+    /// Drops the retired files for good, after the recipe has been published.
+    fn discard(&self) {
+        for moved in &self.retired {
+            if let Err(error) = std::fs::remove_file(&moved.to) {
+                warn!(
+                    path = %moved.to.display(),
+                    %error,
+                    "a replaced mod is still in the instance's retired directory"
+                );
+            }
+        }
+    }
+}
+
+/// Writes the new jars, recording each one so it can be removed again.
+fn write_new_files(
+    pending: &[(&PackFileRecipe, &Action)],
+    fetched: &[ephervex_download::DownloadOutcome],
+    game_dir: &Path,
+    cancel: &CancellationToken,
+    journal: &mut Journal,
+    report: &mut ManagedMutationReport,
+) -> PackResult<()> {
+    for ((file, action), outcome) in pending.iter().zip(fetched) {
+        if cancel.is_cancelled() {
+            return Err(PackError::Canceled);
+        }
+        let destination = game_dir.join(&file.logical_path);
+        copy_into_instance(&outcome.path, &destination)?;
+        journal.created.push(destination);
+
+        if outcome.source == ephervex_download::ArtifactSource::AlreadyCached {
+            report.reused_from_cache += 1;
+        }
+        report.bytes = report.bytes.saturating_add(outcome.bytes);
+        match action {
+            Action::Repair => report.repaired.push(file.logical_path.clone()),
+            Action::Replace(previous) => report.replaced.push(ReplacedMod {
+                logical_path: file.logical_path.clone(),
+                previous_path: previous.logical_path.clone(),
+                previous_version: version_of(previous).map(ToOwned::to_owned),
+                version: version_of(file).map(ToOwned::to_owned),
+            }),
+            Action::Install => report.installed.push(file.logical_path.clone()),
+            Action::Unchanged => {}
+        }
+    }
+    Ok(())
+}
+
+/// Moves the outgoing jars into launcher-owned scratch.
+fn retire(
+    retirements: &[Retirement],
+    game_dir: &Path,
+    retired_dir: &Path,
+    journal: &mut Journal,
+) -> PackResult<()> {
+    if retirements.is_empty() {
+        return Ok(());
+    }
+
+    std::fs::create_dir_all(retired_dir).map_err(|source| PackError::Unwritable {
+        path: retired_dir.to_path_buf(),
+        source,
+    })?;
+
+    for retirement in retirements {
+        let from = game_dir.join(&retirement.logical_path);
+        if !from.exists() {
+            // The jar is already gone — deleted by hand while bisecting, most
+            // likely. Removing the record is still the operation, and there is
+            // nothing here to move.
+            continue;
+        }
+        let to = unique_retired_path(retired_dir, &retirement.logical_path);
+        std::fs::rename(&from, &to).map_err(|source| PackError::Unwritable {
+            path: to.clone(),
+            source,
+        })?;
+        journal.retired.push(Moved { from, to });
+    }
+    Ok(())
+}
+
+/// A free name inside the retired directory.
+///
+/// Two mutations can retire files with the same name, and one instance can have
+/// leftovers from an earlier one, so the name is made unique rather than
+/// assumed to be. The candidate is built from the file's own name only, which
+/// the recipe has already validated as a safe relative path.
+fn unique_retired_path(retired_dir: &Path, logical_path: &Path) -> PathBuf {
+    let name = logical_path
+        .file_name()
+        .map_or_else(|| PathBuf::from("retired"), PathBuf::from);
+    let candidate = retired_dir.join(&name);
+    if !candidate.exists() {
+        return candidate;
+    }
+    for attempt in 1u32..u32::MAX {
+        let candidate = retired_dir.join(format!("{}.{attempt}", name.display()));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    candidate
+}
+
+/// Builds the new desired state and writes it.
+///
+/// Written last and only once every jar is where the new recipe says it is, so
+/// a recipe on disk never names a mod that is not there.
+fn publish(
+    recipe: &mut PackRecipe,
+    upserts: &[PackFileRecipe],
+    actions: &[Action],
+    removals: &[ManagedProject],
+    store: &SourceStore,
+) -> PackResult<()> {
+    let mut updated = recipe.clone();
+
+    let dropped: BTreeSet<(ModProvider, &str)> = removals
+        .iter()
+        .map(|removal| (removal.provider, removal.project_id.as_str()))
+        .collect();
+    updated.files.retain(|file| {
+        project_of(file)
+            .is_none_or(|(provider, project_id)| !dropped.contains(&(provider, project_id)))
+    });
+
+    // Replacements are applied in place so that the entry keeps its position in
+    // the recipe and, more importantly, so that one project can never end up
+    // with two entries.
+    let mut additions: Vec<PackFileRecipe> = Vec::new();
+    for (file, action) in upserts.iter().zip(actions) {
+        match action {
+            Action::Install => additions.push(file.clone()),
+            Action::Replace(_) => {
+                let Some((provider, project_id)) = project_of(file) else {
+                    return Err(PackError::ManagedIdentityMissing {
+                        path: file.display_name(),
+                    });
+                };
+                let position = updated
+                    .files
+                    .iter()
+                    .position(|existing| project_of(existing) == Some((provider, project_id)))
+                    .ok_or_else(|| PackError::ManagedIdentityMissing {
+                        path: file.display_name(),
+                    })?;
+                // The origin is a fact about why the instance has this mod and
+                // survives a version change. Rewriting it would turn a
+                // dependency into a root, or a pack's own mod into a manual
+                // one, on the strength of an unrelated operation.
+                let mut replacement = file.clone();
+                replacement.origin = updated.files[position].origin;
+                updated.files[position] = replacement;
+            }
+            // A repair changes nothing about the record, and an unchanged mod
+            // is already exactly what is asked for.
+            Action::Repair | Action::Unchanged => {}
+        }
+    }
+    for addition in additions {
+        updated.record_managed(addition)?;
+    }
+
+    // Written before the in-memory recipe is replaced, so a caller that carries
+    // on after a failed write is not holding a recipe that disagrees with disk.
+    store.write_recipe(&updated)?;
+    *recipe = updated;
+    Ok(())
+}
+
+/// The provider and project an entry names, if it names both.
+fn project_of(file: &PackFileRecipe) -> Option<(ModProvider, &str)> {
+    file.identity
+        .as_ref()
+        .and_then(ProviderFileIdentity::project)
+}
+
+/// The exact version an entry names, if it names one.
+fn version_of(file: &PackFileRecipe) -> Option<&str> {
+    file.identity
+        .as_ref()
+        .and_then(|identity| identity.version_id.as_deref())
+}
+
+/// Removes anything an earlier mutation could not clean up.
+///
+/// Called before a mutation rather than after, so a crash between publishing a
+/// recipe and deleting a retired file does not leave the directory growing
+/// forever. Failures are logged: scratch the game cannot see is never a reason
+/// to refuse an operation.
+pub fn clear_retired(retired_dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(retired_dir) else {
+        return;
+    };
+    let mut left = 0usize;
+    for entry in entries.flatten() {
+        if std::fs::remove_file(entry.path()).is_err() {
+            left += 1;
+        }
+    }
+    if left > 0 {
+        warn!(
+            path = %retired_dir.display(),
+            left,
+            "some replaced mods could not be cleared from the retired directory"
+        );
+    }
+}
+
+/// The mods an instance would have if this mutation succeeded, without doing it.
+///
+/// Exists so a caller can show the outcome before committing to it, using the
+/// same rules the mutation itself applies rather than a second description of
+/// them.
+#[must_use]
+pub fn projected(
+    recipe: &PackRecipe,
+    upserts: &[PackFileRecipe],
+    removals: &[ManagedProject],
+) -> PackRecipe {
+    let mut projected = recipe.clone();
+    let dropped: BTreeSet<(ModProvider, String)> = removals
+        .iter()
+        .map(|removal| (removal.provider, removal.project_id.clone()))
+        .collect();
+    projected.files.retain(|file| {
+        project_of(file).is_none_or(|(provider, project_id)| {
+            !dropped.contains(&(provider, project_id.to_owned()))
+        })
+    });
+
+    let mut positions: BTreeMap<(ModProvider, String), usize> = BTreeMap::new();
+    for (index, file) in projected.files.iter().enumerate() {
+        if let Some((provider, project_id)) = project_of(file) {
+            positions.insert((provider, project_id.to_owned()), index);
+        }
+    }
+    for file in upserts {
+        let Some((provider, project_id)) = project_of(file) else {
+            continue;
+        };
+        match positions.get(&(provider, project_id.to_owned())) {
+            Some(&index) => {
+                let mut replacement = file.clone();
+                replacement.origin = projected.files[index].origin;
+                projected.files[index] = replacement;
+            }
+            None => projected.files.push(file.clone()),
+        }
+    }
+    projected
+}

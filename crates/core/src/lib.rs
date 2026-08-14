@@ -33,6 +33,7 @@ pub mod launch;
 pub mod live_diagnostics;
 pub mod logging;
 pub mod mods;
+pub mod mutation;
 pub mod server;
 
 pub use account::{AccountStatus, AccountSummary, ApiSettings, LoginOptions, TOKEN_REFRESH_MARGIN};
@@ -57,6 +58,10 @@ pub use logging::{DEFAULT_LOG_DIRECTIVES, init_tracing};
 pub use mods::{
     InstalledMods, InstancePackSource, ManagedModEntry, ManagedModSnapshot, MetadataAvailability,
     ModDetails, ModInstallRequest, ModPresence,
+};
+pub use mutation::{
+    ModMutability, ModMutation, ModMutationPlan, ModVersionChoice, ModVersionChoices,
+    MutationRestriction, PlannedFile, PlannedOutcome,
 };
 pub use server::{CaptureSnapshot, ServerCreateOptions, ServerPersistenceHealth, ServerStatus};
 

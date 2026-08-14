@@ -37,10 +37,10 @@ use ephervex_download::{
     FileExtension, OperationReporter,
 };
 use ephervex_mod_platform::{
-    AnnotatedVersion, InstallSelection, InstalledProject, InstanceTarget, ModInstallPlan,
-    ModPlatformError, ModProject, ModProjectDetails, ModProviderApi, ModSearchQuery,
-    ModSearchResults, ModVersionInfo, ModrinthProvider, PlannedMod, SideSupport, annotate,
-    newest_compatible,
+    AnnotatedVersion, InstallSelection, InstalledPolicy, InstalledProject, InstanceTarget,
+    ModInstallPlan, ModPlatformError, ModProject, ModProjectDetails, ModProviderApi,
+    ModSearchQuery, ModSearchResults, ModVersionInfo, ModrinthProvider, PlannedMod, SideSupport,
+    annotate, newest_compatible,
 };
 use ephervex_model::{Hash, ImportSourceKind, InstanceId, ModOrigin, ModProvider};
 use ephervex_pack::{
@@ -557,6 +557,7 @@ impl App {
         self.plan_for(
             &record,
             request,
+            InstalledPolicy::Preserve,
             &OperationReporter::silent("resolving-mods"),
         )
         .await
@@ -575,7 +576,9 @@ impl App {
         cancel: &CancellationToken,
     ) -> CoreResult<InstalledMods> {
         let record = self.client(instance)?;
-        let plan = self.plan_for(&record, request, reporter).await?;
+        let plan = self
+            .plan_for(&record, request, InstalledPolicy::Preserve, reporter)
+            .await?;
 
         // An instance created by hand has no recipe until something needs one.
         let store = SourceStore::new(ephervex_storage::metadata::source_dir(&record.root));
@@ -814,10 +817,15 @@ impl App {
     }
 
     /// Resolves a plan against an instance's exact versions.
-    async fn plan_for(
+    ///
+    /// `policy` is what separates installing from mutating: an install refuses
+    /// to move a mod that is already there, and a version change is a request
+    /// to do exactly that.
+    pub(crate) async fn plan_for(
         &self,
         record: &ClientRecord,
         request: &ModInstallRequest,
+        policy: InstalledPolicy,
         reporter: &OperationReporter,
     ) -> CoreResult<ModInstallPlan> {
         let target = target_for(record);
@@ -845,6 +853,7 @@ impl App {
                 loader_name: loader,
                 selection: &selection,
                 installed: &installed,
+                installed_policy: policy,
                 reporter,
                 cancel: &cancel,
             })
@@ -870,7 +879,7 @@ impl App {
     /// Built lazily for the same reason the version catalog is: constructing it
     /// builds an HTTP client and a TLS stack, which listing instances has no
     /// business paying for.
-    fn mod_provider(&self) -> CoreResult<&dyn ModProviderApi> {
+    pub(crate) fn mod_provider(&self) -> CoreResult<&dyn ModProviderApi> {
         if let Some(provider) = self.mods.get() {
             return Ok(provider);
         }
@@ -902,7 +911,10 @@ fn target_for(record: &ClientRecord) -> InstanceTarget {
 /// instance rather than a claim about the project. The *server* requirement is
 /// the project's own declaration, verbatim — including `unknown`, which stays
 /// undeclared rather than being resolved into a yes.
-fn recipe_entry(planned: &PlannedMod, provider: ModProvider) -> CoreResult<PackFileRecipe> {
+pub(crate) fn recipe_entry(
+    planned: &PlannedMod,
+    provider: ModProvider,
+) -> CoreResult<PackFileRecipe> {
     let file = &planned.version.file;
 
     // The file name comes from a provider and is untrusted: it is validated as

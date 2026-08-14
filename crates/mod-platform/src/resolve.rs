@@ -104,6 +104,35 @@ pub struct InstalledProject {
     pub version_id: String,
 }
 
+/// What resolution does when a project it resolved is already installed at a
+/// different version.
+///
+/// The two answers are opposite and both are right for their own operation.
+/// Installing a new mod must not quietly move a mod that is already there — the
+/// user asked for one thing and would get two. Changing a mod's version is a
+/// request to do exactly that, and refusing it would refuse the operation.
+///
+/// Making it a parameter rather than a second resolver keeps one implementation
+/// of "what does this mod need", which is the part that is hard to get right.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InstalledPolicy {
+    /// Refuse to plan anything that would change an installed project.
+    #[default]
+    Preserve,
+    /// Report such a project as a replacement and carry on.
+    Replace,
+}
+
+/// An installed project this plan would move to a different version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectReplacement {
+    pub project_id: String,
+    /// The version the instance has now.
+    pub from: String,
+    /// The version this plan resolved to.
+    pub to: String,
+}
+
 /// One mod the plan would install.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlannedMod {
@@ -186,6 +215,9 @@ pub struct ModInstallPlan {
     /// Planned mods the instance already has at the same version. Nothing is
     /// downloaded for these.
     pub already_installed: Vec<InstalledProject>,
+    /// Installed projects this plan moves to a different version. Always empty
+    /// under [`InstalledPolicy::Preserve`], which refuses instead.
+    pub replacements: Vec<ProjectReplacement>,
     pub warnings: Vec<PlanWarning>,
 }
 
@@ -210,6 +242,21 @@ impl ModInstallPlan {
             .into_iter()
             .filter(|planned| !present.contains(planned.version.project_id.as_str()))
             .collect()
+    }
+
+    /// Whether this plan would change anything about the instance.
+    #[must_use]
+    pub fn changes_anything(&self) -> bool {
+        !self.to_install().is_empty()
+    }
+
+    /// Every project this plan says the instance should end up with.
+    pub fn resolved_projects(&self) -> impl Iterator<Item = &str> {
+        self.all_mods()
+            .into_iter()
+            .map(|planned| planned.version.project_id.as_str())
+            .collect::<Vec<_>>()
+            .into_iter()
     }
 }
 
@@ -327,6 +374,8 @@ pub struct ResolveRequest<'a> {
     /// What the instance already has, so an install can be idempotent rather
     /// than a duplicate.
     pub installed: &'a [InstalledProject],
+    /// What to do about an installed project this resolution moves.
+    pub installed_policy: InstalledPolicy,
     pub reporter: &'a OperationReporter,
     pub cancel: &'a CancellationToken,
 }
@@ -639,7 +688,7 @@ impl<'a> Resolver<'a> {
             reference: root_id.to_owned(),
         })?;
 
-        let already_installed = self.already_installed()?;
+        let (already_installed, replacements) = self.already_installed()?;
 
         Ok(ModInstallPlan {
             provider: self.request.provider.provider(),
@@ -649,6 +698,7 @@ impl<'a> Resolver<'a> {
             external: std::mem::take(&mut self.external),
             embedded: std::mem::take(&mut self.embedded),
             already_installed,
+            replacements,
             warnings: std::mem::take(&mut self.warnings),
         })
     }
@@ -815,8 +865,11 @@ impl<'a> Resolver<'a> {
 
     /// Splits the resolved set into "already there" and "would be installed",
     /// refusing a version change.
-    fn already_installed(&self) -> ModPlatformResult<Vec<InstalledProject>> {
+    fn already_installed(
+        &self,
+    ) -> ModPlatformResult<(Vec<InstalledProject>, Vec<ProjectReplacement>)> {
         let mut present = Vec::new();
+        let mut replacements = Vec::new();
         for (project_id, resolution) in &self.resolved {
             let Some(installed) = self
                 .request
@@ -830,16 +883,28 @@ impl<'a> Resolver<'a> {
                 present.push(installed.clone());
                 continue;
             }
-            // Replacing it is a mod update, which this build does not
-            // implement. Refusing here means the instance is never touched.
-            return Err(ModPlatformError::ProjectAlreadyInstalled {
-                provider: self.request.provider.provider(),
-                project_id: project_id.clone(),
-                installed: installed.version_id.clone(),
-                requested: resolution.version.id.clone(),
-            });
+            match self.request.installed_policy {
+                // The caller asked to change this mod's version, so moving it
+                // is the operation rather than a surprise. It is still reported
+                // separately, because the caller has to retire the old file.
+                InstalledPolicy::Replace => replacements.push(ProjectReplacement {
+                    project_id: project_id.clone(),
+                    from: installed.version_id.clone(),
+                    to: resolution.version.id.clone(),
+                }),
+                // An install must not move a mod that is already there.
+                // Refusing here means the instance is never touched.
+                InstalledPolicy::Preserve => {
+                    return Err(ModPlatformError::ProjectAlreadyInstalled {
+                        provider: self.request.provider.provider(),
+                        project_id: project_id.clone(),
+                        installed: installed.version_id.clone(),
+                        requested: resolution.version.id.clone(),
+                    });
+                }
+            }
         }
-        Ok(present)
+        Ok((present, replacements))
     }
 
     async fn fetch_projects(&self) -> ModPlatformResult<BTreeMap<String, ModProject>> {
@@ -1094,12 +1159,22 @@ mod tests {
         selection: InstallSelection,
         installed: &[InstalledProject],
     ) -> ModPlatformResult<ModInstallPlan> {
+        plan_under(catalog, selection, installed, InstalledPolicy::Preserve).await
+    }
+
+    async fn plan_under(
+        catalog: &Catalog,
+        selection: InstallSelection,
+        installed: &[InstalledProject],
+        installed_policy: InstalledPolicy,
+    ) -> ModPlatformResult<ModInstallPlan> {
         resolve(ResolveRequest {
             provider: catalog,
             target: &target(),
             loader_name: "neoforge",
             selection: &selection,
             installed,
+            installed_policy,
             reporter: &OperationReporter::silent("resolving-mods"),
             cancel: &CancellationToken::new(),
         })

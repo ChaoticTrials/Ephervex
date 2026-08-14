@@ -46,6 +46,14 @@ pub const SERVER_METADATA_FILE: &str = "server.json";
 pub const WARNINGS_FILE: &str = "warnings.json";
 /// `.launcher/source/`, holding the provider-specific recipe.
 pub const SOURCE_DIR: &str = "source";
+/// `.launcher/retired/`, where a mutation holds the files it is replacing.
+///
+/// A version change writes the new jar, moves the old one here, and only then
+/// publishes the recipe. If any of that fails the old jar is moved back, which
+/// a delete could not offer. Inside `.launcher/` because it is launcher-owned
+/// scratch the game must never see, and inside the *instance* because a rename
+/// is only atomic within one filesystem.
+pub const RETIRED_DIR: &str = "retired";
 /// The Minecraft game directory inside a client instance root.
 ///
 /// Kept separate from `.launcher/` so that pack extraction, which writes into
@@ -144,6 +152,12 @@ pub fn metadata_dir(root: &Path) -> PathBuf {
 #[must_use]
 pub fn source_dir(root: &Path) -> PathBuf {
     metadata_dir(root).join(SOURCE_DIR)
+}
+
+/// `<root>/.launcher/retired/`.
+#[must_use]
+pub fn retired_dir(root: &Path) -> PathBuf {
+    metadata_dir(root).join(RETIRED_DIR)
 }
 
 /// `<root>/.launcher/instance.json`.

@@ -91,6 +91,32 @@ pub enum CoreError {
     /// Validating and preparing a linked client/server launch.
     #[error(transparent)]
     Connect(#[from] ConnectError),
+
+    /// A mutation named a file the instance does not record as one of its mods.
+    ///
+    /// Always a stale view rather than a bad request: a frontend acts on the
+    /// list it was given, and the mod may have been removed since.
+    #[error("`{path}` is not one of this instance's managed mods")]
+    ModNotManaged { path: std::path::PathBuf },
+
+    /// The mod exists and its ownership or identity does not allow this.
+    ///
+    /// Carries the reason so a frontend explains the refusal rather than
+    /// reporting a generic failure for four different situations.
+    #[error("`{path}` cannot be changed: {}", restriction.as_str())]
+    ModMutationRestricted {
+        path: std::path::PathBuf,
+        restriction: crate::mutation::MutationRestriction,
+    },
+
+    /// Working out which dependencies are still needed requires every root's
+    /// project, and one of them has none.
+    ///
+    /// Refused rather than answered partially: a partial answer to "what is
+    /// still required" reads as proof, and acting on it deletes a mod something
+    /// still needs.
+    #[error("`{path}` has no provider identity, so the instance's dependencies cannot be proven")]
+    ModIdentityIncomplete { path: std::path::PathBuf },
 }
 
 impl CoreError {
@@ -118,6 +144,9 @@ impl CoreError {
             Self::ModPlatform(error) => error.message_id(),
             Self::Server(error) => error.message_id(),
             Self::Connect(error) => error.message_id(),
+            Self::ModNotManaged { .. } => "error-mod-not-managed",
+            Self::ModMutationRestricted { restriction, .. } => restriction.message_id(),
+            Self::ModIdentityIncomplete { .. } => "error-mod-identity-incomplete",
         }
     }
 
@@ -270,7 +299,10 @@ impl CoreError {
             | Self::ModPlatform(_)
             | Self::Pack(_)
             | Self::Server(_)
-            | Self::Connect(_) => None,
+            | Self::Connect(_)
+            | Self::ModNotManaged { .. }
+            | Self::ModMutationRestricted { .. }
+            | Self::ModIdentityIncomplete { .. } => None,
         }
     }
 
@@ -304,6 +336,9 @@ impl CoreError {
             // usefully be pointed at. A rejected preference value is about a
             // setting, not a file either, and a catalog failure is about a
             // project rather than anything on disk.
+            Self::ModNotManaged { path }
+            | Self::ModMutationRestricted { path, .. }
+            | Self::ModIdentityIncomplete { path } => Some(path.clone()),
             Self::Auth(_)
             | Self::JavaSettingsInvalid { .. }
             | Self::Preference(_)

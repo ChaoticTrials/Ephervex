@@ -50,6 +50,7 @@ pub mod import;
 pub mod install;
 pub mod managed;
 pub mod modrinth;
+pub mod mutate;
 pub mod path;
 pub mod policy;
 pub mod recipe;
@@ -71,6 +72,10 @@ pub use install::{
     materialize_server_recipe,
 };
 pub use managed::{MODS_DIR, ManagedModInstall, ManagedModInstallation, install_managed};
+pub use mutate::{
+    ManagedMutation, ManagedMutationReport, ManagedProject, ReplacedMod, clear_retired,
+    mutate_managed, projected,
+};
 pub use path::{RESERVED_METADATA_DIR, safe_file_name};
 pub use policy::PackPolicy;
 pub use recipe::{

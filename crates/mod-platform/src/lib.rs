@@ -57,7 +57,7 @@ pub use model::{
 pub use modrinth::{MODRINTH_API_BASE, ModrinthProvider};
 pub use provider::{ModProviderApi, loader_name_for};
 pub use resolve::{
-    EmbeddedNote, ExternalDependency, InstallSelection, InstalledProject, ModInstallPlan,
-    OptionalCandidate, PlanWarning, PlannedMod, ResolveRequest, annotate, newest_compatible,
-    resolve,
+    EmbeddedNote, ExternalDependency, InstallSelection, InstalledPolicy, InstalledProject,
+    ModInstallPlan, OptionalCandidate, PlanWarning, PlannedMod, ProjectReplacement, ResolveRequest,
+    annotate, newest_compatible, resolve,
 };
