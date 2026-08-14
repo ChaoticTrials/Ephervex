@@ -461,6 +461,25 @@ fn invalid(message: &str) -> ValidationResult {
     }
 }
 
+/// Whether a result that was produced for one instance should still be shown.
+///
+/// Anything fetched in the background races the user. A managed-mod list is
+/// requested for the instance whose workspace is open, arrives after a provider
+/// round trip, and by then the user may have gone back and opened a different
+/// one. Applying it anyway would put one instance's mods under another
+/// instance's name — a wrong answer, not a slow one.
+///
+/// Discarding the late result is the whole remedy. Nothing is cancelled and no
+/// navigation waits on a request: opening a workspace has already shown that
+/// instance's durable state, so a discarded enrichment costs titles the user
+/// was not waiting for.
+///
+/// An empty selection means no workspace is open, which no result belongs to.
+#[must_use]
+pub fn result_is_current(produced_for: &str, selected: &str) -> bool {
+    !selected.is_empty() && produced_for == selected
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
@@ -658,5 +677,24 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(names.len(), PreferenceKey::ALL.len());
         assert!(!names.iter().any(|name| name.starts_with("mod")));
+    }
+
+    #[test]
+    fn a_background_result_for_another_instance_is_not_shown_under_this_one() {
+        let open = InstanceId::new();
+        let other = InstanceId::new();
+
+        assert!(
+            result_is_current(&open.to_string(), &open.to_string()),
+            "the answer to the question the open workspace asked is shown"
+        );
+        assert!(
+            !result_is_current(&other.to_string(), &open.to_string()),
+            "an answer about a different instance is discarded, not renamed"
+        );
+        assert!(
+            !result_is_current(&other.to_string(), ""),
+            "with no workspace open there is nothing for a result to belong to"
+        );
     }
 }

@@ -64,6 +64,12 @@ use crate::error::{PackError, PackResult};
 /// works, because the new fields default.
 pub const RECIPE_VERSION: u32 = 2;
 
+/// The extension a mod loader loads out of `mods/`.
+///
+/// Compared case-insensitively. A pack author who ships `Mod.JAR` has shipped a
+/// mod; one who ships `mod.jar.disabled` deliberately has not.
+const MOD_EXTENSION: &str = "jar";
+
 /// Whether one side of the game needs a file.
 ///
 /// Four states rather than a boolean. "Optional" is a genuine third answer that
@@ -383,14 +389,22 @@ impl PackFileRecipe {
 
     /// Whether this entry describes a jar in the game's `mods/` directory.
     ///
-    /// A direct child of `mods/`, which is what a mod loader reads. A pack's
-    /// configs, resource packs, and shader packs are files the instance needs
-    /// and are not mods, and a nested path under `mods/` is not something any
-    /// supported loader loads.
+    /// Two conditions, both necessary. The entry must be a *direct child* of
+    /// `mods/`, because a nested path there is not something any supported
+    /// loader reads; and it must actually be a `.jar`, because packs also ship
+    /// a `README.txt`, a generated `metadata.json`, or a `.disabled` jar into
+    /// that directory, and none of those is a mod the instance is running.
+    ///
+    /// The extension is the whole test. Nothing here opens the file: deciding
+    /// what a jar contains would mean parsing an archive out of an untrusted
+    /// pack to answer a question about presentation.
     #[must_use]
     pub fn is_mod_file(&self) -> bool {
         self.logical_path.parent() == Some(Path::new(crate::managed::MODS_DIR))
-            && self.logical_path.file_name().is_some()
+            && self
+                .logical_path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case(MOD_EXTENSION))
     }
 
     /// This entry as a mod of the instance, if it is one.
@@ -1369,6 +1383,35 @@ mod tests {
         assert_eq!(mods[0].file_name, "library-1.2.3.jar");
         assert_eq!(mods[0].origin, ModOrigin::UserSelected);
         assert!(!mods[0].hashes.is_empty(), "verification survives a reopen");
+    }
+
+    #[test]
+    fn only_a_jar_directly_in_the_mods_folder_is_a_mod_of_the_instance() {
+        // `mods/` is a directory, not a manifest. Packs ship notes, generated
+        // indexes, and deliberately disabled jars into it, and a mod list that
+        // reported those would be describing the folder rather than the game.
+        for path in [
+            "mods/README.txt",
+            "mods/metadata.json",
+            "mods/something.jar.disabled",
+            "mods/no-extension",
+            "mods/nested/deep.jar",
+            "config/thing.jar",
+            "mods",
+        ] {
+            let entry = file(path, SideRequirement::Required, SideRequirement::Required);
+            assert!(
+                !entry.is_mod_file(),
+                "`{path}` is not a mod the loader would read"
+            );
+            assert_eq!(entry.recorded_mod(), None, "`{path}` produced an entry");
+        }
+
+        for path in ["mods/library.jar", "mods/Library.JAR"] {
+            let entry = file(path, SideRequirement::Required, SideRequirement::Required);
+            assert!(entry.is_mod_file(), "`{path}` is a mod");
+            assert!(entry.recorded_mod().is_some());
+        }
     }
 
     #[test]

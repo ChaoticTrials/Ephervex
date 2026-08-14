@@ -317,6 +317,13 @@ pub struct ManagedModData {
 /// The Managed Mods list plus whatever has to be said about how complete it is.
 #[derive(Debug, Clone, Default)]
 pub struct ManagedModsData {
+    /// Which instance this list describes.
+    ///
+    /// Carried because the enriched list arrives after the durable one, and by
+    /// then the user may be looking at a different instance. Without it the
+    /// frontend cannot tell a late answer from the current one, and would show
+    /// one instance's mods under another instance's name.
+    pub instance: String,
     pub mods: Vec<ManagedModData>,
     /// A localized note when provider metadata could not be fetched, empty
     /// otherwise. Never a reason to withhold the list.
@@ -2421,6 +2428,7 @@ fn localized_value(message_id: &str, value: &str) -> String {
 /// file name, or decides what a mod is.
 fn managed_mods_data(snapshot: &ManagedModSnapshot) -> ManagedModsData {
     ManagedModsData {
+        instance: snapshot.instance.to_string(),
         mods: snapshot.mods.iter().map(managed_mod_data).collect(),
         notice: match snapshot.metadata {
             MetadataAvailability::Unavailable => lookup("gui-mod-metadata-offline"),

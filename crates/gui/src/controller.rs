@@ -19,7 +19,7 @@ use crate::backend::{
     LiveLogLine, LiveLogSource, LiveLogUpdate, ManagedModData, ModSearchData, PreferenceData,
     ServerWorkspaceData, Snapshot,
 };
-use crate::presentation::{parse_network, validate_ip, validate_port};
+use crate::presentation::{self, parse_network, validate_ip, validate_port};
 use crate::ui::{
     AccountRow, ActivityRow, AppWindow, DiagnosticRow, GuiI18n, InstanceRow, JavaRow, LogChunk,
     ModRow, ModSearchRow, PendingEntityRow, PreferenceRow, ServerRow, Theme,
@@ -1251,8 +1251,14 @@ fn apply_event(
             versions,
         } => apply_loader_versions(ui, &form, loader, &minecraft, &versions),
         Event::ManagedMods(data) => {
-            ui.set_managed_mods(model(managed_mod_rows(data.mods)));
-            ui.set_managed_mods_notice(data.notice.into());
+            // A late answer for an instance the user has already navigated
+            // away from is discarded rather than rendered under the wrong
+            // name. The workspace it belongs to already showed its durable
+            // state, and reopening it asks again.
+            if presentation::result_is_current(&data.instance, &ui.get_selected_instance_id()) {
+                ui.set_managed_mods(model(managed_mod_rows(data.mods)));
+                ui.set_managed_mods_notice(data.notice.into());
+            }
         }
         Event::ModResults(rows) => ui.set_mod_results(model(mod_search_rows(rows))),
         Event::ModPlan(plan) => {
