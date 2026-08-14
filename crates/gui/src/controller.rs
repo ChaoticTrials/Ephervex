@@ -22,7 +22,7 @@ use crate::backend::{
 use crate::presentation::{self, parse_network, validate_ip, validate_port};
 use crate::ui::{
     AccountRow, ActivityRow, AppWindow, DiagnosticRow, GuiI18n, InstanceRow, JavaRow, LogChunk,
-    ModRow, ModSearchRow, PendingEntityRow, PreferenceRow, ServerRow, Theme,
+    ModRow, ModSearchRow, ModVersionRow, PendingEntityRow, PreferenceRow, ServerRow, Theme,
 };
 
 pub struct Controller {
@@ -785,6 +785,97 @@ fn register_client_actions(
 }
 
 fn register_mod_actions(ui: &AppWindow, commands: &Sender<Command>) {
+    register_mod_mutations(ui, commands);
+
+    let sender = commands.clone();
+    let handle = ui.as_weak();
+    ui.on_open_mod_manager(move |path| {
+        let Some(ui) = handle.upgrade() else { return };
+        let Some(instance) = backend::parse_instance_id(&ui.get_selected_instance_id()) else {
+            return;
+        };
+        // The modal opens on the state the list already has, then fills in.
+        // Waiting for the catalog before showing anything would make an offline
+        // instance feel broken.
+        ui.set_mod_action_path(path.clone());
+        ui.set_mod_action_name(mod_row_title(&ui, &path));
+        ui.set_mod_action_notice(SharedString::default());
+        ui.set_mod_action_selected(SharedString::default());
+        ui.set_mod_versions(model(Vec::new()));
+        ui.set_mod_action_can_change(false);
+        ui.set_mod_action_can_update(false);
+        ui.set_mod_action_can_remove(false);
+        ui.set_mod_action_up_to_date(false);
+        ui.set_mod_action_pending(false);
+        ui.set_mod_action_loading(true);
+        ui.set_modal_error(SharedString::default());
+        ui.set_modal("mod-manage".into());
+        send(
+            &sender,
+            Command::LoadModVersions {
+                instance,
+                path: PathBuf::from(path.as_str()),
+            },
+        );
+    });
+}
+
+/// The actions that change an instance's mods, kept apart from the ones that
+/// only look at them.
+fn register_mod_mutations(ui: &AppWindow, commands: &Sender<Command>) {
+    let sender = commands.clone();
+    ui.on_change_mod_version(move |instance, path, version| {
+        if let Some(instance) = backend::parse_instance_id(&instance) {
+            send(
+                &sender,
+                Command::ChangeModVersion {
+                    instance,
+                    path: PathBuf::from(path.as_str()),
+                    version: version.to_string(),
+                },
+            );
+        }
+    });
+
+    let sender = commands.clone();
+    ui.on_update_mod(move |instance, path| {
+        if let Some(instance) = backend::parse_instance_id(&instance) {
+            send(
+                &sender,
+                Command::UpdateMod {
+                    instance,
+                    path: PathBuf::from(path.as_str()),
+                },
+            );
+        }
+    });
+
+    let sender = commands.clone();
+    ui.on_plan_mod_removal(move |instance, path| {
+        if let Some(instance) = backend::parse_instance_id(&instance) {
+            send(
+                &sender,
+                Command::PlanModRemoval {
+                    instance,
+                    path: PathBuf::from(path.as_str()),
+                },
+            );
+        }
+    });
+
+    let sender = commands.clone();
+    ui.on_remove_mod(move |instance, path| {
+        if let Some(instance) = backend::parse_instance_id(&instance) {
+            send(
+                &sender,
+                Command::RemoveMod {
+                    instance,
+                    path: PathBuf::from(path.as_str()),
+                },
+            );
+        }
+    });
+
     let sender = commands.clone();
     ui.on_search_mods(move |instance, query| {
         if let Some(instance) = backend::parse_instance_id(&instance) {
@@ -1260,6 +1351,8 @@ fn apply_event(
                 ui.set_managed_mods_notice(data.notice.into());
             }
         }
+        Event::ModVersions(data) => apply_mod_versions(ui, data),
+        Event::ModRemovalPlan(data) => apply_mod_removal_plan(ui, data),
         Event::ModResults(rows) => ui.set_mod_results(model(mod_search_rows(rows))),
         Event::ModPlan(plan) => {
             ui.set_mod_plan_instance(plan.instance.into());
@@ -1306,10 +1399,16 @@ fn apply_event(
         Event::Toast { message, error } => {
             ui.invoke_present_toast(message.into(), error);
         }
-        Event::ModalError(message) => ui.set_modal_error(message.into()),
+        Event::ModalError(message) => {
+            ui.set_modal_error(message.into());
+            // A refused mutation leaves its buttons usable again. Without this
+            // the modal would show the reason and offer no way to act on it.
+            ui.set_mod_action_pending(false);
+        }
         Event::CloseModal => {
             ui.set_modal(SharedString::default());
             ui.set_modal_error(SharedString::default());
+            ui.set_mod_action_pending(false);
         }
         Event::CreationFinished { request_id } => {
             creations.borrow_mut().finish(&request_id);
@@ -1792,10 +1891,86 @@ fn preference_rows(rows: Vec<PreferenceData>) -> Vec<PreferenceRow> {
         .collect()
 }
 
+/// Shows a mod's releases, unless the user has moved on from the mod that asked.
+///
+/// The same rule the managed-mod list follows: a background answer about
+/// something no longer on screen is discarded rather than rendered against
+/// whatever is.
+fn apply_mod_versions(ui: &AppWindow, data: backend::ModVersionsData) {
+    if !addresses_open_mod(ui, &data.instance, &data.logical_path) {
+        return;
+    }
+    ui.set_mod_action_loading(false);
+    ui.set_mod_action_installed(data.installed_version.into());
+    ui.set_mod_action_notice(data.notice.into());
+    ui.set_mod_action_can_change(data.can_change_version);
+    ui.set_mod_action_can_update(data.can_update);
+    ui.set_mod_action_can_remove(data.can_remove);
+    ui.set_mod_action_up_to_date(data.up_to_date);
+    if !data.title.is_empty() {
+        ui.set_mod_action_name(data.title.into());
+    }
+    ui.set_mod_versions(model(mod_version_rows(data.versions)));
+}
+
+/// Shows what a removal would take with it, and asks.
+fn apply_mod_removal_plan(ui: &AppWindow, data: backend::ModRemovalPlanData) {
+    if !addresses_open_mod(ui, &data.instance, &data.logical_path) {
+        return;
+    }
+    ui.set_mod_action_name(data.name.into());
+    ui.set_mod_removal_unprovable(data.dependencies_unprovable);
+    ui.set_mod_removal_dependencies(model(
+        data.dependencies
+            .into_iter()
+            .map(SharedString::from)
+            .collect(),
+    ));
+    ui.set_mod_action_pending(false);
+    ui.set_modal("mod-remove".into());
+}
+
+/// Whether a background answer is about the mod the user currently has open.
+fn addresses_open_mod(ui: &AppWindow, instance: &str, logical_path: &str) -> bool {
+    presentation::result_is_current(instance, &ui.get_selected_instance_id())
+        && logical_path == ui.get_mod_action_path().as_str()
+}
+
+/// The title the mod list is already showing for one row.
+///
+/// Used to name the modal before the catalog answers, so it opens with the mod
+/// the user clicked rather than with a blank heading.
+fn mod_row_title(ui: &AppWindow, path: &SharedString) -> SharedString {
+    ui.get_managed_mods()
+        .iter()
+        .find(|row| row.logical_path == *path)
+        .map_or_else(SharedString::default, |row| row.title.clone())
+}
+
+fn mod_version_rows(rows: Vec<backend::ModVersionData>) -> Vec<ModVersionRow> {
+    rows.into_iter()
+        .map(|row| ModVersionRow {
+            version_id: row.version_id.into(),
+            name: row.name.into(),
+            number: row.number.into(),
+            channel: row.channel.into(),
+            published: row.published.into(),
+            installed: row.installed,
+            newest: row.newest,
+        })
+        .collect()
+}
+
 fn managed_mod_rows(rows: Vec<ManagedModData>) -> Vec<ModRow> {
     rows.into_iter()
         .map(|row| ModRow {
             project_id: row.project_id.into(),
+            logical_path: row.logical_path.into(),
+            can_manage: row.can_manage,
+            can_change_version: row.can_change_version,
+            can_update: row.can_update,
+            can_remove: row.can_remove,
+            restriction: row.restriction.into(),
             title: row.title.into(),
             file_name: row.file_name.into(),
             version: row.version.into(),

@@ -12,13 +12,14 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use ephervex_core::live_diagnostics::TailedLine;
 use ephervex_core::{
-    App, AuthEvent, AuthObserver, CancellationToken, ClientFolder, CoreError, DiagnosticKind,
-    DiagnosticRequest, DiagnosticScope, EulaStatus, GlobalMinecraftPreferences, ImportRequest,
-    LaunchAndConnectObserver, LaunchAndConnectOptions, LaunchEvent, LaunchObserver, LaunchOptions,
-    LoginOptions, ManagedModEntry, ManagedModSnapshot, MetadataAvailability, ModDetails,
-    ModInstallRequest, ModSearchQuery, NewClient, NewServer, OperationReporter, Paths,
-    PreferenceKey, ProgressSink, SearchOptions, ServerCreateOptions, ServerEvent, ServerFolder,
-    ServerNetworkSettings, ServerObserver,
+    App, AuthEvent, AuthObserver, CancellationToken, ClientFolder, CoreError, CoreResult,
+    DiagnosticKind, DiagnosticRequest, DiagnosticScope, EulaStatus, GlobalMinecraftPreferences,
+    ImportRequest, LaunchAndConnectObserver, LaunchAndConnectOptions, LaunchEvent, LaunchObserver,
+    LaunchOptions, LoginOptions, ManagedModEntry, ManagedModSnapshot, MetadataAvailability,
+    ModDetails, ModInstallRequest, ModMutability, ModMutation, ModMutationPlan, ModSearchQuery,
+    ModVersionChoice, MutationRestriction, NewClient, NewServer, OperationReporter, Paths,
+    PlannedOutcome, PreferenceKey, ProgressSink, SearchOptions, ServerCreateOptions, ServerEvent,
+    ServerFolder, ServerNetworkSettings, ServerObserver,
 };
 use ephervex_i18n::{Arg, lookup, lookup_args, lookup_attribute, lookup_attribute_args};
 use ephervex_model::{
@@ -76,6 +77,27 @@ pub enum Command {
         files: bool,
     },
     LoadInstanceWorkspace(InstanceId),
+    LoadModVersions {
+        instance: InstanceId,
+        path: PathBuf,
+    },
+    ChangeModVersion {
+        instance: InstanceId,
+        path: PathBuf,
+        version: String,
+    },
+    UpdateMod {
+        instance: InstanceId,
+        path: PathBuf,
+    },
+    PlanModRemoval {
+        instance: InstanceId,
+        path: PathBuf,
+    },
+    RemoveMod {
+        instance: InstanceId,
+        path: PathBuf,
+    },
     SearchMods {
         instance: InstanceId,
         query: String,
@@ -290,9 +312,14 @@ pub struct EulaData {
 /// layer, and everything that could be absent is either a localized fallback or
 /// an empty string that the view is expected to skip. No field is invented: an
 /// unknown version says so rather than borrowing the file name.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone)]
 pub struct ManagedModData {
     pub project_id: String,
+    /// Where the mod lives inside the game directory. The durable, provider-
+    /// neutral key every mutation is addressed by, and the one thing that names
+    /// an entry with no catalog identity at all.
+    pub logical_path: String,
     /// The project title, or the jar's file name when nothing better is known.
     pub title: String,
     /// The jar's own name, shown as the secondary line when it differs.
@@ -312,6 +339,59 @@ pub struct ManagedModData {
     /// The jar the instance is recorded as having is not in `mods/`.
     pub missing: bool,
     pub pack_owned: bool,
+    /// Whether the row opens anything at all. False for an entry with no
+    /// project, which has neither versions to show nor anything to change.
+    pub can_manage: bool,
+    pub can_change_version: bool,
+    pub can_update: bool,
+    pub can_remove: bool,
+    /// Why the mutating actions are unavailable, already localized. Empty when
+    /// they are available.
+    pub restriction: String,
+}
+
+/// One release of a managed mod's project, as the version picker shows it.
+#[derive(Debug, Clone)]
+pub struct ModVersionData {
+    pub version_id: String,
+    pub name: String,
+    pub number: String,
+    pub channel: String,
+    pub published: String,
+    /// The release the instance is running now.
+    pub installed: bool,
+    /// The release an update would move to.
+    pub newest: bool,
+}
+
+/// Everything the manage-a-mod view needs.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Default)]
+pub struct ModVersionsData {
+    pub instance: String,
+    pub logical_path: String,
+    pub title: String,
+    pub installed_version: String,
+    pub versions: Vec<ModVersionData>,
+    pub can_change_version: bool,
+    pub can_update: bool,
+    pub can_remove: bool,
+    /// Localized: a refusal reason, or the reason the list is empty.
+    pub notice: String,
+    pub up_to_date: bool,
+}
+
+/// What a removal would take with it, before it is carried out.
+#[derive(Debug, Clone, Default)]
+pub struct ModRemovalPlanData {
+    pub instance: String,
+    pub logical_path: String,
+    pub name: String,
+    /// The automatic dependencies that would go too, by display name.
+    pub dependencies: Vec<String>,
+    /// The catalog could not confirm which dependencies are still needed, so
+    /// none are being collected.
+    pub dependencies_unprovable: bool,
 }
 
 /// The Managed Mods list plus whatever has to be said about how complete it is.
@@ -407,6 +487,8 @@ pub enum Event {
         versions: Vec<String>,
     },
     ManagedMods(ManagedModsData),
+    ModVersions(ModVersionsData),
+    ModRemovalPlan(ModRemovalPlanData),
     ModResults(Vec<ModSearchData>),
     ModPlan(ModPlanData),
     ServerWorkspace(ServerWorkspaceData),
@@ -733,6 +815,71 @@ fn run_worker(
                     }
                     Err(error) => send_modal_error(&events, &error),
                 }
+            }
+            Command::LoadModVersions { instance, path } => {
+                let paths = app.paths().clone();
+                spawn_detached(paths, events.clone(), move |app, events, runtime| {
+                    let data = runtime.block_on(mod_versions(&app, instance, &path));
+                    let _ = events.send(Event::ModVersions(data));
+                });
+            }
+            Command::ChangeModVersion {
+                instance,
+                path,
+                version,
+            } => {
+                let paths = app.paths().clone();
+                spawn_detached(paths, events.clone(), move |app, events, runtime| {
+                    let result = runtime.block_on(app.change_managed_mod_version(
+                        instance,
+                        &path,
+                        &ModVersionChoice::Exact(version),
+                        &OperationReporter::silent("changing-mod-version"),
+                        &CancellationToken::new(),
+                    ));
+                    finish_mutation(&app, &events, result);
+                });
+            }
+            Command::UpdateMod { instance, path } => {
+                let paths = app.paths().clone();
+                spawn_detached(paths, events.clone(), move |app, events, runtime| {
+                    let result = runtime.block_on(app.update_managed_mod(
+                        instance,
+                        &path,
+                        &OperationReporter::silent("updating-mod"),
+                        &CancellationToken::new(),
+                    ));
+                    finish_mutation(&app, &events, result);
+                });
+            }
+            Command::PlanModRemoval { instance, path } => {
+                let paths = app.paths().clone();
+                spawn_detached(paths, events.clone(), move |app, events, runtime| {
+                    let result = runtime.block_on(app.plan_mod_removal(
+                        instance,
+                        &path,
+                        &OperationReporter::silent("planning-mod-removal"),
+                        &CancellationToken::new(),
+                    ));
+                    match result {
+                        Ok(plan) => {
+                            let _ = events.send(Event::ModRemovalPlan(removal_plan_data(&plan)));
+                        }
+                        Err(error) => send_modal_error(&events, &error),
+                    }
+                });
+            }
+            Command::RemoveMod { instance, path } => {
+                let paths = app.paths().clone();
+                spawn_detached(paths, events.clone(), move |app, events, runtime| {
+                    let result = runtime.block_on(app.remove_managed_mod(
+                        instance,
+                        &path,
+                        &OperationReporter::silent("removing-mod"),
+                        &CancellationToken::new(),
+                    ));
+                    finish_mutation(&app, &events, result);
+                });
             }
             Command::LoadInstanceWorkspace(instance) => {
                 // The durable view first, so the list is on screen before
@@ -2421,6 +2568,114 @@ fn localized_value(message_id: &str, value: &str) -> String {
     lookup_args(message_id, [("value", Arg::from(value))])
 }
 
+/// Loads one mod's releases, or the reason there are none to show.
+///
+/// A catalog that cannot be reached is reported in the view rather than as a
+/// failed operation: the mod list behind it is still correct, and the user
+/// asked to look at versions, not to change anything.
+async fn mod_versions(app: &App, instance: InstanceId, path: &Path) -> ModVersionsData {
+    let reporter = OperationReporter::silent("listing-mod-versions");
+    let cancel = CancellationToken::new();
+    match app
+        .managed_mod_versions(instance, path, &reporter, &cancel)
+        .await
+    {
+        Ok(choices) => {
+            let installed = choices.installed_version_id.clone().unwrap_or_default();
+            let newest = choices.newest_compatible.clone().unwrap_or_default();
+            let up_to_date = choices.is_current();
+            let versions: Vec<ModVersionData> = choices
+                .compatible
+                .iter()
+                .map(|annotated| ModVersionData {
+                    version_id: annotated.version.id.clone(),
+                    name: annotated.version.name.clone(),
+                    number: annotated.version.version_number.clone(),
+                    channel: annotated.version.channel.as_str().to_owned(),
+                    published: annotated
+                        .version
+                        .published_at
+                        .format("%Y-%m-%d")
+                        .to_string(),
+                    installed: annotated.version.id == installed,
+                    newest: annotated.version.id == newest,
+                })
+                .collect();
+            ModVersionsData {
+                instance: instance.to_string(),
+                logical_path: path.display().to_string(),
+                title: choices.project.title.clone(),
+                installed_version: installed,
+                notice: restriction_text(choices.mutability.restriction),
+                can_change_version: choices.mutability.can_change_version,
+                can_update: choices.mutability.can_update && !up_to_date,
+                can_remove: choices.mutability.can_remove,
+                up_to_date,
+                versions,
+            }
+        }
+        Err(error) => {
+            tracing::warn!(%error, "mod versions could not be listed");
+            ModVersionsData {
+                instance: instance.to_string(),
+                logical_path: path.display().to_string(),
+                notice: localized_error(&error),
+                ..ModVersionsData::default()
+            }
+        }
+    }
+}
+
+/// Reports a finished mutation and refreshes what the workspace is showing.
+fn finish_mutation(app: &App, events: &Sender<Event>, result: CoreResult<ModMutation>) {
+    match result {
+        Ok(mutation) => {
+            let _ = events.send(Event::CloseModal);
+            let _ = events.send(Event::Toast {
+                message: mutation_message(&mutation),
+                error: false,
+            });
+            let _ = events.send(Event::ManagedMods(managed_mods_data(&mutation.snapshot)));
+            send_snapshot(app, events);
+        }
+        Err(error) => send_modal_error(events, &error),
+    }
+}
+
+/// What to tell the user one finished mutation did.
+fn mutation_message(mutation: &ModMutation) -> String {
+    match &mutation.plan.outcome {
+        PlannedOutcome::AlreadyCurrent => {
+            localized_value("gui-mod-already-current", &mutation.plan.name)
+        }
+        PlannedOutcome::Repair => localized_value("gui-mod-repaired", &mutation.plan.name),
+        PlannedOutcome::ChangeVersion { .. } => {
+            localized_value("gui-mod-version-changed", &mutation.plan.name)
+        }
+        PlannedOutcome::Remove => {
+            localized_count("gui-mod-removed", mutation.plan.removes.len().max(1))
+        }
+    }
+}
+
+fn removal_plan_data(plan: &ModMutationPlan) -> ModRemovalPlanData {
+    ModRemovalPlanData {
+        instance: plan.instance.to_string(),
+        logical_path: plan.target.display().to_string(),
+        name: plan.name.clone(),
+        dependencies: plan
+            .collected_dependencies()
+            .map(|file| file.name.clone())
+            .collect(),
+        dependencies_unprovable: plan.orphans_unprovable,
+    }
+}
+
+/// A refusal as something to show, or nothing when there is none.
+fn restriction_text(restriction: Option<MutationRestriction>) -> String {
+    restriction.map_or_else(String::new, |restriction| lookup(restriction.message_id()))
+}
+
 /// Turns the application service's mod view into rows.
 ///
 /// The one place a managed mod becomes display text. Everything it reads is
@@ -2440,8 +2695,15 @@ fn managed_mods_data(snapshot: &ManagedModSnapshot) -> ManagedModsData {
 fn managed_mod_data(entry: &ManagedModEntry) -> ManagedModData {
     let details = entry.details.as_ref();
     let title = entry.display_name().to_owned();
+    let mutability = ModMutability::of(entry);
     ManagedModData {
         project_id: entry.identity.project_id().unwrap_or_default().to_owned(),
+        logical_path: entry.logical_path.display().to_string(),
+        can_manage: mutability.can_list_versions,
+        can_change_version: mutability.can_change_version,
+        can_update: mutability.can_update,
+        can_remove: mutability.can_remove,
+        restriction: restriction_text(mutability.restriction),
         // The file name is the secondary line only when it adds something. For
         // an unidentified mod the title already is the file name, and printing
         // it twice would read as a bug.

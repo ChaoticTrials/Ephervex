@@ -708,6 +708,18 @@ pack-requirement-unsupported = Not supported
 # Ephervex has nothing to go on and does not guess on their behalf.
 pack-requirement-unknown = Not stated
 
+# Why a mod cannot be changed or removed. Each names a different situation, and
+# the difference is what tells a user whether to expect this to change.
+mod-restriction-pack-owned = The imported pack declares this mod. Changing it on its own is not supported yet.
+mod-restriction-dependency = Another mod requires this one, so its release follows what needs it.
+mod-restriction-identity-unresolved = Ephervex cannot tell which project this file is, so it has nothing to look up.
+mod-restriction-version-unknown = Ephervex cannot tell which release is installed, so it will not guess what to replace.
+
+error-mod-not-managed = That mod is no longer part of this instance.
+.action = Reopen the instance to see its current mods.
+error-mod-identity-incomplete = One of this instance's mods has no provider identity, so its dependencies cannot be worked out.
+.action = Mods with no identity have to be managed by hand.
+
 # Why a mod belongs to an instance. Kept distinct because they are different
 # things to look at and, later, different things to change.
 mod-origin-pack-declared = From pack
@@ -1048,6 +1060,31 @@ gui-mod-version-unknown = Version not recorded
 gui-mod-provider-unknown = No provider
 gui-mod-file-missing = File missing from mods folder
 gui-mod-metadata-offline = Showing recorded state only; Modrinth could not be reached.
+gui-modal-manage-mod = Manage Mod
+gui-modal-remove-mod = Remove Mod
+gui-mod-compatible-versions = Releases that fit this instance
+gui-mod-versions-loading = Loading releases...
+gui-mod-no-compatible-versions = No release of this mod fits this instance's exact Minecraft version and loader.
+gui-mod-installed-version = Installed
+gui-mod-newest-version = Newest
+gui-mod-up-to-date = Up to date
+gui-mod-change-version = Change Version
+gui-mod-update = Update
+gui-mod-version-changed = { $value } now runs the release you selected.
+gui-mod-already-current = { $value } is already the newest release that fits this instance.
+gui-mod-repaired = { $value } was put back at its recorded release.
+gui-mod-removed = { $count ->
+    [one] Removed 1 mod.
+   *[other] Removed { $count } mods.
+}
+gui-mod-remove-detail = { $value } will be deleted from this instance.
+gui-mod-remove-dependencies = { $count ->
+    [one] 1 mod was installed only for it and will go too:
+   *[other] { $count } mods were installed only for it and will go too:
+}
+gui-mod-remove-no-dependencies = Nothing else was installed only for it.
+gui-mod-remove-dependencies-unprovable = Modrinth could not confirm which mods are still needed, so none will be collected.
+gui-mod-remove-action = Remove Mod
 gui-add-modrinth-mods = Add Mods from Modrinth
 gui-modrinth-compatibility = Search results are constrained to this instance's exact Minecraft version and loader.
 gui-search-compatible-mods = Search compatible mods...
