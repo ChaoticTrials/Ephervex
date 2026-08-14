@@ -48,7 +48,7 @@ prevents UI code from acquiring storage or provider policy accidentally.
 | `ephervex-server` | Dedicated-server properties, EULA enforcement, process identity, foreground supervision, control channel, and bounded capture |
 | `ephervex-core` | Application services and error classification shared by frontends |
 | `ephervex-cli` | Command-line frontend and human/JSON rendering |
-| `ephervex-gui` | Slint frontend boundary; no functional interface is available |
+| `ephervex-gui` | Slint desktop frontend for instances, servers, accounts, runtimes, mods, preferences, and diagnostics |
 
 Provider-neutral types stay neutral. A Modrinth project ID or CurseForge file ID
 belongs in an explicit provider/source field, not in a generic loader, file, or
@@ -429,10 +429,9 @@ onward, Vanilla, Forge, NeoForge, Modrinth pack import, Modrinth mod browsing
 with dependency resolution, and linked-server reconstruction from retained
 recipes, plus launching a linked client directly into a local managed server.
 Logs, crash reports, and launcher diagnostics are inspectable through
-`ephervex-core` and the CLI. The GUI, CurseForge browsing and pack import, and
-mod updates and removal are unavailable. Fabric, Quilt,
-snapshots, Windows, and macOS are
-outside the supported scope recorded in ADR 0008.
+`ephervex-core`, the CLI, and the GUI. CurseForge browsing and pack import, and
+mod updates and removal are unavailable. Fabric, Quilt, snapshots, Windows,
+and macOS are outside the supported scope recorded in ADR 0008.
 
 ## Verification
 

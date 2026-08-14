@@ -28,8 +28,9 @@ frontend.
   concern; ours is never to assume one.
 - No blocking work on the UI thread. Anything touching network or filesystem
   goes through `ephervex-core` on a Tokio runtime and reports back as events.
-- Slint's licensing terms need a review before any public distribution — it is
-  not a plain permissive license. Deferred alongside ADR 0007.
+- Slint's licensing terms need review before any public distribution. The
+  project's own Apache-2.0 license does not replace that dependency review;
+  see ADR 0018.
 - A live server console and log viewer need efficient handling of continuously
   appended text. Slint's model types are expected to cover this; if they do not,
   that limitation surfaces and gets its own superseding ADR.

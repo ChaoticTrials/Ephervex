@@ -1,6 +1,6 @@
 # ADR 0007 — Licensing deferred; Prism is behavioral reference only
 
-**Status:** Accepted
+**Status:** Superseded by ADR 0018
 
 ## Context
 

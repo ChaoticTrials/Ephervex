@@ -12,7 +12,7 @@ so the reasoning trail survives.
 | [0004](0004-keyring-for-secret-storage.md) | Keyring for secret storage, no plaintext fallback | Accepted |
 | [0005](0005-provider-abstractions.md) | Provider abstractions for loaders, mods, and accounts | Accepted |
 | [0006](0006-temporary-instance-lifecycle.md) | The OS owns temporary-instance cleanup | Accepted |
-| [0007](0007-licensing-and-prism-reference.md) | Licensing deferred; Prism is behavioral reference only | Accepted |
+| [0007](0007-licensing-and-prism-reference.md) | Licensing deferred; Prism is behavioral reference only | Superseded by ADR 0018 |
 | [0008](0008-first-version-scope.md) | Features excluded from the first complete version | Accepted |
 | [0009](0009-session-only-login.md) | Session-only login is a second credential store, not a fallback | Accepted |
 | [0010](0010-account-model.md) | Several accounts, two kinds, one default | Accepted |
@@ -23,3 +23,4 @@ so the reasoning trail survives.
 | [0015](0015-linked-client-direct-connect.md) | Linked client direct connection uses canonical lifecycle services | Accepted |
 | [0016](0016-diagnostics-are-bounded-read-only-windows.md) | Diagnostics are bounded, read-only windows over launcher-owned roots | Accepted |
 | [0017](0017-options-compatibility-is-generated-data.md) | options.txt compatibility is generated data, distributed separately from the application | Accepted |
+| [0018](0018-apache-2.0-project-license.md) | Apache-2.0 project license | Accepted |
