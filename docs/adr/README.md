@@ -24,3 +24,4 @@ so the reasoning trail survives.
 | [0016](0016-diagnostics-are-bounded-read-only-windows.md) | Diagnostics are bounded, read-only windows over launcher-owned roots | Accepted |
 | [0017](0017-options-compatibility-is-generated-data.md) | options.txt compatibility is generated data, distributed separately from the application | Accepted |
 | [0018](0018-apache-2.0-project-license.md) | Apache-2.0 project license | Accepted |
+| [0019](0019-one-mod-list-with-typed-ownership-and-identity.md) | An instance has one mod list, with ownership and identity as separate typed facts | Accepted |

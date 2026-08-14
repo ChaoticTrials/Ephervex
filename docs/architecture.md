@@ -325,6 +325,18 @@ and a file with no provenance stays outside the managed model. Installation
 writes the recipe last; any failure — including a failure to write the recipe —
 removes the files that operation created and leaves everything else untouched.
 
+An instance's mods are one list, and each entry carries its ownership and the
+completeness of its provider identity as separate typed facts (ADR 0019). An
+imported pack's mods are reconstructed from the pack's own catalog download
+addresses, which is provider data rather than an inference from a file name; an
+address that proves no catalog release leaves the release unknown instead of
+recording a version number as an identifier. Provider titles, compatibility, and
+artwork are enrichment over that state: they are served through the metadata
+cache, and failing to fetch them costs a label rather than a mod. A recorded mod
+whose jar is absent from `mods/` is reported as missing rather than forgotten.
+The frontends consume one snapshot from the application service and never read a
+recipe, call a provider, or interpret a file name themselves.
+
 ## Security boundaries
 
 ### Untrusted paths and archives
