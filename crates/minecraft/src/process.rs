@@ -28,6 +28,7 @@
 //! than to detach and pretend it exited. `kill_on_drop` covers the case where
 //! the supervising task itself goes away.
 
+use std::fmt::Write as _;
 use std::process::Stdio;
 
 use ephervex_model::{Operation, OperationId};
@@ -40,6 +41,8 @@ use tracing::{debug, info, instrument, warn};
 use crate::error::{LaunchError, LaunchResult};
 use crate::launch::LaunchCommand;
 use crate::log::{Log4jReader, LogRecord};
+
+const MAX_GAME_OUTPUT_LINE_BYTES: usize = 1024 * 1024;
 
 /// Which pipe a line arrived on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -300,13 +303,14 @@ where
     let mut line = Vec::new();
 
     loop {
-        line.clear();
-        match reader.read_until(b'\n', &mut line).await {
-            Ok(0) => break,
-            Ok(_) => {
-                let text = String::from_utf8_lossy(&line);
-                let text = text.trim_end_matches(['\n', '\r']);
-                for record in parser.push(text) {
+        match read_limited_line(&mut reader, &mut line).await {
+            Ok(None) => break,
+            Ok(Some(omitted_bytes)) => {
+                let mut text = String::from_utf8_lossy(&line).into_owned();
+                if omitted_bytes > 0 {
+                    let _ = write!(text, " [truncated, {omitted_bytes} bytes omitted]");
+                }
+                for record in parser.push(&text) {
                     observer.emit(LaunchEvent::OutputLine(OutputLine { stream, record }));
                 }
             }
@@ -319,6 +323,44 @@ where
 
     for record in parser.flush() {
         observer.emit(LaunchEvent::OutputLine(OutputLine { stream, record }));
+    }
+}
+
+async fn read_limited_line<R>(
+    reader: &mut BufReader<R>,
+    output: &mut Vec<u8>,
+) -> std::io::Result<Option<usize>>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    output.clear();
+    let mut omitted = 0usize;
+    let mut saw_bytes = false;
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            if !saw_bytes {
+                return Ok(None);
+            }
+            if omitted == 0 && output.ends_with(b"\r") {
+                output.pop();
+            }
+            return Ok(Some(omitted));
+        }
+        saw_bytes = true;
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let take = newline.unwrap_or(available.len());
+        let room = MAX_GAME_OUTPUT_LINE_BYTES.saturating_sub(output.len());
+        let retain = take.min(room);
+        output.extend_from_slice(&available[..retain]);
+        omitted = omitted.saturating_add(take - retain);
+        reader.consume(take + usize::from(newline.is_some()));
+        if newline.is_some() {
+            if omitted == 0 && output.ends_with(b"\r") {
+                output.pop();
+            }
+            return Ok(Some(omitted));
+        }
     }
 }
 
@@ -468,5 +510,25 @@ mod tests {
             }
         }
         assert!(lines.iter().any(|line| line.contains("after")));
+    }
+
+    #[tokio::test]
+    async fn one_unterminated_output_line_has_a_memory_bound() {
+        let oversized = vec![b'x'; MAX_GAME_OUTPUT_LINE_BYTES + 4096];
+        let mut reader = BufReader::new(oversized.as_slice());
+        let mut retained = Vec::new();
+
+        let omitted = read_limited_line(&mut reader, &mut retained)
+            .await
+            .expect("read")
+            .expect("line");
+        assert_eq!(retained.len(), MAX_GAME_OUTPUT_LINE_BYTES);
+        assert_eq!(omitted, 4096);
+        assert!(
+            read_limited_line(&mut reader, &mut retained)
+                .await
+                .expect("eof")
+                .is_none()
+        );
     }
 }
