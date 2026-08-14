@@ -653,12 +653,7 @@ fn register_catalog_actions(ui: &AppWindow, commands: &Sender<Command>) {
 
     let sender = commands.clone();
     ui.on_request_loader_catalog(move |form, loader, minecraft| {
-        let loader = match loader.as_str() {
-            "Forge" => Some(ephervex_model::LoaderKind::Forge),
-            "NeoForge" => Some(ephervex_model::LoaderKind::NeoForge),
-            _ => None,
-        };
-        if let Some(loader) = loader {
+        if let Some(loader) = loader_kind_of(&loader) {
             send(
                 &sender,
                 Command::LoadLoaderVersions {
@@ -823,6 +818,8 @@ fn register_mod_actions(ui: &AppWindow, commands: &Sender<Command>) {
 /// The actions that change an instance's mods, kept apart from the ones that
 /// only look at them.
 fn register_mod_mutations(ui: &AppWindow, commands: &Sender<Command>) {
+    register_loader_change(ui, commands);
+
     let sender = commands.clone();
     ui.on_change_mod_version(move |instance, path, version| {
         if let Some(instance) = backend::parse_instance_id(&instance) {
@@ -875,41 +872,50 @@ fn register_mod_mutations(ui: &AppWindow, commands: &Sender<Command>) {
             );
         }
     });
+}
 
+/// Moving the open instance to a different build of its own loader.
+fn register_loader_change(ui: &AppWindow, commands: &Sender<Command>) {
     let sender = commands.clone();
-    ui.on_search_mods(move |instance, query| {
-        if let Some(instance) = backend::parse_instance_id(&instance) {
-            send(
-                &sender,
-                Command::SearchMods {
-                    instance,
-                    query: query.into(),
-                },
-            );
-        }
+    let handle = ui.as_weak();
+    ui.on_open_loader_change(move || {
+        let Some(ui) = handle.upgrade() else { return };
+        let Ok(index) = usize::try_from(ui.get_selected_instance_index()) else {
+            return;
+        };
+        let Some(row) = ui.get_instances().row_data(index) else {
+            return;
+        };
+        // Vanilla has no build to change; the control that opens this is
+        // hidden for it, and this is the second gate.
+        let Some(loader) = loader_kind_of(&row.loader_kind) else {
+            return;
+        };
+        ui.set_loader_change_current(row.loader.clone());
+        ui.set_loader_change_selected(SharedString::default());
+        ui.set_loader_change_versions(model(Vec::new()));
+        ui.set_loader_change_loading(true);
+        ui.set_loader_change_pending(false);
+        ui.set_modal_error(SharedString::default());
+        ui.set_modal("loader-change".into());
+        send(
+            &sender,
+            Command::LoadLoaderVersions {
+                form: "loader-change".to_owned(),
+                loader,
+                minecraft: row.minecraft.to_string(),
+            },
+        );
     });
 
     let sender = commands.clone();
-    ui.on_review_mod(move |instance, project| {
+    ui.on_change_loader_version(move |instance, version| {
         if let Some(instance) = backend::parse_instance_id(&instance) {
             send(
                 &sender,
-                Command::PlanMod {
+                Command::ChangeLoaderVersion {
                     instance,
-                    project: project.into(),
-                },
-            );
-        }
-    });
-
-    let sender = commands.clone();
-    ui.on_install_mod(move |instance, project| {
-        if let Some(instance) = backend::parse_instance_id(&instance) {
-            send(
-                &sender,
-                Command::InstallMod {
-                    instance,
-                    project: project.into(),
+                    version: version.to_string(),
                 },
             );
         }
@@ -1462,6 +1468,20 @@ fn apply_loader_versions(
     versions: &[String],
 ) {
     let label = loader.to_string();
+    // The loader-change form asks for one instance's own family and release, so
+    // there is nothing on screen to compare against and nothing to discard.
+    if form == "loader-change" {
+        ui.set_loader_change_versions(model(
+            versions.iter().cloned().map(SharedString::from).collect(),
+        ));
+        ui.set_loader_change_loading(false);
+        if ui.get_loader_change_selected().is_empty() {
+            ui.set_loader_change_selected(
+                ui.get_loader_change_current().as_str().to_owned().into(),
+            );
+        }
+        return;
+    }
     let current_matches = if form == "server" {
         ui.get_create_server_loader() == label && ui.get_create_server_minecraft() == minecraft
     } else {
@@ -1934,6 +1954,18 @@ fn apply_mod_removal_plan(ui: &AppWindow, data: backend::ModRemovalPlanData) {
 fn addresses_open_mod(ui: &AppWindow, instance: &str, logical_path: &str) -> bool {
     presentation::result_is_current(instance, &ui.get_selected_instance_id())
         && logical_path == ui.get_mod_action_path().as_str()
+}
+
+/// The loader a display label or kind names, or `None` for vanilla.
+///
+/// One reading of both spellings the UI carries: the product name shown in a
+/// form, and the lowercase kind a row carries for its accent colour.
+fn loader_kind_of(value: &str) -> Option<ephervex_model::LoaderKind> {
+    match value {
+        "Forge" | "forge" => Some(ephervex_model::LoaderKind::Forge),
+        "NeoForge" | "neoforge" => Some(ephervex_model::LoaderKind::NeoForge),
+        _ => None,
+    }
 }
 
 /// The title the mod list is already showing for one row.

@@ -1013,7 +1013,7 @@ impl App {
     ///
     /// Private on purpose: exposing it would let a frontend reach the whole
     /// storage API through `App` and re-open the boundary this layer closes.
-    fn registry(&self) -> &Registry {
+    pub(crate) fn registry(&self) -> &Registry {
         &self.storage.registry
     }
 

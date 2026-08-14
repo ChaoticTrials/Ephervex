@@ -715,6 +715,14 @@ mod-restriction-dependency = Another mod requires this one, so its release follo
 mod-restriction-identity-unresolved = Ephervex cannot tell which project this file is, so it has nothing to look up.
 mod-restriction-version-unknown = Ephervex cannot tell which release is installed, so it will not guess what to replace.
 
+error-loader-family-fixed = { $loader } instances have no loader build to change.
+.action = Changing the loader itself is not supported; create an instance with the loader you want.
+error-loader-change-blocked-by-mods = { $count ->
+    [one] 1 installed mod does not fit the selected loader build.
+   *[other] { $count } installed mods do not fit the selected loader build.
+}
+.action = Change those mods first, or confirm that you want to run the new build anyway.
+
 error-mod-not-managed = That mod is no longer part of this instance.
 .action = Reopen the instance to see its current mods.
 error-mod-identity-incomplete = One of this instance's mods has no provider identity, so its dependencies cannot be worked out.
@@ -1060,6 +1068,20 @@ gui-mod-version-unknown = Version not recorded
 gui-mod-provider-unknown = No provider
 gui-mod-file-missing = File missing from mods folder
 gui-mod-metadata-offline = Showing recorded state only; Modrinth could not be reached.
+gui-modal-change-loader = Change Loader Build
+gui-loader-change-open = Change Build
+gui-loader-change-summary = Running { $value }
+gui-loader-change-detail = Move this instance to a different build of the loader it already has. The loader itself does not change.
+gui-loader-change-current = Current
+gui-loader-change-target = Move to
+gui-loader-change-unavailable = No builds are offered for this Minecraft release.
+gui-loader-change-unverifiable = { $count ->
+    [one] 1 installed mod could not be checked against the new build.
+   *[other] { $count } installed mods could not be checked against the new build.
+}
+gui-loader-change-mods-untouched = Installed mods are left exactly as they are.
+gui-loader-change-action = Install and Switch
+gui-loader-changed = This instance now runs { $value }.
 gui-modal-manage-mod = Manage Mod
 gui-modal-remove-mod = Remove Mod
 gui-mod-compatible-versions = Releases that fit this instance

@@ -98,6 +98,10 @@ pub enum Command {
         instance: InstanceId,
         path: PathBuf,
     },
+    ChangeLoaderVersion {
+        instance: InstanceId,
+        version: String,
+    },
     SearchMods {
         instance: InstanceId,
         query: String,
@@ -815,6 +819,34 @@ fn run_worker(
                     }
                     Err(error) => send_modal_error(&events, &error),
                 }
+            }
+            Command::ChangeLoaderVersion { instance, version } => {
+                let paths = app.paths().clone();
+                spawn_detached(paths, events.clone(), move |app, events, runtime| {
+                    let result = runtime.block_on(app.change_loader_version(
+                        instance,
+                        &version,
+                        // Never assumed. A known incompatibility comes back as a
+                        // refusal the user reads before deciding again.
+                        false,
+                        &OperationReporter::silent("changing-loader-version"),
+                        &CancellationToken::new(),
+                    ));
+                    match result {
+                        Ok(change) => {
+                            let _ = events.send(Event::CloseModal);
+                            let _ = events.send(Event::Toast {
+                                message: localized_value(
+                                    "gui-loader-changed",
+                                    &change.loader.to_string(),
+                                ),
+                                error: false,
+                            });
+                            send_snapshot(&app, &events);
+                        }
+                        Err(error) => send_modal_error(&events, &error),
+                    }
+                });
             }
             Command::LoadModVersions { instance, path } => {
                 let paths = app.paths().clone();

@@ -109,6 +109,25 @@ pub enum CoreError {
         restriction: crate::mutation::MutationRestriction,
     },
 
+    /// The instance has no loader family to stay inside, so there is no version
+    /// of one to change.
+    ///
+    /// Turning a vanilla instance into a modded one — or one loader into
+    /// another — changes what the instance is and invalidates every mod in it.
+    /// That is a different operation from moving between builds of one loader,
+    /// and this refuses rather than quietly becoming it.
+    #[error("`{loader}` instances have no loader build to change")]
+    LoaderFamilyFixed { loader: ephervex_model::LoaderKind },
+
+    /// Managed mods are known not to fit the candidate loader build.
+    ///
+    /// A refusal the caller can override, because the user may be changing the
+    /// loader precisely to see what breaks. Never resolved by updating the
+    /// mods: that would move two things at once in an instance whose purpose is
+    /// to isolate one.
+    #[error("{incompatible} installed mods do not fit the selected loader build")]
+    LoaderChangeBlockedByMods { incompatible: usize },
+
     /// Working out which dependencies are still needed requires every root's
     /// project, and one of them has none.
     ///
@@ -144,6 +163,8 @@ impl CoreError {
             Self::ModPlatform(error) => error.message_id(),
             Self::Server(error) => error.message_id(),
             Self::Connect(error) => error.message_id(),
+            Self::LoaderFamilyFixed { .. } => "error-loader-family-fixed",
+            Self::LoaderChangeBlockedByMods { .. } => "error-loader-change-blocked-by-mods",
             Self::ModNotManaged { .. } => "error-mod-not-managed",
             Self::ModMutationRestricted { restriction, .. } => restriction.message_id(),
             Self::ModIdentityIncomplete { .. } => "error-mod-identity-incomplete",
@@ -163,6 +184,10 @@ impl CoreError {
             Self::ModPlatform(error) => error.message_args(),
             Self::Server(error) => error.message_args(),
             Self::Connect(error) => error.message_args(),
+            Self::LoaderFamilyFixed { loader } => vec![("loader", loader.to_string())],
+            Self::LoaderChangeBlockedByMods { incompatible } => {
+                vec![("count", incompatible.to_string())]
+            }
             Self::Preference(error) => vec![("syntax", error.syntax.to_owned())],
             Self::JavaSettingsInvalid {
                 minimum_mib,
@@ -302,7 +327,9 @@ impl CoreError {
             | Self::Connect(_)
             | Self::ModNotManaged { .. }
             | Self::ModMutationRestricted { .. }
-            | Self::ModIdentityIncomplete { .. } => None,
+            | Self::ModIdentityIncomplete { .. }
+            | Self::LoaderFamilyFixed { .. }
+            | Self::LoaderChangeBlockedByMods { .. } => None,
         }
     }
 
@@ -343,7 +370,9 @@ impl CoreError {
             | Self::JavaSettingsInvalid { .. }
             | Self::Preference(_)
             | Self::ModPlatform(_)
-            | Self::Connect(_) => None,
+            | Self::Connect(_)
+            | Self::LoaderFamilyFixed { .. }
+            | Self::LoaderChangeBlockedByMods { .. } => None,
         }
     }
 }
