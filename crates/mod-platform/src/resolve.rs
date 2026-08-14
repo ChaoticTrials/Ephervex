@@ -2019,4 +2019,282 @@ mod tests {
             ModPlatformError::ProjectAlreadyInstalled { ref project_id, .. } if project_id == "LIB"
         ));
     }
+
+    // -- resolving a change rather than an install -------------------------
+
+    fn installed(project: &str, version: &str) -> InstalledProject {
+        InstalledProject {
+            project_id: project.to_owned(),
+            version_id: version.to_owned(),
+        }
+    }
+
+    /// One mod at two releases, the newer one needing a library.
+    fn upgradeable() -> Catalog {
+        Catalog::default()
+            .with(
+                "ROOTPROJ",
+                vec![
+                    at(compatible("ROOTV1", "ROOTPROJ"), 0),
+                    at(
+                        needs(
+                            compatible("ROOTV2", "ROOTPROJ"),
+                            DependencyKind::Required,
+                            "LIBPROJ",
+                        ),
+                        10,
+                    ),
+                ],
+            )
+            .with("LIBPROJ", vec![at(compatible("LIBV1", "LIBPROJ"), 0)])
+    }
+
+    #[tokio::test]
+    async fn an_install_still_refuses_to_move_a_mod_that_is_already_there() {
+        let error = plan_with(
+            &upgradeable(),
+            InstallSelection::new("ROOTPROJ").at_version("ROOTV2"),
+            &[installed("ROOTPROJ", "ROOTV1")],
+        )
+        .await
+        .expect_err("an install must not change an installed mod");
+        assert!(matches!(
+            error,
+            ModPlatformError::ProjectAlreadyInstalled { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_change_reports_the_move_it_was_asked_to_make() {
+        let plan = plan_under(
+            &upgradeable(),
+            InstallSelection::new("ROOTPROJ").at_version("ROOTV2"),
+            &[installed("ROOTPROJ", "ROOTV1")],
+            InstalledPolicy::Replace,
+        )
+        .await
+        .expect("a plan");
+
+        assert_eq!(
+            plan.replacements,
+            vec![ProjectReplacement {
+                project_id: "ROOTPROJ".to_owned(),
+                from: "ROOTV1".to_owned(),
+                to: "ROOTV2".to_owned(),
+            }]
+        );
+        assert_eq!(plan.root.version.id, "ROOTV2");
+        assert!(
+            plan.already_installed.is_empty(),
+            "a mod that moved is not a mod that was left alone"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_upgrade_pulls_in_what_the_new_release_newly_requires() {
+        let plan = plan_under(
+            &upgradeable(),
+            InstallSelection::new("ROOTPROJ").at_version("ROOTV2"),
+            &[installed("ROOTPROJ", "ROOTV1")],
+            InstalledPolicy::Replace,
+        )
+        .await
+        .expect("a plan");
+
+        assert_eq!(ids(&plan.dependencies), vec!["LIBPROJ".to_owned()]);
+        assert_eq!(
+            plan.dependencies[0].origin,
+            ModOrigin::RequiredDependency,
+            "a dependency an upgrade dragged in is a dependency"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dependency_already_installed_at_the_resolved_version_is_reused() {
+        let plan = plan_under(
+            &upgradeable(),
+            InstallSelection::new("ROOTPROJ").at_version("ROOTV2"),
+            &[
+                installed("ROOTPROJ", "ROOTV1"),
+                installed("LIBPROJ", "LIBV1"),
+            ],
+            InstalledPolicy::Replace,
+        )
+        .await
+        .expect("a plan");
+
+        assert_eq!(
+            plan.already_installed,
+            vec![installed("LIBPROJ", "LIBV1")],
+            "the library is already exactly right"
+        );
+        assert_eq!(
+            ids(plan.to_install()),
+            vec!["ROOTPROJ".to_owned()],
+            "so only the mod that actually moved is fetched"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_update_takes_the_newest_release_that_fits_and_not_the_newest_one() {
+        // The release that would win on date alone is for another Minecraft
+        // version. "Latest" that ignores compatibility is the wrong answer.
+        let catalog = Catalog::default().with(
+            "ROOTPROJ",
+            vec![
+                at(compatible("ROOTV1", "ROOTPROJ"), 0),
+                at(compatible("ROOTV2", "ROOTPROJ"), 10),
+                at(
+                    version("ROOTV3", "ROOTPROJ", &["1.21.4"], &["neoforge"]),
+                    20,
+                ),
+                at(version("ROOTV4", "ROOTPROJ", &["1.20.1"], &["forge"]), 30),
+            ],
+        );
+
+        let plan = plan_under(
+            &catalog,
+            InstallSelection::new("ROOTPROJ"),
+            &[installed("ROOTPROJ", "ROOTV1")],
+            InstalledPolicy::Replace,
+        )
+        .await
+        .expect("a plan");
+
+        assert_eq!(plan.root.version.id, "ROOTV2");
+    }
+
+    #[tokio::test]
+    async fn an_update_with_nothing_newer_resolves_to_what_is_already_installed() {
+        let catalog = Catalog::default().with(
+            "ROOTPROJ",
+            vec![
+                at(compatible("ROOTV1", "ROOTPROJ"), 0),
+                at(
+                    version("ROOTV2", "ROOTPROJ", &["1.21.4"], &["neoforge"]),
+                    10,
+                ),
+            ],
+        );
+
+        let plan = plan_under(
+            &catalog,
+            InstallSelection::new("ROOTPROJ"),
+            &[installed("ROOTPROJ", "ROOTV1")],
+            InstalledPolicy::Replace,
+        )
+        .await
+        .expect("a plan");
+
+        assert_eq!(plan.root.version.id, "ROOTV1");
+        assert!(
+            plan.replacements.is_empty(),
+            "nothing moved, so nothing is reported as moving"
+        );
+        assert!(
+            !plan.changes_anything(),
+            "which is what makes an update a no-op rather than a rewrite"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_exact_version_that_does_not_fit_is_refused_rather_than_neighboured() {
+        let catalog = Catalog::default().with(
+            "ROOTPROJ",
+            vec![
+                at(compatible("ROOTV1", "ROOTPROJ"), 0),
+                at(
+                    version("ROOTV2", "ROOTPROJ", &["1.21.4"], &["neoforge"]),
+                    10,
+                ),
+            ],
+        );
+
+        let error = plan_under(
+            &catalog,
+            InstallSelection::new("ROOTPROJ").at_version("ROOTV2"),
+            &[installed("ROOTPROJ", "ROOTV1")],
+            InstalledPolicy::Replace,
+        )
+        .await
+        .expect_err("must refuse");
+        assert!(matches!(
+            error,
+            ModPlatformError::IncompatibleSelectedVersion { ref version_id, .. }
+                if version_id == "ROOTV2"
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_change_whose_dependencies_cannot_agree_fails_without_a_plan() {
+        // The new release pins the library to one version; another mod in the
+        // graph pins it to a different one. Arbitrating would substitute a
+        // release nobody asked for.
+        let catalog = Catalog::default()
+            .with(
+                "ROOTPROJ",
+                vec![at(
+                    pins(
+                        needs(
+                            compatible("ROOTV2", "ROOTPROJ"),
+                            DependencyKind::Required,
+                            "MIDPROJ",
+                        ),
+                        DependencyKind::Required,
+                        "LIBV1",
+                    ),
+                    10,
+                )],
+            )
+            .with(
+                "MIDPROJ",
+                vec![at(
+                    pins(
+                        compatible("MIDV1", "MIDPROJ"),
+                        DependencyKind::Required,
+                        "LIBV2",
+                    ),
+                    0,
+                )],
+            )
+            .with(
+                "LIBPROJ",
+                vec![
+                    at(compatible("LIBV1", "LIBPROJ"), 0),
+                    at(compatible("LIBV2", "LIBPROJ"), 10),
+                ],
+            );
+
+        let error = plan_under(
+            &catalog,
+            InstallSelection::new("ROOTPROJ").at_version("ROOTV2"),
+            &[installed("ROOTPROJ", "ROOTV1")],
+            InstalledPolicy::Replace,
+        )
+        .await
+        .expect_err("must refuse");
+        assert!(matches!(
+            error,
+            ModPlatformError::ConflictingPinnedVersions { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_projects_a_change_still_reaches_are_what_ownership_is_proven_from() {
+        let plan = plan_under(
+            &upgradeable(),
+            InstallSelection::new("ROOTPROJ").at_version("ROOTV1"),
+            &[installed("ROOTPROJ", "ROOTV2")],
+            InstalledPolicy::Replace,
+        )
+        .await
+        .expect("a plan");
+
+        let reached: Vec<&str> = plan.resolved_projects().collect();
+        assert_eq!(
+            reached,
+            vec!["ROOTPROJ"],
+            "the older release needs no library, so nothing else is reached"
+        );
+    }
 }

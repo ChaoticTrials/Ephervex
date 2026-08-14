@@ -951,3 +951,228 @@ fn display_name(entry: &ManagedModEntry, plan: &ModInstallPlan) -> String {
 fn target_for(record: &ClientRecord) -> ephervex_mod_platform::InstanceTarget {
     ephervex_mod_platform::InstanceTarget::new(record.minecraft_version.clone(), record.loader.kind)
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use ephervex_model::{Hash, HashAlgorithm};
+    use ephervex_pack::{ModIdentity, SideRequirement};
+
+    use super::*;
+    use crate::mods::ModPresence;
+
+    fn entry(origin: ModOrigin, identity: ModIdentity) -> ManagedModEntry {
+        ManagedModEntry {
+            logical_path: PathBuf::from("mods/thing.jar"),
+            file_name: "thing.jar".to_owned(),
+            origin,
+            identity,
+            hashes: vec![
+                Hash::new(
+                    HashAlgorithm::Sha1,
+                    "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+                )
+                .expect("valid sha1"),
+            ],
+            size: Some(1024),
+            client: SideRequirement::Required,
+            server: SideRequirement::Unknown,
+            presence: ModPresence::Installed,
+            details: None,
+            icon: None,
+        }
+    }
+
+    fn resolved() -> ModIdentity {
+        ModIdentity::Version {
+            provider: ModProvider::Modrinth,
+            project_id: "ROOTPROJ".to_owned(),
+            version_id: "ROOTV1".to_owned(),
+            file_id: None,
+        }
+    }
+
+    fn project_only() -> ModIdentity {
+        ModIdentity::Project {
+            provider: ModProvider::Modrinth,
+            project_id: "ROOTPROJ".to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_mod_the_user_chose_may_be_moved_or_taken_away() {
+        let mutability = ModMutability::of(&entry(ModOrigin::UserSelected, resolved()));
+        assert!(mutability.can_change_version);
+        assert!(mutability.can_update);
+        assert!(mutability.can_remove);
+        assert!(mutability.can_list_versions);
+        assert_eq!(mutability.restriction, None);
+    }
+
+    #[test]
+    fn an_automatic_dependency_has_no_independent_life() {
+        // Its version follows its dependents, and removing it by hand would
+        // leave whatever asked for it broken.
+        let mutability = ModMutability::of(&entry(ModOrigin::RequiredDependency, resolved()));
+        assert!(!mutability.can_change_version);
+        assert!(!mutability.can_update);
+        assert!(!mutability.can_remove);
+        assert!(
+            mutability.can_list_versions,
+            "seeing what else exists is not a mutation"
+        );
+        assert_eq!(
+            mutability.restriction,
+            Some(MutationRestriction::Dependency)
+        );
+    }
+
+    #[test]
+    fn an_optional_dependency_may_be_untaken_but_not_moved() {
+        // Both halves of its name are true: a human ticked it, so unticking it
+        // is theirs; the resolver picks its version, so moving it is not.
+        let mutability =
+            ModMutability::of(&entry(ModOrigin::SelectedOptionalDependency, resolved()));
+        assert!(!mutability.can_change_version);
+        assert!(!mutability.can_update);
+        assert!(mutability.can_remove);
+        assert_eq!(
+            mutability.restriction,
+            Some(MutationRestriction::Dependency)
+        );
+    }
+
+    #[test]
+    fn a_pack_owned_mod_is_refused_and_says_which_refusal_it_is() {
+        let mutability = ModMutability::of(&entry(ModOrigin::PackDeclared, resolved()));
+        assert!(!mutability.can_change_version);
+        assert!(!mutability.can_update);
+        assert!(!mutability.can_remove);
+        assert!(
+            mutability.can_list_versions,
+            "a pack's mod still has versions worth showing"
+        );
+        assert_eq!(mutability.restriction, Some(MutationRestriction::PackOwned));
+    }
+
+    #[test]
+    fn ownership_is_reported_before_identity_when_both_would_refuse() {
+        // "The pack owns this" is a more useful thing to be told than "its
+        // version is unknown", and for a pack mod both are often true.
+        let mutability = ModMutability::of(&entry(ModOrigin::PackDeclared, project_only()));
+        assert_eq!(mutability.restriction, Some(MutationRestriction::PackOwned));
+        assert!(mutability.can_list_versions);
+    }
+
+    #[test]
+    fn a_mod_whose_installed_release_is_unproven_is_not_updated_on_a_guess() {
+        // Without the current version there is no way to tell an update from a
+        // no-op, or to know what is being replaced.
+        let mutability = ModMutability::of(&entry(ModOrigin::UserSelected, project_only()));
+        assert!(!mutability.can_change_version);
+        assert!(!mutability.can_update);
+        assert!(!mutability.can_remove);
+        assert!(mutability.can_list_versions);
+        assert_eq!(
+            mutability.restriction,
+            Some(MutationRestriction::VersionUnknown)
+        );
+    }
+
+    #[test]
+    fn a_mod_with_no_provenance_offers_nothing_at_all() {
+        for origin in [
+            ModOrigin::UserSelected,
+            ModOrigin::RequiredDependency,
+            ModOrigin::SelectedOptionalDependency,
+        ] {
+            let mutability = ModMutability::of(&entry(origin, ModIdentity::Unresolved));
+            assert!(!mutability.can_change_version, "{origin:?}");
+            assert!(!mutability.can_update, "{origin:?}");
+            assert!(!mutability.can_remove, "{origin:?}");
+            assert!(
+                !mutability.can_list_versions,
+                "there is no project to list versions of: {origin:?}"
+            );
+        }
+        assert_eq!(
+            ModMutability::of(&entry(ModOrigin::UserSelected, ModIdentity::Unresolved)).restriction,
+            Some(MutationRestriction::IdentityUnresolved)
+        );
+    }
+
+    #[test]
+    fn every_refusal_names_a_distinct_reason_and_a_distinct_message() {
+        let all = [
+            MutationRestriction::PackOwned,
+            MutationRestriction::Dependency,
+            MutationRestriction::IdentityUnresolved,
+            MutationRestriction::VersionUnknown,
+        ];
+        let ids: BTreeSet<&str> = all.iter().map(|it| it.message_id()).collect();
+        assert_eq!(ids.len(), all.len(), "two refusals share a sentence");
+        let names: BTreeSet<&str> = all.iter().map(|it| it.as_str()).collect();
+        assert_eq!(names.len(), all.len());
+    }
+
+    #[test]
+    fn a_plan_that_changes_nothing_says_so() {
+        let plan = ModMutationPlan {
+            instance: InstanceId::new(),
+            target: PathBuf::from("mods/thing.jar"),
+            name: "Thing".to_owned(),
+            project_id: Some("ROOTPROJ".to_owned()),
+            candidate_version: Some("ROOTV1".to_owned()),
+            outcome: PlannedOutcome::AlreadyCurrent,
+            installs: Vec::new(),
+            removes: Vec::new(),
+            orphans_unprovable: false,
+            warnings: Vec::new(),
+        };
+        assert!(!plan.changes_anything());
+        assert_eq!(plan.outcome.as_str(), "already-current");
+    }
+
+    #[test]
+    fn a_removal_shows_the_dependencies_it_would_take_with_it() {
+        let target = PathBuf::from("mods/root.jar");
+        let plan = ModMutationPlan {
+            instance: InstanceId::new(),
+            target: target.clone(),
+            name: "Root".to_owned(),
+            project_id: Some("ROOTPROJ".to_owned()),
+            candidate_version: None,
+            outcome: PlannedOutcome::Remove,
+            installs: Vec::new(),
+            removes: vec![
+                PlannedFile {
+                    logical_path: target,
+                    name: "Root".to_owned(),
+                    project_id: Some("ROOTPROJ".to_owned()),
+                    version_id: Some("ROOTV1".to_owned()),
+                    origin: ModOrigin::UserSelected,
+                },
+                PlannedFile {
+                    logical_path: PathBuf::from("mods/library.jar"),
+                    name: "Library".to_owned(),
+                    project_id: Some("LIBPROJ".to_owned()),
+                    version_id: Some("LIBV1".to_owned()),
+                    origin: ModOrigin::RequiredDependency,
+                },
+            ],
+            orphans_unprovable: false,
+            warnings: Vec::new(),
+        };
+
+        let collected: Vec<&str> = plan
+            .collected_dependencies()
+            .map(|file| file.name.as_str())
+            .collect();
+        assert_eq!(
+            collected,
+            vec!["Library"],
+            "the mod being removed is not one of its own consequences"
+        );
+        assert!(plan.changes_anything());
+    }
+}
