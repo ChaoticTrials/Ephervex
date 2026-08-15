@@ -8,7 +8,7 @@
 //!
 //! # The atomicity invariant
 //!
-//! A download is written to a unique `<destination>.part.<id>` sibling and only renamed into place
+//! A download is written to a unique `.part.<id>` sibling and only renamed into place
 //! after every supplied hash and size has been verified. A partial or corrupt
 //! artifact therefore never appears at the final path, and that is the
 //! invariant the whole shared-cache design rests on: downstream consumers check for a
