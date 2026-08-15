@@ -31,6 +31,7 @@ pub mod error;
 pub mod import;
 pub mod instance;
 pub mod launch;
+pub mod linked_mods;
 pub mod live_diagnostics;
 pub mod loader;
 pub mod logging;
@@ -56,6 +57,11 @@ pub use error::{CoreError, CoreResult};
 pub use import::{ImportRequest, ImportedPack};
 pub use instance::{CreatedClient, PreferenceContext, global_minecraft_preferences};
 pub use launch::{LaunchOptions, LaunchOutcome};
+pub use linked_mods::{
+    ClientModOutcome, ClientModPlan, LinkedModOutcome, LinkedModPlan, LinkedModRequest,
+    LinkedModRoot, LinkedTargetBlock, LinkedTargetFailure, LinkedTargetOutcome, LinkedTargetPlan,
+    LinkedTargetResult, LinkedTargetState,
+};
 pub use loader::{IncompatibleMod, LoaderVersionChange, LoaderVersionPlan};
 pub use logging::{DEFAULT_LOG_DIRECTIVES, init_tracing};
 pub use mods::{
@@ -149,11 +155,11 @@ pub use ephervex_options::{
     SkippedPreference, WindowSize,
 };
 pub use ephervex_pack::{
-    AppliedLayer, ExtractionLimits, ManagedMod, ManagedModInstallation, MaterializedFiles,
-    MaterializedPack, MaterializedServerRecipe, ModIdentity, ModOrigin, OptionalComponent,
-    OptionalSelection, OverrideLayer, OverrideScope, PackAnalysis, PackError, PackFileRecipe,
-    PackFormat, PackPolicy, PackRecipe, PackSide, ProviderFileIdentity, ProviderRecipeMetadata,
-    RecordedMod, ServerReconstructionPlan, SidePlan, SideRequirement,
+    AppliedLayer, ExtractionLimits, ManagedMod, ManagedModInstallation, ManagedMutationReport,
+    MaterializedFiles, MaterializedPack, MaterializedServerRecipe, ModIdentity, ModOrigin,
+    OptionalComponent, OptionalSelection, OverrideLayer, OverrideScope, PackAnalysis, PackError,
+    PackFileRecipe, PackFormat, PackPolicy, PackRecipe, PackSide, ProviderFileIdentity,
+    ProviderRecipeMetadata, RecordedMod, ServerReconstructionPlan, SidePlan, SideRequirement,
 };
 pub use ephervex_server::{
     CaptureHealth, CaptureRetention, CapturedLine, ControlAction, ControlResponse,

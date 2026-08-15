@@ -715,6 +715,29 @@ mod-restriction-dependency = Another mod requires this one, so its release follo
 mod-restriction-identity-unresolved = Ephervex cannot tell which project this file is, so it has nothing to look up.
 mod-restriction-version-unknown = Ephervex cannot tell which release is installed, so it will not guess what to replace.
 
+# What carrying one mod decision to a linked server would do, and why it
+# cannot. The exact release the client ends up with is the release every
+# selected server is evaluated for, so "a newer release fits this server" is
+# never one of these answers.
+linked-target-will-install = Will install
+linked-target-will-change-version = Will change version
+linked-target-will-repair = Will restore its recorded release
+linked-target-will-remove = Will remove
+linked-target-already-current = Already at this release
+linked-target-not-present = Does not have this mod
+
+linked-target-server-unsupported = This mod does not support servers.
+linked-target-incompatible-minecraft = This release does not support the server's Minecraft version.
+linked-target-incompatible-loader = This release does not support the server's loader.
+linked-target-exact-release-unavailable = This exact release cannot be installed on this server.
+linked-target-server-running = Stop this server before changing its mods.
+linked-target-server-not-installed = This server has no installation yet.
+linked-target-no-longer-linked = This server is no longer linked to this instance.
+linked-target-provider-unavailable = The mod catalog could not be reached, so this server could not be checked.
+linked-target-state-unavailable = This server's recorded mods could not be read.
+linked-target-pack-owned = This server's pack declares this mod.
+linked-target-server-dependency = Another mod on this server requires this one.
+
 error-artwork-unusable = A mod's icon could not be shown.
 .action = The mod itself is unaffected; a generic icon is used instead.
 error-loader-family-fixed = { $loader } instances have no loader build to change.
@@ -1525,3 +1548,35 @@ gui-activity-server-run = Server run
 gui-activity-server-exited = Server exited
 gui-activity-connected-to = Connected to { $value }
 gui-launch-and-connect = Launch & Connect
+
+# Linked servers, shown inside the mod flows they belong to rather than on a
+# page of their own.
+gui-linked-servers = Linked servers
+gui-linked-exact-release = Every selected server receives { $value }.
+gui-linked-support-required = This mod requires a server-side install.
+gui-linked-support-optional = Server support is optional for this mod.
+# "Not stated" is not "not needed": the author declared nothing, and Ephervex
+# says so instead of deciding for them.
+gui-linked-support-unknown = This mod does not state whether it supports servers.
+gui-linked-support-unsupported = This mod is client-only, so no server is offered it.
+gui-linked-installs = { $count ->
+    [one] 1 mod
+   *[other] { $count } mods
+}
+gui-linked-removes = { $count ->
+    [one] 1 mod removed
+   *[other] { $count } mods removed
+}
+gui-linked-dependencies-unprovable = Dependencies could not be confirmed, so none will be collected.
+# One word for every reason a server cannot take part. The reason itself is the
+# sentence beside it, so the row reads as one state plus one explanation.
+gui-linked-unavailable = Unavailable
+gui-modal-apply-mod = Apply Mod Change
+gui-linked-apply = Apply
+gui-modal-mod-result = Result
+gui-linked-result-client = This instance
+gui-linked-applied = Done
+gui-linked-skipped = Skipped
+gui-linked-failed = Failed
+gui-linked-partial = Some targets were not changed. Each one is listed with its own result.
+gui-linked-all-applied = Every selected target was changed.
