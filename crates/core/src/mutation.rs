@@ -51,12 +51,13 @@ use std::path::{Path, PathBuf};
 
 use ephervex_download::{CacheLayout, DownloadManager, DownloaderConfig, OperationReporter};
 use ephervex_mod_platform::{
-    AnnotatedVersion, InstalledPolicy, ModInstallPlan, ModProject, PlanWarning, PlannedMod,
-    annotate, newest_compatible,
+    AnnotatedVersion, InstalledPolicy, InstanceTarget, ModInstallPlan, ModProject, PlanWarning,
+    PlannedMod, annotate, newest_compatible,
 };
 use ephervex_model::{InstanceId, ModOrigin, ModProvider};
 use ephervex_pack::{
-    ManagedMutation, ManagedProject, PackError, PackFileRecipe, PackRecipe, SourceStore,
+    ManagedMutation, ManagedProject, PackError, PackFileRecipe, PackRecipe, RecordedMod,
+    SourceStore,
 };
 use ephervex_storage::ClientRecord;
 use tokio_util::sync::CancellationToken;
@@ -519,8 +520,8 @@ impl App {
         };
 
         Ok(MutationContext {
+            target: target_for(&record),
             record,
-            snapshot,
             entry,
             recipe,
             store,
@@ -589,8 +590,8 @@ impl App {
 
         let installs = planned_files(&resolved, &context.recipe);
         let (removes, orphans_unprovable) = self
-            .collect_orphans(
-                context,
+            .orphaned_dependencies(
+                &context.dependency_scope(),
                 Some((&project_id, &candidate)),
                 &[],
                 reporter,
@@ -639,7 +640,13 @@ impl App {
         // is gone.
         let mut removes = vec![planned_from_entry(&context.entry)];
         let (orphans, orphans_unprovable) = self
-            .collect_orphans(context, None, &[project_id.as_str()], reporter, cancel)
+            .orphaned_dependencies(
+                &context.dependency_scope(),
+                None,
+                &[project_id.as_str()],
+                reporter,
+                cancel,
+            )
             .await;
         removes.extend(orphans);
 
@@ -677,17 +684,20 @@ impl App {
     /// `moving` names a root that is changing version, so it is resolved at its
     /// new release rather than its current one. `dropping` names roots that are
     /// going away and contribute nothing.
-    async fn collect_orphans(
+    ///
+    /// Takes a desired state and a target rather than a client, because a
+    /// linked server asks exactly this question about its own mods and must not
+    /// get a second implementation of the answer.
+    pub(crate) async fn orphaned_dependencies(
         &self,
-        context: &MutationContext,
+        scope: &DependencyScope<'_>,
         moving: Option<(&str, &str)>,
         dropping: &[&str],
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> (Vec<PlannedFile>, bool) {
-        let candidates: Vec<&ManagedModEntry> = context
-            .snapshot
-            .mods
+        let recorded = scope.recipe.recorded_mods_for(scope.side);
+        let candidates: Vec<&RecordedMod> = recorded
             .iter()
             .filter(|entry| entry.origin == ModOrigin::RequiredDependency)
             .filter(|entry| entry.identity.project_id().is_some())
@@ -697,7 +707,7 @@ impl App {
         }
 
         let required = match self
-            .required_projects(context, moving, dropping, reporter, cancel)
+            .required_projects(scope, &recorded, moving, dropping, reporter, cancel)
             .await
         {
             Ok(required) => required,
@@ -718,12 +728,12 @@ impl App {
                     .project_id()
                     .is_some_and(|project| !required.contains(project))
             })
-            .map(planned_from_entry)
+            .map(planned_from_recorded)
             .collect();
         (orphans, false)
     }
 
-    /// Every project the instance's own roots still reach.
+    /// Every project this desired state's own roots still reach.
     ///
     /// A root is a mod a human chose: one they picked by name, or an optional
     /// dependency they ticked. A pack's own mods are not roots and are not
@@ -733,14 +743,15 @@ impl App {
     /// confirm something the import already guarantees.
     async fn required_projects(
         &self,
-        context: &MutationContext,
+        scope: &DependencyScope<'_>,
+        recorded: &[RecordedMod],
         moving: Option<(&str, &str)>,
         dropping: &[&str],
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<BTreeSet<String>> {
         let mut roots: BTreeMap<String, Option<String>> = BTreeMap::new();
-        for entry in &context.snapshot.mods {
+        for entry in recorded {
             if !matches!(
                 entry.origin,
                 ModOrigin::UserSelected | ModOrigin::SelectedOptionalDependency
@@ -768,6 +779,7 @@ impl App {
             roots.insert(project.to_owned(), Some(version.to_owned()));
         }
 
+        let installed = crate::mods::installed_projects_of(Some(scope.recipe));
         let mut required = BTreeSet::new();
         for (project, version) in roots {
             let mut request = crate::mods::ModInstallRequest::new(project);
@@ -775,7 +787,14 @@ impl App {
                 request = request.at_version(version);
             }
             let plan = self
-                .resolve_replacement(&context.record, &request, reporter)
+                .resolve_against(
+                    scope.target,
+                    &installed,
+                    &request,
+                    InstalledPolicy::Replace,
+                    reporter,
+                    cancel,
+                )
                 .await?;
             if cancel.is_cancelled() {
                 return Err(PackError::Canceled.into());
@@ -864,11 +883,34 @@ impl App {
 #[derive(Debug)]
 struct MutationContext {
     record: ClientRecord,
-    snapshot: ManagedModSnapshot,
     entry: ManagedModEntry,
     recipe: PackRecipe,
+    target: InstanceTarget,
     store: SourceStore,
     report: ephervex_pack::ManagedMutationReport,
+}
+
+impl MutationContext {
+    fn dependency_scope(&self) -> DependencyScope<'_> {
+        DependencyScope {
+            recipe: &self.recipe,
+            side: ephervex_pack::PackSide::Client,
+            target: &self.target,
+        }
+    }
+}
+
+/// One desired state, and the exact release and loader it is resolved against.
+///
+/// The pair every dependency question needs. Naming it keeps a client and a
+/// linked server asking the same question of the same code rather than each
+/// carrying its own idea of what "still required" means.
+#[derive(Debug)]
+pub(crate) struct DependencyScope<'a> {
+    pub recipe: &'a PackRecipe,
+    /// Which side's recorded desired state the mods are read from.
+    pub side: ephervex_pack::PackSide,
+    pub target: &'a InstanceTarget,
 }
 
 /// The entry at one logical path, or a refusal naming it.
@@ -938,6 +980,21 @@ fn planned_from_entry(entry: &ManagedModEntry) -> PlannedFile {
     }
 }
 
+/// The same, for a mod read straight out of a desired state.
+///
+/// A recorded mod carries no provider metadata, so its label is its file name.
+/// That is the honest answer: nothing here has asked a catalog what the project
+/// is called.
+pub(crate) fn planned_from_recorded(entry: &RecordedMod) -> PlannedFile {
+    PlannedFile {
+        logical_path: entry.logical_path.clone(),
+        name: entry.file_name.clone(),
+        project_id: entry.identity.project_id().map(ToOwned::to_owned),
+        version_id: entry.identity.version_id().map(ToOwned::to_owned),
+        origin: entry.origin,
+    }
+}
+
 /// The best name for the mod being acted on.
 fn display_name(entry: &ManagedModEntry, plan: &ModInstallPlan) -> String {
     if plan.root.project.title.is_empty() {
@@ -948,8 +1005,8 @@ fn display_name(entry: &ManagedModEntry, plan: &ModInstallPlan) -> String {
 }
 
 /// The instance's exact Minecraft version and loader.
-fn target_for(record: &ClientRecord) -> ephervex_mod_platform::InstanceTarget {
-    ephervex_mod_platform::InstanceTarget::new(record.minecraft_version.clone(), record.loader.kind)
+fn target_for(record: &ClientRecord) -> InstanceTarget {
+    InstanceTarget::new(record.minecraft_version.clone(), record.loader.kind)
 }
 
 #[cfg(test)]

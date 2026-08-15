@@ -44,7 +44,7 @@ use ephervex_mod_platform::{
 use ephervex_model::{Hash, ImportSourceKind, InstanceId, ModOrigin, ModProvider};
 use ephervex_pack::{
     ManagedMod, ManagedModInstall, ManagedModInstallation, ModIdentity, PackError, PackFileRecipe,
-    PackRecipe, ProviderFileIdentity, RecordedMod, SideRequirement, SourceStore,
+    PackRecipe, PackSide, ProviderFileIdentity, RecordedMod, SideRequirement, SourceStore,
 };
 use ephervex_storage::ClientRecord;
 use tokio_util::sync::CancellationToken;
@@ -776,16 +776,39 @@ impl App {
         policy: InstalledPolicy,
         reporter: &OperationReporter,
     ) -> CoreResult<ModInstallPlan> {
-        let target = target_for(record);
+        let installed = self.installed_projects(record)?;
+        self.resolve_against(
+            &target_for(record),
+            &installed,
+            request,
+            policy,
+            reporter,
+            &CancellationToken::new(),
+        )
+        .await
+    }
+
+    /// Resolves a request against an arbitrary exact target and desired state.
+    ///
+    /// Split out from [`Self::plan_for`] because a linked server is the same
+    /// question asked of a different Minecraft release, loader, and installed
+    /// set. Sharing the implementation is what keeps a server from arriving at
+    /// a different answer to "what does this mod need" than the client did.
+    pub(crate) async fn resolve_against(
+        &self,
+        target: &InstanceTarget,
+        installed: &[InstalledProject],
+        request: &ModInstallRequest,
+        policy: InstalledPolicy,
+        reporter: &OperationReporter,
+        cancel: &CancellationToken,
+    ) -> CoreResult<ModInstallPlan> {
         let provider = self.mod_provider()?;
-        let loader = ephervex_mod_platform::loader_name_for(provider, &target)?;
-        let cancel = CancellationToken::new();
+        let loader = ephervex_mod_platform::loader_name_for(provider, target)?;
 
         // A human-typable slug has to become an id before anything is keyed on
         // it, or the same project could enter the graph twice under two names.
-        let project = provider
-            .project(&request.project, reporter, &cancel)
-            .await?;
+        let project = provider.project(&request.project, reporter, cancel).await?;
 
         let mut selection =
             InstallSelection::new(project.id).selecting_optional(request.optional.iter().cloned());
@@ -793,17 +816,16 @@ impl App {
             selection = selection.at_version(version.clone());
         }
 
-        let installed = self.installed_projects(record)?;
         Ok(
             ephervex_mod_platform::resolve(ephervex_mod_platform::ResolveRequest {
                 provider,
-                target: &target,
+                target,
                 loader_name: loader,
                 selection: &selection,
-                installed: &installed,
+                installed,
                 installed_policy: policy,
                 reporter,
-                cancel: &cancel,
+                cancel,
             })
             .await?,
         )
@@ -811,15 +833,7 @@ impl App {
 
     /// What the instance already has, for the provider this browse is against.
     fn installed_projects(&self, record: &ClientRecord) -> CoreResult<Vec<InstalledProject>> {
-        Ok(self
-            .managed_mods(record.id)?
-            .into_iter()
-            .filter(|managed| managed.provider == ModProvider::Modrinth)
-            .map(|managed| InstalledProject {
-                project_id: managed.project_id,
-                version_id: managed.version_id,
-            })
-            .collect())
+        Ok(installed_projects_of(self.pack_recipe(record.id)?.as_ref()))
     }
 
     /// The mod catalog, built on first use.
@@ -844,6 +858,23 @@ impl App {
     }
 }
 
+/// The provider projects one desired state already records, for resolution.
+///
+/// Takes the recipe rather than an instance id so that a client and a linked
+/// server produce this the same way.
+pub(crate) fn installed_projects_of(recipe: Option<&PackRecipe>) -> Vec<InstalledProject> {
+    recipe
+        .map(PackRecipe::managed_mods)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|managed| managed.provider == ModProvider::Modrinth)
+        .map(|managed| InstalledProject {
+            project_id: managed.project_id,
+            version_id: managed.version_id,
+        })
+        .collect()
+}
+
 /// The instance's exact Minecraft version and loader.
 ///
 /// Cloned out of the record rather than borrowed so that nothing downstream can
@@ -863,6 +894,23 @@ pub(crate) fn recipe_entry(
     planned: &PlannedMod,
     provider: ModProvider,
 ) -> CoreResult<PackFileRecipe> {
+    recipe_entry_for(planned, provider, PackSide::Client)
+}
+
+/// The same entry for whichever side is being written.
+///
+/// A linked server's recipe is that server's desired state, not a copy of the
+/// client's: the side the operation is for is the one recorded as `Required` by
+/// the decision, and the other keeps the project's own declaration. On the
+/// server an `optional` or undeclared server side is answered here rather than
+/// left open, because agreeing to sync the mod to this server *is* that answer
+/// — and without it the server's own record would not say the jar belongs
+/// there.
+pub(crate) fn recipe_entry_for(
+    planned: &PlannedMod,
+    provider: ModProvider,
+    side: PackSide,
+) -> CoreResult<PackFileRecipe> {
     let file = &planned.version.file;
 
     // The file name comes from a provider and is untrusted: it is validated as
@@ -873,16 +921,28 @@ pub(crate) fn recipe_entry(
         }
     })?;
 
+    let client = match side {
+        // The user asked for this mod on this client, which is a fact about the
+        // instance rather than a claim about the project.
+        PackSide::Client => SideRequirement::Required,
+        PackSide::Server => side_requirement(planned.project.client_side),
+    };
+    let server = side_requirement(planned.project.server_side);
+    let selected = match side {
+        // Nobody has been asked about the server yet. `None` is what lets a
+        // later prompt tell "unanswered" from "the user said no".
+        PackSide::Client => None,
+        PackSide::Server => server.needs_decision().then_some(true),
+    };
+
     Ok(PackFileRecipe {
         logical_path: PathBuf::from(ephervex_pack::MODS_DIR).join(name),
         hashes: file.hashes.clone(),
         downloads: vec![file.url.clone()],
         size: file.size,
-        client: SideRequirement::Required,
-        server: side_requirement(planned.project.server_side),
-        // Nobody has been asked about the server yet. `None` is what lets a
-        // later prompt tell "unanswered" from "the user said no".
-        selected: None,
+        client,
+        server,
+        selected,
         origin: planned.origin,
         identity: Some(ProviderFileIdentity {
             provider: Some(provider),
