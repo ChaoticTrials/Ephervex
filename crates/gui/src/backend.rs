@@ -2895,6 +2895,10 @@ fn version_change_request(path: &Path, version: &str) -> LinkedModRequest {
 
 /// The linked-server half of a confirmation, and what applying it needs.
 fn linked_section(plan: &LinkedModPlan) -> LinkedSectionData {
+    // A mod no server could ever run is not a decision, and neither is a client
+    // with no linked servers. Dropping the rows here rather than in each modal
+    // keeps "is this worth asking about" one answer.
+    let relevant = plan.has_relevant_targets();
     LinkedSectionData {
         instance: plan.client.to_string(),
         kind: plan.request.as_str().to_owned(),
@@ -2907,8 +2911,16 @@ fn linked_section(plan: &LinkedModPlan) -> LinkedSectionData {
         version: plan.root.version_id.clone().unwrap_or_default(),
         name: plan.root.name.clone(),
         version_number: plan.root.version_number.clone().unwrap_or_default(),
-        support: support_note(plan),
-        targets: plan.targets.iter().map(linked_target_row).collect(),
+        support: if relevant {
+            support_note(plan)
+        } else {
+            String::new()
+        },
+        targets: if relevant {
+            plan.targets.iter().map(linked_target_row).collect()
+        } else {
+            Vec::new()
+        },
     }
 }
 

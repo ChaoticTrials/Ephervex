@@ -614,19 +614,23 @@ slint::slint! {
             viewport-width: self.width;
             VerticalLayout { alignment: start; padding: 8px; spacing: 6px;
                 for row[index] in root.rows : Rectangle {
-                    height: 52px;
+                    height: 62px;
                     border-radius: 5px;
                     border-width: row.selected ? 2px : 1px;
                     border-color: row.selected ? Theme.accent : Theme.border.with-alpha(0.6);
                     background: row.actionable || !root.selectable ? Theme.surface : Theme.surface.with-alpha(0.45);
                     HorizontalLayout { padding-left: 10px; padding-right: 10px; spacing: 10px;
-                        VerticalLayout { alignment: center; spacing: 2px; horizontal-stretch: 1;
-                            Text { text: row.name; color: row.actionable || !root.selectable ? Theme.text : Theme.text-secondary; font-size: Theme.label-size; font-weight: 600; overflow: elide; }
-                            Text { text: row.detail; color: Theme.text-muted; font-size: Theme.caption-size; overflow: elide; }
+                        // The explanation gets the full row width: a refusal is a
+                        // sentence, and eliding it to a column loses the reason.
+                        VerticalLayout { alignment: center; spacing: 1px; horizontal-stretch: 1;
+                            HorizontalLayout { spacing: 8px;
+                                Text { text: row.name; color: row.actionable || !root.selectable ? Theme.text : Theme.text-secondary; font-size: Theme.label-size; font-weight: 600; overflow: elide; horizontal-stretch: 1; }
+                                Text { text: row.detail; color: Theme.text-muted; font-size: Theme.caption-size; vertical-alignment: center; overflow: elide; horizontal-stretch: 0; }
+                            }
+                            Text { text: row.explanation; color: Theme.text-muted; font-size: Theme.caption-size; overflow: elide; }
                         }
-                        VerticalLayout { alignment: center; spacing: 2px; horizontal-stretch: 1;
+                        VerticalLayout { alignment: center; max-width: 150px;
                             Text { text: row.state; color: row.tone == "ok" ? Theme.success : row.tone == "warn" ? Theme.warning : row.tone == "error" ? Theme.danger : Theme.text-secondary; font-size: Theme.label-size; horizontal-alignment: right; overflow: elide; }
-                            Text { text: row.explanation; color: Theme.text-muted; font-size: Theme.caption-size; horizontal-alignment: right; overflow: elide; }
                         }
                     }
                     TouchArea { enabled: root.selectable && row.actionable; mouse-cursor: pointer; clicked => { root.toggled(index); } }
@@ -1811,7 +1815,7 @@ slint::slint! {
             TouchArea { clicked => { } }
             Rectangle {
                 width: root.modal == "license" ? min(820px, parent.width - 80px) : min(620px, parent.width - 80px);
-                height: root.modal == "license" ? min(720px, parent.height - 80px) : root.modal == "third-party" ? 340px : root.modal == "mod-plan" ? min(560px, parent.height - 80px) : root.modal == "mod-manage" ? min(620px, parent.height - 80px) : root.modal == "mod-apply" || root.modal == "mod-result" ? min(520px, parent.height - 80px) : root.modal == "loader-change" ? 400px : root.modal == "mod-remove" ? min(480px, parent.height - 80px) : root.modal == "eula" ? 440px : root.modal == "kill" ? 300px : root.modal == "delete-instance" || root.modal == "delete-server" ? 330px : 570px;
+                height: root.modal == "license" ? min(720px, parent.height - 80px) : root.modal == "third-party" ? 340px : root.modal == "mod-plan" ? min(430px + root.linked-targets.length * 68px, parent.height - 80px) : root.modal == "mod-manage" ? min(620px, parent.height - 80px) : root.modal == "mod-apply" ? min(300px + root.linked-targets.length * 68px, parent.height - 80px) : root.modal == "mod-result" ? min(240px + root.linked-results.length * 68px, parent.height - 80px) : root.modal == "loader-change" ? 400px : root.modal == "mod-remove" ? min((root.linked-targets.length > 0 ? 340px : 250px) + root.mod-removal-dependencies.length * 24px + root.linked-targets.length * 68px, parent.height - 80px) : root.modal == "eula" ? 440px : root.modal == "kill" ? 300px : root.modal == "delete-instance" || root.modal == "delete-server" ? 330px : 570px;
                 x: (parent.width - self.width) / 2;
                 y: (parent.height - self.height) / 2;
                 border-radius: 8px;
@@ -1868,7 +1872,9 @@ slint::slint! {
                         BodyText { text: GuiI18n.value("gui-mod-remove-detail", root.mod-action-name); color: Theme.warning; wrap: word-wrap; }
                         if root.mod-removal-dependencies.length > 0 : BodyText { text: GuiI18n.count("gui-mod-remove-dependencies", root.mod-removal-dependencies.length); wrap: word-wrap; }
                         if root.mod-removal-dependencies.length > 0 : Rectangle {
-                            vertical-stretch: 1; border-radius: 6px; border-width: 1px; border-color: Theme.border; background: Theme.background;
+                            // Sized to its own content so that the linked-server
+                            // list beside it is not squeezed by an empty box.
+                            vertical-stretch: 1; max-height: root.mod-removal-dependencies.length * 24px + 18px; border-radius: 6px; border-width: 1px; border-color: Theme.border; background: Theme.background;
                             ScrollView { viewport-width: self.width; VerticalLayout { alignment: start; padding: 9px; spacing: 4px; for name in root.mod-removal-dependencies : Text { text: name; color: Theme.text-secondary; font-size: Theme.label-size; height: 20px; overflow: elide; } } }
                         }
                         if root.mod-removal-dependencies.length == 0 && !root.mod-removal-unprovable : BodyText { text: GuiI18n.text("gui-mod-remove-no-dependencies"); color: Theme.text-muted; wrap: word-wrap; }
