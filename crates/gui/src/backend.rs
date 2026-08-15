@@ -10,16 +10,19 @@ use std::thread;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use ephervex_core::ManagedMutationReport;
 use ephervex_core::live_diagnostics::TailedLine;
 use ephervex_core::{
-    App, AuthEvent, AuthObserver, CancellationToken, ClientFolder, CoreError, CoreResult,
-    DiagnosticKind, DiagnosticRequest, DiagnosticScope, EulaStatus, GlobalMinecraftPreferences,
-    ImportRequest, LaunchAndConnectObserver, LaunchAndConnectOptions, LaunchEvent, LaunchObserver,
-    LaunchOptions, LoginOptions, ManagedModEntry, ManagedModSnapshot, MetadataAvailability,
-    ModDetails, ModInstallRequest, ModMutability, ModMutation, ModMutationPlan, ModSearchQuery,
-    ModVersionChoice, MutationRestriction, NewClient, NewServer, OperationReporter, Paths,
-    PlannedOutcome, PreferenceKey, ProgressSink, SearchOptions, ServerCreateOptions, ServerEvent,
-    ServerFolder, ServerNetworkSettings, ServerObserver,
+    App, AuthEvent, AuthObserver, CancellationToken, ClientFolder, ClientModOutcome, ClientModPlan,
+    CoreError, CoreResult, DiagnosticKind, DiagnosticRequest, DiagnosticScope, EulaStatus,
+    GlobalMinecraftPreferences, ImportRequest, LaunchAndConnectObserver, LaunchAndConnectOptions,
+    LaunchEvent, LaunchObserver, LaunchOptions, LinkedModOutcome, LinkedModPlan, LinkedModRequest,
+    LinkedTargetPlan, LinkedTargetResult, LinkedTargetState, LoginOptions, ManagedModEntry,
+    ManagedModSnapshot, MetadataAvailability, ModDetails, ModInstallPlan, ModMutability,
+    ModMutation, ModMutationPlan, ModSearchQuery, MutationRestriction, NewClient, NewServer,
+    OperationReporter, Paths, PlannedOutcome, PreferenceKey, ProgressSink, SearchOptions,
+    ServerCreateOptions, ServerEvent, ServerFolder, ServerNetworkSettings, ServerObserver,
+    SideRequirement,
 };
 use ephervex_i18n::{Arg, lookup, lookup_args, lookup_attribute, lookup_attribute_args};
 use ephervex_model::{
@@ -81,14 +84,24 @@ pub enum Command {
         instance: InstanceId,
         path: PathBuf,
     },
-    ChangeModVersion {
+    /// Works out what changing or updating one mod would do here and on every
+    /// linked server, before anything is written. An empty `version` means the
+    /// newest release that fits this client.
+    PlanModApply {
         instance: InstanceId,
         path: PathBuf,
         version: String,
     },
+    ChangeModVersion {
+        instance: InstanceId,
+        path: PathBuf,
+        version: String,
+        servers: Vec<ServerId>,
+    },
     UpdateMod {
         instance: InstanceId,
         path: PathBuf,
+        servers: Vec<ServerId>,
     },
     PlanModRemoval {
         instance: InstanceId,
@@ -97,6 +110,7 @@ pub enum Command {
     RemoveMod {
         instance: InstanceId,
         path: PathBuf,
+        servers: Vec<ServerId>,
     },
     ChangeLoaderVersion {
         instance: InstanceId,
@@ -113,6 +127,7 @@ pub enum Command {
     InstallMod {
         instance: InstanceId,
         project: String,
+        servers: Vec<ServerId>,
     },
     CreateServer {
         request_id: String,
@@ -396,6 +411,58 @@ pub struct ModRemovalPlanData {
     /// The catalog could not confirm which dependencies are still needed, so
     /// none are being collected.
     pub dependencies_unprovable: bool,
+    pub linked: LinkedSectionData,
+}
+
+/// One linked server, or one finished target, as a row.
+///
+/// The same shape serves the confirmation and the result summary: both list
+/// servers by stable id with a short state and a sentence explaining it, and
+/// having one row type is what keeps the two from describing the same target
+/// differently.
+#[derive(Debug, Clone, Default)]
+pub struct LinkedTargetData {
+    /// The server's stable id. Never a list position: a server deleted while a
+    /// confirmation is open must not let the next one inherit its row.
+    pub id: String,
+    pub name: String,
+    /// The server's own exact Minecraft release and loader build.
+    pub detail: String,
+    /// The short state label.
+    pub state: String,
+    /// Why, or what it would involve.
+    pub explanation: String,
+    pub tone: String,
+    pub actionable: bool,
+    pub selected: bool,
+}
+
+/// The linked-server half of a mod confirmation.
+///
+/// Carries what the frontend has to send back to apply the same operation, so
+/// the decision the user made on this screen is the one that is carried out.
+#[derive(Debug, Clone, Default)]
+pub struct LinkedSectionData {
+    pub instance: String,
+    /// The operation, as `ephervex-core` names it.
+    pub kind: String,
+    pub path: String,
+    pub project: String,
+    /// The exact release every selected server would receive.
+    pub version: String,
+    pub name: String,
+    pub version_number: String,
+    /// A sentence about what the project declares for the server side.
+    pub support: String,
+    pub targets: Vec<LinkedTargetData>,
+}
+
+/// The per-target result of one finished linked operation.
+#[derive(Debug, Clone)]
+pub struct LinkedResultData {
+    pub title: String,
+    pub summary: String,
+    pub rows: Vec<LinkedTargetData>,
 }
 
 /// The Managed Mods list plus whatever has to be said about how complete it is.
@@ -423,7 +490,7 @@ pub struct ModSearchData {
     pub downloads: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ModPlanData {
     pub instance: String,
     pub project: String,
@@ -434,6 +501,7 @@ pub struct ModPlanData {
     pub optional_count: usize,
     pub already_installed_count: usize,
     pub warning_count: usize,
+    pub linked: LinkedSectionData,
 }
 
 #[derive(Debug, Clone)]
@@ -495,6 +563,10 @@ pub enum Event {
     ModRemovalPlan(ModRemovalPlanData),
     ModResults(Vec<ModSearchData>),
     ModPlan(ModPlanData),
+    /// A change or update that has linked servers worth asking about.
+    LinkedApply(LinkedSectionData),
+    /// What one finished operation did to each target it touched.
+    LinkedResult(LinkedResultData),
     ServerWorkspace(ServerWorkspaceData),
     LiveLog(LiveLogUpdate),
     Diagnostics {
@@ -726,7 +798,12 @@ fn run_worker(
                         }
                         app.import_pack(&request, &reporter, &cancel)
                             .await
-                            .map(|pack| localized_value("gui-imported-pack", &pack.record.name))
+                            .map(|pack| {
+                                OperationReport::Toast(localized_value(
+                                    "gui-imported-pack",
+                                    &pack.record.name,
+                                ))
+                            })
                     },
                 );
             }
@@ -855,41 +932,83 @@ fn run_worker(
                     let _ = events.send(Event::ModVersions(data));
                 });
             }
-            Command::ChangeModVersion {
+            Command::PlanModApply {
                 instance,
                 path,
                 version,
             } => {
                 let paths = app.paths().clone();
                 spawn_detached(paths, events.clone(), move |app, events, runtime| {
-                    let result = runtime.block_on(app.change_managed_mod_version(
+                    let request = version_change_request(&path, &version);
+                    let reporter = OperationReporter::silent("planning-mod-change");
+                    let cancel = CancellationToken::new();
+                    match runtime.block_on(
+                        app.plan_linked_mod_operation(instance, &request, &reporter, &cancel),
+                    ) {
+                        // Nothing to ask about: no linked server could take part
+                        // either way, so an empty confirmation would be a click
+                        // for its own sake.
+                        Ok(plan) if !plan.has_relevant_targets() => {
+                            let result = runtime.block_on(app.apply_linked_mod_operation(
+                                instance,
+                                &request,
+                                &[],
+                                &reporter,
+                                &cancel,
+                            ));
+                            finish_linked(&app, &events, result);
+                        }
+                        Ok(plan) => {
+                            let _ = events.send(Event::LinkedApply(linked_section(&plan)));
+                        }
+                        Err(error) => send_modal_error(&events, &error),
+                    }
+                });
+            }
+            Command::ChangeModVersion {
+                instance,
+                path,
+                version,
+                servers,
+            } => {
+                let paths = app.paths().clone();
+                spawn_detached(paths, events.clone(), move |app, events, runtime| {
+                    let result = runtime.block_on(app.apply_linked_mod_operation(
                         instance,
-                        &path,
-                        &ModVersionChoice::Exact(version),
+                        &LinkedModRequest::ChangeVersion {
+                            target: path,
+                            version,
+                        },
+                        &servers,
                         &OperationReporter::silent("changing-mod-version"),
                         &CancellationToken::new(),
                     ));
-                    finish_mutation(&app, &events, result);
+                    finish_linked(&app, &events, result);
                 });
             }
-            Command::UpdateMod { instance, path } => {
+            Command::UpdateMod {
+                instance,
+                path,
+                servers,
+            } => {
                 let paths = app.paths().clone();
                 spawn_detached(paths, events.clone(), move |app, events, runtime| {
-                    let result = runtime.block_on(app.update_managed_mod(
+                    let result = runtime.block_on(app.apply_linked_mod_operation(
                         instance,
-                        &path,
+                        &LinkedModRequest::Update { target: path },
+                        &servers,
                         &OperationReporter::silent("updating-mod"),
                         &CancellationToken::new(),
                     ));
-                    finish_mutation(&app, &events, result);
+                    finish_linked(&app, &events, result);
                 });
             }
             Command::PlanModRemoval { instance, path } => {
                 let paths = app.paths().clone();
                 spawn_detached(paths, events.clone(), move |app, events, runtime| {
-                    let result = runtime.block_on(app.plan_mod_removal(
+                    let result = runtime.block_on(app.plan_linked_mod_operation(
                         instance,
-                        &path,
+                        &LinkedModRequest::Remove { target: path },
                         &OperationReporter::silent("planning-mod-removal"),
                         &CancellationToken::new(),
                     ));
@@ -901,16 +1020,21 @@ fn run_worker(
                     }
                 });
             }
-            Command::RemoveMod { instance, path } => {
+            Command::RemoveMod {
+                instance,
+                path,
+                servers,
+            } => {
                 let paths = app.paths().clone();
                 spawn_detached(paths, events.clone(), move |app, events, runtime| {
-                    let result = runtime.block_on(app.remove_managed_mod(
+                    let result = runtime.block_on(app.apply_linked_mod_operation(
                         instance,
-                        &path,
+                        &LinkedModRequest::Remove { target: path },
+                        &servers,
                         &OperationReporter::silent("removing-mod"),
                         &CancellationToken::new(),
                     ));
-                    finish_mutation(&app, &events, result);
+                    finish_linked(&app, &events, result);
                 });
             }
             Command::LoadInstanceWorkspace(instance) => {
@@ -978,27 +1102,29 @@ fn run_worker(
             Command::PlanMod { instance, project } => {
                 let paths = app.paths().clone();
                 spawn_detached(paths, events.clone(), move |app, events, runtime| {
-                    let request = ModInstallRequest::new(project.clone());
-                    match runtime.block_on(app.plan_mod_installation(instance, &request)) {
+                    let result = runtime.block_on(app.plan_linked_mod_operation(
+                        instance,
+                        &LinkedModRequest::Install {
+                            project: project.clone(),
+                        },
+                        &OperationReporter::silent("planning-mod-install"),
+                        &CancellationToken::new(),
+                    ));
+                    match result {
                         Ok(plan) => {
-                            let _ = events.send(Event::ModPlan(ModPlanData {
-                                instance: instance.to_string(),
-                                project,
-                                title: plan.root.project.title.clone(),
-                                version: plan.root.version.version_number.clone(),
-                                install_count: plan.to_install().len(),
-                                dependency_count: plan.dependencies.len(),
-                                optional_count: plan.optional.len(),
-                                already_installed_count: plan.already_installed.len(),
-                                warning_count: plan.warnings.len(),
-                            }));
+                            let _ = events.send(Event::ModPlan(install_plan_data(&plan, &project)));
                         }
                         Err(error) => send_error(&events, &error),
                     }
                 });
             }
-            Command::InstallMod { instance, project } => {
+            Command::InstallMod {
+                instance,
+                project,
+                servers,
+            } => {
                 let paths = app.paths().clone();
+                let reports = events.clone();
                 spawn_async_operation(
                     paths,
                     &events,
@@ -1006,12 +1132,21 @@ fn run_worker(
                     "operation-installing-mods",
                     project.clone(),
                     move |app, reporter, cancel| async move {
-                        let request = ModInstallRequest::new(project);
-                        let plan = app.plan_mod_installation(instance, &request).await?;
-                        let count = plan.all_mods().len();
-                        app.install_mods(instance, &request, &reporter, &cancel)
+                        let request = LinkedModRequest::Install { project };
+                        let outcome = app
+                            .apply_linked_mod_operation(
+                                instance, &request, &servers, &reporter, &cancel,
+                            )
                             .await?;
-                        Ok(localized_count("gui-installed-managed-mods", count))
+                        let message = client_outcome_message(&outcome);
+                        if outcome.targets.is_empty() {
+                            return Ok(OperationReport::Toast(message));
+                        }
+                        // Several targets took part, so several results have to
+                        // be shown. One toast could only be right about one.
+                        let _ = reports.send(Event::CloseModal);
+                        let _ = reports.send(Event::LinkedResult(linked_result_data(&outcome)));
+                        Ok(OperationReport::Reported)
                     },
                 );
             }
@@ -2266,6 +2401,17 @@ fn spawn_login(paths: Paths, events: &Sender<Event>) {
     });
 }
 
+/// What a finished background operation wants shown.
+///
+/// Most operations have one line to say. A multi-target one does not, and
+/// letting it say so is what keeps the shared helper from overwriting a report
+/// with a toast.
+enum OperationReport {
+    Toast(String),
+    /// The operation has already sent its own result.
+    Reported,
+}
+
 fn refresh_snapshot(paths: &Paths, events: &Sender<Event>) {
     if let Ok(app) = App::open_at(paths.clone()) {
         send_snapshot(&app, events);
@@ -2281,7 +2427,7 @@ fn spawn_async_operation<F, Fut>(
     operation: F,
 ) where
     F: FnOnce(App, OperationReporter, CancellationToken) -> Fut + Send + 'static,
-    Fut: std::future::Future<Output = Result<String, CoreError>> + 'static,
+    Fut: std::future::Future<Output = Result<OperationReport, CoreError>> + 'static,
 {
     spawn_detached(
         paths.clone(),
@@ -2299,13 +2445,19 @@ fn spawn_async_operation<F, Fut>(
             let result = runtime.block_on(operation(app, reporter.clone(), cancel));
             remove_cancellation(&cancellations, &reporter);
             match result {
-                Ok(message) => {
+                Ok(OperationReport::Toast(message)) => {
                     reporter.finish(OperationStatus::Completed);
                     let _ = events.send(Event::CloseModal);
                     let _ = events.send(Event::Toast {
                         message,
                         error: false,
                     });
+                }
+                // The operation has already said what it did, in more detail
+                // than one line could. Closing the modal here would take that
+                // report off the screen before it was read.
+                Ok(OperationReport::Reported) => {
+                    reporter.finish(OperationStatus::Completed);
                 }
                 Err(error) => {
                     if error.is_cancellation() {
@@ -2658,22 +2810,6 @@ async fn mod_versions(app: &App, instance: InstanceId, path: &Path) -> ModVersio
     }
 }
 
-/// Reports a finished mutation and refreshes what the workspace is showing.
-fn finish_mutation(app: &App, events: &Sender<Event>, result: CoreResult<ModMutation>) {
-    match result {
-        Ok(mutation) => {
-            let _ = events.send(Event::CloseModal);
-            let _ = events.send(Event::Toast {
-                message: mutation_message(&mutation),
-                error: false,
-            });
-            let _ = events.send(Event::ManagedMods(managed_mods_data(&mutation.snapshot)));
-            send_snapshot(app, events);
-        }
-        Err(error) => send_modal_error(events, &error),
-    }
-}
-
 /// What to tell the user one finished mutation did.
 fn mutation_message(mutation: &ModMutation) -> String {
     match &mutation.plan.outcome {
@@ -2690,7 +2826,10 @@ fn mutation_message(mutation: &ModMutation) -> String {
     }
 }
 
-fn removal_plan_data(plan: &ModMutationPlan) -> ModRemovalPlanData {
+fn removal_plan_data(linked: &LinkedModPlan) -> ModRemovalPlanData {
+    let Some(plan) = mutation_plan_of(linked) else {
+        return ModRemovalPlanData::default();
+    };
     ModRemovalPlanData {
         instance: plan.instance.to_string(),
         logical_path: plan.target.display().to_string(),
@@ -2700,7 +2839,239 @@ fn removal_plan_data(plan: &ModMutationPlan) -> ModRemovalPlanData {
             .map(|file| file.name.clone())
             .collect(),
         dependencies_unprovable: plan.orphans_unprovable,
+        linked: linked_section(linked),
     }
+}
+
+/// What installing a mod would involve, on this client and on its servers.
+fn install_plan_data(linked: &LinkedModPlan, project: &str) -> ModPlanData {
+    let Some(plan) = install_plan_of(linked) else {
+        return ModPlanData::default();
+    };
+    ModPlanData {
+        instance: linked.client.to_string(),
+        project: project.to_owned(),
+        title: plan.root.project.title.clone(),
+        version: plan.root.version.version_number.clone(),
+        install_count: plan.to_install().len(),
+        dependency_count: plan.dependencies.len(),
+        optional_count: plan.optional.len(),
+        already_installed_count: plan.already_installed.len(),
+        warning_count: plan.warnings.len(),
+        linked: linked_section(linked),
+    }
+}
+
+fn mutation_plan_of(plan: &LinkedModPlan) -> Option<&ModMutationPlan> {
+    match &plan.client_plan {
+        ClientModPlan::Mutate(plan) => Some(plan),
+        ClientModPlan::Install(_) => None,
+    }
+}
+
+fn install_plan_of(plan: &LinkedModPlan) -> Option<&ModInstallPlan> {
+    match &plan.client_plan {
+        ClientModPlan::Install(plan) => Some(plan),
+        ClientModPlan::Mutate(_) => None,
+    }
+}
+
+/// The request a version picker's selection names.
+///
+/// An empty version is "the newest release that fits this client", which is a
+/// different operation from an exact choice and not a missing value.
+fn version_change_request(path: &Path, version: &str) -> LinkedModRequest {
+    if version.is_empty() {
+        LinkedModRequest::Update {
+            target: path.to_path_buf(),
+        }
+    } else {
+        LinkedModRequest::ChangeVersion {
+            target: path.to_path_buf(),
+            version: version.to_owned(),
+        }
+    }
+}
+
+/// The linked-server half of a confirmation, and what applying it needs.
+fn linked_section(plan: &LinkedModPlan) -> LinkedSectionData {
+    LinkedSectionData {
+        instance: plan.client.to_string(),
+        kind: plan.request.as_str().to_owned(),
+        path: plan
+            .request
+            .target()
+            .map(|path| path.display().to_string())
+            .unwrap_or_default(),
+        project: plan.root.project_id.clone(),
+        version: plan.root.version_id.clone().unwrap_or_default(),
+        name: plan.root.name.clone(),
+        version_number: plan.root.version_number.clone().unwrap_or_default(),
+        support: support_note(plan),
+        targets: plan.targets.iter().map(linked_target_row).collect(),
+    }
+}
+
+/// What the project declares about the server side, said out loud.
+///
+/// A removal claims nothing: it is decided by what a server durably owns, not
+/// by what the project says.
+fn support_note(plan: &LinkedModPlan) -> String {
+    if plan.request.is_removal() {
+        return String::new();
+    }
+    lookup(match plan.root.server_side {
+        SideRequirement::Required => "gui-linked-support-required",
+        SideRequirement::Optional => "gui-linked-support-optional",
+        SideRequirement::Unsupported => "gui-linked-support-unsupported",
+        SideRequirement::Unknown => "gui-linked-support-unknown",
+    })
+}
+
+fn linked_target_row(target: &LinkedTargetPlan) -> LinkedTargetData {
+    LinkedTargetData {
+        id: target.server.to_string(),
+        name: target.name.clone(),
+        // Technical values stay exact and untranslated.
+        detail: format!("{} | {}", target.minecraft_version, target.loader),
+        state: lookup(match target.state {
+            LinkedTargetState::Blocked(_) => "gui-linked-unavailable",
+            ref state => state.message_id(),
+        }),
+        explanation: target_explanation(target),
+        tone: if target.state.is_actionable() {
+            "ok".to_owned()
+        } else if target.state.block().is_some() {
+            "warn".to_owned()
+        } else {
+            "muted".to_owned()
+        },
+        actionable: target.state.is_actionable(),
+        selected: target.selected_by_default,
+    }
+}
+
+/// Why a target cannot take part, or what taking part would involve.
+fn target_explanation(target: &LinkedTargetPlan) -> String {
+    if let Some(block) = target.state.block() {
+        return lookup(block.message_id());
+    }
+    if !target.state.is_actionable() {
+        return String::new();
+    }
+    let mut parts = Vec::new();
+    if !target.installs.is_empty() {
+        parts.push(localized_count(
+            "gui-linked-installs",
+            target.installs.len(),
+        ));
+    }
+    if !target.removes.is_empty() {
+        parts.push(localized_count("gui-linked-removes", target.removes.len()));
+    }
+    if target.orphans_unprovable {
+        parts.push(lookup("gui-linked-dependencies-unprovable"));
+    }
+    parts.join(", ")
+}
+
+/// Reports one finished linked operation.
+///
+/// A single target keeps the ordinary toast. Several get a list, because the
+/// truth about them is per target and a summary line would have to pick one.
+fn finish_linked(app: &App, events: &Sender<Event>, result: CoreResult<LinkedModOutcome>) {
+    match result {
+        Ok(outcome) => {
+            let _ = events.send(Event::CloseModal);
+            if outcome.targets.is_empty() {
+                let _ = events.send(Event::Toast {
+                    message: client_outcome_message(&outcome),
+                    error: false,
+                });
+            } else {
+                let _ = events.send(Event::LinkedResult(linked_result_data(&outcome)));
+            }
+            if let ClientModOutcome::Mutated(mutation) = &outcome.client {
+                let _ = events.send(Event::ManagedMods(managed_mods_data(&mutation.snapshot)));
+            }
+            send_snapshot(app, events);
+        }
+        Err(error) => send_modal_error(events, &error),
+    }
+}
+
+/// What the client half of a linked operation did.
+fn client_outcome_message(outcome: &LinkedModOutcome) -> String {
+    match &outcome.client {
+        ClientModOutcome::Installed(installed) => localized_count(
+            "gui-installed-managed-mods",
+            installed.plan.all_mods().len(),
+        ),
+        ClientModOutcome::Mutated(mutation) => mutation_message(mutation),
+    }
+}
+
+/// Every target's own result, so a partial success is visibly partial.
+fn linked_result_data(outcome: &LinkedModOutcome) -> LinkedResultData {
+    let mut rows = vec![LinkedTargetData {
+        name: lookup("gui-linked-result-client"),
+        state: lookup("gui-linked-applied"),
+        explanation: client_outcome_message(outcome),
+        tone: "ok".to_owned(),
+        ..LinkedTargetData::default()
+    }];
+    rows.extend(outcome.targets.iter().map(linked_result_row));
+
+    LinkedResultData {
+        title: outcome.root.name.clone(),
+        summary: lookup(if outcome.unfinished().count() == 0 {
+            "gui-linked-all-applied"
+        } else {
+            "gui-linked-partial"
+        }),
+        rows,
+    }
+}
+
+fn linked_result_row(target: &ephervex_core::LinkedTargetOutcome) -> LinkedTargetData {
+    let (state, explanation, tone) = match &target.result {
+        LinkedTargetResult::Applied(report) => (
+            "gui-linked-applied",
+            applied_summary(report),
+            "ok".to_owned(),
+        ),
+        LinkedTargetResult::Skipped(state) => (
+            "gui-linked-skipped",
+            lookup(state.message_id()),
+            "muted".to_owned(),
+        ),
+        LinkedTargetResult::Failed(failure) => (
+            "gui-linked-failed",
+            lookup(failure.message_id),
+            "error".to_owned(),
+        ),
+    };
+    LinkedTargetData {
+        id: target.server.to_string(),
+        name: target.name.clone(),
+        state: lookup(state),
+        explanation,
+        tone,
+        ..LinkedTargetData::default()
+    }
+}
+
+/// What one target's transaction actually wrote.
+fn applied_summary(report: &ManagedMutationReport) -> String {
+    let written = report.installed.len() + report.replaced.len() + report.repaired.len();
+    let mut parts = Vec::new();
+    if written > 0 {
+        parts.push(localized_count("gui-linked-installs", written));
+    }
+    if !report.removed.is_empty() {
+        parts.push(localized_count("gui-linked-removes", report.removed.len()));
+    }
+    parts.join(", ")
 }
 
 /// A refusal as something to show, or nothing when there is none.

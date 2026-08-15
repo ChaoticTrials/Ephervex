@@ -120,6 +120,20 @@ slint::slint! {
         newest: bool,
     }
 
+    // One linked server in a mod confirmation, or one finished target in a
+    // result. The same shape serves both so the two cannot describe the same
+    // server differently.
+    export struct LinkedTargetRow {
+        id: string,
+        name: string,
+        detail: string,
+        state: string,
+        explanation: string,
+        tone: string,
+        actionable: bool,
+        selected: bool,
+    }
+
     export struct ModSearchRow {
         project-id: string,
         title: string,
@@ -584,6 +598,40 @@ slint::slint! {
             font-weight: 600;
             horizontal-alignment: center;
             vertical-alignment: center;
+        }
+    }
+
+    component LinkedTargetsPanel inherits Rectangle {
+        in property <[LinkedTargetRow]> rows;
+        // Result lists are read-only; a confirmation's are not.
+        in property <bool> selectable: false;
+        callback toggled(int);
+        border-radius: 6px;
+        border-width: 1px;
+        border-color: Theme.border;
+        background: Theme.background;
+        ScrollView {
+            viewport-width: self.width;
+            VerticalLayout { alignment: start; padding: 8px; spacing: 6px;
+                for row[index] in root.rows : Rectangle {
+                    height: 52px;
+                    border-radius: 5px;
+                    border-width: row.selected ? 2px : 1px;
+                    border-color: row.selected ? Theme.accent : Theme.border.with-alpha(0.6);
+                    background: row.actionable || !root.selectable ? Theme.surface : Theme.surface.with-alpha(0.45);
+                    HorizontalLayout { padding-left: 10px; padding-right: 10px; spacing: 10px;
+                        VerticalLayout { alignment: center; spacing: 2px; horizontal-stretch: 1;
+                            Text { text: row.name; color: row.actionable || !root.selectable ? Theme.text : Theme.text-secondary; font-size: Theme.label-size; font-weight: 600; overflow: elide; }
+                            Text { text: row.detail; color: Theme.text-muted; font-size: Theme.caption-size; overflow: elide; }
+                        }
+                        VerticalLayout { alignment: center; spacing: 2px; horizontal-stretch: 1;
+                            Text { text: row.state; color: row.tone == "ok" ? Theme.success : row.tone == "warn" ? Theme.warning : row.tone == "error" ? Theme.danger : Theme.text-secondary; font-size: Theme.label-size; horizontal-alignment: right; overflow: elide; }
+                            Text { text: row.explanation; color: Theme.text-muted; font-size: Theme.caption-size; horizontal-alignment: right; overflow: elide; }
+                        }
+                    }
+                    TouchArea { enabled: root.selectable && row.actionable; mouse-cursor: pointer; clicked => { root.toggled(index); } }
+                }
+            }
         }
     }
 
@@ -1103,6 +1151,16 @@ slint::slint! {
         in-out property <[ModVersionRow]> mod-versions;
         in-out property <[string]> mod-removal-dependencies;
         in-out property <bool> mod-removal-unprovable: false;
+        // -- carrying the same mod decision to this client's linked servers.
+        in-out property <[LinkedTargetRow]> linked-targets;
+        in-out property <string> linked-support;
+        in-out property <string> linked-path;
+        in-out property <string> linked-version;
+        in-out property <string> linked-name;
+        in-out property <string> linked-version-number;
+        in-out property <[LinkedTargetRow]> linked-results;
+        in-out property <string> linked-result-title;
+        in-out property <string> linked-result-summary;
         // -- changing the loader build this instance runs.
         in-out property <string> loader-change-current;
         in-out property <string> loader-change-selected;
@@ -1114,8 +1172,11 @@ slint::slint! {
         callback change-loader-version(string, string);
         callback open-mod-manager(string);
         callback change-mod-version(string, string, string);
-        callback update-mod(string, string);
         callback plan-mod-removal(string, string);
+        // Works out what a change or an update would do here and on every
+        // linked server. An empty version means "the newest release that fits
+        // this client", which is a different request from an exact choice.
+        callback plan-mod-apply(string, string, string);
         callback remove-mod(string, string);
         in-out property <[ModSearchRow]> mod-results;
         in-out property <[DiagnosticRow]> diagnostics;
@@ -1750,7 +1811,7 @@ slint::slint! {
             TouchArea { clicked => { } }
             Rectangle {
                 width: root.modal == "license" ? min(820px, parent.width - 80px) : min(620px, parent.width - 80px);
-                height: root.modal == "license" ? min(720px, parent.height - 80px) : root.modal == "third-party" ? 340px : root.modal == "mod-plan" ? 430px : root.modal == "mod-manage" ? min(620px, parent.height - 80px) : root.modal == "loader-change" ? 400px : root.modal == "mod-remove" ? 380px : root.modal == "eula" ? 440px : root.modal == "kill" ? 300px : root.modal == "delete-instance" || root.modal == "delete-server" ? 330px : 570px;
+                height: root.modal == "license" ? min(720px, parent.height - 80px) : root.modal == "third-party" ? 340px : root.modal == "mod-plan" ? min(560px, parent.height - 80px) : root.modal == "mod-manage" ? min(620px, parent.height - 80px) : root.modal == "mod-apply" || root.modal == "mod-result" ? min(520px, parent.height - 80px) : root.modal == "loader-change" ? 400px : root.modal == "mod-remove" ? min(480px, parent.height - 80px) : root.modal == "eula" ? 440px : root.modal == "kill" ? 300px : root.modal == "delete-instance" || root.modal == "delete-server" ? 330px : 570px;
                 x: (parent.width - self.width) / 2;
                 y: (parent.height - self.height) / 2;
                 border-radius: 8px;
@@ -1758,12 +1819,16 @@ slint::slint! {
                 border-color: Theme.border;
                 background: Theme.elevated;
                 VerticalLayout { padding: 22px; spacing: 13px;
-                    HorizontalLayout { alignment: center; Heading { text: root.modal == "create-instance" ? GuiI18n.text("gui-modal-new-instance") : root.modal == "import" ? GuiI18n.text("gui-modal-import") : root.modal == "create-server" ? GuiI18n.text("gui-modal-new-server") : root.modal == "mod-plan" ? GuiI18n.text("gui-modal-install-mod") : root.modal == "mod-manage" ? GuiI18n.text("gui-modal-manage-mod") : root.modal == "loader-change" ? GuiI18n.text("gui-modal-change-loader") : root.modal == "mod-remove" ? GuiI18n.text("gui-modal-remove-mod") : root.modal == "eula" ? GuiI18n.text("gui-server-eula") : root.modal == "kill" ? GuiI18n.text("gui-modal-force-kill") : root.modal == "delete-instance" ? GuiI18n.text("gui-delete-instance") : root.modal == "delete-server" ? GuiI18n.text("gui-delete-server") : root.modal == "license" ? GuiI18n.text("gui-modal-apache-license") : GuiI18n.text("gui-third-party-licenses"); font-size: 20px; } Rectangle { horizontal-stretch: 1; } IconButton { icon: @image-url("../../../assets/icons/close.svg"); accessible-name: GuiI18n.text("gui-close"); clicked => { root.modal = ""; root.modal-error = ""; } } }
+                    HorizontalLayout { alignment: center; Heading { text: root.modal == "create-instance" ? GuiI18n.text("gui-modal-new-instance") : root.modal == "import" ? GuiI18n.text("gui-modal-import") : root.modal == "create-server" ? GuiI18n.text("gui-modal-new-server") : root.modal == "mod-plan" ? GuiI18n.text("gui-modal-install-mod") : root.modal == "mod-manage" ? GuiI18n.text("gui-modal-manage-mod") : root.modal == "loader-change" ? GuiI18n.text("gui-modal-change-loader") : root.modal == "mod-remove" ? GuiI18n.text("gui-modal-remove-mod") : root.modal == "mod-apply" ? GuiI18n.text("gui-modal-apply-mod") : root.modal == "mod-result" ? GuiI18n.text("gui-modal-mod-result") : root.modal == "eula" ? GuiI18n.text("gui-server-eula") : root.modal == "kill" ? GuiI18n.text("gui-modal-force-kill") : root.modal == "delete-instance" ? GuiI18n.text("gui-delete-instance") : root.modal == "delete-server" ? GuiI18n.text("gui-delete-server") : root.modal == "license" ? GuiI18n.text("gui-modal-apache-license") : GuiI18n.text("gui-third-party-licenses"); font-size: 20px; } Rectangle { horizontal-stretch: 1; } IconButton { icon: @image-url("../../../assets/icons/close.svg"); accessible-name: GuiI18n.text("gui-close"); clicked => { root.modal = ""; root.modal-error = ""; } } }
                     Divider { }
                     if root.modal == "create-instance" : VerticalLayout { spacing: 11px; BodyText { text: GuiI18n.text("gui-create-instance-detail"); wrap: word-wrap; } Text { text: GuiI18n.text("gui-name"); color: Theme.text-secondary; font-size: 12px; } TextField { text <=> root.create-name; placeholder: GuiI18n.text("gui-instance-name-placeholder"); } Text { text: GuiI18n.text("gui-minecraft-release"); color: Theme.text-secondary; font-size: 12px; } ComboBox { model: root.minecraft-releases; current-value <=> root.create-minecraft; selected(value) => { root.create-minecraft = value; root.create-loader-version = ""; root.create-loader-versions = []; if root.create-loader != "Vanilla" { root.request-loader-catalog("client", root.create-loader, value); } } } Text { text: GuiI18n.text("gui-loader"); color: Theme.text-secondary; font-size: 12px; } ComboBox { model: ["Vanilla", "Forge", "NeoForge"]; current-index: root.create-loader == "Forge" ? 1 : root.create-loader == "NeoForge" ? 2 : 0; selected(value) => { root.create-loader = value; root.create-loader-version = ""; root.create-loader-versions = []; if value != "Vanilla" { root.request-loader-catalog("client", value, root.create-minecraft); } } } if root.create-loader != "Vanilla" : ComboBox { model: root.create-loader-versions; current-value <=> root.create-loader-version; } HorizontalLayout { BodyText { text: GuiI18n.text("gui-store-persistently"); } Toggle { checked <=> root.create-persistent; } BodyText { text: root.create-persistent ? GuiI18n.text("gui-persistent-root") : GuiI18n.text("gui-temporary-root"); color: Theme.text-muted; } } if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; } HorizontalLayout { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; } } AppButton { text: GuiI18n.text("gui-create-instance"); tone: "primary"; enabled: root.minecraft-releases.length > 0 && root.create-name != "" && root.create-minecraft != "" && (root.create-loader == "Vanilla" || root.create-loader-version != ""); clicked => { root.submit-create-instance(root.create-name, root.create-minecraft, root.create-loader, root.create-loader-version, root.create-persistent); } } } }
                     if root.modal == "import" : VerticalLayout { spacing: 11px; BodyText { text: GuiI18n.text("gui-import-detail"); wrap: word-wrap; } Text { text: GuiI18n.text("gui-modpack-archive"); color: Theme.text-secondary; font-size: 12px; } HorizontalLayout { TextField { text <=> root.import-path; placeholder: GuiI18n.text("gui-modpack-placeholder"); horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-browse"); clicked => { root.import-analysis = ""; root.choose-import-file(); } } } if root.import-analysis != "" : Rectangle { height: 64px; border-radius: 6px; border-width: 1px; border-color: Theme.success; background: Theme.surface; BodyText { x: 12px; width: parent.width - 24px; text: GuiI18n.value("gui-validated", root.import-analysis); wrap: word-wrap; } } Text { text: GuiI18n.text("gui-instance-name-optional"); color: Theme.text-secondary; font-size: 12px; } TextField { text <=> root.import-name; placeholder: GuiI18n.text("gui-detected-pack-name"); } HorizontalLayout { BodyText { text: GuiI18n.text("gui-store-persistently"); } Toggle { checked <=> root.create-persistent; } } if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; } HorizontalLayout { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; } } AppButton { text: GuiI18n.text("gui-import-modpack"); tone: "primary"; enabled: root.import-path != ""; clicked => { root.submit-import(root.import-path, root.import-name, root.create-persistent); } } } }
                     if root.modal == "create-server" : ScrollView { VerticalLayout { spacing: 10px; BodyText { text: root.create-server-client-id != "" ? GuiI18n.text("gui-create-linked-server-detail") : GuiI18n.text("gui-create-standalone-server-detail"); wrap: word-wrap; } Text { text: GuiI18n.text("gui-name"); color: Theme.text-secondary; font-size: 12px; } TextField { text <=> root.create-server-name; placeholder: GuiI18n.text("gui-server-name-placeholder"); } if root.create-server-client-id == "" : Text { text: GuiI18n.text("gui-minecraft-release"); color: Theme.text-secondary; font-size: 12px; } if root.create-server-client-id == "" : ComboBox { model: root.minecraft-releases; current-value <=> root.create-server-minecraft; selected(value) => { root.create-server-minecraft = value; root.create-server-loader-version = ""; root.create-server-loader-versions = []; if root.create-server-loader != "Vanilla" { root.request-loader-catalog("server", root.create-server-loader, value); } } } if root.create-server-client-id == "" : Text { text: GuiI18n.text("gui-loader"); color: Theme.text-secondary; font-size: 12px; } if root.create-server-client-id == "" : ComboBox { model: ["Vanilla", "Forge", "NeoForge"]; current-index: root.create-server-loader == "Forge" ? 1 : root.create-server-loader == "NeoForge" ? 2 : 0; selected(value) => { root.create-server-loader = value; root.create-server-loader-version = ""; root.create-server-loader-versions = []; if value != "Vanilla" { root.request-loader-catalog("server", value, root.create-server-minecraft); } } } if root.create-server-client-id == "" && root.create-server-loader != "Vanilla" : ComboBox { model: root.create-server-loader-versions; current-value <=> root.create-server-loader-version; } HorizontalLayout { BodyText { text: GuiI18n.text("gui-store-persistently"); } Toggle { checked <=> root.create-server-persistent; } } HorizontalLayout { BodyText { text: GuiI18n.text("gui-port-automatic"); } Toggle { checked <=> root.create-server-automatic-port; accessible-name: GuiI18n.text("gui-port-automatic"); } } if root.create-server-automatic-port : BodyText { text: GuiI18n.text("gui-port-automatic-detail"); color: Theme.text-muted; wrap: word-wrap; } if !root.create-server-automatic-port : HorizontalLayout { FieldLabel { text: GuiI18n.text("gui-port-custom"); } TextField { accessible-label: GuiI18n.text("gui-port-custom"); text <=> root.create-server-port; input-type: InputType.number; width: 150px; } } BodyText { text: GuiI18n.text("gui-eula-create-warning"); color: Theme.warning; wrap: word-wrap; } if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; } HorizontalLayout { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; } } AppButton { text: GuiI18n.text("gui-create-server"); tone: "primary"; enabled: root.create-server-name != "" && (root.create-server-client-id != "" || (root.minecraft-releases.length > 0 && root.create-server-minecraft != "" && (root.create-server-loader == "Vanilla" || root.create-server-loader-version != ""))); clicked => { root.submit-create-server(root.create-server-name, root.create-server-client-id, root.create-server-minecraft, root.create-server-loader, root.create-server-loader-version, root.create-server-persistent, root.create-server-automatic-port, root.create-server-port); } } } } }
-                    if root.modal == "mod-plan" : VerticalLayout { spacing: 12px; Heading { text: root.mod-plan-title + " " + root.mod-plan-version; font-size: 16px; } BodyText { text: GuiI18n.text("gui-mod-plan-compatible"); wrap: word-wrap; } Rectangle { height: 116px; border-radius: 6px; border-width: 1px; border-color: Theme.border; background: Theme.background; VerticalLayout { padding: 12px; spacing: 5px; BodyText { text: GuiI18n.count("gui-mod-plan-install", root.mod-plan-install-count); color: Theme.text; } BodyText { text: GuiI18n.count("gui-mod-plan-required", root.mod-plan-dependency-count); } BodyText { text: GuiI18n.count("gui-mod-plan-existing", root.mod-plan-existing-count); } BodyText { text: GuiI18n.count("gui-mod-plan-optional", root.mod-plan-optional-count); } } } if root.mod-plan-warning-count > 0 : BodyText { text: GuiI18n.count("gui-mod-plan-warnings", root.mod-plan-warning-count); color: Theme.warning; wrap: word-wrap; } HorizontalLayout { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; } } AppButton { text: GuiI18n.text("gui-install-required"); tone: "primary"; enabled: root.mod-plan-install-count > 0; clicked => { root.install-mod(root.mod-plan-instance, root.mod-plan-project); root.modal = ""; } } } }
+                    if root.modal == "mod-plan" : VerticalLayout { spacing: 12px; Heading { text: root.mod-plan-title + " " + root.mod-plan-version; font-size: 16px; } BodyText { text: GuiI18n.text("gui-mod-plan-compatible"); wrap: word-wrap; } Rectangle { height: 116px; border-radius: 6px; border-width: 1px; border-color: Theme.border; background: Theme.background; VerticalLayout { padding: 12px; spacing: 5px; BodyText { text: GuiI18n.count("gui-mod-plan-install", root.mod-plan-install-count); color: Theme.text; } BodyText { text: GuiI18n.count("gui-mod-plan-required", root.mod-plan-dependency-count); } BodyText { text: GuiI18n.count("gui-mod-plan-existing", root.mod-plan-existing-count); } BodyText { text: GuiI18n.count("gui-mod-plan-optional", root.mod-plan-optional-count); } } } if root.mod-plan-warning-count > 0 : BodyText { text: GuiI18n.count("gui-mod-plan-warnings", root.mod-plan-warning-count); color: Theme.warning; wrap: word-wrap; }
+                        if root.linked-targets.length > 0 : Text { text: GuiI18n.text("gui-linked-servers"); color: Theme.text-secondary; font-size: Theme.label-size; }
+                        if root.linked-targets.length > 0 && root.linked-support != "" : BodyText { text: root.linked-support; color: Theme.text-muted; wrap: word-wrap; }
+                        if root.linked-targets.length > 0 : LinkedTargetsPanel { vertical-stretch: 1; rows: root.linked-targets; selectable: true; toggled(index) => { root.linked-targets[index].selected = !root.linked-targets[index].selected; } }
+                        HorizontalLayout { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; } } AppButton { text: GuiI18n.text("gui-install-required"); tone: "primary"; enabled: root.mod-plan-install-count > 0 && !root.mod-action-pending; clicked => { root.mod-action-pending = true; root.install-mod(root.mod-plan-instance, root.mod-plan-project); root.modal = ""; } } } }
                     if root.modal == "mod-manage" : VerticalLayout { spacing: 11px;
                         HorizontalLayout { spacing: 8px; Heading { text: root.mod-action-name; font-size: Theme.section-size; overflow: elide; horizontal-stretch: 1; } if root.mod-action-up-to-date : Pill { text: GuiI18n.text("gui-mod-up-to-date"); tone-color: Theme.success; } }
                         if root.mod-action-notice != "" : BodyText { text: root.mod-action-notice; color: root.mod-action-can-change ? Theme.text-muted : Theme.warning; wrap: word-wrap; }
@@ -1795,8 +1860,8 @@ slint::slint! {
                             if root.mod-action-can-remove : AppButton { text: GuiI18n.text("gui-remove"); tone: "danger"; enabled: !root.mod-action-pending; clicked => { root.modal-error = ""; root.plan-mod-removal(root.selected-instance-id, root.mod-action-path); } }
                             Rectangle { horizontal-stretch: 1; }
                             AppButton { text: GuiI18n.text("gui-close"); clicked => { root.modal = ""; root.modal-error = ""; } }
-                            if root.mod-action-can-update : AppButton { text: GuiI18n.text("gui-mod-update"); enabled: !root.mod-action-pending; clicked => { root.mod-action-pending = true; root.modal-error = ""; root.update-mod(root.selected-instance-id, root.mod-action-path); } }
-                            if root.mod-action-can-change : AppButton { text: GuiI18n.text("gui-mod-change-version"); tone: "primary"; enabled: !root.mod-action-pending && root.mod-action-selected != "" && root.mod-action-selected != root.mod-action-installed; clicked => { root.mod-action-pending = true; root.modal-error = ""; root.change-mod-version(root.selected-instance-id, root.mod-action-path, root.mod-action-selected); } }
+                            if root.mod-action-can-update : AppButton { text: GuiI18n.text("gui-mod-update"); enabled: !root.mod-action-pending; clicked => { root.mod-action-pending = true; root.modal-error = ""; root.plan-mod-apply(root.selected-instance-id, root.mod-action-path, ""); } }
+                            if root.mod-action-can-change : AppButton { text: GuiI18n.text("gui-mod-change-version"); tone: "primary"; enabled: !root.mod-action-pending && root.mod-action-selected != "" && root.mod-action-selected != root.mod-action-installed; clicked => { root.mod-action-pending = true; root.modal-error = ""; root.plan-mod-apply(root.selected-instance-id, root.mod-action-path, root.mod-action-selected); } }
                         }
                     }
                     if root.modal == "mod-remove" : VerticalLayout { spacing: 12px;
@@ -1808,11 +1873,31 @@ slint::slint! {
                         }
                         if root.mod-removal-dependencies.length == 0 && !root.mod-removal-unprovable : BodyText { text: GuiI18n.text("gui-mod-remove-no-dependencies"); color: Theme.text-muted; wrap: word-wrap; }
                         if root.mod-removal-unprovable : BodyText { text: GuiI18n.text("gui-mod-remove-dependencies-unprovable"); color: Theme.text-muted; wrap: word-wrap; }
+                        if root.linked-targets.length > 0 : Text { text: GuiI18n.text("gui-linked-servers"); color: Theme.text-secondary; font-size: Theme.label-size; }
+                        if root.linked-targets.length > 0 : LinkedTargetsPanel { vertical-stretch: 1; rows: root.linked-targets; selectable: true; toggled(index) => { root.linked-targets[index].selected = !root.linked-targets[index].selected; } }
                         if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; }
                         HorizontalLayout { spacing: 8px; Rectangle { horizontal-stretch: 1; }
                             AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = "mod-manage"; root.modal-error = ""; } }
                             AppButton { text: GuiI18n.text("gui-mod-remove-action"); tone: "danger"; enabled: !root.mod-action-pending; clicked => { root.mod-action-pending = true; root.modal-error = ""; root.remove-mod(root.selected-instance-id, root.mod-action-path); } }
                         }
+                    }
+                    if root.modal == "mod-apply" : VerticalLayout { spacing: 11px;
+                        Heading { text: root.linked-name; font-size: Theme.section-size; overflow: elide; }
+                        if root.linked-version-number != "" : BodyText { text: GuiI18n.value("gui-linked-exact-release", root.linked-version-number); wrap: word-wrap; }
+                        if root.linked-support != "" : BodyText { text: root.linked-support; color: Theme.text-muted; wrap: word-wrap; }
+                        Text { text: GuiI18n.text("gui-linked-servers"); color: Theme.text-secondary; font-size: Theme.label-size; }
+                        LinkedTargetsPanel { vertical-stretch: 1; rows: root.linked-targets; selectable: true; toggled(index) => { root.linked-targets[index].selected = !root.linked-targets[index].selected; } }
+                        if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; }
+                        HorizontalLayout { spacing: 8px; Rectangle { horizontal-stretch: 1; }
+                            AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = "mod-manage"; root.modal-error = ""; root.mod-action-pending = false; } }
+                            AppButton { text: GuiI18n.text("gui-linked-apply"); tone: "primary"; enabled: !root.mod-action-pending; clicked => { root.mod-action-pending = true; root.modal-error = ""; root.change-mod-version(root.selected-instance-id, root.linked-path, root.linked-version); } }
+                        }
+                    }
+                    if root.modal == "mod-result" : VerticalLayout { spacing: 11px;
+                        Heading { text: root.linked-result-title; font-size: Theme.section-size; overflow: elide; }
+                        BodyText { text: root.linked-result-summary; wrap: word-wrap; }
+                        LinkedTargetsPanel { vertical-stretch: 1; rows: root.linked-results; }
+                        HorizontalLayout { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-close"); tone: "primary"; clicked => { root.modal = ""; } } }
                     }
                     if root.modal == "loader-change" : VerticalLayout { spacing: 12px;
                         BodyText { text: GuiI18n.text("gui-loader-change-detail"); wrap: word-wrap; }

@@ -21,8 +21,9 @@ use crate::backend::{
 };
 use crate::presentation::{self, parse_network, validate_ip, validate_port};
 use crate::ui::{
-    AccountRow, ActivityRow, AppWindow, DiagnosticRow, GuiI18n, InstanceRow, JavaRow, LogChunk,
-    ModRow, ModSearchRow, ModVersionRow, PendingEntityRow, PreferenceRow, ServerRow, Theme,
+    AccountRow, ActivityRow, AppWindow, DiagnosticRow, GuiI18n, InstanceRow, JavaRow,
+    LinkedTargetRow, LogChunk, ModRow, ModSearchRow, ModVersionRow, PendingEntityRow,
+    PreferenceRow, ServerRow, Theme,
 };
 
 pub struct Controller {
@@ -821,7 +822,9 @@ fn register_mod_mutations(ui: &AppWindow, commands: &Sender<Command>) {
     register_loader_change(ui, commands);
 
     let sender = commands.clone();
+    let handle = ui.as_weak();
     ui.on_change_mod_version(move |instance, path, version| {
+        let Some(ui) = handle.upgrade() else { return };
         if let Some(instance) = backend::parse_instance_id(&instance) {
             send(
                 &sender,
@@ -829,19 +832,21 @@ fn register_mod_mutations(ui: &AppWindow, commands: &Sender<Command>) {
                     instance,
                     path: PathBuf::from(path.as_str()),
                     version: version.to_string(),
+                    servers: chosen_linked_servers(&ui),
                 },
             );
         }
     });
 
     let sender = commands.clone();
-    ui.on_update_mod(move |instance, path| {
+    ui.on_plan_mod_apply(move |instance, path, version| {
         if let Some(instance) = backend::parse_instance_id(&instance) {
             send(
                 &sender,
-                Command::UpdateMod {
+                Command::PlanModApply {
                     instance,
                     path: PathBuf::from(path.as_str()),
+                    version: version.to_string(),
                 },
             );
         }
@@ -861,17 +866,50 @@ fn register_mod_mutations(ui: &AppWindow, commands: &Sender<Command>) {
     });
 
     let sender = commands.clone();
+    let handle = ui.as_weak();
     ui.on_remove_mod(move |instance, path| {
+        let Some(ui) = handle.upgrade() else { return };
         if let Some(instance) = backend::parse_instance_id(&instance) {
             send(
                 &sender,
                 Command::RemoveMod {
                     instance,
                     path: PathBuf::from(path.as_str()),
+                    servers: chosen_linked_servers(&ui),
                 },
             );
         }
     });
+
+    let sender = commands.clone();
+    let handle = ui.as_weak();
+    ui.on_install_mod(move |instance, project| {
+        let Some(ui) = handle.upgrade() else { return };
+        if let Some(instance) = backend::parse_instance_id(&instance) {
+            send(
+                &sender,
+                Command::InstallMod {
+                    instance,
+                    project: project.to_string(),
+                    servers: chosen_linked_servers(&ui),
+                },
+            );
+        }
+    });
+}
+
+/// The linked servers the user ticked, by their own stable ids.
+///
+/// Read out of the rows rather than tracked separately, so what is submitted is
+/// exactly what the confirmation showed. A row whose id no longer parses is
+/// dropped rather than guessed at: acting on a position instead would let a
+/// deleted server hand its selection to whichever one took its place.
+fn chosen_linked_servers(ui: &AppWindow) -> Vec<ephervex_model::ServerId> {
+    ui.get_linked_targets()
+        .iter()
+        .filter(|row| row.actionable && row.selected)
+        .filter_map(|row| backend::parse_server_id(&row.id))
+        .collect()
 }
 
 /// Moving the open instance to a different build of its own loader.
@@ -1360,19 +1398,9 @@ fn apply_event(
         Event::ModVersions(data) => apply_mod_versions(ui, data),
         Event::ModRemovalPlan(data) => apply_mod_removal_plan(ui, data),
         Event::ModResults(rows) => ui.set_mod_results(model(mod_search_rows(rows))),
-        Event::ModPlan(plan) => {
-            ui.set_mod_plan_instance(plan.instance.into());
-            ui.set_mod_plan_project(plan.project.into());
-            ui.set_mod_plan_title(plan.title.into());
-            ui.set_mod_plan_version(plan.version.into());
-            ui.set_mod_plan_install_count(to_i32(plan.install_count));
-            ui.set_mod_plan_dependency_count(to_i32(plan.dependency_count));
-            ui.set_mod_plan_optional_count(to_i32(plan.optional_count));
-            ui.set_mod_plan_existing_count(to_i32(plan.already_installed_count));
-            ui.set_mod_plan_warning_count(to_i32(plan.warning_count));
-            ui.set_modal("mod-plan".into());
-            ui.set_modal_error(SharedString::default());
-        }
+        Event::ModPlan(plan) => apply_mod_install_plan(ui, plan),
+        Event::LinkedApply(section) => apply_linked_confirmation(ui, section),
+        Event::LinkedResult(result) => apply_linked_result(ui, result),
         Event::ServerWorkspace(workspace) => apply_server_workspace(ui, workspace),
         Event::LiveLog(_) => {}
         Event::Diagnostics {
@@ -1933,7 +1961,34 @@ fn apply_mod_versions(ui: &AppWindow, data: backend::ModVersionsData) {
     ui.set_mod_versions(model(mod_version_rows(data.versions)));
 }
 
-/// Shows what a removal would take with it, and asks.
+/// Shows what installing a mod would involve, here and on each linked server.
+fn apply_mod_install_plan(ui: &AppWindow, plan: backend::ModPlanData) {
+    ui.set_mod_plan_instance(plan.instance.into());
+    ui.set_mod_plan_project(plan.project.into());
+    ui.set_mod_plan_title(plan.title.into());
+    ui.set_mod_plan_version(plan.version.into());
+    ui.set_mod_plan_install_count(to_i32(plan.install_count));
+    ui.set_mod_plan_dependency_count(to_i32(plan.dependency_count));
+    ui.set_mod_plan_optional_count(to_i32(plan.optional_count));
+    ui.set_mod_plan_existing_count(to_i32(plan.already_installed_count));
+    ui.set_mod_plan_warning_count(to_i32(plan.warning_count));
+    apply_linked_section(ui, plan.linked);
+    ui.set_mod_action_pending(false);
+    ui.set_modal("mod-plan".into());
+    ui.set_modal_error(SharedString::default());
+}
+
+/// Shows what one finished operation did to each target that took part.
+fn apply_linked_result(ui: &AppWindow, result: backend::LinkedResultData) {
+    ui.set_linked_result_title(result.title.into());
+    ui.set_linked_result_summary(result.summary.into());
+    ui.set_linked_results(model(linked_target_rows(result.rows)));
+    ui.set_mod_action_pending(false);
+    ui.set_modal_error(SharedString::default());
+    ui.set_modal("mod-result".into());
+}
+
+/// Shows what a removal would take with it, here and on each linked server.
 fn apply_mod_removal_plan(ui: &AppWindow, data: backend::ModRemovalPlanData) {
     if !addresses_open_mod(ui, &data.instance, &data.logical_path) {
         return;
@@ -1946,8 +2001,46 @@ fn apply_mod_removal_plan(ui: &AppWindow, data: backend::ModRemovalPlanData) {
             .map(SharedString::from)
             .collect(),
     ));
+    apply_linked_section(ui, data.linked);
     ui.set_mod_action_pending(false);
     ui.set_modal("mod-remove".into());
+}
+
+/// Shows the exact release a change or update settled on, and which linked
+/// servers can take it.
+fn apply_linked_confirmation(ui: &AppWindow, section: backend::LinkedSectionData) {
+    if !addresses_open_mod(ui, &section.instance, &section.path) {
+        return;
+    }
+    apply_linked_section(ui, section);
+    ui.set_mod_action_pending(false);
+    ui.set_modal_error(SharedString::default());
+    ui.set_modal("mod-apply".into());
+}
+
+/// Puts one confirmation's linked-server half on screen.
+fn apply_linked_section(ui: &AppWindow, section: backend::LinkedSectionData) {
+    ui.set_linked_path(section.path.into());
+    ui.set_linked_version(section.version.into());
+    ui.set_linked_name(section.name.into());
+    ui.set_linked_version_number(section.version_number.into());
+    ui.set_linked_support(section.support.into());
+    ui.set_linked_targets(model(linked_target_rows(section.targets)));
+}
+
+fn linked_target_rows(rows: Vec<backend::LinkedTargetData>) -> Vec<LinkedTargetRow> {
+    rows.into_iter()
+        .map(|row| LinkedTargetRow {
+            id: row.id.into(),
+            name: row.name.into(),
+            detail: row.detail.into(),
+            state: row.state.into(),
+            explanation: row.explanation.into(),
+            tone: row.tone.into(),
+            actionable: row.actionable,
+            selected: row.selected,
+        })
+        .collect()
 }
 
 /// Whether a background answer is about the mod the user currently has open.
