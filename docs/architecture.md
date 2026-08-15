@@ -337,6 +337,18 @@ whose jar is absent from `mods/` is reported as missing rather than forgotten.
 The frontends consume one snapshot from the application service and never read a
 recipe, call a provider, or interpret a file name themselves.
 
+An explicit mod decision can be carried from a client to its linked servers
+(ADR 0021). The exact release the client settles on is the release every
+selected server is evaluated for; no server runs its own newest-compatible
+search, and a release that does not fit one makes that target ineligible with a
+typed reason rather than being substituted. Dependencies resolve per target
+against that server's own Minecraft release, loader, and installed set. A synced
+root is recorded in the server's own retained recipe as an explicit choice, so it
+stays distinguishable from what the pack declared, and ownership is read back
+from that record rather than from the directory. Each target's mutation is the
+same undoable transaction; several targets are not one transaction, and the
+result is per target.
+
 ## Security boundaries
 
 ### Untrusted paths and archives

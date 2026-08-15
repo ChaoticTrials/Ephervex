@@ -26,3 +26,4 @@ so the reasoning trail survives.
 | [0018](0018-apache-2.0-project-license.md) | Apache-2.0 project license | Accepted |
 | [0019](0019-one-mod-list-with-typed-ownership-and-identity.md) | An instance has one mod list, with ownership and identity as separate typed facts | Accepted |
 | [0020](0020-mod-mutation-is-one-undoable-transaction.md) | Mod mutation is one undoable transaction, and ownership decides what may be mutated | Accepted |
+| [0021](0021-linked-mod-sync-pins-the-root-and-resolves-per-target.md) | Linked mod synchronization pins the root release and resolves dependencies per target | Accepted |
