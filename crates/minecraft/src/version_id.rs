@@ -21,6 +21,17 @@
 //! 2. How should a list of versions be ordered for display when a caller is
 //!    not iterating the manifest in its published order?
 //!
+//! # Minecraft releases only
+//!
+//! Both questions are about Minecraft releases, so a Minecraft release id is
+//! the only thing that belongs here. Loader ids look close enough to invite the
+//! mistake and are not the same thing: `neoforge-26.2.0.59` is NeoForge build
+//! 59 for Minecraft 26.2, not a Minecraft version with a fourth component, and
+//! `1.20.1-forge-47.4.10` is two identifiers joined by a hyphen. A caller
+//! holding a loader-derived version-manifest id has to reach the Minecraft
+//! release it extends — [`crate::VersionMetadata::minecraft_version`] carries
+//! it — rather than hand the loader id to this parser.
+//!
 //! # Degrading on an id it cannot parse
 //!
 //! Mojang has changed the version scheme once already, so this parser must
@@ -340,6 +351,35 @@ mod tests {
             assert!(!parsed.is_recognized(), "`{text}` should not parse");
             assert_eq!(parsed.as_str(), text, "`{text}` must survive verbatim");
         }
+    }
+
+    #[test]
+    fn a_loader_version_manifest_id_is_not_a_minecraft_version() {
+        for text in [
+            "neoforge-26.2.0.59",
+            "neoforge-21.1.248",
+            "1.20.1-forge-47.4.10",
+            "1.12.2-forge-14.23.5.2859",
+        ] {
+            let parsed = id(text);
+            assert!(
+                !parsed.is_recognized(),
+                "`{text}` is a loader build id and must not read as a Minecraft release"
+            );
+            assert_eq!(parsed.as_str(), text, "`{text}` must survive verbatim");
+        }
+    }
+
+    #[test]
+    fn a_loader_build_number_is_not_the_minecraft_version_it_was_built_for() {
+        // Why a loader id must reach its Minecraft release through the
+        // document's `inheritsFrom` rather than by removing the loader's name
+        // from the front: NeoForge 26.2.0.59 targets Minecraft 26.2, but the
+        // remainder of its id parses cleanly as a four-component version that
+        // is neither equal to 26.2 nor ordered anywhere near it.
+        assert_ne!(id("26.2.0.59"), id("26.2"));
+        assert!(id("26.2.0.59") > id("26.2"));
+        assert!(id("26.2.0.59") < id("26.2.1"));
     }
 
     #[test]

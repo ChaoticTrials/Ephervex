@@ -55,10 +55,16 @@ impl RequiredJava {
 
     /// The requirement for a resolved version: the metadata's if it has one,
     /// the table's otherwise.
+    ///
+    /// The table is keyed on the *Minecraft* release, which the metadata
+    /// already carries. A loader document's own id is not one — asking the
+    /// table about `neoforge-26.2.0.59` would get Java 8 for a release that
+    /// needs 25, because an id the table cannot rank falls back to its oldest
+    /// entry.
     #[must_use]
     pub fn resolve(metadata: &VersionMetadata) -> Self {
         Self::from_metadata(metadata)
-            .unwrap_or_else(|| Self::from_table(&MinecraftVersionId::parse(&metadata.id)))
+            .unwrap_or_else(|| Self::from_table(&metadata.minecraft_version))
     }
 }
 
@@ -219,5 +225,29 @@ mod tests {
         let required = RequiredJava::resolve(&metadata);
         assert_eq!(required.major, 8);
         assert_eq!(required.basis, RequirementBasis::FallbackTable);
+    }
+
+    #[test]
+    fn a_loader_document_falls_back_to_the_minecraft_release_it_is_for() {
+        // No Forge or NeoForge child carries a `javaVersion`, so every one of
+        // them reaches the table. The table ranks Minecraft releases, and a
+        // loader build id is not one: asked about `neoforge-26.2.0.59` it can
+        // only fall to its oldest entry and answer Java 8 for a release that
+        // needs 25.
+        let metadata = ephervex_minecraft::VersionMetadata::parse(include_str!(
+            "../../../fixtures/loaders/neoforge-26.2.0.59-version.json"
+        ))
+        .expect("official NeoForge child fixture");
+        assert!(metadata.java_version.is_none());
+
+        let required = RequiredJava::resolve(&metadata);
+        assert_eq!(required.major, 25);
+        assert_eq!(required.basis, RequirementBasis::FallbackTable);
+
+        let legacy = ephervex_minecraft::VersionMetadata::parse(include_str!(
+            "../../../fixtures/loaders/forge-1.20.1-version.json"
+        ))
+        .expect("official Forge child fixture");
+        assert_eq!(RequiredJava::resolve(&legacy).major, 17);
     }
 }

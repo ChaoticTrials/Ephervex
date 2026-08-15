@@ -145,10 +145,21 @@ pub enum VersionMetadataError {
 /// One version's complete metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VersionMetadata {
-    /// The id as published, e.g. `1.12.2`.
+    /// The id as published, e.g. `1.12.2` for a vanilla document and
+    /// `neoforge-26.2.0.59` for a loader child.
     pub id: String,
-    /// The same id, parsed for ordering and the support floor.
-    pub version: MinecraftVersionId,
+    /// The canonical Minecraft release the document is for, parsed for
+    /// ordering and the support floor.
+    ///
+    /// For a vanilla document that is [`Self::id`] itself. For a Forge or
+    /// NeoForge child it is `inheritsFrom`, because a loader document's id is
+    /// the loader build's identity and not a Minecraft version:
+    /// `neoforge-26.2.0.59` names NeoForge build 59, not a fourth Minecraft
+    /// component, and `1.20.1-forge-47.4.10` is not a version string at all.
+    /// [`MinecraftVersionId`] answers questions about Minecraft releases, so
+    /// routing a loader id through it would be reading a loader build number
+    /// as a Minecraft patch level.
+    pub minecraft_version: MinecraftVersionId,
     pub release_type: ReleaseType,
     /// When Mojang released it. The manifest's ordering authority
     pub release_time: DateTime<Utc>,
@@ -280,7 +291,11 @@ impl VersionMetadata {
 
         Ok(Self {
             id: child.id.clone(),
-            version: child.version.clone(),
+            // The merged document keeps the child's loader id but *is* the
+            // parent's Minecraft release, and `inherits_from` is cleared below
+            // — so the canonical version has to be carried here rather than
+            // recovered from either field afterwards.
+            minecraft_version: parent.minecraft_version.clone(),
             release_type: child.release_type.clone(),
             release_time: child.release_time,
             time: child.time,
@@ -490,13 +505,21 @@ impl RawVersion {
             warn!(version = %id, %group, "version declares an argument group this build does not know");
         }
 
-        let version = MinecraftVersionId::parse(&id);
-        if !version.is_recognized() {
-            warn!(version = %id, "version id is in a scheme this build does not parse");
+        // A loader child names the release it extends; its own id is the
+        // loader build's identity. Parsing that as a Minecraft version is what
+        // made a correct NeoForge installation report a malformed version.
+        let canonical = self.inherits_from.as_deref().unwrap_or(&id);
+        let minecraft_version = MinecraftVersionId::parse(canonical);
+        if !minecraft_version.is_recognized() {
+            warn!(
+                version = %id,
+                minecraft = %canonical,
+                "minecraft version id is in a scheme this build does not parse"
+            );
         }
 
         Ok(VersionMetadata {
-            version,
+            minecraft_version,
             id,
             release_type: self.release_type,
             release_time: self.release_time,
@@ -884,6 +907,98 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn a_vanilla_document_is_for_the_release_its_own_id_names() {
+        for (name, expected) in [
+            ("1.12.2.json", "1.12.2"),
+            ("1.20.1.json", "1.20.1"),
+            ("1.21.1.json", "1.21.1"),
+            ("26.1.json", "26.1"),
+        ] {
+            let version = parse(name);
+            assert_eq!(version.minecraft_version.as_str(), expected, "{name}");
+            assert!(
+                version.minecraft_version.is_recognized(),
+                "{name} is a release this build parses"
+            );
+        }
+    }
+
+    #[test]
+    fn a_loader_document_is_for_the_release_it_inherits_not_the_build_it_names() {
+        // The official NeoForge 26.2.0.59 and Forge 1.20.1 children. Their ids
+        // are loader build identities; the Minecraft release each is for is the
+        // one it inherits, and that is what the whole pipeline downstream means
+        // by "the Minecraft version".
+        for (json, id, minecraft) in [
+            (
+                include_str!("../../../fixtures/loaders/neoforge-26.2.0.59-version.json"),
+                "neoforge-26.2.0.59",
+                "26.2",
+            ),
+            (
+                include_str!("../../../fixtures/loaders/forge-1.20.1-version.json"),
+                "1.20.1-forge-47.4.10",
+                "1.20.1",
+            ),
+        ] {
+            let version = VersionMetadata::parse(json).expect("official loader child fixture");
+            assert_eq!(version.id, id);
+            assert_eq!(version.minecraft_version.as_str(), minecraft);
+            assert!(
+                version.minecraft_version.is_recognized(),
+                "`{id}` is for Minecraft {minecraft}, which this build parses"
+            );
+        }
+    }
+
+    #[test]
+    fn merging_a_loader_child_keeps_the_parents_minecraft_release() {
+        // `inherit` clears `inheritsFrom` and keeps the child's loader id, so
+        // after the merge neither field can still be reparsed for the release —
+        // the answer has to have been carried across.
+        let parent = parse("1.20.1.json");
+        let child = child(include_str!(
+            "../../../fixtures/loaders/forge-1.20.1-version.json"
+        ));
+        let merged = VersionMetadata::inherit(&parent, &child).expect("merge");
+
+        assert_eq!(merged.id, "1.20.1-forge-47.4.10");
+        assert_eq!(merged.inherits_from(), None);
+        assert_eq!(merged.minecraft_version, parent.minecraft_version);
+        assert_eq!(merged.minecraft_version.as_str(), "1.20.1");
+    }
+
+    #[test]
+    fn a_release_id_in_an_unknown_scheme_stays_unrecognized_wherever_it_appears() {
+        // The diagnostic this build actually needs: an id it cannot rank is
+        // still reported as such, whether it is a document's own or the parent
+        // a loader child claims to extend.
+        let vanilla = child(
+            r#"{
+                "id":"2030w01a","type":"snapshot",
+                "releaseTime":"2030-01-01T00:00:00Z","time":"2030-01-01T00:00:00Z",
+                "mainClass":"net.minecraft.client.main.Main"
+            }"#,
+        );
+        assert!(!vanilla.minecraft_version.is_recognized());
+        assert_eq!(vanilla.minecraft_version.as_str(), "2030w01a");
+
+        let loader = child(
+            r#"{
+                "id":"neoforge-99.0.0.1","inheritsFrom":"2030w01a","type":"release",
+                "releaseTime":"2030-01-01T00:00:00Z","time":"2030-01-01T00:00:00Z",
+                "mainClass":"net.neoforged.fml.startup.Client"
+            }"#,
+        );
+        assert!(!loader.minecraft_version.is_recognized());
+        assert_eq!(
+            loader.minecraft_version.as_str(),
+            "2030w01a",
+            "the value reported as unparseable is the one that was supposed to be a release"
+        );
     }
 
     #[test]
