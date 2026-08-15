@@ -73,7 +73,7 @@ pub use cache::{
     MavenCoordinate,
 };
 pub use client::{HttpConfig, build_client};
-pub use error::DownloadError;
+pub use error::{ArtifactStep, DownloadError};
 pub use manager::{
     ArtifactSource, DownloadManager, DownloadOutcome, DownloadRequest, DownloaderConfig,
 };

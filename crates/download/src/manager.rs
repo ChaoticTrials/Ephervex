@@ -36,7 +36,7 @@ use tracing::{debug, trace, warn};
 
 use crate::allowlist::{UrlPolicyError, check_transport, redacted};
 use crate::client::{HttpConfig, build_client};
-use crate::error::{AttemptFailure, DownloadError};
+use crate::error::{ArtifactStep, AttemptFailure, DownloadError};
 use crate::progress::{ByteTally, OperationReporter};
 use crate::retry::{RetryPolicy, retry_after};
 use crate::verify::HashVerifier;
@@ -44,6 +44,17 @@ use crate::verify::HashVerifier;
 /// Suffix for in-flight downloads. Kept in the destination directory so the
 /// finalizing rename is a same-filesystem operation.
 const PART_SUFFIX: &str = "part";
+
+/// The longest filename Ephervex generates for its own scratch files.
+///
+/// Deliberately well below the 255 bytes a plain Linux filesystem allows. An
+/// encrypted home directory — eCryptfs with filename encryption, which is what
+/// an "encrypt my home directory" installer option sets up — accepts 143, and
+/// the cache lives under `$XDG_CACHE_HOME`. A SHA-512 content path is already
+/// 132 characters, so a temporary sibling has to be *bounded* rather than
+/// derived by appending to it. The remaining margin is deliberate: it costs
+/// nothing, and it leaves room for a limit stricter than the ones known today.
+const MAX_TEMPORARY_NAME_BYTES: usize = 120;
 
 type DestinationLocks = Mutex<HashMap<PathBuf, Weak<AsyncMutex<()>>>>;
 static DESTINATION_LOCKS: OnceLock<DestinationLocks> = OnceLock::new();
@@ -544,9 +555,9 @@ impl Transfer<'_, '_> {
             return Err(self.canceled());
         }
         if let Some(parent) = self.request.destination.parent() {
-            fs::create_dir_all(parent)
-                .await
-                .map_err(|source| DownloadError::io(parent, source))?;
+            fs::create_dir_all(parent).await.map_err(|source| {
+                DownloadError::io(ArtifactStep::CreateDirectory, parent, source)
+            })?;
         }
 
         let resuming = self.prepare_resume().await;
@@ -698,7 +709,7 @@ impl Transfer<'_, '_> {
 
             file.write_all(&chunk)
                 .await
-                .map_err(|source| DownloadError::io(self.part, source))?;
+                .map_err(|source| DownloadError::io(ArtifactStep::WriteBody, self.part, source))?;
             // Hashed only after the write succeeds, so the verifier state always
             // describes exactly the first `state.offset` bytes of the file —
             // which is what makes resuming without re-reading them sound.
@@ -709,12 +720,12 @@ impl Transfer<'_, '_> {
 
         file.flush()
             .await
-            .map_err(|source| DownloadError::io(self.part, source))?;
+            .map_err(|source| DownloadError::io(ArtifactStep::Flush, self.part, source))?;
         // Durable before the rename: a crash must not be able to leave a
         // renamed-but-empty artifact at a cache path.
         file.sync_all()
             .await
-            .map_err(|source| DownloadError::io(self.part, source))?;
+            .map_err(|source| DownloadError::io(ArtifactStep::Flush, self.part, source))?;
         Ok(written)
     }
 
@@ -753,7 +764,9 @@ impl Transfer<'_, '_> {
 
         fs::rename(self.part, &self.request.destination)
             .await
-            .map_err(|source| DownloadError::io(&self.request.destination, source))?;
+            .map_err(|source| {
+                DownloadError::io(ArtifactStep::Publish, &self.request.destination, source)
+            })?;
         sync_parent_directory(&self.request.destination).await;
         self.cursor.report(written, Some(written));
         Ok(written)
@@ -767,14 +780,15 @@ impl Transfer<'_, '_> {
         if offset == 0 {
             options.truncate(true);
         }
-        let mut file = options
-            .open(self.part)
-            .await
-            .map_err(|source| DownloadError::io(self.part, source))?;
+        let mut file = options.open(self.part).await.map_err(|source| {
+            DownloadError::io(ArtifactStep::CreateTemporary, self.part, source)
+        })?;
         if offset > 0 {
             file.seek(std::io::SeekFrom::Start(offset))
                 .await
-                .map_err(|source| DownloadError::io(self.part, source))?;
+                .map_err(|source| {
+                    DownloadError::io(ArtifactStep::CreateTemporary, self.part, source)
+                })?;
         }
         Ok(file)
     }
@@ -824,7 +838,13 @@ async fn already_cached(
         Ok(metadata) if metadata.is_file() => metadata,
         Ok(_) => return Ok(None),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(source) => return Err(DownloadError::io(destination, source)),
+        Err(source) => {
+            return Err(DownloadError::io(
+                ArtifactStep::ReadCached,
+                destination,
+                source,
+            ));
+        }
     };
     let bytes = metadata.len();
     let size_matches = request
@@ -835,14 +855,13 @@ async fn already_cached(
     } else {
         let mut file = File::open(destination)
             .await
-            .map_err(|source| DownloadError::io(destination, source))?;
+            .map_err(|source| DownloadError::io(ArtifactStep::ReadCached, destination, source))?;
         let mut verifier = HashVerifier::new(&request.expected_hashes);
         let mut buffer = vec![0; 64 * 1024];
         loop {
-            let read = file
-                .read(&mut buffer)
-                .await
-                .map_err(|source| DownloadError::io(destination, source))?;
+            let read = file.read(&mut buffer).await.map_err(|source| {
+                DownloadError::io(ArtifactStep::ReadCached, destination, source)
+            })?;
             if read == 0 {
                 break;
             }
@@ -855,7 +874,7 @@ async fn already_cached(
         warn!(path = %destination.display(), "discarding a cache entry that does not match its request");
         fs::remove_file(destination)
             .await
-            .map_err(|source| DownloadError::io(destination, source))?;
+            .map_err(|source| DownloadError::io(ArtifactStep::ReadCached, destination, source))?;
         return Ok(None);
     }
 
@@ -868,13 +887,44 @@ async fn already_cached(
 }
 
 /// A unique partial sibling in the destination's own directory.
+///
+/// A sibling because the publishing rename must not cross a filesystem
+/// boundary, and unique because two transfers may aim at one content-addressed
+/// destination at once and must not write over each other's bytes.
+///
+/// The destination's own name is kept only as far as
+/// [`MAX_TEMPORARY_NAME_BYTES`] allows. It is there so a human looking at the
+/// cache can tell what a transfer in flight belongs to; what makes the name
+/// unique is the identifier, so shortening the readable half costs nothing and
+/// is what keeps the result creatable on every filesystem the cache can land
+/// on.
 fn part_path(destination: &Path, id: uuid::Uuid) -> PathBuf {
-    let mut name = destination.as_os_str().to_os_string();
-    name.push(".");
-    name.push(PART_SUFFIX);
-    name.push(".");
-    name.push(id.to_string());
-    PathBuf::from(name)
+    // `simple` rather than the hyphenated form: the same 128 bits, four bytes
+    // shorter, and every byte here is taken from the readable half.
+    let suffix = format!(".{PART_SUFFIX}.{}", id.simple());
+    let name = destination
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy();
+    let kept = bounded(&name, MAX_TEMPORARY_NAME_BYTES.saturating_sub(suffix.len()));
+
+    destination
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .join(format!("{kept}{suffix}"))
+}
+
+/// The longest prefix of `name` that fits `max_bytes` without splitting a
+/// character.
+fn bounded(name: &str, max_bytes: usize) -> &str {
+    if name.len() <= max_bytes {
+        return name;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    &name[..end]
 }
 
 fn destination_lock(destination: &Path) -> Arc<AsyncMutex<()>> {
@@ -975,13 +1025,51 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
 
+    /// The shortest filename limit Ephervex has to work under.
+    ///
+    /// eCryptfs with filename encryption, which is what an "encrypt my home
+    /// directory" installer option sets up, accepts 143 bytes where a plain
+    /// Linux filesystem accepts 255. The cache lives under `$XDG_CACHE_HOME`,
+    /// so that is the limit that binds.
+    const ENCRYPTED_HOME_NAME_LIMIT: usize = 143;
+
+    /// The generated bound must stay inside the shortest limit Ephervex
+    /// supports, so raising it past what an encrypted home accepts fails the
+    /// build rather than the next download.
+    const _: () = assert!(MAX_TEMPORARY_NAME_BYTES <= ENCRYPTED_HOME_NAME_LIMIT);
+
+    #[test]
+    fn a_temporary_artifact_name_fits_an_encrypted_home_directory() {
+        // A SHA-512 content path is already 132 characters before any suffix,
+        // and every mod a provider publishes a SHA-512 for lands on one. Naming
+        // the temporary sibling after it and appending a full-length unique
+        // suffix produced 174 characters, which an encrypted home refuses to
+        // create at all: every such download failed before its first byte.
+        let destination = PathBuf::from(format!(
+            "/cache/ephervex/downloads/sha512/aa/{}.jar",
+            "a".repeat(128)
+        ));
+        let part = part_path(&destination, uuid::Uuid::new_v4());
+        let name = part
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .expect("a temporary artifact has a name");
+
+        assert!(
+            name.len() <= MAX_TEMPORARY_NAME_BYTES,
+            "`{name}` is {} bytes, over the {MAX_TEMPORARY_NAME_BYTES} this launcher generates",
+            name.len()
+        );
+    }
+
     #[test]
     fn the_part_file_is_a_sibling_of_the_destination() {
         let id = uuid::Uuid::nil();
         let part = part_path(Path::new("/cache/ephervex/downloads/sha1/da/abc.jar"), id);
         assert_eq!(
             part.file_name().and_then(std::ffi::OsStr::to_str),
-            Some("abc.jar.part.00000000-0000-0000-0000-000000000000")
+            Some("abc.jar.part.00000000000000000000000000000000"),
+            "a name that already fits keeps the destination's own name in full"
         );
         assert_eq!(
             part.parent(),

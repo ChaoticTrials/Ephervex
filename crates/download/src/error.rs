@@ -7,6 +7,7 @@
 //! [`crate::allowlist::redacted`] first so a signed CDN URL cannot leak its
 //! query string into a log file.
 
+use std::fmt;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -71,8 +72,16 @@ pub enum DownloadError {
     RangeNotHonored { url: String },
 
     /// Filesystem failure against a specific path.
-    #[error("io failure at {path}")]
+    ///
+    /// The step is named because a bare "io failure" cannot be acted on:
+    /// creating a cache directory, creating a temporary artifact, writing a
+    /// body, and publishing a finished file fail for different reasons and have
+    /// different fixes. The operating system's own message is part of the
+    /// display rather than only the source chain, because a single log line is
+    /// where these are read.
+    #[error("could not {operation} at {path}: {source}")]
     Io {
+        operation: ArtifactStep,
         path: PathBuf,
         #[source]
         source: std::io::Error,
@@ -133,12 +142,70 @@ impl DownloadError {
         matches!(self, Self::Canceled { .. })
     }
 
-    /// Builds an [`DownloadError::Io`] with the path that failed attached.
-    pub(crate) fn io(path: impl Into<PathBuf>, source: std::io::Error) -> Self {
+    /// Builds a [`DownloadError::Io`] naming the step and the path that failed.
+    pub(crate) fn io(
+        operation: ArtifactStep,
+        path: impl Into<PathBuf>,
+        source: std::io::Error,
+    ) -> Self {
         Self::Io {
+            operation,
             path: path.into(),
             source,
         }
+    }
+}
+
+/// Which filesystem step of an artifact transfer failed.
+///
+/// A transfer touches the disk in five distinguishable places, and knowing
+/// which one gave way is the difference between an actionable report and
+/// "something went wrong with a file". A name too long for the filesystem, a
+/// full disk, and a cache directory somebody made read-only all surface as an
+/// I/O error, and each is reported at a different step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ArtifactStep {
+    /// Creating the directory an artifact is cached in.
+    CreateDirectory,
+    /// Creating or positioning the temporary file a transfer writes into.
+    CreateTemporary,
+    /// Writing the response body.
+    WriteBody,
+    /// Flushing and syncing the temporary file before it is published.
+    Flush,
+    /// Renaming the verified file into its cache path.
+    Publish,
+    /// Reading an entry already at the cache path, to decide whether it can be
+    /// reused.
+    ReadCached,
+}
+
+impl ArtifactStep {
+    /// A stable identifier for structured logs and `--json` output.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CreateDirectory => "create-directory",
+            Self::CreateTemporary => "create-temporary",
+            Self::WriteBody => "write-body",
+            Self::Flush => "flush",
+            Self::Publish => "publish",
+            Self::ReadCached => "read-cached",
+        }
+    }
+}
+
+impl fmt::Display for ArtifactStep {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::CreateDirectory => "create the cache directory",
+            Self::CreateTemporary => "create the temporary artifact",
+            Self::WriteBody => "write the artifact",
+            Self::Flush => "flush the artifact",
+            Self::Publish => "publish the artifact",
+            Self::ReadCached => "read the cached artifact",
+        })
     }
 }
 

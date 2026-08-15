@@ -12,11 +12,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ephervex_download::{
-    ArtifactSource, ChannelSink, DownloadError, DownloadManager, DownloadRequest, DownloaderConfig,
-    HttpConfig, OperationReporter, ProgressSink, RetryPolicy, UrlPolicyError,
+    ArtifactSource, CacheLayout, ChannelSink, ContentStore, DownloadError, DownloadManager,
+    DownloadRequest, DownloaderConfig, FileExtension, HttpConfig, OperationReporter, ProgressSink,
+    RetryPolicy, UrlPolicyError,
 };
 use ephervex_model::{Hash, HashAlgorithm, OperationStatus};
 use sha1::{Digest, Sha1};
+use sha2::Sha512;
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{method, path};
@@ -58,12 +60,22 @@ fn no_partial_siblings(destination: &std::path::Path) -> bool {
     let Some(name) = destination.file_name().and_then(std::ffi::OsStr::to_str) else {
         return true;
     };
-    let prefix = format!("{name}.part.");
+    // Matched on the marker rather than on the destination's name: a temporary
+    // name is bounded, so it does not necessarily begin with the name it
+    // belongs to.
+    let _ = name;
     std::fs::read_dir(parent).is_ok_and(|entries| {
         entries
             .filter_map(Result::ok)
-            .all(|entry| !entry.file_name().to_string_lossy().starts_with(&prefix))
+            .all(|entry| !entry.file_name().to_string_lossy().contains(".part."))
     })
+}
+
+fn sha512_of(bytes: &[u8]) -> Hash {
+    let mut hasher = Sha512::new();
+    hasher.update(bytes);
+    Hash::new(HashAlgorithm::Sha512, &hex::encode(hasher.finalize()))
+        .expect("computed sha512 is valid")
 }
 
 #[tokio::test]
@@ -708,5 +720,229 @@ async fn concurrency_is_bounded_by_the_configured_limit() {
     assert!(
         elapsed >= delay * 2,
         "six transfers through two permits finished in {elapsed:?}, which means the semaphore was not applied"
+    );
+}
+
+#[tokio::test]
+async fn a_content_addressed_artifact_is_published_into_a_cache_that_does_not_exist_yet() {
+    // The shape every provider download actually has: a SHA-512 digest, a
+    // sharded directory nothing has created, and a `.jar` suffix.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/mod.jar"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(BODY))
+        .mount(&server)
+        .await;
+
+    let dir = TempDir::new().expect("temp dir");
+    let cache = CacheLayout::new(dir.path().join("cache"));
+    let hash = sha512_of(BODY);
+    let extension = FileExtension::new("jar").expect("jar is a safe extension");
+    let destination = cache.content(ContentStore::Downloads, &hash, Some(&extension));
+    assert!(!destination.exists());
+
+    let outcome = manager(RetryPolicy::none())
+        .download(
+            &request(&server, "/mod.jar", &destination).verifying(hash.clone()),
+            &OperationReporter::silent("test"),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("the artifact is fetched, verified, and published");
+
+    assert_eq!(outcome.source, ArtifactSource::Network);
+    assert_eq!(std::fs::read(&destination).unwrap(), BODY);
+    assert!(
+        no_partial_siblings(&destination),
+        "a published artifact leaves no scratch beside it"
+    );
+
+    // Asking again costs nothing and reuses exactly what was verified.
+    let again = manager(RetryPolicy::none())
+        .download(
+            &request(&server, "/mod.jar", &destination).verifying(hash),
+            &OperationReporter::silent("test"),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("the cached artifact is reused");
+    assert_eq!(again.source, ArtifactSource::AlreadyCached);
+}
+
+#[tokio::test]
+async fn a_long_destination_name_still_gets_a_temporary_file_the_filesystem_accepts() {
+    // A temporary name derived by appending to the destination's own grows with
+    // it, and every filesystem has a limit: an encrypted home directory refuses
+    // anything over 143 bytes, which a SHA-512 cache entry plus a full-length
+    // suffix exceeds. The name a transfer writes to has to be bounded instead,
+    // or the download fails before its first byte.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/mod.jar"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(BODY))
+        .mount(&server)
+        .await;
+
+    let dir = TempDir::new().expect("temp dir");
+    let destination = dir.path().join(format!("{}.jar", "a".repeat(250)));
+
+    let outcome = manager(RetryPolicy::none())
+        .download(
+            &request(&server, "/mod.jar", &destination),
+            &OperationReporter::silent("test"),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("a long destination name does not stop the transfer");
+
+    assert_eq!(outcome.source, ArtifactSource::Network);
+    assert_eq!(std::fs::read(&destination).unwrap(), BODY);
+    assert!(no_partial_siblings(&destination));
+}
+
+#[tokio::test]
+async fn a_partial_file_left_by_an_earlier_run_is_never_served_as_a_cached_artifact() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/mod.jar"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(BODY))
+        .mount(&server)
+        .await;
+
+    let dir = TempDir::new().expect("temp dir");
+    let store = dir.path().join("store");
+    std::fs::create_dir_all(&store).expect("store");
+    let destination = store.join("artifact.jar");
+    // What a killed process leaves behind: bytes nothing verified, under a name
+    // that looks related to the artifact.
+    let stale = store.join("artifact.jar.part.0123456789abcdef0123456789abcdef");
+    std::fs::write(&stale, b"bytes from a transfer that never finished").expect("stale");
+
+    let outcome = manager(RetryPolicy::none())
+        .download(
+            &request(&server, "/mod.jar", &destination).verifying(sha1_of(BODY)),
+            &OperationReporter::silent("test"),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("the artifact is fetched");
+
+    assert_eq!(
+        outcome.source,
+        ArtifactSource::Network,
+        "scratch beside the cache path is not a cache entry"
+    );
+    assert_eq!(std::fs::read(&destination).unwrap(), BODY);
+    assert!(
+        stale.exists(),
+        "another transfer's scratch is left alone rather than deleted on its behalf"
+    );
+}
+
+#[tokio::test]
+async fn two_transfers_for_one_artifact_publish_it_once() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/mod.jar"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(BODY))
+        .mount(&server)
+        .await;
+
+    let dir = TempDir::new().expect("temp dir");
+    let destination = dir.path().join("store").join("artifact.jar");
+    let manager = Arc::new(manager(RetryPolicy::none()));
+    let hash = sha1_of(BODY);
+
+    let first = {
+        let manager = Arc::clone(&manager);
+        let request = request(&server, "/mod.jar", &destination).verifying(hash.clone());
+        tokio::spawn(async move {
+            manager
+                .download(
+                    &request,
+                    &OperationReporter::silent("test"),
+                    &CancellationToken::new(),
+                )
+                .await
+        })
+    };
+    let second = {
+        let manager = Arc::clone(&manager);
+        let request = request(&server, "/mod.jar", &destination).verifying(hash);
+        tokio::spawn(async move {
+            manager
+                .download(
+                    &request,
+                    &OperationReporter::silent("test"),
+                    &CancellationToken::new(),
+                )
+                .await
+        })
+    };
+
+    let first = first.await.expect("join").expect("first transfer");
+    let second = second.await.expect("join").expect("second transfer");
+
+    assert_eq!(std::fs::read(&destination).unwrap(), BODY);
+    assert!(
+        no_partial_siblings(&destination),
+        "neither transfer leaves its scratch behind"
+    );
+    assert_eq!(
+        [first.source, second.source]
+            .iter()
+            .filter(|source| **source == ArtifactSource::AlreadyCached)
+            .count(),
+        1,
+        "the second transfer finds what the first published instead of fetching it again"
+    );
+}
+
+#[tokio::test]
+async fn a_filesystem_failure_names_the_step_and_the_operating_system_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/mod.jar"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(BODY))
+        .mount(&server)
+        .await;
+
+    let dir = TempDir::new().expect("temp dir");
+    // A directory where the finished artifact has to go, so the transfer gets
+    // all the way to publication and fails there. What matters is that the
+    // report says which step gave way and what the operating system said,
+    // rather than "io failure at <path>" for every one of them.
+    let destination = dir.path().join("store").join("artifact.jar");
+    std::fs::create_dir_all(&destination).expect("blocking directory");
+
+    let error = manager(RetryPolicy::none())
+        .download(
+            &request(&server, "/mod.jar", &destination).verifying(sha1_of(BODY)),
+            &OperationReporter::silent("test"),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("the verified artifact cannot be published");
+
+    let reported = error.to_string();
+    assert!(
+        reported.contains("publish the artifact"),
+        "the step that failed is missing from `{reported}`"
+    );
+    assert!(
+        reported.contains(&destination.display().to_string()),
+        "the path is missing from `{reported}`"
+    );
+    let underlying = std::error::Error::source(&error)
+        .expect("the operating system error stays available as a source")
+        .to_string();
+    assert!(
+        reported.contains(&underlying),
+        "`{reported}` does not repeat what the operating system reported, so a single log \
+         line cannot be acted on"
+    );
+    assert!(
+        no_partial_siblings(&destination),
+        "a failed transfer takes its scratch with it"
     );
 }
