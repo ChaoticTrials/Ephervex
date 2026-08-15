@@ -1442,6 +1442,8 @@ fn apply_event(
         Event::CloseModal => {
             ui.set_modal(SharedString::default());
             ui.set_modal_error(SharedString::default());
+            // The operation that disabled the modal's actions has answered.
+            ui.set_mod_action_pending(false);
             ui.set_mod_action_pending(false);
         }
         Event::CreationFinished { request_id } => {
