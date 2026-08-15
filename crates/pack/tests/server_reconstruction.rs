@@ -255,11 +255,21 @@ async fn retained_desired_state_reconstructs_a_server_without_the_source_archive
             std::fs::read(game.join("config/precedence.txt")).expect("precedence"),
             b"server"
         );
+        // The server's own copy describes the server, not the client it was
+        // copied from. An undeclared server side this creation did not confirm
+        // is recorded as answered "no", so the file the server never received
+        // cannot later look like one it has.
+        let mut expected = recipe.clone();
+        for file in &mut expected.files {
+            if file.logical_path == PathBuf::from("mods/unknown.jar") {
+                file.selected = Some(false);
+            }
+        }
         assert_eq!(
             SourceStore::new(&server_source)
                 .read_recipe()
                 .expect("server recipe"),
-            recipe
+            expected
         );
         assert!(!server_source.join("modrinth/client-overrides").exists());
         assert!(!game.join("eula.txt").exists());

@@ -48,7 +48,10 @@ use tracing::{debug, info, instrument, warn};
 use crate::archive::{ExtractionLimits, ExtractionReport, PackArchive};
 use crate::error::{PackError, PackResult};
 use crate::path::{contained_join, is_reserved, safe_relative_path};
-use crate::recipe::{OptionalSelection, OverrideLayer, PackFileRecipe, PackRecipe, PackSide};
+use crate::recipe::{
+    OptionalSelection, OverrideLayer, PackFileRecipe, PackRecipe, PackSide,
+    ServerReconstructionPlan,
+};
 use crate::store::SourceStore;
 
 /// What materializing one side of a pack produced.
@@ -190,7 +193,7 @@ pub async fn materialize_server_recipe(
     remove_retained_eula(game_dir)?;
     let server_store = SourceStore::new(server_source_dir);
     copy_server_source(&client_store, &server_store, recipe, &plan.layers)?;
-    let recipe_path = server_store.write_recipe(recipe)?;
+    let recipe_path = server_store.write_recipe(&server_desired_state(recipe, &plan))?;
 
     Ok(MaterializedServerRecipe {
         files,
@@ -202,6 +205,31 @@ pub async fn materialize_server_recipe(
             .map(|file| file.logical_path.clone())
             .collect(),
     })
+}
+
+/// The recipe a reconstructed server keeps, describing the server rather than
+/// the client it was copied from.
+///
+/// The two differ wherever a side needed a decision. A file the client took
+/// because it is `optional` there may be `unknown` on the server, and an
+/// undeclared server side is only installed when this reconstruction confirmed
+/// it — so carrying the client's answer across would leave the server's own
+/// record claiming a jar that was never written. Recording what this
+/// reconstruction actually installed is what lets a later managed-mod operation
+/// read the file and know what the server has.
+fn server_desired_state(recipe: &PackRecipe, plan: &ServerReconstructionPlan<'_>) -> PackRecipe {
+    let installed: BTreeSet<&Path> = plan
+        .files
+        .iter()
+        .map(|file| file.logical_path.as_path())
+        .collect();
+    let mut retained = recipe.clone();
+    for file in &mut retained.files {
+        if file.server.needs_decision() {
+            file.selected = Some(installed.contains(file.logical_path.as_path()));
+        }
+    }
+    retained
 }
 
 /// EULA consent is launcher-global and explicit. A retained pack file is not a

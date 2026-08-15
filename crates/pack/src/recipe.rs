@@ -821,10 +821,21 @@ impl PackRecipe {
     /// that, so this is a pure function of the recipe and never reads `mods/`.
     #[must_use]
     pub fn recorded_mods(&self) -> Vec<RecordedMod> {
+        self.recorded_mods_for(PackSide::Client)
+    }
+
+    /// The same list for either side of the game.
+    ///
+    /// A server keeps its own recipe, and a decision recorded there is about
+    /// the server: an entry the client takes and the server does not is not one
+    /// of the server's mods, and a managed-mod operation on that server must
+    /// not treat it as one.
+    #[must_use]
+    pub fn recorded_mods_for(&self, side: PackSide) -> Vec<RecordedMod> {
         let selection = OptionalSelection::none();
         self.files
             .iter()
-            .filter(|file| file.is_installed_on(PackSide::Client, &selection))
+            .filter(|file| file.is_installed_on(side, &selection))
             .filter_map(PackFileRecipe::recorded_mod)
             .collect()
     }
