@@ -1367,3 +1367,1017 @@ const fn side_requirement(support: SideSupport) -> SideRequirement {
         SideSupport::Unknown => SideRequirement::Unknown,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use std::io::Write as _;
+
+    use ephervex_model::{ModOrigin, ServerInstallation, ServerLaunch, ServerRelativePath};
+    use ephervex_pack::SourceStore;
+    use ephervex_storage::{NewServer, Paths};
+    use serde_json::{Value, json};
+    use sha1::{Digest as _, Sha1};
+    use sha2::Sha512;
+    use tempfile::TempDir;
+    use wiremock::matchers::{method, path as route, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::*;
+
+    const MINECRAFT: &str = "1.20.1";
+    /// A release a linked server may have been moved to independently.
+    const OTHER_MINECRAFT: &str = "1.20.2";
+    const LOADER: &str = "neoforge";
+    const LOADER_BUILD: &str = "47.1.106";
+
+    // -- the catalog every test runs against -------------------------------
+
+    /// The bytes standing in for one release's jar.
+    fn jar(version_id: &str) -> Vec<u8> {
+        format!("a fixture jar standing in for {version_id}").into_bytes()
+    }
+
+    fn sha1_of(bytes: &[u8]) -> String {
+        let mut hasher = Sha1::new();
+        hasher.update(bytes);
+        hex::encode(hasher.finalize())
+    }
+
+    fn sha512_of(bytes: &[u8]) -> String {
+        let mut hasher = Sha512::new();
+        hasher.update(bytes);
+        hex::encode(hasher.finalize())
+    }
+
+    fn project_json(id: &str, title: &str, client: &str, server: &str) -> Value {
+        json!({
+            "id": id,
+            "slug": id.to_ascii_lowercase(),
+            "title": title,
+            "description": "a fixture project",
+            "project_type": "mod",
+            "client_side": client,
+            "server_side": server,
+            "icon_url": null,
+        })
+    }
+
+    /// One release, published `minutes` after the fixture epoch so that
+    /// "newest" is an explicit fact rather than an accident of ordering.
+    fn version_json(
+        base: &str,
+        id: &str,
+        project: &str,
+        game_versions: &[&str],
+        requires: &[&str],
+        minutes: u32,
+    ) -> Value {
+        let body = jar(id);
+        json!({
+            "id": id,
+            "project_id": project,
+            "name": format!("{project} {id}"),
+            "version_number": id,
+            "version_type": "release",
+            "game_versions": game_versions,
+            "loaders": [LOADER],
+            "date_published": format!("2026-01-01T00:{minutes:02}:00Z"),
+            "files": [{
+                "hashes": {"sha1": sha1_of(&body), "sha512": sha512_of(&body)},
+                "url": format!("{base}/files/{id}.jar"),
+                "filename": format!("{}-{id}.jar", project.to_ascii_lowercase()),
+                "primary": true,
+                "size": body.len(),
+            }],
+            "dependencies": requires
+                .iter()
+                .map(|id| json!({"project_id": id, "dependency_type": "required"}))
+                .collect::<Vec<_>>(),
+        })
+    }
+
+    /// Every project and release the tests below draw on.
+    ///
+    /// `ROOTV3` exists only on the other Minecraft release and is the newest of
+    /// them all, which is what makes "the server picked its own newest" a
+    /// visible mistake rather than an indistinguishable coincidence.
+    fn fixtures(base: &str) -> (Vec<Value>, Vec<Value>) {
+        let projects = vec![
+            project_json("ROOTPROJ", "Root Mod", "required", "required"),
+            project_json("LIBPROJ", "Server Library", "required", "required"),
+            project_json("CLIENTLIB", "Client Library", "required", "unsupported"),
+            project_json("CLIENTMOD", "Client Mod", "required", "unsupported"),
+            project_json("OPTPROJ", "Optional Server Mod", "required", "optional"),
+            project_json("UNKPROJ", "Undeclared Mod", "required", "unknown"),
+            project_json("SECONDPROJ", "Second Root", "required", "required"),
+        ];
+        let versions = vec![
+            version_json(base, "ROOTV1", "ROOTPROJ", &[MINECRAFT], &["CLIENTLIB"], 0),
+            version_json(
+                base,
+                "ROOTV2",
+                "ROOTPROJ",
+                &[MINECRAFT],
+                &["CLIENTLIB", "LIBPROJ"],
+                10,
+            ),
+            version_json(base, "ROOTV3", "ROOTPROJ", &[OTHER_MINECRAFT], &[], 20),
+            version_json(base, "LIBV1", "LIBPROJ", &[MINECRAFT], &[], 0),
+            version_json(base, "CLIENTLIBV1", "CLIENTLIB", &[MINECRAFT], &[], 0),
+            version_json(base, "CLIENTMODV1", "CLIENTMOD", &[MINECRAFT], &[], 0),
+            version_json(base, "OPTV1", "OPTPROJ", &[MINECRAFT], &[], 0),
+            version_json(base, "UNKV1", "UNKPROJ", &[MINECRAFT], &[], 0),
+            version_json(
+                base,
+                "SECONDV1",
+                "SECONDPROJ",
+                &[MINECRAFT],
+                &["LIBPROJ"],
+                0,
+            ),
+        ];
+        (projects, versions)
+    }
+
+    /// A loopback catalog serving the fixtures and their jars.
+    async fn catalog() -> MockServer {
+        let server = MockServer::start().await;
+        let base = server.uri();
+        let (projects, versions) = fixtures(&base);
+
+        for project in &projects {
+            let id = project["id"].as_str().unwrap().to_owned();
+            let owned: Vec<Value> = versions
+                .iter()
+                .filter(|version| version["project_id"] == id.as_str())
+                .cloned()
+                .collect();
+            Mock::given(method("GET"))
+                .and(route(format!("/project/{id}")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(project.clone()))
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(route(format!("/project/{id}/version")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(owned))
+                .mount(&server)
+                .await;
+        }
+
+        for version in &versions {
+            let id = version["id"].as_str().unwrap().to_owned();
+            // Answered per exact id: a batch that returned everything would let
+            // a pinned lookup take whichever release happened to come first.
+            Mock::given(method("GET"))
+                .and(route("/versions"))
+                .and(query_param("ids", format!("[\"{id}\"]")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(vec![version.clone()]))
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(route(format!("/files/{id}.jar")))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(jar(&id)))
+                .mount(&server)
+                .await;
+        }
+
+        Mock::given(method("GET"))
+            .and(route("/projects"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(projects))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    // -- an application with a client and its linked servers ---------------
+
+    struct World {
+        _base: TempDir,
+        _catalog: MockServer,
+        app: App,
+        client: InstanceId,
+    }
+
+    impl World {
+        /// A linked server, installed and stopped, holding a copy of the
+        /// client's desired state exactly as reconstruction leaves it.
+        fn link_server(&self, name: &str, minecraft: &str) -> ServerId {
+            let mut record = self
+                .app
+                .registry_for_services()
+                .prepare_server(NewServer::linked(name, self.client))
+                .expect("prepare");
+            record.minecraft_version = minecraft.to_owned();
+            record.installation = ServerInstallation::Installed {
+                launch: ServerLaunch::Jar {
+                    path: ServerRelativePath::new("server.jar").expect("launch path"),
+                },
+            };
+
+            let staging = record.root.with_extension("staging");
+            let game = ephervex_storage::metadata::server_game_dir(&staging);
+            std::fs::create_dir_all(game.join("mods")).expect("mods dir");
+            let mut recipe = self
+                .app
+                .pack_recipe(self.client)
+                .expect("recipe")
+                .expect("an imported client has one");
+            recipe.minecraft_version = minecraft.to_owned();
+            SourceStore::new(ephervex_storage::metadata::source_dir(&staging))
+                .write_recipe(&recipe)
+                .expect("server recipe");
+            self.app
+                .registry_for_services()
+                .publish_staged_server(&record, &staging)
+                .expect("publish");
+            record.id
+        }
+
+        fn server_root(&self, server: ServerId) -> PathBuf {
+            self.app.server(server).expect("server").root
+        }
+
+        fn server_recipe(&self, server: ServerId) -> PackRecipe {
+            SourceStore::new(ephervex_storage::metadata::source_dir(
+                &self.server_root(server),
+            ))
+            .read_recipe()
+            .expect("server recipe")
+        }
+
+        fn server_jars(&self, server: ServerId) -> Vec<String> {
+            jars_in(&ephervex_storage::metadata::server_game_dir(
+                &self.server_root(server),
+            ))
+        }
+
+        fn client_jars(&self) -> Vec<String> {
+            let root = self.app.client(self.client).expect("client").root;
+            jars_in(&ephervex_storage::metadata::client_game_dir(&root))
+        }
+
+        /// Marks a server as running by leaving the evidence a supervisor would.
+        fn mark_running(&self, server: ServerId) {
+            let root = self.server_root(server);
+            let evidence = ephervex_server::RuntimeEvidence::for_current_supervisor()
+                .expect("runtime evidence");
+            let path = ephervex_server::runtime_path(&root);
+            std::fs::create_dir_all(path.parent().expect("metadata dir")).expect("metadata dir");
+            std::fs::write(&path, serde_json::to_vec(&evidence).expect("evidence")).expect("write");
+        }
+    }
+
+    fn jars_in(game_dir: &Path) -> Vec<String> {
+        let Ok(entries) = std::fs::read_dir(game_dir.join("mods")) else {
+            return Vec::new();
+        };
+        let mut names: Vec<String> = entries
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// A pack with no files, so importing it contacts nothing.
+    fn mrpack(path: &Path) {
+        let file = std::fs::File::create(path).expect("create archive");
+        let mut writer = zip::ZipWriter::new(file);
+        let options: zip::write::FileOptions<'_, ()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        writer
+            .start_file("modrinth.index.json", options)
+            .expect("start index");
+        writer
+            .write_all(
+                format!(
+                    r#"{{"formatVersion":1,"game":"minecraft","versionId":"1.0.0",
+                        "name":"Reproduction Pack","files":[],
+                        "dependencies":{{"minecraft":"{MINECRAFT}","{LOADER}":"{LOADER_BUILD}"}}}}"#
+                )
+                .as_bytes(),
+            )
+            .expect("write index");
+        writer.finish().expect("finish archive");
+    }
+
+    async fn world() -> World {
+        let catalog = catalog().await;
+        let base = tempfile::tempdir().expect("temp dir");
+
+        let archive_dir = tempfile::tempdir().expect("temp dir");
+        let archive = archive_dir.path().join("pack.mrpack");
+        mrpack(&archive);
+
+        let mut app = App::open_at(Paths::rooted_at(base.path())).expect("app opens");
+        app.use_loopback_catalog(&catalog.uri())
+            .expect("loopback catalog");
+        let imported = app
+            .import_pack(
+                &crate::import::ImportRequest::new(&archive),
+                &OperationReporter::silent("test-import"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("import");
+
+        World {
+            client: imported.record.id,
+            app,
+            _base: base,
+            _catalog: catalog,
+        }
+    }
+
+    fn silent() -> OperationReporter {
+        OperationReporter::silent("linked-mod-test")
+    }
+
+    /// Where the fixture releases land in `mods/`.
+    const ROOT_V1: &str = "mods/rootproj-ROOTV1.jar";
+    const ROOT_V2: &str = "mods/rootproj-ROOTV2.jar";
+
+    fn install(project: &str) -> LinkedModRequest {
+        LinkedModRequest::Install {
+            project: project.to_owned(),
+        }
+    }
+
+    fn change(target: &str, version: &str) -> LinkedModRequest {
+        LinkedModRequest::ChangeVersion {
+            target: PathBuf::from(target),
+            version: version.to_owned(),
+        }
+    }
+
+    fn update(target: &str) -> LinkedModRequest {
+        LinkedModRequest::Update {
+            target: PathBuf::from(target),
+        }
+    }
+
+    fn remove(target: &str) -> LinkedModRequest {
+        LinkedModRequest::Remove {
+            target: PathBuf::from(target),
+        }
+    }
+
+    fn target(plan: &LinkedModPlan, server: ServerId) -> &LinkedTargetPlan {
+        plan.targets
+            .iter()
+            .find(|target| target.server == server)
+            .expect("a target for this server")
+    }
+
+    fn result_for(outcome: &LinkedModOutcome, server: ServerId) -> &LinkedTargetResult {
+        &outcome
+            .targets
+            .iter()
+            .find(|target| target.server == server)
+            .expect("a result for this server")
+            .result
+    }
+
+    async fn plan(world: &World, request: &LinkedModRequest) -> LinkedModPlan {
+        world
+            .app
+            .plan_linked_mod_operation(world.client, request, &silent(), &CancellationToken::new())
+            .await
+            .expect("plan")
+    }
+
+    async fn apply(
+        world: &World,
+        request: &LinkedModRequest,
+        servers: &[ServerId],
+    ) -> LinkedModOutcome {
+        world
+            .app
+            .apply_linked_mod_operation(
+                world.client,
+                request,
+                servers,
+                &silent(),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("apply")
+    }
+
+    // -- side semantics ----------------------------------------------------
+
+    #[tokio::test]
+    async fn a_client_only_mod_is_never_offered_to_a_linked_server() {
+        let world = world().await;
+        let server = world.link_server("Reproduction Server", MINECRAFT);
+
+        let plan = plan(&world, &install("CLIENTMOD")).await;
+
+        assert_eq!(plan.root.server_side, SideRequirement::Unsupported);
+        assert_eq!(
+            target(&plan, server).state,
+            LinkedTargetState::Blocked(LinkedTargetBlock::ServerUnsupported)
+        );
+        assert!(plan.actionable_targets().next().is_none());
+        assert!(
+            !plan.has_relevant_targets(),
+            "a decision nobody can act on is not a decision to put in front of a user"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_server_required_mod_is_offered_and_starts_selected() {
+        let world = world().await;
+        let server = world.link_server("Reproduction Server", MINECRAFT);
+
+        let plan = plan(&world, &install("ROOTPROJ")).await;
+
+        let target = target(&plan, server);
+        assert_eq!(target.state, LinkedTargetState::WillInstall);
+        assert!(target.selected_by_default);
+        assert_eq!(plan.default_selection(), vec![server]);
+    }
+
+    #[tokio::test]
+    async fn optional_and_undeclared_server_support_are_offered_without_being_assumed() {
+        let world = world().await;
+        let server = world.link_server("Reproduction Server", MINECRAFT);
+
+        for (project, declared) in [
+            ("OPTPROJ", SideRequirement::Optional),
+            ("UNKPROJ", SideRequirement::Unknown),
+        ] {
+            let plan = plan(&world, &install(project)).await;
+            assert_eq!(plan.root.server_side, declared, "{project}");
+            let target = target(&plan, server);
+            assert_eq!(
+                target.state,
+                LinkedTargetState::WillInstall,
+                "{project} can be installed there"
+            );
+            assert!(
+                !target.selected_by_default,
+                "{project}: neither an author's `optional` nor their silence is a reason to \
+                 write to a server nobody asked about"
+            );
+            assert!(plan.default_selection().is_empty(), "{project}");
+        }
+    }
+
+    // -- the exact root release --------------------------------------------
+
+    #[tokio::test]
+    async fn a_selected_server_receives_the_exact_release_the_client_installed() {
+        let world = world().await;
+        let server = world.link_server("Reproduction Server", MINECRAFT);
+
+        let outcome = apply(&world, &install("ROOTPROJ"), &[server]).await;
+
+        assert!(result_for(&outcome, server).succeeded());
+        let recipe = world.server_recipe(server);
+        let root = recipe
+            .managed_project(ModProvider::Modrinth, "ROOTPROJ")
+            .expect("the server records the synced root");
+        assert_eq!(
+            root.identity
+                .as_ref()
+                .and_then(|it| it.version_id.as_deref()),
+            Some("ROOTV2"),
+            "the release the client resolved is the release the server got"
+        );
+        assert_eq!(
+            root.origin,
+            ModOrigin::UserSelected,
+            "a mod synced after reconstruction is an explicit choice, not pack history"
+        );
+        assert_eq!(
+            world.server_jars(server),
+            vec![
+                "libproj-LIBV1.jar".to_owned(),
+                "rootproj-ROOTV2.jar".to_owned()
+            ],
+            "the server takes the root and its server-side dependency and nothing else"
+        );
+        assert!(
+            world
+                .client_jars()
+                .contains(&"clientlib-CLIENTLIBV1.jar".to_owned()),
+            "the client keeps the dependency the server cannot run"
+        );
+        assert!(
+            recipe
+                .managed_project(ModProvider::Modrinth, "CLIENTLIB")
+                .is_none(),
+            "a dependency declared unsupported on servers is not recorded on one"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_server_on_another_release_is_refused_without_being_offered_a_substitute() {
+        let world = world().await;
+        let compatible = world.link_server("Reproduction Server", MINECRAFT);
+        let stale = world.link_server("Old Server", OTHER_MINECRAFT);
+
+        let plan = plan(&world, &install("ROOTPROJ")).await;
+
+        assert_eq!(
+            target(&plan, compatible).state,
+            LinkedTargetState::WillInstall
+        );
+        assert!(matches!(
+            target(&plan, stale).state,
+            LinkedTargetState::Blocked(LinkedTargetBlock::IncompatibleMinecraft { .. })
+        ));
+        assert_eq!(
+            plan.default_selection(),
+            vec![compatible],
+            "one server that cannot take the release does not stop the one that can"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_clients_update_candidate_is_the_only_release_a_server_is_offered() {
+        let world = world().await;
+        // Newer than everything and only on the other Minecraft release, so a
+        // server choosing for itself would take it.
+        let stale = world.link_server("Old Server", OTHER_MINECRAFT);
+        apply(&world, &install("ROOTPROJ"), &[]).await;
+        apply(&world, &change(ROOT_V2, "ROOTV1"), &[]).await;
+
+        let plan = plan(&world, &update(ROOT_V1)).await;
+
+        assert_eq!(
+            plan.root.version_id.as_deref(),
+            Some("ROOTV2"),
+            "the update candidate is the newest release that fits the client"
+        );
+        assert!(
+            matches!(
+                target(&plan, stale).state,
+                LinkedTargetState::Blocked(LinkedTargetBlock::IncompatibleMinecraft { .. })
+            ),
+            "the server is refused rather than given ROOTV3, which is newer and does fit it"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_exact_version_change_moves_the_server_to_the_same_release() {
+        let world = world().await;
+        let server = world.link_server("Reproduction Server", MINECRAFT);
+        apply(&world, &install("ROOTPROJ"), &[server]).await;
+
+        let plan = plan(&world, &change(ROOT_V2, "ROOTV1")).await;
+        assert_eq!(
+            target(&plan, server).state,
+            LinkedTargetState::WillChangeVersion {
+                from: "ROOTV2".to_owned(),
+                to: "ROOTV1".to_owned(),
+            }
+        );
+        assert!(
+            target(&plan, server).selected_by_default,
+            "a server that already manages this root stays in step by default"
+        );
+
+        let outcome = apply(&world, &change(ROOT_V2, "ROOTV1"), &[server]).await;
+
+        assert!(result_for(&outcome, server).succeeded());
+        assert_eq!(
+            world.server_jars(server),
+            vec!["rootproj-ROOTV1.jar".to_owned()],
+            "the downgrade took the dependency the older release no longer needs"
+        );
+        assert!(
+            world
+                .server_recipe(server)
+                .managed_project(ModProvider::Modrinth, "LIBPROJ")
+                .is_none()
+        );
+    }
+
+    // -- removal -----------------------------------------------------------
+
+    #[tokio::test]
+    async fn removing_a_synced_root_collects_its_orphan_and_leaves_everything_else() {
+        let world = world().await;
+        let server = world.link_server("Reproduction Server", MINECRAFT);
+        apply(&world, &install("ROOTPROJ"), &[server]).await;
+
+        let mods =
+            ephervex_storage::metadata::server_game_dir(&world.server_root(server)).join("mods");
+        std::fs::write(mods.join("local-debug-build.jar"), b"jar").expect("write jar");
+
+        let plan = plan(&world, &remove(ROOT_V2)).await;
+        let target = target(&plan, server);
+        assert_eq!(target.state, LinkedTargetState::WillRemove);
+        assert!(target.selected_by_default);
+        let collected: Vec<&str> = target
+            .collected_dependencies()
+            .map(|file| file.project_id.as_deref().unwrap_or_default())
+            .collect();
+        assert_eq!(collected, vec!["LIBPROJ"]);
+
+        let outcome = apply(&world, &remove(ROOT_V2), &[server]).await;
+
+        assert!(result_for(&outcome, server).succeeded());
+        assert_eq!(
+            world.server_jars(server),
+            vec!["local-debug-build.jar".to_owned()],
+            "a jar Ephervex never recorded is not something a provider operation can reach"
+        );
+        assert!(world.server_recipe(server).managed_mods().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_server_that_never_received_the_root_gains_no_removal_target() {
+        let world = world().await;
+        let synced = world.link_server("Reproduction Server", MINECRAFT);
+        // Linked before the install, so its own desired state never records the
+        // root. A server built afterwards would have reconstructed it.
+        let untouched = world.link_server("Second Server", MINECRAFT);
+        apply(&world, &install("ROOTPROJ"), &[synced]).await;
+
+        let plan = plan(&world, &remove(ROOT_V2)).await;
+
+        assert_eq!(target(&plan, synced).state, LinkedTargetState::WillRemove);
+        assert_eq!(
+            target(&plan, untouched).state,
+            LinkedTargetState::NotPresent,
+            "durable ownership is what proves the relationship, not a shared file name"
+        );
+        assert_eq!(plan.default_selection(), vec![synced]);
+    }
+
+    #[tokio::test]
+    async fn a_server_the_pack_owns_this_mod_on_is_refused() {
+        let world = world().await;
+        let server = world.link_server("Reproduction Server", MINECRAFT);
+
+        // The server's pack declares the project, as an import would have.
+        let store = SourceStore::new(ephervex_storage::metadata::source_dir(
+            &world.server_root(server),
+        ));
+        let mut recipe = store.read_recipe().expect("recipe");
+        recipe.files.push(PackFileRecipe {
+            logical_path: PathBuf::from("mods/from-the-pack.jar"),
+            hashes: Vec::new(),
+            downloads: Vec::new(),
+            size: None,
+            client: SideRequirement::Required,
+            server: SideRequirement::Required,
+            selected: None,
+            origin: ModOrigin::PackDeclared,
+            identity: Some(ephervex_pack::ProviderFileIdentity {
+                provider: Some(ModProvider::Modrinth),
+                project_id: Some("ROOTPROJ".to_owned()),
+                version_id: Some("ROOTV1".to_owned()),
+                file_id: None,
+            }),
+        });
+        store.write_recipe(&recipe).expect("write recipe");
+
+        let plan = plan(&world, &install("ROOTPROJ")).await;
+
+        assert_eq!(
+            target(&plan, server).state,
+            LinkedTargetState::Blocked(LinkedTargetBlock::PackOwned),
+            "pack-owned content is reconstructed, never independently mutated"
+        );
+    }
+
+    // -- runtime and stale targets -----------------------------------------
+
+    #[tokio::test]
+    async fn a_running_server_is_refused_rather_than_written_to() {
+        let world = world().await;
+        let server = world.link_server("Running Server", MINECRAFT);
+        world.mark_running(server);
+
+        let plan = plan(&world, &install("ROOTPROJ")).await;
+        assert_eq!(
+            target(&plan, server).state,
+            LinkedTargetState::Blocked(LinkedTargetBlock::ServerRunning)
+        );
+
+        // Selected anyway, as a stale confirmation would.
+        let outcome = apply(&world, &install("ROOTPROJ"), &[server]).await;
+
+        assert!(matches!(
+            result_for(&outcome, server),
+            LinkedTargetResult::Skipped(LinkedTargetState::Blocked(
+                LinkedTargetBlock::ServerRunning
+            ))
+        ));
+        assert!(
+            world.server_jars(server).is_empty(),
+            "nothing is written under a live process, and nothing stops it either"
+        );
+        assert!(
+            !world.client_jars().is_empty(),
+            "the client operation is independent of the server that refused"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_target_unlinked_between_planning_and_applying_fails_safely() {
+        let world = world().await;
+        let server = world.link_server("Reproduction Server", MINECRAFT);
+
+        let plan = plan(&world, &install("ROOTPROJ")).await;
+        assert_eq!(plan.default_selection(), vec![server]);
+
+        let mut record = world.app.server(server).expect("server");
+        record.linked_client_id = None;
+        world
+            .app
+            .registry_for_services()
+            .update_server_committed(&mut record)
+            .expect("unlink");
+
+        let outcome = apply(&world, &install("ROOTPROJ"), &[server]).await;
+
+        assert!(matches!(
+            result_for(&outcome, server),
+            LinkedTargetResult::Skipped(LinkedTargetState::Blocked(
+                LinkedTargetBlock::NoLongerLinked
+            ))
+        ));
+        assert!(world.server_jars(server).is_empty());
+    }
+
+    // -- several targets ---------------------------------------------------
+
+    #[tokio::test]
+    async fn each_target_keeps_its_own_result_and_a_partial_outcome_says_so() {
+        let world = world().await;
+        let applied = world.link_server("Reproduction Server", MINECRAFT);
+        let running = world.link_server("Running Server", MINECRAFT);
+        let unselected = world.link_server("Second Server", MINECRAFT);
+        world.mark_running(running);
+
+        let outcome = apply(&world, &install("ROOTPROJ"), &[applied, running]).await;
+
+        assert!(result_for(&outcome, applied).succeeded());
+        assert!(!result_for(&outcome, running).succeeded());
+        assert!(
+            outcome.is_partial(),
+            "one target failing does not make the successful ones fail"
+        );
+        assert_eq!(outcome.succeeded().count(), 1);
+        assert_eq!(
+            outcome.targets.len(),
+            2,
+            "results are keyed by the servers that were selected, by their own ids"
+        );
+        assert!(
+            world.server_jars(unselected).is_empty(),
+            "a linked server nobody selected is not touched"
+        );
+        assert!(!world.server_jars(applied).is_empty());
+    }
+
+    #[tokio::test]
+    async fn one_verified_artifact_serves_the_client_and_every_server() {
+        let world = world().await;
+        let first = world.link_server("Reproduction Server", MINECRAFT);
+        let second = world.link_server("Second Server", MINECRAFT);
+
+        let outcome = apply(&world, &install("ROOTPROJ"), &[first, second]).await;
+
+        for server in [first, second] {
+            let LinkedTargetResult::Applied(report) = result_for(&outcome, server) else {
+                panic!("both servers take part");
+            };
+            assert_eq!(
+                report.reused_from_cache, 2,
+                "the root and its dependency come out of the shared verified cache the client                  filled, never out of the client's own mods directory"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_submitted_target_is_acted_on_once_however_often_it_is_named() {
+        let world = world().await;
+        let server = world.link_server("Reproduction Server", MINECRAFT);
+
+        let outcome = apply(&world, &install("ROOTPROJ"), &[server, server, server]).await;
+
+        assert_eq!(
+            outcome.targets.len(),
+            1,
+            "one directory cannot be mutated three times by one operation"
+        );
+        assert!(result_for(&outcome, server).succeeded());
+    }
+
+    // -- persistence -------------------------------------------------------
+
+    #[tokio::test]
+    async fn synced_ownership_and_pack_history_survive_a_reopen_and_stay_distinct() {
+        let world = world().await;
+        let server = world.link_server("Reproduction Server", MINECRAFT);
+
+        let store = SourceStore::new(ephervex_storage::metadata::source_dir(
+            &world.server_root(server),
+        ));
+        let mut recipe = store.read_recipe().expect("recipe");
+        recipe.files.push(PackFileRecipe {
+            logical_path: PathBuf::from("mods/from-the-pack.jar"),
+            hashes: Vec::new(),
+            downloads: Vec::new(),
+            size: None,
+            client: SideRequirement::Required,
+            server: SideRequirement::Required,
+            selected: None,
+            origin: ModOrigin::PackDeclared,
+            identity: Some(ephervex_pack::ProviderFileIdentity {
+                provider: Some(ModProvider::Modrinth),
+                project_id: Some("OPTPROJ".to_owned()),
+                version_id: Some("OPTV1".to_owned()),
+                file_id: None,
+            }),
+        });
+        store.write_recipe(&recipe).expect("write recipe");
+
+        apply(&world, &install("ROOTPROJ"), &[server]).await;
+
+        // Read back through a fresh application, so nothing below is reading
+        // state this test happened to leave in memory.
+        let reopened = App::open_at(world.app.paths().clone()).expect("app reopens");
+        let root = reopened.server(server).expect("server").root;
+        let recipe = SourceStore::new(ephervex_storage::metadata::source_dir(&root))
+            .read_recipe()
+            .expect("recipe");
+
+        let synced = recipe
+            .managed_project(ModProvider::Modrinth, "ROOTPROJ")
+            .expect("the synced root survives");
+        assert_eq!(synced.origin, ModOrigin::UserSelected);
+        assert_eq!(
+            synced
+                .identity
+                .as_ref()
+                .and_then(|it| it.version_id.as_deref()),
+            Some("ROOTV2")
+        );
+        assert!(
+            !synced.hashes.is_empty(),
+            "the hashes that verify it are kept"
+        );
+        assert_eq!(synced.size, Some(jar("ROOTV2").len() as u64));
+
+        assert_eq!(
+            recipe
+                .managed_project(ModProvider::Modrinth, "LIBPROJ")
+                .expect("its dependency survives")
+                .origin,
+            ModOrigin::RequiredDependency,
+            "a dependency installed for a synced root keeps saying so"
+        );
+        assert_eq!(
+            recipe
+                .managed_project(ModProvider::Modrinth, "OPTPROJ")
+                .expect("the pack's own entry survives")
+                .origin,
+            ModOrigin::PackDeclared,
+            "a later sync does not rewrite what the pack declared"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dependency_another_synced_root_still_needs_is_kept() {
+        let world = world().await;
+        let server = world.link_server("Reproduction Server", MINECRAFT);
+        apply(&world, &install("ROOTPROJ"), &[server]).await;
+        apply(&world, &install("SECONDPROJ"), &[server]).await;
+
+        let shared = plan(&world, &remove(ROOT_V2)).await;
+        assert_eq!(
+            target(&shared, server).collected_dependencies().count(),
+            0,
+            "the library still has an owner on this server"
+        );
+
+        apply(&world, &remove(ROOT_V2), &[server]).await;
+
+        assert_eq!(
+            world.server_jars(server),
+            vec![
+                "libproj-LIBV1.jar".to_owned(),
+                "secondproj-SECONDV1.jar".to_owned()
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_server_already_at_the_release_is_repaired_only_when_its_jar_is_gone() {
+        let world = world().await;
+        let server = world.link_server("Reproduction Server", MINECRAFT);
+        apply(&world, &install("ROOTPROJ"), &[server]).await;
+
+        let current = plan(&world, &install("ROOTPROJ")).await;
+        let current = target(&current, server);
+        assert_eq!(current.state, LinkedTargetState::AlreadyCurrent);
+        assert!(
+            !current.selected_by_default,
+            "there is nothing to do, so there is nothing to preselect"
+        );
+
+        let jar = ephervex_storage::metadata::server_game_dir(&world.server_root(server))
+            .join("mods/rootproj-ROOTV2.jar");
+        std::fs::remove_file(&jar).expect("delete the jar, as bisecting a crash does");
+
+        let repair = plan(&world, &install("ROOTPROJ")).await;
+        assert_eq!(target(&repair, server).state, LinkedTargetState::WillRepair);
+
+        let outcome = apply(&world, &install("ROOTPROJ"), &[server]).await;
+
+        assert!(result_for(&outcome, server).succeeded());
+        assert!(jar.is_file(), "the recorded release is put back");
+        assert_eq!(
+            world
+                .server_recipe(server)
+                .managed_project(ModProvider::Modrinth, "ROOTPROJ")
+                .and_then(|entry| entry.identity.as_ref())
+                .and_then(|identity| identity.version_id.as_deref()),
+            Some("ROOTV2"),
+            "a repair changes nothing about what the server records"
+        );
+    }
+
+    // -- the policy, without a catalog -------------------------------------
+
+    #[test]
+    fn only_a_server_that_already_manages_the_root_or_declares_it_required_starts_selected() {
+        let change = LinkedTargetState::WillChangeVersion {
+            from: "A".to_owned(),
+            to: "B".to_owned(),
+        };
+        for state in [
+            &change,
+            &LinkedTargetState::WillRepair,
+            &LinkedTargetState::WillRemove,
+        ] {
+            for side in [
+                SideRequirement::Required,
+                SideRequirement::Optional,
+                SideRequirement::Unknown,
+            ] {
+                assert!(
+                    default_selection(state, side),
+                    "a server already managing the root stays in step: {state:?} {side:?}"
+                );
+            }
+        }
+
+        assert!(default_selection(
+            &LinkedTargetState::WillInstall,
+            SideRequirement::Required
+        ));
+        for side in [SideRequirement::Optional, SideRequirement::Unknown] {
+            assert!(
+                !default_selection(&LinkedTargetState::WillInstall, side),
+                "{side:?} is not a reason to write to a server nobody asked about"
+            );
+        }
+        for state in [
+            LinkedTargetState::AlreadyCurrent,
+            LinkedTargetState::NotPresent,
+            LinkedTargetState::Blocked(LinkedTargetBlock::ServerRunning),
+        ] {
+            assert!(!default_selection(&state, SideRequirement::Required));
+        }
+    }
+
+    #[test]
+    fn every_target_state_names_a_distinct_reason_and_a_distinct_message() {
+        let blocks = [
+            LinkedTargetBlock::ServerUnsupported,
+            LinkedTargetBlock::IncompatibleMinecraft {
+                supported: Vec::new(),
+            },
+            LinkedTargetBlock::IncompatibleLoader {
+                supported: Vec::new(),
+            },
+            LinkedTargetBlock::ExactReleaseUnavailable,
+            LinkedTargetBlock::ServerRunning,
+            LinkedTargetBlock::ServerNotInstalled,
+            LinkedTargetBlock::NoLongerLinked,
+            LinkedTargetBlock::ProviderUnavailable,
+            LinkedTargetBlock::StateUnavailable,
+            LinkedTargetBlock::PackOwned,
+            LinkedTargetBlock::ServerDependency,
+        ];
+        let ids: BTreeSet<&str> = blocks.iter().map(LinkedTargetBlock::message_id).collect();
+        assert_eq!(ids.len(), blocks.len(), "two refusals share a sentence");
+        let names: BTreeSet<&str> = blocks.iter().map(LinkedTargetBlock::as_str).collect();
+        assert_eq!(names.len(), blocks.len());
+        assert!(
+            blocks
+                .iter()
+                .all(|block| !LinkedTargetState::Blocked(block.clone()).is_actionable())
+        );
+    }
+}

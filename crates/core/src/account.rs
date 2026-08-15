@@ -213,10 +213,18 @@ impl App {
     /// advanced User-Agent override.
     #[must_use]
     pub fn http_config(&self) -> HttpConfig {
-        HttpConfig {
+        #[allow(unused_mut)]
+        let mut config = HttpConfig {
             user_agent: self.effective_user_agent(),
             ..HttpConfig::default()
+        };
+        // Only a test build has the field to read, so the strict transport is
+        // the only one a release binary can produce.
+        #[cfg(test)]
+        if self.loopback_http {
+            config.allow_plaintext_http = true;
         }
+        config
     }
 
     // -- status ------------------------------------------------------------

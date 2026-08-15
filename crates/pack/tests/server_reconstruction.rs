@@ -261,7 +261,7 @@ async fn retained_desired_state_reconstructs_a_server_without_the_source_archive
         // cannot later look like one it has.
         let mut expected = recipe.clone();
         for file in &mut expected.files {
-            if file.logical_path == PathBuf::from("mods/unknown.jar") {
+            if file.logical_path == Path::new("mods/unknown.jar") {
                 file.selected = Some(false);
             }
         }

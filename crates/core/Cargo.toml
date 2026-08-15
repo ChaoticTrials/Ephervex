@@ -41,6 +41,10 @@ tempfile.workspace = true
 # The import tests build `.mrpack` archives to import; nothing in this crate
 # reads an archive itself.
 zip.workspace = true
-# The artwork cache is driven against a loopback server, so no ordinary test
-# depends on a provider's CDN.
+# The artwork cache and the linked-mod flows are driven against a loopback
+# server, so no ordinary test depends on a provider's CDN.
 wiremock.workspace = true
+# Fixture jars are hashed so the download manager's verification runs for real.
+sha1.workspace = true
+sha2.workspace = true
+hex.workspace = true

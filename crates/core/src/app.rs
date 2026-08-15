@@ -224,6 +224,16 @@ pub struct App {
     /// operations that set it already take `&mut self` — see
     /// [`crate::account`].
     pub(crate) session: Option<ephervex_auth::Session>,
+    /// Whether this application may talk plaintext HTTP.
+    ///
+    /// The field exists only in a test build, so a release binary has no way to
+    /// reach the relaxed transport at all: the strict production default is not
+    /// a setting anything can change, it is the only behavior compiled in. Set
+    /// by [`Self::use_loopback_catalog`] so an integration test can drive the
+    /// whole stack — catalog, downloads, verification, publication — against a
+    /// local server instead of a production one.
+    #[cfg(test)]
+    pub(crate) loopback_http: bool,
 }
 
 impl App {
@@ -241,6 +251,8 @@ impl App {
             mods: OnceLock::new(),
             java: RwLock::new(None),
             session: None,
+            #[cfg(test)]
+            loopback_http: false,
         })
     }
 
@@ -260,7 +272,37 @@ impl App {
             mods: OnceLock::new(),
             java: RwLock::new(None),
             session: None,
+            #[cfg(test)]
+            loopback_http: false,
         })
+    }
+
+    /// Points the mod catalog and its downloads at a loopback server.
+    ///
+    /// Compiled only into a test build. See [`Self::loopback_http`].
+    #[cfg(test)]
+    pub(crate) fn use_loopback_catalog(&mut self, base: &str) -> CoreResult<()> {
+        use ephervex_download::{HttpConfig, RetryPolicy};
+
+        self.loopback_http = true;
+        let manager = DownloadManager::new(DownloaderConfig {
+            http: HttpConfig::for_loopback_tests(),
+            retry: RetryPolicy::none(),
+            ..DownloaderConfig::default()
+        })
+        .map_err(
+            |source| ephervex_mod_platform::ModPlatformError::ResponseInvalid {
+                provider: ephervex_model::ModProvider::Modrinth,
+                detail: source.to_string(),
+            },
+        )?;
+        let provider = ephervex_mod_platform::ModrinthProvider::with_base_url(
+            manager,
+            CacheLayout::new(self.paths().cache_dir()),
+            base,
+        )?;
+        let _ = self.mods.set(provider);
+        Ok(())
     }
 
     /// The effective configuration.
