@@ -782,6 +782,7 @@ fn register_client_actions(
 
 fn register_mod_actions(ui: &AppWindow, commands: &Sender<Command>) {
     register_mod_mutations(ui, commands);
+    register_mod_browser(ui, commands);
 
     let sender = commands.clone();
     let handle = ui.as_weak();
@@ -811,6 +812,51 @@ fn register_mod_actions(ui: &AppWindow, commands: &Sender<Command>) {
             Command::LoadModVersions {
                 instance,
                 path: PathBuf::from(path.as_str()),
+            },
+        );
+    });
+}
+
+/// Finding a mod in the catalog and reviewing what installing it would involve.
+///
+/// Both handlers do the same two things and nothing else: turn a display id back
+/// into a typed one, and send a command. Searching, deciding what fits this
+/// instance, and resolving a dependency graph all happen in `ephervex-core`;
+/// this side never asks a provider anything.
+fn register_mod_browser(ui: &AppWindow, commands: &Sender<Command>) {
+    let sender = commands.clone();
+    let handle = ui.as_weak();
+    ui.on_search_mods(move |instance, query| {
+        let Some(ui) = handle.upgrade() else { return };
+        let Some(instance) = backend::parse_instance_id(&instance) else {
+            return;
+        };
+        // What was submitted, which is not what the field says: the user may
+        // keep typing while the catalog answers, and those results are still
+        // the ones they asked for.
+        ui.set_mod_search_submitted(query.clone());
+        send(
+            &sender,
+            Command::SearchMods {
+                instance,
+                query: query.to_string(),
+            },
+        );
+    });
+
+    let sender = commands.clone();
+    ui.on_review_mod(move |instance, project| {
+        let Some(instance) = backend::parse_instance_id(&instance) else {
+            return;
+        };
+        // Reviewing is planning: the confirmation it opens is the same one the
+        // linked-server section lives in, so a review already answers "and what
+        // would this do to my servers".
+        send(
+            &sender,
+            Command::PlanMod {
+                instance,
+                project: project.to_string(),
             },
         );
     });
@@ -1397,7 +1443,7 @@ fn apply_event(
         }
         Event::ModVersions(data) => apply_mod_versions(ui, data),
         Event::ModRemovalPlan(data) => apply_mod_removal_plan(ui, data),
-        Event::ModResults(rows) => ui.set_mod_results(model(mod_search_rows(rows))),
+        Event::ModResults(results) => apply_mod_results(ui, results),
         Event::ModPlan(plan) => apply_mod_install_plan(ui, plan),
         Event::LinkedApply(section) => apply_linked_confirmation(ui, section),
         Event::LinkedResult(result) => apply_linked_result(ui, result),
@@ -1963,8 +2009,35 @@ fn apply_mod_versions(ui: &AppWindow, data: backend::ModVersionsData) {
     ui.set_mod_versions(model(mod_version_rows(data.versions)));
 }
 
+/// Shows the hits of the search the user is currently waiting on.
+///
+/// An answer is discarded when it is for another instance, and when it is for a
+/// query that has since been superseded — two searches run on their own threads
+/// and can finish in either order, so without this a slow older one could
+/// replace the newer results already on screen.
+fn apply_mod_results(ui: &AppWindow, results: backend::ModResultsData) {
+    if !presentation::result_is_current(&results.instance, &ui.get_selected_instance_id()) {
+        return;
+    }
+    if results.query != ui.get_mod_search_submitted().as_str() {
+        return;
+    }
+    ui.set_mod_results(model(mod_search_rows(results.rows)));
+}
+
 /// Shows what installing a mod would involve, here and on each linked server.
 fn apply_mod_install_plan(ui: &AppWindow, plan: backend::ModPlanData) {
+    if !presentation::result_is_current(&plan.instance, &ui.get_selected_instance_id()) {
+        return;
+    }
+    // A confirmation arriving over a modal the user opened while it was being
+    // planned would replace what they are looking at, and would leave the
+    // linked-server rows describing a different operation than the one on
+    // screen.
+    let modal = ui.get_modal();
+    if !modal.is_empty() && modal != "mod-plan" {
+        return;
+    }
     ui.set_mod_plan_instance(plan.instance.into());
     ui.set_mod_plan_project(plan.project.into());
     ui.set_mod_plan_title(plan.title.into());
@@ -2387,6 +2460,53 @@ mod tests {
                 }
                 remaining = &candidate[end + 1..];
             }
+        }
+    }
+
+    /// Every callback the window declares, in declaration order.
+    ///
+    /// Scoped to `AppWindow`'s own callbacks by their indentation, so the ones
+    /// belonging to reusable components — `clicked`, `toggled`, and the rest —
+    /// are left out. Those are wired inside the markup and have no Rust side.
+    fn window_callbacks(source: &str) -> Vec<String> {
+        // A renamed component leaves nothing to scan, which the caller's count
+        // assertion reports rather than this silently finding zero callbacks.
+        let window = source
+            .find("export component AppWindow inherits Window {")
+            .unwrap_or(source.len());
+        source[window..]
+            .lines()
+            .filter_map(|line| line.strip_prefix("        callback "))
+            .filter_map(|rest| rest.split('(').next())
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn every_callback_the_window_declares_reaches_the_rust_side() {
+        // The exception, and the only kind there is: a callback Rust *invokes*
+        // rather than handles. Its implementation is in the markup.
+        const INVOKED_BY_RUST: &[&str] = &["present-toast"];
+
+        let declared = window_callbacks(include_str!("ui.rs"));
+        assert!(
+            declared.len() > 50,
+            "the parser found {} callbacks, so it is no longer reading the window component",
+            declared.len()
+        );
+
+        let controller = include_str!("controller.rs");
+        let main = include_str!("main.rs");
+        for name in declared {
+            if INVOKED_BY_RUST.contains(&name.as_str()) {
+                continue;
+            }
+            let handler = format!("on_{}(", name.replace('-', "_"));
+            assert!(
+                controller.contains(&handler) || main.contains(&handler),
+                "`{name}` is declared on the window and nothing handles it, so the control \
+                 that invokes it does nothing"
+            );
         }
     }
 

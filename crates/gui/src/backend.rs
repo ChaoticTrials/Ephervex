@@ -490,6 +490,19 @@ pub struct ModSearchData {
     pub downloads: String,
 }
 
+/// One page of search results, and the request it answers.
+///
+/// Each search runs on its own thread, so two of them can finish in either
+/// order. Carrying the instance and the query is what lets the frontend tell an
+/// answer to the question it is currently asking from an answer to one it has
+/// moved on from.
+#[derive(Debug, Clone)]
+pub struct ModResultsData {
+    pub instance: String,
+    pub query: String,
+    pub rows: Vec<ModSearchData>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ModPlanData {
     pub instance: String,
@@ -561,7 +574,7 @@ pub enum Event {
     ManagedMods(ManagedModsData),
     ModVersions(ModVersionsData),
     ModRemovalPlan(ModRemovalPlanData),
-    ModResults(Vec<ModSearchData>),
+    ModResults(ModResultsData),
     ModPlan(ModPlanData),
     /// A change or update that has linked servers worth asking about.
     LinkedApply(LinkedSectionData),
@@ -1075,8 +1088,8 @@ fn run_worker(
             Command::SearchMods { instance, query } => {
                 let paths = app.paths().clone();
                 spawn_detached(paths, events.clone(), move |app, events, runtime| {
-                    let result =
-                        runtime.block_on(app.search_mods(instance, &ModSearchQuery::new(query)));
+                    let result = runtime
+                        .block_on(app.search_mods(instance, &ModSearchQuery::new(query.clone())));
                     match result {
                         Ok(results) => {
                             let rows = results
@@ -1093,7 +1106,11 @@ fn run_worker(
                                     downloads: lookup("gui-compatible"),
                                 })
                                 .collect();
-                            let _ = events.send(Event::ModResults(rows));
+                            let _ = events.send(Event::ModResults(ModResultsData {
+                                instance: instance.to_string(),
+                                query,
+                                rows,
+                            }));
                         }
                         Err(error) => send_error(&events, &error),
                     }

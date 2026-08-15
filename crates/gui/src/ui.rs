@@ -1218,6 +1218,11 @@ slint::slint! {
         in-out property <string> instance-query;
         in-out property <string> server-query;
         in-out property <string> mod-query;
+        // The query a search was actually submitted with. Distinct from
+        // `mod-query`, which follows the field as it is typed: an answer is
+        // matched against what was asked for, not against what the field says
+        // by the time it arrives.
+        in-out property <string> mod-search-submitted;
         in-out property <string> diagnostic-query;
         in-out property <string> diagnostic-content;
         in-out property <string> diagnostic-path;
