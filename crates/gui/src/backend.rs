@@ -508,6 +508,10 @@ pub struct ModResultsData {
 #[derive(Debug, Clone, Default)]
 pub struct ModPlanData {
     pub instance: String,
+    /// The reference the review asked about, echoed back. Two reviews can be in
+    /// flight at once and finish in either order, so an answer says which
+    /// question it answers.
+    pub requested: String,
     /// The provider's own project id, resolved once at plan time. A human-typable
     /// slug becomes this before anything is keyed on it.
     pub project: String,
@@ -1139,7 +1143,7 @@ fn run_worker(
                     ));
                     match result {
                         Ok(plan) => {
-                            let _ = events.send(Event::ModPlan(install_plan_data(&plan)));
+                            let _ = events.send(Event::ModPlan(install_plan_data(&plan, &project)));
                         }
                         Err(error) => send_error(&events, &error),
                     }
@@ -2878,12 +2882,13 @@ fn removal_plan_data(linked: &LinkedModPlan) -> ModRemovalPlanData {
 }
 
 /// What installing a mod would involve, on this client and on its servers.
-fn install_plan_data(linked: &LinkedModPlan) -> ModPlanData {
+fn install_plan_data(linked: &LinkedModPlan, requested: &str) -> ModPlanData {
     let Some(plan) = install_plan_of(linked) else {
         return ModPlanData::default();
     };
     ModPlanData {
         instance: linked.client.to_string(),
+        requested: requested.to_owned(),
         project: linked.root.project_id.clone(),
         title: plan.root.project.title.clone(),
         version: plan.root.version.version_number.clone(),

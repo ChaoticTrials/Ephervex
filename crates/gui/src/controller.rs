@@ -845,10 +845,13 @@ fn register_mod_browser(ui: &AppWindow, commands: &Sender<Command>) {
     });
 
     let sender = commands.clone();
+    let handle = ui.as_weak();
     ui.on_review_mod(move |instance, project| {
+        let Some(ui) = handle.upgrade() else { return };
         let Some(instance) = backend::parse_instance_id(&instance) else {
             return;
         };
+        ui.set_mod_plan_requested(project.clone());
         // Reviewing is planning: the confirmation it opens is the same one the
         // linked-server section lives in, so a review already answers "and what
         // would this do to my servers".
@@ -2037,6 +2040,10 @@ fn apply_mod_install_plan(ui: &AppWindow, plan: backend::ModPlanData) {
     // screen.
     let modal = ui.get_modal();
     if !modal.is_empty() && modal != "mod-plan" {
+        return;
+    }
+    // Two reviews can be in flight; the older one must not replace the newer.
+    if plan.requested != ui.get_mod_plan_requested().as_str() {
         return;
     }
     ui.set_mod_plan_instance(plan.instance.into());

@@ -1252,6 +1252,9 @@ slint::slint! {
         in-out property <bool> show-inspector: true;
         in-out property <bool> compact-layout;
         in-out property <string> mod-plan-instance;
+        // The reference the open review asked about, so an answer to an
+        // earlier one cannot replace it.
+        in-out property <string> mod-plan-requested;
         in-out property <string> mod-plan-project;
         // The exact release the confirmation showed, which is the release
         // installing it asks for. A newer one published since must not take its
