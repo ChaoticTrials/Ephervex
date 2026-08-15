@@ -127,6 +127,9 @@ pub enum Command {
     InstallMod {
         instance: InstanceId,
         project: String,
+        /// The exact release the confirmation showed. Empty only when nothing
+        /// resolved one, in which case the newest that fits is installed.
+        version: String,
         servers: Vec<ServerId>,
     },
     CreateServer {
@@ -447,7 +450,6 @@ pub struct LinkedSectionData {
     /// The operation, as `ephervex-core` names it.
     pub kind: String,
     pub path: String,
-    pub project: String,
     /// The exact release every selected server would receive.
     pub version: String,
     pub name: String,
@@ -506,9 +508,16 @@ pub struct ModResultsData {
 #[derive(Debug, Clone, Default)]
 pub struct ModPlanData {
     pub instance: String,
+    /// The provider's own project id, resolved once at plan time. A human-typable
+    /// slug becomes this before anything is keyed on it.
     pub project: String,
     pub title: String,
+    /// The release's published number, for reading.
     pub version: String,
+    /// The release's provider id, which is what applying this confirmation
+    /// installs. Kept apart from the number above because one is for a person
+    /// and the other is an identifier.
+    pub version_id: String,
     pub install_count: usize,
     pub dependency_count: usize,
     pub optional_count: usize,
@@ -964,7 +973,7 @@ fn run_worker(
                         Ok(plan) if !plan.has_relevant_targets() => {
                             let result = runtime.block_on(app.apply_linked_mod_operation(
                                 instance,
-                                &request,
+                                &planned_request(&plan),
                                 &[],
                                 &reporter,
                                 &cancel,
@@ -1123,13 +1132,14 @@ fn run_worker(
                         instance,
                         &LinkedModRequest::Install {
                             project: project.clone(),
+                            version: None,
                         },
                         &OperationReporter::silent("planning-mod-install"),
                         &CancellationToken::new(),
                     ));
                     match result {
                         Ok(plan) => {
-                            let _ = events.send(Event::ModPlan(install_plan_data(&plan, &project)));
+                            let _ = events.send(Event::ModPlan(install_plan_data(&plan)));
                         }
                         Err(error) => send_error(&events, &error),
                     }
@@ -1138,6 +1148,7 @@ fn run_worker(
             Command::InstallMod {
                 instance,
                 project,
+                version,
                 servers,
             } => {
                 let paths = app.paths().clone();
@@ -1149,7 +1160,13 @@ fn run_worker(
                     "operation-installing-mods",
                     project.clone(),
                     move |app, reporter, cancel| async move {
-                        let request = LinkedModRequest::Install { project };
+                        let request = LinkedModRequest::Install {
+                            project,
+                            // Pinned to what the user agreed to, so a release
+                            // published since the confirmation cannot take its
+                            // place here or on any selected server.
+                            version: (!version.is_empty()).then_some(version),
+                        };
                         let outcome = app
                             .apply_linked_mod_operation(
                                 instance, &request, &servers, &reporter, &cancel,
@@ -2861,15 +2878,16 @@ fn removal_plan_data(linked: &LinkedModPlan) -> ModRemovalPlanData {
 }
 
 /// What installing a mod would involve, on this client and on its servers.
-fn install_plan_data(linked: &LinkedModPlan, project: &str) -> ModPlanData {
+fn install_plan_data(linked: &LinkedModPlan) -> ModPlanData {
     let Some(plan) = install_plan_of(linked) else {
         return ModPlanData::default();
     };
     ModPlanData {
         instance: linked.client.to_string(),
-        project: project.to_owned(),
+        project: linked.root.project_id.clone(),
         title: plan.root.project.title.clone(),
         version: plan.root.version.version_number.clone(),
+        version_id: linked.root.version_id.clone().unwrap_or_default(),
         install_count: plan.to_install().len(),
         dependency_count: plan.dependencies.len(),
         optional_count: plan.optional.len(),
@@ -2910,6 +2928,23 @@ fn version_change_request(path: &Path, version: &str) -> LinkedModRequest {
     }
 }
 
+/// The same operation, pinned to the release its plan resolved.
+///
+/// An update asks for "the newest release that fits this client", and applying
+/// that request would ask again. The two lookups can disagree, so the release
+/// the plan settled on is the one that gets applied — the same property the
+/// confirmation gives every other path. A request the plan named no release for
+/// is unchanged.
+fn planned_request(plan: &LinkedModPlan) -> LinkedModRequest {
+    match (plan.request.target(), plan.root.version_id.clone()) {
+        (Some(target), Some(version)) => LinkedModRequest::ChangeVersion {
+            target: target.to_path_buf(),
+            version,
+        },
+        _ => plan.request.clone(),
+    }
+}
+
 /// The linked-server half of a confirmation, and what applying it needs.
 fn linked_section(plan: &LinkedModPlan) -> LinkedSectionData {
     // A mod no server could ever run is not a decision, and neither is a client
@@ -2924,7 +2959,6 @@ fn linked_section(plan: &LinkedModPlan) -> LinkedSectionData {
             .target()
             .map(|path| path.display().to_string())
             .unwrap_or_default(),
-        project: plan.root.project_id.clone(),
         version: plan.root.version_id.clone().unwrap_or_default(),
         name: plan.root.name.clone(),
         version_number: plan.root.version_number.clone().unwrap_or_default(),

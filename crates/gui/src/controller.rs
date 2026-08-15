@@ -929,7 +929,7 @@ fn register_mod_mutations(ui: &AppWindow, commands: &Sender<Command>) {
 
     let sender = commands.clone();
     let handle = ui.as_weak();
-    ui.on_install_mod(move |instance, project| {
+    ui.on_install_mod(move |instance, project, version| {
         let Some(ui) = handle.upgrade() else { return };
         if let Some(instance) = backend::parse_instance_id(&instance) {
             send(
@@ -937,6 +937,7 @@ fn register_mod_mutations(ui: &AppWindow, commands: &Sender<Command>) {
                 Command::InstallMod {
                     instance,
                     project: project.to_string(),
+                    version: version.to_string(),
                     servers: chosen_linked_servers(&ui),
                 },
             );
@@ -2042,6 +2043,7 @@ fn apply_mod_install_plan(ui: &AppWindow, plan: backend::ModPlanData) {
     ui.set_mod_plan_project(plan.project.into());
     ui.set_mod_plan_title(plan.title.into());
     ui.set_mod_plan_version(plan.version.into());
+    ui.set_mod_plan_version_id(plan.version_id.into());
     ui.set_mod_plan_install_count(to_i32(plan.install_count));
     ui.set_mod_plan_dependency_count(to_i32(plan.dependency_count));
     ui.set_mod_plan_optional_count(to_i32(plan.optional_count));

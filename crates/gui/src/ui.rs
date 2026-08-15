@@ -1253,6 +1253,10 @@ slint::slint! {
         in-out property <bool> compact-layout;
         in-out property <string> mod-plan-instance;
         in-out property <string> mod-plan-project;
+        // The exact release the confirmation showed, which is the release
+        // installing it asks for. A newer one published since must not take its
+        // place, here or on any selected server.
+        in-out property <string> mod-plan-version-id;
         in-out property <string> mod-plan-title;
         in-out property <string> mod-plan-version;
         in-out property <int> mod-plan-install-count;
@@ -1336,7 +1340,7 @@ slint::slint! {
         callback load-instance-workspace(string);
         callback search-mods(string, string);
         callback review-mod(string, string);
-        callback install-mod(string, string);
+        callback install-mod(string, string, string);
         callback submit-create-instance(string, string, string, string, bool);
         callback choose-import-file();
         callback submit-import(string, string, bool);
@@ -1837,7 +1841,7 @@ slint::slint! {
                         if root.linked-targets.length > 0 : Text { text: GuiI18n.text("gui-linked-servers"); color: Theme.text-secondary; font-size: Theme.label-size; }
                         if root.linked-targets.length > 0 && root.linked-support != "" : BodyText { text: root.linked-support; color: Theme.text-muted; wrap: word-wrap; }
                         if root.linked-targets.length > 0 : LinkedTargetsPanel { vertical-stretch: 1; rows: root.linked-targets; selectable: true; toggled(index) => { root.linked-targets[index].selected = !root.linked-targets[index].selected; } }
-                        HorizontalLayout { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; } } AppButton { text: GuiI18n.text("gui-install-required"); tone: "primary"; enabled: root.mod-plan-install-count > 0 && !root.mod-action-pending; clicked => { root.mod-action-pending = true; root.install-mod(root.mod-plan-instance, root.mod-plan-project); root.modal = ""; } } } }
+                        HorizontalLayout { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; } } AppButton { text: GuiI18n.text("gui-install-required"); tone: "primary"; enabled: root.mod-plan-install-count > 0 && !root.mod-action-pending; clicked => { root.mod-action-pending = true; root.install-mod(root.mod-plan-instance, root.mod-plan-project, root.mod-plan-version-id); root.modal = ""; } } } }
                     if root.modal == "mod-manage" : VerticalLayout { spacing: 11px;
                         HorizontalLayout { spacing: 8px; Heading { text: root.mod-action-name; font-size: Theme.section-size; overflow: elide; horizontal-stretch: 1; } if root.mod-action-up-to-date : Pill { text: GuiI18n.text("gui-mod-up-to-date"); tone-color: Theme.success; } }
                         if root.mod-action-notice != "" : BodyText { text: root.mod-action-notice; color: root.mod-action-can-change ? Theme.text-muted : Theme.warning; wrap: word-wrap; }

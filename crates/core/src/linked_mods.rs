@@ -74,6 +74,16 @@ pub enum LinkedModRequest {
     /// A mod chosen by name that the client does not have yet.
     Install {
         project: String,
+        /// The exact release to install. `None` takes the newest that fits the
+        /// *client*, which is what choosing a mod by name in a browser means.
+        ///
+        /// A confirmation is produced from a plan and applied afterwards, and
+        /// the catalog can publish a release in between. So once planning has
+        /// resolved one, whatever applies that plan pins it here: a
+        /// confirmation that named one release and installed another would be
+        /// the substitution this launcher exists not to do, and it would hand
+        /// every selected linked server a release the user never saw.
+        version: Option<String>,
     },
     /// An exact release, for a mod the client already has.
     ChangeVersion {
@@ -631,9 +641,9 @@ impl App {
     ) -> CoreResult<(ClientModPlan, LinkedModRoot, Option<ModVersionInfo>)> {
         let cancel = CancellationToken::new();
         match request {
-            LinkedModRequest::Install { project } => {
+            LinkedModRequest::Install { project, version } => {
                 let plan = self
-                    .plan_mod_installation(client, &ModInstallRequest::new(project.clone()))
+                    .plan_mod_installation(client, &install_request(project, version.as_deref()))
                     .await?;
                 let root = root_of_install(&plan);
                 let release = plan.root.version.clone();
@@ -727,11 +737,15 @@ impl App {
         cancel: &CancellationToken,
     ) -> CoreResult<(ClientModOutcome, LinkedModRoot, Option<ModVersionInfo>)> {
         match request {
-            LinkedModRequest::Install { project } => {
+            LinkedModRequest::Install { project, version } => {
+                // Pinned when a confirmation named a release. The resolver
+                // refuses a pin it cannot honor, so one that has been withdrawn
+                // or that no longer fits fails the operation rather than
+                // quietly becoming a neighboring release.
                 let installed = self
                     .install_mods(
                         client,
-                        &ModInstallRequest::new(project.clone()),
+                        &install_request(project, version.as_deref()),
                         reporter,
                         cancel,
                     )
@@ -1315,6 +1329,18 @@ fn planned_from_entry(entry: &PackFileRecipe, plan: &ModInstallPlan) -> PlannedF
     }
 }
 
+/// The catalog request one install names.
+///
+/// One builder for planning and for applying, so the two cannot disagree about
+/// what was asked for.
+fn install_request(project: &str, version: Option<&str>) -> ModInstallRequest {
+    let request = ModInstallRequest::new(project.to_owned());
+    match version {
+        Some(version) => request.at_version(version.to_owned()),
+        None => request,
+    }
+}
+
 /// The root an install plan names.
 fn root_of_install(plan: &ModInstallPlan) -> LinkedModRoot {
     LinkedModRoot {
@@ -1373,6 +1399,8 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use std::io::Write as _;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use ephervex_model::{ModOrigin, ServerInstallation, ServerLaunch, ServerRelativePath};
     use ephervex_pack::SourceStore;
@@ -1501,11 +1529,57 @@ mod tests {
         (projects, versions)
     }
 
+    /// A release the catalog has not published yet.
+    ///
+    /// Serving the project's release list through a responder rather than a
+    /// fixed body is what lets one test act out the case a confirmation exists
+    /// for: the catalog gaining a newer compatible release between the moment a
+    /// plan was shown and the moment it is applied.
+    #[derive(Debug, Clone)]
+    struct LateRelease {
+        published: Arc<AtomicBool>,
+    }
+
+    impl LateRelease {
+        fn publish(&self) {
+            self.published.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// The release list one project answers with, before and after publication.
+    struct PublishedReleases {
+        before: Vec<Value>,
+        after: Vec<Value>,
+        published: Arc<AtomicBool>,
+    }
+
+    impl wiremock::Respond for PublishedReleases {
+        fn respond(&self, _: &wiremock::Request) -> ResponseTemplate {
+            let body = if self.published.load(Ordering::SeqCst) {
+                &self.after
+            } else {
+                &self.before
+            };
+            ResponseTemplate::new(200).set_body_json(body)
+        }
+    }
+
     /// A loopback catalog serving the fixtures and their jars.
-    async fn catalog() -> MockServer {
+    async fn catalog() -> (MockServer, LateRelease) {
         let server = MockServer::start().await;
         let base = server.uri();
-        let (projects, versions) = fixtures(&base);
+        let (projects, mut versions) = fixtures(&base);
+        // Newer than every release of the root project, and compatible with the
+        // client, so an unpinned resolution run after publication would take it.
+        let late = version_json(
+            &base,
+            "ROOTV4",
+            "ROOTPROJ",
+            &[MINECRAFT],
+            &["CLIENTLIB"],
+            40,
+        );
+        let published = Arc::new(AtomicBool::new(false));
 
         for project in &projects {
             let id = project["id"].as_str().unwrap().to_owned();
@@ -1519,12 +1593,23 @@ mod tests {
                 .respond_with(ResponseTemplate::new(200).set_body_json(project.clone()))
                 .mount(&server)
                 .await;
+            let mut after = owned.clone();
+            if id == "ROOTPROJ" {
+                after.push(late.clone());
+            }
             Mock::given(method("GET"))
                 .and(route(format!("/project/{id}/version")))
-                .respond_with(ResponseTemplate::new(200).set_body_json(owned))
+                .respond_with(PublishedReleases {
+                    before: owned,
+                    after,
+                    published: Arc::clone(&published),
+                })
                 .mount(&server)
                 .await;
         }
+
+        // Reachable by exact id throughout, so a pin can always be resolved.
+        versions.push(late);
 
         for version in &versions {
             let id = version["id"].as_str().unwrap().to_owned();
@@ -1548,7 +1633,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(projects))
             .mount(&server)
             .await;
-        server
+        (server, LateRelease { published })
     }
 
     // -- an application with a client and its linked servers ---------------
@@ -1556,6 +1641,8 @@ mod tests {
     struct World {
         _base: TempDir,
         _catalog: MockServer,
+        /// Publishes the release the catalog has been holding back.
+        late: LateRelease,
         app: App,
         client: InstanceId,
     }
@@ -1618,6 +1705,20 @@ mod tests {
             jars_in(&ephervex_storage::metadata::client_game_dir(&root))
         }
 
+        /// Forgets every cached catalog document.
+        ///
+        /// Release lists are cached for `DEFAULT_METADATA_TTL`, so without this
+        /// a second resolution inside one test would be answered from disk and
+        /// could not see a release published in the meantime. Dropping the
+        /// store is what a plan and an apply separated by more than the TTL —
+        /// or by a restart — actually look like.
+        fn forget_cached_catalog(&self) {
+            let metadata = self.app.paths().cache_dir().join("metadata");
+            if metadata.exists() {
+                std::fs::remove_dir_all(&metadata).expect("clear the metadata cache");
+            }
+        }
+
         /// Marks a server as running by leaving the evidence a supervisor would.
         fn mark_running(&self, server: ServerId) {
             let root = self.server_root(server);
@@ -1664,7 +1765,7 @@ mod tests {
     }
 
     async fn world() -> World {
-        let catalog = catalog().await;
+        let (catalog, late) = catalog().await;
         let base = tempfile::tempdir().expect("temp dir");
 
         let archive_dir = tempfile::tempdir().expect("temp dir");
@@ -1686,6 +1787,7 @@ mod tests {
         World {
             client: imported.record.id,
             app,
+            late,
             _base: base,
             _catalog: catalog,
         }
@@ -1699,9 +1801,28 @@ mod tests {
     const ROOT_V1: &str = "mods/rootproj-ROOTV1.jar";
     const ROOT_V2: &str = "mods/rootproj-ROOTV2.jar";
 
+    /// A browser install: the newest release that fits the client.
     fn install(project: &str) -> LinkedModRequest {
         LinkedModRequest::Install {
             project: project.to_owned(),
+            version: None,
+        }
+    }
+
+    /// The same install as a confirmation carries it, pinned to the release the
+    /// plan resolved.
+    fn confirmed(plan: &LinkedModPlan) -> LinkedModRequest {
+        LinkedModRequest::Install {
+            project: plan.root.project_id.clone(),
+            version: plan.root.version_id.clone(),
+        }
+    }
+
+    /// An install pinned to an exact release by the caller.
+    fn pinned(project: &str, version: &str) -> LinkedModRequest {
+        LinkedModRequest::Install {
+            project: project.to_owned(),
+            version: Some(version.to_owned()),
         }
     }
 
@@ -1729,6 +1850,16 @@ mod tests {
             .iter()
             .find(|target| target.server == server)
             .expect("a target for this server")
+    }
+
+    /// The release a desired state records for the root project.
+    fn installed_version(recipe: Option<&PackRecipe>) -> Option<String> {
+        recipe?
+            .managed_project(ModProvider::Modrinth, "ROOTPROJ")?
+            .identity
+            .as_ref()?
+            .version_id
+            .clone()
     }
 
     fn result_for(outcome: &LinkedModOutcome, server: ServerId) -> &LinkedTargetResult {
@@ -2104,6 +2235,104 @@ mod tests {
                 LinkedTargetBlock::NoLongerLinked
             ))
         ));
+        assert!(world.server_jars(server).is_empty());
+    }
+
+    // -- the release a confirmation named ----------------------------------
+
+    #[tokio::test]
+    async fn a_confirmed_install_applies_the_release_it_confirmed() {
+        let world = world().await;
+        let server = world.link_server("Reproduction Server", MINECRAFT);
+
+        // What the user is shown, and what they agree to.
+        let confirmation = plan(&world, &install("ROOTPROJ")).await;
+        assert_eq!(confirmation.root.version_id.as_deref(), Some("ROOTV2"));
+        assert_eq!(
+            target(&confirmation, server).state,
+            LinkedTargetState::WillInstall
+        );
+
+        // The catalog moves on while the confirmation is open.
+        world.late.publish();
+        world.forget_cached_catalog();
+        assert_eq!(
+            plan(&world, &install("ROOTPROJ"))
+                .await
+                .root
+                .version_id
+                .as_deref(),
+            Some("ROOTV4"),
+            "an unpinned resolution now takes the new release, which is exactly what \
+             applying the confirmation must not do"
+        );
+        world.forget_cached_catalog();
+
+        let outcome = apply(&world, &confirmed(&confirmation), &[server]).await;
+
+        assert!(result_for(&outcome, server).succeeded());
+        assert_eq!(
+            outcome.root.version_id.as_deref(),
+            Some("ROOTV2"),
+            "the operation is about the release the user confirmed"
+        );
+        assert_eq!(
+            installed_version(
+                world
+                    .app
+                    .pack_recipe(world.client)
+                    .expect("recipe")
+                    .as_ref()
+            ),
+            Some("ROOTV2".to_owned()),
+            "the client got what the confirmation said, not what the catalog now prefers"
+        );
+        assert_eq!(
+            installed_version(Some(&world.server_recipe(server))),
+            Some("ROOTV2".to_owned()),
+            "and every selected server was evaluated against that same exact release"
+        );
+        assert_eq!(
+            world.server_jars(server),
+            vec![
+                "libproj-LIBV1.jar".to_owned(),
+                "rootproj-ROOTV2.jar".to_owned()
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_confirmed_release_that_no_longer_fits_fails_instead_of_substituting() {
+        let world = world().await;
+        let server = world.link_server("Reproduction Server", MINECRAFT);
+
+        // A release of the same project that this client cannot run. Standing
+        // in for one withdrawn or invalidated between the confirmation and the
+        // apply: the answer is the same either way.
+        let error = world
+            .app
+            .apply_linked_mod_operation(
+                world.client,
+                &pinned("ROOTPROJ", "ROOTV3"),
+                &[server],
+                &silent(),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("a release that does not fit is refused");
+
+        assert!(
+            matches!(
+                error,
+                CoreError::ModPlatform(ModPlatformError::IncompatibleSelectedVersion { .. })
+            ),
+            "the refusal names the release, rather than the operation finding a near miss: \
+             {error}"
+        );
+        assert!(
+            world.client_jars().is_empty(),
+            "nothing was installed on the way to refusing"
+        );
         assert!(world.server_jars(server).is_empty());
     }
 
