@@ -4458,6 +4458,10 @@ fn reconciled_json(records: &[ephervex_core::ReconciledRecord]) -> serde_json::V
     )
 }
 
+/// Prints a `--json` result.
+///
+/// Indented on purpose: command output is read in a terminal, so readability
+/// wins here, unlike the launcher's own stored JSON, which stays compact.
 fn print_json(value: &serde_json::Value) {
     match serde_json::to_string_pretty(value) {
         Ok(text) => println!("{text}"),

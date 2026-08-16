@@ -388,7 +388,7 @@ fn read_retention(directory: &Path) -> std::io::Result<CaptureRetention> {
 fn write_retention(directory: &Path, retention: &CaptureRetention) -> std::io::Result<()> {
     let path = directory.join(CAPTURE_INDEX_FILE);
     let temporary = path.with_extension("json.tmp");
-    let body = serde_json::to_vec_pretty(retention).map_err(std::io::Error::other)?;
+    let body = serde_json::to_vec(retention).map_err(std::io::Error::other)?;
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(true)
@@ -451,5 +451,33 @@ mod tests {
         let retention = pruned.expect("old segments should be pruned");
         assert!(retention.removed_segments > 0);
         assert!(directory.path().join(CAPTURE_INDEX_FILE).is_file());
+    }
+
+    #[test]
+    fn the_capture_index_is_stored_compactly_and_a_pretty_one_still_loads() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let retention = CaptureRetention {
+            removed_segments: 2,
+            removed_bytes: 1024,
+            removed_lines: 17,
+            earliest_retained_at: Some(Utc::now()),
+        };
+        write_retention(directory.path(), &retention).expect("write");
+
+        let path = directory.path().join(CAPTURE_INDEX_FILE);
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert!(
+            !text.contains('\n'),
+            "the capture index carries pretty-printing whitespace: {text}"
+        );
+        assert_eq!(read_retention(directory.path()).expect("read"), retention);
+
+        let stored: serde_json::Value = serde_json::from_str(&text).expect("parse");
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&stored).expect("indent"),
+        )
+        .expect("rewrite as an older build would have");
+        assert_eq!(read_retention(directory.path()).expect("read"), retention);
     }
 }

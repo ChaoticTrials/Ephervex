@@ -55,6 +55,10 @@ impl OperatorsDocument {
     }
 
     /// Serializes a complete `ops.json` document using JSON escaping.
+    ///
+    /// Indented on purpose, unlike launcher-owned storage: `ops.json` belongs to
+    /// the Minecraft server, which writes it indented itself and whose operators
+    /// routinely edit it by hand. Rewriting it compactly would fight both.
     pub fn render(&self) -> Result<String, OperatorsDocumentError> {
         let mut rendered = serde_json::to_string_pretty(&self.entries)
             .map_err(OperatorsDocumentError::Serialization)?;

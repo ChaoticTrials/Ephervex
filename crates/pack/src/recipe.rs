@@ -1291,7 +1291,7 @@ mod tests {
     #[test]
     fn the_recipe_round_trips_through_json_which_is_how_it_is_stored() {
         let recipe = recipe();
-        let json = serde_json::to_string_pretty(&recipe).expect("serialize");
+        let json = serde_json::to_string(&recipe).expect("serialize");
         let back: PackRecipe = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(recipe, back);
 

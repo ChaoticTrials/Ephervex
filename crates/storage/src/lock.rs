@@ -218,7 +218,7 @@ impl LaunchLock {
     /// instance can be diagnosed without guessing.
     pub fn record_game_pid(&mut self, pid: u32) -> Result<(), LockError> {
         self.state.game_pid = Some(pid);
-        let body = serde_json::to_vec_pretty(&self.state)
+        let body = serde_json::to_vec(&self.state)
             .map_err(|error| LockError::unusable(&self.path, error.into()))?;
         let mut temporary_name = self.path.as_os_str().to_os_string();
         temporary_name.push(format!(".tmp.{}", uuid::Uuid::new_v4()));
@@ -293,7 +293,7 @@ fn write_new(path: &Path, state: &LaunchState) -> std::io::Result<()> {
         .write(true)
         .create_new(true)
         .open(path)?;
-    let body = serde_json::to_vec_pretty(state).map_err(std::io::Error::other)?;
+    let body = serde_json::to_vec(state).map_err(std::io::Error::other)?;
     file.write_all(&body)?;
     file.sync_all()
 }
@@ -386,6 +386,27 @@ mod tests {
     }
 
     #[test]
+    fn owner_evidence_is_stored_compactly_and_a_pretty_file_from_an_older_build_still_loads() {
+        let root = instance();
+        let mut held = LaunchLock::acquire(root.path()).expect("lock");
+        held.record_game_pid(4242).expect("record");
+
+        let text = std::fs::read_to_string(held.path()).expect("lock body");
+        assert!(
+            !text.contains('\n'),
+            "the launch lock carries pretty-printing whitespace: {text}"
+        );
+
+        let state: LaunchState = serde_json::from_str(&text).expect("parse");
+        std::fs::write(
+            held.path(),
+            serde_json::to_string_pretty(&state).expect("indent"),
+        )
+        .expect("rewrite as an older build would have");
+        assert_eq!(running_state(root.path()).expect("running"), state);
+    }
+
+    #[test]
     fn dropping_an_old_guard_does_not_remove_replacement_owner_evidence() {
         let root = instance();
         let held = LaunchLock::acquire(root.path()).expect("lock");
@@ -397,7 +418,7 @@ mod tests {
         };
         std::fs::write(
             held.path(),
-            serde_json::to_vec_pretty(&replacement).expect("serialize"),
+            serde_json::to_vec(&replacement).expect("serialize"),
         )
         .expect("replace evidence");
 

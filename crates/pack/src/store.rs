@@ -108,20 +108,21 @@ impl SourceStore {
 
     /// Writes the normalized recipe.
     ///
-    /// Pretty-printed, because these files end up pasted into bug reports, and
-    /// written through a temporary file so an interrupted write cannot turn a
-    /// recoverable instance into an unreadable one — the same rename dance
-    /// `ephervex-storage` uses for instance metadata.
+    /// Compact, because the recipe is launcher-owned storage rather than a file
+    /// a person maintains, and written through a temporary file so an
+    /// interrupted write cannot turn a recoverable instance into an unreadable
+    /// one: the same rename dance `ephervex-storage` uses for instance
+    /// metadata.
     pub fn write_recipe(&self, recipe: &PackRecipe) -> PackResult<PathBuf> {
         Self::ensure_dir(&self.dir)?;
         let path = self.recipe_path();
-        let text = serde_json::to_string_pretty(recipe).map_err(|error| PackError::Unwritable {
+        let body = serde_json::to_vec(recipe).map_err(|error| PackError::Unwritable {
             path: path.clone(),
             source: std::io::Error::other(error),
         })?;
 
         let temporary = path.with_extension("json.tmp");
-        std::fs::write(&temporary, text).map_err(|source| PackError::Unwritable {
+        std::fs::write(&temporary, body).map_err(|source| PackError::Unwritable {
             path: temporary.clone(),
             source,
         })?;
@@ -256,6 +257,37 @@ mod tests {
     }
 
     #[test]
+    fn the_retained_recipe_is_stored_compactly() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = SourceStore::new(dir.path().join("source"));
+        let path = store.write_recipe(&recipe()).expect("write");
+
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert!(
+            !text.contains('\n'),
+            "the recipe carries pretty-printing whitespace: {text}"
+        );
+        serde_json::from_str::<serde_json::Value>(&text).expect("valid JSON");
+    }
+
+    #[test]
+    fn a_pretty_printed_recipe_from_an_older_build_still_loads() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = SourceStore::new(dir.path().join("source"));
+        let path = store.write_recipe(&recipe()).expect("write");
+
+        let stored: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("parse");
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&stored).expect("indent"),
+        )
+        .expect("rewrite as an older build would have");
+
+        assert_eq!(store.read_recipe().expect("read"), recipe());
+    }
+
+    #[test]
     fn a_manifest_is_retained_verbatim_under_its_provider() {
         let dir = tempfile::tempdir().expect("temp dir");
         let store = SourceStore::new(dir.path().join("source"));
@@ -281,11 +313,10 @@ mod tests {
         store.write_recipe(&recipe()).expect("write");
 
         let path = store.recipe_path();
-        let text = std::fs::read_to_string(&path).expect("read").replace(
-            &format!("\"recipe_version\": {RECIPE_VERSION}"),
-            "\"recipe_version\": 99",
-        );
-        std::fs::write(&path, text).expect("write");
+        let mut stored: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("parse");
+        stored["recipe_version"] = serde_json::json!(99);
+        std::fs::write(&path, serde_json::to_vec(&stored).expect("serialize")).expect("write");
 
         let error = store.read_recipe().expect_err("must refuse");
         assert!(matches!(

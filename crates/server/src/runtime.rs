@@ -175,7 +175,7 @@ pub fn write_runtime_evidence(server_root: &Path, evidence: &RuntimeEvidence) ->
         source,
     })?;
     let temporary = path.with_extension("json.tmp");
-    let body = serde_json::to_vec_pretty(evidence).map_err(|error| ServerError::RuntimeState {
+    let body = serde_json::to_vec(evidence).map_err(|error| ServerError::RuntimeState {
         path: temporary.clone(),
         source: std::io::Error::other(error),
     })?;
@@ -480,6 +480,35 @@ mod tests {
             classify_runtime(root.path()).expect("classify"),
             RuntimeClassification::Stopped
         ));
+    }
+
+    #[test]
+    fn runtime_evidence_is_stored_compactly_and_a_pretty_file_from_an_older_build_still_loads() {
+        let root = root();
+        let evidence = RuntimeEvidence::for_current_supervisor().expect("capture");
+        write_runtime_evidence(root.path(), &evidence).expect("write");
+
+        let path = runtime_path(root.path());
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert!(
+            !text.contains('\n'),
+            "runtime evidence carries pretty-printing whitespace: {text}"
+        );
+        assert_eq!(
+            read_runtime_evidence(root.path()).expect("read"),
+            Some(evidence.clone())
+        );
+
+        let stored: serde_json::Value = serde_json::from_str(&text).expect("parse");
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&stored).expect("indent"),
+        )
+        .expect("rewrite as an older build would have");
+        assert_eq!(
+            read_runtime_evidence(root.path()).expect("read"),
+            Some(evidence)
+        );
     }
 
     #[test]

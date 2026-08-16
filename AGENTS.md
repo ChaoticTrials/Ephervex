@@ -57,6 +57,13 @@ These instructions apply to the entire repository unless a more specific `AGENTS
 - Avoid duplicating security, path-validation, version-selection, or compatibility logic across crates. Reuse the owning crate's implementation.
 - Do not weaken a production safety rule to make a test pass. If tests require a special environment such as loopback HTTP, use an explicit test-only or narrowly scoped escape hatch whose production default remains strict.
 
+## JSON serialization
+
+- Keep machine-owned JSON compact. Production code must not pretty-print JSON that Ephervex writes for its own runtime, cache, metadata, state, registry, recipe, index, or other persistent machine-consumed storage. Use compact serializers such as `serde_json::to_writer`, `to_vec`, or `to_string`, not their pretty-printing equivalents.
+- Pretty-printed JSON is acceptable only when human readability is the purpose of the file and storage efficiency is irrelevant, such as checked-in fixtures, test data, documentation examples, or explicitly human-facing exports.
+- Do not reformat externally supplied JSON merely for storage. Preserve the original source when source retention requires it; otherwise normalize to the smallest appropriate machine representation.
+- Whitespace must never be relied on for JSON identity or cache semantics.
+
 ## Import and filesystem safety
 
 - Archive extraction must reject path traversal, absolute paths, unsafe prefixes, escapes through links, and writes into launcher-owned metadata areas.

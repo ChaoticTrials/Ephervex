@@ -278,8 +278,9 @@ fn prepare_metadata_dir(root: &Path) -> Result<(), MetadataError> {
 }
 
 fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), MetadataError> {
-    // Pretty-printed on purpose: these files end up pasted into bug reports.
-    let text = serde_json::to_string_pretty(value).map_err(|error| MetadataError::Unwritable {
+    // Compact: `.launcher` metadata is read by the launcher, not by a person,
+    // and indentation only costs storage and I/O.
+    let body = serde_json::to_vec(value).map_err(|error| MetadataError::Unwritable {
         path: path.to_path_buf(),
         source: std::io::Error::other(error),
     })?;
@@ -296,7 +297,7 @@ fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), MetadataError>
             path: temporary.clone(),
             source,
         })?;
-    file.write_all(text.as_bytes())
+    file.write_all(&body)
         .and_then(|()| file.sync_all())
         .map_err(|source| MetadataError::Unwritable {
             path: temporary.clone(),
@@ -358,6 +359,42 @@ mod tests {
     }
 
     #[test]
+    fn metadata_is_stored_compactly() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let root = directory.path();
+        write_client_metadata(root, &sample(root)).expect("write");
+
+        for path in [client_metadata_path(root), warnings_path(root)] {
+            let text = std::fs::read_to_string(&path).expect("read");
+            assert!(
+                !text.contains('\n'),
+                "{} carries pretty-printing whitespace: {text}",
+                path.display()
+            );
+            serde_json::from_str::<serde_json::Value>(&text).expect("valid JSON");
+        }
+    }
+
+    #[test]
+    fn pretty_printed_metadata_from_an_older_build_still_loads() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let root = directory.path();
+        let record = sample(root);
+        write_client_metadata(root, &record).expect("write");
+
+        let path = client_metadata_path(root);
+        let stored: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("parse");
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&stored).expect("indent"),
+        )
+        .expect("rewrite as an older build would have");
+
+        assert_eq!(read_client_metadata(root).expect("read"), record);
+    }
+
+    #[test]
     fn the_documented_launcher_directory_layout_is_created() {
         let directory = tempfile::tempdir().expect("temp dir");
         let root = directory.path();
@@ -397,10 +434,10 @@ mod tests {
         write_client_metadata(root, &sample(root)).expect("write");
 
         let path = client_metadata_path(root);
-        let text = std::fs::read_to_string(&path)
-            .expect("read")
-            .replace("\"metadata_version\": 1", "\"metadata_version\": 99");
-        std::fs::write(&path, text).expect("write");
+        let mut stored: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("parse");
+        stored["metadata_version"] = serde_json::json!(99);
+        std::fs::write(&path, serde_json::to_vec(&stored).expect("serialize")).expect("write");
 
         let error = read_client_metadata(root).expect_err("must refuse");
         assert!(matches!(
