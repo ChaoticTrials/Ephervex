@@ -121,6 +121,28 @@ error-config-unsupported-schema = This configuration was written by a newer vers
 error-config-secret-rejected = Refusing to save a credential into the configuration file.
 .action = The key { $key } looks like a secret. Secrets are stored in the system keyring instead, and configuration only records that one exists.
 
+## Artifact cache errors
+
+# The cache holds re-downloadable copies, so every one of these leaves the cache
+# larger than its budget rather than risking a file something is still using.
+error-artifact-cache-busy = The reusable artifact cache is in use right now.
+.action = Wait for the current download or installation to finish, then try again.
+
+error-artifact-cache-lock-unusable = Ephervex could not claim the artifact cache for maintenance.
+.action = Check permissions on { $path }.
+
+error-artifact-cache-scan-failed = The reusable artifact cache could not be read.
+.action = Check permissions on { $path }. Nothing was removed.
+
+error-artifact-cache-limit-too-large = That cache limit is larger than Ephervex can store.
+.action = Choose at most { $maximum }. The limit you had is unchanged.
+
+error-artifact-cache-limit-too-small = That cache limit is too small to be useful.
+.action = Choose at least { $minimum }. The limit you had is unchanged.
+
+error-artifact-cache-limit-malformed = That cache limit is not a whole number.
+.action = Enter a whole number and pick a unit. The limit you had is unchanged.
+
 ## Path resolution errors (ADR 0003)
 
 error-paths-no-home-directory = Ephervex could not work out where your home directory is.

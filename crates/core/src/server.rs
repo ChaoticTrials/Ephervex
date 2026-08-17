@@ -163,6 +163,18 @@ impl App {
     /// final root is published.
     pub async fn create_server(
         &self,
+        request: NewServer,
+        options: &ServerCreateOptions,
+        cancel: &CancellationToken,
+    ) -> CoreResult<ServerCommit<ServerRecord>> {
+        self.with_artifact_cache(Box::pin(
+            self.create_server_holding_the_cache(request, options, cancel),
+        ))
+        .await
+    }
+
+    async fn create_server_holding_the_cache(
+        &self,
         mut request: NewServer,
         options: &ServerCreateOptions,
         cancel: &CancellationToken,
@@ -233,6 +245,18 @@ impl App {
 
     /// Installs a previously scaffolded record. Unknown files are never merged.
     pub async fn install_server(
+        &self,
+        id: ServerId,
+        options: &ServerCreateOptions,
+        cancel: &CancellationToken,
+    ) -> CoreResult<ServerCommit<ServerRecord>> {
+        self.with_artifact_cache(Box::pin(
+            self.install_server_holding_the_cache(id, options, cancel),
+        ))
+        .await
+    }
+
+    async fn install_server_holding_the_cache(
         &self,
         id: ServerId,
         options: &ServerCreateOptions,

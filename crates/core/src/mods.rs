@@ -518,6 +518,19 @@ impl App {
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<InstalledMods> {
+        self.with_artifact_cache(Box::pin(
+            self.install_mods_holding_the_cache(instance, request, reporter, cancel),
+        ))
+        .await
+    }
+
+    async fn install_mods_holding_the_cache(
+        &self,
+        instance: InstanceId,
+        request: &ModInstallRequest,
+        reporter: &OperationReporter,
+        cancel: &CancellationToken,
+    ) -> CoreResult<InstalledMods> {
         let record = self.client(instance)?;
         let plan = self
             .plan_for(&record, request, InstalledPolicy::Preserve, reporter)

@@ -416,6 +416,20 @@ impl App {
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<ModMutation> {
+        self.with_artifact_cache(Box::pin(self.change_managed_mod_version_holding_the_cache(
+            instance, target, choice, reporter, cancel,
+        )))
+        .await
+    }
+
+    async fn change_managed_mod_version_holding_the_cache(
+        &self,
+        instance: InstanceId,
+        target: &Path,
+        choice: &ModVersionChoice,
+        reporter: &OperationReporter,
+        cancel: &CancellationToken,
+    ) -> CoreResult<ModMutation> {
         let mut context = self.mutation_context(instance, target)?;
         let plan = self
             .version_change_plan(&context, choice, reporter, cancel)

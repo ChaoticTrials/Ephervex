@@ -638,6 +638,20 @@ impl App {
         target: &Path,
         cancel: &CancellationToken,
     ) -> CoreResult<InstalledServer> {
+        self.with_artifact_cache(Box::pin(self.install_server_version_holding_the_cache(
+            minecraft, loader, java, target, cancel,
+        )))
+        .await
+    }
+
+    async fn install_server_version_holding_the_cache(
+        &self,
+        minecraft: &str,
+        loader: &ephervex_model::LoaderSelection,
+        java: &Path,
+        target: &Path,
+        cancel: &CancellationToken,
+    ) -> CoreResult<InstalledServer> {
         let parent = self.minecraft_version(minecraft).await?;
         let reporter = OperationReporter::silent("installing-loader-server");
         Ok(self
@@ -892,6 +906,19 @@ impl App {
     }
 
     async fn install_java_with_maximum_update(
+        &self,
+        major: u32,
+        maximum_update: Option<u32>,
+    ) -> CoreResult<ManagedInstallation> {
+        // The archive lands in the shared cache and is unpacked into the data
+        // root, so the lease has to outlive the unpack rather than the download.
+        self.with_artifact_cache(Box::pin(
+            self.install_java_holding_the_cache(major, maximum_update),
+        ))
+        .await
+    }
+
+    async fn install_java_holding_the_cache(
         &self,
         major: u32,
         maximum_update: Option<u32>,

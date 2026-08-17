@@ -24,6 +24,7 @@
 
 pub mod account;
 pub mod app;
+pub mod artifact_cache;
 mod artwork;
 pub mod connection;
 pub mod diagnostics;
@@ -44,6 +45,7 @@ pub use app::{
     App, ApplicationDisplaySettings, JavaPlan, JavaPlanRequest, JavaTarget,
     PersistentStorageSettings, ServerApplicationSettings, global_java_settings,
 };
+pub use artifact_cache::ArtifactCacheStatus;
 pub use connection::{
     ConnectError, DEFAULT_SERVER_READINESS_TIMEOUT, LaunchAndConnectAvailability,
     LaunchAndConnectEvent, LaunchAndConnectObserver, LaunchAndConnectOptions,
@@ -112,6 +114,13 @@ pub use ephervex_auth::{
     DEFAULT_MICROSOFT_CLIENT_ID, DeviceCodePrompt, Entitlements, LoginFlow, LoginRequest,
     MINECRAFT_API_REVIEW_FORM, OfflineAccount, SecretString, Session, XstsDenial, offline_uuid,
 };
+/// The artifact-cache maintenance results a settings screen renders.
+///
+/// The collector itself is not here: a frontend displays a report and asks for a
+/// clear, it does not run a collection.
+pub use ephervex_download::{
+    ArtifactCacheError, ArtifactCacheMaintenance, MaintenanceStage, MaintenanceTrouble,
+};
 /// Progress, re-exported because the import service takes a reporter and
 /// `Operation` is the single progress abstraction both frontends
 /// render. A frontend that could not name these would have to add
@@ -146,7 +155,9 @@ pub use ephervex_mod_platform::{
     SideSupport,
 };
 pub use ephervex_model::{
-    ConnectionTarget, JavaOverride, JvmSettings, ServerInstallation, ServerRelativePath,
+    ARTIFACT_CACHE_LIMIT_PRESETS, ArtifactCacheLimit, ArtifactCacheLimitError, ByteUnit,
+    ConnectionTarget, DEFAULT_ARTIFACT_CACHE_LIMIT_BYTES, JavaOverride, JvmSettings,
+    MAX_ARTIFACT_CACHE_LIMIT_BYTES, ServerInstallation, ServerRelativePath, format_binary_bytes,
 };
 pub use ephervex_options::{
     CompatibilitySource, GlobalMinecraftPreferences, GuiScalePreference, InvalidPreferenceValue,

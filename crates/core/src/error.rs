@@ -92,6 +92,19 @@ pub enum CoreError {
     #[error(transparent)]
     Connect(#[from] ConnectError),
 
+    /// Measuring, collecting, or clearing the reusable artifact cache.
+    ///
+    /// Reaches a frontend only for the operations a user asked for directly —
+    /// reading the cache's size, clearing it, changing its budget. Automatic
+    /// maintenance never surfaces here: see `App::maintain_artifact_cache` for
+    /// why a housekeeping failure must not become an installation failure.
+    #[error(transparent)]
+    ArtifactCache(#[from] ephervex_download::ArtifactCacheError),
+
+    /// A cache budget the user typed that cannot be represented.
+    #[error(transparent)]
+    ArtifactCacheLimitInvalid(#[from] ephervex_model::ArtifactCacheLimitError),
+
     /// A mutation named a file the instance does not record as one of its mods.
     ///
     /// Always a stale view rather than a bad request: a frontend acts on the
@@ -174,6 +187,8 @@ impl CoreError {
             Self::ModPlatform(error) => error.message_id(),
             Self::Server(error) => error.message_id(),
             Self::Connect(error) => error.message_id(),
+            Self::ArtifactCache(error) => error.message_id(),
+            Self::ArtifactCacheLimitInvalid(error) => error.message_id(),
             Self::ArtworkUnusable { .. } => "error-artwork-unusable",
             Self::LoaderFamilyFixed { .. } => "error-loader-family-fixed",
             Self::LoaderChangeBlockedByMods { .. } => "error-loader-change-blocked-by-mods",
@@ -196,6 +211,7 @@ impl CoreError {
             Self::ModPlatform(error) => error.message_args(),
             Self::Server(error) => error.message_args(),
             Self::Connect(error) => error.message_args(),
+            Self::ArtifactCacheLimitInvalid(error) => error.message_args(),
             Self::LoaderFamilyFixed { loader } => vec![("loader", loader.to_string())],
             Self::LoaderChangeBlockedByMods { incompatible } => {
                 vec![("count", incompatible.to_string())]
@@ -326,6 +342,8 @@ impl CoreError {
         match self {
             Self::Java(error) => error.required_major(),
             Self::Storage(_)
+            | Self::ArtifactCache(_)
+            | Self::ArtifactCacheLimitInvalid(_)
             | Self::JavaSettingsInvalid { .. }
             | Self::Minecraft(_)
             | Self::Loader(_)
@@ -379,7 +397,9 @@ impl CoreError {
             Self::ModNotManaged { path }
             | Self::ModMutationRestricted { path, .. }
             | Self::ModIdentityIncomplete { path } => Some(path.clone()),
+            Self::ArtifactCache(error) => error.failing_path(),
             Self::Auth(_)
+            | Self::ArtifactCacheLimitInvalid(_)
             | Self::JavaSettingsInvalid { .. }
             | Self::Preference(_)
             | Self::ModPlatform(_)
@@ -571,8 +591,61 @@ mod tests {
                 server: ephervex_model::ServerId::new(),
             }
             .message_id(),
+            ephervex_download::ArtifactCacheError::Busy {
+                path: PathBuf::new(),
+            }
+            .message_id(),
+            ephervex_download::ArtifactCacheError::LockUnusable {
+                path: PathBuf::new(),
+                source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            }
+            .message_id(),
+            ephervex_download::ArtifactCacheError::ScanFailed {
+                path: PathBuf::new(),
+                source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            }
+            .message_id(),
+            ephervex_model::ArtifactCacheLimitError::TooSmall.message_id(),
+            ephervex_model::ArtifactCacheLimitError::TooLarge {
+                value: u64::MAX,
+                unit: ephervex_model::ByteUnit::Tebibytes,
+            }
+            .message_id(),
+            ephervex_model::ArtifactCacheLimitError::Malformed {
+                value: String::new(),
+            }
+            .message_id(),
         ] {
             assert!(ephervex_i18n::has(id), "missing message id: {id}");
         }
+    }
+
+    #[test]
+    fn a_refused_cache_limit_names_the_bound_the_message_reads_out() {
+        let error = CoreError::from(
+            ephervex_model::ArtifactCacheLimit::from_unit(
+                u64::MAX,
+                ephervex_model::ByteUnit::Tebibytes,
+            )
+            .expect_err("an overflowing budget is refused"),
+        );
+        assert_eq!(error.message_id(), "error-artifact-cache-limit-too-large");
+        assert_eq!(
+            error.message_args(),
+            vec![("maximum", "4 EiB".to_owned())],
+            "the sentence has to name the same ceiling the type enforces"
+        );
+        assert!(ephervex_i18n::has_attribute(error.message_id(), "action"));
+    }
+
+    #[test]
+    fn a_busy_cache_names_the_lock_a_user_can_be_pointed_at() {
+        let error = CoreError::from(ephervex_download::ArtifactCacheError::Busy {
+            path: PathBuf::from("/cache/ephervex/artifact-cache.lock"),
+        });
+        assert_eq!(
+            error.failing_path(),
+            Some(PathBuf::from("/cache/ephervex/artifact-cache.lock"))
+        );
     }
 }

@@ -73,6 +73,9 @@ Immutable or reproducible artifacts live in shared stores:
 - native extractions are keyed by version and platform; and
 - managed runtimes are installed in a shared runtime store.
 
+The content-addressed download stores additionally carry a configurable byte
+budget with automatic collection; see the reusable artifact cache budget below.
+
 A file appears at a final shared-store path only after it has been completely
 written and verified. Incomplete work remains in staging paths.
 
@@ -87,6 +90,64 @@ root and published with one directory rename. Existing metadata wins during
 reconciliation; corrupt or missing metadata leaves the SQLite recovery copy
 visible but unusable for launch or mutation. Multiple roots claiming one server
 ID are a blocking conflict rather than a selection opportunity (ADR 0014).
+
+## Reusable artifact cache budget
+
+The cache under the XDG cache root is a disposable optimization, never a source
+of truth. Removing an entry costs a re-download and nothing else, because every
+installed workspace owns its own files: pack files and mods are copied into the
+instance or server, a managed runtime is unpacked into the data root, and a
+loader installer has already run by the time its jar is cacheable.
+
+That is what makes a byte budget expressible, and it also bounds what the budget
+governs. Only the two stores addressed purely by verified content hash are in
+scope: `downloads/` and `installer-cache/`. Every other store under the cache
+root is excluded, for reasons of ownership rather than size — `libraries/` is
+what a retained server's own `libraries` link resolves through, `assets/` is the
+directory a running game is handed, `natives/` is unpacked rather than
+downloaded, `metadata/` holds provider documents and their freshness envelopes,
+and `artwork/` holds entries no provider publishes a hash for. The provider
+metadata cache has its own addressing and its own freshness policy and is not
+governed by this limit.
+
+The budget is a `u64` byte count or Unlimited, defaulting to 10 GiB. A settings
+screen offers presets up to 100 GiB, a custom size in mebibytes, gibibytes, or
+tebibytes, and Unlimited; the stored value is always bytes, so no unit choice
+changes what the file means. A size that cannot be represented is refused with a
+typed error and the previous budget stays in force. Existing configuration files
+that predate the setting load with the default.
+
+Collection is high/low-water rather than a single threshold: it starts only when
+measured usage is strictly above the configured limit and then removes entries
+until usage is at or below approximately four fifths of it, so a cache near its
+budget does not evict after every download. Unlimited runs no collection at all,
+while still supporting measurement and a manual clear.
+
+Eviction order is oldest publication first, with the path as a deterministic
+tie-break. This is not LRU and is not described as one: the cache is
+content-addressed, so a hit opens a file and changes nothing about it, and
+`atime` is unusable on desktops that mount with `relatime` or `noatime`. An
+entry's modification time is when its bytes arrived, because publication is a
+rename and a rename does not touch it.
+
+The budget is soft in both directions that matter. A required artifact is
+fetched, verified, and used whatever its size, even when it is larger than the
+whole budget; and an operation holds a shared lease on the cache for as long as
+it may still resolve, open, copy, or launch a reusable artifact path, so
+collection cannot remove one out from under it. The lease is a kernel advisory
+lock on a fixed launcher-owned file at the cache root, which makes it hold
+between two Ephervex processes sharing one cache as well as between two tasks in
+one. Collection takes the same lock exclusively and never waits for it, so a
+manual clear reports a busy cache instead of hanging.
+
+Maintenance is a housekeeping policy, not an installation precondition. It runs
+after a cache-changing operation has released its lease and when the budget is
+lowered. If it cannot run, or cannot remove a particular entry, the operation's
+own result stands, the trouble is reported through the launcher's warning path,
+and the cache stays over budget — leaving files behind is always preferable to
+removing ones whose status is uncertain. A pass reports what it measured, what
+it freed, and what it could not, so a partial clear is never presented as an
+empty cache.
 
 ## Dedicated-server data flow
 
@@ -447,6 +508,9 @@ The configuration schema is versioned. Unknown keys are preserved so an older
 binary does not destroy settings it does not understand; a newer schema version
 is refused instead of guessed at. `App::mutate_config` commits an in-memory
 change only after the atomic write succeeds.
+
+Configuration holds settings and never cache contents: what the launcher happens
+to have downloaded is a fact about the filesystem, not a preference.
 
 Errors are typed by domain and composed through `CoreError`. User-visible text
 uses Fluent message IDs and typed arguments, while paths, versions, hashes, and

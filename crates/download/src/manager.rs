@@ -35,15 +35,12 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
 
 use crate::allowlist::{UrlPolicyError, check_transport, redacted};
+use crate::cache::PART_SUFFIX;
 use crate::client::{HttpConfig, build_client};
 use crate::error::{ArtifactStep, AttemptFailure, DownloadError};
 use crate::progress::{ByteTally, OperationReporter};
 use crate::retry::{RetryPolicy, retry_after};
 use crate::verify::HashVerifier;
-
-/// Suffix for in-flight downloads. Kept in the destination directory so the
-/// finalizing rename is a same-filesystem operation.
-const PART_SUFFIX: &str = "part";
 
 /// The longest filename Ephervex generates for its own scratch files.
 ///

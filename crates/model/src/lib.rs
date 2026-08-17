@@ -6,6 +6,7 @@
 
 pub mod account;
 pub mod app;
+pub mod cache;
 pub mod hash;
 pub mod ids;
 pub mod instance;
@@ -18,6 +19,11 @@ pub mod storage;
 
 pub use account::AccountKind;
 pub use app::{APP_ID, APP_NAME, APP_URL, APP_VERSION, user_agent};
+pub use cache::{
+    ARTIFACT_CACHE_LIMIT_PRESETS, ArtifactCacheLimit, ArtifactCacheLimitError, ByteUnit,
+    CLEANUP_TARGET_PERCENT, DEFAULT_ARTIFACT_CACHE_LIMIT_BYTES, GIB, KIB,
+    MAX_ARTIFACT_CACHE_LIMIT_BYTES, MIB, TIB, format_binary_bytes,
+};
 pub use hash::{Hash, HashAlgorithm};
 pub use ids::{InstanceId, OperationId, ServerId};
 pub use instance::{AttentionReason, ImportSourceKind, InstanceKind};

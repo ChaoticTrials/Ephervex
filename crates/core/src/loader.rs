@@ -182,6 +182,24 @@ impl App {
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<LoaderVersionChange> {
+        self.with_artifact_cache(Box::pin(self.change_loader_version_holding_the_cache(
+            instance,
+            exact,
+            accept_incompatible_mods,
+            reporter,
+            cancel,
+        )))
+        .await
+    }
+
+    async fn change_loader_version_holding_the_cache(
+        &self,
+        instance: InstanceId,
+        exact: &str,
+        accept_incompatible_mods: bool,
+        reporter: &OperationReporter,
+        cancel: &CancellationToken,
+    ) -> CoreResult<LoaderVersionChange> {
         let plan = self.plan_loader_version_change(instance, exact).await?;
         let mut record = self.client(instance)?;
 

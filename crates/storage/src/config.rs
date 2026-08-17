@@ -19,7 +19,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use ephervex_model::{AccountKind, OperatorPermissionLevel};
+use ephervex_model::{
+    AccountKind, ArtifactCacheLimit, DEFAULT_ARTIFACT_CACHE_LIMIT_BYTES, OperatorPermissionLevel,
+};
 
 use crate::paths::{PathError, Paths};
 
@@ -413,6 +415,88 @@ pub enum AccountLookup {
     Ambiguous { matches: usize },
 }
 
+/// Whether the shared reusable artifact cache has a byte budget at all.
+///
+/// A mode beside the byte count rather than a sentinel inside it. `0` and
+/// `u64::MAX` are both arithmetically valid budgets, so encoding "no limit" as
+/// either would mean every reader has to remember which number is not a number.
+/// Keeping them separate also lets the file remember the byte value a user had
+/// configured while they try Unlimited, so switching back restores it instead of
+/// silently resetting to the default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactCacheLimitMode {
+    #[default]
+    Limited,
+    Unlimited,
+}
+
+/// How much disk the disposable caches may use.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CacheConfig {
+    pub artifact_limit_mode: ArtifactCacheLimitMode,
+    /// The budget in bytes, always. Not mebibytes, not gibibytes: a unit is a
+    /// presentation choice, and storing one would make the file's meaning depend
+    /// on which screen last wrote it.
+    pub artifact_limit_bytes: u64,
+    /// Keys this build does not know about. See [`Config::unknown`].
+    #[serde(flatten)]
+    pub unknown: toml::Table,
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            artifact_limit_mode: ArtifactCacheLimitMode::Limited,
+            artifact_limit_bytes: DEFAULT_ARTIFACT_CACHE_LIMIT_BYTES,
+            unknown: toml::Table::new(),
+        }
+    }
+}
+
+impl CacheConfig {
+    /// The typed budget this table describes.
+    ///
+    /// A byte count the type refuses — a hand-edited zero, say — degrades to the
+    /// default rather than failing the whole configuration load, for the same
+    /// reason [`Config::active_account`] does: one implausible value in a file
+    /// full of deliberate settings should cost the user that value, not all of
+    /// them.
+    #[must_use]
+    pub fn artifact_limit(&self) -> ArtifactCacheLimit {
+        match self.artifact_limit_mode {
+            ArtifactCacheLimitMode::Unlimited => ArtifactCacheLimit::Unlimited,
+            ArtifactCacheLimitMode::Limited => {
+                ArtifactCacheLimit::from_bytes(self.artifact_limit_bytes).unwrap_or_else(|error| {
+                    tracing::warn!(
+                        bytes = self.artifact_limit_bytes,
+                        %error,
+                        "the configured artifact cache limit is not usable; using the default"
+                    );
+                    ArtifactCacheLimit::default()
+                })
+            }
+        }
+    }
+
+    /// Records a budget.
+    ///
+    /// Switching to Unlimited keeps the byte value, so turning the limit back on
+    /// returns the user to the number they chose.
+    pub const fn set_artifact_limit(&mut self, limit: ArtifactCacheLimit) {
+        match limit {
+            ArtifactCacheLimit::Limited(bytes) => {
+                self.artifact_limit_mode = ArtifactCacheLimitMode::Limited;
+                self.artifact_limit_bytes = bytes;
+            }
+            ArtifactCacheLimit::Unlimited => {
+                self.artifact_limit_mode = ArtifactCacheLimitMode::Unlimited;
+            }
+        }
+    }
+}
+
 /// Recorded Minecraft EULA workflow.
 ///
 /// The launcher must never claim on the user's behalf that they accepted the
@@ -458,6 +542,10 @@ pub struct Config {
     pub server_defaults: ServerDefaults,
     pub eula: EulaConfig,
     pub api: ApiConfig,
+    /// Budgets for the disposable caches. Never cache *contents* — those are
+    /// files under the cache root, and configuration is not where a launcher
+    /// records what it happens to have downloaded.
+    pub cache: CacheConfig,
     /// Non-secret metadata for accounts that have signed in, keyed by profile
     /// UUID.
     ///
@@ -487,6 +575,7 @@ impl Default for Config {
             server_defaults: ServerDefaults::default(),
             eula: EulaConfig::default(),
             api: ApiConfig::default(),
+            cache: CacheConfig::default(),
             accounts: BTreeMap::new(),
             unknown: toml::Table::new(),
         }
@@ -800,6 +889,7 @@ impl Config {
             // CurseForge key into, since that is where the settings screen
             // shows the field.
             .or_else(|| find_secret_key(&self.api.unknown, "api").map(|found| found.reported))
+            .or_else(|| find_secret_key(&self.cache.unknown, "cache").map(|found| found.reported))
             .or_else(|| {
                 self.minecraft_preferences
                     .keys()
@@ -822,6 +912,7 @@ impl Config {
             (&mut self.server_defaults.unknown, "server_defaults"),
             (&mut self.eula.unknown, "eula"),
             (&mut self.api.unknown, "api"),
+            (&mut self.cache.unknown, "cache"),
         ] {
             while let Some(found) = find_secret_key(table, prefix) {
                 // The key can itself contain credential material, so neither
@@ -970,6 +1061,81 @@ reference = ""
         let parsed = Config::from_toml_str(DEFAULT_CONFIG_EXAMPLE)
             .expect("the default configuration example must parse");
         assert_eq!(parsed, Config::default());
+    }
+
+    #[test]
+    fn a_configuration_file_written_before_cache_budgets_gets_the_ten_gibibyte_default() {
+        // The example above deliberately has no `[cache]` table, which is
+        // exactly what a file written by an earlier build looks like.
+        assert!(!DEFAULT_CONFIG_EXAMPLE.contains("[cache]"));
+        let parsed = Config::from_toml_str(DEFAULT_CONFIG_EXAMPLE).expect("parse");
+        assert_eq!(
+            parsed.cache.artifact_limit(),
+            ArtifactCacheLimit::Limited(10 * 1024 * 1024 * 1024)
+        );
+        assert_eq!(
+            parsed.cache.artifact_limit_mode,
+            ArtifactCacheLimitMode::Limited
+        );
+    }
+
+    #[test]
+    fn a_large_custom_cache_budget_round_trips_through_the_settings_file() {
+        for bytes in [
+            500 * 1024 * 1024 * 1024_u64,
+            1024 * 1024 * 1024 * 1024,
+            4 * 1024 * 1024 * 1024 * 1024,
+            ephervex_model::MAX_ARTIFACT_CACHE_LIMIT_BYTES,
+        ] {
+            let mut config = Config::default();
+            config
+                .cache
+                .set_artifact_limit(ArtifactCacheLimit::Limited(bytes));
+
+            let text = config.to_toml_string().expect("serialize");
+            let parsed = Config::from_toml_str(&text).expect("parse");
+            assert_eq!(
+                parsed.cache.artifact_limit(),
+                ArtifactCacheLimit::Limited(bytes),
+                "{bytes} bytes must survive a save and a load"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unlimited_cache_round_trips_and_remembers_the_previous_byte_value() {
+        let mut config = Config::default();
+        config
+            .cache
+            .set_artifact_limit(ArtifactCacheLimit::Limited(500 * 1024 * 1024 * 1024));
+        config
+            .cache
+            .set_artifact_limit(ArtifactCacheLimit::Unlimited);
+
+        let text = config.to_toml_string().expect("serialize");
+        let mut parsed = Config::from_toml_str(&text).expect("parse");
+        assert_eq!(parsed.cache.artifact_limit(), ArtifactCacheLimit::Unlimited);
+
+        // Turning the budget back on returns the number the user chose rather
+        // than resetting them to the default.
+        parsed.cache.artifact_limit_mode = ArtifactCacheLimitMode::Limited;
+        assert_eq!(
+            parsed.cache.artifact_limit(),
+            ArtifactCacheLimit::Limited(500 * 1024 * 1024 * 1024)
+        );
+    }
+
+    #[test]
+    fn an_implausible_hand_edited_cache_budget_degrades_to_the_default() {
+        for bytes in [0, 1, 1023] {
+            let text = format!("[cache]\nartifact_limit_bytes = {bytes}\n");
+            let parsed = Config::from_toml_str(&text).expect("the rest of the file still loads");
+            assert_eq!(
+                parsed.cache.artifact_limit(),
+                ArtifactCacheLimit::default(),
+                "{bytes} is not a usable budget"
+            );
+        }
     }
 
     #[test]

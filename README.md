@@ -19,7 +19,9 @@ optimizes for controlled, disposable reproductions.
 * **Exact selections.** Minecraft, loader, mod, and pack versions are never
   silently upgraded, downgraded, or approximated.
 * **Shared verified artifacts.** Game JARs, libraries, assets, loader files,
-  mods, and managed runtimes are cached and verified before publication.
+  mods, and managed runtimes are cached and verified before publication. The
+  reusable download cache has a configurable byte budget, 10 GiB by default, and
+  clearing it only costs a re-download.
 * **Untrusted imports stay untrusted.** Archive paths, download addresses, and
   executable customizations are validated or refused rather than trusted.
 * **Reproduction environments can include servers.** A client instance can have

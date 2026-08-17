@@ -602,6 +602,20 @@ impl App {
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<LinkedModOutcome> {
+        self.with_artifact_cache(Box::pin(self.apply_linked_mod_operation_holding_the_cache(
+            client, request, servers, reporter, cancel,
+        )))
+        .await
+    }
+
+    async fn apply_linked_mod_operation_holding_the_cache(
+        &self,
+        client: InstanceId,
+        request: &LinkedModRequest,
+        servers: &[ServerId],
+        reporter: &OperationReporter,
+        cancel: &CancellationToken,
+    ) -> CoreResult<LinkedModOutcome> {
         let (outcome, root, release) = self
             .apply_client_half(client, request, reporter, cancel)
             .await?;

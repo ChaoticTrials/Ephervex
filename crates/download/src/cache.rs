@@ -87,7 +87,61 @@ impl ContentStore {
             Self::Natives => "natives",
         }
     }
+
+    /// Whether this store holds nothing but finalized, hash-addressed artifacts
+    /// that can be fetched again from their source.
+    ///
+    /// This is the predicate the artifact-cache budget is defined over, and it
+    /// is deliberately narrow. The other stores are excluded for reasons that
+    /// are about *ownership*, not about size:
+    ///
+    /// * [`Self::Libraries`] is addressed by Maven coordinate and a retained
+    ///   server's own `libraries` directory is a link to it, so an entry there
+    ///   is part of an installed workspace.
+    /// * [`Self::Assets`] is the directory a running game is handed as
+    ///   `--assetsDir`, in Mojang's own layout rather than this launcher's.
+    /// * [`Self::Natives`] is derived by unpacking rather than downloaded, and
+    ///   holds directories rather than verified artifacts.
+    /// * [`Self::Metadata`] carries provider documents and their freshness
+    ///   envelopes: state, not artifacts.
+    /// * [`Self::Artwork`] is keyed by provider and project because no provider
+    ///   publishes a hash for an icon, so its entries are not verified
+    ///   artifacts at all.
+    #[must_use]
+    pub const fn holds_reusable_artifacts(self) -> bool {
+        match self {
+            Self::Downloads | Self::InstallerCache => true,
+            Self::Assets | Self::Libraries | Self::Metadata | Self::Artwork | Self::Natives => {
+                false
+            }
+        }
+    }
 }
+
+/// A finalized entry recognized under a content-addressed store.
+///
+/// Produced by [`CacheLayout::recognize_content`], which is the exact inverse of
+/// [`CacheLayout::content`]. Having the two in one module is the point: a
+/// collector that recognized entries by pattern-matching strings of its own
+/// would drift away from the writer the first time the layout changed, and the
+/// consequence of drifting is either an unswept store or a deleted file nobody
+/// meant to delete.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContentAddress {
+    pub hash: Hash,
+    pub extension: Option<FileExtension>,
+}
+
+/// The extension that marks a transfer in flight rather than a finished
+/// artifact.
+///
+/// Owned here, beside the layout it appears in, because two pieces of code
+/// depend on it meaning the same thing: [`crate::DownloadManager`] writes a
+/// partial download to a sibling carrying this suffix, and
+/// [`CacheLayout::recognize_content`] refuses to call such a sibling a finalized
+/// entry. If those two ever disagreed, maintenance could delete bytes a transfer
+/// was still writing.
+pub const PART_SUFFIX: &str = "part";
 
 /// The one format cached artwork is ever stored in.
 ///
@@ -450,6 +504,58 @@ impl CacheLayout {
             .join(prefix)
             .join(filename)
     }
+
+    /// Recognizes the three path components [`CacheLayout::content`] generates.
+    ///
+    /// `None` means "this is not one of ours". Everything a caller could
+    /// otherwise be tempted to guess about is checked here: the algorithm
+    /// directory has to be one this build writes, the shard has to be the
+    /// digest's own first two characters, the digest has to be canonical
+    /// lowercase hex of the algorithm's exact length, and a suffix has to be a
+    /// [`FileExtension`] that is already in the normalized form `content`
+    /// emits.
+    ///
+    /// A suffix that begins with [`PART_SUFFIX`] is refused outright, so a
+    /// transfer in flight can never be mistaken for something finished no matter
+    /// how the unique half of its name is generated.
+    #[must_use]
+    pub fn recognize_content(
+        algorithm: &str,
+        shard: &str,
+        file_name: &str,
+    ) -> Option<ContentAddress> {
+        let algorithm = HashAlgorithm::ALL
+            .into_iter()
+            .find(|candidate| candidate.to_string() == algorithm)?;
+
+        // Split at the first dot, because an extension may itself contain one
+        // (`tar.gz`) while a hex digest never can.
+        let (digest, suffix) = match file_name.split_once('.') {
+            Some((digest, suffix)) => (digest, Some(suffix)),
+            None => (file_name, None),
+        };
+
+        let hash = Hash::new(algorithm, digest)?;
+        // `Hash::new` normalizes; requiring the name to survive that unchanged
+        // is what rejects a mixed-case duplicate of a real entry.
+        if hash.digest() != digest || !digest.starts_with(shard) || shard.len() != 2 {
+            return None;
+        }
+
+        let extension = match suffix {
+            Some(suffix) => {
+                let extension = FileExtension::new(suffix).ok()?;
+                if extension.as_str() != suffix
+                    || extension.as_str().split('.').next() == Some(PART_SUFFIX)
+                {
+                    return None;
+                }
+                Some(extension)
+            }
+            None => None,
+        };
+        Some(ContentAddress { hash, extension })
+    }
 }
 
 #[cfg(test)]
@@ -525,6 +631,83 @@ mod tests {
             path,
             PathBuf::from(format!("/cache/ephervex/installer-cache/sha1/da/{SHA1}"))
         );
+    }
+
+    #[test]
+    fn recognition_is_the_exact_inverse_of_the_generated_content_path() {
+        let extension = FileExtension::new("tar.gz").expect("safe extension");
+        for suffix in [None, Some(&extension)] {
+            let path = layout().content(ContentStore::Downloads, &sha1(), suffix);
+            let mut components = path.components().rev();
+            let file_name = components.next().expect("file name");
+            let shard = components.next().expect("shard");
+            let algorithm = components.next().expect("algorithm");
+
+            let recognized = CacheLayout::recognize_content(
+                algorithm.as_os_str().to_str().expect("utf-8"),
+                shard.as_os_str().to_str().expect("utf-8"),
+                file_name.as_os_str().to_str().expect("utf-8"),
+            )
+            .expect("a generated path must be recognized");
+            assert_eq!(recognized.hash, sha1());
+            assert_eq!(recognized.extension.as_ref(), suffix);
+        }
+    }
+
+    #[test]
+    fn a_transfer_in_flight_is_not_a_recognized_finalized_entry() {
+        let part = format!("{SHA1}.jar.part.{}", "0".repeat(32));
+        assert_eq!(
+            CacheLayout::recognize_content("sha1", "da", &part),
+            None,
+            "a partial download must never look like a finalized artifact"
+        );
+        assert_eq!(
+            CacheLayout::recognize_content("sha1", "da", &format!("{SHA1}.part.abc")),
+            None
+        );
+    }
+
+    #[test]
+    fn nothing_but_a_canonical_content_entry_is_recognized() {
+        let cases = [
+            ("md5", "da", SHA1.to_owned()),
+            ("sha1", "da", SHA1.to_ascii_uppercase()),
+            ("sha1", "ab", SHA1.to_owned()),
+            ("sha1", "d", SHA1.to_owned()),
+            ("sha1", "da", format!("{SHA1}0")),
+            ("sha1", "da", SHA1[..39].to_owned()),
+            ("sha1", "da", format!("{SHA1}.JAR")),
+            ("sha1", "da", format!("{SHA1}.")),
+            ("sha1", "da", format!("{SHA1}.a/b")),
+            ("sha1", "da", String::new()),
+            ("sha512", "da", SHA1.to_owned()),
+        ];
+        for (algorithm, shard, file_name) in cases {
+            assert_eq!(
+                CacheLayout::recognize_content(algorithm, shard, &file_name),
+                None,
+                "`{algorithm}/{shard}/{file_name}` should not be recognized"
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_hash_addressed_download_stores_hold_reusable_artifacts() {
+        assert!(ContentStore::Downloads.holds_reusable_artifacts());
+        assert!(ContentStore::InstallerCache.holds_reusable_artifacts());
+        for excluded in [
+            ContentStore::Assets,
+            ContentStore::Libraries,
+            ContentStore::Metadata,
+            ContentStore::Artwork,
+            ContentStore::Natives,
+        ] {
+            assert!(
+                !excluded.holds_reusable_artifacts(),
+                "{excluded:?} is not a disposable artifact store"
+            );
+        }
     }
 
     #[test]

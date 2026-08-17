@@ -140,6 +140,21 @@ impl App {
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<ImportedPack> {
+        // An import fetches pack files into the shared cache and then copies
+        // each one into the instance, so it must hold the artifact-cache lease
+        // across both halves.
+        self.with_artifact_cache(Box::pin(
+            self.import_pack_holding_the_cache(request, reporter, cancel),
+        ))
+        .await
+    }
+
+    async fn import_pack_holding_the_cache(
+        &self,
+        request: &ImportRequest,
+        reporter: &OperationReporter,
+        cancel: &CancellationToken,
+    ) -> CoreResult<ImportedPack> {
         // Everything that can refuse the pack runs before the instance exists.
         let (mut archive, analysis) = Self::open_pack(&request.archive)?;
 

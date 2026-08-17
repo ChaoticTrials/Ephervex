@@ -56,6 +56,7 @@
 //! ```
 
 pub mod allowlist;
+pub mod artifact_cache;
 pub mod cache;
 pub mod client;
 pub mod error;
@@ -68,9 +69,14 @@ pub mod verify;
 pub use allowlist::{
     DomainAllowlist, MODRINTH_PACK_HOSTS, UrlPolicyError, check_transport, redacted,
 };
+pub use artifact_cache::{
+    ArtifactCache, ArtifactCacheError, ArtifactCacheLease, ArtifactCacheMaintenance,
+    ArtifactCacheUsage, MAINTENANCE_LOCK_FILE, MaintenanceStage, MaintenanceTrouble,
+    reusable_artifact_stores,
+};
 pub use cache::{
-    ARTWORK_FORMAT, CacheKeyError, CacheLayout, ContentStore, FileExtension, MavenConflictKey,
-    MavenCoordinate,
+    ARTWORK_FORMAT, CacheKeyError, CacheLayout, ContentAddress, ContentStore, FileExtension,
+    MavenConflictKey, MavenCoordinate, PART_SUFFIX,
 };
 pub use client::{HttpConfig, build_client};
 pub use error::{ArtifactStep, DownloadError};

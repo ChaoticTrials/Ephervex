@@ -18,6 +18,13 @@ pub enum HashAlgorithm {
 }
 
 impl HashAlgorithm {
+    /// Every algorithm this build can verify.
+    ///
+    /// Exists so code that has to recognize an algorithm from its own on-disk
+    /// spelling can iterate the set instead of hand-listing it and going stale
+    /// the next time one is added.
+    pub const ALL: [Self; 3] = [Self::Sha1, Self::Sha256, Self::Sha512];
+
     /// Length of the hex-encoded digest.
     #[must_use]
     pub const fn hex_len(self) -> usize {

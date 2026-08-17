@@ -150,8 +150,17 @@ impl App {
                 observer: observer.clone(),
             }),
         );
-        self.launch_operation(instance, options, observer, cancel, &reporter)
-            .await
+        // A launch installs artifacts into the shared cache and then hands their
+        // paths to a JVM, so the lease has to survive until the game has exited.
+        // Spelled out rather than routed through `App::with_artifact_cache`
+        // because the work borrows `self` mutably; the order is identical.
+        let lease = self.artifact_cache_lease().await?;
+        let outcome = self
+            .launch_operation(instance, options, observer, cancel, &reporter)
+            .await;
+        drop(lease);
+        self.maintain_artifact_cache().await;
+        outcome
     }
 
     #[instrument(

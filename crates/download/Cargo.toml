@@ -14,6 +14,11 @@ workspace = true
 [dependencies]
 ephervex-model.workspace = true
 reqwest.workspace = true
+# `flock` for the artifact-cache maintenance lock. A kernel advisory lock is
+# what makes the lock correct across processes *and* self-releasing: a launcher
+# that is killed mid-collection leaves no stale lock behind for the next run to
+# reason about.
+rustix.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 futures-util.workspace = true
