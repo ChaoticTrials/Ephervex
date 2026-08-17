@@ -9,9 +9,9 @@ use ephervex_model::{
     Hash, HashAlgorithm, ImportSourceKind, LoaderKind, LoaderSelection, ModOrigin, ModProvider,
 };
 use ephervex_pack::{
-    OptionalSelection, OverrideLayer, OverrideScope, PackError, PackFileRecipe, PackRecipe,
-    ProviderFileIdentity, ProviderRecipeMetadata, RECIPE_VERSION, ServerMaterializeRequest,
-    SideRequirement, SourceStore, materialize_server_recipe,
+    ArtifactFetch, OptionalSelection, OverrideLayer, OverrideScope, PackError, PackFileRecipe,
+    PackRecipe, ProviderFileIdentity, ProviderRecipeMetadata, RECIPE_VERSION,
+    ServerMaterializeRequest, SideRequirement, SourceStore, materialize_server_recipe,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -130,6 +130,7 @@ fn recipe() -> (PackRecipe, Vec<Vec<u8>>) {
             source_kind: ImportSourceKind::ModrinthPack,
             original_name: "Retained Test Pack".to_owned(),
             original_version: Some("exact-pack-version".to_owned()),
+            author: None,
             summary: None,
             archive_name: Some("deleted.mrpack".to_owned()),
             minecraft_version: "1.20.1".to_owned(),
@@ -179,10 +180,13 @@ async fn reconstruct(
         game_dir: game,
         client_source_dir: client_source,
         server_source_dir: server_source,
-        manager: &manager,
-        cache,
-        reporter: &OperationReporter::silent("server-reconstruction-test"),
-        cancel: &CancellationToken::new(),
+        fetch: ArtifactFetch {
+            manager: &manager,
+            cache,
+            authenticated: None,
+            reporter: &OperationReporter::silent("server-reconstruction-test"),
+            cancel: &CancellationToken::new(),
+        },
     })
     .await
 }

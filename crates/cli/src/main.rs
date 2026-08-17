@@ -3694,14 +3694,26 @@ fn print_analysis(analysis: &PackAnalysis, json: bool) {
     if let Some(version) = &analysis.recipe.original_version {
         println!("version:   {version}");
     }
+    if let Some(author) = analysis.author() {
+        println!("author:    {author}");
+    }
     println!("source:    {}", analysis.format);
     println!("minecraft: {}", analysis.minecraft_version());
     println!("loader:    {}", analysis.loader());
     println!(
         "files:     {} required, {} optional",
         analysis.required_file_count(PackSide::Client),
-        analysis.optional_components(PackSide::Client).len()
+        analysis.optional_file_count(PackSide::Client)
     );
+    if analysis.needs_provider_resolution() {
+        // The counts above come from the pack's own manifest. Which files they
+        // are is a question only the provider can answer, and answering it
+        // needs the key.
+        println!(
+            "blocked:   a {} API key is required before these files can be listed",
+            analysis.format
+        );
+    }
     for component in analysis.optional_components(PackSide::Client) {
         println!(
             "optional:  {} [{}]",
@@ -3856,7 +3868,10 @@ fn analysis_json(analysis: &PackAnalysis) -> serde_json::Value {
                 "kind": analysis.loader().kind.to_string(),
                 "version": analysis.loader().version,
             },
+            "author": analysis.author(),
             "required_files": analysis.required_file_count(PackSide::Client),
+            "optional_file_count": analysis.optional_file_count(PackSide::Client),
+            "needs_provider_resolution": analysis.needs_provider_resolution(),
             "optional_files": analysis
     .optional_components(PackSide::Client)
     .iter()

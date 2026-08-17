@@ -23,8 +23,9 @@ use ephervex_model::{
     ArtifactCacheLimit, Hash, HashAlgorithm, LoaderKind, LoaderSelection, ModOrigin,
 };
 use ephervex_pack::{
-    FileInstall, OptionalSelection, PackFileRecipe, PackRecipe, PackSide, ServerMaterializeRequest,
-    SideRequirement, SourceStore, install_files, materialize_server_recipe,
+    ArtifactFetch, FileInstall, OptionalSelection, PackFileRecipe, PackRecipe, PackSide,
+    ServerMaterializeRequest, SideRequirement, SourceStore, install_files,
+    materialize_server_recipe,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -103,10 +104,13 @@ async fn a_mod_installed_into_a_client_instance_survives_eviction_of_its_cache_e
         side: PackSide::Client,
         selection: &OptionalSelection::default(),
         game_dir: &game_dir,
-        manager: &manager(),
-        cache: &layout,
-        reporter: &reporter(),
-        cancel: &CancellationToken::new(),
+        fetch: ArtifactFetch {
+            manager: &manager(),
+            cache: &layout,
+            authenticated: None,
+            reporter: &reporter(),
+            cancel: &CancellationToken::new(),
+        },
     })
     .await
     .expect("the cached artifact installs without a network");
@@ -150,10 +154,13 @@ async fn a_reconstructed_server_survives_a_full_clear_of_the_reusable_cache() {
         game_dir: &server_game,
         client_source_dir: &client_source,
         server_source_dir: &server_source,
-        manager: &manager(),
-        cache: &layout,
-        reporter: &reporter(),
-        cancel: &CancellationToken::new(),
+        fetch: ArtifactFetch {
+            manager: &manager(),
+            cache: &layout,
+            authenticated: None,
+            reporter: &reporter(),
+            cancel: &CancellationToken::new(),
+        },
     })
     .await
     .expect("the server reconstructs from the cache alone");

@@ -1,0 +1,18 @@
+{
+  "minecraft": {
+    "version": "1.20.1",
+    "modLoaders": [
+      {
+        "id": "neoforge-20.4.190",
+        "primary": true
+      }
+    ]
+  },
+  "manifestType": "minecraftModpack",
+  "manifestVersion": 1,
+  "name": "Overrides Only",
+  "version": "1.0.0",
+  "author": "A Reporter",
+  "files": [],
+  "overrides": "overrides"
+}

@@ -36,10 +36,11 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use ephervex_download::{
-    CacheLayout, ContentStore, DownloadManager, DownloadRequest, FileExtension, OperationReporter,
-    Url, UrlPolicyError,
+    AuthenticatedSource, CacheLayout, ContentStore, DownloadManager, DownloadRequest,
+    FileExtension, OperationReporter, Url, UrlPolicyError,
 };
 use ephervex_model::Hash;
 use tokio_util::sync::CancellationToken;
@@ -69,6 +70,30 @@ pub struct MaterializedFiles {
     pub bytes: u64,
 }
 
+/// Everything one operation needs to put a verified artifact in the shared
+/// cache.
+///
+/// Grouped because these five always travel together and are meaningless apart:
+/// where artifacts go, who fetches them, what credential this operation may
+/// spend, and how progress and cancellation are reported. Passing them as one
+/// value is also what keeps a new one — `authenticated` was the last — from
+/// growing every signature between here and the download manager.
+#[derive(Debug, Clone, Copy)]
+pub struct ArtifactFetch<'a> {
+    pub manager: &'a DownloadManager,
+    pub cache: &'a CacheLayout,
+    /// The credential this operation's artifact requests may carry.
+    ///
+    /// `None` for every source that publishes its files openly, which is all of
+    /// them but one. A source that needs one supplies it here rather than
+    /// having it installed on the download manager, so an unauthenticated
+    /// Mojang or Modrinth request made through the same manager cannot inherit
+    /// it.
+    pub authenticated: Option<&'a Arc<AuthenticatedSource>>,
+    pub reporter: &'a OperationReporter,
+    pub cancel: &'a CancellationToken,
+}
+
 /// One request to install a side's pack files.
 ///
 /// A struct rather than a long argument list, matching `ephervex-loaders`'
@@ -82,10 +107,7 @@ pub struct FileInstall<'a> {
     pub selection: &'a OptionalSelection,
     /// The directory the game runs in. Pack file paths are relative to it.
     pub game_dir: &'a Path,
-    pub manager: &'a DownloadManager,
-    pub cache: &'a CacheLayout,
-    pub reporter: &'a OperationReporter,
-    pub cancel: &'a CancellationToken,
+    pub fetch: ArtifactFetch<'a>,
 }
 
 /// One linked-server reconstruction request.
@@ -97,10 +119,7 @@ pub struct ServerMaterializeRequest<'a> {
     pub game_dir: &'a Path,
     pub client_source_dir: &'a Path,
     pub server_source_dir: &'a Path,
-    pub manager: &'a DownloadManager,
-    pub cache: &'a CacheLayout,
-    pub reporter: &'a OperationReporter,
-    pub cancel: &'a CancellationToken,
+    pub fetch: ArtifactFetch<'a>,
 }
 
 /// What reconstructing a linked server from retained desired state produced.
@@ -123,23 +142,11 @@ pub async fn install_files(request: FileInstall<'_>) -> PackResult<MaterializedF
         side,
         selection,
         game_dir,
-        manager,
-        cache,
-        reporter,
-        cancel,
+        fetch,
     } = request;
 
     let wanted = recipe.files_for(side, selection);
-    install_selected_files(
-        &recipe.files,
-        &wanted,
-        game_dir,
-        manager,
-        cache,
-        reporter,
-        cancel,
-    )
-    .await
+    install_selected_files(&recipe.files, &wanted, game_dir, fetch).await
 }
 
 /// Reconstructs server-applicable content without reading the source archive
@@ -158,10 +165,7 @@ pub async fn materialize_server_recipe(
         game_dir,
         client_source_dir,
         server_source_dir,
-        manager,
-        cache,
-        reporter,
-        cancel,
+        fetch,
     } = request;
     let plan = recipe.server_reconstruction_plan(confirmed_unknown)?;
     for layer in &plan.layers {
@@ -178,16 +182,7 @@ pub async fn materialize_server_recipe(
         )?;
     }
 
-    let files = install_selected_files(
-        &recipe.files,
-        &plan.files,
-        game_dir,
-        manager,
-        cache,
-        reporter,
-        cancel,
-    )
-    .await?;
+    let files = install_selected_files(&recipe.files, &plan.files, game_dir, fetch).await?;
     let client_store = SourceStore::new(client_source_dir);
     let layers = apply_retained_overrides(&client_store, recipe, PackSide::Server, game_dir)?;
     remove_retained_eula(game_dir)?;
@@ -252,11 +247,9 @@ async fn install_selected_files(
     all: &[PackFileRecipe],
     wanted: &[&PackFileRecipe],
     game_dir: &Path,
-    manager: &DownloadManager,
-    cache: &CacheLayout,
-    reporter: &OperationReporter,
-    cancel: &CancellationToken,
+    fetch: ArtifactFetch<'_>,
 ) -> PackResult<MaterializedFiles> {
+    let cancel = fetch.cancel;
     preflight_destinations(wanted, game_dir)?;
     let mut report = MaterializedFiles {
         skipped: all
@@ -270,7 +263,7 @@ async fn install_selected_files(
         return Ok(report);
     }
 
-    let outcomes = fetch_all(wanted, cache, manager, reporter, cancel).await?;
+    let outcomes = fetch_all(wanted, fetch).await?;
 
     for (file, outcome) in wanted.iter().zip(outcomes.iter()) {
         if cancel.is_cancelled() {
@@ -346,17 +339,18 @@ fn preflight_destinations(wanted: &[&PackFileRecipe], game_dir: &Path) -> PackRe
 /// Returns outcomes positionally matching `files`.
 pub(crate) async fn fetch_all(
     files: &[&PackFileRecipe],
-    cache: &CacheLayout,
-    manager: &DownloadManager,
-    reporter: &OperationReporter,
-    cancel: &CancellationToken,
+    fetch: ArtifactFetch<'_>,
 ) -> PackResult<Vec<ephervex_download::DownloadOutcome>> {
     let requests: Vec<DownloadRequest> = files
         .iter()
-        .map(|file| primary_request(file, cache))
+        .map(|file| primary_request(file, fetch))
         .collect::<PackResult<_>>()?;
 
-    match manager.download_all(&requests, reporter, cancel).await {
+    match fetch
+        .manager
+        .download_all(&requests, fetch.reporter, fetch.cancel)
+        .await
+    {
         Ok(outcomes) => Ok(outcomes),
         Err(error) if error.is_cancellation() => Err(PackError::Canceled),
         Err(error) => {
@@ -364,30 +358,33 @@ pub(crate) async fn fetch_all(
                 %error,
                 "a download failed; retrying each file against its remaining addresses"
             );
-            fetch_one_by_one(files, cache, manager, reporter, cancel).await
+            fetch_one_by_one(files, fetch).await
         }
     }
 }
 
 /// One download request per file, using its first permitted address.
-fn primary_request(file: &PackFileRecipe, cache: &CacheLayout) -> PackResult<DownloadRequest> {
+fn primary_request(file: &PackFileRecipe, fetch: ArtifactFetch<'_>) -> PackResult<DownloadRequest> {
     let address = file
         .downloads
         .first()
         .ok_or_else(|| PackError::FileDownloadsMissing {
             path: file.display_name(),
         })?;
-    request_for(file, address, cache)
+    request_for(file, address, fetch)
 }
 
 /// Builds a verified request for one address.
 fn request_for(
     file: &PackFileRecipe,
     address: &str,
-    cache: &CacheLayout,
+    fetch: ArtifactFetch<'_>,
 ) -> PackResult<DownloadRequest> {
     let hash = strongest_hash(file)?;
-    let destination = cache.content(ContentStore::Downloads, hash, extension_of(file).as_ref());
+    let destination =
+        fetch
+            .cache
+            .content(ContentStore::Downloads, hash, extension_of(file).as_ref());
 
     // The provider parser has already applied its domain allowlist. Parse the
     // serialized recipe value without repeating the downloader's transport
@@ -406,6 +403,11 @@ fn request_for(
         .labeled(file.display_name());
     if let Some(size) = file.size {
         request = request.sized(size);
+    }
+    if let Some(source) = fetch.authenticated {
+        // The source decides whether this particular address may receive the
+        // credential; attaching it here only offers it.
+        request = request.authenticated_by(Arc::clone(source));
     }
     Ok(request)
 }
@@ -438,11 +440,9 @@ fn extension_of(file: &PackFileRecipe) -> Option<FileExtension> {
 /// Fetches each file sequentially, trying every address it lists.
 async fn fetch_one_by_one(
     files: &[&PackFileRecipe],
-    cache: &CacheLayout,
-    manager: &DownloadManager,
-    reporter: &OperationReporter,
-    cancel: &CancellationToken,
+    fetch: ArtifactFetch<'_>,
 ) -> PackResult<Vec<ephervex_download::DownloadOutcome>> {
+    let cancel = fetch.cancel;
     let mut outcomes = Vec::with_capacity(files.len());
     for file in files {
         if cancel.is_cancelled() {
@@ -456,8 +456,12 @@ async fn fetch_one_by_one(
         let mut last_error = None;
         let mut fetched = None;
         for address in &file.downloads {
-            let request = request_for(file, address, cache)?;
-            match manager.download(&request, reporter, cancel).await {
+            let request = request_for(file, address, fetch)?;
+            match fetch
+                .manager
+                .download(&request, fetch.reporter, cancel)
+                .await
+            {
                 Ok(outcome) => {
                     fetched = Some(outcome);
                     break;
@@ -887,12 +891,34 @@ mod tests {
         }
     }
 
+    /// A fetch context that never touches the network, for building requests.
+    fn offline_fetch<'a>(
+        manager: &'a DownloadManager,
+        cache: &'a CacheLayout,
+        reporter: &'a OperationReporter,
+        cancel: &'a CancellationToken,
+        authenticated: Option<&'a Arc<AuthenticatedSource>>,
+    ) -> ArtifactFetch<'a> {
+        ArtifactFetch {
+            manager,
+            cache,
+            authenticated,
+            reporter,
+            cancel,
+        }
+    }
+
     #[test]
     fn a_cache_path_is_derived_from_the_strongest_hash_and_never_from_the_url() {
         // a remote server does not get to choose where a file
         // lands. The destination comes from the hash the pack published.
         let cache = CacheLayout::new("/cache/ephervex");
-        let request = primary_request(&file("mods/some mod.jar"), &cache).expect("request");
+        let manager =
+            DownloadManager::new(ephervex_download::DownloaderConfig::default()).expect("manager");
+        let reporter = OperationReporter::silent("test");
+        let cancel = CancellationToken::new();
+        let fetch = offline_fetch(&manager, &cache, &reporter, &cancel, None);
+        let request = primary_request(&file("mods/some mod.jar"), fetch).expect("request");
         let destination = request.destination().to_string_lossy().into_owned();
 
         assert!(destination.starts_with("/cache/ephervex/downloads/sha512/cf/"));
@@ -904,18 +930,72 @@ mod tests {
             "the verifier checks both"
         );
         assert_eq!(request.expected_size(), Some(10));
+        assert!(
+            request.authenticated_source().is_none(),
+            "an open source's download carries no credential"
+        );
     }
 
     #[test]
     fn a_path_with_no_usable_extension_still_gets_a_cache_path() {
         let cache = CacheLayout::new("/cache/ephervex");
+        let manager =
+            DownloadManager::new(ephervex_download::DownloaderConfig::default()).expect("manager");
+        let reporter = OperationReporter::silent("test");
+        let cancel = CancellationToken::new();
         let mut entry = file("config/no-extension");
         entry.logical_path = PathBuf::from("config/no-extension");
-        let request = primary_request(&entry, &cache).expect("request");
+        let request = primary_request(
+            &entry,
+            offline_fetch(&manager, &cache, &reporter, &cancel, None),
+        )
+        .expect("request");
         assert!(
             request.destination().to_string_lossy().ends_with(SHA512),
             "an extension is cosmetic, not required"
         );
+    }
+
+    #[test]
+    fn an_operations_credential_reaches_the_request_it_belongs_to_and_no_other() {
+        // The cache path is still the content hash, and the credential rides
+        // along with the request rather than with the manager.
+        let cache = CacheLayout::new("/cache/ephervex");
+        let manager =
+            DownloadManager::new(ephervex_download::DownloaderConfig::default()).expect("manager");
+        let reporter = OperationReporter::silent("test");
+        let cancel = CancellationToken::new();
+        let source = Arc::new(AuthenticatedSource::new(
+            reqwest::header::HeaderName::from_static("x-api-key"),
+            ephervex_model::SecretString::new("test-key-do-not-use"),
+            ephervex_download::DomainAllowlist::curseforge_artifact_defaults(),
+        ));
+
+        let authenticated = primary_request(
+            &file("mods/a.jar"),
+            offline_fetch(&manager, &cache, &reporter, &cancel, Some(&source)),
+        )
+        .expect("request");
+        assert_eq!(
+            authenticated
+                .authenticated_source()
+                .map(|source| source.header().as_str()),
+            Some("x-api-key")
+        );
+        assert!(
+            authenticated
+                .destination()
+                .to_string_lossy()
+                .contains("downloads/sha512/"),
+            "the cache address is still the verified content hash"
+        );
+
+        let open = primary_request(
+            &file("mods/a.jar"),
+            offline_fetch(&manager, &cache, &reporter, &cancel, None),
+        )
+        .expect("request");
+        assert!(open.authenticated_source().is_none());
     }
 
     #[test]
@@ -925,6 +1005,7 @@ mod tests {
             source_kind: ImportSourceKind::ModrinthPack,
             original_name: "Test".to_owned(),
             original_version: None,
+            author: None,
             summary: None,
             archive_name: None,
             minecraft_version: "1.20.1".to_owned(),

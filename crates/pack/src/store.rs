@@ -232,6 +232,7 @@ mod tests {
             source_kind: ImportSourceKind::ModrinthPack,
             original_name: "Test Pack".to_owned(),
             original_version: None,
+            author: None,
             summary: None,
             archive_name: Some("test.mrpack".to_owned()),
             minecraft_version: "1.20.1".to_owned(),
@@ -360,6 +361,16 @@ mod tests {
         let recipe = store.read_recipe().expect("a version 1 recipe still reads");
         assert_eq!(recipe.recipe_version, 1);
         assert_eq!(recipe.files.len(), 1);
+        assert_eq!(
+            recipe.author, None,
+            "a field added since is absent rather than fatal"
+        );
+        assert_eq!(recipe.source_kind, ImportSourceKind::ModrinthPack);
+        assert_eq!(
+            recipe.files[0].downloads,
+            vec!["https://cdn.modrinth.com/data/x/a.jar"],
+            "an existing Modrinth recipe is read exactly as it always was"
+        );
         assert_eq!(
             recipe.files[0].origin,
             ephervex_model::ModOrigin::PackDeclared,

@@ -792,12 +792,12 @@ error-pack-archive-invalid = That file is not a readable archive.
 .action = A pack is a ZIP file. Check that { $path } downloaded completely.
 
 error-pack-format-unrecognized = Ephervex does not recognize that file as a modpack.
-.action = Choose a supported Modrinth `.mrpack` file.
+.action = Choose a Modrinth `.mrpack` file or a CurseForge modpack export.
 
 # A recognized but unsupported format is said out loud rather than reported as
 # a broken file.
 error-pack-format-unsupported = This build of Ephervex cannot import { $format } packs.
-.action = Use a Modrinth `.mrpack` file, which this build supports.
+.action = Use a Modrinth `.mrpack` file or a CurseForge modpack export, which this build supports.
 
 error-pack-manifest-missing = The pack is missing the file that describes it.
 .action = Ephervex expected { $entry } inside the archive.
@@ -807,6 +807,9 @@ error-pack-manifest-invalid = The pack's description file could not be understoo
 
 error-pack-manifest-unsupported-version = That pack uses a newer pack format than this build of Ephervex understands.
 .action = Update Ephervex. Guessing at a format revision would risk importing the wrong files.
+
+error-pack-manifest-type-unsupported = That pack is not a Minecraft modpack.
+.action = Its description file says it is { $found }. Ephervex imports Minecraft modpacks only.
 
 error-pack-game-unsupported = That pack is not a Minecraft pack.
 
@@ -832,13 +835,25 @@ error-pack-entry-type-unsupported = The pack contains an archive entry Ephervex 
 error-pack-limit-exceeded = The pack is larger than Ephervex is willing to unpack.
 .action = Ephervex stopped rather than filling the disk. The limits are deliberately generous.
 
+error-pack-entry-id-invalid = The pack names a mod by an id that identifies nothing.
+.action = { $field } is { $value }, which no project or file can have. Ephervex refused the whole pack rather than guessing which mod was meant.
+
+error-pack-entry-conflict = The pack asks for two different versions of the same mod.
+.action = Project { $project } is listed as both file { $first } and file { $second }. Ephervex installs one version of a mod and will not choose between them.
+
+error-pack-entry-inclusion-conflict = The pack lists the same file as both required and optional.
+.action = File { $file_id } of project { $project } appears twice with different answers, so what the pack wants installed is not clear.
+
+error-pack-provider-files-unresolved = { $remaining } of the pack's files have not been looked up yet.
+.action = Ephervex stopped rather than installing a pack with those files missing.
+
 error-pack-file-hashes-missing = One of the pack's files has no checksum Ephervex can verify.
 .action = Ephervex will not download a file it cannot verify.
 
 error-pack-file-downloads-missing = One of the pack's files has no download address.
 
 error-pack-download-url-rejected = One of the pack's files is hosted somewhere Ephervex will not download from.
-.action = Ephervex only downloads pack files over HTTPS from the hosts Modrinth's own pack validation accepts.
+.action = Ephervex only downloads pack files over HTTPS, and only from the hosts the pack's own provider publishes them on.
 
 # a hash mismatch is a hard failure, and the bad file is deleted.
 error-pack-download-failed = A file from the pack could not be downloaded or did not match its checksum.
@@ -937,6 +952,20 @@ error-mod-version-unknown = No such version.
 
 # At most one file per version may be marked primary, so two is a malformed
 # version rather than a choice to make.
+error-mod-file-unknown = { $provider } has no such file for that mod.
+.action = The pack asks for file { $file_id } of project { $project }, which { $provider } no longer lists. Ephervex will not install a different file in its place.
+
+error-mod-file-unavailable = { $provider } is not serving that file.
+.action = File { $file_id } of project { $project } exists but cannot be downloaded right now.
+
+# The author's decision, not a fault. Ephervex has no other way to obtain the
+# file and does not go looking for one.
+error-mod-file-distribution-restricted = That mod's author does not allow other launchers to download it.
+.action = Project { $project } has third-party downloads turned off, so Ephervex cannot fetch file { $file_id }. Download the pack through CurseForge's own app, or ask the pack author to replace the mod.
+
+error-mod-file-identity-mismatch = { $provider } answered about a different file than the one requested.
+.action = Ephervex asked for { $requested } and was told about { $returned }, so nothing was installed.
+
 error-mod-primary-file-ambiguous = That version does not name exactly one file to install.
 .action = Ephervex will not pick between { $found } candidate files. Choose a different version.
 

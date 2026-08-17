@@ -23,25 +23,33 @@
 //! # Why detection and orchestration are provider-independent
 //!
 //! Only [`parse_with`] knows a provider exists, and it dispatches on a
-//! [`PackFormat`]. Adding CurseForge is a second arm there plus a module beside
-//! `modrinth`; nothing in the pipeline, the recipe, the installer, or the
-//! retained-source layout has to learn a new vocabulary.
+//! [`PackFormat`]. `modrinth` and `curseforge` are its two arms, and nothing in
+//! the pipeline, the recipe, the installer, or the retained-source layout had
+//! to learn a new vocabulary for the second.
+//!
+//! One thing the pipeline does have to know: a format may name files its own
+//! manifest cannot describe. [`analyze`] reports those as
+//! [`PendingProviderFile`] entries and [`materialize`] refuses to run while any
+//! remain, so the layer that resolves them cannot be skipped by accident.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use ephervex_download::{CacheLayout, DownloadManager, OperationReporter};
+use ephervex_download::{AuthenticatedSource, CacheLayout, DownloadManager, OperationReporter};
 use ephervex_model::{ImportSourceKind, LoaderSelection};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument};
 
 use crate::archive::PackArchive;
+use crate::curseforge::{self, ParsedExport};
 use crate::detect::PackFormat;
 use crate::error::{PackError, PackResult};
 use crate::install::{self, AppliedLayer, MaterializedFiles};
 use crate::modrinth::{self, ParsedPack};
 use crate::policy::PackPolicy;
 use crate::recipe::{
-    OptionalComponent, OptionalSelection, OverrideScope, PackRecipe, PackSide, SideRequirement,
+    OptionalComponent, OptionalSelection, OverrideScope, PackRecipe, PackSide, PendingProviderFile,
+    SideRequirement,
 };
 use crate::store::SourceStore;
 
@@ -50,6 +58,13 @@ use crate::store::SourceStore;
 pub struct PackAnalysis {
     pub format: PackFormat,
     pub recipe: PackRecipe,
+    /// Files the pack declared that its own manifest cannot fully describe.
+    ///
+    /// Empty for a format whose manifest carries names, hashes, and addresses.
+    /// A CurseForge export names its files by catalog id only, so they wait
+    /// here until the provider has been asked — which is what lets an archive
+    /// be identified, described, and counted with no credential and no network.
+    pub pending: Vec<PendingProviderFile>,
     /// Download addresses the URL policy refused, for files that had another
     /// permitted address.
     pub rejected_urls: Vec<String>,
@@ -72,7 +87,29 @@ impl PackAnalysis {
         &self.recipe.loader
     }
 
+    /// Who the pack credits, where its format names an author.
+    #[must_use]
+    pub fn author(&self) -> Option<&str> {
+        self.recipe.author.as_deref()
+    }
+
+    /// Whether this pack still has files only its provider can describe.
+    ///
+    /// What a frontend shows an "a CurseForge API key is needed before these
+    /// files can be resolved" blocker for, without knowing which provider is
+    /// involved or what a credential is.
+    #[must_use]
+    pub fn needs_provider_resolution(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
     /// The optional files this side would ask about (optional-file selection).
+    ///
+    /// Only resolved entries appear: an unresolved one has no destination path,
+    /// and a selection is made by path. A pack with pending files therefore
+    /// offers its optional list once [`Self::needs_provider_resolution`] is
+    /// false, and offers a count before that
+    /// ([`Self::optional_file_count`]).
     #[must_use]
     pub fn optional_components(&self, side: PackSide) -> Vec<OptionalComponent> {
         self.recipe.optional_components(side)
@@ -86,6 +123,44 @@ impl PackAnalysis {
             .iter()
             .filter(|file| file.requirement(side) == SideRequirement::Required)
             .count()
+            + self
+                .pending
+                .iter()
+                .filter(|file| file.requirement(side) == SideRequirement::Required)
+                .count()
+    }
+
+    /// How many files this side would ask about before installing.
+    ///
+    /// Counts resolved and pending entries alike, so the number a user is shown
+    /// is the pack's own and does not change when the provider answers.
+    #[must_use]
+    pub fn optional_file_count(&self, side: PackSide) -> usize {
+        self.recipe
+            .files
+            .iter()
+            .filter(|file| file.requirement(side).needs_decision())
+            .count()
+            + self
+                .pending
+                .iter()
+                .filter(|file| file.requirement(side).needs_decision())
+                .count()
+    }
+
+    /// Every file the pack declares for this side, resolved or not.
+    #[must_use]
+    pub fn declared_file_count(&self, side: PackSide) -> usize {
+        self.recipe
+            .files
+            .iter()
+            .filter(|file| file.requirement(side).is_installable())
+            .count()
+            + self
+                .pending
+                .iter()
+                .filter(|file| file.requirement(side).is_installable())
+                .count()
     }
 
     /// Whether the pack carries anything for the side it is *not* being
@@ -96,10 +171,7 @@ impl PackAnalysis {
     /// normal outcome of a client import.
     #[must_use]
     pub fn has_files_for(&self, side: PackSide) -> bool {
-        self.recipe
-            .files
-            .iter()
-            .any(|file| file.requirement(side).is_installable())
+        self.declared_file_count(side) > 0
     }
 
     /// Which override layers the archive carries.
@@ -128,6 +200,7 @@ pub fn analyze(path: &Path, policy: &PackPolicy) -> PackResult<(PackArchive, Pac
         minecraft = %analysis.recipe.minecraft_version,
         loader = %analysis.recipe.loader,
         files = analysis.recipe.files.len(),
+        pending = analysis.pending.len(),
         "analyzed a pack archive"
     );
     Ok((archive, analysis))
@@ -152,12 +225,27 @@ pub fn parse_with(
             Ok(PackAnalysis {
                 format,
                 recipe,
+                pending: Vec::new(),
                 rejected_urls,
             })
         }
-        PackFormat::CurseForgePack | PackFormat::PrismExport => {
-            Err(PackError::FormatUnsupported { format })
+        PackFormat::CurseForgePack => {
+            // No allowlist is consulted here: a CurseForge manifest names no
+            // download address at all. The addresses come back from the API,
+            // and are checked against the policy by whoever asks it.
+            let ParsedExport {
+                recipe,
+                pending,
+                manifest: _,
+            } = curseforge::read(archive)?;
+            Ok(PackAnalysis {
+                format,
+                recipe,
+                pending,
+                rejected_urls: Vec::new(),
+            })
         }
+        PackFormat::PrismExport => Err(PackError::FormatUnsupported { format }),
     }
 }
 
@@ -209,6 +297,9 @@ pub struct MaterializeRequest<'a> {
     pub source_dir: &'a Path,
     pub manager: &'a DownloadManager,
     pub cache: &'a CacheLayout,
+    /// The credential this import's artifact downloads may carry, for a
+    /// provider that authenticates them. `None` for every open source.
+    pub authenticated: Option<&'a Arc<AuthenticatedSource>>,
     pub reporter: &'a OperationReporter,
     pub cancel: &'a CancellationToken,
 }
@@ -225,12 +316,30 @@ pub async fn materialize(request: MaterializeRequest<'_>) -> PackResult<Material
         source_dir,
         manager,
         cache,
+        authenticated,
         reporter,
         cancel,
     } = request;
+    let fetch = install::ArtifactFetch {
+        manager,
+        cache,
+        authenticated,
+        reporter,
+        cancel,
+    };
 
     if cancel.is_cancelled() {
         return Err(PackError::Canceled);
+    }
+    if let Some(unresolved) = analysis.pending.first() {
+        // Materializing an analysis that still has pending entries would lay
+        // down a pack missing every file its provider was never asked about,
+        // and record that as the instance's complete desired state. The caller
+        // resolves first; reaching here means it did not.
+        return Err(PackError::ProviderFilesUnresolved {
+            remaining: analysis.pending.len(),
+            first: unresolved.identity.project_id.clone().unwrap_or_default(),
+        });
     }
 
     let mut recipe = analysis.recipe.clone();
@@ -244,10 +353,7 @@ pub async fn materialize(request: MaterializeRequest<'_>) -> PackResult<Material
         side,
         selection,
         game_dir,
-        manager,
-        cache,
-        reporter,
-        cancel,
+        fetch,
     })
     .await?;
 
@@ -409,12 +515,12 @@ mod tests {
     #[test]
     fn a_recognized_but_unsupported_format_is_not_reported_as_unrecognized() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let archive = dir.path().join("pack.zip");
+        let archive = dir.path().join("instance.zip");
         zip_file(
             &archive,
             &[
-                ("manifest.json", br#"{"minecraft":{"version":"1.20.1"}}"#),
-                ("overrides/mods/a.jar", b"jar"),
+                ("mmc-pack.json", br#"{"formatVersion":1,"components":[]}"#),
+                ("instance.cfg", b"name=Repro\n"),
             ],
         );
 
@@ -422,10 +528,128 @@ mod tests {
         assert!(matches!(
             error,
             PackError::FormatUnsupported {
-                format: PackFormat::CurseForgePack
+                format: PackFormat::PrismExport
             }
         ));
         assert_eq!(error.message_id(), "error-pack-format-unsupported");
+    }
+
+    /// A minimal but complete CurseForge export manifest.
+    fn curseforge_manifest(files: &str) -> Vec<u8> {
+        format!(
+            r#"{{
+                "minecraft": {{
+                    "version": "1.20.1",
+                    "modLoaders": [{{"id": "forge-47.4.10", "primary": true}}]
+                }},
+                "manifestType": "minecraftModpack",
+                "manifestVersion": 1,
+                "name": "Repro Pack",
+                "version": "3.1.0",
+                "author": "A Reporter",
+                "files": [{files}],
+                "overrides": "overrides"
+            }}"#
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn a_curseforge_export_is_described_completely_without_a_credential_or_a_network() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = dir.path().join("repro.zip");
+        zip_file(
+            &archive,
+            &[
+                (
+                    "manifest.json",
+                    &curseforge_manifest(
+                        r#"{"projectID": 238222, "fileID": 4593548, "required": true},
+                           {"projectID": 238223, "fileID": 4593549, "required": true},
+                           {"projectID": 238224, "fileID": 4593550, "required": false}"#,
+                    ),
+                ),
+                ("overrides/config/a.toml", b"a" as &[u8]),
+            ],
+        );
+
+        let (_, analysis) = analyze(&archive, &PackPolicy::curseforge()).expect("analyze");
+        assert_eq!(analysis.format, PackFormat::CurseForgePack);
+        assert_eq!(analysis.name(), "Repro Pack");
+        assert_eq!(analysis.minecraft_version(), "1.20.1");
+        assert_eq!(analysis.loader().to_string(), "Forge 47.4.10");
+        assert_eq!(analysis.author(), Some("A Reporter"));
+        assert_eq!(analysis.recipe.original_version.as_deref(), Some("3.1.0"));
+
+        // Everything a wizard needs to describe the pack, counted from the
+        // manifest alone.
+        assert_eq!(analysis.required_file_count(PackSide::Client), 2);
+        assert_eq!(analysis.optional_file_count(PackSide::Client), 1);
+        assert_eq!(analysis.declared_file_count(PackSide::Client), 3);
+        assert!(analysis.needs_provider_resolution());
+
+        // ...and the archive's own override layer.
+        let layers: Vec<OverrideScope> = analysis.layers().collect();
+        assert_eq!(layers, vec![OverrideScope::Common]);
+    }
+
+    #[test]
+    fn a_curseforge_export_with_no_overrides_directory_records_no_layer() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = dir.path().join("repro.zip");
+        zip_file(&archive, &[("manifest.json", &curseforge_manifest(""))]);
+
+        let (_, analysis) = analyze(&archive, &PackPolicy::curseforge()).expect("analyze");
+        assert!(
+            analysis.recipe.override_layers.is_empty(),
+            "the manifest names the directory; the archive decides whether it is there"
+        );
+    }
+
+    #[tokio::test]
+    async fn materializing_a_pack_whose_provider_files_are_unresolved_is_refused() {
+        // Laying this down would install the overrides and record an empty
+        // desired state as though the pack had asked for nothing.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive_path = dir.path().join("repro.zip");
+        zip_file(
+            &archive_path,
+            &[(
+                "manifest.json",
+                &curseforge_manifest(
+                    r#"{"projectID": 238222, "fileID": 4593548, "required": true}"#,
+                ),
+            )],
+        );
+
+        let (mut archive, analysis) =
+            analyze(&archive_path, &PackPolicy::curseforge()).expect("analyze");
+        let manager =
+            DownloadManager::new(ephervex_download::DownloaderConfig::default()).expect("manager");
+        let error = materialize(MaterializeRequest {
+            archive: &mut archive,
+            analysis: &analysis,
+            side: PackSide::Client,
+            selection: &OptionalSelection::none(),
+            game_dir: &dir.path().join("instance/minecraft"),
+            source_dir: &dir.path().join("instance/.launcher/source"),
+            manager: &manager,
+            cache: &CacheLayout::new(dir.path().join("cache")),
+            authenticated: None,
+            reporter: &OperationReporter::silent("test-import"),
+            cancel: &CancellationToken::new(),
+        })
+        .await
+        .expect_err("must refuse");
+
+        assert!(matches!(
+            error,
+            PackError::ProviderFilesUnresolved { remaining: 1, .. }
+        ));
+        assert!(
+            !dir.path().join("instance").exists(),
+            "nothing was written for a pack that was refused"
+        );
     }
 
     #[test]
@@ -471,6 +695,7 @@ mod tests {
             source_dir: &source,
             manager: &manager,
             cache: &CacheLayout::new(dir.path().join("cache")),
+            authenticated: None,
             reporter: &OperationReporter::silent("test-import"),
             cancel: &CancellationToken::new(),
         })

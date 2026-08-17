@@ -39,16 +39,31 @@ impl PackPolicy {
         }
     }
 
+    /// The policy for a CurseForge export.
+    ///
+    /// A CurseForge manifest names no download address at all — the addresses
+    /// come back from the API — so this list is what the *API's* answers are
+    /// checked against. It is deliberately not Modrinth's: an address is
+    /// permitted here because CurseForge delivers its own files from it, not
+    /// because some other provider vouches for the host.
+    #[must_use]
+    pub fn curseforge() -> Self {
+        Self {
+            limits: ExtractionLimits::default(),
+            allowlist: DomainAllowlist::curseforge_artifact_defaults(),
+        }
+    }
+
     /// The policy for one recognized format.
     ///
-    /// CurseForge and Prism resolve to an empty allowlist rather than to
-    /// Modrinth's: unsupported formats permit nothing rather than inheriting
-    /// another provider's policy.
+    /// Prism resolves to an empty allowlist: an unsupported format permits
+    /// nothing rather than inheriting another provider's policy.
     #[must_use]
     pub fn for_format(format: PackFormat) -> Self {
         match format {
             PackFormat::ModrinthPack => Self::modrinth(),
-            PackFormat::CurseForgePack | PackFormat::PrismExport => Self {
+            PackFormat::CurseForgePack => Self::curseforge(),
+            PackFormat::PrismExport => Self {
                 limits: ExtractionLimits::default(),
                 allowlist: DomainAllowlist::empty(),
             },
@@ -76,7 +91,15 @@ mod tests {
 
     #[test]
     fn an_unsupported_format_permits_no_download_hosts() {
-        let policy = PackPolicy::for_format(PackFormat::CurseForgePack);
+        let policy = PackPolicy::for_format(PackFormat::PrismExport);
         assert_eq!(policy.allowlist.hosts().len(), 0);
+    }
+
+    #[test]
+    fn a_curseforge_pack_permits_curseforges_own_delivery_hosts_and_not_modrinths() {
+        let policy = PackPolicy::for_format(PackFormat::CurseForgePack);
+        assert!(policy.allowlist.permits_host("mediafilez.forgecdn.net"));
+        assert!(!policy.allowlist.permits_host("cdn.modrinth.com"));
+        assert!(!policy.allowlist.permits_host("evil.example"));
     }
 }

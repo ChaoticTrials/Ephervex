@@ -59,7 +59,19 @@ impl PackFormat {
     /// whose importer is not available.
     #[must_use]
     pub const fn is_implemented(self) -> bool {
-        matches!(self, Self::ModrinthPack)
+        matches!(self, Self::ModrinthPack | Self::CurseForgePack)
+    }
+
+    /// Whether importing this format needs a provider credential before its
+    /// declared files can be resolved.
+    ///
+    /// Detection and manifest parsing never do: reading what is already in the
+    /// archive is a local operation, and a launcher that cannot even say what a
+    /// file is without a key is worse than one that says what it is and what it
+    /// still needs.
+    #[must_use]
+    pub const fn needs_provider_credential(self) -> bool {
+        matches!(self, Self::CurseForgePack)
     }
 }
 
@@ -144,20 +156,44 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_pack_formats_are_recognized_before_import() {
-        // A recognized but unsupported CurseForge pack must not be reported as
-        // an unrecognized archive.
+    fn a_curseforge_export_is_identified_by_its_manifest() {
         assert_eq!(
             identify(["manifest.json", "overrides/mods/a.jar"]),
             Some(PackFormat::CurseForgePack)
         );
+        assert!(PackFormat::CurseForgePack.is_implemented());
+    }
+
+    #[test]
+    fn unsupported_pack_formats_are_recognized_before_import() {
+        // A recognized but unsupported Prism export must not be reported as an
+        // unrecognized archive.
         assert_eq!(
             identify(["mmc-pack.json", "instance.cfg", "minecraft/options.txt"]),
             Some(PackFormat::PrismExport)
         );
-        assert!(!PackFormat::CurseForgePack.is_implemented());
         assert!(!PackFormat::PrismExport.is_implemented());
         assert!(PackFormat::ModrinthPack.is_implemented());
+    }
+
+    #[test]
+    fn only_the_format_whose_files_live_behind_an_api_needs_a_credential() {
+        assert!(PackFormat::CurseForgePack.needs_provider_credential());
+        assert!(!PackFormat::ModrinthPack.needs_provider_credential());
+    }
+
+    #[test]
+    fn an_unrelated_archive_is_not_a_curseforge_export_because_of_a_similar_name() {
+        // Detection is on the exact manifest entry, at the root or under one
+        // wrapper directory. Nothing else counts.
+        for entries in [
+            vec!["manifest.json.txt", "readme.md"],
+            vec!["my-manifest.json"],
+            vec!["docs/manifest.json/notes.txt"],
+            vec!["a/b/manifest.json"],
+        ] {
+            assert_eq!(identify(entries.clone()), None, "{entries:?}");
+        }
     }
 
     #[test]

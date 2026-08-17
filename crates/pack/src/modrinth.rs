@@ -159,6 +159,7 @@ pub fn parse(
                 .unwrap_or_else(|| "Modrinth pack".to_owned())
         }),
         original_version: index.version_id,
+        author: None,
         summary: index.summary,
         archive_name,
         minecraft_version,

@@ -48,13 +48,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use ephervex_download::{CacheLayout, DownloadManager, OperationReporter};
 use ephervex_model::ModProvider;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument, warn};
 
 use crate::error::{PackError, PackResult};
-use crate::install::{copy_into_instance, fetch_all};
+use crate::install::{ArtifactFetch, copy_into_instance, fetch_all};
 use crate::recipe::{PackFileRecipe, PackRecipe, ProviderFileIdentity};
 use crate::store::SourceStore;
 
@@ -98,10 +97,7 @@ pub struct ManagedMutation<'a> {
     /// wait until the recipe is published.
     pub retired_dir: &'a Path,
     pub store: &'a SourceStore,
-    pub manager: &'a DownloadManager,
-    pub cache: &'a CacheLayout,
-    pub reporter: &'a OperationReporter,
-    pub cancel: &'a CancellationToken,
+    pub fetch: ArtifactFetch<'a>,
 }
 
 /// What a mutation did.
@@ -178,11 +174,9 @@ pub async fn mutate_managed(request: ManagedMutation<'_>) -> PackResult<ManagedM
         game_dir,
         retired_dir,
         store,
-        manager,
-        cache,
-        reporter,
-        cancel,
+        fetch,
     } = request;
+    let cancel = fetch.cancel;
 
     // Nothing below this line runs until the whole desired state is known to be
     // reachable: every destination safe, every removal something Ephervex
@@ -212,7 +206,7 @@ pub async fn mutate_managed(request: ManagedMutation<'_>) -> PackResult<ManagedM
     let fetched = if wanted.is_empty() {
         Vec::new()
     } else {
-        fetch_all(&wanted, cache, manager, reporter, cancel).await?
+        fetch_all(&wanted, fetch).await?
     };
 
     // Everything from here on can leave the instance changed, so each step

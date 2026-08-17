@@ -11,7 +11,7 @@ use ephervex_model::{
     ServerId, ServerInstallation, ServerLaunch, ServerRelativePath,
 };
 use ephervex_pack::{
-    OptionalSelection, PackError, PackRecipe, ServerMaterializeRequest, SourceStore,
+    ArtifactFetch, OptionalSelection, PackError, PackRecipe, ServerMaterializeRequest, SourceStore,
 };
 use ephervex_server::{
     CaptureHealth, CaptureRetention, CapturedLine, ControlAction, ControlResponse,
@@ -393,10 +393,18 @@ impl App {
             game_dir: target,
             client_source_dir: client_source,
             server_source_dir: server_source,
-            manager: &manager,
-            cache: &CacheLayout::new(self.paths().cache_dir()),
-            reporter: &OperationReporter::silent("server-content"),
-            cancel,
+            fetch: ArtifactFetch {
+                manager: &manager,
+                cache: &CacheLayout::new(self.paths().cache_dir()),
+                // Reconstruction needs no provider credential, whichever
+                // provider the pack came from: it installs from the addresses
+                // and digests the recipe already records. A linked server can
+                // therefore be rebuilt on a machine that has never configured
+                // one.
+                authenticated: None,
+                reporter: &OperationReporter::silent("server-content"),
+                cancel,
+            },
         })
         .await?;
         Ok(materialized.unconfirmed_unknown)

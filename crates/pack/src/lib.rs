@@ -9,7 +9,7 @@
 //! archive.
 //!
 //! ```text
-//! .mrpack ──▶ detect ──▶ parse+validate ──▶ PackRecipe ──▶ materialize
+//! archive ──▶ detect ──▶ parse+validate ──▶ PackRecipe ──▶ materialize
 //!                                   │                              │
 //!                              (provider)                  (provider-neutral)
 //! ```
@@ -20,9 +20,16 @@
 //! ([`import::parse_with`], which dispatches on [`detect::PackFormat`]).
 //! Everything downstream — [`recipe::PackRecipe`], [`install`], [`store`] — is
 //! provider-neutral because provider-specific formats are not the shape of the
-//! problem. Supporting CurseForge requires a module beside
-//! [`modrinth`] plus an arm in that dispatch; it is not a change to the recipe,
-//! the installer, the retained-source layout, or anything above this crate.
+//! problem. [`modrinth`] and [`curseforge`] are the two arms of that dispatch,
+//! and adding the second changed neither the recipe, the installer, the
+//! retained-source layout, nor anything above this crate.
+//!
+//! The two formats differ in one way the boundary had to absorb. A Modrinth
+//! index describes its own files completely; a CurseForge manifest names them
+//! by catalog id and leaves the rest to an API. So parsing may also yield
+//! [`recipe::PendingProviderFile`] entries, which a layer that can reach a
+//! provider turns into ordinary recipe entries before anything is
+//! materialized.
 //!
 //! Provider-specific state lives in two clearly-labeled places:
 //! [`recipe::ProviderFileIdentity`] and [`recipe::ProviderRecipeMetadata`].
@@ -44,6 +51,7 @@
 //!   file with no verifiable hash is never fetched.
 
 pub mod archive;
+pub mod curseforge;
 pub mod detect;
 pub mod error;
 pub mod import;
@@ -67,7 +75,7 @@ pub use import::{
     retained_recipe,
 };
 pub use install::{
-    AppliedLayer, FileInstall, MaterializedFiles, MaterializedServerRecipe,
+    AppliedLayer, ArtifactFetch, FileInstall, MaterializedFiles, MaterializedServerRecipe,
     ServerMaterializeRequest, apply_overrides, apply_retained_overrides, install_files,
     materialize_server_recipe,
 };
@@ -80,7 +88,8 @@ pub use path::{RESERVED_METADATA_DIR, safe_file_name};
 pub use policy::PackPolicy;
 pub use recipe::{
     ManagedMod, ModIdentity, OptionalComponent, OptionalSelection, OverrideLayer, OverrideScope,
-    PackFileRecipe, PackRecipe, PackSide, ProviderFileIdentity, ProviderRecipeMetadata,
-    RECIPE_VERSION, RecordedMod, ServerReconstructionPlan, SidePlan, SideRequirement,
+    PackFileRecipe, PackRecipe, PackSide, PendingProviderFile, ProviderFileIdentity,
+    ProviderRecipeMetadata, RECIPE_VERSION, RecordedMod, ServerReconstructionPlan, SidePlan,
+    SideRequirement,
 };
 pub use store::{RECIPE_FILE, SourceStore, provider_directory};

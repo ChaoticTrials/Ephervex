@@ -71,6 +71,14 @@ pub enum PackError {
         supported: u64,
     },
 
+    /// The manifest describes something other than a Minecraft modpack.
+    ///
+    /// A CurseForge export manifest states the kind of pack it is, and an
+    /// export for another game or another product resolves perfectly well
+    /// against this parser while meaning nothing to a Minecraft instance.
+    #[error("`{entry}` describes `{found}`, which is not a Minecraft modpack")]
+    ManifestTypeUnsupported { entry: &'static str, found: String },
+
     /// The pack is for something other than Minecraft.
     #[error("`{game}` is not a game Ephervex can import")]
     GameUnsupported { game: String },
@@ -107,6 +115,40 @@ pub enum PackError {
         allowed: u64,
         reached: u64,
     },
+
+    /// A declared entry names a catalog id that cannot identify anything.
+    ///
+    /// Zero, negative, or too large for the id space. Refused rather than
+    /// coerced: an approximated id names another project's file.
+    #[error("the pack entry's `{field}` is `{value}`, which names nothing")]
+    PackEntryIdInvalid { field: &'static str, value: String },
+
+    /// One project is declared with two different files.
+    ///
+    /// There is no honest way to install both: they are two versions of one
+    /// mod, and the desired state has room for one.
+    #[error(
+        "the pack declares project `{project_id}` as both file `{first_file}` and `{second_file}`"
+    )]
+    PackEntryConflict {
+        project_id: String,
+        first_file: String,
+        second_file: String,
+    },
+
+    /// One file is declared both as part of the pack and as an optional choice.
+    #[error("the pack declares file `{file_id}` of `{project_id}` as both required and optional")]
+    PackEntryInclusionConflict { project_id: String, file_id: String },
+
+    /// Materialization was asked for while the pack still had files only its
+    /// provider can describe.
+    ///
+    /// A programming error rather than a bad pack, and it fails loudly for the
+    /// reason every other refusal here does: laying down a pack missing the
+    /// files nobody resolved would record an instance's desired state as
+    /// something the pack never said.
+    #[error("{remaining} of the pack's files have not been resolved with their provider")]
+    ProviderFilesUnresolved { remaining: usize, first: String },
 
     /// A pack file carries no hash, so a download could not be verified
     #[error("the pack file `{path}` has no usable hash")]
@@ -247,6 +289,7 @@ impl PackError {
             Self::ManifestMissing { .. } => "error-pack-manifest-missing",
             Self::ManifestInvalid { .. } => "error-pack-manifest-invalid",
             Self::ManifestUnsupportedVersion { .. } => "error-pack-manifest-unsupported-version",
+            Self::ManifestTypeUnsupported { .. } => "error-pack-manifest-type-unsupported",
             Self::GameUnsupported { .. } => "error-pack-game-unsupported",
             Self::MinecraftDependencyMissing => "error-pack-minecraft-missing",
             Self::LoaderUnsupported { .. } => "error-pack-loader-unsupported",
@@ -255,6 +298,10 @@ impl PackError {
             Self::EntryReserved { .. } => "error-pack-entry-reserved",
             Self::EntryTypeUnsupported { .. } => "error-pack-entry-type-unsupported",
             Self::LimitExceeded { .. } => "error-pack-limit-exceeded",
+            Self::PackEntryIdInvalid { .. } => "error-pack-entry-id-invalid",
+            Self::PackEntryConflict { .. } => "error-pack-entry-conflict",
+            Self::PackEntryInclusionConflict { .. } => "error-pack-entry-inclusion-conflict",
+            Self::ProviderFilesUnresolved { .. } => "error-pack-provider-files-unresolved",
             Self::FileHashesMissing { .. } => "error-pack-file-hashes-missing",
             Self::FileDownloadsMissing { .. } => "error-pack-file-downloads-missing",
             Self::DownloadUrlRejected { .. } => "error-pack-download-url-rejected",
@@ -337,7 +384,33 @@ impl PackError {
                 ("found", found.to_string()),
                 ("supported", supported.to_string()),
             ],
+            Self::ManifestTypeUnsupported { entry, found } => {
+                vec![("entry", (*entry).to_owned()), ("found", found.clone())]
+            }
             Self::GameUnsupported { game } => vec![("game", game.clone())],
+            Self::PackEntryIdInvalid { field, value } => {
+                vec![("field", (*field).to_owned()), ("value", value.clone())]
+            }
+            Self::PackEntryConflict {
+                project_id,
+                first_file,
+                second_file,
+            } => vec![
+                ("project", project_id.clone()),
+                ("first", first_file.clone()),
+                ("second", second_file.clone()),
+            ],
+            Self::PackEntryInclusionConflict {
+                project_id,
+                file_id,
+            } => vec![
+                ("project", project_id.clone()),
+                ("file_id", file_id.clone()),
+            ],
+            Self::ProviderFilesUnresolved { remaining, first } => vec![
+                ("remaining", remaining.to_string()),
+                ("project", first.clone()),
+            ],
             Self::LoaderAmbiguous { first, second } => {
                 vec![("first", first.clone()), ("second", second.clone())]
             }
@@ -416,6 +489,13 @@ mod tests {
     /// every variant explicitly, so a new one fails to compile until it is
     /// handled there. Listing it here is what puts it in front of these tests.
     fn every_variant() -> Vec<PackError> {
+        let mut variants = archive_and_manifest_variants();
+        variants.extend(file_and_recipe_variants());
+        variants
+    }
+
+    /// The refusals about the archive itself and the manifest inside it.
+    fn archive_and_manifest_variants() -> Vec<PackError> {
         vec![
             PackError::Unreadable {
                 path: PathBuf::from("/tmp/a.mrpack"),
@@ -435,8 +515,29 @@ mod tests {
                 found: 2,
                 supported: 1,
             },
+            PackError::ManifestTypeUnsupported {
+                entry: "manifest.json",
+                found: "wowAddonPack".to_owned(),
+            },
             PackError::GameUnsupported {
                 game: "terraria".to_owned(),
+            },
+            PackError::PackEntryIdInvalid {
+                field: "projectID",
+                value: "0".to_owned(),
+            },
+            PackError::PackEntryConflict {
+                project_id: "238222".to_owned(),
+                first_file: "1".to_owned(),
+                second_file: "2".to_owned(),
+            },
+            PackError::PackEntryInclusionConflict {
+                project_id: "238222".to_owned(),
+                file_id: "1".to_owned(),
+            },
+            PackError::ProviderFilesUnresolved {
+                remaining: 3,
+                first: "238222".to_owned(),
             },
             PackError::MinecraftDependencyMissing,
             PackError::LoaderUnsupported {
@@ -461,6 +562,15 @@ mod tests {
                 allowed: 1,
                 reached: 2,
             },
+        ]
+    }
+
+    /// The refusals about a pack's own files, its retained state, and its mods.
+    ///
+    /// Split from [`archive_and_manifest_variants`] only for length: the two
+    /// together are the complete list the tests below run over.
+    fn file_and_recipe_variants() -> Vec<PackError> {
+        vec![
             PackError::FileHashesMissing {
                 path: "mods/a.jar".to_owned(),
             },

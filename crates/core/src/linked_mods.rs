@@ -49,8 +49,8 @@ use ephervex_mod_platform::{
 };
 use ephervex_model::{InstanceId, LoaderSelection, ModProvider, ServerId};
 use ephervex_pack::{
-    ManagedMutation, ManagedMutationReport, ManagedProject, OptionalSelection, PackError,
-    PackFileRecipe, PackRecipe, PackSide, SideRequirement, SourceStore,
+    ArtifactFetch, ManagedMutation, ManagedMutationReport, ManagedProject, OptionalSelection,
+    PackError, PackFileRecipe, PackRecipe, PackSide, SideRequirement, SourceStore,
 };
 use ephervex_server::classify_runtime;
 use ephervex_storage::ServerRecord;
@@ -1182,10 +1182,15 @@ impl App {
             game_dir: &game_dir,
             retired_dir: &retired_dir,
             store: &store,
-            manager: &manager,
-            cache: &CacheLayout::new(self.paths().cache_dir()),
-            reporter,
-            cancel,
+            fetch: ArtifactFetch {
+                manager: &manager,
+                cache: &CacheLayout::new(self.paths().cache_dir()),
+                // Every address a recipe entry carries was already checked when
+                // it was recorded, and none of them authenticates.
+                authenticated: None,
+                reporter,
+                cancel,
+            },
         })
         .await?)
     }

@@ -27,6 +27,10 @@ ephervex-i18n.workspace = true
 image.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+# Bounded concurrency for a pack import's exact-file lookups: a pack may declare
+# several hundred files, and `buffered` is what keeps that to a handful of
+# requests in flight rather than one task per entry.
+futures-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 thiserror.workspace = true
@@ -34,6 +38,9 @@ uuid.workspace = true
 chrono.workspace = true
 serde_json.workspace = true
 open.workspace = true
+# The CurseForge credential header is named once, in `ephervex-mod-platform`,
+# and building the authenticated artifact request needs the header type.
+reqwest.workspace = true
 sysinfo.workspace = true
 
 [dev-dependencies]

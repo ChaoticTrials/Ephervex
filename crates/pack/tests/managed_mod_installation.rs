@@ -17,7 +17,7 @@ use ephervex_download::{
 };
 use ephervex_model::{Hash, HashAlgorithm, LoaderKind, LoaderSelection, ModProvider};
 use ephervex_pack::{
-    ManagedModInstall, ModOrigin, PackError, PackFileRecipe, PackRecipe, PackSide,
+    ArtifactFetch, ManagedModInstall, ModOrigin, PackError, PackFileRecipe, PackRecipe, PackSide,
     ProviderFileIdentity, SideRequirement, SourceStore, install_managed,
 };
 use sha1::{Digest as _, Sha1};
@@ -137,10 +137,13 @@ async fn install(
         additions,
         game_dir: &instance.game_dir,
         store: &instance.store,
-        manager: &manager(),
-        cache: &instance.cache,
-        reporter: &OperationReporter::silent("installing-mods"),
-        cancel: &CancellationToken::new(),
+        fetch: ArtifactFetch {
+            manager: &manager(),
+            cache: &instance.cache,
+            authenticated: None,
+            reporter: &OperationReporter::silent("installing-mods"),
+            cancel: &CancellationToken::new(),
+        },
     })
     .await
 }

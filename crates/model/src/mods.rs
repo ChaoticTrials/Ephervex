@@ -19,6 +19,7 @@
 //! entirely.
 
 use std::fmt;
+use std::num::NonZeroU32;
 
 use serde::{Deserialize, Serialize};
 
@@ -32,7 +33,8 @@ pub enum ModProvider {
     ///
     /// Present so that everything the CurseForge transport reports — an absent
     /// API key, a rejected one, a response that could not be read — names the
-    /// catalog it came from. Nothing writes it into a recipe yet.
+    /// catalog it came from, and so a pack imported from a CurseForge export
+    /// records the catalog its files came from.
     CurseForge,
 }
 
@@ -69,6 +71,67 @@ impl fmt::Display for ModProvider {
         })
     }
 }
+
+/// The exact numeric id CurseForge names a project by.
+///
+/// A typed wrapper rather than a bare integer because a CurseForge project id
+/// and a CurseForge file id are both small numbers that appear side by side in
+/// an export manifest, in an API path, and in a recipe entry — and swapping
+/// them resolves perfectly well against the wrong thing. Zero is not a valid
+/// id, so it cannot be constructed: a manifest that declares `0` is refused at
+/// the parser rather than turning into a lookup that can only fail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct CurseForgeProjectId(NonZeroU32);
+
+/// The exact numeric id CurseForge names one file of a project by.
+///
+/// Distinct from [`CurseForgeProjectId`] for the reason given there. A file id
+/// is what makes a pack import exact: the launcher installs the file the pack
+/// declared, never the newest file of the same project.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct CurseForgeFileId(NonZeroU32);
+
+macro_rules! curseforge_id {
+    ($name:ident) => {
+        impl $name {
+            /// The id, or `None` for zero.
+            #[must_use]
+            pub const fn new(value: u32) -> Option<Self> {
+                match NonZeroU32::new(value) {
+                    Some(value) => Some(Self(value)),
+                    None => None,
+                }
+            }
+
+            /// Parses the decimal spelling a manifest and a recipe both use.
+            ///
+            /// Deliberately strict: leading signs, whitespace, and anything a
+            /// `u32` cannot hold are refused rather than truncated, because an
+            /// approximated id names another project's file.
+            #[must_use]
+            pub fn parse(text: &str) -> Option<Self> {
+                text.parse::<u32>().ok().and_then(Self::new)
+            }
+
+            /// The id as a plain number, for building an API path.
+            #[must_use]
+            pub const fn get(self) -> u32 {
+                self.0.get()
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                // The exact upstream value, which is what a recipe stores and
+                // what an API path carries.
+                fmt::Display::fmt(&self.0, f)
+            }
+        }
+    };
+}
+
+curseforge_id!(CurseForgeProjectId);
+curseforge_id!(CurseForgeFileId);
 
 /// Why a file is part of an instance's desired state.
 ///

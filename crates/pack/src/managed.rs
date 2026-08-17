@@ -32,12 +32,11 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use ephervex_download::{CacheLayout, DownloadManager, OperationReporter};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument, warn};
 
 use crate::error::{PackError, PackResult};
-use crate::install::{copy_into_instance, fetch_all};
+use crate::install::{ArtifactFetch, copy_into_instance, fetch_all};
 use crate::recipe::{PackFileRecipe, PackRecipe};
 use crate::store::SourceStore;
 
@@ -82,10 +81,7 @@ pub struct ManagedModInstall<'a> {
     pub game_dir: &'a Path,
     /// Where the updated recipe is written.
     pub store: &'a SourceStore,
-    pub manager: &'a DownloadManager,
-    pub cache: &'a CacheLayout,
-    pub reporter: &'a OperationReporter,
-    pub cancel: &'a CancellationToken,
+    pub fetch: ArtifactFetch<'a>,
 }
 
 /// What the pre-flight decided to do with one planned file.
@@ -112,11 +108,9 @@ pub async fn install_managed(request: ManagedModInstall<'_>) -> PackResult<Manag
         additions,
         game_dir,
         store,
-        manager,
-        cache,
-        reporter,
-        cancel,
+        fetch,
     } = request;
+    let cancel = fetch.cancel;
 
     // Nothing below this line runs until every destination is known to be safe.
     let dispositions = plan_destinations(recipe, additions, game_dir)?;
@@ -138,7 +132,7 @@ pub async fn install_managed(request: ManagedModInstall<'_>) -> PackResult<Manag
     }
 
     let wanted: Vec<&PackFileRecipe> = pending.iter().map(|(file, _)| *file).collect();
-    let outcomes = fetch_all(&wanted, cache, manager, reporter, cancel).await?;
+    let outcomes = fetch_all(&wanted, fetch).await?;
 
     // Everything from here on can leave a file behind, so it is undone on
     // failure. `created` is the exact set this operation wrote — never a guess

@@ -322,6 +322,57 @@ impl ModIdentity {
     }
 }
 
+/// One file a pack declares that its own manifest cannot fully describe.
+///
+/// Some pack formats name a file by catalog id and nothing else: a CurseForge
+/// export declares a project id and a file id, and the file's name, size,
+/// hashes, and download address exist only in that provider's API. Such an
+/// entry cannot be a [`PackFileRecipe`] yet — a recipe entry names a
+/// destination and carries the hashes its download is verified against, and
+/// inventing either from an id would be inventing a fact.
+///
+/// So it waits here instead. Analysis can still count these, report which side
+/// they belong to, and say that resolving them needs the provider, all without
+/// a credential and without a network. Resolving one produces a real
+/// [`PackFileRecipe`]; nothing else in the launcher ever sees this type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingProviderFile {
+    /// The exact catalog identity the pack declared. Durable: it is what the
+    /// resolved recipe entry records, so the recipe keeps saying which file of
+    /// which project the pack asked for.
+    pub identity: ProviderFileIdentity,
+    /// What the pack's own inclusion rules make this on the client.
+    pub client: SideRequirement,
+    /// What the pack declares about servers, which for a format that says
+    /// nothing is [`SideRequirement::Unknown`].
+    pub server: SideRequirement,
+}
+
+impl PendingProviderFile {
+    /// What this entry's requirement is on one side.
+    #[must_use]
+    pub const fn requirement(&self, side: PackSide) -> SideRequirement {
+        match side {
+            PackSide::Client => self.client,
+            PackSide::Server => self.server,
+        }
+    }
+
+    /// The provider, project, and release this entry names, when it names all
+    /// three.
+    ///
+    /// The triple a resolver needs. Half an identity resolves nothing, so this
+    /// returns nothing rather than letting a caller improvise.
+    #[must_use]
+    pub fn resolvable(&self) -> Option<(ModProvider, &str, &str)> {
+        Some((
+            self.identity.provider?,
+            self.identity.project_id.as_deref()?,
+            self.identity.version_id.as_deref()?,
+        ))
+    }
+}
+
 /// One file the pack declares (the project's `PackFileRecipe`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PackFileRecipe {
@@ -622,6 +673,14 @@ pub struct PackRecipe {
     pub original_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_version: Option<String>,
+    /// Who the pack's own manifest credits, where the format has such a field.
+    ///
+    /// Purely descriptive, so it is additive rather than a recipe-format
+    /// change: a build that has never heard of it reads every other field
+    /// exactly as before, and a recipe written without it loads unchanged.
+    /// Absent for Modrinth, whose pack index does not name an author.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
     /// The file the pack was imported from. Display only.
@@ -798,6 +857,7 @@ impl PackRecipe {
             source_kind: ImportSourceKind::Manual,
             original_name: name.into(),
             original_version: None,
+            author: None,
             summary: None,
             archive_name: None,
             minecraft_version: minecraft_version.into(),
@@ -1116,6 +1176,7 @@ mod tests {
             source_kind: ImportSourceKind::ModrinthPack,
             original_name: "Test Pack".to_owned(),
             original_version: Some("1.0.0".to_owned()),
+            author: None,
             summary: None,
             archive_name: Some("test.mrpack".to_owned()),
             minecraft_version: "1.20.1".to_owned(),

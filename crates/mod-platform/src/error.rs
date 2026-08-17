@@ -87,6 +87,51 @@ pub enum ModPlatformError {
         version_id: String,
     },
 
+    /// The project exists, and this exact file of it does not.
+    ///
+    /// Distinct from [`Self::VersionUnknown`] because a pack names a file by
+    /// project *and* file, and "no such file of that project" is what a user
+    /// needs to read to know which entry of their pack is the problem.
+    #[error("`{file_id}` is not a file of project `{project_id}` on {provider}")]
+    FileUnknown {
+        provider: ModProvider,
+        project_id: String,
+        file_id: String,
+    },
+
+    /// The exact file exists but the provider is not currently serving it.
+    #[error("file `{file_id}` of `{project_id}` is not available from {provider}")]
+    FileUnavailable {
+        provider: ModProvider,
+        project_id: String,
+        file_id: String,
+    },
+
+    /// The project's owner has turned off third-party distribution.
+    ///
+    /// The provider answers about the file and declines to say where it is.
+    /// That is a decision by the author, not a fault and not something to work
+    /// around: there is no second address, and one assembled from the ids would
+    /// be routing around exactly that decision.
+    #[error("the author of `{project_id}` does not permit third-party downloads of `{file_id}`")]
+    FileDistributionRestricted {
+        provider: ModProvider,
+        project_id: String,
+        file_id: String,
+    },
+
+    /// The provider answered about a different file than the one asked for.
+    ///
+    /// Never resolved by using what came back. An exact import that accepted a
+    /// substitute would install something the pack never declared, which is the
+    /// one failure it exists to prevent.
+    #[error("{provider} was asked for `{requested}` and answered about `{returned}`")]
+    FileIdentityMismatch {
+        provider: ModProvider,
+        requested: String,
+        returned: String,
+    },
+
     /// A version has no file this launcher can install, or more than one that
     /// claims to be the primary.
     ///
@@ -212,6 +257,10 @@ impl ModPlatformError {
             Self::ProjectUnknown { .. } => "error-mod-project-unknown",
             Self::ProjectTypeUnsupported { .. } => "error-mod-project-type-unsupported",
             Self::VersionUnknown { .. } => "error-mod-version-unknown",
+            Self::FileUnknown { .. } => "error-mod-file-unknown",
+            Self::FileUnavailable { .. } => "error-mod-file-unavailable",
+            Self::FileDistributionRestricted { .. } => "error-mod-file-distribution-restricted",
+            Self::FileIdentityMismatch { .. } => "error-mod-file-identity-mismatch",
             Self::AmbiguousPrimaryFile { .. } => "error-mod-primary-file-ambiguous",
             Self::HashesMissing { .. } => "error-mod-hashes-missing",
             Self::LoaderCannotHostMods { .. } => "error-mod-loader-cannot-host-mods",
@@ -277,6 +326,34 @@ impl ModPlatformError {
             Self::VersionUnknown { version_id, .. } => {
                 vec![("version_id", version_id.clone())]
             }
+            Self::FileUnknown {
+                provider,
+                project_id,
+                file_id,
+            }
+            | Self::FileUnavailable {
+                provider,
+                project_id,
+                file_id,
+            }
+            | Self::FileDistributionRestricted {
+                provider,
+                project_id,
+                file_id,
+            } => vec![
+                ("provider", provider.to_string()),
+                ("project", project_id.clone()),
+                ("file_id", file_id.clone()),
+            ],
+            Self::FileIdentityMismatch {
+                provider,
+                requested,
+                returned,
+            } => vec![
+                ("provider", provider.to_string()),
+                ("requested", requested.clone()),
+                ("returned", returned.clone()),
+            ],
             Self::AmbiguousPrimaryFile { version_id, found } => vec![
                 ("version_id", version_id.clone()),
                 ("found", found.to_string()),
@@ -414,6 +491,13 @@ mod tests {
     /// to compile until it is handled there. Adding it here is what puts it in
     /// front of the two tests below.
     fn every_variant() -> Vec<ModPlatformError> {
+        let mut variants = catalog_variants();
+        variants.extend(resolution_and_transport_variants());
+        variants
+    }
+
+    /// The failures that come from reading a catalog.
+    fn catalog_variants() -> Vec<ModPlatformError> {
         vec![
             ModPlatformError::ResponseInvalid {
                 provider: ModProvider::Modrinth,
@@ -431,6 +515,26 @@ mod tests {
                 provider: ModProvider::Modrinth,
                 version_id: "nope".to_owned(),
             },
+            ModPlatformError::FileUnknown {
+                provider: ModProvider::CurseForge,
+                project_id: "238222".to_owned(),
+                file_id: "4593548".to_owned(),
+            },
+            ModPlatformError::FileUnavailable {
+                provider: ModProvider::CurseForge,
+                project_id: "238222".to_owned(),
+                file_id: "4593548".to_owned(),
+            },
+            ModPlatformError::FileDistributionRestricted {
+                provider: ModProvider::CurseForge,
+                project_id: "238222".to_owned(),
+                file_id: "4593548".to_owned(),
+            },
+            ModPlatformError::FileIdentityMismatch {
+                provider: ModProvider::CurseForge,
+                requested: "238222/4593548".to_owned(),
+                returned: "238222/4593549".to_owned(),
+            },
             ModPlatformError::AmbiguousPrimaryFile {
                 version_id: "v".to_owned(),
                 found: 2,
@@ -441,6 +545,16 @@ mod tests {
             ModPlatformError::LoaderCannotHostMods {
                 loader: LoaderKind::Vanilla,
             },
+        ]
+    }
+
+    /// The failures that come from resolving a graph, plus the transport and
+    /// credential states every provider shares.
+    ///
+    /// Split from [`catalog_variants`] only for length: the two together are
+    /// the complete list the tests below run over.
+    fn resolution_and_transport_variants() -> Vec<ModPlatformError> {
+        vec![
             ModPlatformError::IncompatibleSelectedVersion {
                 project_id: "p".to_owned(),
                 version_id: "v".to_owned(),

@@ -28,6 +28,7 @@ pub mod artifact_cache;
 mod artwork;
 pub mod connection;
 pub mod curseforge;
+pub mod curseforge_pack;
 pub mod diagnostics;
 pub mod error;
 pub mod import;

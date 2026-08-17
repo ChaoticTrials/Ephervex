@@ -56,8 +56,8 @@ use ephervex_mod_platform::{
 };
 use ephervex_model::{InstanceId, ModOrigin, ModProvider};
 use ephervex_pack::{
-    ManagedMutation, ManagedProject, PackError, PackFileRecipe, PackRecipe, RecordedMod,
-    SourceStore,
+    ArtifactFetch, ManagedMutation, ManagedProject, PackError, PackFileRecipe, PackRecipe,
+    RecordedMod, SourceStore,
 };
 use ephervex_storage::ClientRecord;
 use tokio_util::sync::CancellationToken;
@@ -883,10 +883,13 @@ impl App {
             game_dir: &ephervex_storage::metadata::client_game_dir(&context.record.root),
             retired_dir: &retired,
             store: &context.store,
-            manager: &manager,
-            cache: &CacheLayout::new(self.paths().cache_dir()),
-            reporter,
-            cancel,
+            fetch: ArtifactFetch {
+                manager: &manager,
+                cache: &CacheLayout::new(self.paths().cache_dir()),
+                authenticated: None,
+                reporter,
+                cancel,
+            },
         })
         .await?;
         Ok(())
