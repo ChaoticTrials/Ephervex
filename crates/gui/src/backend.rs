@@ -647,6 +647,10 @@ pub enum Event {
     },
     StorageRootPicked(PathBuf),
     ArtifactCacheStatus(ArtifactCacheStatusData),
+    /// A manual clear has finished without a fresh usage figure to show, because
+    /// the clear was refused or the store could not be measured afterwards. The
+    /// view still has to stop presenting the clear as running.
+    ArtifactCacheClearFinished,
 }
 
 /// The reusable artifact cache as the storage settings show it.
@@ -1535,23 +1539,14 @@ fn run_worker(
                     Err(error) => send_error(&events, &CoreError::from(error)),
                 }
             }
-            Command::ClearArtifactCache => match runtime.block_on(app.clear_artifact_cache()) {
-                Ok(report) => {
-                    let _ = events.send(Event::Toast {
-                        message: cleared_cache_message(&report),
-                        error: false,
-                    });
-                    match runtime.block_on(app.artifact_cache_status()) {
-                        Ok(status) => {
-                            let _ = events.send(Event::ArtifactCacheStatus(
-                                artifact_cache_status_data(&status),
-                            ));
-                        }
-                        Err(error) => send_error(&events, &error),
-                    }
+            Command::ClearArtifactCache => {
+                let cleared = runtime.block_on(app.clear_artifact_cache());
+                for event in clear_artifact_cache_events(cleared, || {
+                    runtime.block_on(app.artifact_cache_status())
+                }) {
+                    let _ = events.send(event);
                 }
-                Err(error) => send_error(&events, &error),
-            },
+            }
             Command::SaveDisplaySettings {
                 text_scale,
                 technical_text_size,
@@ -1856,6 +1851,37 @@ fn cleared_cache_message(report: &ephervex_core::ArtifactCacheMaintenance) -> St
         "gui-artifact-cache-cleared",
         [("value", ephervex_i18n::Arg::from(freed.as_str()))],
     )
+}
+
+/// Everything a manual clear reports back, in the order the view receives it.
+///
+/// Each outcome ends with an event that takes the view out of its clearing
+/// state: a fresh usage figure when the store could be measured, and an explicit
+/// "finished" otherwise. A clear that only reported an error would otherwise
+/// leave the button that started it disabled with nothing on the way to enable
+/// it again.
+fn clear_artifact_cache_events(
+    cleared: Result<ephervex_core::ArtifactCacheMaintenance, CoreError>,
+    measure: impl FnOnce() -> Result<ephervex_core::ArtifactCacheStatus, CoreError>,
+) -> Vec<Event> {
+    let report = match cleared {
+        Ok(report) => report,
+        Err(error) => return vec![error_toast(&error), Event::ArtifactCacheClearFinished],
+    };
+    let mut events = vec![Event::Toast {
+        message: cleared_cache_message(&report),
+        error: false,
+    }];
+    match measure() {
+        Ok(status) => events.push(Event::ArtifactCacheStatus(artifact_cache_status_data(
+            &status,
+        ))),
+        Err(error) => {
+            events.push(error_toast(&error));
+            events.push(Event::ArtifactCacheClearFinished);
+        }
+    }
+    events
 }
 
 /// The measured cache, formatted for the storage settings.
@@ -3401,11 +3427,17 @@ fn localized_count(message_id: &str, count: usize) -> String {
 }
 
 fn send_error(events: &Sender<Event>, error: &CoreError) {
+    let _ = events.send(error_toast(error));
+}
+
+/// A failure as the user sees it, logged with the technical detail the toast
+/// deliberately leaves out.
+fn error_toast(error: &CoreError) -> Event {
     tracing::warn!(message_id = error.message_id(), detail = %error, "GUI operation failed");
-    let _ = events.send(Event::Toast {
+    Event::Toast {
         message: localized_error(error),
         error: true,
-    });
+    }
 }
 
 fn send_modal_error(events: &Sender<Event>, error: &CoreError) {
@@ -3558,6 +3590,93 @@ mod tests {
     #![allow(clippy::expect_used)]
 
     use super::*;
+
+    fn busy_cache() -> CoreError {
+        CoreError::from(ephervex_core::ArtifactCacheError::Busy {
+            path: PathBuf::from("/cache/artifact-cache.lock"),
+        })
+    }
+
+    #[test]
+    fn a_refused_clear_reports_the_reason_and_ends_the_clearing_state() {
+        let measured = std::cell::Cell::new(false);
+        let events = clear_artifact_cache_events(Err(busy_cache()), || {
+            measured.set(true);
+            Err(busy_cache())
+        });
+
+        assert!(
+            !measured.get(),
+            "a clear that never ran leaves the store unchanged, so nothing needs re-measuring"
+        );
+        assert!(matches!(
+            events.first(),
+            Some(Event::Toast { error: true, .. })
+        ));
+        assert!(matches!(
+            events.last(),
+            Some(Event::ArtifactCacheClearFinished)
+        ));
+    }
+
+    #[test]
+    fn a_clear_that_cannot_be_measured_afterwards_still_ends_the_clearing_state() {
+        let events = clear_artifact_cache_events(
+            Ok(ephervex_core::ArtifactCacheMaintenance {
+                removed_entries: 3,
+                freed_bytes: 4096,
+                ..ephervex_core::ArtifactCacheMaintenance::default()
+            }),
+            || Err(busy_cache()),
+        );
+
+        assert!(
+            matches!(events.first(), Some(Event::Toast { error: false, .. })),
+            "the clear succeeded, so its result is still reported as such"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, Event::Toast { error: true, .. }))
+        );
+        assert!(matches!(
+            events.last(),
+            Some(Event::ArtifactCacheClearFinished)
+        ));
+    }
+
+    #[test]
+    fn a_measured_clear_ends_on_the_figure_it_measured() {
+        let events = clear_artifact_cache_events(
+            Ok(ephervex_core::ArtifactCacheMaintenance {
+                removed_entries: 1,
+                freed_bytes: 1024,
+                ..ephervex_core::ArtifactCacheMaintenance::default()
+            }),
+            || {
+                Ok(ephervex_core::ArtifactCacheStatus {
+                    used_bytes: 0,
+                    entries: 0,
+                    complete: true,
+                    limit: ephervex_core::ArtifactCacheLimit::default(),
+                })
+            },
+        );
+
+        assert!(matches!(events.last(), Some(Event::ArtifactCacheStatus(_))));
+        // The status event is itself terminal for the view, so a second
+        // "finished" beside it would say nothing new.
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::ArtifactCacheClearFinished))
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::Toast { error: true, .. }))
+        );
+    }
 
     #[test]
     fn diagnostic_scope_mapping_never_guesses_an_entity_type() {

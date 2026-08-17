@@ -1430,6 +1430,12 @@ fn apply_event(
             apply_pending_creations(ui, &creations.borrow());
         }
         Event::ArtifactCacheStatus(status) => apply_artifact_cache_status(ui, status),
+        Event::ArtifactCacheClearFinished => {
+            // No new figure to show, so the previous one stands. What must not
+            // stand is the clearing state: the toast beside this event is the
+            // whole answer, and the button has to be usable again.
+            ui.set_artifact_cache_clearing(false);
+        }
         Event::MinecraftReleases(versions) => apply_minecraft_releases(ui, versions),
         Event::LoaderVersions {
             form,
@@ -2981,6 +2987,9 @@ mod tests {
             !backend.contains("artifact_cache_status()) => Event::Snapshot"),
             "the usage figure is not part of the ordinary snapshot"
         );
+        // Both events that can end a clear release the guard the button set, so
+        // a clear that reports only a failure cannot leave it disabled.
+        assert!(backend.contains("Event::ArtifactCacheClearFinished"));
     }
 
     #[test]
