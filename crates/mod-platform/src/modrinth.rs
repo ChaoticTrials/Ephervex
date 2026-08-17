@@ -6,10 +6,11 @@
 //! sees a facet string or a `dependency_type`.
 //!
 //! ```text
-//! modrinth.rs   the provider: what to ask for, and what to do with the answer
-//! ├── api       endpoints, requests, and the metadata cache
-//! ├── dto       Modrinth's wire shapes, declared and nothing more
-//! └── mapping   what those shapes mean as Ephervex's own model
+//! modrinth.rs     the provider: what to ask for, and what to do with the answer
+//! ├── api         endpoints, requests, and the metadata cache
+//! ├── cache_key   what identifies one cached answer
+//! ├── dto         Modrinth's wire shapes, declared and nothing more
+//! └── mapping     what those shapes mean as Ephervex's own model
 //! ```
 //!
 //! The split is along the question each file answers. `api` knows how to ask
@@ -19,6 +20,7 @@
 //! concrete version rather than from anything a search response says.
 
 mod api;
+mod cache_key;
 mod dto;
 mod mapping;
 

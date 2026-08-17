@@ -35,10 +35,19 @@
 //!
 //! # On-disk shape
 //!
+//! A document with a name of Ephervex's own choosing is stored under that name.
+//! A document whose identity is a *request* is stored under the SHA-256 digest
+//! of that request's canonical key, in a provider namespace, sharded on the
+//! first two digest characters (see [`MetadataKey::addressed`]).
+//!
 //! ```text
 //! $XDG_CACHE_HOME/ephervex/metadata/
 //! ├── mojang-version-manifest.json         the envelope below
-//! └── mojang-version-manifest.fetch.json   staging, only while a refresh runs
+//! ├── mojang-version-manifest.fetch.json   staging, only while a refresh runs
+//! └── modrinth/
+//!     └── 7a/
+//!         ├── 7a...<64 hex characters>.json
+//!         └── 7a...<64 hex characters>.fetch.json
 //! ```
 //!
 //! ```json
@@ -63,6 +72,7 @@ use reqwest::Url;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
+use sha2::{Digest, Sha256};
 use tokio::fs;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
@@ -111,12 +121,29 @@ impl Freshness {
     }
 }
 
-/// A validated name for one cached document.
+/// How many leading digest characters become the shard directory.
 ///
-/// Wrapping it in a type means the filename can only be built from a string
-/// that has been checked once, at construction. The key is chosen by Ephervex
-/// (`"mojang-version-manifest"`), never taken from provider output, but the
-/// validation is here anyway because "never" has a way of becoming "not yet"
+/// One level of 256 is enough to keep a directory listing manageable without
+/// turning the store into a deep tree nobody can inspect by hand. The shared
+/// content stores shard the same way, and matching them means a user browsing
+/// the cache sees one layout rather than two.
+const DIGEST_SHARD_LEN: usize = 2;
+
+/// A validated location for one cached document, relative to the metadata
+/// store root.
+///
+/// Wrapping it in a type means the path can only be built from something that
+/// has been checked once, at construction. There are two ways to build one and
+/// no third:
+///
+/// - [`MetadataKey::new`], for a document Ephervex names itself
+///   (`"mojang-version-manifest"`). The name is a single validated segment.
+/// - [`MetadataKey::addressed`], for a document whose identity is a request.
+///   The request never reaches the filesystem; its digest does.
+///
+/// Both forms are bounded, which is the property the rest of the launcher
+/// depends on: a metadata path is a sibling away from a staging file and a
+/// temporary file, and filesystem name limits apply to those too.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MetadataKey(String);
 
@@ -126,9 +153,55 @@ impl MetadataKey {
         Ok(Self(safe_segment(key.trim())?.to_owned()))
     }
 
+    /// Addresses a document by the SHA-256 digest of its canonical key.
+    ///
+    /// For documents whose identity is a request rather than a name: a project
+    /// reference, a search, a list of ids. Those values arrive from users and
+    /// from providers, they have no length anyone controls, and a name derived
+    /// from one is a name a filesystem may refuse — an encrypted home directory
+    /// accepts 143 bytes for a filename, and a slug alone can exceed that. So
+    /// the canonical key is hashed and the digest is the name: 64 lowercase hex
+    /// characters, whatever went in.
+    ///
+    /// `canonical_key` is the caller's stable, unambiguous rendering of the
+    /// request it identifies, and it is the caller's job to keep it stable —
+    /// changing it changes every address derived from it, which is why callers
+    /// carry a schema version inside it. `namespace` is the provider directory
+    /// the entry lands in, so two providers cannot collide even if they ever
+    /// chose the same canonical rendering.
+    ///
+    /// The digest is not a security boundary. It is here for bounded names,
+    /// deterministic addressing, and directory distribution; nothing is
+    /// authenticated by it and nothing secret may be put into a canonical key.
+    pub fn addressed(namespace: &str, canonical_key: &str) -> Result<Self, CacheKeyError> {
+        let namespace = safe_segment(namespace.trim())?;
+        let digest = hex::encode(Sha256::digest(canonical_key.as_bytes()));
+        let shard = digest.get(..DIGEST_SHARD_LEN).unwrap_or(digest.as_str());
+        Ok(Self(format!("{namespace}/{shard}/{digest}")))
+    }
+
+    /// The key as a `/`-separated relative path. Every segment is validated.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// This key's file beneath the metadata store root, with `extension`
+    /// appended to the final segment.
+    ///
+    /// Built segment by segment rather than by joining the whole string, so
+    /// nothing here depends on a platform reading `/` as a separator.
+    fn relative_file(&self, extension: &str) -> PathBuf {
+        let mut path = PathBuf::new();
+        let mut segments = self.0.split('/').peekable();
+        while let Some(segment) = segments.next() {
+            if segments.peek().is_some() {
+                path.push(segment);
+            } else {
+                path.push(format!("{segment}.{extension}"));
+            }
+        }
+        path
     }
 }
 
@@ -314,19 +387,22 @@ impl MetadataCache {
     /// Where one document's envelope lives.
     #[must_use]
     pub fn path(&self, key: &MetadataKey) -> PathBuf {
-        self.layout
-            .store_root(ContentStore::Metadata)
-            .join(format!("{}.json", key.as_str()))
+        self.entry_path(key, "json")
     }
 
     /// Where a refresh writes before it is known to have succeeded.
     ///
     /// Distinct from the envelope path so that a failed refresh cannot destroy
-    /// the copy the launcher is currently able to serve.
+    /// the copy the launcher is currently able to serve. A sibling of it, so
+    /// that publishing stays a rename inside one directory.
     fn staging_path(&self, key: &MetadataKey) -> PathBuf {
+        self.entry_path(key, "fetch.json")
+    }
+
+    fn entry_path(&self, key: &MetadataKey, extension: &str) -> PathBuf {
         self.layout
             .store_root(ContentStore::Metadata)
-            .join(format!("{}.fetch.json", key.as_str()))
+            .join(key.relative_file(extension))
     }
 
     /// Reads whatever is cached, however old, without touching the network.
@@ -559,7 +635,12 @@ impl MetadataCache {
         entry: &CachedMetadata,
     ) -> Result<(), MetadataCacheError> {
         let path = self.path(key);
-        let directory = self.layout.store_root(ContentStore::Metadata);
+        // The key's own directory, not the store root: an addressed key lives
+        // in a provider namespace and a shard beneath it.
+        let directory = path.parent().map_or_else(
+            || self.layout.store_root(ContentStore::Metadata),
+            Path::to_path_buf,
+        );
         fs::create_dir_all(&directory)
             .await
             .map_err(|source| MetadataCacheError::Io {
@@ -583,7 +664,9 @@ impl MetadataCache {
 
         // Same atomicity rule as the download manager's: a reader must never
         // see a half-written envelope, and a rename within one directory is the
-        // cheapest way to guarantee that.
+        // cheapest way to guarantee that. The suffix is a fixed eight bytes on
+        // top of a key that [`MetadataKey`] already bounds, so the sibling is
+        // creatable wherever the entry itself is.
         let temporary = path.with_extension("json.writing");
         fs::write(&temporary, &encoded)
             .await
@@ -638,6 +721,188 @@ mod tests {
                 .expect("safe key")
                 .as_str(),
             "mojang-version-manifest"
+        );
+    }
+
+    /// The digest of an addressed key, split back into the parts the layout
+    /// promises: a namespace, a shard, and the digest itself.
+    fn addressed_parts(key: &MetadataKey) -> (String, String, String) {
+        let parts: Vec<&str> = key.as_str().split('/').collect();
+        assert_eq!(parts.len(), 3, "`{key}` is not namespace/shard/digest");
+        (
+            parts[0].to_owned(),
+            parts[1].to_owned(),
+            parts[2].to_owned(),
+        )
+    }
+
+    #[test]
+    fn an_addressed_key_is_a_namespace_a_two_character_shard_and_a_digest() {
+        let key = MetadataKey::addressed("modrinth", "modrinth:v1:project\nreference=jei\n")
+            .expect("safe namespace");
+        let (namespace, shard, digest) = addressed_parts(&key);
+
+        assert_eq!(namespace, "modrinth");
+        assert_eq!(digest.len(), 64);
+        assert_eq!(shard.len(), 2);
+        assert!(digest.starts_with(&shard), "the shard leads the digest");
+        for part in [&shard, &digest] {
+            assert!(
+                part.bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+                "`{part}` is not lowercase hexadecimal"
+            );
+        }
+    }
+
+    #[test]
+    fn an_addressed_key_is_the_same_every_time_and_different_per_request() {
+        let one = MetadataKey::addressed("modrinth", "modrinth:v1:project\nreference=jei\n")
+            .expect("safe namespace");
+        assert_eq!(
+            one,
+            MetadataKey::addressed("modrinth", "modrinth:v1:project\nreference=jei\n")
+                .expect("safe namespace")
+        );
+        assert_ne!(
+            one,
+            MetadataKey::addressed("modrinth", "modrinth:v1:project\nreference=rei\n")
+                .expect("safe namespace")
+        );
+        // The namespace is part of the address, so two providers that ever
+        // chose the same canonical rendering still get different entries.
+        assert_ne!(
+            one,
+            MetadataKey::addressed("other-provider", "modrinth:v1:project\nreference=jei\n")
+                .expect("safe namespace")
+        );
+    }
+
+    #[test]
+    fn an_addressed_key_stays_the_same_size_however_long_the_request_was() {
+        // The point of the whole exercise: a slug or a search query has no
+        // length anyone controls, and a filename does.
+        let enormous = "s".repeat(20_000);
+        let base = tempfile::tempdir().expect("temp dir");
+        let cache = MetadataCache::new(CacheLayout::new(base.path()));
+        let key = MetadataKey::addressed(
+            "modrinth",
+            &format!("modrinth:v1:search\nquery={enormous}\n"),
+        )
+        .expect("safe namespace");
+
+        let (_, shard, digest) = addressed_parts(&key);
+        assert_eq!(shard.len(), 2);
+        assert_eq!(digest.len(), 64);
+
+        for path in [cache.path(&key), cache.staging_path(&key)] {
+            let name = path
+                .file_name()
+                .and_then(std::ffi::OsStr::to_str)
+                .expect("a name");
+            assert!(
+                name.len() <= 64 + ".fetch.json".len(),
+                "`{name}` grows with the request"
+            );
+            assert!(
+                !path.to_string_lossy().contains(&enormous),
+                "the request leaked into {}",
+                path.display()
+            );
+        }
+        assert_eq!(
+            cache
+                .path(&key)
+                .file_name()
+                .and_then(std::ffi::OsStr::to_str),
+            Some(format!("{digest}.json").as_str())
+        );
+    }
+
+    #[test]
+    fn an_addressed_entry_publishes_from_a_sibling_in_its_own_shard() {
+        // A rename is only atomic inside one directory, so the staging file and
+        // the temporary file have to be siblings of the entry, not of the store.
+        let base = tempfile::tempdir().expect("temp dir");
+        let cache = MetadataCache::new(CacheLayout::new(base.path()));
+        let key = MetadataKey::addressed("modrinth", "modrinth:v1:project\nreference=jei\n")
+            .expect("safe namespace");
+
+        let path = cache.path(&key);
+        let parent = path.parent().expect("an entry has a directory");
+        assert_eq!(cache.staging_path(&key).parent(), Some(parent));
+        assert_eq!(
+            path.with_extension("json.writing").parent(),
+            Some(parent),
+            "the envelope's temporary file must not leave the shard"
+        );
+        assert!(parent.starts_with(base.path().join("metadata").join("modrinth")));
+    }
+
+    #[tokio::test]
+    async fn an_addressed_document_round_trips_through_its_shard_as_compact_json() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let layout = CacheLayout::new(base.path());
+        let cache = MetadataCache::new(layout.clone());
+        let key = MetadataKey::addressed("modrinth", "modrinth:v1:project\nreference=jei\n")
+            .expect("safe namespace");
+
+        cache
+            .store(&key, &url(), raw(r#"{"slug":"jei"}"#))
+            .await
+            .expect("store");
+
+        let read = cache.peek(&key).await.expect("cached");
+        assert_eq!(read.json(), r#"{"slug":"jei"}"#);
+        assert_eq!(read.freshness(), Freshness::Cached);
+
+        let text = std::fs::read_to_string(cache.path(&key)).expect("read");
+        assert!(
+            !text.contains('\n'),
+            "the envelope carries pretty-printing whitespace: {text}"
+        );
+        serde_json::from_str::<serde_json::Value>(&text).expect("valid JSON");
+
+        // The same TTL rules as any other entry: nothing about the address
+        // changes when a document expires.
+        assert_eq!(
+            MetadataCache::with_ttl(layout, Duration::ZERO)
+                .peek(&key)
+                .await
+                .expect("cached")
+                .freshness(),
+            Freshness::Stale
+        );
+    }
+
+    #[tokio::test]
+    async fn an_entry_left_by_an_older_layout_neither_answers_nor_blocks_an_addressed_read() {
+        // Cache files from a build that named entries differently are disposable
+        // leftovers: they are not read, and they are not in the way.
+        let base = tempfile::tempdir().expect("temp dir");
+        let cache = MetadataCache::new(CacheLayout::new(base.path()));
+        let store = base.path().join("metadata");
+        std::fs::create_dir_all(&store).expect("mkdir");
+        std::fs::write(
+            store.join("modrinth-project-jei.json"),
+            br#"{"schema":1,"source":"https://api.modrinth.invalid/v2/project/jei","fetched_at":"2026-01-01T00:00:00Z","payload":{"slug":"stale"}}"#,
+        )
+        .expect("write");
+
+        let key = MetadataKey::addressed("modrinth", "modrinth:v1:project\nreference=jei\n")
+            .expect("safe namespace");
+        assert!(
+            cache.peek(&key).await.is_none(),
+            "an old-layout file must read as a miss, not as an answer"
+        );
+
+        cache
+            .store(&key, &url(), raw(r#"{"slug":"fresh"}"#))
+            .await
+            .expect("store");
+        assert_eq!(
+            cache.peek(&key).await.expect("cached").json(),
+            r#"{"slug":"fresh"}"#
         );
     }
 

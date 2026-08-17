@@ -25,6 +25,14 @@
 //! first. Searches and batch lookups are not cached: a search is per-keystroke
 //! and never re-read, and giving each typed query its own cache file would fill
 //! the metadata store with documents nothing asks for twice.
+//!
+//! # Where a cached document lands
+//!
+//! Every request that touches the cache — including the uncached ones, which
+//! still stage a download and drop the entry afterwards — is addressed by the
+//! digest of a canonical key built in [`super::cache_key`]. Nothing a user
+//! typed and nothing a provider named reaches a path, which is what keeps the
+//! filename a fixed length no matter how long a slug or a search query is.
 
 use ephervex_download::{
     CacheLayout, DownloadManager, MetadataCache, MetadataCacheError, MetadataKey,
@@ -35,6 +43,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
 use super::PROJECT_TYPE;
+use super::cache_key::{CompatibilityFilter, ModrinthRequest};
 use super::dto::{RawProject, RawSearch, RawVersion};
 use crate::error::{ModPlatformError, ModPlatformResult};
 use crate::model::{InstanceTarget, MAX_SEARCH_LIMIT, ModSearchQuery};
@@ -97,7 +106,22 @@ impl ModrinthApi {
         )?;
 
         let response: RawSearch = self
-            .fetch_uncached("modrinth-search", &url, reporter, cancel)
+            .fetch_uncached(
+                &ModrinthRequest::Search {
+                    text: &query.text,
+                    // The clamped value, because that is the page the provider
+                    // is actually asked for.
+                    limit,
+                    offset: query.offset,
+                    filter: (!query.include_incompatible).then_some(CompatibilityFilter {
+                        minecraft_version: &target.minecraft_version,
+                        loader,
+                    }),
+                },
+                &url,
+                reporter,
+                cancel,
+            )
             .await?;
         debug!(
             hits = response.hits.len(),
@@ -116,7 +140,7 @@ impl ModrinthApi {
     ) -> ModPlatformResult<RawProject> {
         let url = self.endpoint(&["project", reference], &[])?;
         self.fetch(
-            &safe_key("modrinth-project", reference),
+            &ModrinthRequest::Project { reference },
             &url,
             reporter,
             cancel,
@@ -134,7 +158,7 @@ impl ModrinthApi {
     ) -> ModPlatformResult<Vec<RawVersion>> {
         let url = self.endpoint(&["project", project_id, "version"], &[])?;
         self.fetch(
-            &safe_key("modrinth-versions", project_id),
+            &ModrinthRequest::ProjectVersions { project_id },
             &url,
             reporter,
             cancel,
@@ -151,7 +175,7 @@ impl ModrinthApi {
         cancel: &CancellationToken,
     ) -> ModPlatformResult<Vec<RawProject>> {
         let url = self.endpoint(&["projects"], &[("ids", json_id_array(ids))])?;
-        self.fetch_uncached("modrinth-projects-batch", &url, reporter, cancel)
+        self.fetch_uncached(&ModrinthRequest::Projects { ids }, &url, reporter, cancel)
             .await
     }
 
@@ -163,7 +187,7 @@ impl ModrinthApi {
         cancel: &CancellationToken,
     ) -> ModPlatformResult<Vec<RawVersion>> {
         let url = self.endpoint(&["versions"], &[("ids", json_id_array(ids))])?;
-        self.fetch_uncached("modrinth-versions-batch", &url, reporter, cancel)
+        self.fetch_uncached(&ModrinthRequest::Versions { ids }, &url, reporter, cancel)
             .await
     }
 
@@ -199,12 +223,12 @@ impl ModrinthApi {
     /// Fetches a document, serving a cached copy while the provider is down.
     async fn fetch<T: serde::de::DeserializeOwned>(
         &self,
-        key: &str,
+        request: &ModrinthRequest<'_>,
         url: &Url,
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> ModPlatformResult<T> {
-        let key = metadata_key(key)?;
+        let key = cache_key(request)?;
         let document = self
             .cache
             .fetch(&self.manager, &key, url, reporter, cancel)
@@ -219,14 +243,18 @@ impl ModrinthApi {
     }
 
     /// Fetches a document that is not worth caching.
+    ///
+    /// The entry is still addressed by the request rather than by the endpoint,
+    /// so two of these running at once stage their downloads at different paths
+    /// instead of over each other.
     async fn fetch_uncached<T: serde::de::DeserializeOwned>(
         &self,
-        key: &str,
+        request: &ModrinthRequest<'_>,
         url: &Url,
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> ModPlatformResult<T> {
-        let key = metadata_key(key)?;
+        let key = cache_key(request)?;
         let document = self
             .cache
             .refresh(&self.manager, &key, url, reporter, cancel)
@@ -257,31 +285,14 @@ fn facets(target: &InstanceTarget, query: &ModSearchQuery, loader: &str) -> Stri
     format!("[{}]", groups.join(","))
 }
 
-/// Validates a cache key.
-fn metadata_key(key: &str) -> ModPlatformResult<MetadataKey> {
-    MetadataKey::new(key).map_err(|error| ModPlatformError::ResponseInvalid {
-        provider: ModProvider::Modrinth,
-        detail: error.to_string(),
-    })
-}
-
-/// A cache key segment derived from a provider id.
-///
-/// Modrinth ids are base62, but the id reaching here came off a command line,
-/// so anything outside `[A-Za-z0-9]` is replaced rather than trusted to be
-/// harmless in a file name.
-fn safe_key(prefix: &str, id: &str) -> String {
-    let cleaned: String = id
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() {
-                character
-            } else {
-                '-'
-            }
+/// Where one request's answer is cached.
+fn cache_key(request: &ModrinthRequest<'_>) -> ModPlatformResult<MetadataKey> {
+    request
+        .cache_key()
+        .map_err(|error| ModPlatformError::ResponseInvalid {
+            provider: ModProvider::Modrinth,
+            detail: error.to_string(),
         })
-        .collect();
-    format!("{prefix}-{cleaned}")
 }
 
 /// Modrinth encodes id lists as a JSON array inside a query parameter.
@@ -352,15 +363,26 @@ mod tests {
 
     #[test]
     fn an_id_taken_from_a_command_line_cannot_escape_the_metadata_store() {
-        assert_eq!(
-            safe_key("modrinth-versions", "../../etc"),
-            "modrinth-versions-------etc"
-        );
-        assert_eq!(
-            safe_key("modrinth-project", "AABBCCDD"),
-            "modrinth-project-AABBCCDD"
-        );
-        assert!(MetadataKey::new(&safe_key("modrinth-project", "../evil")).is_ok());
+        // Nothing of the reference survives into the address, so a separator or
+        // a `..` in one is not a path component to begin with.
+        for hostile in ["../../etc", "a/b", "", "..", "\0"] {
+            let key = cache_key(&ModrinthRequest::Project { reference: hostile })
+                .expect("a reference is hashed, never spelled out");
+            assert!(
+                !key.as_str().contains(".."),
+                "`{hostile}` reached the address as `{key}`"
+            );
+            assert!(
+                MetadataKey::new(
+                    key.as_str()
+                        .rsplit('/')
+                        .next()
+                        .expect("an address has a final segment")
+                )
+                .is_ok(),
+                "`{hostile}` produced an unusable final segment"
+            );
+        }
     }
 
     #[test]

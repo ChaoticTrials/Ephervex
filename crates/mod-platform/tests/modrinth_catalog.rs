@@ -34,7 +34,7 @@ fn fixture(name: &str) -> String {
 
 struct Catalog {
     server: MockServer,
-    _cache: TempDir,
+    cache: TempDir,
     provider: ModrinthProvider,
 }
 
@@ -61,9 +61,34 @@ impl Catalog {
 
         Self {
             server,
-            _cache: cache,
+            cache,
             provider,
         }
+    }
+
+    /// Every file the provider left in the metadata store, relative to it.
+    fn metadata_entries(&self) -> Vec<PathBuf> {
+        let root = self.cache.path().join("metadata");
+        let mut entries = Vec::new();
+        let mut pending = vec![root.clone()];
+        while let Some(directory) = pending.pop() {
+            let Ok(listing) = std::fs::read_dir(&directory) else {
+                continue;
+            };
+            for entry in listing.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else {
+                    entries.push(
+                        path.strip_prefix(&root)
+                            .expect("listed beneath the store")
+                            .to_path_buf(),
+                    );
+                }
+            }
+        }
+        entries
     }
 
     async fn serving(self, route: &str, body: String) -> Self {
@@ -306,6 +331,80 @@ async fn a_version_list_is_fetched_once_and_then_served_from_the_cache() {
         .filter(|request| request.url.path() == "/v2/project/FITSPROJ/version")
         .count();
     assert_eq!(lookups, 1);
+}
+
+#[tokio::test]
+async fn a_cached_version_list_is_named_by_a_digest_rather_than_by_the_project_that_asked_for_it() {
+    // A slug is whatever an author published and a reference is whatever a user
+    // typed; neither has a length this launcher controls, and a filename does.
+    // An encrypted home directory refuses names past 143 bytes, and the cache
+    // lives under `$XDG_CACHE_HOME`.
+    let enormous = "l".repeat(4_000);
+    let catalog = Catalog::start()
+        .await
+        .serving(
+            &format!("/v2/project/{enormous}/version"),
+            fixture("versions-fits.json"),
+        )
+        .await;
+
+    catalog
+        .provider
+        .versions(&enormous, &reporter(), &CancellationToken::new())
+        .await
+        .expect("versions");
+
+    let entries = catalog.metadata_entries();
+    assert_eq!(
+        entries.len(),
+        1,
+        "expected one cached document: {entries:?}"
+    );
+    let components: Vec<String> = entries[0]
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    let [namespace, shard, filename] = components.as_slice() else {
+        panic!("expected <namespace>/<shard>/<digest>.json, got {components:?}");
+    };
+
+    assert_eq!(namespace, "modrinth");
+    assert_eq!(shard.len(), 2);
+    let digest = filename
+        .strip_suffix(".json")
+        .expect("a cached document is json");
+    assert_eq!(digest.len(), 64);
+    assert!(digest.starts_with(shard.as_str()));
+    assert!(
+        digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "`{digest}` is not lowercase hexadecimal"
+    );
+    assert!(
+        !entries[0].to_string_lossy().contains(&enormous),
+        "the reference reached the path: {}",
+        entries[0].display()
+    );
+
+    // The document is still the one that was fetched, read back through the
+    // provider's own path without another request.
+    let versions = catalog
+        .provider
+        .versions(&enormous, &reporter(), &CancellationToken::new())
+        .await
+        .expect("versions");
+    assert!(!versions.is_empty());
+    assert_eq!(
+        catalog
+            .requests()
+            .await
+            .iter()
+            .filter(|request| request.url.path().ends_with("/version"))
+            .count(),
+        1,
+        "the second read should have been served from the cache"
+    );
 }
 
 #[tokio::test]

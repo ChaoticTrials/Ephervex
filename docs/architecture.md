@@ -374,6 +374,15 @@ Resume is allowed only with a strong ETag and compatible range metadata. Pack
 URLs must also pass the pack-download allowlist; loopback exceptions are scoped
 to tests.
 
+No cache path is derived from a name a provider or a user chose. Shared
+artifacts are addressed by a published content hash. A provider metadata
+document either carries a name the launcher chose itself or is addressed by the
+SHA-256 digest of a canonical key describing the request, in a provider
+namespace and sharded on the first two digest characters. A slug, a search
+query, or an id list therefore cannot decide how long a filename is, which
+matters because staging and temporary files are siblings of the entry and
+filesystem name limits apply to them too.
+
 ### Secrets and diagnostics
 
 Refresh tokens and API keys use a credential store, never `config.toml`.
