@@ -54,6 +54,25 @@ ephervex api show
 ephervex api clear-curseforge-key
 ```
 
+## What it is used for
+
+Importing a CurseForge modpack export. The archive itself is read locally, so
+Ephervex identifies the file, names the pack, and reports its exact Minecraft
+version, loader build, and file counts with no key configured at all. What needs
+the key is looking those files up: a CurseForge manifest names each one by
+project id and file id, and their names, sizes, checksums, and addresses exist
+only in the API. The import then downloads and verifies each one.
+
+The key travels to two places and nowhere else: the CurseForge API, and
+CurseForge's own file-delivery hosts. Ephervex will not follow a redirect that
+leaves either, so no response can send the key somewhere it was not issued for,
+and one import reads it once rather than once per file.
+
+Some projects have third-party distribution turned off by their authors. The API
+answers about such a file and declines to say where it is, so Ephervex cannot
+download it and says which project stopped the import. That is the author's
+decision, and there is no setting that works around it.
+
 ## What Ephervex does not keep
 
 CurseForge API responses are not cached. Project documents, file documents,

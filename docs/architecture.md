@@ -43,7 +43,7 @@ prevents UI code from acquiring storage or provider policy accidentally.
 | `ephervex-auth` | Microsoft, Xbox, and Minecraft Services authentication; offline identities; account sessions; keyring and memory-only credentials |
 | `ephervex-loaders` | Vanilla, Forge, and NeoForge metadata resolution and client/server installation |
 | `ephervex-options` | Line-preserving `options.txt` parsing, the generated per-release compatibility dataset and its remote feed, and version-aware application of global preferences |
-| `ephervex-pack` | Format detection, hardened archive handling, provider-neutral recipes, Modrinth parsing, optional selection, materialization, and managed-mod installation |
+| `ephervex-pack` | Format detection, hardened archive handling, provider-neutral recipes, Modrinth and CurseForge manifest parsing, optional selection, materialization, and managed-mod installation |
 | `ephervex-mod-platform` | Modrinth project/version catalog, the authenticated CurseForge third-party API transport, compatibility verdicts, and provider-neutral dependency resolution |
 | `ephervex-server` | Dedicated-server properties, EULA enforcement, process identity, foreground supervision, control channel, and bounded capture |
 | `ephervex-core` | Application services and error classification shared by frontends |
@@ -319,6 +319,7 @@ untrusted archive
    │
    ├── format detection and bounded archive inspection
    ├── provider parser and exact-version validation
+   ├── provider file resolution, where a manifest names files by id alone
    ▼
 provider-neutral PackRecipe
    │
@@ -340,6 +341,16 @@ The recipe is the operational boundary shared by import formats. Provider
 field names, archive conventions, and IDs remain nested provider metadata.
 Common/client/server applicability and optional selection have provider-neutral
 representations, preventing each importer from inventing a separate installer.
+
+Two formats reach that boundary by different routes. A Modrinth index carries
+each file's path, hashes, and download addresses, so parsing produces a complete
+recipe. A CurseForge export names each file by project id and file id only, so
+parsing produces a recipe plus a list of entries the provider still has to
+describe; `ephervex-core` resolves each against the endpoint that answers about
+that exact file and turns the result into ordinary recipe entries. Recognizing
+and describing the archive stays local either way — only the resolution step
+needs a credential, and analysis reports that as a blocker rather than failing
+to identify the file (ADR 0022).
 
 ## Mod-installation data flow
 
@@ -461,8 +472,12 @@ The CurseForge third-party API key follows the same rule and adds two of its
 own (ADR 0022). It is sent in an `x-api-key` header set per request rather than
 installed as a default header, and its client refuses to follow a redirect that
 leaves the CurseForge API origin, so no response can direct the launcher to hand
-the key to another host. Frontends learn whether a key is configured and never
-what it is.
+the key to another host. An artifact download applies the same rule to a
+different boundary: the header travels only to CurseForge's own explicitly
+listed delivery hosts, through a client whose redirects cannot leave that list.
+One import reads the credential once and holds it for that operation's requests
+and no longer. Frontends learn whether a key is configured and never what it
+is.
 
 `SecretString` redacts `Debug` output and has no `Display` implementation.
 Launch commands mark token-bearing arguments when values are substituted, and
@@ -535,12 +550,14 @@ stderr so machine-readable output remains valid.
 ## Supported scope and known boundaries
 
 The supported scope includes Linux, Minecraft release versions from 1.12.2
-onward, Vanilla, Forge, NeoForge, Modrinth pack import, Modrinth mod browsing
-with dependency resolution, and linked-server reconstruction from retained
-recipes, plus launching a linked client directly into a local managed server.
-Logs, crash reports, and launcher diagnostics are inspectable through
-`ephervex-core`, the CLI, and the GUI. CurseForge browsing and pack import, and
-mod updates and removal are unavailable. Fabric, Quilt, snapshots, Windows,
+onward, Vanilla, Forge, NeoForge, Modrinth and CurseForge pack import, Modrinth
+mod browsing with dependency resolution, and linked-server reconstruction from
+retained recipes, plus launching a linked client directly into a local managed
+server. Logs, crash reports, and launcher diagnostics are inspectable through
+`ephervex-core`, the CLI, and the GUI. CurseForge pack import needs a
+user-supplied API key and cannot obtain a file whose author has turned off
+third-party distribution. CurseForge browsing, and mod updates and removal, are
+unavailable. Fabric, Quilt, snapshots, Windows,
 and macOS are outside the supported scope recorded in ADR 0008.
 
 ## Verification

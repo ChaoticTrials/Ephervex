@@ -39,10 +39,52 @@ trait, not a change to the transport.
 namespace under the metadata store. Responses are parsed in memory, used by the
 operation that asked for them, and dropped.
 
-**The credential is scoped to one origin.** The client will not follow a
-redirect that leaves the API origin, so no response can direct the launcher to
-hand its key to another host. `x-api-key` is set per request rather than
-installed as a default header, so no unrelated request can inherit it.
+**The credential is scoped to the origins it was issued for.** The API client
+will not follow a redirect that leaves the API origin. An artifact download
+carries the key only to CurseForge's own explicitly listed delivery hosts, and
+is made through a client whose redirects cannot leave that list, so no response
+can direct the launcher to hand its key to another host. `x-api-key` is attached
+per request rather than installed as a default header, so no unrelated request —
+Mojang's, Modrinth's, a managed JDK's — can inherit it by sharing a client.
+
+## Importing a CurseForge pack
+
+A CurseForge export manifest names each of its files by project id and file id,
+and nothing else. That produces four decisions the rest of this launcher depends
+on.
+
+**Identity is exact, and it comes from the user's own manifest.** An import
+resolves `project P, file F` against the endpoint that answers about exactly
+that file, and checks the answer against the question before using it. Nothing
+lists a project's versions and picks from the list; a declared file that no
+longer exists fails the import rather than being replaced by a newer one. The
+durable record is the pair the *manifest* declared — CurseForge's release
+identifier is its file id, so the provider-neutral `version_id` carries it
+rather than a version parsed out of a display name.
+
+**Pack inclusion is not side support.** A manifest's `required` flag says
+whether a file is part of the pack as installed. It maps onto the client side —
+`required: false` becomes an optional pack choice — while the server side of
+every entry stays `unknown`, because the export format states nothing about
+servers. Reading `required: true` as "required on the server" would put a
+client-only mod into a reconstructed server on the strength of a flag that never
+meant that, and the existing reconstruction path already knows how to ask about
+`unknown` rather than assume.
+
+**Nothing an API answer says is written down; the normalized recipe is.** What
+survives an import is the provider-neutral `PackRecipe` plus the user's own
+manifest, retained verbatim under `.launcher/source/` like every other
+provider's. The recipe carries the exact ids and the minimum the launcher's own
+model needs to install and verify an artifact — a name, a size, a digest, and
+the address it was fetched from. The response document itself is parsed, used,
+and dropped, exactly as this ADR requires of every other CurseForge request.
+
+**Artifacts use the shared verified store.** A downloaded jar is content the
+provider published a hash for, addressed in `downloads/` by that hash, subject
+to the ordinary reusable-cache budget and collection. It is not API response
+data. Because everything a reconstruction needs is in the recipe, a linked
+server can be rebuilt from a CurseForge-imported client with no credential
+configured at all.
 
 ## Consequences
 
@@ -60,3 +102,18 @@ installed as a default header, so no unrelated request can inherit it.
 - A 401 or 403 is reported as "the configured key may be invalid or no longer
   authorized" rather than as a network failure, because those are the two
   outcomes a user can act on.
+- Recognizing a CurseForge export and reading what its manifest says stays
+  local, so a launcher with no key configured still identifies the archive,
+  names the pack, and reports its exact Minecraft version, loader build, and
+  file counts. Only resolving those files needs the credential, and that is
+  reported as a blocker on an otherwise complete description.
+- A project whose owner has turned off third-party distribution cannot be
+  imported. That is the author's decision: the API declines to say where the
+  file is, there is no second address, and assembling a CDN path out of the ids
+  would be routing around it. The import stops and says which project it was.
+- The export format states no destination directory for a declared file, and the
+  exact-file response states none either, so every declared file is installed
+  into `mods/`. A pack shipping a resource pack or a shader as a *declared file*
+  rather than in its overrides would land it there. Deciding otherwise would mean
+  either a second request per project or a table of undocumented class ids, and
+  neither is a schema this launcher can prove.

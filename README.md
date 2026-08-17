@@ -92,11 +92,13 @@ Ephervex retains a provider-neutral pack recipe after import so later workflows,
 including linked-server reconstruction, do not depend on the original archive
 still being present.
 
-CurseForge pack ZIP import and CurseForge mod browsing are planned but are not
-yet implemented. CurseForge access uses the official third-party API with an API
-key you apply for yourself; Ephervex stores it in the system keyring and never
-in its configuration. See
-[`docs/curseforge-api-key.md`](docs/curseforge-api-key.md).
+CurseForge modpack exports import into that same recipe. A CurseForge manifest
+names its files by project and file id, so importing one needs the official
+third-party API and an API key you apply for yourself; Ephervex stores it in the
+system keyring and never in its configuration. Reading what an export *says* —
+its name, its exact Minecraft version and loader build, how many files it has —
+needs no key at all. CurseForge mod browsing is planned but not yet
+implemented. See [`docs/curseforge-api-key.md`](docs/curseforge-api-key.md).
 
 Managed mod workflows currently support Modrinth browsing, dependency
 resolution, and installation. More complete pack and mod controls, including
@@ -159,7 +161,9 @@ shell configuration files or install completion scripts automatically.
 
 ## Current limitations
 
-* CurseForge pack ZIP import and CurseForge mod browsing are not yet available.
+* CurseForge mod browsing is not yet available. CurseForge pack import needs a
+  configured API key, and cannot obtain a file whose author has turned off
+  third-party distribution.
 * Complete pack and mod version-management workflows are still in development.
 * The generated Minecraft preference metadata is not yet exposed through the
   complete desktop preference interface.
