@@ -1303,21 +1303,8 @@ fn register_settings(ui: &AppWindow, commands: &Sender<Command>) {
     let sender = commands.clone();
     ui.on_begin_microsoft_login(move || send(&sender, Command::MicrosoftLogin));
 
-    let sender = commands.clone();
-    ui.on_save_api_settings(move |client_id, user_agent| {
-        send(
-            &sender,
-            Command::SaveApiSettings {
-                client_id: client_id.into(),
-                user_agent: user_agent.into(),
-            },
-        );
-    });
-
-    let sender = commands.clone();
-    ui.on_reset_microsoft_client_id(move || send(&sender, Command::ResetMicrosoftClientId));
-    let sender = commands.clone();
-    ui.on_reset_user_agent(move || send(&sender, Command::ResetUserAgent));
+    register_provider_identifiers(ui, commands);
+    register_curseforge_credential(ui, commands);
 
     let sender = commands.clone();
     ui.on_save_storage_settings(move |root| {
@@ -1705,6 +1692,65 @@ fn apply_pending_creations(ui: &AppWindow, tracker: &CreationTracker) {
     ));
 }
 
+/// The non-secret provider identifiers: the Microsoft Client ID and the
+/// advanced User-Agent override, both of which round-trip through the view.
+fn register_provider_identifiers(ui: &AppWindow, commands: &Sender<Command>) {
+    let sender = commands.clone();
+    ui.on_save_api_settings(move |client_id, user_agent| {
+        send(
+            &sender,
+            Command::SaveApiSettings {
+                client_id: client_id.into(),
+                user_agent: user_agent.into(),
+            },
+        );
+    });
+
+    let sender = commands.clone();
+    ui.on_reset_microsoft_client_id(move || send(&sender, Command::ResetMicrosoftClientId));
+    let sender = commands.clone();
+    ui.on_reset_user_agent(move || send(&sender, Command::ResetUserAgent));
+}
+
+/// The CurseForge credential actions: set or replace, remove, and apply for a
+/// key.
+///
+/// Its own function because of the one rule that separates it from every other
+/// setting: the input field is emptied on submit and is never written from a
+/// snapshot, so a stored key has no path back into the window.
+fn register_curseforge_credential(ui: &AppWindow, commands: &Sender<Command>) {
+    let sender = commands.clone();
+    let weak = ui.as_weak();
+    ui.on_save_curseforge_api_key(move |key| {
+        // Blank submissions are dropped here rather than sent, which is also
+        // what makes a second click on an already-emptied field do nothing.
+        if key.trim().is_empty() {
+            return;
+        }
+        send(&sender, Command::SaveCurseForgeApiKey(key.into()));
+        // Emptied the moment it is submitted, not when the write comes back:
+        // the field must never hold a credential longer than it has to, and
+        // nothing ever puts one back into it.
+        if let Some(ui) = weak.upgrade() {
+            ui.set_curseforge_api_key(SharedString::new());
+        }
+    });
+
+    let sender = commands.clone();
+    let weak = ui.as_weak();
+    ui.on_remove_curseforge_api_key(move || {
+        send(&sender, Command::RemoveCurseForgeApiKey);
+        // Removing does not need the existing value, and must not leave a
+        // half-typed replacement behind either.
+        if let Some(ui) = weak.upgrade() {
+            ui.set_curseforge_api_key(SharedString::new());
+        }
+    });
+
+    let sender = commands.clone();
+    ui.on_open_curseforge_key_help(move || send(&sender, Command::OpenCurseForgeKeyHelp));
+}
+
 /// The three artifact-cache actions the storage settings offer.
 fn register_artifact_cache(ui: &AppWindow, commands: &Sender<Command>) {
     let sender = commands.clone();
@@ -1803,6 +1849,9 @@ fn apply_snapshot(ui: &AppWindow, snapshot: Snapshot) {
     ui.set_user_agent(settings.user_agent.into());
     ui.set_effective_user_agent(settings.effective_user_agent.into());
     ui.set_user_agent_is_custom(settings.user_agent_origin.is_override());
+    // Presence only. There is deliberately no `set_curseforge_api_key` here:
+    // a snapshot must not be able to put a stored secret into a text field.
+    ui.set_curseforge_key_configured(settings.curseforge_key_present);
     ui.set_application_text_scale(i32::from(settings.text_scale_percent));
     ui.set_technical_text_size(i32::from(settings.technical_text_size_pixels));
     ui.global::<Theme>()
@@ -2856,6 +2905,56 @@ mod tests {
         assert!(source.contains("root.default-persistent-root"));
         assert!(backend.contains(".pick_folder()"));
         assert!(backend.contains("Event::StorageRootPicked(path)"));
+    }
+
+    #[test]
+    fn the_curseforge_credential_row_reports_presence_and_offers_set_replace_and_remove() {
+        let source = include_str!("ui.rs");
+        // Presence is the only thing the view is told, and the three operations
+        // are separate callbacks so removing cannot be expressed as saving an
+        // empty value.
+        assert!(source.contains("in-out property <bool> curseforge-key-configured"));
+        assert!(source.contains("callback save-curseforge-api-key(string)"));
+        assert!(source.contains("callback remove-curseforge-api-key()"));
+        assert!(source.contains("callback open-curseforge-key-help()"));
+        assert!(source.contains("gui-curseforge-key-configured"));
+        assert!(source.contains("gui-curseforge-key-not-configured"));
+        // Replacing asks for the new value rather than revealing the old one.
+        assert!(source.contains("gui-curseforge-key-replace"));
+        assert!(source.contains("input-type: InputType.password"));
+    }
+
+    #[test]
+    fn no_stored_curseforge_key_is_ever_written_back_into_the_view() {
+        // The one invariant this surface exists to keep. `apply_settings` may
+        // set the *configured* flag and nothing else, and the only writes to
+        // the input field anywhere in the controller empty it.
+        let source = include_str!("controller.rs");
+        // Split so this assertion does not match its own text.
+        let write = concat!("ui.set_", "curseforge_api_key(");
+        let mut found = 0;
+        for (index, _) in source.match_indices(write) {
+            found += 1;
+            let argument = &source[index + write.len()..];
+            assert!(
+                argument.starts_with("SharedString::new()"),
+                "the input field is written with something other than an empty value"
+            );
+        }
+        assert!(found > 0, "the field is cleared somewhere");
+        assert!(source.contains(concat!(
+            "ui.set_",
+            "curseforge_key_configured(settings.curseforge_key_present)"
+        )));
+    }
+
+    #[test]
+    fn the_key_application_action_points_at_the_official_support_article() {
+        let backend = include_str!("backend.rs");
+        assert!(backend.contains("open_in_browser(ephervex_core::CURSEFORGE_API_KEY_HELP)"));
+        assert!(
+            ephervex_core::CURSEFORGE_API_KEY_HELP.starts_with("https://support.curseforge.com/")
+        );
     }
 
     /// Where the Custom entry sits, found the way the view finds it: by asking

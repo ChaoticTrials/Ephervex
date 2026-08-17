@@ -190,6 +190,14 @@ pub enum Command {
     },
     ResetMicrosoftClientId,
     ResetUserAgent,
+    /// Store a CurseForge API key, replacing any existing one.
+    ///
+    /// Carries the value the user just typed and nothing else: there is no
+    /// command that reads a stored key back, because nothing in the frontend is
+    /// allowed to have one.
+    SaveCurseForgeApiKey(String),
+    RemoveCurseForgeApiKey,
+    OpenCurseForgeKeyHelp,
     SaveStorageRoot(String),
     /// Measure the reusable artifact cache.
     ///
@@ -325,6 +333,12 @@ pub struct SettingsData {
     pub user_agent: String,
     pub effective_user_agent: String,
     pub user_agent_origin: SettingOrigin,
+    /// Whether a CurseForge API key is stored.
+    ///
+    /// A `bool` and nothing else. There is deliberately no field the key itself
+    /// could travel in, so no view can render it and no snapshot can carry it
+    /// into a log or a crash report.
+    pub curseforge_key_present: bool,
     pub text_scale_percent: u16,
     pub technical_text_size_pixels: u16,
     pub show_linked_servers: bool,
@@ -1489,6 +1503,42 @@ fn run_worker(
                 }
                 Err(error) => send_error(&events, &error),
             },
+            Command::SaveCurseForgeApiKey(key) => {
+                // The value is moved into the credential store and dropped
+                // here. Nothing echoes it, and the snapshot that follows
+                // reports presence rather than a value.
+                match app.set_curseforge_api_key(&ephervex_core::SecretString::new(key)) {
+                    Ok(()) => {
+                        let _ = events.send(Event::Toast {
+                            message: lookup("gui-curseforge-key-saved"),
+                            error: false,
+                        });
+                        send_snapshot(&app, &events);
+                    }
+                    Err(error) => send_error(&events, &error),
+                }
+            }
+            Command::RemoveCurseForgeApiKey => match app.clear_curseforge_api_key() {
+                Ok(()) => {
+                    let _ = events.send(Event::Toast {
+                        message: lookup("gui-curseforge-key-removed"),
+                        error: false,
+                    });
+                    send_snapshot(&app, &events);
+                }
+                Err(error) => send_error(&events, &error),
+            },
+            Command::OpenCurseForgeKeyHelp => {
+                let opened = ephervex_core::open_in_browser(ephervex_core::CURSEFORGE_API_KEY_HELP);
+                let _ = events.send(Event::Toast {
+                    message: if opened {
+                        lookup("gui-curseforge-key-help-opened")
+                    } else {
+                        lookup("gui-curseforge-key-help-failed")
+                    },
+                    error: !opened,
+                });
+            }
             Command::SaveStorageRoot(root) => {
                 let path = nonempty(&root).map(Path::new);
                 match app.set_persistent_instance_root(path) {
@@ -1796,6 +1846,7 @@ fn application_settings(app: &App) -> Result<SettingsData, CoreError> {
         effective_microsoft_client_id: api.effective_microsoft_client_id,
         user_agent: api.user_agent,
         effective_user_agent: api.effective_user_agent,
+        curseforge_key_present: api.curseforge_api_key_present,
         text_scale_percent: display.text_scale.percent(),
         technical_text_size_pixels: display.technical_text_size.pixels(),
         show_linked_servers: display.show_linked_servers,
