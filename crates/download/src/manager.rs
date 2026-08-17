@@ -23,10 +23,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
-use ephervex_model::{Hash, OperationStatus, Progress};
+use ephervex_model::{Hash, OperationStatus, Progress, SecretString};
 use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
-use reqwest::header::{ACCEPT_RANGES, CONTENT_RANGE, ETAG, IF_RANGE, RANGE};
+use reqwest::header::{
+    ACCEPT_RANGES, CONTENT_RANGE, ETAG, HeaderName, HeaderValue, IF_RANGE, RANGE,
+};
 use reqwest::{Client, Response, StatusCode, Url};
 use tokio::fs::{self, File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
@@ -34,7 +36,7 @@ use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
 
-use crate::allowlist::{UrlPolicyError, check_transport, redacted};
+use crate::allowlist::{DomainAllowlist, UrlPolicyError, check_transport, redacted};
 use crate::cache::PART_SUFFIX;
 use crate::client::{HttpConfig, build_client};
 use crate::error::{ArtifactStep, AttemptFailure, DownloadError};
@@ -75,6 +77,83 @@ pub struct DownloadOutcome {
     pub source: ArtifactSource,
 }
 
+/// A credential one narrow set of hosts is allowed to receive.
+///
+/// The provider-neutral answer to a single problem: one artifact source
+/// authenticates its downloads, and every other source must not learn its
+/// secret. Installing the header as a client default would hand it to Mojang
+/// and Modrinth alongside; putting it in the URL would write it into logs and
+/// caches. So it travels with the one request that needs it, and only reaches a
+/// host the caller has explicitly vouched for.
+///
+/// Redirects are the other half of the containment and are *not* enforced here,
+/// because a redirect is decided inside the HTTP client: a manager that sends
+/// these must be built with a client whose redirect policy refuses to leave the
+/// same host set — see
+/// [`build_allowlisted_client`](crate::build_allowlisted_client).
+#[derive(Debug, Clone)]
+pub struct AuthenticatedSource {
+    header: HeaderName,
+    secret: SecretString,
+    hosts: DomainAllowlist,
+}
+
+impl AuthenticatedSource {
+    /// A credential header and the hosts permitted to receive it.
+    ///
+    /// The header name is `'static` rather than caller-supplied text: a
+    /// credential header is part of a provider's protocol, not something a
+    /// remote answer gets to choose.
+    #[must_use]
+    pub fn new(header: HeaderName, secret: SecretString, hosts: DomainAllowlist) -> Self {
+        Self {
+            header,
+            secret,
+            hosts,
+        }
+    }
+
+    /// Whether this address may receive the credential.
+    #[must_use]
+    pub fn permits(&self, url: &Url) -> bool {
+        self.hosts.validate_url(url).is_ok()
+    }
+
+    /// The header name, for tests and diagnostics. Never the value.
+    #[must_use]
+    pub fn header(&self) -> &HeaderName {
+        &self.header
+    }
+
+    /// The header this request should carry, or `None` when the address is not
+    /// one this credential may be sent to.
+    ///
+    /// The value is marked sensitive, which keeps it out of the HTTP/2 header
+    /// index where it would otherwise be retained for the life of the
+    /// connection.
+    fn header_value(&self, url: &Url) -> Option<Result<HeaderValue, DownloadError>> {
+        if !self.permits(url) {
+            // Fail closed on the credential rather than on the request: the
+            // download may well succeed unauthenticated, and refusing to send
+            // the secret is never the wrong answer.
+            warn!(
+                url = %redacted(url),
+                "not attaching a credential to an address outside its permitted hosts"
+            );
+            return None;
+        }
+        Some(
+            HeaderValue::from_str(self.secret.expose())
+                .map(|mut value| {
+                    value.set_sensitive(true);
+                    value
+                })
+                // A fixed sentence, never the rejected value.
+                .map_err(|_| DownloadError::CredentialUnusable { url: redacted(url) }),
+        )
+    }
+}
+
 /// One artifact to fetch.
 #[derive(Debug, Clone)]
 pub struct DownloadRequest {
@@ -83,6 +162,12 @@ pub struct DownloadRequest {
     expected_hashes: Vec<Hash>,
     expected_size: Option<u64>,
     label: Option<String>,
+    /// The credential this one request may carry, when its source needs one.
+    ///
+    /// Shared rather than copied: a pack import builds hundreds of requests
+    /// from one operation's credential, and one secret in memory is one secret
+    /// to keep out of a core dump.
+    authenticated: Option<Arc<AuthenticatedSource>>,
 }
 
 impl DownloadRequest {
@@ -100,6 +185,7 @@ impl DownloadRequest {
             expected_hashes: Vec::new(),
             expected_size: None,
             label: None,
+            authenticated: None,
         }
     }
 
@@ -142,6 +228,24 @@ impl DownloadRequest {
     pub fn labeled(mut self, label: impl Into<String>) -> Self {
         self.label = Some(label.into());
         self
+    }
+
+    /// Lets this request carry a provider credential.
+    ///
+    /// Opt-in per request, so an unauthenticated Mojang or Modrinth download
+    /// built beside it cannot inherit the secret. The credential is still only
+    /// sent to the hosts the source itself permits.
+    #[must_use]
+    pub fn authenticated_by(mut self, source: Arc<AuthenticatedSource>) -> Self {
+        self.authenticated = Some(source);
+        self
+    }
+
+    /// The credential this request carries, if any. For tests and diagnostics;
+    /// the value inside is never rendered.
+    #[must_use]
+    pub fn authenticated_source(&self) -> Option<&AuthenticatedSource> {
+        self.authenticated.as_deref()
     }
 
     #[must_use]
@@ -582,6 +686,11 @@ impl Transfer<'_, '_> {
 
     async fn send(&self, resuming: bool) -> Result<Response, AttemptFailure> {
         let mut builder = self.manager.client.get(self.request.url.clone());
+        if let Some(source) = &self.request.authenticated
+            && let Some(value) = source.header_value(&self.request.url)
+        {
+            builder = builder.header(source.header.clone(), value?);
+        }
         if let Some(validator) = self.state.validator.clone().filter(|_| resuming) {
             // `If-Range` hands the decision to the server: it answers 206 only
             // if the representation is byte-for-byte the one those `.part`
@@ -1095,6 +1204,109 @@ mod tests {
             .expect("https url")
             .labeled("../../../../etc/cron.d/evil");
         assert_eq!(request.destination(), Path::new("/cache/fixed.jar"));
+    }
+
+    // -- credentials on artifact downloads ---------------------------------
+
+    /// Obviously not a credential.
+    const FAKE_KEY: &str = "test-provider-key-do-not-use";
+
+    fn curseforge_source() -> Arc<AuthenticatedSource> {
+        Arc::new(AuthenticatedSource::new(
+            HeaderName::from_static("x-api-key"),
+            SecretString::new(FAKE_KEY),
+            DomainAllowlist::curseforge_artifact_defaults(),
+        ))
+    }
+
+    fn url(address: &str) -> Url {
+        Url::parse(address).expect("a url")
+    }
+
+    #[test]
+    fn a_credential_is_offered_only_to_the_hosts_its_source_vouches_for() {
+        let source = curseforge_source();
+        assert!(source.permits(&url("https://mediafilez.forgecdn.net/files/1/2/a.jar")));
+        assert!(source.permits(&url("https://edge.forgecdn.net/files/1/2/a.jar")));
+
+        for elsewhere in [
+            // The API origin is not a delivery host.
+            "https://api.curseforge.com/v1/mods/1/files/2",
+            // A look-alike host, and a subdomain of a permitted one.
+            "https://evil.example/files/1/2/a.jar",
+            "https://forgecdn.net.evil.example/a.jar",
+            "https://cdn.modrinth.com/data/x/a.jar",
+            // Plaintext, which the transport rules refuse whoever the host is.
+            "http://mediafilez.forgecdn.net/files/1/2/a.jar",
+        ] {
+            assert!(
+                !source.permits(&url(elsewhere)),
+                "{elsewhere} was offered a credential"
+            );
+        }
+    }
+
+    #[test]
+    fn an_address_outside_the_permitted_hosts_gets_no_header_rather_than_an_error() {
+        // Failing closed on the credential and open on the request: the
+        // download may well succeed without it, and not sending a secret is
+        // never the wrong answer.
+        let source = curseforge_source();
+        assert!(
+            source
+                .header_value(&url("https://evil.example/a.jar"))
+                .is_none()
+        );
+        let permitted = source
+            .header_value(&url("https://mediafilez.forgecdn.net/files/1/2/a.jar"))
+            .expect("a permitted host is offered the header")
+            .expect("the key builds a header");
+        assert!(
+            permitted.is_sensitive(),
+            "a credential header must stay out of the HTTP/2 header index"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_download_carries_no_credential_at_all() {
+        // Structural: the credential is opt-in per request, so a Mojang or
+        // Modrinth request built beside an authenticated one cannot inherit it.
+        let plain = DownloadRequest::parse("https://cdn.modrinth.com/data/x/a.jar", "/cache/a.jar")
+            .expect("https url");
+        assert!(plain.authenticated_source().is_none());
+
+        let authenticated = DownloadRequest::parse(
+            "https://mediafilez.forgecdn.net/files/1/2/a.jar",
+            "/cache/b.jar",
+        )
+        .expect("https url")
+        .authenticated_by(curseforge_source());
+        assert_eq!(
+            authenticated
+                .authenticated_source()
+                .map(|source| source.header().as_str()),
+            Some("x-api-key")
+        );
+    }
+
+    #[test]
+    fn nothing_about_an_authenticated_request_renders_the_credential() {
+        let request = DownloadRequest::parse(
+            "https://mediafilez.forgecdn.net/files/1/2/a.jar",
+            "/cache/b.jar",
+        )
+        .expect("https url")
+        .authenticated_by(curseforge_source());
+
+        assert!(!format!("{request:?}").contains(FAKE_KEY), "{request:?}");
+        assert!(!request.url().as_str().contains(FAKE_KEY));
+        assert!(
+            !DownloadError::CredentialUnusable {
+                url: redacted(request.url()),
+            }
+            .to_string()
+            .contains(FAKE_KEY)
+        );
     }
 
     #[test]

@@ -103,6 +103,14 @@ pub enum DownloadError {
     },
 
     /// The manager's concurrency semaphore was closed, i.e. the process is
+    /// The configured credential cannot be sent in an HTTP header.
+    ///
+    /// Names the address and nothing else. The rejected value is a secret, and
+    /// a diagnostic that quoted it to explain why it was rejected would put it
+    /// in every log the user pastes into a bug report.
+    #[error("the configured credential cannot be sent to {url}")]
+    CredentialUnusable { url: String },
+
     /// shutting down.
     #[error("download manager is shutting down")]
     ShuttingDown,
@@ -132,6 +140,7 @@ impl DownloadError {
             | Self::Io { .. }
             | Self::Canceled { .. }
             | Self::RetriesExhausted { .. }
+            | Self::CredentialUnusable { .. }
             | Self::ShuttingDown => false,
         }
     }

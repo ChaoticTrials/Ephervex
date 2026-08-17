@@ -38,6 +38,27 @@ pub const MODRINTH_PACK_HOSTS: &[&str] = &[
     "gitlab.com",
 ];
 
+/// Hosts CurseForge delivers project files from.
+///
+/// A CurseForge export manifest names no download address: the address comes
+/// back from the third-party API as a `downloadUrl`. That is provider data
+/// rather than pack data, but it is still remote input that decides which
+/// machine the launcher connects to — and, because a CurseForge artifact
+/// request is the one download that may carry a credential, which machine could
+/// be handed one. So it is checked against this list like any other.
+///
+/// Audit note: every entry is a CurseForge-operated delivery host observed in
+/// the API's own `downloadUrl` answers. Keep the list minimal and exact-match;
+/// wildcards are intentionally unsupported here for the same subdomain-takeover
+/// reason they are unsupported for [`MODRINTH_PACK_HOSTS`]. An address the API
+/// returns that is not on this list is refused rather than followed, and adding
+/// a host widens where a credential may be sent.
+pub const CURSEFORGE_ARTIFACT_HOSTS: &[&str] = &[
+    "edge.forgecdn.net",
+    "media.forgecdn.net",
+    "mediafilez.forgecdn.net",
+];
+
 /// Why a URL from imported metadata was refused.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
@@ -135,6 +156,13 @@ impl DomainAllowlist {
     #[must_use]
     pub fn modrinth_pack_defaults() -> Self {
         Self::new(MODRINTH_PACK_HOSTS.iter().copied())
+    }
+
+    /// The list Ephervex applies to CurseForge artifact downloads: see
+    /// [`CURSEFORGE_ARTIFACT_HOSTS`] for the source and the audit rules.
+    #[must_use]
+    pub fn curseforge_artifact_defaults() -> Self {
+        Self::new(CURSEFORGE_ARTIFACT_HOSTS.iter().copied())
     }
 
     /// An allowlist that permits nothing. Every URL checked against it is
@@ -260,6 +288,26 @@ mod tests {
                 "raw.githubusercontent.com",
             ]
         );
+    }
+
+    #[test]
+    fn the_curseforge_artifact_list_is_exactly_the_delivery_hosts_and_nothing_else() {
+        let list = DomainAllowlist::curseforge_artifact_defaults();
+        let hosts: Vec<&str> = list.hosts().collect();
+        assert_eq!(
+            hosts,
+            vec![
+                "edge.forgecdn.net",
+                "media.forgecdn.net",
+                "mediafilez.forgecdn.net",
+            ]
+        );
+        // The API origin is not a delivery host, and a delivery host is not the
+        // API origin. Neither vouches for the other.
+        assert!(!list.permits_host("api.curseforge.com"));
+        assert!(!list.permits_host("www.curseforge.com"));
+        assert!(!list.permits_host("evil.forgecdn.net.example"));
+        assert!(!list.permits_host("cdn.modrinth.com"));
     }
 
     #[test]

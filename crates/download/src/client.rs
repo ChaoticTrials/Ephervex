@@ -18,7 +18,7 @@ use ephervex_model::user_agent;
 use reqwest::{Client, Url, redirect};
 use tracing::warn;
 
-use crate::allowlist::redacted;
+use crate::allowlist::{DomainAllowlist, redacted};
 use crate::error::DownloadError;
 
 /// Transport-level settings for every outbound request.
@@ -140,6 +140,50 @@ pub fn build_single_origin_client(
         .map_err(|source| DownloadError::ClientBuild { source })
 }
 
+/// Builds a client that will not follow a redirect off an explicit host list.
+///
+/// The counterpart to [`build_single_origin_client`] for a caller whose
+/// credential is scoped to a *set* of hosts rather than to one origin: a
+/// provider that answers with a download address may legitimately hand out
+/// several delivery hosts and redirect between them, and a client that refused
+/// the second one could not fetch the file at all.
+///
+/// The guarantee is the same one, widened by exactly the list: a redirect to a
+/// host the caller has not vouched for is stopped rather than followed, so the
+/// header the request carries cannot reach it. The caller receives the `3xx`
+/// response and treats it as a failure, which is the honest outcome.
+pub fn build_allowlisted_client(
+    config: &HttpConfig,
+    allowlist: &DomainAllowlist,
+) -> Result<Client, DownloadError> {
+    let permitted = allowlist.clone();
+    let max_redirects = config.max_redirects;
+    let policy = redirect::Policy::custom(move |attempt| {
+        if permitted.validate_url(attempt.url()).is_err() {
+            // The address, never its query string: a redirect target can carry
+            // a signed token, and this line exists to explain a refusal.
+            warn!(
+                target = %redacted(attempt.url()),
+                "refusing to follow an authenticated download off its permitted hosts"
+            );
+            return attempt.stop();
+        }
+        if attempt.previous().len() >= max_redirects {
+            return attempt.error(TooManyRedirects);
+        }
+        attempt.follow()
+    });
+
+    Client::builder()
+        .user_agent(config.user_agent.clone())
+        .https_only(!config.allow_plaintext_http)
+        .redirect(policy)
+        .connect_timeout(config.connect_timeout)
+        .read_timeout(config.read_timeout)
+        .build()
+        .map_err(|source| DownloadError::ClientBuild { source })
+}
+
 /// What a redirect chain that never settles fails with.
 ///
 /// `redirect::Policy::custom` reports a refusal through an arbitrary error
@@ -186,5 +230,16 @@ mod tests {
     fn an_origin_scoped_client_builds_for_an_https_api_root() {
         let origin = Url::parse("https://api.example.test/v1/").expect("a url");
         assert!(build_single_origin_client(&HttpConfig::default(), &origin).is_ok());
+    }
+
+    #[test]
+    fn a_host_scoped_client_builds_for_a_delivery_allowlist() {
+        assert!(
+            build_allowlisted_client(
+                &HttpConfig::default(),
+                &DomainAllowlist::curseforge_artifact_defaults(),
+            )
+            .is_ok()
+        );
     }
 }
