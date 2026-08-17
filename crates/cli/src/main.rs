@@ -349,6 +349,11 @@ enum ApiCommand {
     /// Read a CurseForge API key from standard input and store it in the
     /// system keyring.
     ///
+    /// This is a CurseForge third-party API key, which you apply for through
+    /// CurseForge/Overwolf. It is not the CurseForge Upload API token. The key
+    /// is stored in the system keyring and never written to Ephervex's
+    /// configuration.
+    ///
     /// From stdin rather than an argument on purpose: process arguments are
     /// readable by every other process on the machine through `/proc`, and a
     /// shell would put the key in the history file too.
@@ -3078,16 +3083,12 @@ fn run_api_command(app: &mut App, command: &ApiCommand, json: bool) -> anyhow::R
         ApiCommand::SetCurseforgeKey => {
             let mut key = String::new();
             std::io::Read::read_to_string(&mut std::io::stdin(), &mut key)?;
-            let key = key.trim();
-            if key.is_empty() {
-                anyhow::bail!("no API key was supplied on standard input");
-            }
-            app.set_curseforge_api_key(Some(&SecretString::new(key)))?;
+            app.set_curseforge_api_key(&SecretString::new(key))?;
             // Never echo it back, not even truncated.
             println!("stored the CurseForge API key in the system keyring");
         }
         ApiCommand::ClearCurseforgeKey => {
-            app.set_curseforge_api_key(None)?;
+            app.clear_curseforge_api_key()?;
             println!("removed the CurseForge API key from the system keyring");
         }
     }
@@ -3136,6 +3137,14 @@ fn show_api_settings(settings: &ApiSettings, json: bool) {
             "not set"
         }
     );
+    if !settings.curseforge_api_key_present {
+        // The address a user needs at exactly the moment they discover they
+        // have no key. Not the Upload API, which is a different credential.
+        println!(
+            "  apply for one:      {}",
+            ephervex_core::CURSEFORGE_API_KEY_HELP
+        );
+    }
     println!(
         "credential storage:   {}",
         settings.credential_storage.map_or_else(

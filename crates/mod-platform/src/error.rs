@@ -25,6 +25,40 @@ pub enum ModPlatformError {
         source: Box<MetadataCacheError>,
     },
 
+    /// A request to the provider could not be completed at all.
+    ///
+    /// Distinct from [`Self::Unreachable`] only in where it comes from: a
+    /// provider that reads through the metadata cache can still answer from a
+    /// stale document, while one that must not persist anything has nothing to
+    /// fall back to. Both are outages and share a sentence.
+    #[error("{provider} could not be reached")]
+    RequestFailed {
+        provider: ModProvider,
+        detail: String,
+    },
+
+    /// The provider answered with a status this launcher cannot use.
+    #[error("{provider} answered with HTTP {status}")]
+    HttpStatus { provider: ModProvider, status: u16 },
+
+    /// The provider requires an API key and none is configured.
+    #[error("{provider} needs an API key, and none is configured")]
+    CredentialMissing { provider: ModProvider },
+
+    /// The configured API key could not be read out of the secret store.
+    ///
+    /// Not the same as having none: a locked keyring is a machine problem the
+    /// user can fix, while an absent key is a setting they have not filled in.
+    #[error("the API key for {provider} could not be read")]
+    CredentialUnreadable {
+        provider: ModProvider,
+        detail: String,
+    },
+
+    /// The provider refused the configured API key.
+    #[error("{provider} rejected the configured API key with HTTP {status}")]
+    CredentialRejected { provider: ModProvider, status: u16 },
+
     /// The provider answered with something this build cannot read.
     #[error("{provider} returned a response Ephervex could not read")]
     ResponseInvalid {
@@ -165,7 +199,15 @@ impl ModPlatformError {
     #[must_use]
     pub const fn message_id(&self) -> &'static str {
         match self {
-            Self::Unreachable { .. } => "error-mod-provider-unreachable",
+            // One sentence for "that catalog is not answering", however the
+            // request was made.
+            Self::Unreachable { .. } | Self::RequestFailed { .. } => {
+                "error-mod-provider-unreachable"
+            }
+            Self::HttpStatus { .. } => "error-mod-provider-http-status",
+            Self::CredentialMissing { .. } => "error-mod-credential-missing",
+            Self::CredentialUnreadable { .. } => "error-mod-credential-unreadable",
+            Self::CredentialRejected { .. } => "error-mod-credential-rejected",
             Self::ResponseInvalid { .. } => "error-mod-provider-response-invalid",
             Self::ProjectUnknown { .. } => "error-mod-project-unknown",
             Self::ProjectTypeUnsupported { .. } => "error-mod-project-type-unsupported",
@@ -206,9 +248,18 @@ impl ModPlatformError {
     /// Arguments for the failures that come from reading a catalog.
     fn catalog_args(&self) -> Option<Vec<(&'static str, String)>> {
         let args = match self {
-            Self::Unreachable { provider, .. } | Self::ResponseInvalid { provider, .. } => {
+            Self::Unreachable { provider, .. }
+            | Self::RequestFailed { provider, .. }
+            | Self::ResponseInvalid { provider, .. }
+            | Self::CredentialMissing { provider }
+            | Self::CredentialUnreadable { provider, .. } => {
                 vec![("provider", provider.to_string())]
             }
+            Self::HttpStatus { provider, status }
+            | Self::CredentialRejected { provider, status } => vec![
+                ("provider", provider.to_string()),
+                ("status", status.to_string()),
+            ],
             Self::ProjectUnknown {
                 provider,
                 reference,
@@ -330,7 +381,21 @@ impl ModPlatformError {
     /// A frontend offers "try again" for the first and not for the second.
     #[must_use]
     pub const fn is_offline(&self) -> bool {
-        matches!(self, Self::Unreachable { .. })
+        matches!(self, Self::Unreachable { .. } | Self::RequestFailed { .. })
+    }
+
+    /// Whether the configured API key is the thing standing in the way.
+    ///
+    /// A frontend sends the user to the provider settings for these and
+    /// nowhere else, which it cannot decide by matching on this enum.
+    #[must_use]
+    pub const fn is_credential_problem(&self) -> bool {
+        matches!(
+            self,
+            Self::CredentialMissing { .. }
+                | Self::CredentialUnreadable { .. }
+                | Self::CredentialRejected { .. }
+        )
     }
 }
 
@@ -423,6 +488,25 @@ mod tests {
                     source: std::io::Error::other("unreachable"),
                 }),
             },
+            ModPlatformError::RequestFailed {
+                provider: ModProvider::CurseForge,
+                detail: "connection refused".to_owned(),
+            },
+            ModPlatformError::HttpStatus {
+                provider: ModProvider::CurseForge,
+                status: 500,
+            },
+            ModPlatformError::CredentialMissing {
+                provider: ModProvider::CurseForge,
+            },
+            ModPlatformError::CredentialUnreadable {
+                provider: ModProvider::CurseForge,
+                detail: "the keyring is locked".to_owned(),
+            },
+            ModPlatformError::CredentialRejected {
+                provider: ModProvider::CurseForge,
+                status: 401,
+            },
             ModPlatformError::ResolutionDidNotConverge { iterations: 100 },
             ModPlatformError::Canceled,
         ]
@@ -481,5 +565,52 @@ mod tests {
             }
             .is_cancellation()
         );
+        assert!(
+            ModPlatformError::RequestFailed {
+                provider: ModProvider::CurseForge,
+                detail: "connection refused".to_owned(),
+            }
+            .is_offline()
+        );
+    }
+
+    #[test]
+    fn every_way_an_api_key_can_block_a_request_is_reported_as_a_credential_problem() {
+        // A frontend sends the user to the provider settings for exactly these
+        // three and for nothing else.
+        for error in [
+            ModPlatformError::CredentialMissing {
+                provider: ModProvider::CurseForge,
+            },
+            ModPlatformError::CredentialUnreadable {
+                provider: ModProvider::CurseForge,
+                detail: String::new(),
+            },
+            ModPlatformError::CredentialRejected {
+                provider: ModProvider::CurseForge,
+                status: 403,
+            },
+        ] {
+            assert!(error.is_credential_problem(), "{error:?}");
+        }
+        assert!(
+            !ModPlatformError::HttpStatus {
+                provider: ModProvider::CurseForge,
+                status: 500,
+            }
+            .is_credential_problem()
+        );
+    }
+
+    #[test]
+    fn no_credential_failure_can_carry_the_key_it_failed_with() {
+        // Structural rather than incidental: none of these variants has a field
+        // an API key could be put in, so no call site can leak one by being
+        // helpful with the detail string. This test is what fails if one grows.
+        const FAKE_KEY: &str = "test-curseforge-key-do-not-use";
+        for error in every_variant() {
+            assert!(!format!("{error:?}").contains(FAKE_KEY), "{error:?}");
+            assert!(!error.to_string().contains(FAKE_KEY), "{error}");
+        }
     }
 }

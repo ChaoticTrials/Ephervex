@@ -14,6 +14,7 @@ pub mod java;
 pub mod loader;
 pub mod mods;
 pub mod operation;
+pub mod secret;
 pub mod server;
 pub mod storage;
 
@@ -31,6 +32,7 @@ pub use java::{JavaOverride, JvmSettings};
 pub use loader::{LoaderKind, LoaderSelection, LoaderVersionMode};
 pub use mods::{ModOrigin, ModProvider};
 pub use operation::{Operation, OperationStatus, Progress};
+pub use secret::{REDACTED, SecretString};
 pub use server::{
     ConnectionTarget, InvalidOperatorPermissionLevel, InvalidServerRelativePath,
     OperatorPermissionLevel, ServerInstallation, ServerLaunch, ServerRelativePath,

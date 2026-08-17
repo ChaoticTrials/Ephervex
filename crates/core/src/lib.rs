@@ -27,6 +27,7 @@ pub mod app;
 pub mod artifact_cache;
 mod artwork;
 pub mod connection;
+pub mod curseforge;
 pub mod diagnostics;
 pub mod error;
 pub mod import;
@@ -51,6 +52,7 @@ pub use connection::{
     LaunchAndConnectEvent, LaunchAndConnectObserver, LaunchAndConnectOptions,
     LaunchAndConnectOutcome, ServerPreparation,
 };
+pub use curseforge::StoredApiKey;
 pub use diagnostics::{
     ClientLogTail, DEFAULT_DIAGNOSTIC_BYTES, DiagnosticCatalog, DiagnosticRequest, DiagnosticScope,
     DiagnosticSearch, DiagnosticSection,
@@ -148,11 +150,11 @@ pub use ephervex_minecraft::{
 /// The provider trait and the resolver itself are deliberately *not* here: a
 /// frontend displays a plan, it does not build one.
 pub use ephervex_mod_platform::{
-    AnnotatedVersion, Compatibility, DEFAULT_SEARCH_LIMIT, DependencyKind, EmbeddedNote,
-    ExternalDependency, IncompatibilityReason, InstanceTarget, MAX_SEARCH_LIMIT, ModFile,
-    ModInstallPlan, ModPlatformError, ModProject, ModProjectDetails, ModSearchHit, ModSearchQuery,
-    ModSearchResults, ModVersionInfo, OptionalCandidate, PlanWarning, PlannedMod, ReleaseChannel,
-    SideSupport,
+    AnnotatedVersion, CURSEFORGE_API_KEY_HELP, Compatibility, DEFAULT_SEARCH_LIMIT, DependencyKind,
+    EmbeddedNote, ExternalDependency, IncompatibilityReason, InstanceTarget, MAX_SEARCH_LIMIT,
+    ModFile, ModInstallPlan, ModPlatformError, ModProject, ModProjectDetails, ModSearchHit,
+    ModSearchQuery, ModSearchResults, ModVersionInfo, OptionalCandidate, PlanWarning, PlannedMod,
+    ReleaseChannel, SideSupport,
 };
 pub use ephervex_model::{
     ARTIFACT_CACHE_LIMIT_PRESETS, ArtifactCacheLimit, ArtifactCacheLimitError, ByteUnit,

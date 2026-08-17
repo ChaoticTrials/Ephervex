@@ -190,14 +190,30 @@ impl App {
         self.mutate_config(|config| config.api.user_agent = value)
     }
 
-    /// Stores the CurseForge API key in the keyring, or removes it.
+    /// Stores the CurseForge API key in the keyring, replacing any existing
+    /// one.
     ///
-    /// Pack importers read it through the authentication credential store.
-    /// Keeping the write here lets frontends manage all API settings through
-    /// `App` while ensuring the key never reaches `config.toml`.
-    pub fn set_curseforge_api_key(&self, key: Option<&SecretString>) -> CoreResult<()> {
+    /// CurseForge integrations read it back through the authentication
+    /// credential store. Keeping the write here lets frontends manage all API
+    /// settings through `App` while ensuring the key never reaches
+    /// `config.toml`. A blank value is refused, and a failed keyring write
+    /// leaves whatever was stored before exactly as it was.
+    ///
+    /// Setting a key never contacts CurseForge: a user configuring the launcher
+    /// offline must still be able to finish.
+    pub fn set_curseforge_api_key(&self, key: &SecretString) -> CoreResult<()> {
         let store = credential_store()?;
         Ok(ephervex_auth::set_curseforge_api_key(store.as_ref(), key)?)
+    }
+
+    /// Removes the stored CurseForge API key.
+    ///
+    /// A separate operation from setting one, so that removal cannot happen by
+    /// submitting an empty field — and so that it never needs the existing
+    /// value.
+    pub fn clear_curseforge_api_key(&self) -> CoreResult<()> {
+        let store = credential_store()?;
+        Ok(ephervex_auth::clear_curseforge_api_key(store.as_ref())?)
     }
 
     /// The `User-Agent` every outbound request carries.
@@ -641,7 +657,7 @@ impl App {
 /// rather than on the application: `keyring` does its own one-time platform
 /// initialization behind a `LazyLock`, so calling this repeatedly costs a
 /// struct literal and nothing more.
-fn credential_store() -> Result<Arc<dyn CredentialStore>, AuthError> {
+pub(crate) fn credential_store() -> Result<Arc<dyn CredentialStore>, AuthError> {
     KeyringStore::open().map(|store| -> Arc<dyn CredentialStore> { Arc::new(store) })
 }
 

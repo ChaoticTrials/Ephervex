@@ -9,12 +9,17 @@
 //!
 //! # The boundary this crate is built around
 //!
-//! Exactly one module knows what Modrinth is ([`modrinth`]). Everything
-//! downstream — [`model`], [`resolve`], and every caller above this crate — is
-//! provider-neutral, because a second catalog is a translation problem and not
-//! a second launcher. Adding CurseForge is a module beside [`modrinth`] plus a
-//! [`ModProvider`](ephervex_model::ModProvider) variant; it is not a change to
-//! the resolver, the plan, or anything the services layer calls.
+//! One module per catalog: [`modrinth`] knows what Modrinth is, [`curseforge`]
+//! knows what CurseForge is. Everything downstream — [`model`], [`resolve`],
+//! and every caller above this crate — is provider-neutral, because a second
+//! catalog is a translation problem and not a second launcher. Neither module
+//! changes the resolver, the plan, or anything the services layer calls.
+//!
+//! The two are not symmetrical yet, and the asymmetry is real rather than
+//! incidental. Modrinth is a finished [`ModProviderApi`] over a public,
+//! cacheable API. CurseForge is an authenticated transport: it needs a
+//! user-supplied API key, and its published terms forbid persisting what it
+//! returns, so it reads nothing from and writes nothing to the metadata cache.
 //!
 //! # What this crate refuses to guess
 //!
@@ -39,6 +44,7 @@
 //! recording belong to `ephervex-pack`, and sequencing them belongs to
 //! `ephervex-core`.
 
+pub mod curseforge;
 pub mod error;
 pub mod model;
 pub mod modrinth;
@@ -48,6 +54,10 @@ pub mod resolve;
 #[cfg(test)]
 mod test_support;
 
+pub use curseforge::{
+    CURSEFORGE_API_BASE, CURSEFORGE_API_KEY_HELP, ConfiguredApiKey, CurseForgeApi,
+    CurseForgeCredentialSource, CurseForgeGame, CurseForgeProject, MINECRAFT_GAME_ID,
+};
 pub use error::{ModPlatformError, ModPlatformResult};
 pub use model::{
     AnnotatedVersion, Compatibility, DEFAULT_SEARCH_LIMIT, DependencyKind, IncompatibilityReason,

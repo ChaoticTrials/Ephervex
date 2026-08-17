@@ -23,15 +23,17 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 /// A mod catalog Ephervex can resolve a project and version against.
-///
-/// CurseForge belongs here when its provider exists. Adding a variant is an
-/// additive change to the persisted recipe, so there is no reason to reserve
-/// one in advance for code that cannot yet construct it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ModProvider {
     Modrinth,
+    /// CurseForge, reached through its official third-party API.
+    ///
+    /// Present so that everything the CurseForge transport reports — an absent
+    /// API key, a rejected one, a response that could not be read — names the
+    /// catalog it came from. Nothing writes it into a recipe yet.
+    CurseForge,
 }
 
 impl ModProvider {
@@ -43,6 +45,7 @@ impl ModProvider {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Modrinth => "modrinth",
+            Self::CurseForge => "curseforge",
         }
     }
 
@@ -51,6 +54,7 @@ impl ModProvider {
     pub fn parse(name: &str) -> Option<Self> {
         match name.trim().to_ascii_lowercase().as_str() {
             "modrinth" => Some(Self::Modrinth),
+            "curseforge" => Some(Self::CurseForge),
             _ => None,
         }
     }
@@ -61,6 +65,7 @@ impl fmt::Display for ModProvider {
         // Provider names are product names and stay untranslated.
         f.write_str(match self {
             Self::Modrinth => "Modrinth",
+            Self::CurseForge => "CurseForge",
         })
     }
 }
@@ -151,19 +156,25 @@ mod tests {
             Some(ModProvider::Modrinth)
         );
         assert_eq!(ModProvider::Modrinth.as_str(), "modrinth");
+        assert_eq!(
+            ModProvider::parse("CurseForge"),
+            Some(ModProvider::CurseForge)
+        );
+        assert_eq!(ModProvider::CurseForge.as_str(), "curseforge");
     }
 
     #[test]
     fn a_provider_this_build_does_not_know_is_refused_rather_than_guessed_at() {
         // The alternative — folding it into a placeholder — is how a recipe
         // ends up naming a project nothing can resolve.
-        assert_eq!(ModProvider::parse("curseforge"), None);
+        assert_eq!(ModProvider::parse("technic"), None);
         assert_eq!(ModProvider::parse(""), None);
     }
 
     #[test]
     fn the_display_name_is_the_product_name_and_the_stored_one_is_not() {
         assert_eq!(ModProvider::Modrinth.to_string(), "Modrinth");
+        assert_eq!(ModProvider::CurseForge.to_string(), "CurseForge");
         assert_ne!(
             ModProvider::Modrinth.to_string(),
             ModProvider::Modrinth.as_str(),

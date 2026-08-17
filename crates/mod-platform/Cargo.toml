@@ -21,11 +21,17 @@ thiserror.workspace = true
 tracing.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
+# `select!` only: the CurseForge client races a request against a cancellation
+# token, and nothing here spawns or blocks.
+tokio.workspace = true
 tokio-util.workspace = true
 futures-util.workspace = true
 
 [dev-dependencies]
 ephervex-i18n.workspace = true
 tempfile.workspace = true
-tokio.workspace = true
+# Used by one test only, and an important one: it installs a capturing
+# subscriber and runs the CurseForge client at TRACE, so "no API key reaches a
+# log" is checked against what `tracing` actually emitted rather than asserted.
+tracing-subscriber.workspace = true
 wiremock.workspace = true

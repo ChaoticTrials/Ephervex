@@ -207,6 +207,11 @@ pub struct App {
     /// above: constructing it builds an HTTP client and a TLS stack, and
     /// `ephervex instance list` has no business paying for one.
     pub(crate) mods: OnceLock<ephervex_mod_platform::ModrinthProvider>,
+    /// The CurseForge third-party API client, built on first use for the same
+    /// reason. It holds no credential: the key is read from the secret store at
+    /// the moment a request needs it, so a key set or removed mid-session takes
+    /// effect without rebuilding anything.
+    pub(crate) curseforge: OnceLock<ephervex_mod_platform::CurseForgeApi>,
     /// The last Java scan, held for the life of the process.
     ///
     /// Discovery forks a JVM per distinct runtime, so recomputing it whenever a
@@ -249,6 +254,7 @@ impl App {
             options: RwLock::new(None),
             loaders: OnceLock::new(),
             mods: OnceLock::new(),
+            curseforge: OnceLock::new(),
             java: RwLock::new(None),
             session: None,
             #[cfg(test)]
@@ -270,6 +276,7 @@ impl App {
             options: RwLock::new(None),
             loaders: OnceLock::new(),
             mods: OnceLock::new(),
+            curseforge: OnceLock::new(),
             java: RwLock::new(None),
             session: None,
             #[cfg(test)]

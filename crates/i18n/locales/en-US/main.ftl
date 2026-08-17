@@ -506,6 +506,9 @@ error-auth-secret-storage-unavailable = Ephervex cannot store your sign-in secur
 error-auth-credential-store-failed = The system keyring could not be used.
 .action = Check that your keyring is unlocked, then try again.
 
+error-auth-credential-blank = No value was entered.
+.action = Paste the credential and try again. Nothing was changed.
+
 error-auth-not-signed-in = No Microsoft account is signed in.
 .action = Sign in with your Microsoft account before launching Minecraft.
 
@@ -911,6 +914,18 @@ error-mod-provider-unreachable = { $provider } could not be reached.
 
 error-mod-provider-response-invalid = { $provider } returned something Ephervex could not read.
 .action = This is usually temporary. If it persists, Ephervex may need updating for a changed API.
+
+error-mod-provider-http-status = { $provider } answered with HTTP { $status }.
+.action = This is usually temporary. Try again in a few minutes.
+
+error-mod-credential-missing = { $provider } needs an API key, and none is configured.
+.action = Add your { $provider } API key in Settings, under Providers & APIs.
+
+error-mod-credential-unreadable = Ephervex could not read your { $provider } API key.
+.action = The key is kept in the system keyring. Check that your keyring is unlocked, then try again.
+
+error-mod-credential-rejected = { $provider } refused your API key (HTTP { $status }).
+.action = The key may be invalid or no longer authorized. Check it on { $provider }, then set it again in Settings, under Providers & APIs.
 
 error-mod-project-unknown = No such mod.
 .action = Check the project id or slug. Ephervex looked for { $reference }.

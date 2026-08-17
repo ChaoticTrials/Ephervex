@@ -308,15 +308,24 @@ pub fn curseforge_api_key(store: &dyn CredentialStore) -> AuthResult<Option<Secr
     store.load(&CredentialKey::CurseForgeApiKey)
 }
 
-/// Stores the CurseForge API key, or removes it when given an empty value.
-pub fn set_curseforge_api_key(
-    store: &dyn CredentialStore,
-    key: Option<&SecretString>,
-) -> AuthResult<()> {
-    match key.filter(|key| !key.is_empty()) {
-        Some(key) => store.store(&CredentialKey::CurseForgeApiKey, key),
-        None => store.delete(&CredentialKey::CurseForgeApiKey),
-    }
+/// Stores the CurseForge API key, replacing whatever was there.
+///
+/// A value that is nothing but whitespace is refused before the store is
+/// touched, so a mistaken submission leaves the previous credential exactly as
+/// it was rather than replacing a working key with a blank one. Removal is a
+/// separate operation ([`clear_curseforge_api_key`]) precisely so that it
+/// cannot happen by submitting an empty field.
+pub fn set_curseforge_api_key(store: &dyn CredentialStore, key: &SecretString) -> AuthResult<()> {
+    let key = key.trimmed().ok_or(AuthError::CredentialValueBlank)?;
+    store.store(&CredentialKey::CurseForgeApiKey, &key)
+}
+
+/// Removes the stored CurseForge API key.
+///
+/// Idempotent, and it never needs the existing value: removing a credential
+/// must not require revealing one.
+pub fn clear_curseforge_api_key(store: &dyn CredentialStore) -> AuthResult<()> {
+    store.delete(&CredentialKey::CurseForgeApiKey)
 }
 
 #[cfg(test)]
@@ -358,24 +367,129 @@ mod tests {
         provider.logout(account).expect("second logout");
     }
 
+    /// Obviously not a credential. Every test here uses it.
+    const FAKE_KEY: &str = "test-curseforge-key-do-not-use";
+
     #[test]
-    fn the_curseforge_key_round_trips_through_the_credential_store() {
+    fn the_curseforge_key_is_set_replaced_and_removed_through_the_credential_store() {
         let store = MemoryStore::new();
         assert!(curseforge_api_key(&store).expect("read").is_none());
 
-        set_curseforge_api_key(&store, Some(&SecretString::new("$2a$10$key"))).expect("store");
+        set_curseforge_api_key(&store, &SecretString::new(FAKE_KEY)).expect("store");
         assert_eq!(
             curseforge_api_key(&store)
                 .expect("read")
                 .expect("present")
                 .expose(),
-            "$2a$10$key"
+            FAKE_KEY
         );
 
-        // Clearing the field in a settings screen must remove the credential,
-        // not store an empty string that later reads as "a key exists".
-        set_curseforge_api_key(&store, Some(&SecretString::new(""))).expect("clear");
+        // Replacing is the same operation with a new value: there is nothing to
+        // remove first, and no way to ask for the old one.
+        set_curseforge_api_key(
+            &store,
+            &SecretString::new("test-curseforge-key-replacement"),
+        )
+        .expect("replace");
+        assert_eq!(
+            curseforge_api_key(&store)
+                .expect("read")
+                .expect("present")
+                .expose(),
+            "test-curseforge-key-replacement"
+        );
+
+        clear_curseforge_api_key(&store).expect("remove");
         assert!(curseforge_api_key(&store).expect("read").is_none());
+        clear_curseforge_api_key(&store).expect("removing twice is not an error");
+    }
+
+    #[test]
+    fn a_blank_value_is_refused_and_leaves_the_stored_key_untouched() {
+        let store = MemoryStore::new();
+        set_curseforge_api_key(&store, &SecretString::new(FAKE_KEY)).expect("store");
+
+        for blank in ["", " ", "\t\n", "   "] {
+            let error = set_curseforge_api_key(&store, &SecretString::new(blank))
+                .expect_err("a blank value is not a credential");
+            assert!(
+                matches!(error, AuthError::CredentialValueBlank),
+                "{blank:?}"
+            );
+        }
+
+        // The state a settings screen reports must still be true afterwards.
+        assert_eq!(
+            curseforge_api_key(&store)
+                .expect("read")
+                .expect("present")
+                .expose(),
+            FAKE_KEY
+        );
+    }
+
+    #[test]
+    fn a_pasted_value_is_stored_without_the_whitespace_around_it() {
+        // An HTTP field value has its surrounding whitespace stripped by
+        // definition, so a key stored with a trailing newline could never have
+        // been sent verbatim.
+        let store = MemoryStore::new();
+        set_curseforge_api_key(&store, &SecretString::new(format!("  {FAKE_KEY}\n")))
+            .expect("store");
+        assert_eq!(
+            curseforge_api_key(&store)
+                .expect("read")
+                .expect("present")
+                .expose(),
+            FAKE_KEY
+        );
+    }
+
+    #[test]
+    fn a_failing_credential_store_reports_a_typed_error_that_holds_no_key() {
+        let store = FailingStore;
+        let error = set_curseforge_api_key(&store, &SecretString::new(FAKE_KEY))
+            .expect_err("the store refuses");
+        assert!(matches!(
+            error,
+            AuthError::SecretStorageUnavailable { .. } | AuthError::CredentialStore { .. }
+        ));
+        assert!(!format!("{error:?}").contains(FAKE_KEY));
+        assert!(!error.to_string().contains(FAKE_KEY));
+
+        // The state the settings screen reads stays truthful: nothing was
+        // stored, and asking reports the failure rather than inventing a key.
+        assert!(curseforge_api_key(&store).is_err());
+        assert!(clear_curseforge_api_key(&store).is_err());
+    }
+
+    /// A credential store that cannot do anything, standing in for a machine
+    /// with no unlocked Secret Service.
+    #[derive(Debug)]
+    struct FailingStore;
+
+    impl CredentialStore for FailingStore {
+        fn store(&self, _key: &CredentialKey, _secret: &SecretString) -> AuthResult<()> {
+            Err(AuthError::SecretStorageUnavailable {
+                detail: "no secret service".to_owned(),
+            })
+        }
+
+        fn load(&self, _key: &CredentialKey) -> AuthResult<Option<SecretString>> {
+            Err(AuthError::SecretStorageUnavailable {
+                detail: "no secret service".to_owned(),
+            })
+        }
+
+        fn delete(&self, _key: &CredentialKey) -> AuthResult<()> {
+            Err(AuthError::SecretStorageUnavailable {
+                detail: "no secret service".to_owned(),
+            })
+        }
+
+        fn storage(&self) -> CredentialStorage {
+            CredentialStorage::Keyring
+        }
     }
 
     #[tokio::test]

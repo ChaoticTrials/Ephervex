@@ -78,7 +78,7 @@ pub use cache::{
     ARTWORK_FORMAT, CacheKeyError, CacheLayout, ContentAddress, ContentStore, FileExtension,
     MavenConflictKey, MavenCoordinate, PART_SUFFIX,
 };
-pub use client::{HttpConfig, build_client};
+pub use client::{HttpConfig, build_client, build_single_origin_client};
 pub use error::{ArtifactStep, DownloadError};
 pub use manager::{
     ArtifactSource, DownloadManager, DownloadOutcome, DownloadRequest, DownloaderConfig,

@@ -191,6 +191,15 @@ pub enum AuthError {
     #[error("secure credential storage is unavailable")]
     SecretStorageUnavailable { detail: String },
 
+    /// A credential was submitted with nothing but whitespace in it.
+    ///
+    /// Refused before it reaches the keyring rather than stored and discovered
+    /// later: a blank entry would report as *configured* while every request
+    /// made with it was rejected, which is the least diagnosable state to leave
+    /// a user in.
+    #[error("a blank value cannot be stored as a credential")]
+    CredentialValueBlank,
+
     /// The keyring is present but the operation failed.
     #[error("the credential store could not {operation} the credential")]
     CredentialStore {
@@ -387,6 +396,7 @@ impl AuthError {
             }
             Self::ProfileMalformed => "error-auth-profile-malformed",
             Self::SecretStorageUnavailable { .. } => "error-auth-secret-storage-unavailable",
+            Self::CredentialValueBlank => "error-auth-credential-blank",
             Self::CredentialStore { .. } => "error-auth-credential-store-failed",
             Self::OfflineNameInvalid { .. } => "error-auth-offline-name-invalid",
             Self::AccountUnknown { .. } => "error-auth-account-unknown",

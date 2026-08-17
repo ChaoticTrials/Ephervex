@@ -44,7 +44,7 @@ prevents UI code from acquiring storage or provider policy accidentally.
 | `ephervex-loaders` | Vanilla, Forge, and NeoForge metadata resolution and client/server installation |
 | `ephervex-options` | Line-preserving `options.txt` parsing, the generated per-release compatibility dataset and its remote feed, and version-aware application of global preferences |
 | `ephervex-pack` | Format detection, hardened archive handling, provider-neutral recipes, Modrinth parsing, optional selection, materialization, and managed-mod installation |
-| `ephervex-mod-platform` | Modrinth project/version catalog, compatibility verdicts, and provider-neutral dependency resolution |
+| `ephervex-mod-platform` | Modrinth project/version catalog, the authenticated CurseForge third-party API transport, compatibility verdicts, and provider-neutral dependency resolution |
 | `ephervex-server` | Dedicated-server properties, EULA enforcement, process identity, foreground supervision, control channel, and bounded capture |
 | `ephervex-core` | Application services and error classification shared by frontends |
 | `ephervex-cli` | Command-line frontend and human/JSON rendering |
@@ -444,12 +444,25 @@ query, or an id list therefore cannot decide how long a filename is, which
 matters because staging and temporary files are siblings of the entry and
 filesystem name limits apply to them too.
 
+CurseForge is the one source deliberately outside the metadata cache. Its
+published third-party API terms prohibit saving or caching what the API returns,
+so its client defines no cache key, no time-to-live, and no namespace under the
+metadata store; responses live in memory for the operation that needed them and
+are then dropped (ADR 0022).
+
 ### Secrets and diagnostics
 
 Refresh tokens and API keys use a credential store, never `config.toml`.
 Configuration loading strips secret-shaped legacy keys, and saving refuses to
 serialize one. When a keyring is unavailable, Microsoft login can use an
 explicit memory-only session without weakening the persistent-storage rule.
+
+The CurseForge third-party API key follows the same rule and adds two of its
+own (ADR 0022). It is sent in an `x-api-key` header set per request rather than
+installed as a default header, and its client refuses to follow a redirect that
+leaves the CurseForge API origin, so no response can direct the launcher to hand
+the key to another host. Frontends learn whether a key is configured and never
+what it is.
 
 `SecretString` redacts `Debug` output and has no `Display` implementation.
 Launch commands mark token-bearing arguments when values are substituted, and

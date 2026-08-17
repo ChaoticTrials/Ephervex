@@ -93,7 +93,10 @@ including linked-server reconstruction, do not depend on the original archive
 still being present.
 
 CurseForge pack ZIP import and CurseForge mod browsing are planned but are not
-yet implemented.
+yet implemented. CurseForge access uses the official third-party API with an API
+key you apply for yourself; Ephervex stores it in the system keyring and never
+in its configuration. See
+[`docs/curseforge-api-key.md`](docs/curseforge-api-key.md).
 
 Managed mod workflows currently support Modrinth browsing, dependency
 resolution, and installation. More complete pack and mod controls, including
@@ -198,6 +201,9 @@ cargo test --workspace
 
 * [`docs/architecture.md`](docs/architecture.md) describes crate ownership,
   dependency direction, workflows, and security boundaries.
+* [`docs/curseforge-api-key.md`](docs/curseforge-api-key.md) explains why
+  CurseForge access needs an API key, how to apply for one, and where Ephervex
+  keeps it.
 * [`docs/adr/`](docs/adr/) contains architecture decision records.
 
 ## Status

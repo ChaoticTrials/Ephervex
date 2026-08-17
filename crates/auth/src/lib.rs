@@ -131,7 +131,9 @@ pub mod stage;
 pub mod store;
 pub mod xbox;
 
-pub use chain::{MicrosoftAccountProvider, curseforge_api_key, set_curseforge_api_key};
+pub use chain::{
+    MicrosoftAccountProvider, clear_curseforge_api_key, curseforge_api_key, set_curseforge_api_key,
+};
 pub use endpoints::{Endpoints, SCOPE, TENANT};
 pub use error::{
     AuthError, AuthResult, CredentialOperation, MINECRAFT_API_REVIEW_FORM, XstsDenial,
