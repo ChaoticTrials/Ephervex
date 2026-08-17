@@ -191,6 +191,21 @@ pub enum Command {
     ResetMicrosoftClientId,
     ResetUserAgent,
     SaveStorageRoot(String),
+    /// Measure the reusable artifact cache.
+    ///
+    /// Its own command rather than part of the ordinary snapshot: measuring walks
+    /// the store, and a list of instances has no reason to pay for that. Sent
+    /// when the storage settings are opened and after anything that changes the
+    /// cache.
+    MeasureArtifactCache,
+    SaveArtifactCacheLimit {
+        /// The index the limit selector is on. See
+        /// `presentation::cache_limit_choices`.
+        selection: usize,
+        custom_value: String,
+        custom_unit: String,
+    },
+    ClearArtifactCache,
     SaveDisplaySettings {
         text_scale: ephervex_core::ApplicationTextScale,
         technical_text_size: ephervex_core::TechnicalTextSize,
@@ -320,6 +335,17 @@ pub struct SettingsData {
     pub java_memory_min: u32,
     pub java_memory_max: u32,
     pub java_preferred_path: String,
+    /// The artifact-cache budget as the selector shows it. Cheap to read: it
+    /// comes from the configuration file, never from a scan of the cache.
+    pub artifact_cache_limit_labels: Vec<String>,
+    pub artifact_cache_limit_index: usize,
+    pub artifact_cache_custom_index: usize,
+    pub artifact_cache_units: Vec<String>,
+    pub artifact_cache_custom_value: String,
+    pub artifact_cache_custom_unit: String,
+    /// The budget as a sentence names it, so the usage line can read
+    /// "7.4 GiB of 10 GiB" without the view doing arithmetic.
+    pub artifact_cache_limit_display: String,
 }
 
 #[derive(Debug, Clone)]
@@ -620,6 +646,20 @@ pub enum Event {
         summary: String,
     },
     StorageRootPicked(PathBuf),
+    ArtifactCacheStatus(ArtifactCacheStatusData),
+}
+
+/// The reusable artifact cache as the storage settings show it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ArtifactCacheStatusData {
+    /// Already-formatted IEC sizes: the view renders text, it does not do
+    /// arithmetic on byte counts.
+    pub used: String,
+    pub total: String,
+    /// Whether the whole store could be measured. A `false` makes `used` a lower
+    /// bound, and the view says so rather than presenting it as exact.
+    pub exact: bool,
+    pub over_budget: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1458,6 +1498,60 @@ fn run_worker(
                     Err(error) => send_error(&events, &error),
                 }
             }
+            Command::MeasureArtifactCache => match runtime.block_on(app.artifact_cache_status()) {
+                Ok(status) => {
+                    let _ = events.send(Event::ArtifactCacheStatus(artifact_cache_status_data(
+                        &status,
+                    )));
+                }
+                Err(error) => send_error(&events, &error),
+            },
+            Command::SaveArtifactCacheLimit {
+                selection,
+                custom_value,
+                custom_unit,
+            } => {
+                // Parsed before anything is written, so a refused size leaves the
+                // budget that is in force exactly as it was.
+                let limit = crate::presentation::cache_limit_from_selection(
+                    selection,
+                    &custom_value,
+                    &custom_unit,
+                );
+                match limit {
+                    Ok(limit) => match runtime.block_on(app.set_artifact_cache_limit(limit)) {
+                        Ok(status) => {
+                            let _ = events.send(Event::Toast {
+                                message: lookup("gui-artifact-cache-limit-saved"),
+                                error: false,
+                            });
+                            let _ = events.send(Event::ArtifactCacheStatus(
+                                artifact_cache_status_data(&status),
+                            ));
+                            send_snapshot(&app, &events);
+                        }
+                        Err(error) => send_error(&events, &error),
+                    },
+                    Err(error) => send_error(&events, &CoreError::from(error)),
+                }
+            }
+            Command::ClearArtifactCache => match runtime.block_on(app.clear_artifact_cache()) {
+                Ok(report) => {
+                    let _ = events.send(Event::Toast {
+                        message: cleared_cache_message(&report),
+                        error: false,
+                    });
+                    match runtime.block_on(app.artifact_cache_status()) {
+                        Ok(status) => {
+                            let _ = events.send(Event::ArtifactCacheStatus(
+                                artifact_cache_status_data(&status),
+                            ));
+                        }
+                        Err(error) => send_error(&events, &error),
+                    }
+                }
+                Err(error) => send_error(&events, &error),
+            },
             Command::SaveDisplaySettings {
                 text_scale,
                 technical_text_size,
@@ -1690,6 +1784,9 @@ fn application_settings(app: &App) -> Result<SettingsData, CoreError> {
     let storage = app.persistent_storage_settings();
     let java = app.java_settings();
     let server = app.server_application_settings();
+    let cache_limit = app.artifact_cache_limit();
+    let choices = crate::presentation::cache_limit_choices();
+    let (custom_value, custom_unit) = crate::presentation::cache_limit_custom_fields(cache_limit);
     Ok(SettingsData {
         storage_root: storage.effective_root.display().to_string(),
         persistent_root: storage
@@ -1716,7 +1813,64 @@ fn application_settings(app: &App) -> Result<SettingsData, CoreError> {
         java_preferred_path: java
             .preferred_path
             .map_or_else(String::new, |path| path.display().to_string()),
+        artifact_cache_limit_labels: choices.iter().map(|choice| choice.label.clone()).collect(),
+        artifact_cache_limit_index: crate::presentation::cache_limit_selection(cache_limit),
+        artifact_cache_custom_index: choices
+            .iter()
+            .position(|choice| choice.kind == crate::presentation::CacheLimitKind::Custom)
+            .unwrap_or_default(),
+        artifact_cache_units: crate::presentation::cache_limit_units(),
+        artifact_cache_custom_value: custom_value,
+        artifact_cache_custom_unit: custom_unit,
+        artifact_cache_limit_display: cache_limit.bytes().map_or_else(
+            || lookup("gui-artifact-cache-unlimited"),
+            ephervex_core::format_binary_bytes,
+        ),
     })
+}
+
+/// What a finished clear tells the user.
+///
+/// Three outcomes rather than one sentence, because "freed 6 GiB", "freed 6 GiB
+/// but some is still cached", and "there was nothing to free" are different
+/// things and a user acting on the wrong one goes looking for a bug.
+fn cleared_cache_message(report: &ephervex_core::ArtifactCacheMaintenance) -> String {
+    let freed = ephervex_core::format_binary_bytes(report.freed_bytes);
+    if report.usage_after > 0 || !report.is_clean() {
+        if report.removed_entries == 0 && report.usage_before == 0 {
+            return lookup("gui-artifact-cache-already-empty");
+        }
+        let remaining = ephervex_core::format_binary_bytes(report.usage_after);
+        return ephervex_i18n::lookup_args(
+            "gui-artifact-cache-cleared-partly",
+            [
+                ("value", ephervex_i18n::Arg::from(freed.as_str())),
+                ("remaining", ephervex_i18n::Arg::from(remaining.as_str())),
+            ],
+        );
+    }
+    if report.removed_entries == 0 {
+        return lookup("gui-artifact-cache-already-empty");
+    }
+    ephervex_i18n::lookup_args(
+        "gui-artifact-cache-cleared",
+        [("value", ephervex_i18n::Arg::from(freed.as_str()))],
+    )
+}
+
+/// The measured cache, formatted for the storage settings.
+fn artifact_cache_status_data(
+    status: &ephervex_core::ArtifactCacheStatus,
+) -> ArtifactCacheStatusData {
+    ArtifactCacheStatusData {
+        used: ephervex_core::format_binary_bytes(status.used_bytes),
+        total: status.limit.bytes().map_or_else(
+            || lookup("gui-artifact-cache-unlimited"),
+            ephervex_core::format_binary_bytes,
+        ),
+        exact: status.complete,
+        over_budget: status.is_over_budget(),
+    }
 }
 
 const fn origin(is_override: bool) -> SettingOrigin {

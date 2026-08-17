@@ -7,8 +7,10 @@
 use std::net::IpAddr;
 
 use ephervex_core::{
-    ClientRecord, DiagnosticKind, DiagnosticScope, LaunchAndConnectAvailability, NetworkAccess,
-    PreferenceKey, RuntimeClassification, ServerRecord, ServerStatus,
+    ARTIFACT_CACHE_LIMIT_PRESETS, ArtifactCacheLimit, ArtifactCacheLimitError, ByteUnit,
+    ClientRecord, DEFAULT_ARTIFACT_CACHE_LIMIT_BYTES, DiagnosticKind, DiagnosticScope,
+    LaunchAndConnectAvailability, NetworkAccess, PreferenceKey, RuntimeClassification,
+    ServerRecord, ServerStatus, format_binary_bytes,
 };
 use ephervex_i18n::lookup;
 use ephervex_model::{LoaderKind, Operation, OperationStatus, StorageClass};
@@ -696,5 +698,125 @@ mod tests {
             !result_is_current(&other.to_string(), ""),
             "with no workspace open there is nothing for a result to belong to"
         );
+    }
+}
+
+/// One entry in the artifact-cache limit selector.
+///
+/// The list is the mapping. A selector reports the index it is on, and this is
+/// what that index means, so nothing has to parse a label — and in particular
+/// nothing has to parse a *localized* label, which is how a settings screen ends
+/// up behaving differently in another language.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheLimitChoice {
+    /// What the selector shows. Preset sizes are exact technical values and are
+    /// deliberately not translated; the two open-ended entries are.
+    pub label: String,
+    pub kind: CacheLimitKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheLimitKind {
+    /// A fixed budget in bytes.
+    Preset(u64),
+    /// A budget the user types, in the unit they pick beside it.
+    Custom,
+    Unlimited,
+}
+
+/// Every choice the limit selector offers, in the order it shows them.
+#[must_use]
+pub fn cache_limit_choices() -> Vec<CacheLimitChoice> {
+    let mut choices: Vec<CacheLimitChoice> = ARTIFACT_CACHE_LIMIT_PRESETS
+        .into_iter()
+        .map(|bytes| CacheLimitChoice {
+            label: format_binary_bytes(bytes),
+            kind: CacheLimitKind::Preset(bytes),
+        })
+        .collect();
+    choices.push(CacheLimitChoice {
+        label: lookup("gui-artifact-cache-custom"),
+        kind: CacheLimitKind::Custom,
+    });
+    choices.push(CacheLimitChoice {
+        label: lookup("gui-artifact-cache-unlimited"),
+        kind: CacheLimitKind::Unlimited,
+    });
+    choices
+}
+
+/// Which entry the selector should open on for a stored budget.
+///
+/// A budget that is not one of the presets is Custom, which is what makes a
+/// hand-edited or previously typed size come back as the user left it rather
+/// than snapping to the nearest preset.
+#[must_use]
+pub fn cache_limit_selection(limit: ArtifactCacheLimit) -> usize {
+    let choices = cache_limit_choices();
+    let wanted = match limit {
+        ArtifactCacheLimit::Unlimited => CacheLimitKind::Unlimited,
+        ArtifactCacheLimit::Limited(bytes) => {
+            if ARTIFACT_CACHE_LIMIT_PRESETS.contains(&bytes) {
+                CacheLimitKind::Preset(bytes)
+            } else {
+                CacheLimitKind::Custom
+            }
+        }
+    };
+    choices
+        .iter()
+        .position(|choice| choice.kind == wanted)
+        // The list always contains Custom, so this is a total function; falling
+        // back to the first entry keeps it total without an unwrap.
+        .unwrap_or_default()
+}
+
+/// The size and unit a Custom entry should start from for a stored budget.
+///
+/// The largest unit that divides the budget exactly, so `500 GiB` comes back as
+/// `500` and `GiB` rather than as `512000` and `MiB`. A budget no offered unit
+/// divides exactly is shown in mebibytes, rounded down, because that is the
+/// finest the selector can express.
+#[must_use]
+pub fn cache_limit_custom_fields(limit: ArtifactCacheLimit) -> (String, String) {
+    let bytes = limit.bytes().unwrap_or(DEFAULT_ARTIFACT_CACHE_LIMIT_BYTES);
+    let unit = ByteUnit::ALL
+        .into_iter()
+        .rev()
+        .find(|unit| bytes % unit.bytes() == 0)
+        .unwrap_or(ByteUnit::Mebibytes);
+    ((bytes / unit.bytes()).to_string(), unit.label().to_owned())
+}
+
+/// The units a custom size may be entered in.
+#[must_use]
+pub fn cache_limit_units() -> Vec<String> {
+    ByteUnit::ALL
+        .into_iter()
+        .map(|unit| unit.label().to_owned())
+        .collect()
+}
+
+/// The budget a selection describes, or why it cannot be one.
+pub fn cache_limit_from_selection(
+    index: usize,
+    custom_value: &str,
+    custom_unit: &str,
+) -> Result<ArtifactCacheLimit, ArtifactCacheLimitError> {
+    let choices = cache_limit_choices();
+    match choices.get(index).map(|choice| choice.kind) {
+        Some(CacheLimitKind::Preset(bytes)) => ArtifactCacheLimit::from_bytes(bytes),
+        Some(CacheLimitKind::Unlimited) => Ok(ArtifactCacheLimit::Unlimited),
+        // An index the list does not have can only come from a view and a
+        // backend that disagree, and treating it as Custom asks the typed parser
+        // what the fields say rather than guessing a budget.
+        Some(CacheLimitKind::Custom) | None => {
+            let unit = ByteUnit::from_label(custom_unit).ok_or_else(|| {
+                ArtifactCacheLimitError::Malformed {
+                    value: custom_unit.trim().to_owned(),
+                }
+            })?;
+            ArtifactCacheLimit::parse_in_unit(custom_value, unit)
+        }
     }
 }

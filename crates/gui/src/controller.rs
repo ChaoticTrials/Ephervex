@@ -15,9 +15,9 @@ use slint::{
 };
 
 use crate::backend::{
-    self, AccountData, ActivityData, Command, DiagnosticContent, DiagnosticData, Event, JavaData,
-    LiveLogLine, LiveLogSource, LiveLogUpdate, ManagedModData, ModSearchData, PreferenceData,
-    ServerWorkspaceData, Snapshot,
+    self, AccountData, ActivityData, ArtifactCacheStatusData, Command, DiagnosticContent,
+    DiagnosticData, Event, JavaData, LiveLogLine, LiveLogSource, LiveLogUpdate, ManagedModData,
+    ModSearchData, PreferenceData, ServerWorkspaceData, SettingsData, Snapshot,
 };
 use crate::presentation::{self, parse_network, validate_ip, validate_port};
 use crate::ui::{
@@ -1323,6 +1323,7 @@ fn register_settings(ui: &AppWindow, commands: &Sender<Command>) {
     ui.on_save_storage_settings(move |root| {
         send(&sender, Command::SaveStorageRoot(root.into()));
     });
+    register_artifact_cache(ui, commands);
     let sender = commands.clone();
     ui.on_choose_storage_root(move || send(&sender, Command::PickStorageRoot));
     let sender = commands.clone();
@@ -1428,6 +1429,7 @@ fn apply_event(
             apply_snapshot(ui, snapshot);
             apply_pending_creations(ui, &creations.borrow());
         }
+        Event::ArtifactCacheStatus(status) => apply_artifact_cache_status(ui, status),
         Event::MinecraftReleases(versions) => apply_minecraft_releases(ui, versions),
         Event::LoaderVersions {
             form,
@@ -1697,6 +1699,77 @@ fn apply_pending_creations(ui: &AppWindow, tracker: &CreationTracker) {
     ));
 }
 
+/// The three artifact-cache actions the storage settings offer.
+fn register_artifact_cache(ui: &AppWindow, commands: &Sender<Command>) {
+    let sender = commands.clone();
+    ui.on_measure_artifact_cache(move || send(&sender, Command::MeasureArtifactCache));
+    let sender = commands.clone();
+    ui.on_save_artifact_cache_limit(move |selection, custom_value, custom_unit| {
+        send(
+            &sender,
+            Command::SaveArtifactCacheLimit {
+                // A negative index can only mean the view has no entry selected,
+                // which the typed resolution treats as a custom size — so the
+                // fields beside it decide, rather than a preset nobody picked.
+                selection: usize::try_from(selection).unwrap_or(usize::MAX),
+                custom_value: custom_value.into(),
+                custom_unit: custom_unit.into(),
+            },
+        );
+    });
+    let sender = commands.clone();
+    ui.on_clear_artifact_cache(move || send(&sender, Command::ClearArtifactCache));
+}
+
+/// The budget selector, from the configuration file alone.
+///
+/// Deliberately separate from [`apply_artifact_cache_status`]: the limit is cheap
+/// and arrives with every snapshot, while the usage figure costs a walk of the
+/// cache and arrives only when something asked for one.
+fn apply_artifact_cache_settings(ui: &AppWindow, settings: &SettingsData) {
+    ui.set_artifact_cache_limit_labels(model(
+        settings
+            .artifact_cache_limit_labels
+            .iter()
+            .map(|label| SharedString::from(label.as_str()))
+            .collect(),
+    ));
+    ui.set_artifact_cache_units(model(
+        settings
+            .artifact_cache_units
+            .iter()
+            .map(|label| SharedString::from(label.as_str()))
+            .collect(),
+    ));
+    ui.set_artifact_cache_custom_index(index_for_view(settings.artifact_cache_custom_index));
+    ui.set_artifact_cache_limit_index(index_for_view(settings.artifact_cache_limit_index));
+    ui.set_artifact_cache_custom_value(settings.artifact_cache_custom_value.as_str().into());
+    ui.set_artifact_cache_custom_unit(settings.artifact_cache_custom_unit.as_str().into());
+    if !ui.get_artifact_cache_usage_known() {
+        // Nothing has been measured yet, so the only honest total to show beside
+        // "measuring" is the budget itself.
+        ui.set_artifact_cache_total(settings.artifact_cache_limit_display.as_str().into());
+    }
+}
+
+/// A list index as the view holds it.
+///
+/// Slint counts with `int`, so an index that somehow does not fit becomes the
+/// "no such entry" value rather than wrapping onto a real one.
+fn index_for_view(index: usize) -> i32 {
+    i32::try_from(index).unwrap_or(-1)
+}
+
+fn apply_artifact_cache_status(ui: &AppWindow, status: ArtifactCacheStatusData) {
+    ui.set_artifact_cache_used(status.used.into());
+    ui.set_artifact_cache_total(status.total.into());
+    ui.set_artifact_cache_usage_exact(status.exact);
+    ui.set_artifact_cache_over_budget(status.over_budget);
+    ui.set_artifact_cache_usage_known(true);
+    // Whatever the clear did, it is finished: the figure above is the answer.
+    ui.set_artifact_cache_clearing(false);
+}
+
 fn apply_snapshot(ui: &AppWindow, snapshot: Snapshot) {
     let Snapshot {
         instances,
@@ -1713,6 +1786,7 @@ fn apply_snapshot(ui: &AppWindow, snapshot: Snapshot) {
     apply_server_snapshot(ui, servers);
     ui.set_accounts(model(account_rows(accounts)));
     ui.set_preferences(model(preference_rows(preferences)));
+    apply_artifact_cache_settings(ui, &settings);
     ui.set_storage_root(settings.storage_root.into());
     ui.set_persistent_root(settings.persistent_root.into());
     ui.set_default_persistent_root(settings.default_persistent_root.into());
@@ -2290,6 +2364,7 @@ fn to_i32(value: usize) -> i32 {
 #[cfg(test)]
 mod tests {
     use crate::presentation::ActivityPresentation;
+    use ephervex_core::ArtifactCacheLimit;
     use ephervex_i18n::has;
 
     use super::*;
@@ -2775,6 +2850,137 @@ mod tests {
         assert!(source.contains("root.default-persistent-root"));
         assert!(backend.contains(".pick_folder()"));
         assert!(backend.contains("Event::StorageRootPicked(path)"));
+    }
+
+    /// Where the Custom entry sits, found the way the view finds it: by asking
+    /// for a budget that is not one of the presets.
+    fn custom_selection_index() -> usize {
+        presentation::cache_limit_selection(ArtifactCacheLimit::Limited(3 * 1024 * 1024 * 1024))
+    }
+
+    #[test]
+    fn the_cache_limit_selector_offers_every_preset_plus_custom_and_unlimited() {
+        let choices = presentation::cache_limit_choices();
+        let labels: Vec<&str> = choices.iter().map(|choice| choice.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec![
+                "2 GiB",
+                "5 GiB",
+                "10 GiB",
+                "25 GiB",
+                "50 GiB",
+                "100 GiB",
+                "Custom",
+                "Unlimited",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_selector_opens_on_the_stored_budget_including_a_custom_one() {
+        let choices = presentation::cache_limit_choices();
+        let default = presentation::cache_limit_selection(ArtifactCacheLimit::default());
+        assert_eq!(choices[default].label, "10 GiB");
+
+        let unlimited = presentation::cache_limit_selection(ArtifactCacheLimit::Unlimited);
+        assert_eq!(
+            choices[unlimited].kind,
+            presentation::CacheLimitKind::Unlimited
+        );
+
+        // 500 GiB is not a preset, so the selector opens on Custom with the
+        // fields the user typed rather than snapping to 100 GiB.
+        let custom = ArtifactCacheLimit::Limited(500 * 1024 * 1024 * 1024);
+        assert_eq!(
+            choices[presentation::cache_limit_selection(custom)].kind,
+            presentation::CacheLimitKind::Custom
+        );
+        assert_eq!(
+            presentation::cache_limit_custom_fields(custom),
+            ("500".to_owned(), "GiB".to_owned())
+        );
+        assert_eq!(
+            presentation::cache_limit_custom_fields(ArtifactCacheLimit::Limited(
+                4 * 1024 * 1024 * 1024 * 1024
+            )),
+            ("4".to_owned(), "TiB".to_owned()),
+            "the largest unit that divides exactly is the one shown"
+        );
+    }
+
+    #[test]
+    fn a_custom_size_above_the_last_preset_resolves_to_the_exact_byte_count() {
+        let custom = custom_selection_index();
+
+        for (typed, unit, expected) in [
+            ("500", "GiB", 500 * 1024 * 1024 * 1024_u64),
+            ("1", "TiB", 1024 * 1024 * 1024 * 1024),
+            ("4096", "GiB", 4096 * 1024 * 1024 * 1024),
+        ] {
+            assert_eq!(
+                presentation::cache_limit_from_selection(custom, typed, unit),
+                Ok(ArtifactCacheLimit::Limited(expected)),
+                "{typed} {unit}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_custom_size_that_cannot_be_stored_is_refused_rather_than_clamped() {
+        let custom = custom_selection_index();
+
+        for (typed, unit) in [
+            ("8388608", "TiB"),
+            ("18446744073709551615", "TiB"),
+            ("", "GiB"),
+            ("ten", "GiB"),
+            ("-5", "GiB"),
+            ("500", "GB"),
+        ] {
+            assert!(
+                presentation::cache_limit_from_selection(custom, typed, unit).is_err(),
+                "`{typed} {unit}` should be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_preset_selection_resolves_without_reading_the_custom_fields() {
+        for (index, expected) in [(0_usize, 2), (2, 10), (5, 100)] {
+            assert_eq!(
+                presentation::cache_limit_from_selection(index, "nonsense", "not a unit"),
+                Ok(ArtifactCacheLimit::Limited(expected * 1024 * 1024 * 1024))
+            );
+        }
+        let unlimited = presentation::cache_limit_choices().len() - 1;
+        assert_eq!(
+            presentation::cache_limit_from_selection(unlimited, "nonsense", "not a unit"),
+            Ok(ArtifactCacheLimit::Unlimited)
+        );
+    }
+
+    #[test]
+    fn the_cache_section_measures_on_demand_and_guards_a_second_clear() {
+        let source = include_str!("ui.rs");
+        // Measuring walks the store, so it must not be on the ordinary refresh
+        // path — only on opening the page that shows the figure.
+        assert!(source.contains("root.measure-artifact-cache()"));
+        assert!(source.contains("callback clear-artifact-cache()"));
+        assert!(source.contains("root.artifact-cache-clearing = true"));
+        assert!(source.contains("enabled: !root.artifact-cache-clearing"));
+        // The size box only exists on the Custom entry, and which entry that is
+        // comes from the same list the backend built.
+        assert!(
+            source.contains("root.artifact-cache-limit-index == root.artifact-cache-custom-index")
+        );
+        assert!(source.contains("root.artifact-cache-units"));
+
+        let backend = include_str!("backend.rs");
+        assert!(
+            !backend.contains("artifact_cache_status()) => Event::Snapshot"),
+            "the usage figure is not part of the ordinary snapshot"
+        );
     }
 
     #[test]

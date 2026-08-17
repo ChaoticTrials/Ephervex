@@ -1315,6 +1315,24 @@ slint::slint! {
         in-out property <string> persistent-root;
         in-out property <string> default-persistent-root;
         in-out property <bool> persistent-root-is-custom;
+        in-out property <[string]> artifact-cache-limit-labels;
+        in-out property <int> artifact-cache-limit-index;
+        // Which entry in the list above is Custom. Held rather than hardcoded so
+        // adding a preset cannot silently move the size box onto another entry.
+        in-out property <int> artifact-cache-custom-index: -1;
+        in-out property <[string]> artifact-cache-units;
+        in-out property <string> artifact-cache-custom-value;
+        in-out property <string> artifact-cache-custom-unit;
+        in-out property <string> artifact-cache-used;
+        in-out property <string> artifact-cache-total;
+        // False until the cache has actually been measured, so the usage line
+        // shows that it is loading rather than claiming the cache is empty.
+        in-out property <bool> artifact-cache-usage-known;
+        in-out property <bool> artifact-cache-usage-exact: true;
+        in-out property <bool> artifact-cache-over-budget;
+        // Guards the clear button against a second click while the first is
+        // still in the backend.
+        in-out property <bool> artifact-cache-clearing;
         in-out property <int> application-text-scale: 100;
         in-out property <int> technical-text-size: 12;
         in-out property <string> java-memory-min: "512";
@@ -1381,6 +1399,9 @@ slint::slint! {
         callback save-storage-settings(string);
         callback choose-storage-root();
         callback reset-storage-root();
+        callback measure-artifact-cache();
+        callback save-artifact-cache-limit(int, string, string);
+        callback clear-artifact-cache();
         callback save-display-settings(int, int);
         callback save-linked-server-settings(bool, bool, int);
         callback refresh-java();
@@ -1704,7 +1725,10 @@ slint::slint! {
                         SettingsNavItem { label: GuiI18n.text("gui-settings-java"); selected: root.workspace-tab == "Java"; clicked => { root.workspace-tab = "Java"; } }
                         SettingsNavItem { label: GuiI18n.text("gui-settings-accounts"); selected: root.workspace-tab == "Accounts"; clicked => { root.workspace-tab = "Accounts"; } }
                         SettingsNavItem { label: GuiI18n.text("gui-settings-providers"); selected: root.workspace-tab == "Providers & APIs"; clicked => { root.workspace-tab = "Providers & APIs"; } }
-                        SettingsNavItem { label: GuiI18n.text("gui-settings-storage"); selected: root.workspace-tab == "Storage"; clicked => { root.workspace-tab = "Storage"; } }
+                        // Measuring walks the cache, so it happens when the page
+                        // that shows the figure is opened rather than on every
+                        // refresh of everything else.
+                        SettingsNavItem { label: GuiI18n.text("gui-settings-storage"); selected: root.workspace-tab == "Storage"; clicked => { root.workspace-tab = "Storage"; root.measure-artifact-cache(); } }
                         Rectangle { vertical-stretch: 1; }
                         Divider { }
                         SettingsNavItem { label: GuiI18n.text("gui-settings-about"); selected: root.workspace-tab == "About & Licenses"; clicked => { root.workspace-tab = "About & Licenses"; } }
@@ -1780,6 +1804,56 @@ slint::slint! {
                             } }
                             HorizontalLayout { if root.persistent-root-is-custom : AppButton { text: GuiI18n.text("gui-reset-default"); clicked => { root.reset-storage-root(); } } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-save-storage-root"); tone: "primary"; clicked => { root.save-storage-settings(root.persistent-root); } } }
                             BodyText { text: GuiI18n.text("gui-storage-change-future-only"); color: Theme.text-muted; wrap: word-wrap; }
+                            Divider { }
+                            SectionTitle { title: GuiI18n.text("gui-artifact-cache"); detail: GuiI18n.text("gui-artifact-cache-detail"); }
+                            // Height taken from the content rather than fixed:
+                            // a bare Rectangle reports no preferred height of
+                            // its own, and the scroll view needs a real one or
+                            // the row below this card cannot be reached.
+                            Rectangle { height: cache-card.preferred-height; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface; cache-card := VerticalLayout { padding: 16px; spacing: 12px;
+                                HorizontalLayout { spacing: 10px;
+                                    Heading { text: root.artifact-cache-usage-known ? (root.artifact-cache-usage-exact ? GuiI18n.values("gui-artifact-cache-usage", root.artifact-cache-used, root.artifact-cache-total) : GuiI18n.values("gui-artifact-cache-usage-approximate", root.artifact-cache-used, root.artifact-cache-total)) : GuiI18n.text("gui-artifact-cache-measuring"); font-size: Theme.row-heading-size; overflow: elide; horizontal-stretch: 1; }
+                                    if root.artifact-cache-over-budget : Pill { text: GuiI18n.text("gui-artifact-cache-over-budget"); tone-color: Theme.warning; }
+                                }
+                                HorizontalLayout { spacing: 10px; alignment: start;
+                                    VerticalLayout { spacing: 4px;
+                                        FieldLabel { text: GuiI18n.text("gui-artifact-cache-limit"); }
+                                        ComboBox {
+                                            width: 170px;
+                                            accessible-label: GuiI18n.text("gui-artifact-cache-limit");
+                                            model: root.artifact-cache-limit-labels;
+                                            current-index <=> root.artifact-cache-limit-index;
+                                        }
+                                    }
+                                    if root.artifact-cache-limit-index == root.artifact-cache-custom-index : VerticalLayout { spacing: 4px;
+                                        FieldLabel { text: GuiI18n.text("gui-artifact-cache-custom-value"); }
+                                        // Wide enough for a value far past any
+                                        // preset: the presets stop at 100 GiB,
+                                        // the setting does not.
+                                        TextField { width: 130px; text <=> root.artifact-cache-custom-value; placeholder: "500"; input-type: InputType.number; accessible-name: GuiI18n.text("gui-artifact-cache-custom-value"); }
+                                    }
+                                    if root.artifact-cache-limit-index == root.artifact-cache-custom-index : VerticalLayout { spacing: 4px;
+                                        FieldLabel { text: " "; }
+                                        ComboBox { width: 100px; accessible-label: GuiI18n.text("gui-artifact-cache-custom-value"); model: root.artifact-cache-units; current-value <=> root.artifact-cache-custom-unit; }
+                                    }
+                                    VerticalLayout { spacing: 4px;
+                                        // An empty label so the button lines up
+                                        // with the controls it saves rather than
+                                        // with their labels.
+                                        FieldLabel { text: " "; }
+                                        AppButton { text: GuiI18n.text("gui-save-artifact-cache-limit"); tone: "primary"; clicked => { root.save-artifact-cache-limit(root.artifact-cache-limit-index, root.artifact-cache-custom-value, root.artifact-cache-custom-unit); } }
+                                    }
+                                }
+                                BodyText { text: GuiI18n.text("gui-artifact-cache-cleanup-note"); color: Theme.text-muted; wrap: word-wrap; }
+                            } }
+                            HorizontalLayout {
+                                // Named for the cache and nothing else: an
+                                // instance or a server is never what this
+                                // removes, and the button must not read as if it
+                                // might be.
+                                AppButton { text: root.artifact-cache-clearing ? GuiI18n.text("gui-clearing-artifact-cache") : GuiI18n.text("gui-clear-artifact-cache"); enabled: !root.artifact-cache-clearing; clicked => { root.artifact-cache-clearing = true; root.clear-artifact-cache(); } }
+                                Rectangle { horizontal-stretch: 1; }
+                            }
                         }
                         if root.workspace-tab == "About & Licenses" : VerticalLayout { alignment: start; spacing: 14px;
                             Image { source: root.logo; width: 92px; height: 92px; image-fit: contain; accessible-label: GuiI18n.text("gui-logo-accessible"); }
