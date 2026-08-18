@@ -9,10 +9,10 @@ use std::net::IpAddr;
 use ephervex_core::{
     ARTIFACT_CACHE_LIMIT_PRESETS, ArtifactCacheLimit, ArtifactCacheLimitError, ByteUnit,
     ClientRecord, DEFAULT_ARTIFACT_CACHE_LIMIT_BYTES, DiagnosticKind, DiagnosticScope,
-    LaunchAndConnectAvailability, NetworkAccess, PreferenceKey, RuntimeClassification,
-    ServerRecord, ServerStatus, format_binary_bytes,
+    LaunchAndConnectAvailability, NetworkAccess, PackAnalysis, PackSide, PreferenceKey,
+    RuntimeClassification, ServerRecord, ServerStatus, format_binary_bytes,
 };
-use ephervex_i18n::lookup;
+use ephervex_i18n::{Arg, lookup, lookup_args};
 use ephervex_model::{LoaderKind, Operation, OperationStatus, StorageClass};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -818,5 +818,200 @@ pub fn cache_limit_from_selection(
             })?;
             ArtifactCacheLimit::parse_in_unit(custom_value, unit)
         }
+    }
+}
+
+/// One optional client component the import wizard can offer, translated from
+/// the normalized [`ephervex_core::OptionalComponent`] the pack analysis
+/// carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportOptionPresentation {
+    /// The component's stable logical identity, and the join key a selection
+    /// is made by.
+    pub logical_path: String,
+    pub display: String,
+    pub selected: bool,
+}
+
+/// The provider-neutral facts an import analysis has enough information to
+/// show, independent of whether provider resolution has finished.
+///
+/// Built from a local analysis alone, `optional` is empty and `optional_count`
+/// still names how many decisions the pack will eventually ask for: a
+/// CurseForge export's pending files are counted before they have logical
+/// paths to select by. See [`ephervex_core::PackAnalysis::optional_components`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportPresentation {
+    pub format: String,
+    pub name: String,
+    pub version: String,
+    pub author: String,
+    pub minecraft_version: String,
+    pub loader: String,
+    pub required_count: usize,
+    pub optional_count: usize,
+    pub optional: Vec<ImportOptionPresentation>,
+    pub needs_provider_resolution: bool,
+}
+
+impl ImportPresentation {
+    #[must_use]
+    pub fn from_analysis(analysis: &PackAnalysis) -> Self {
+        Self {
+            format: analysis.format.to_string(),
+            name: analysis.name().to_owned(),
+            version: analysis.recipe.original_version.clone().unwrap_or_default(),
+            author: analysis.author().unwrap_or_default().to_owned(),
+            minecraft_version: analysis.minecraft_version().to_owned(),
+            loader: analysis.loader().to_string(),
+            required_count: analysis.required_file_count(PackSide::Client),
+            optional_count: analysis.optional_file_count(PackSide::Client),
+            optional: analysis
+                .optional_components(PackSide::Client)
+                .into_iter()
+                .map(|component| ImportOptionPresentation {
+                    logical_path: component.logical_path.to_string_lossy().into_owned(),
+                    display: component.display_name(),
+                    selected: component.starts_selected(),
+                })
+                .collect(),
+            needs_provider_resolution: analysis.needs_provider_resolution(),
+        }
+    }
+
+    /// "`CurseForge` - Example Pack 1.2.0"
+    #[must_use]
+    pub fn header_line(&self) -> String {
+        let title = if self.version.is_empty() {
+            self.name.clone()
+        } else {
+            format!("{} {}", self.name, self.version)
+        };
+        lookup_args(
+            "gui-import-pack-header",
+            [
+                ("first", Arg::from(self.format.as_str())),
+                ("second", Arg::from(title.as_str())),
+            ],
+        )
+    }
+
+    /// "by Example Author", or empty when the format names no author.
+    #[must_use]
+    pub fn author_line(&self) -> String {
+        if self.author.is_empty() {
+            String::new()
+        } else {
+            lookup_args(
+                "gui-import-author",
+                [("value", Arg::from(self.author.as_str()))],
+            )
+        }
+    }
+
+    /// "Minecraft 1.21.1"
+    #[must_use]
+    pub fn minecraft_line(&self) -> String {
+        lookup_args(
+            "gui-minecraft-version-label",
+            [("value", Arg::from(self.minecraft_version.as_str()))],
+        )
+    }
+
+    #[must_use]
+    pub fn required_line(&self) -> String {
+        lookup_args(
+            "gui-import-required-count",
+            [("count", Arg::from(self.required_count))],
+        )
+    }
+
+    #[must_use]
+    pub fn optional_line(&self) -> String {
+        lookup_args(
+            "gui-import-optional-count",
+            [("count", Arg::from(self.optional_count))],
+        )
+    }
+}
+
+#[cfg(test)]
+mod import_tests {
+    use super::*;
+
+    fn presentation() -> ImportPresentation {
+        ImportPresentation {
+            format: "CurseForge".to_owned(),
+            name: "Example Pack".to_owned(),
+            version: "1.2.0".to_owned(),
+            author: "Example Author".to_owned(),
+            minecraft_version: "1.21.1".to_owned(),
+            loader: "NeoForge 21.1.42".to_owned(),
+            required_count: 18,
+            optional_count: 3,
+            optional: vec![
+                ImportOptionPresentation {
+                    logical_path: "mods/optional-a.jar".to_owned(),
+                    display: "mods/optional-a.jar".to_owned(),
+                    selected: false,
+                },
+                ImportOptionPresentation {
+                    logical_path: "mods/optional-b.jar".to_owned(),
+                    display: "mods/optional-b.jar".to_owned(),
+                    selected: true,
+                },
+            ],
+            needs_provider_resolution: false,
+        }
+    }
+
+    #[test]
+    fn the_header_line_names_the_provider_and_the_pack_with_its_version() {
+        let header = presentation().header_line();
+        assert!(header.contains("CurseForge"), "{header}");
+        assert!(header.contains("Example Pack 1.2.0"), "{header}");
+    }
+
+    #[test]
+    fn a_pack_with_no_version_omits_the_trailing_space() {
+        let mut facts = presentation();
+        facts.version.clear();
+        let header = facts.header_line();
+        assert!(header.contains("Example Pack"), "{header}");
+        assert!(!header.contains("Example Pack "), "{header}");
+    }
+
+    #[test]
+    fn an_author_the_format_did_not_declare_produces_no_line() {
+        let mut facts = presentation();
+        facts.author.clear();
+        assert_eq!(facts.author_line(), "");
+    }
+
+    #[test]
+    fn required_and_optional_counts_read_back_from_the_composed_lines() {
+        let facts = presentation();
+        assert!(
+            facts.required_line().contains("18"),
+            "{}",
+            facts.required_line()
+        );
+        assert!(
+            facts.optional_line().contains('3'),
+            "{}",
+            facts.optional_line()
+        );
+    }
+
+    #[test]
+    fn a_pending_curseforge_analysis_has_no_selectable_optional_list_yet() {
+        // Before provider resolution, `optional_components()` reports nothing
+        // even though the pack declares optional files: they have no logical
+        // path to select by until the provider names them.
+        let mut facts = presentation();
+        facts.optional.clear();
+        facts.needs_provider_resolution = true;
+        assert!(facts.optional.is_empty());
+        assert_eq!(facts.optional_count, 3);
     }
 }

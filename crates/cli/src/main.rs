@@ -4602,3 +4602,60 @@ fn localized_failure(error: &CoreError) -> (String, Option<String>) {
 
     (summary, action)
 }
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    fn import_args(argv: &[&str]) -> Result<ImportArgs, clap::Error> {
+        let mut full = vec!["ephervex", "import"];
+        full.extend_from_slice(argv);
+        match Cli::try_parse_from(full)?.command {
+            Command::Import(parsed) => Ok(parsed),
+            other => panic!("expected an Import command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn repeated_optional_flags_collect_every_declared_path_in_order() {
+        let args = import_args(&[
+            "pack.zip",
+            "--optional",
+            "mods/a.jar",
+            "--optional",
+            "mods/b.jar",
+        ])
+        .expect("valid arguments");
+        assert_eq!(
+            args.optional,
+            vec![PathBuf::from("mods/a.jar"), PathBuf::from("mods/b.jar")]
+        );
+        assert!(!args.all_optional);
+    }
+
+    #[test]
+    fn all_optional_needs_no_explicit_path() {
+        let args = import_args(&["pack.zip", "--all-optional"]).expect("valid arguments");
+        assert!(args.all_optional);
+        assert!(args.optional.is_empty());
+    }
+
+    #[test]
+    fn neither_flag_selects_nothing_by_default() {
+        let args = import_args(&["pack.zip"]).expect("valid arguments");
+        assert!(!args.all_optional);
+        assert!(args.optional.is_empty());
+    }
+
+    #[test]
+    fn optional_and_all_optional_together_are_rejected_by_argument_parsing() {
+        let error = import_args(&["pack.zip", "--optional", "mods/a.jar", "--all-optional"])
+            .expect_err("the flags are mutually exclusive");
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::ArgumentConflict,
+            "the conflict must be caught at the argument-parsing boundary, before any pack is read"
+        );
+    }
+}

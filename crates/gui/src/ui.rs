@@ -120,6 +120,15 @@ slint::slint! {
         newest: bool,
     }
 
+    // One optional client component the import modal can offer. `logical-path`
+    // is the stable identity a selection is toggled and submitted by;
+    // `display` is what the row shows.
+    export struct ImportOptionRow {
+        logical-path: string,
+        display: string,
+        selected: bool,
+    }
+
     // One linked server in a mod confirmation, or one finished target in a
     // result. The same shape serves both so the two cannot describe the same
     // server differently.
@@ -1279,7 +1288,23 @@ slint::slint! {
         in-out property <bool> create-persistent: false;
         in-out property <string> import-path;
         in-out property <string> import-name;
-        in-out property <string> import-analysis;
+        // "idle" | "analyzing" | "resolving" | "ready" | "failed" | "submitting".
+        // Drives which part of the import modal is visible and whether the
+        // archive picker and the Import button are enabled.
+        in-out property <string> import-status-kind: "idle";
+        in-out property <string> import-format;
+        // Pre-composed, already-localized lines: the modal displays them as
+        // plain text and does not itself run any of this through GuiI18n.
+        in-out property <string> import-pack-header;
+        in-out property <string> import-author-line;
+        in-out property <string> import-minecraft-line;
+        in-out property <string> import-loader-line;
+        in-out property <string> import-required-line;
+        in-out property <string> import-optional-line;
+        in-out property <[ImportOptionRow]> import-optional-items;
+        // Whether the current archive has a successful, fully resolved
+        // analysis: the only condition the Import button's `enabled` needs.
+        in-out property <bool> import-ready;
         in-out property <string> create-server-client-id;
         in-out property <string> create-server-name;
         in-out property <string> create-server-minecraft: "1.21.1";
@@ -1370,8 +1395,14 @@ slint::slint! {
         callback review-mod(string, string);
         callback install-mod(string, string, string);
         callback submit-create-instance(string, string, string, string, bool);
+        callback open-import-modal();
+        callback close-import-modal();
         callback choose-import-file();
-        callback submit-import(string, string, bool);
+        callback toggle-import-optional(string);
+        callback import-name-edited(string);
+        // No archive path: submission always uses whichever archive the
+        // current analysis actually applies to, not this text.
+        callback submit-import(string, bool);
         callback submit-create-server(string, string, string, string, string, bool, bool, string);
         callback server-start(string);
         callback server-stop(string);
@@ -1467,7 +1498,7 @@ slint::slint! {
                     Image { source: root.logo; width: 36px; height: 36px; image-fit: contain; accessible-label: GuiI18n.text("gui-logo-accessible"); }
                     Heading { text: "Ephervex"; font-size: Theme.brand-size; width: 180px; }
                     Rectangle { horizontal-stretch: 1; }
-                    if root.page == 0 && root.workspace == "" : AppButton { text: GuiI18n.text("gui-import-modpack"); clicked => { root.modal = "import"; } }
+                    if root.page == 0 && root.workspace == "" : AppButton { text: GuiI18n.text("gui-import-modpack"); clicked => { root.open-import-modal(); } }
                     if root.page == 0 && root.workspace == "" : AppButton { text: GuiI18n.text("gui-new-instance"); tone: "primary"; min-width: 148px; clicked => { root.modal-error = ""; root.request-version-catalog(); root.warm-language-catalog(root.create-minecraft); root.modal = "create-instance"; } }
                     if root.page == 1 && root.workspace == "" : AppButton { text: GuiI18n.text("gui-new-server"); tone: "primary"; min-width: 130px; clicked => { root.create-server-client-id = ""; root.create-server-name = ""; root.modal-error = ""; root.request-version-catalog(); root.warm-language-catalog(root.create-server-minecraft); root.modal = "create-server"; } }
                     IconButton { icon: @image-url("../../../assets/icons/refresh.svg"); accessible-name: GuiI18n.text("gui-refresh"); clicked => { root.refresh(); } }
@@ -1523,7 +1554,7 @@ slint::slint! {
                                 message: GuiI18n.text("gui-no-client-instances-detail");
                                 primary-text: GuiI18n.text("gui-modal-new-instance"); secondary-text: GuiI18n.text("gui-import-modpack");
                                 primary => { root.modal-error = ""; root.request-version-catalog(); root.warm-language-catalog(root.create-minecraft); root.modal = "create-instance"; }
-                                secondary => { root.modal = "import"; }
+                                secondary => { root.open-import-modal(); }
                             }
                             if !root.loading && (root.instances.length > 0 || root.pending-instances.length > 0) : ScrollView {
                                 viewport-width: self.width;
@@ -1920,7 +1951,7 @@ slint::slint! {
             TouchArea { clicked => { } }
             Rectangle {
                 width: root.modal == "license" ? min(820px, parent.width - 80px) : min(620px, parent.width - 80px);
-                height: root.modal == "license" ? min(720px, parent.height - 80px) : root.modal == "third-party" ? 340px : root.modal == "mod-plan" ? min(430px + root.linked-targets.length * 68px, parent.height - 80px) : root.modal == "mod-manage" ? min(620px, parent.height - 80px) : root.modal == "mod-apply" ? min(300px + root.linked-targets.length * 68px, parent.height - 80px) : root.modal == "mod-result" ? min(240px + root.linked-results.length * 68px, parent.height - 80px) : root.modal == "loader-change" ? 400px : root.modal == "mod-remove" ? min((root.linked-targets.length > 0 ? 340px : 250px) + root.mod-removal-dependencies.length * 24px + root.linked-targets.length * 68px, parent.height - 80px) : root.modal == "eula" ? 440px : root.modal == "kill" ? 300px : root.modal == "delete-instance" || root.modal == "delete-server" ? 330px : 570px;
+                height: root.modal == "license" ? min(720px, parent.height - 80px) : root.modal == "third-party" ? 340px : root.modal == "import" ? min(360px + root.import-optional-items.length * 28px, parent.height - 80px) : root.modal == "mod-plan" ? min(430px + root.linked-targets.length * 68px, parent.height - 80px) : root.modal == "mod-manage" ? min(620px, parent.height - 80px) : root.modal == "mod-apply" ? min(300px + root.linked-targets.length * 68px, parent.height - 80px) : root.modal == "mod-result" ? min(240px + root.linked-results.length * 68px, parent.height - 80px) : root.modal == "loader-change" ? 400px : root.modal == "mod-remove" ? min((root.linked-targets.length > 0 ? 340px : 250px) + root.mod-removal-dependencies.length * 24px + root.linked-targets.length * 68px, parent.height - 80px) : root.modal == "eula" ? 440px : root.modal == "kill" ? 300px : root.modal == "delete-instance" || root.modal == "delete-server" ? 330px : 570px;
                 x: (parent.width - self.width) / 2;
                 y: (parent.height - self.height) / 2;
                 border-radius: 8px;
@@ -1928,10 +1959,88 @@ slint::slint! {
                 border-color: Theme.border;
                 background: Theme.elevated;
                 VerticalLayout { padding: 22px; spacing: 13px;
-                    HorizontalLayout { alignment: center; Heading { text: root.modal == "create-instance" ? GuiI18n.text("gui-modal-new-instance") : root.modal == "import" ? GuiI18n.text("gui-modal-import") : root.modal == "create-server" ? GuiI18n.text("gui-modal-new-server") : root.modal == "mod-plan" ? GuiI18n.text("gui-modal-install-mod") : root.modal == "mod-manage" ? GuiI18n.text("gui-modal-manage-mod") : root.modal == "loader-change" ? GuiI18n.text("gui-modal-change-loader") : root.modal == "mod-remove" ? GuiI18n.text("gui-modal-remove-mod") : root.modal == "mod-apply" ? GuiI18n.text("gui-modal-apply-mod") : root.modal == "mod-result" ? GuiI18n.text("gui-modal-mod-result") : root.modal == "eula" ? GuiI18n.text("gui-server-eula") : root.modal == "kill" ? GuiI18n.text("gui-modal-force-kill") : root.modal == "delete-instance" ? GuiI18n.text("gui-delete-instance") : root.modal == "delete-server" ? GuiI18n.text("gui-delete-server") : root.modal == "license" ? GuiI18n.text("gui-modal-apache-license") : GuiI18n.text("gui-third-party-licenses"); font-size: 20px; } Rectangle { horizontal-stretch: 1; } IconButton { icon: @image-url("../../../assets/icons/close.svg"); accessible-name: GuiI18n.text("gui-close"); clicked => { root.modal = ""; root.modal-error = ""; } } }
+                    HorizontalLayout { alignment: center; Heading { text: root.modal == "create-instance" ? GuiI18n.text("gui-modal-new-instance") : root.modal == "import" ? GuiI18n.text("gui-modal-import") : root.modal == "create-server" ? GuiI18n.text("gui-modal-new-server") : root.modal == "mod-plan" ? GuiI18n.text("gui-modal-install-mod") : root.modal == "mod-manage" ? GuiI18n.text("gui-modal-manage-mod") : root.modal == "loader-change" ? GuiI18n.text("gui-modal-change-loader") : root.modal == "mod-remove" ? GuiI18n.text("gui-modal-remove-mod") : root.modal == "mod-apply" ? GuiI18n.text("gui-modal-apply-mod") : root.modal == "mod-result" ? GuiI18n.text("gui-modal-mod-result") : root.modal == "eula" ? GuiI18n.text("gui-server-eula") : root.modal == "kill" ? GuiI18n.text("gui-modal-force-kill") : root.modal == "delete-instance" ? GuiI18n.text("gui-delete-instance") : root.modal == "delete-server" ? GuiI18n.text("gui-delete-server") : root.modal == "license" ? GuiI18n.text("gui-modal-apache-license") : GuiI18n.text("gui-third-party-licenses"); font-size: 20px; } Rectangle { horizontal-stretch: 1; } IconButton { icon: @image-url("../../../assets/icons/close.svg"); accessible-name: GuiI18n.text("gui-close"); clicked => { if root.modal == "import" { root.close-import-modal(); } else { root.modal = ""; root.modal-error = ""; } } } }
                     Divider { }
                     if root.modal == "create-instance" : VerticalLayout { spacing: 11px; BodyText { text: GuiI18n.text("gui-create-instance-detail"); wrap: word-wrap; } Text { text: GuiI18n.text("gui-name"); color: Theme.text-secondary; font-size: 12px; } TextField { text <=> root.create-name; placeholder: GuiI18n.text("gui-instance-name-placeholder"); } Text { text: GuiI18n.text("gui-minecraft-release"); color: Theme.text-secondary; font-size: 12px; } ComboBox { model: root.minecraft-releases; current-value <=> root.create-minecraft; selected(value) => { root.create-minecraft = value; root.create-loader-version = ""; root.create-loader-versions = []; if root.create-loader != "Vanilla" { root.request-loader-catalog("client", root.create-loader, value); } } } Text { text: GuiI18n.text("gui-loader"); color: Theme.text-secondary; font-size: 12px; } ComboBox { model: ["Vanilla", "Forge", "NeoForge"]; current-index: root.create-loader == "Forge" ? 1 : root.create-loader == "NeoForge" ? 2 : 0; selected(value) => { root.create-loader = value; root.create-loader-version = ""; root.create-loader-versions = []; if value != "Vanilla" { root.request-loader-catalog("client", value, root.create-minecraft); } } } if root.create-loader != "Vanilla" : ComboBox { model: root.create-loader-versions; current-value <=> root.create-loader-version; } HorizontalLayout { BodyText { text: GuiI18n.text("gui-store-persistently"); } Toggle { checked <=> root.create-persistent; } BodyText { text: root.create-persistent ? GuiI18n.text("gui-persistent-root") : GuiI18n.text("gui-temporary-root"); color: Theme.text-muted; } } if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; } HorizontalLayout { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; } } AppButton { text: GuiI18n.text("gui-create-instance"); tone: "primary"; enabled: root.minecraft-releases.length > 0 && root.create-name != "" && root.create-minecraft != "" && (root.create-loader == "Vanilla" || root.create-loader-version != ""); clicked => { root.submit-create-instance(root.create-name, root.create-minecraft, root.create-loader, root.create-loader-version, root.create-persistent); } } } }
-                    if root.modal == "import" : VerticalLayout { spacing: 11px; BodyText { text: GuiI18n.text("gui-import-detail"); wrap: word-wrap; } Text { text: GuiI18n.text("gui-modpack-archive"); color: Theme.text-secondary; font-size: 12px; } HorizontalLayout { TextField { text <=> root.import-path; placeholder: GuiI18n.text("gui-modpack-placeholder"); horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-browse"); clicked => { root.import-analysis = ""; root.choose-import-file(); } } } if root.import-analysis != "" : Rectangle { height: 64px; border-radius: 6px; border-width: 1px; border-color: Theme.success; background: Theme.surface; BodyText { x: 12px; width: parent.width - 24px; text: GuiI18n.value("gui-validated", root.import-analysis); wrap: word-wrap; } } Text { text: GuiI18n.text("gui-instance-name-optional"); color: Theme.text-secondary; font-size: 12px; } TextField { text <=> root.import-name; placeholder: GuiI18n.text("gui-detected-pack-name"); } HorizontalLayout { BodyText { text: GuiI18n.text("gui-store-persistently"); } Toggle { checked <=> root.create-persistent; } } if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; } HorizontalLayout { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; } } AppButton { text: GuiI18n.text("gui-import-modpack"); tone: "primary"; enabled: root.import-path != ""; clicked => { root.submit-import(root.import-path, root.import-name, root.create-persistent); } } } }
+                    if root.modal == "import" : VerticalLayout {
+                        spacing: 11px;
+                        BodyText { text: GuiI18n.text("gui-import-detail"); wrap: word-wrap; }
+                        Text { text: GuiI18n.text("gui-modpack-archive"); color: Theme.text-secondary; font-size: 12px; }
+                        HorizontalLayout {
+                            TextField {
+                                // Display-only: it always mirrors the archive
+                                // the current analysis is for, and Browse is
+                                // the only way to start a new one.
+                                text: root.import-path;
+                                placeholder: GuiI18n.text("gui-modpack-placeholder");
+                                horizontal-stretch: 1;
+                                enabled: false;
+                            }
+                            AppButton {
+                                text: GuiI18n.text("gui-browse");
+                                enabled: root.import-status-kind != "submitting";
+                                clicked => { root.choose-import-file(); }
+                            }
+                        }
+                        if root.import-status-kind == "analyzing" || root.import-status-kind == "resolving" : HorizontalLayout {
+                            spacing: 7px;
+                            Spinner { width: 16px; height: 16px; }
+                            BodyText {
+                                text: root.import-status-kind == "resolving" ? GuiI18n.text("gui-import-resolving") : GuiI18n.text("gui-import-analyzing");
+                                color: Theme.text-secondary;
+                            }
+                        }
+                        if root.import-pack-header != "" : Rectangle {
+                            border-radius: 6px;
+                            border-width: 1px;
+                            border-color: root.import-status-kind == "ready" || root.import-status-kind == "submitting" ? Theme.success : Theme.border;
+                            background: Theme.surface;
+                            VerticalLayout {
+                                padding: 12px;
+                                spacing: 4px;
+                                Heading { text: root.import-pack-header; font-size: 14px; wrap: word-wrap; }
+                                if root.import-author-line != "" : BodyText { text: root.import-author-line; color: Theme.text-secondary; }
+                                BodyText { text: root.import-minecraft-line; color: Theme.text-secondary; }
+                                BodyText { text: root.import-loader-line; color: Theme.text-secondary; }
+                                BodyText { text: root.import-required-line + " | " + root.import-optional-line; color: Theme.text-secondary; }
+                            }
+                        }
+                        if root.import-optional-items.length > 0 : ScrollView {
+                            viewport-width: self.width;
+                            height: min(root.import-optional-items.length * 28px, 200px);
+                            VerticalLayout {
+                                for item in root.import-optional-items : HorizontalLayout {
+                                    spacing: 8px;
+                                    height: 28px;
+                                    Toggle {
+                                        checked: item.selected;
+                                        accessible-name: item.display;
+                                        toggled(selected) => { root.toggle-import-optional(item.logical-path); }
+                                    }
+                                    BodyText { text: item.display; overflow: elide; vertical-alignment: center; }
+                                }
+                            }
+                        }
+                        Text { text: GuiI18n.text("gui-instance-name-optional"); color: Theme.text-secondary; font-size: 12px; }
+                        TextField {
+                            text <=> root.import-name;
+                            placeholder: GuiI18n.text("gui-detected-pack-name");
+                            enabled: root.import-status-kind != "submitting";
+                            edited(text) => { root.import-name-edited(text); }
+                        }
+                        HorizontalLayout { BodyText { text: GuiI18n.text("gui-store-persistently"); } Toggle { checked <=> root.create-persistent; } }
+                        if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; }
+                        HorizontalLayout {
+                            Rectangle { horizontal-stretch: 1; }
+                            AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.close-import-modal(); } }
+                            AppButton {
+                                text: GuiI18n.text("gui-import-modpack");
+                                tone: "primary";
+                                enabled: root.import-ready;
+                                clicked => { root.submit-import(root.import-name, root.create-persistent); }
+                            }
+                        }
+                    }
                     if root.modal == "create-server" : ScrollView { VerticalLayout { spacing: 10px; BodyText { text: root.create-server-client-id != "" ? GuiI18n.text("gui-create-linked-server-detail") : GuiI18n.text("gui-create-standalone-server-detail"); wrap: word-wrap; } Text { text: GuiI18n.text("gui-name"); color: Theme.text-secondary; font-size: 12px; } TextField { text <=> root.create-server-name; placeholder: GuiI18n.text("gui-server-name-placeholder"); } if root.create-server-client-id == "" : Text { text: GuiI18n.text("gui-minecraft-release"); color: Theme.text-secondary; font-size: 12px; } if root.create-server-client-id == "" : ComboBox { model: root.minecraft-releases; current-value <=> root.create-server-minecraft; selected(value) => { root.create-server-minecraft = value; root.create-server-loader-version = ""; root.create-server-loader-versions = []; if root.create-server-loader != "Vanilla" { root.request-loader-catalog("server", root.create-server-loader, value); } } } if root.create-server-client-id == "" : Text { text: GuiI18n.text("gui-loader"); color: Theme.text-secondary; font-size: 12px; } if root.create-server-client-id == "" : ComboBox { model: ["Vanilla", "Forge", "NeoForge"]; current-index: root.create-server-loader == "Forge" ? 1 : root.create-server-loader == "NeoForge" ? 2 : 0; selected(value) => { root.create-server-loader = value; root.create-server-loader-version = ""; root.create-server-loader-versions = []; if value != "Vanilla" { root.request-loader-catalog("server", value, root.create-server-minecraft); } } } if root.create-server-client-id == "" && root.create-server-loader != "Vanilla" : ComboBox { model: root.create-server-loader-versions; current-value <=> root.create-server-loader-version; } HorizontalLayout { BodyText { text: GuiI18n.text("gui-store-persistently"); } Toggle { checked <=> root.create-server-persistent; } } HorizontalLayout { BodyText { text: GuiI18n.text("gui-port-automatic"); } Toggle { checked <=> root.create-server-automatic-port; accessible-name: GuiI18n.text("gui-port-automatic"); } } if root.create-server-automatic-port : BodyText { text: GuiI18n.text("gui-port-automatic-detail"); color: Theme.text-muted; wrap: word-wrap; } if !root.create-server-automatic-port : HorizontalLayout { FieldLabel { text: GuiI18n.text("gui-port-custom"); } TextField { accessible-label: GuiI18n.text("gui-port-custom"); text <=> root.create-server-port; input-type: InputType.number; width: 150px; } } BodyText { text: GuiI18n.text("gui-eula-create-warning"); color: Theme.warning; wrap: word-wrap; } if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; } HorizontalLayout { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; } } AppButton { text: GuiI18n.text("gui-create-server"); tone: "primary"; enabled: root.create-server-name != "" && (root.create-server-client-id != "" || (root.minecraft-releases.length > 0 && root.create-server-minecraft != "" && (root.create-server-loader == "Vanilla" || root.create-server-loader-version != ""))); clicked => { root.submit-create-server(root.create-server-name, root.create-server-client-id, root.create-server-minecraft, root.create-server-loader, root.create-server-loader-version, root.create-server-persistent, root.create-server-automatic-port, root.create-server-port); } } } } }
                     if root.modal == "mod-plan" : VerticalLayout { spacing: 12px; Heading { text: root.mod-plan-title + " " + root.mod-plan-version; font-size: 16px; } BodyText { text: GuiI18n.text("gui-mod-plan-compatible"); wrap: word-wrap; } Rectangle { height: 116px; border-radius: 6px; border-width: 1px; border-color: Theme.border; background: Theme.background; VerticalLayout { padding: 12px; spacing: 5px; BodyText { text: GuiI18n.count("gui-mod-plan-install", root.mod-plan-install-count); color: Theme.text; } BodyText { text: GuiI18n.count("gui-mod-plan-required", root.mod-plan-dependency-count); } BodyText { text: GuiI18n.count("gui-mod-plan-existing", root.mod-plan-existing-count); } BodyText { text: GuiI18n.count("gui-mod-plan-optional", root.mod-plan-optional-count); } } } if root.mod-plan-warning-count > 0 : BodyText { text: GuiI18n.count("gui-mod-plan-warnings", root.mod-plan-warning-count); color: Theme.warning; wrap: word-wrap; }
                         if root.linked-targets.length > 0 : Text { text: GuiI18n.text("gui-linked-servers"); color: Theme.text-secondary; font-size: Theme.label-size; }

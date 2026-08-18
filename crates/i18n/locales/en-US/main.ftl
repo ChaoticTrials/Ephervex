@@ -1488,7 +1488,6 @@ gui-import-detail = Supported archives are inspected and imported through Epherv
 gui-modpack-archive = Modpack archive
 gui-modpack-placeholder = Choose a .mrpack or supported .zip
 gui-browse = Browse...
-gui-validated = Validated: { $value }
 gui-instance-name-optional = Instance name (optional)
 gui-detected-pack-name = Use the detected pack name
 gui-create-linked-server-detail = Create and materialize a server linked to the selected client's retained recipe.
@@ -1562,7 +1561,20 @@ gui-background-service-failed = The background service could not start: { $value
 gui-background-runtime-failed = The background runtime could not start: { $value }
 gui-choose-modpack-archive = Choose a modpack archive
 gui-modpack-archives = Modpack archives
-gui-import-analysis = { $first } | Minecraft { $second } | { $third } | { $count } files
+gui-import-pack-header = { $first } - { $second }
+gui-import-author = by { $value }
+gui-minecraft-version-label = Minecraft { $value }
+gui-import-required-count = { $count ->
+    [one] 1 required file
+   *[other] { $count } required files
+}
+gui-import-optional-count = { $count ->
+    [one] 1 optional file
+   *[other] { $count } optional files
+}
+gui-import-analyzing = Reading the archive...
+gui-import-resolving = Resolving files from the provider...
+gui-import-resolution-unavailable = The import worker could not start to resolve provider files.
 gui-created-entity = Created "{ $value }".
 gui-imported-pack = Imported "{ $value }".
 gui-folder-unavailable = Folder unavailable.

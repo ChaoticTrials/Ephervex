@@ -1462,6 +1462,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn linked_server_reconstruction_never_requeries_curseforge_metadata() {
+        let server = MockServer::start().await;
+        serve_pack_guarded(&server).await;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = archive_at(dir.path(), "repro.zip");
+        let app = app_against(dir.path(), &server);
+
+        // Evicted, so reconstruction has to actually redeliver the artifact
+        // rather than finding it already on disk: a weaker test that never
+        // touched the cache could pass by accident, having asked nothing.
+        let imported = import_then_evict(&app, &archive).await;
+        let (metadata_before, _) = artifact_requests(&server, "/v1/").await;
+        assert_eq!(
+            metadata_before, 2,
+            "one exact-file lookup per declared file during import, and no more"
+        );
+
+        let target = reconstruct_server(&app, &imported, &dir.path().join("server"))
+            .await
+            .expect("the server reconstructs from the retained recipe");
+
+        let (metadata_after, _) = artifact_requests(&server, "/v1/").await;
+        assert_eq!(
+            metadata_after, metadata_before,
+            "linked-server reconstruction must use the retained recipe's own \
+             identity, never a fresh CurseForge metadata query"
+        );
+        let (artifacts, _) = artifact_requests(&server, "/files/").await;
+        assert!(
+            artifacts > 0,
+            "the evicted artifact is still delivered by content identity"
+        );
+        assert_eq!(
+            std::fs::read(target.join("mods/required-1.0.0.jar")).expect("read"),
+            REQUIRED_BODY
+        );
+    }
+
+    #[tokio::test]
     async fn a_cached_retained_curseforge_artifact_needs_no_key_and_contacts_nobody() {
         let server = MockServer::start().await;
         serve_pack_guarded(&server).await;

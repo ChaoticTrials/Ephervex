@@ -20,9 +20,9 @@ use ephervex_core::{
     LinkedTargetPlan, LinkedTargetResult, LinkedTargetState, LoginOptions, ManagedModEntry,
     ManagedModSnapshot, MetadataAvailability, ModDetails, ModInstallPlan, ModMutability,
     ModMutation, ModMutationPlan, ModSearchQuery, MutationRestriction, NewClient, NewServer,
-    OperationReporter, Paths, PlannedOutcome, PreferenceKey, ProgressSink, SearchOptions,
-    ServerCreateOptions, ServerEvent, ServerFolder, ServerNetworkSettings, ServerObserver,
-    SideRequirement,
+    OperationReporter, OptionalSelection, PackAnalysis, Paths, PlannedOutcome, PreferenceKey,
+    ProgressSink, SearchOptions, ServerCreateOptions, ServerEvent, ServerFolder,
+    ServerNetworkSettings, ServerObserver, SideRequirement,
 };
 use ephervex_i18n::{Arg, lookup, lookup_args, lookup_attribute, lookup_attribute_args};
 use ephervex_model::{
@@ -31,8 +31,8 @@ use ephervex_model::{
 };
 
 use crate::presentation::{
-    ActivityPresentation, InstancePresentation, ServerPresentation, diagnostic_kind_label,
-    diagnostic_scope_label,
+    ActivityPresentation, ImportPresentation, InstancePresentation, ServerPresentation,
+    diagnostic_kind_label, diagnostic_scope_label,
 };
 
 type CancellationRegistry = Arc<Mutex<HashMap<String, CancellationToken>>>;
@@ -48,7 +48,18 @@ pub enum Command {
         minecraft: String,
     },
     CancelOperation(String),
-    PickImport,
+    /// `generation` is assigned by the controller the instant the attempt
+    /// begins (before the file dialog even opens), not once a result comes
+    /// back: that is what lets a later result be checked against the attempt
+    /// that is still current instead of trusting whatever the backend hands
+    /// back.
+    PickImport {
+        generation: u64,
+    },
+    /// Abandons whatever provider resolution is still running for the import
+    /// modal: a superseding archive pick already does this on its own before
+    /// starting the next one, so this is for the modal closing outright.
+    CancelImportAnalysis,
     PickStorageRoot,
     CreateClient {
         request_id: String,
@@ -62,6 +73,14 @@ pub enum Command {
         archive: PathBuf,
         name: String,
         persistent: bool,
+        /// The optional client components the modal's checkboxes selected, as
+        /// analyzed and possibly resolved. Never inferred here: the modal
+        /// built it from the same normalized components the core reports.
+        selection: OptionalSelection,
+        /// The attempt this submission belongs to, echoed back on
+        /// [`Event::ImportSubmissionFinished`] so the double-submit guard is
+        /// only ever released by the completion of this exact submission.
+        generation: u64,
     },
     LaunchClient(InstanceId),
     LaunchAndConnect {
@@ -654,10 +673,47 @@ pub enum Event {
     CreationFinished {
         request_id: String,
     },
-    ImportAnalysis {
-        path: PathBuf,
-        suggested_name: String,
-        summary: String,
+    /// The native file dialog for [`Command::PickImport`] closed without a
+    /// choice. A receiver must discard this unless `generation` still names
+    /// the attempt it is tracking, exactly like [`Event::ImportAnalyzed`].
+    ImportPickCanceled {
+        generation: u64,
+    },
+    /// Local analysis of a freshly chosen archive finished.
+    ///
+    /// Runs inline in the backend's single command loop, so results for one
+    /// attempt are delivered in the order they were requested. A receiver
+    /// must still discard this unless `generation` still names the attempt
+    /// it is tracking: the attempt begins the moment it is chosen, in the
+    /// controller, not the moment this event arrives, so a modal closed and
+    /// reopened in between must not let a late analysis repopulate it.
+    ImportAnalyzed {
+        generation: u64,
+        archive: PathBuf,
+        result: Result<ImportPresentation, String>,
+    },
+    /// Provider resolution for a pending archive finished.
+    ///
+    /// Runs on its own thread and can complete after a newer archive has
+    /// already been picked. A receiver must discard this unless `generation`
+    /// still names the attempt it is tracking.
+    ImportResolved {
+        generation: u64,
+        result: Result<ImportPresentation, String>,
+    },
+    /// An `ImportPack` submission reached a terminal outcome (success,
+    /// failure, cancellation, or a setup failure before the operation could
+    /// even start). `generation` is the same identity the submission's
+    /// attempt was analyzed under: only a receiver still tracking this exact
+    /// attempt may release its double-submit guard on this event, so an
+    /// unrelated background operation's `Toast`/`ModalError`/`CloseModal`
+    /// can never do so by coincidence. A success carries no `CloseModal` of
+    /// its own for the same reason: closing is only correct for a receiver
+    /// that still owns this attempt, which only the receiver can judge from
+    /// `generation` and whichever modal it currently has open.
+    ImportSubmissionFinished {
+        generation: u64,
+        succeeded: bool,
     },
     StorageRootPicked(PathBuf),
     ArtifactCacheStatus(ArtifactCacheStatusData),
@@ -753,6 +809,12 @@ fn run_worker(
     }
     send_snapshot(&app, &events);
     let live_log_generation = Arc::new(AtomicU64::new(0));
+    // The still-running resolution's own cancellation, so a superseding pick
+    // or a closed modal can stop wasting a network request on an answer
+    // nothing will read. The attempt identity itself belongs to the
+    // controller (see `Command::PickImport`); this loop only ever cancels by
+    // it, it does not assign it.
+    let mut import_resolve_cancel: Option<CancellationToken> = None;
 
     for command in commands {
         match command {
@@ -792,31 +854,63 @@ fn run_worker(
                 Err(error) => send_modal_error(&events, &error),
             },
             Command::CancelOperation(id) => cancel_operation(&cancellations, &events, &id),
-            Command::PickImport => {
-                if let Some(path) = rfd::FileDialog::new()
+            Command::PickImport { generation } => {
+                // The attempt begins here, at the controller's request, not
+                // at whichever later point this handler happens to finish:
+                // any resolution still running for the previous attempt is
+                // no longer worth its network request the moment a new pick
+                // starts, regardless of whether this one is completed by a
+                // choice or a cancellation.
+                if let Some(previous) = import_resolve_cancel.take() {
+                    previous.cancel();
+                }
+                match rfd::FileDialog::new()
                     .set_title(lookup("gui-choose-modpack-archive"))
                     .add_filter(lookup("gui-modpack-archives"), &["mrpack", "zip"])
                     .pick_file()
                 {
-                    match app.analyze_pack(&path) {
+                    Some(path) => match app.analyze_pack(&path) {
                         Ok(analysis) => {
-                            let summary = lookup_args(
-                                "gui-import-analysis",
-                                [
-                                    ("first", Arg::from(analysis.format.to_string())),
-                                    ("second", Arg::from(analysis.minecraft_version())),
-                                    ("third", Arg::from(analysis.loader().to_string())),
-                                    ("count", Arg::from(analysis.recipe.files.len())),
-                                ],
+                            let presentation = ImportPresentation::from_analysis(&analysis);
+                            let needs_resolution = presentation.needs_provider_resolution;
+                            let _ = events.send(Event::ImportAnalyzed {
+                                generation,
+                                archive: path.clone(),
+                                result: Ok(presentation),
+                            });
+                            if needs_resolution {
+                                let cancel = CancellationToken::new();
+                                import_resolve_cancel = Some(cancel.clone());
+                                spawn_import_resolution(
+                                    app.paths().clone(),
+                                    events.clone(),
+                                    generation,
+                                    analysis,
+                                    cancel,
+                                );
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                message_id = error.message_id(),
+                                detail = %error,
+                                "pack analysis failed"
                             );
-                            let _ = events.send(Event::ImportAnalysis {
-                                path,
-                                suggested_name: analysis.name().to_owned(),
-                                summary,
+                            let _ = events.send(Event::ImportAnalyzed {
+                                generation,
+                                archive: path,
+                                result: Err(localized_error(&error)),
                             });
                         }
-                        Err(error) => send_modal_error(&events, &error),
+                    },
+                    None => {
+                        let _ = events.send(Event::ImportPickCanceled { generation });
                     }
+                }
+            }
+            Command::CancelImportAnalysis => {
+                if let Some(previous) = import_resolve_cancel.take() {
+                    previous.cancel();
                 }
             }
             Command::PickStorageRoot => {
@@ -866,28 +960,20 @@ fn run_worker(
                 archive,
                 name,
                 persistent,
+                selection,
+                generation,
             } => {
                 let paths = app.paths().clone();
-                spawn_async_operation(
+                spawn_import_submission(
                     paths,
                     &events,
                     Arc::clone(&cancellations),
-                    "operation-importing-pack",
-                    archive.display().to_string(),
-                    move |app, reporter, cancel| async move {
-                        let mut request =
-                            ImportRequest::new(archive).with_storage(storage_class(persistent));
-                        if !name.trim().is_empty() {
-                            request = request.named(name);
-                        }
-                        app.import_pack(&request, &reporter, &cancel)
-                            .await
-                            .map(|pack| {
-                                OperationReport::Toast(localized_value(
-                                    "gui-imported-pack",
-                                    &pack.record.name,
-                                ))
-                            })
+                    ImportSubmission {
+                        generation,
+                        archive,
+                        name,
+                        persistent,
+                        selection,
                     },
                 );
             }
@@ -2881,6 +2967,142 @@ fn spawn_detached_with_setup_failure(
         };
         work(app, events, runtime);
     });
+}
+
+/// Resolves a provider-backed pack's pending files on a thread of its own, so
+/// the network work behind [`App::resolve_pack`] never blocks the worker's
+/// command loop.
+///
+/// `generation` is opaque here: this function does not decide whether the
+/// result still matters, it only carries the identity back unchanged so the
+/// receiver can.
+fn spawn_import_resolution(
+    paths: Paths,
+    events: Sender<Event>,
+    generation: u64,
+    mut analysis: PackAnalysis,
+    cancel: CancellationToken,
+) {
+    spawn_detached_with_setup_failure(
+        paths,
+        events,
+        move |events| {
+            let _ = events.send(Event::ImportResolved {
+                generation,
+                result: Err(lookup("gui-import-resolution-unavailable")),
+            });
+        },
+        move |app, events, runtime| {
+            let result = runtime.block_on(app.resolve_pack(&mut analysis, &cancel));
+            let outcome = match result {
+                Ok(()) => Ok(ImportPresentation::from_analysis(&analysis)),
+                Err(error) => Err(localized_error(&error)),
+            };
+            let _ = events.send(Event::ImportResolved {
+                generation,
+                result: outcome,
+            });
+        },
+    );
+}
+
+/// One `ImportPack` command's worth of work, bundled so the function that
+/// runs it stays under the shared argument-count limit.
+struct ImportSubmission {
+    /// The attempt this submission belongs to, echoed back on every terminal
+    /// event so the controller can tell its own submission apart from any
+    /// other operation's.
+    generation: u64,
+    archive: PathBuf,
+    name: String,
+    persistent: bool,
+    selection: OptionalSelection,
+}
+
+/// Runs an `ImportPack` submission on a thread of its own and, on every
+/// terminal path, including a setup failure that never reaches
+/// [`App::import_pack`], reports back which attempt finished.
+///
+/// This does not reuse [`spawn_async_operation`]: that helper is shared by
+/// operations with no submission identity of their own, and folding one in
+/// there would make every other caller carry a concept only import needs.
+fn spawn_import_submission(
+    paths: Paths,
+    events: &Sender<Event>,
+    cancellations: CancellationRegistry,
+    submission: ImportSubmission,
+) {
+    let ImportSubmission {
+        generation,
+        archive,
+        name,
+        persistent,
+        selection,
+    } = submission;
+    let entity = archive.display().to_string();
+    spawn_detached_with_setup_failure(
+        paths.clone(),
+        events.clone(),
+        move |events| {
+            let _ = events.send(Event::ImportSubmissionFinished {
+                generation,
+                succeeded: false,
+            });
+        },
+        move |app, events, runtime| {
+            let sink = Arc::new(UiProgressSink {
+                events: events.clone(),
+                entity,
+                allow_cancel: true,
+            });
+            let reporter = OperationReporter::new("operation-importing-pack", true, sink);
+            reporter.begin(None);
+            let cancel = CancellationToken::new();
+            register_cancellation(&cancellations, &reporter, &cancel);
+            let mut request = ImportRequest::new(archive)
+                .with_storage(storage_class(persistent))
+                .selecting(selection);
+            if !name.trim().is_empty() {
+                request = request.named(name);
+            }
+            let result = runtime.block_on(app.import_pack(&request, &reporter, &cancel));
+            remove_cancellation(&cancellations, &reporter);
+            // Closing the modal is not decided here: a receiver only closes
+            // its own still-current attempt, which this thread cannot know.
+            // `Event::ImportSubmissionFinished` carries `succeeded` so the
+            // receiver can decide on its own state.
+            let succeeded = match result {
+                Ok(pack) => {
+                    reporter.finish(OperationStatus::Completed);
+                    let _ = events.send(Event::Toast {
+                        message: localized_value("gui-imported-pack", &pack.record.name),
+                        error: false,
+                    });
+                    true
+                }
+                Err(error) => {
+                    if error.is_cancellation() {
+                        reporter.finish(OperationStatus::Canceled);
+                        let _ = events.send(Event::Toast {
+                            message: lookup("gui-operation-canceled"),
+                            error: false,
+                        });
+                    } else {
+                        reporter.finish(OperationStatus::Failed(localized_error(&error)));
+                        send_error(&events, &error);
+                    }
+                    false
+                }
+            };
+            let _ = events.send(Event::ImportSubmissionFinished {
+                generation,
+                succeeded,
+            });
+            if let Ok(app) = App::open_at(paths) {
+                send_snapshot(&app, &events);
+            }
+        },
+    );
 }
 
 #[derive(Debug)]

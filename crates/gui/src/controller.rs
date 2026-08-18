@@ -8,6 +8,7 @@ use std::sync::mpsc::Sender;
 use std::time::Duration;
 
 use copypasta::{ClipboardContext, ClipboardProvider as _};
+use ephervex_core::OptionalSelection;
 use ephervex_core::live_diagnostics::{LogFilter, LogLevel, RetainedLog};
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use slint::{
@@ -19,10 +20,10 @@ use crate::backend::{
     DiagnosticData, Event, JavaData, LiveLogLine, LiveLogSource, LiveLogUpdate, ManagedModData,
     ModSearchData, PreferenceData, ServerWorkspaceData, SettingsData, Snapshot,
 };
-use crate::presentation::{self, parse_network, validate_ip, validate_port};
+use crate::presentation::{self, ImportPresentation, parse_network, validate_ip, validate_port};
 use crate::ui::{
-    AccountRow, ActivityRow, AppWindow, DiagnosticRow, GuiI18n, InstanceRow, JavaRow,
-    LinkedTargetRow, LogChunk, ModRow, ModSearchRow, ModVersionRow, PendingEntityRow,
+    AccountRow, ActivityRow, AppWindow, DiagnosticRow, GuiI18n, ImportOptionRow, InstanceRow,
+    JavaRow, LinkedTargetRow, LogChunk, ModRow, ModSearchRow, ModVersionRow, PendingEntityRow,
     PreferenceRow, ServerRow, Theme,
 };
 
@@ -399,6 +400,160 @@ fn render_live_viewer(ui: &AppWindow, state: &mut LiveViewerState) {
     state.pending_lines = 0;
 }
 
+/// Pushes the import modal's every visible property from the flow's current
+/// state.
+///
+/// Unconditional and idempotent: called after any state change, including
+/// ones (like toggling a checkbox) that only touch one property. `import-name`
+/// is the one exception that cannot be blindly re-pushed: see
+/// [`ImportFlowState::name_edited`].
+fn render_import_flow(ui: &AppWindow, state: &ImportFlowState) {
+    ui.set_import_path(state.archive.display().to_string().into());
+    if !state.name_edited {
+        ui.set_import_name(state.suggested_name.clone().into());
+    }
+    let status_kind = match state.phase {
+        ImportPhase::Idle => "idle",
+        ImportPhase::Analyzing => "analyzing",
+        ImportPhase::Resolving => "resolving",
+        ImportPhase::Ready => "ready",
+        ImportPhase::Failed => "failed",
+        ImportPhase::Submitting => "submitting",
+    };
+    ui.set_import_status_kind(status_kind.into());
+    ui.set_import_ready(state.is_ready());
+    ui.set_modal_error(state.error.clone().into());
+
+    let (format, header, author, minecraft, loader, required, optional) = match &state.presentation
+    {
+        Some(facts) => (
+            facts.format.clone(),
+            facts.header_line(),
+            facts.author_line(),
+            facts.minecraft_line(),
+            facts.loader.clone(),
+            facts.required_line(),
+            facts.optional_line(),
+        ),
+        None => Default::default(),
+    };
+    ui.set_import_format(format.into());
+    ui.set_import_pack_header(header.into());
+    ui.set_import_author_line(author.into());
+    ui.set_import_minecraft_line(minecraft.into());
+    ui.set_import_loader_line(loader.into());
+    ui.set_import_required_line(required.into());
+    ui.set_import_optional_line(optional.into());
+
+    let rows: Vec<ImportOptionRow> = state
+        .options
+        .iter()
+        .map(|option| ImportOptionRow {
+            logical_path: option.logical_path.clone().into(),
+            display: option.display.clone().into(),
+            selected: option.selected,
+        })
+        .collect();
+    ui.set_import_optional_items(model(rows));
+}
+
+fn register_import_flow(
+    ui: &AppWindow,
+    commands: &Sender<Command>,
+    import_flow: &Rc<RefCell<ImportFlowState>>,
+) {
+    let sender = commands.clone();
+    let weak = ui.as_weak();
+    let pick_state = Rc::clone(import_flow);
+    ui.on_choose_import_file(move || {
+        // The attempt begins here, synchronously, before the native dialog
+        // even opens: `Analyzing` must be visible immediately, and any
+        // result for whatever attempt was current before this one has to
+        // fail its generation check the moment it arrives, not once the
+        // dialog happens to close.
+        let generation = pick_state.borrow_mut().begin_attempt();
+        if let Some(ui) = weak.upgrade() {
+            render_import_flow(&ui, &pick_state.borrow());
+        }
+        send(&sender, Command::PickImport { generation });
+    });
+
+    let weak = ui.as_weak();
+    let open_state = Rc::clone(import_flow);
+    ui.on_open_import_modal(move || {
+        open_state.borrow_mut().reset();
+        if let Some(ui) = weak.upgrade() {
+            render_import_flow(&ui, &open_state.borrow());
+            ui.set_modal_error(SharedString::default());
+            ui.set_modal("import".into());
+        }
+    });
+
+    let sender = commands.clone();
+    let weak = ui.as_weak();
+    let close_state = Rc::clone(import_flow);
+    ui.on_close_import_modal(move || {
+        close_state.borrow_mut().reset();
+        // Abandoning the archive is not asking the backend to cancel a
+        // user-visible operation, so this bypasses the toast-producing
+        // `CancelOperation` path and goes straight to the worker.
+        send(&sender, Command::CancelImportAnalysis);
+        if let Some(ui) = weak.upgrade() {
+            render_import_flow(&ui, &close_state.borrow());
+            ui.set_modal(SharedString::default());
+            ui.set_modal_error(SharedString::default());
+        }
+    });
+
+    let weak = ui.as_weak();
+    let toggle_state = Rc::clone(import_flow);
+    ui.on_toggle_import_optional(move |logical_path| {
+        toggle_state
+            .borrow_mut()
+            .toggle_option(logical_path.as_str());
+        if let Some(ui) = weak.upgrade() {
+            render_import_flow(&ui, &toggle_state.borrow());
+        }
+    });
+
+    let edited_state = Rc::clone(import_flow);
+    ui.on_import_name_edited(move |_text| {
+        edited_state.borrow_mut().mark_name_edited();
+    });
+
+    let sender = commands.clone();
+    let weak = ui.as_weak();
+    let submit_state = Rc::clone(import_flow);
+    ui.on_submit_import(move |name, persistent| {
+        // The archive comes from the flow's own state, never from a UI
+        // field: `import-path` only ever displays what the last successful
+        // analysis found, and is not itself a source of a new one.
+        let submission = {
+            let mut state = submit_state.borrow_mut();
+            let Some(submission) = state.begin_submit() else {
+                // Nothing is ready, or a submission for this archive is
+                // already running: a second click must not start a second
+                // import.
+                return;
+            };
+            submission
+        };
+        if let Some(ui) = weak.upgrade() {
+            render_import_flow(&ui, &submit_state.borrow());
+        }
+        send(
+            &sender,
+            Command::ImportPack {
+                archive: submission.archive,
+                name: name.into(),
+                persistent,
+                selection: submission.selection,
+                generation: submission.generation,
+            },
+        );
+    });
+}
+
 impl CreationTracker {
     fn accept(&mut self, key: CreationKey, mut pending: PendingCreation) -> Option<String> {
         if !self.keys.insert(key.clone()) {
@@ -424,6 +579,258 @@ impl CreationTracker {
     }
 }
 
+/// Where one archive's import attempt stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum ImportPhase {
+    /// No archive chosen, or the modal was closed before one finished.
+    #[default]
+    Idle,
+    /// Local analysis is running. Fast and inline in the backend, but the
+    /// modal still needs an explicit state for it: readiness must not flash
+    /// true before it exists.
+    Analyzing,
+    /// A provider-backed pack is being resolved over the network.
+    Resolving,
+    /// Fully analyzed (and resolved, if it needed to be) and importable.
+    Ready,
+    /// Local analysis or provider resolution failed. Recoverable only by
+    /// choosing another archive.
+    Failed,
+    /// An `ImportPack` submission is in flight for the current archive.
+    Submitting,
+}
+
+/// One optional component's checkbox state in the import modal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ImportOptionState {
+    logical_path: String,
+    display: String,
+    selected: bool,
+}
+
+/// Everything `Command::ImportPack` needs, built from [`ImportFlowState`]'s
+/// own authoritative fields by [`ImportFlowState::begin_submit`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PreparedImportSubmission {
+    generation: u64,
+    archive: PathBuf,
+    selection: OptionalSelection,
+}
+
+/// Tracks one archive at a time through analysis, optional resolution,
+/// optional-file selection, and submission.
+///
+/// The identity that makes a late result discardable is `tracked_generation`,
+/// not the archive path: two picks of the same file are two different
+/// attempts, and a stale one must not win just because the name matches.
+/// `next_generation` is the only field [`Self::reset`] must not clear: it
+/// has to keep counting up across modal close/reopen, or a later attempt
+/// could be assigned a number an earlier, already-abandoned one used, which
+/// would let that earlier attempt's late result pass the staleness check.
+#[derive(Debug, Default)]
+struct ImportFlowState {
+    next_generation: u64,
+    tracked_generation: Option<u64>,
+    phase: ImportPhase,
+    archive: PathBuf,
+    presentation: Option<ImportPresentation>,
+    options: Vec<ImportOptionState>,
+    suggested_name: String,
+    /// Set the moment the user types in the name field. Checked before a
+    /// later analysis/resolution result would otherwise overwrite it: an
+    /// edit survives everything except a genuinely new archive pick.
+    name_edited: bool,
+    error: String,
+}
+
+impl ImportFlowState {
+    fn reset(&mut self) {
+        let next_generation = self.next_generation;
+        *self = Self::default();
+        self.next_generation = next_generation;
+    }
+
+    /// Starts a new attempt and returns the generation to send with
+    /// [`Command::PickImport`].
+    ///
+    /// Called the instant the user asks to choose an archive, before the
+    /// native file dialog even opens: entering `Analyzing` here, rather than
+    /// waiting for a result to arrive, is what makes the phase real instead
+    /// of a state nothing ever assigns. It also invalidates whatever attempt
+    /// was current before it, the same way closing the modal does, so a
+    /// result for that older attempt is rejected by every method below
+    /// regardless of how the new one turns out.
+    fn begin_attempt(&mut self) -> u64 {
+        self.reset();
+        self.next_generation = self.next_generation.saturating_add(1);
+        self.tracked_generation = Some(self.next_generation);
+        self.phase = ImportPhase::Analyzing;
+        self.next_generation
+    }
+
+    /// The native file dialog closed with no choice made. `false` means it
+    /// was discarded: a newer attempt is already current. Otherwise the
+    /// attempt returns to `Idle`, the same safe, non-ready state as before
+    /// the user ever asked to choose an archive.
+    fn pick_canceled(&mut self, generation: u64) -> bool {
+        if self.tracked_generation != Some(generation) {
+            return false;
+        }
+        self.reset();
+        true
+    }
+
+    /// Applies a local-analysis result for a freshly chosen archive.
+    ///
+    /// `false` means it was discarded: `generation` no longer names the
+    /// attempt this flow is tracking, because a newer archive superseded it
+    /// or the modal was closed before this arrived. This is also the one
+    /// point a new archive's suggested name and edited-flag are reset, which
+    /// is what keeps the name deterministic per archive rather than carrying
+    /// a previous pack's edit forward.
+    fn analyzed(
+        &mut self,
+        generation: u64,
+        archive: PathBuf,
+        result: Result<ImportPresentation, String>,
+    ) -> bool {
+        if self.tracked_generation != Some(generation) {
+            return false;
+        }
+        self.archive = archive;
+        self.options.clear();
+        self.error.clear();
+        self.name_edited = false;
+        self.suggested_name.clear();
+        match result {
+            Ok(presentation) => {
+                self.suggested_name.clone_from(&presentation.name);
+                self.options = options_from(&presentation);
+                self.phase = if presentation.needs_provider_resolution {
+                    ImportPhase::Resolving
+                } else {
+                    ImportPhase::Ready
+                };
+                self.presentation = Some(presentation);
+            }
+            Err(message) => {
+                self.presentation = None;
+                self.error = message;
+                self.phase = ImportPhase::Failed;
+            }
+        }
+        true
+    }
+
+    /// Applies a provider-resolution result.
+    ///
+    /// `false` means it was discarded: `generation` no longer names the
+    /// attempt this flow is tracking, because a newer archive superseded it
+    /// or the modal was closed. The caller has nothing further to render in
+    /// that case.
+    fn resolved(&mut self, generation: u64, result: Result<ImportPresentation, String>) -> bool {
+        if self.tracked_generation != Some(generation) {
+            return false;
+        }
+        match result {
+            Ok(presentation) => {
+                if !self.name_edited {
+                    self.suggested_name.clone_from(&presentation.name);
+                }
+                self.options = options_from(&presentation);
+                self.phase = ImportPhase::Ready;
+                self.presentation = Some(presentation);
+            }
+            Err(message) => {
+                self.presentation = None;
+                self.error = message;
+                self.phase = ImportPhase::Failed;
+            }
+        }
+        true
+    }
+
+    fn mark_name_edited(&mut self) {
+        self.name_edited = true;
+    }
+
+    fn toggle_option(&mut self, logical_path: &str) {
+        if let Some(option) = self
+            .options
+            .iter_mut()
+            .find(|option| option.logical_path == logical_path)
+        {
+            option.selected = !option.selected;
+        }
+    }
+
+    const fn is_ready(&self) -> bool {
+        matches!(self.phase, ImportPhase::Ready)
+    }
+
+    /// Tries to move into `Submitting`, returning everything `ImportPack`
+    /// needs, drawn only from this flow's own state. `None` means the caller
+    /// must not send anything: either nothing is ready yet, or a submission
+    /// for this same archive is already running.
+    ///
+    /// The archive here, not whatever the UI's editable text field currently
+    /// shows, is what makes it into the command: the field can only ever
+    /// reflect a completed analysis, never drive one, so trusting it at
+    /// submit time would let a manually typed path escape analysis and
+    /// optional-selection entirely.
+    fn begin_submit(&mut self) -> Option<PreparedImportSubmission> {
+        if !self.is_ready() {
+            return None;
+        }
+        let generation = self.tracked_generation?;
+        self.phase = ImportPhase::Submitting;
+        Some(PreparedImportSubmission {
+            generation,
+            archive: self.archive.clone(),
+            selection: self.selection(),
+        })
+    }
+
+    /// The submission for `generation` reached a terminal outcome, however
+    /// it finished. `false` means it was ignored: either `generation` no
+    /// longer names the attempt this flow is tracking (a newer attempt
+    /// started, or the modal was closed, while the submission was still in
+    /// flight), or nothing was actually submitting. This is the only way the
+    /// double-submit guard is released: a generic event with no submission
+    /// identity of its own cannot call this at all.
+    fn submit_finished(&mut self, generation: u64) -> bool {
+        if self.tracked_generation != Some(generation)
+            || !matches!(self.phase, ImportPhase::Submitting)
+        {
+            return false;
+        }
+        self.phase = ImportPhase::Ready;
+        true
+    }
+
+    /// The exact `OptionalSelection` the current checkbox state describes.
+    fn selection(&self) -> OptionalSelection {
+        OptionalSelection::of(
+            self.options
+                .iter()
+                .filter(|option| option.selected)
+                .map(|option| option.logical_path.clone()),
+        )
+    }
+}
+
+fn options_from(presentation: &ImportPresentation) -> Vec<ImportOptionState> {
+    presentation
+        .optional
+        .iter()
+        .map(|option| ImportOptionState {
+            logical_path: option.logical_path.clone(),
+            display: option.display.clone(),
+            selected: option.selected,
+        })
+        .collect()
+}
+
 impl std::fmt::Debug for Controller {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.debug_struct("Controller").finish_non_exhaustive()
@@ -436,15 +843,23 @@ pub fn attach(ui: &AppWindow) -> Controller {
     let activities = Rc::new(RefCell::new(Vec::<ActivityData>::new()));
     let creations = Rc::new(RefCell::new(CreationTracker::default()));
     let live_viewer = Rc::new(RefCell::new(LiveViewerState::default()));
+    let import_flow = Rc::new(RefCell::new(ImportFlowState::default()));
     register_i18n(ui);
     register_toasts(ui);
-    register_callbacks(ui, &backend.commands, Rc::clone(&creations), &live_viewer);
+    register_callbacks(
+        ui,
+        &backend.commands,
+        Rc::clone(&creations),
+        &live_viewer,
+        &import_flow,
+    );
 
     let weak = ui.as_weak();
     let poll_receiver = Rc::clone(&receiver);
     let poll_activities = Rc::clone(&activities);
     let poll_creations = Rc::clone(&creations);
     let poll_live_viewer = Rc::clone(&live_viewer);
+    let poll_import_flow = Rc::clone(&import_flow);
     let poll_timer = Timer::default();
     poll_timer.start(TimerMode::Repeated, Duration::from_millis(80), move || {
         let Some(ui) = weak.upgrade() else {
@@ -466,7 +881,13 @@ pub fn attach(ui: &AppWindow) -> Controller {
                 Event::LiveLog(update) => {
                     live_dirty |= poll_live_viewer.borrow_mut().apply(update);
                 }
-                other => apply_event(&ui, other, &poll_activities, &poll_creations),
+                other => apply_event(
+                    &ui,
+                    other,
+                    &poll_activities,
+                    &poll_creations,
+                    &poll_import_flow,
+                ),
             }
         }
         if live_dirty {
@@ -529,9 +950,11 @@ fn register_callbacks(
     commands: &Sender<Command>,
     creations: Rc<RefCell<CreationTracker>>,
     live_viewer: &Rc<RefCell<LiveViewerState>>,
+    import_flow: &Rc<RefCell<ImportFlowState>>,
 ) {
     register_catalog_actions(ui, commands);
     register_client_actions(ui, commands, Rc::clone(&creations));
+    register_import_flow(ui, commands, import_flow);
 
     let sender = commands.clone();
     let weak = ui.as_weak();
@@ -703,21 +1126,6 @@ fn register_client_actions(
                 minecraft: minecraft.into(),
                 loader: loader.into(),
                 loader_version: loader_version.into(),
-                persistent,
-            },
-        );
-    });
-
-    let sender = commands.clone();
-    ui.on_choose_import_file(move || send(&sender, Command::PickImport));
-
-    let sender = commands.clone();
-    ui.on_submit_import(move |archive, name, persistent| {
-        send(
-            &sender,
-            Command::ImportPack {
-                archive: PathBuf::from(archive.as_str()),
-                name: name.into(),
                 persistent,
             },
         );
@@ -1410,6 +1818,7 @@ fn apply_event(
     event: Event,
     activities: &Rc<RefCell<Vec<ActivityData>>>,
     creations: &Rc<RefCell<CreationTracker>>,
+    import_flow: &Rc<RefCell<ImportFlowState>>,
 ) {
     match event {
         Event::Snapshot(snapshot) => {
@@ -1489,27 +1898,105 @@ fn apply_event(
             ui.set_modal_error(SharedString::default());
             // The operation that disabled the modal's actions has answered.
             ui.set_mod_action_pending(false);
-            ui.set_mod_action_pending(false);
         }
         Event::CreationFinished { request_id } => {
             creations.borrow_mut().finish(&request_id);
             apply_pending_creations(ui, &creations.borrow());
         }
-        Event::ImportAnalysis {
-            path,
-            suggested_name,
-            summary,
-        } => {
-            ui.set_import_path(path.display().to_string().into());
-            if ui.get_import_name().is_empty() {
-                ui.set_import_name(suggested_name.into());
-            }
-            ui.set_import_analysis(summary.into());
-            ui.set_modal_error(SharedString::default());
+        // A discarded result belongs to an attempt this flow no longer tracks
+        // (superseded, the modal was closed and reopened, or an unrelated
+        // submission finished): there is nothing that should touch whatever
+        // modal is open now. See `apply_import_result`.
+        Event::ImportPickCanceled { generation } => {
+            let applied = import_flow.borrow_mut().pick_canceled(generation);
+            apply_import_result(ui, import_flow, applied);
         }
+        Event::ImportAnalyzed {
+            generation,
+            archive,
+            result,
+        } => {
+            let applied = import_flow
+                .borrow_mut()
+                .analyzed(generation, archive, result);
+            apply_import_result(ui, import_flow, applied);
+        }
+        Event::ImportResolved { generation, result } => {
+            let applied = import_flow.borrow_mut().resolved(generation, result);
+            apply_import_result(ui, import_flow, applied);
+        }
+        Event::ImportSubmissionFinished {
+            generation,
+            succeeded,
+        } => apply_import_submission_finished(ui, import_flow, generation, succeeded),
         Event::StorageRootPicked(path) => {
             ui.set_persistent_root(path.display().to_string().into());
         }
+    }
+}
+
+/// Re-renders the import modal from `applied`, the result of applying one of
+/// the import flow's generation-gated transitions. A late-arriving result
+/// this flow no longer tracks does not reach here at all (`applied` is
+/// `false`), and one that does still must not clobber a different modal the
+/// user has since navigated to.
+fn apply_import_result(ui: &AppWindow, import_flow: &Rc<RefCell<ImportFlowState>>, applied: bool) {
+    if applied && ui.get_modal() == "import" {
+        render_import_flow(ui, &import_flow.borrow());
+    }
+}
+
+fn apply_import_submission_finished(
+    ui: &AppWindow,
+    import_flow: &Rc<RefCell<ImportFlowState>>,
+    generation: u64,
+    succeeded: bool,
+) {
+    let applied = import_flow.borrow_mut().submit_finished(generation);
+    match import_submission_action(ui.get_modal().as_str(), applied, succeeded) {
+        ImportSubmissionAction::Ignore => {}
+        ImportSubmissionAction::Close => {
+            ui.set_modal(SharedString::default());
+            ui.set_modal_error(SharedString::default());
+        }
+        ImportSubmissionAction::Render => {
+            render_import_flow(ui, &import_flow.borrow());
+        }
+    }
+}
+
+/// What to do with the currently open modal after an `ImportPack` submission
+/// reaches a terminal outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImportSubmissionAction {
+    /// Either the outcome belongs to an attempt this flow no longer tracks
+    /// (`applied` is `false`), or the user has since navigated away from the
+    /// import modal entirely: nothing here should touch what is open now.
+    Ignore,
+    /// The current attempt's own submission succeeded while its modal is
+    /// still open.
+    Close,
+    /// The current attempt's own submission ended without succeeding
+    /// (failure, cancellation, or a setup failure) while its modal is still
+    /// open: the guard already released, so re-render to show it.
+    Render,
+}
+
+/// Pure so the ownership rule ("only the attempt's own still-open modal may
+/// be closed by its own success") is checkable without constructing a live
+/// `AppWindow`, which nothing in this crate's tests does.
+fn import_submission_action(
+    current_modal: &str,
+    applied: bool,
+    succeeded: bool,
+) -> ImportSubmissionAction {
+    if !applied || current_modal != "import" {
+        return ImportSubmissionAction::Ignore;
+    }
+    if succeeded {
+        ImportSubmissionAction::Close
+    } else {
+        ImportSubmissionAction::Render
     }
 }
 
@@ -3104,5 +3591,555 @@ mod tests {
 
         assert!((rows[0].numeric_value - 70.0).abs() < f32::EPSILON);
         assert_eq!(rows[0].value, "70");
+    }
+
+    fn resolved_presentation(name: &str, needs_resolution: bool) -> ImportPresentation {
+        ImportPresentation {
+            format: "CurseForge".to_owned(),
+            name: name.to_owned(),
+            version: "1.0.0".to_owned(),
+            author: "An Author".to_owned(),
+            minecraft_version: "1.21.1".to_owned(),
+            loader: "NeoForge 21.1.42".to_owned(),
+            required_count: 5,
+            optional_count: 2,
+            optional: if needs_resolution {
+                Vec::new()
+            } else {
+                vec![
+                    presentation::ImportOptionPresentation {
+                        logical_path: "mods/optional-a.jar".to_owned(),
+                        display: "mods/optional-a.jar".to_owned(),
+                        selected: false,
+                    },
+                    presentation::ImportOptionPresentation {
+                        logical_path: "mods/optional-b.jar".to_owned(),
+                        display: "mods/optional-b.jar".to_owned(),
+                        selected: true,
+                    },
+                ]
+            },
+            needs_provider_resolution: needs_resolution,
+        }
+    }
+
+    #[test]
+    fn beginning_an_attempt_enters_analyzing_immediately() {
+        let mut flow = ImportFlowState::default();
+        let generation = flow.begin_attempt();
+        assert_eq!(flow.phase, ImportPhase::Analyzing);
+        assert_eq!(flow.tracked_generation, Some(generation));
+        assert!(!flow.is_ready());
+    }
+
+    #[test]
+    fn a_canceled_picker_returns_the_current_attempt_to_idle() {
+        let mut flow = ImportFlowState::default();
+        let generation = flow.begin_attempt();
+        assert!(flow.pick_canceled(generation));
+        assert_eq!(flow.phase, ImportPhase::Idle);
+        assert_eq!(flow.tracked_generation, None);
+    }
+
+    #[test]
+    fn a_stale_cancellation_does_not_touch_a_newer_attempt() {
+        let mut flow = ImportFlowState::default();
+        let first = flow.begin_attempt();
+        let second = flow.begin_attempt();
+        assert_ne!(first, second);
+
+        assert!(
+            !flow.pick_canceled(first),
+            "the first attempt is no longer current"
+        );
+        assert_eq!(
+            flow.phase,
+            ImportPhase::Analyzing,
+            "the second attempt is untouched"
+        );
+        assert_eq!(flow.tracked_generation, Some(second));
+    }
+
+    #[test]
+    fn generations_never_repeat_across_a_reset() {
+        let mut flow = ImportFlowState::default();
+        let first = flow.begin_attempt();
+        flow.reset();
+        let second = flow.begin_attempt();
+        assert!(
+            second > first,
+            "a reused number would let a stale result pass the check"
+        );
+    }
+
+    #[test]
+    fn a_local_analysis_result_for_an_abandoned_attempt_is_rejected() {
+        let mut flow = ImportFlowState::default();
+        let first = flow.begin_attempt();
+        let second = flow.begin_attempt();
+
+        let applied = flow.analyzed(
+            first,
+            PathBuf::from("a.zip"),
+            Ok(resolved_presentation("Pack A", false)),
+        );
+        assert!(!applied, "generation 1 is no longer the current attempt");
+        assert_eq!(flow.phase, ImportPhase::Analyzing, "attempt 2 is untouched");
+        assert_eq!(flow.tracked_generation, Some(second));
+    }
+
+    #[test]
+    fn a_stale_local_analysis_failure_does_not_fail_the_current_attempt() {
+        let mut flow = ImportFlowState::default();
+        let first = flow.begin_attempt();
+        let second = flow.begin_attempt();
+
+        let applied = flow.analyzed(first, PathBuf::from("a.zip"), Err("broken".to_owned()));
+        assert!(!applied);
+        assert_eq!(flow.phase, ImportPhase::Analyzing, "attempt 2 is untouched");
+        assert!(flow.error.is_empty());
+        assert_eq!(flow.tracked_generation, Some(second));
+    }
+
+    #[test]
+    fn closing_the_modal_makes_a_still_arriving_local_analysis_unappliable() {
+        let mut flow = ImportFlowState::default();
+        let generation = flow.begin_attempt();
+        flow.reset(); // what `on_close_import_modal` does
+
+        let applied = flow.analyzed(
+            generation,
+            PathBuf::from("a.zip"),
+            Ok(resolved_presentation("Pack A", false)),
+        );
+        assert!(!applied, "the modal was closed before this arrived");
+        assert_eq!(flow.phase, ImportPhase::Idle);
+    }
+
+    #[test]
+    fn a_local_analysis_failure_is_shown_and_blocks_readiness() {
+        let mut flow = ImportFlowState::default();
+        let generation = flow.begin_attempt();
+        assert!(flow.analyzed(
+            generation,
+            PathBuf::from("broken.zip"),
+            Err("not a pack".to_owned())
+        ));
+        assert_eq!(flow.phase, ImportPhase::Failed);
+        assert!(!flow.is_ready());
+        assert_eq!(flow.error, "not a pack");
+    }
+
+    #[test]
+    fn a_pack_needing_no_resolution_is_ready_as_soon_as_it_is_analyzed() {
+        let mut flow = ImportFlowState::default();
+        let generation = flow.begin_attempt();
+        assert!(flow.analyzed(
+            generation,
+            PathBuf::from("pack.mrpack"),
+            Ok(resolved_presentation("Modrinth Pack", false)),
+        ));
+        assert!(flow.is_ready());
+        assert_eq!(flow.options.len(), 2);
+    }
+
+    #[test]
+    fn a_resolved_analysis_becomes_ready_with_its_optional_defaults_preserved() {
+        let mut flow = ImportFlowState::default();
+        let generation = flow.begin_attempt();
+        flow.analyzed(
+            generation,
+            PathBuf::from("pack.zip"),
+            Ok(resolved_presentation("Example Pack", true)),
+        );
+        assert_eq!(flow.phase, ImportPhase::Resolving);
+        assert!(!flow.is_ready());
+
+        let applied = flow.resolved(generation, Ok(resolved_presentation("Example Pack", false)));
+        assert!(applied);
+        assert!(flow.is_ready());
+        assert_eq!(flow.options.len(), 2);
+        assert!(!flow.options[0].selected, "starts_selected() is preserved");
+        assert!(flow.options[1].selected, "starts_selected() is preserved");
+    }
+
+    #[test]
+    fn a_stale_resolution_result_is_dropped_once_a_newer_archive_is_current() {
+        let mut flow = ImportFlowState::default();
+        let first = flow.begin_attempt();
+        flow.analyzed(
+            first,
+            PathBuf::from("a.zip"),
+            Ok(resolved_presentation("Pack A", true)),
+        );
+        // A second archive is picked before the first's resolution answers.
+        let second = flow.begin_attempt();
+        flow.analyzed(
+            second,
+            PathBuf::from("b.zip"),
+            Ok(resolved_presentation("Pack B", false)),
+        );
+        assert_eq!(flow.phase, ImportPhase::Ready);
+        assert_eq!(flow.archive, PathBuf::from("b.zip"));
+
+        // Generation 1's late answer must not touch the now-current attempt.
+        let applied = flow.resolved(first, Ok(resolved_presentation("Pack A", false)));
+        assert!(!applied);
+        assert_eq!(flow.phase, ImportPhase::Ready);
+        assert_eq!(flow.archive, PathBuf::from("b.zip"));
+        assert_eq!(flow.suggested_name, "Pack B");
+    }
+
+    #[test]
+    fn a_stale_resolution_failure_does_not_fail_the_current_attempt() {
+        let mut flow = ImportFlowState::default();
+        let first = flow.begin_attempt();
+        flow.analyzed(
+            first,
+            PathBuf::from("a.zip"),
+            Ok(resolved_presentation("Pack A", true)),
+        );
+        let second = flow.begin_attempt();
+        flow.analyzed(
+            second,
+            PathBuf::from("b.zip"),
+            Ok(resolved_presentation("Pack B", true)),
+        );
+
+        let applied = flow.resolved(first, Err("stale failure".to_owned()));
+        assert!(!applied);
+        assert_eq!(
+            flow.phase,
+            ImportPhase::Resolving,
+            "generation 2 is still resolving"
+        );
+        assert!(flow.error.is_empty());
+    }
+
+    #[test]
+    fn a_resolution_failure_makes_the_import_not_ready_until_a_new_archive_is_picked() {
+        let mut flow = ImportFlowState::default();
+        let first = flow.begin_attempt();
+        flow.analyzed(
+            first,
+            PathBuf::from("pack.zip"),
+            Ok(resolved_presentation("Example Pack", true)),
+        );
+
+        let applied = flow.resolved(first, Err("missing CurseForge API key".to_owned()));
+        assert!(applied);
+        assert_eq!(flow.phase, ImportPhase::Failed);
+        assert!(!flow.is_ready());
+        assert!(
+            flow.begin_submit().is_none(),
+            "a failed analysis must not be submittable"
+        );
+        assert_eq!(flow.error, "missing CurseForge API key");
+
+        // Choosing another archive recovers normally.
+        let second = flow.begin_attempt();
+        flow.analyzed(
+            second,
+            PathBuf::from("other.mrpack"),
+            Ok(resolved_presentation("Other Pack", false)),
+        );
+        assert!(flow.is_ready());
+        assert!(flow.error.is_empty());
+    }
+
+    #[test]
+    fn only_the_first_of_two_submits_is_accepted_and_completion_releases_the_guard() {
+        let mut flow = ImportFlowState::default();
+        let generation = flow.begin_attempt();
+        flow.analyzed(
+            generation,
+            PathBuf::from("pack.zip"),
+            Ok(resolved_presentation("Example Pack", false)),
+        );
+
+        let expected = PreparedImportSubmission {
+            generation,
+            archive: PathBuf::from("pack.zip"),
+            selection: OptionalSelection::of(["mods/optional-b.jar"]),
+        };
+        assert_eq!(flow.begin_submit(), Some(expected.clone()));
+        assert_eq!(flow.phase, ImportPhase::Submitting);
+        assert_eq!(
+            flow.begin_submit(),
+            None,
+            "a second click while the first submission is running must not start another"
+        );
+
+        assert!(flow.submit_finished(generation));
+        assert!(flow.is_ready(), "a finished submission falls back to Ready");
+        assert_eq!(
+            flow.begin_submit(),
+            Some(expected),
+            "the guard is released once the first submission ends"
+        );
+    }
+
+    #[test]
+    fn the_submitted_archive_is_always_the_analyzed_one_regardless_of_anything_else() {
+        let mut flow = ImportFlowState::default();
+        let generation = flow.begin_attempt();
+        flow.analyzed(
+            generation,
+            PathBuf::from("/tmp/analyzed-pack.zip"),
+            Ok(resolved_presentation("Example Pack", false)),
+        );
+        flow.mark_name_edited();
+        flow.toggle_option("mods/optional-a.jar");
+
+        assert_eq!(
+            flow.begin_submit(),
+            Some(PreparedImportSubmission {
+                generation,
+                archive: PathBuf::from("/tmp/analyzed-pack.zip"),
+                selection: OptionalSelection::of(["mods/optional-a.jar", "mods/optional-b.jar"]),
+            }),
+            "the archive submitted must be exactly the one the current analysis is for; \
+             `begin_submit` takes no archive argument, so nothing else could have supplied one"
+        );
+    }
+
+    #[test]
+    fn a_wrong_submission_completion_does_not_release_the_guard() {
+        let mut flow = ImportFlowState::default();
+        let generation = flow.begin_attempt();
+        flow.analyzed(
+            generation,
+            PathBuf::from("pack.zip"),
+            Ok(resolved_presentation("Example Pack", false)),
+        );
+        flow.begin_submit();
+        assert_eq!(flow.phase, ImportPhase::Submitting);
+
+        assert!(
+            !flow.submit_finished(generation.wrapping_add(1)),
+            "a completion for a different generation must not release the guard"
+        );
+        assert_eq!(
+            flow.phase,
+            ImportPhase::Submitting,
+            "an unrelated completion leaves the current submission running"
+        );
+
+        assert!(flow.submit_finished(generation));
+        assert_eq!(flow.phase, ImportPhase::Ready);
+    }
+
+    #[test]
+    fn a_submission_completion_for_an_attempt_no_longer_current_is_ignored() {
+        let mut flow = ImportFlowState::default();
+        let first = flow.begin_attempt();
+        flow.analyzed(
+            first,
+            PathBuf::from("pack.zip"),
+            Ok(resolved_presentation("Example Pack", false)),
+        );
+        flow.begin_submit();
+
+        // The modal is closed while the submission is still running in the
+        // background, and a new attempt begins before it finishes.
+        flow.reset();
+        let second = flow.begin_attempt();
+
+        assert!(
+            !flow.submit_finished(first),
+            "the old submission's completion must not touch the new attempt"
+        );
+        assert_eq!(flow.phase, ImportPhase::Analyzing);
+        assert_eq!(flow.tracked_generation, Some(second));
+    }
+
+    #[test]
+    fn submit_finished_is_a_no_op_when_nothing_was_submitting() {
+        let mut flow = ImportFlowState::default();
+        assert!(!flow.submit_finished(1));
+        assert_eq!(flow.phase, ImportPhase::Idle);
+    }
+
+    #[test]
+    fn a_matching_success_may_close_its_own_still_current_import_modal() {
+        assert_eq!(
+            import_submission_action("import", true, true),
+            ImportSubmissionAction::Close
+        );
+    }
+
+    #[test]
+    fn an_abandoned_generations_success_does_not_close_a_newly_opened_import_modal() {
+        // `applied` is what `ImportFlowState::submit_finished` reports for a
+        // stale generation: `false`, regardless of `succeeded`, regardless of
+        // which modal happens to be open now (even the reopened import one).
+        assert_eq!(
+            import_submission_action("import", false, true),
+            ImportSubmissionAction::Ignore
+        );
+    }
+
+    #[test]
+    fn an_abandoned_generations_success_does_not_close_an_unrelated_modal() {
+        assert_eq!(
+            import_submission_action("create-server", true, true),
+            ImportSubmissionAction::Ignore
+        );
+        // Both conditions have to hold: even a matching generation must not
+        // reach into a modal the user has since navigated to.
+        assert_eq!(
+            import_submission_action("create-server", false, true),
+            ImportSubmissionAction::Ignore
+        );
+    }
+
+    #[test]
+    fn a_stale_submission_completion_cannot_alter_a_newer_flow() {
+        let mut flow = ImportFlowState::default();
+        let first = flow.begin_attempt();
+        flow.analyzed(
+            first,
+            PathBuf::from("pack.zip"),
+            Ok(resolved_presentation("Example Pack", false)),
+        );
+        flow.begin_submit();
+        flow.reset();
+        let second = flow.begin_attempt();
+
+        // The old submission's own terminal event still arrives, generation
+        // and all, after a newer attempt is already current.
+        let applied = flow.submit_finished(first);
+        assert!(!applied, "generation 1 no longer names the current attempt");
+        assert_eq!(
+            import_submission_action("import", applied, true),
+            ImportSubmissionAction::Ignore,
+            "a stale completion must not act on the modal even if it succeeded"
+        );
+        assert_eq!(flow.phase, ImportPhase::Analyzing, "attempt 2 is untouched");
+        assert_eq!(flow.tracked_generation, Some(second));
+    }
+
+    #[test]
+    fn a_matching_non_success_releases_the_guard_and_only_re_renders() {
+        let mut flow = ImportFlowState::default();
+        let generation = flow.begin_attempt();
+        flow.analyzed(
+            generation,
+            PathBuf::from("pack.zip"),
+            Ok(resolved_presentation("Example Pack", false)),
+        );
+        flow.begin_submit();
+
+        let applied = flow.submit_finished(generation);
+        assert!(applied, "the matching generation releases the guard");
+        assert!(flow.is_ready(), "failure/cancellation falls back to Ready");
+        assert_eq!(
+            import_submission_action("import", applied, false),
+            ImportSubmissionAction::Render,
+            "failure, cancellation, and setup failure all pass succeeded: false, \
+             and none of them may close the modal"
+        );
+    }
+
+    #[test]
+    fn selected_optional_logical_paths_become_the_exact_optional_selection() {
+        let mut flow = ImportFlowState::default();
+        let generation = flow.begin_attempt();
+        flow.analyzed(
+            generation,
+            PathBuf::from("pack.zip"),
+            Ok(resolved_presentation("Example Pack", false)),
+        );
+        // "mods/optional-a.jar" starts unselected, "mods/optional-b.jar" starts selected.
+        flow.toggle_option("mods/optional-a.jar");
+
+        assert_eq!(
+            flow.selection(),
+            OptionalSelection::of(["mods/optional-a.jar", "mods/optional-b.jar"])
+        );
+    }
+
+    #[test]
+    fn toggling_an_unknown_logical_path_changes_nothing() {
+        let mut flow = ImportFlowState::default();
+        let generation = flow.begin_attempt();
+        flow.analyzed(
+            generation,
+            PathBuf::from("pack.zip"),
+            Ok(resolved_presentation("Example Pack", false)),
+        );
+        flow.toggle_option("mods/does-not-exist.jar");
+        assert_eq!(
+            flow.selection(),
+            OptionalSelection::of(["mods/optional-b.jar"])
+        );
+    }
+
+    #[test]
+    fn an_edit_made_while_resolving_survives_the_resolution_finishing() {
+        let mut flow = ImportFlowState::default();
+        let generation = flow.begin_attempt();
+        flow.analyzed(
+            generation,
+            PathBuf::from("a.zip"),
+            Ok(resolved_presentation("Pack A", true)),
+        );
+        flow.mark_name_edited();
+
+        // Resolution finishes and reports a name-bearing presentation for the
+        // same attempt; the user's edit must still win.
+        let applied = flow.resolved(
+            generation,
+            Ok(resolved_presentation("Pack A (Full)", false)),
+        );
+        assert!(applied);
+        assert_eq!(
+            flow.suggested_name, "Pack A",
+            "the edited flag must block the overwrite"
+        );
+        assert!(flow.name_edited);
+    }
+
+    #[test]
+    fn a_new_archive_deterministically_resets_the_suggested_name_and_the_edited_flag() {
+        let mut flow = ImportFlowState::default();
+        let first = flow.begin_attempt();
+        flow.analyzed(
+            first,
+            PathBuf::from("a.zip"),
+            Ok(resolved_presentation("Pack A", false)),
+        );
+        flow.mark_name_edited();
+
+        let second = flow.begin_attempt();
+        flow.analyzed(
+            second,
+            PathBuf::from("b.zip"),
+            Ok(resolved_presentation("Pack B", false)),
+        );
+        assert_eq!(
+            flow.suggested_name, "Pack B",
+            "a new archive always starts a fresh suggestion"
+        );
+        assert!(!flow.name_edited);
+    }
+
+    #[test]
+    fn closing_the_modal_resets_the_flow_so_a_stale_resolution_cannot_apply() {
+        let mut flow = ImportFlowState::default();
+        let generation = flow.begin_attempt();
+        flow.analyzed(
+            generation,
+            PathBuf::from("pack.zip"),
+            Ok(resolved_presentation("Example Pack", true)),
+        );
+        flow.reset();
+
+        let applied = flow.resolved(generation, Ok(resolved_presentation("Example Pack", false)));
+        assert!(
+            !applied,
+            "a resolution for an abandoned attempt must not apply"
+        );
+        assert_eq!(flow.phase, ImportPhase::Idle);
     }
 }
