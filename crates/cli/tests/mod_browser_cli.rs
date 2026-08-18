@@ -260,3 +260,29 @@ fn a_recipe_from_a_newer_build_is_refused_rather_than_partly_read() {
         "a recipe this build cannot fully read is refused rather than partly listed"
     );
 }
+
+#[test]
+fn a_catalog_can_be_chosen_and_an_unknown_one_is_refused() {
+    // The catalog is part of the request rather than an application-wide
+    // setting, and only the ones this build can browse are accepted.
+    let sandbox = Sandbox::new();
+    let help = sandbox.run(&["mod", "search", "--help"]);
+    assert!(help.status.success());
+    let text = String::from_utf8_lossy(&help.stdout);
+    assert!(text.contains("--provider"), "{text}");
+    assert!(text.contains("modrinth"), "{text}");
+    assert!(
+        text.contains("curse-forge") || text.contains("curseforge"),
+        "{text}"
+    );
+
+    let refused = sandbox.run(&[
+        "mod",
+        "search",
+        "00000000-0000-4000-8000-000000000000",
+        "jei",
+        "--provider",
+        "nowhere",
+    ]);
+    assert!(!refused.status.success());
+}

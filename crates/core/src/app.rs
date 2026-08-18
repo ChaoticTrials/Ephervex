@@ -212,6 +212,10 @@ pub struct App {
     /// the moment a request needs it, so a key set or removed mid-session takes
     /// effect without rebuilding anything.
     pub(crate) curseforge: OnceLock<ephervex_mod_platform::CurseForgeApi>,
+    /// The CurseForge catalog as the browser sees it, built on first use over
+    /// the client above. Separate from that client because one is a transport
+    /// several operations share and the other is a mod provider.
+    pub(crate) curseforge_mods: OnceLock<ephervex_mod_platform::CurseForgeProvider>,
     /// The last Java scan, held for the life of the process.
     ///
     /// Discovery forks a JVM per distinct runtime, so recomputing it whenever a
@@ -255,6 +259,7 @@ impl App {
             loaders: OnceLock::new(),
             mods: OnceLock::new(),
             curseforge: OnceLock::new(),
+            curseforge_mods: OnceLock::new(),
             java: RwLock::new(None),
             session: None,
             #[cfg(test)]
@@ -277,6 +282,7 @@ impl App {
             loaders: OnceLock::new(),
             mods: OnceLock::new(),
             curseforge: OnceLock::new(),
+            curseforge_mods: OnceLock::new(),
             java: RwLock::new(None),
             session: None,
             #[cfg(test)]

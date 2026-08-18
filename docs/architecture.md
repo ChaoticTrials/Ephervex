@@ -44,7 +44,7 @@ prevents UI code from acquiring storage or provider policy accidentally.
 | `ephervex-loaders` | Vanilla, Forge, and NeoForge metadata resolution and client/server installation |
 | `ephervex-options` | Line-preserving `options.txt` parsing, the generated per-release compatibility dataset and its remote feed, and version-aware application of global preferences |
 | `ephervex-pack` | Format detection, hardened archive handling, provider-neutral recipes, Modrinth and CurseForge manifest parsing, optional selection, materialization, and managed-mod installation |
-| `ephervex-mod-platform` | Modrinth project/version catalog, the authenticated CurseForge third-party API transport, compatibility verdicts, and provider-neutral dependency resolution |
+| `ephervex-mod-platform` | Modrinth and CurseForge project/version catalogs behind one provider trait, the authenticated CurseForge third-party API transport, compatibility verdicts, and provider-neutral dependency resolution |
 | `ephervex-server` | Dedicated-server properties, EULA enforcement, process identity, foreground supervision, control channel, and bounded capture |
 | `ephervex-core` | Application services and error classification shared by frontends |
 | `ephervex-cli` | Command-line frontend and human/JSON rendering |
@@ -571,14 +571,17 @@ stderr so machine-readable output remains valid.
 
 The supported scope includes Linux, Minecraft release versions from 1.12.2
 onward, Vanilla, Forge, NeoForge, Modrinth and CurseForge pack import, Modrinth
-mod browsing with dependency resolution, and linked-server reconstruction from
-retained recipes, plus launching a linked client directly into a local managed
-server. Logs, crash reports, and launcher diagnostics are inspectable through
-`ephervex-core`, the CLI, and the GUI. CurseForge pack import needs a
-user-supplied API key and cannot obtain a file whose author has turned off
-third-party distribution. CurseForge browsing, and mod updates and removal, are
-unavailable. Fabric, Quilt, snapshots, Windows,
-and macOS are outside the supported scope recorded in ADR 0008.
+and CurseForge mod browsing with dependency resolution, and linked-server
+reconstruction from retained recipes, plus launching a linked client directly
+into a local managed server. Logs, crash reports, and launcher diagnostics are
+inspectable through `ephervex-core`, the CLI, and the GUI. CurseForge pack
+import and CurseForge browsing need a user-supplied API key and cannot obtain a
+file whose author has turned off third-party distribution. CurseForge browsing
+offers Minecraft's Mods class only, and its version lists are scoped to the
+instance's exact Minecraft release and loader family because the provider pages
+its file listings. Mod updates and removal are unavailable. Fabric, Quilt,
+snapshots, Windows, and macOS are outside the supported scope recorded in
+ADR 0008.
 
 ## Verification
 

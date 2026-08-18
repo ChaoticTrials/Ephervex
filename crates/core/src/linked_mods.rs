@@ -73,6 +73,8 @@ use crate::mutation::{
 pub enum LinkedModRequest {
     /// A mod chosen by name that the client does not have yet.
     Install {
+        /// The catalog the project reference below belongs to.
+        provider: ModProvider,
         project: String,
         /// The exact release to install. `None` takes the newest that fits the
         /// *client*, which is what choosing a mod by name in a browser means.
@@ -655,9 +657,16 @@ impl App {
     ) -> CoreResult<(ClientModPlan, LinkedModRoot, Option<ModVersionInfo>)> {
         let cancel = CancellationToken::new();
         match request {
-            LinkedModRequest::Install { project, version } => {
+            LinkedModRequest::Install {
+                provider,
+                project,
+                version,
+            } => {
                 let plan = self
-                    .plan_mod_installation(client, &install_request(project, version.as_deref()))
+                    .plan_mod_installation(
+                        client,
+                        &install_request(*provider, project, version.as_deref()),
+                    )
                     .await?;
                 let root = root_of_install(&plan);
                 let release = plan.root.version.clone();
@@ -719,7 +728,7 @@ impl App {
             return Ok((ClientModPlan::Mutate(Box::new(plan)), root, None));
         };
 
-        let provider = self.mod_provider()?;
+        let provider = self.mod_provider(plan.provider.unwrap_or(ModProvider::Modrinth))?;
         let project = provider.project(project_id, reporter, cancel).await?;
         let release = provider
             .versions_by_id(std::slice::from_ref(version_id), reporter, cancel)
@@ -751,7 +760,11 @@ impl App {
         cancel: &CancellationToken,
     ) -> CoreResult<(ClientModOutcome, LinkedModRoot, Option<ModVersionInfo>)> {
         match request {
-            LinkedModRequest::Install { project, version } => {
+            LinkedModRequest::Install {
+                provider,
+                project,
+                version,
+            } => {
                 // Pinned when a confirmation named a release. The resolver
                 // refuses a pin it cannot honor, so one that has been withdrawn
                 // or that no longer fits fails the operation rather than
@@ -759,7 +772,7 @@ impl App {
                 let installed = self
                     .install_mods(
                         client,
-                        &install_request(project, version.as_deref()),
+                        &install_request(*provider, project, version.as_deref()),
                         reporter,
                         cancel,
                     )
@@ -918,7 +931,7 @@ impl App {
             return blocked(record, root, LinkedTargetBlock::ServerUnsupported);
         }
 
-        let Ok(provider) = self.mod_provider() else {
+        let Ok(provider) = self.mod_provider(root.provider) else {
             return blocked(record, root, LinkedTargetBlock::ProviderUnavailable);
         };
         let Some(loader_name) = provider.loader_name(target.loader) else {
@@ -940,8 +953,9 @@ impl App {
             return blocked(record, root, incompatibility(&reasons, release));
         }
 
-        let installed = crate::mods::installed_projects_of(Some(&recipe));
+        let installed = crate::mods::installed_projects_of(Some(&recipe), root.provider);
         let request = ModInstallRequest::new(root.project_id.clone())
+            .from_provider(root.provider)
             .at_version(root.version_id.clone().unwrap_or_default());
         let resolved = match self
             .resolve_against(
@@ -984,6 +998,7 @@ impl App {
                         recipe: &recipe,
                         side: PackSide::Server,
                         target,
+                        provider: root.provider,
                     },
                     root.version_id
                         .as_deref()
@@ -1001,7 +1016,7 @@ impl App {
             .iter()
             .map(|entry| planned_from_entry(entry, &resolved))
             .collect();
-        let removals = removals_of(&removes);
+        let removals = removals_of(root.provider, &removes);
         let plan = LinkedTargetPlan {
             server: record.id,
             name: record.name.clone(),
@@ -1056,6 +1071,7 @@ impl App {
                     recipe: &recipe,
                     side: PackSide::Server,
                     target,
+                    provider: root.provider,
                 },
                 None,
                 &[root.project_id.as_str()],
@@ -1065,7 +1081,7 @@ impl App {
             .await;
         removes.extend(orphans);
 
-        let removals = removals_of(&removes);
+        let removals = removals_of(root.provider, &removes);
         let state = LinkedTargetState::WillRemove;
         let plan = LinkedTargetPlan {
             server: record.id,
@@ -1303,15 +1319,10 @@ fn resolution_block(error: &CoreError) -> LinkedTargetBlock {
 }
 
 /// The projects a set of planned removals names.
-fn removals_of(removes: &[PlannedFile]) -> Vec<ManagedProject> {
+fn removals_of(provider: ModProvider, removes: &[PlannedFile]) -> Vec<ManagedProject> {
     removes
         .iter()
-        .filter_map(|file| {
-            Some(ManagedProject::new(
-                ModProvider::Modrinth,
-                file.project_id.clone()?,
-            ))
-        })
+        .filter_map(|file| Some(ManagedProject::new(provider, file.project_id.clone()?)))
         .collect()
 }
 
@@ -1346,8 +1357,12 @@ fn planned_from_entry(entry: &PackFileRecipe, plan: &ModInstallPlan) -> PlannedF
 ///
 /// One builder for planning and for applying, so the two cannot disagree about
 /// what was asked for.
-fn install_request(project: &str, version: Option<&str>) -> ModInstallRequest {
-    let request = ModInstallRequest::new(project.to_owned());
+fn install_request(
+    provider: ModProvider,
+    project: &str,
+    version: Option<&str>,
+) -> ModInstallRequest {
+    let request = ModInstallRequest::new(project.to_owned()).from_provider(provider);
     match version {
         Some(version) => request.at_version(version.to_owned()),
         None => request,
@@ -1372,7 +1387,10 @@ fn root_of_install(plan: &ModInstallPlan) -> LinkedModRoot {
 /// own record is what proves ownership, so this stays usable offline.
 fn root_of_removal(plan: &ModMutationPlan) -> LinkedModRoot {
     LinkedModRoot {
-        provider: ModProvider::Modrinth,
+        // The plan's own record of where the mod came from. A removal asks no
+        // catalog anything, but the linked half still has to name the right one
+        // when it looks for the same project on a server.
+        provider: plan.provider.unwrap_or(ModProvider::Modrinth),
         project_id: plan.project_id.clone().unwrap_or_default(),
         name: plan.name.clone(),
         version_id: None,
@@ -1817,6 +1835,7 @@ mod tests {
     /// A browser install: the newest release that fits the client.
     fn install(project: &str) -> LinkedModRequest {
         LinkedModRequest::Install {
+            provider: ModProvider::Modrinth,
             project: project.to_owned(),
             version: None,
         }
@@ -1826,6 +1845,7 @@ mod tests {
     /// plan resolved.
     fn confirmed(plan: &LinkedModPlan) -> LinkedModRequest {
         LinkedModRequest::Install {
+            provider: ModProvider::Modrinth,
             project: plan.root.project_id.clone(),
             version: plan.root.version_id.clone(),
         }
@@ -1834,6 +1854,7 @@ mod tests {
     /// An install pinned to an exact release by the caller.
     fn pinned(project: &str, version: &str) -> LinkedModRequest {
         LinkedModRequest::Install {
+            provider: ModProvider::Modrinth,
             project: project.to_owned(),
             version: Some(version.to_owned()),
         }
@@ -2485,6 +2506,29 @@ mod tests {
                 .origin,
             ModOrigin::PackDeclared,
             "a later sync does not rewrite what the pack declared"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_client_only_install_is_visible_in_the_managed_snapshot_without_a_reopen() {
+        // The GUI panel that lists an instance's mods reads exactly this view
+        // right after every browser install; if this needed a reopen to see
+        // the recorded mod, the panel would stay stale until the workspace
+        // was reloaded.
+        let world = world().await;
+        let outcome = apply(&world, &install("ROOTPROJ"), &[]).await;
+        assert!(matches!(outcome.client, ClientModOutcome::Installed(_)));
+
+        let snapshot = world
+            .app
+            .managed_mod_snapshot(world.client)
+            .expect("snapshot");
+        assert!(
+            snapshot
+                .mods
+                .iter()
+                .any(|entry| entry.identity.project_id() == Some("ROOTPROJ")),
+            "the mod an install just recorded is in the same snapshot the GUI panel reads"
         );
     }
 

@@ -26,8 +26,8 @@ use ephervex_core::{
 };
 use ephervex_i18n::{Arg, lookup, lookup_args, lookup_attribute, lookup_attribute_args};
 use ephervex_model::{
-    InstanceId, LoaderKind, LoaderSelection, ModOrigin, Operation, OperationStatus, ServerId,
-    StorageClass,
+    InstanceId, LoaderKind, LoaderSelection, ModOrigin, ModProvider, Operation, OperationStatus,
+    ServerId, StorageClass,
 };
 
 use crate::presentation::{
@@ -137,14 +137,28 @@ pub enum Command {
     },
     SearchMods {
         instance: InstanceId,
+        /// Which catalog to search. Explicit rather than an application-wide
+        /// setting: the answer, and every id in it, belongs to one catalog.
+        provider: ModProvider,
         query: String,
+        /// How far into the result list this page starts. Non-zero only when
+        /// the user asked for more of a list they are already looking at.
+        offset: u32,
+        /// Opaque frontend bookkeeping, echoed back unchanged. Two requests
+        /// can otherwise carry an identical instance, provider, query, and
+        /// offset (a search resubmitted after switching catalog away and
+        /// back), and this is what still tells their answers apart. Never
+        /// read by a provider or recorded anywhere.
+        request_id: u64,
     },
     PlanMod {
         instance: InstanceId,
+        provider: ModProvider,
         project: String,
     },
     InstallMod {
         instance: InstanceId,
+        provider: ModProvider,
         project: String,
         /// The exact release the confirmation showed. Empty only when nothing
         /// resolved one, in which case the newest that fits is installed.
@@ -548,7 +562,10 @@ pub struct ModSearchData {
     pub title: String,
     pub description: String,
     pub author: String,
-    pub downloads: String,
+    /// A short localized note about the result, such as whether it fits this
+    /// instance. The catalogs do not publish one comparable statistic between
+    /// them, and inventing a number here would only look like one.
+    pub note: String,
 }
 
 /// One page of search results, and the request it answers.
@@ -560,13 +577,40 @@ pub struct ModSearchData {
 #[derive(Debug, Clone)]
 pub struct ModResultsData {
     pub instance: String,
+    /// The catalog this page came from, echoed back for the same reason the
+    /// query is: switching catalog asks a new question, and the old answer
+    /// must not land on it.
+    pub provider: String,
     pub query: String,
+    /// The offset this page starts at. A page after the first is appended to
+    /// what is on screen rather than replacing it.
+    pub offset: u32,
     pub rows: Vec<ModSearchData>,
+    /// How many results the catalog says match. Informational: whether another
+    /// page is worth a request is decided by `next_offset`, not this count.
+    pub total: u64,
+    /// Where the provider says its next page begins, `None` once there is no
+    /// more. Read from how much of the raw page the provider consumed, never
+    /// from how many of `rows` this launcher went on to keep.
+    pub next_offset: Option<u32>,
+    /// The request this answers, echoed back unchanged.
+    pub request_id: u64,
+    /// A localized sentence when the search failed, empty otherwise.
+    ///
+    /// Shown in the browser rather than only as a toast: a missing API key, a
+    /// rejected one, and an unreachable catalog are all states of the panel the
+    /// user is looking at, and a toast that has faded leaves an empty list with
+    /// no explanation.
+    pub notice: String,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct ModPlanData {
     pub instance: String,
+    /// The catalog the review asked, echoed back beside the reference. Two
+    /// catalogs can spell a project id the same way, so the reference alone
+    /// does not identify the question.
+    pub provider: String,
     /// The reference the review asked about, echoed back. Two reviews can be in
     /// flight at once and finish in either order, so an answer says which
     /// question it answers.
@@ -1242,13 +1286,21 @@ fn run_worker(
                     }
                 });
             }
-            Command::SearchMods { instance, query } => {
+            Command::SearchMods {
+                instance,
+                provider,
+                query,
+                offset,
+                request_id,
+            } => {
                 let paths = app.paths().clone();
                 spawn_detached(paths, events.clone(), move |app, events, runtime| {
-                    let result = runtime
-                        .block_on(app.search_mods(instance, &ModSearchQuery::new(query.clone())));
-                    match result {
+                    let request = ModSearchQuery::new(query.clone()).from_offset(offset);
+                    let result = runtime.block_on(app.search_mods(instance, provider, &request));
+                    let answer = match result {
                         Ok(results) => {
+                            let total = results.total_hits;
+                            let next_offset = results.next_offset;
                             let rows = results
                                 .hits
                                 .into_iter()
@@ -1260,25 +1312,56 @@ fn run_worker(
                                         .project
                                         .author
                                         .unwrap_or_else(|| lookup("gui-unknown-author")),
-                                    downloads: lookup("gui-compatible"),
+                                    note: lookup("gui-compatible"),
                                 })
                                 .collect();
-                            let _ = events.send(Event::ModResults(ModResultsData {
+                            ModResultsData {
                                 instance: instance.to_string(),
+                                provider: provider.as_str().to_owned(),
                                 query,
+                                offset,
                                 rows,
-                            }));
+                                total,
+                                next_offset,
+                                request_id,
+                                notice: String::new(),
+                            }
                         }
-                        Err(error) => send_error(&events, &error),
-                    }
+                        Err(error) => {
+                            // Reported in the panel the search happens in, so
+                            // the reason survives longer than a toast does.
+                            tracing::warn!(
+                                message_id = error.message_id(),
+                                detail = %error,
+                                "mod search failed"
+                            );
+                            ModResultsData {
+                                instance: instance.to_string(),
+                                provider: provider.as_str().to_owned(),
+                                query,
+                                offset,
+                                rows: Vec::new(),
+                                total: 0,
+                                next_offset: None,
+                                request_id,
+                                notice: localized_error(&error),
+                            }
+                        }
+                    };
+                    let _ = events.send(Event::ModResults(answer));
                 });
             }
-            Command::PlanMod { instance, project } => {
+            Command::PlanMod {
+                instance,
+                provider,
+                project,
+            } => {
                 let paths = app.paths().clone();
                 spawn_detached(paths, events.clone(), move |app, events, runtime| {
                     let result = runtime.block_on(app.plan_linked_mod_operation(
                         instance,
                         &LinkedModRequest::Install {
+                            provider,
                             project: project.clone(),
                             version: None,
                         },
@@ -1295,6 +1378,7 @@ fn run_worker(
             }
             Command::InstallMod {
                 instance,
+                provider,
                 project,
                 version,
                 servers,
@@ -1309,6 +1393,7 @@ fn run_worker(
                     project.clone(),
                     move |app, reporter, cancel| async move {
                         let request = LinkedModRequest::Install {
+                            provider,
                             project,
                             // Pinned to what the user agreed to, so a release
                             // published since the confirmation cannot take its
@@ -1321,6 +1406,15 @@ fn run_worker(
                             )
                             .await?;
                         let message = client_outcome_message(&outcome);
+                        // The Managed Mods panel may already be open on this
+                        // instance, and a newly installed mod must appear on
+                        // it without the workspace being reopened. Recorded
+                        // state is authoritative here; the panel picks up
+                        // provider titles and artwork the next time it is
+                        // freshly loaded, the same as any other durable read.
+                        if let Ok(snapshot) = app.managed_mod_snapshot(instance) {
+                            let _ = reports.send(Event::ManagedMods(managed_mods_data(&snapshot)));
+                        }
                         if outcome.targets.is_empty() {
                             return Ok(OperationReport::Toast(message));
                         }
@@ -3356,6 +3450,7 @@ fn install_plan_data(linked: &LinkedModPlan, requested: &str) -> ModPlanData {
     };
     ModPlanData {
         instance: linked.client.to_string(),
+        provider: linked.root.provider.as_str().to_owned(),
         requested: requested.to_owned(),
         project: linked.root.project_id.clone(),
         title: plan.root.project.title.clone(),

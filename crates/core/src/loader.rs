@@ -36,8 +36,8 @@
 
 use ephervex_download::OperationReporter;
 use ephervex_minecraft::Platform;
-use ephervex_mod_platform::{IncompatibilityReason, InstanceTarget};
-use ephervex_model::{InstanceId, LoaderKind, LoaderSelection};
+use ephervex_mod_platform::{IncompatibilityReason, InstanceTarget, ModVersionInfo};
+use ephervex_model::{InstanceId, LoaderKind, LoaderSelection, ModProvider};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument, warn};
 
@@ -308,31 +308,46 @@ impl App {
             return Ok((0, unverifiable, Vec::new()));
         }
 
-        let provider = self.mod_provider()?;
-        let loader_name = ephervex_mod_platform::loader_name_for(provider, target)?;
-        let ids: Vec<String> = checkable
-            .iter()
-            .filter_map(|entry| entry.identity.version_id().map(ToOwned::to_owned))
-            .collect();
         let reporter = OperationReporter::silent("checking-mod-compatibility");
-        let versions = match provider
-            .versions_by_id(&ids, &reporter, &CancellationToken::new())
-            .await
-        {
-            Ok(versions) => versions,
-            Err(error) => {
-                warn!(%error, "no mod was checked against the candidate loader build");
-                return Ok((0, snapshot.len(), Vec::new()));
+        // Each catalog is asked about its own mods, and each answers in its own
+        // spelling of the loader. An instance holding mods from two of them is
+        // checked against both rather than having one catalog's ids sent to the
+        // other.
+        let mut versions: Vec<(ModProvider, ModVersionInfo, &'static str)> = Vec::new();
+        for catalog in [ModProvider::Modrinth, ModProvider::CurseForge] {
+            let ids: Vec<String> = checkable
+                .iter()
+                .filter(|entry| entry.identity.provider() == Some(catalog))
+                .filter_map(|entry| entry.identity.version_id().map(ToOwned::to_owned))
+                .collect();
+            if ids.is_empty() {
+                continue;
             }
-        };
+            let provider = self.mod_provider(catalog)?;
+            let loader_name = ephervex_mod_platform::loader_name_for(provider, target)?;
+            match provider
+                .versions_by_id(&ids, &reporter, &CancellationToken::new())
+                .await
+            {
+                Ok(found) => versions.extend(
+                    found
+                        .into_iter()
+                        .map(|version| (catalog, version, loader_name)),
+                ),
+                Err(error) => {
+                    warn!(%error, provider = %catalog, "no mod was checked against the candidate loader build");
+                    return Ok((0, snapshot.len(), Vec::new()));
+                }
+            }
+        }
 
         let mut incompatible = Vec::new();
         let mut checked = 0;
         for entry in checkable {
-            let Some(version) = versions
-                .iter()
-                .find(|version| Some(version.id.as_str()) == entry.identity.version_id())
-            else {
+            let Some((_, version, loader_name)) = versions.iter().find(|(catalog, version, _)| {
+                entry.identity.provider() == Some(*catalog)
+                    && Some(version.id.as_str()) == entry.identity.version_id()
+            }) else {
                 continue;
             };
             checked += 1;

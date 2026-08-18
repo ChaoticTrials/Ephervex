@@ -118,6 +118,15 @@ impl ModProviderApi for ModrinthProvider {
             .api
             .search(target, query, loader, reporter, cancel)
             .await?;
+        // Read before `response.hits` is consumed below: this is the raw page
+        // the provider actually returned, which is what the next offset has
+        // to continue from, not how many of those hits survive the
+        // compatibility check that follows.
+        let next_offset = crate::model::next_search_offset(
+            query.offset,
+            response.hits.len() as u64,
+            response.total_hits,
+        );
 
         // Each hit needs its own version list: neither the facets nor the hit's
         // project-wide arrays can show that one version supports both this
@@ -126,7 +135,7 @@ impl ModProviderApi for ModrinthProvider {
         let annotated =
             futures_util::stream::iter(response.hits.into_iter().map(|hit| async move {
                 let project = mapping::hit_project(hit);
-                let versions = self.versions(&project.id, reporter, cancel).await;
+                let versions = self.versions(&project.id, target, reporter, cancel).await;
                 (project, versions)
             }))
             .buffered(MAX_CONCURRENT_PROJECT_LOOKUPS)
@@ -169,6 +178,7 @@ impl ModProviderApi for ModrinthProvider {
             hits,
             total_hits: response.total_hits,
             offset: query.offset,
+            next_offset,
         })
     }
 
@@ -187,6 +197,12 @@ impl ModProviderApi for ModrinthProvider {
     async fn versions(
         &self,
         project_id: &str,
+        // Modrinth serves a project's whole version list as one cacheable
+        // document, so the answer does not depend on the instance: the local
+        // compatibility check narrows it, and keeping the wide list is what
+        // lets an incompatible version be shown with the reason it does not
+        // fit.
+        _target: &InstanceTarget,
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> ModPlatformResult<Vec<ModVersionInfo>> {

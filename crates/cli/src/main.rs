@@ -41,7 +41,7 @@ use ephervex_core::{
 };
 use ephervex_i18n::Arg as MessageArg;
 use ephervex_model::{
-    InstanceId, LoaderKind, LoaderSelection, OperationId, ServerId, StorageClass,
+    InstanceId, LoaderKind, LoaderSelection, ModProvider, OperationId, ServerId, StorageClass,
 };
 
 #[derive(Debug, Parser)]
@@ -193,20 +193,49 @@ struct ImportArgs {
     all_optional: bool,
 }
 
+/// Which mod catalog a command reads.
+///
+/// CurseForge needs your own API key, stored with
+/// `ephervex api set-curseforge-key`.
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+enum CatalogArg {
+    #[default]
+    Modrinth,
+    /// Spelled the way CurseForge spells it, rather than the hyphenated name
+    /// derived from the variant.
+    #[value(name = "curseforge")]
+    CurseForge,
+}
+
+impl CatalogArg {
+    const fn provider(self) -> ModProvider {
+        match self {
+            Self::Modrinth => ModProvider::Modrinth,
+            Self::CurseForge => ModProvider::CurseForge,
+        }
+    }
+}
+
 /// Mods are searched for, inspected, and installed against one instance,
 /// because whether a mod fits depends entirely on that instance's exact
 /// Minecraft version and mod loader.
 #[derive(Debug, Subcommand)]
 enum ModCommand {
-    /// Search Modrinth for mods that fit an instance.
+    /// Search a mod catalog for mods that fit an instance.
     Search {
         /// The client instance the results are judged against.
         instance: InstanceId,
         /// What to search for.
         query: String,
+        /// Which catalog to search.
+        #[arg(long, value_enum, default_value_t = CatalogArg::Modrinth)]
+        provider: CatalogArg,
         /// Show at most this many results.
         #[arg(long, default_value_t = DEFAULT_SEARCH_LIMIT)]
         limit: u8,
+        /// Skip this many results, to page further into a long list.
+        #[arg(long, default_value_t = 0)]
+        offset: u32,
         /// Also list mods that do not fit, with the reason each one does not.
         ///
         /// They are shown so you can see why the mod you were looking for is
@@ -217,8 +246,11 @@ enum ModCommand {
     /// Show a mod and the versions available for an instance.
     Show {
         instance: InstanceId,
-        /// The mod, by its Modrinth project id or slug.
+        /// The mod, by its project id or slug in the chosen catalog.
         project: String,
+        /// Which catalog the mod is on.
+        #[arg(long, value_enum, default_value_t = CatalogArg::Modrinth)]
+        provider: CatalogArg,
         /// Also list versions that do not fit, with the reason each one does
         /// not.
         #[arg(long)]
@@ -231,7 +263,7 @@ enum ModCommand {
     Plan {
         /// The client instance the mod would be installed into.
         instance: InstanceId,
-        /// The mod, by its Modrinth project id or slug.
+        /// The mod, by its project id or slug in the chosen catalog.
         project: String,
         #[command(flatten)]
         selection: ModSelectionArgs,
@@ -244,7 +276,7 @@ enum ModCommand {
     Install {
         /// The client instance to install into.
         instance: InstanceId,
-        /// The mod, by its Modrinth project id or slug.
+        /// The mod, by its project id or slug in the chosen catalog.
         project: String,
         #[command(flatten)]
         selection: ModSelectionArgs,
@@ -262,6 +294,9 @@ enum ModCommand {
 /// Which version, and which optional extras, an install should take.
 #[derive(Debug, Args)]
 struct ModSelectionArgs {
+    /// Which catalog the mod is on.
+    #[arg(long, value_enum, default_value_t = CatalogArg::Modrinth)]
+    provider: CatalogArg,
     /// Install this exact version instead of the newest compatible one.
     ///
     /// Preserved exactly. If it does not fit the instance, the install is
@@ -277,7 +312,9 @@ struct ModSelectionArgs {
 
 impl ModSelectionArgs {
     fn request(&self, project: &str) -> ModInstallRequest {
-        let request = ModInstallRequest::new(project).selecting_optional(self.optional.clone());
+        let request = ModInstallRequest::new(project)
+            .from_provider(self.provider.provider())
+            .selecting_optional(self.optional.clone());
         match &self.version {
             Some(version) => request.at_version(version),
             None => request,
@@ -2254,22 +2291,33 @@ async fn run_mod_command(app: &App, command: &ModCommand, json: bool) -> anyhow:
         ModCommand::Search {
             instance,
             query,
+            provider,
             limit,
+            offset,
             include_incompatible,
         } => {
             let query = ModSearchQuery::new(query)
                 .limited(*limit)
+                .from_offset(*offset)
                 .including_incompatible(*include_incompatible);
-            let results = app.search_mods(*instance, &query).await?;
+            let results = app
+                .search_mods(*instance, provider.provider(), &query)
+                .await?;
             print_mod_search(&results, json);
         }
         ModCommand::Show {
             instance,
             project,
+            provider,
             include_incompatible,
         } => {
             let details = app
-                .mod_project(*instance, project, *include_incompatible)
+                .mod_project(
+                    *instance,
+                    provider.provider(),
+                    project,
+                    *include_incompatible,
+                )
                 .await?;
             print_mod_project(&details, json);
         }

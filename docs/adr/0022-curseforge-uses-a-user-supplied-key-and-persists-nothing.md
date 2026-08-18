@@ -100,6 +100,56 @@ API answering the same way, from one definition of what those statuses mean. The
 from the provider identity the recipe records, so a desired state naming several
 catalogs offers each secret only to its own files.
 
+## Browsing CurseForge mods
+
+The mod browser is one browser with a catalog selector, not a second page. A
+search, a project, a version list, and an install all travel the existing
+provider-neutral path (the same models, the same resolver, the same install
+planner, the same retained recipe), and CurseForge is one more implementation of
+the mod platform provider trait of ADR 0005. Four decisions are specific to it.
+
+**The catalog is part of the request.** A project id is meaningful only together
+with the catalog it was read from, so the provider travels with every search,
+review, install, dependency question, and version change rather than being an
+application-wide setting. An instance can hold mods from both catalogs, and each
+is asked only about its own: a Modrinth install never sees a CurseForge project
+as already present, and a dependency graph never crosses catalogs.
+
+**Only Minecraft's Mods class is browsable.** A search carries the Mods class id
+discovered from `GET /v1/categories` for this operation, never a hard-coded
+number. The filter is not taken as proof: every project document that comes back
+is classified again against the classes that same operation asked for, by the
+one implementation a pack import also uses. A project whose class cannot be
+confirmed as Mods is left out of a result list and refused by name when it is
+asked for directly. Resource packs, worlds, shader packs, modpacks, and plugin
+projects are therefore not installable through the browser, and nothing is
+inferred from a filename or a category.
+
+**Compatibility is what the provider publishes, scoped to the exact target.**
+CurseForge pages its file listings, so a project's whole release history cannot
+be enumerated to answer one question: a search and a version list are filtered
+server-side on the instance's exact Minecraft release and on the loader family,
+and neither is ever widened. Forge and NeoForge map to their own documented
+`modLoaderType` values and never to each other's or to a loader this launcher
+does not support. The cost is stated rather than hidden: a file that does not fit
+is not returned at all, so nothing explains an incompatible release the way
+Modrinth's full listing can. CurseForge's file metadata expresses loader
+*family*, not an exact Forge or NeoForge build, and this launcher does not claim
+otherwise.
+
+**A file with no third-party download is refused, never skipped.** Silently
+leaving a restricted file out of a version list would offer a different release
+than the newest one that fits, which is the substitution this launcher exists not
+to make. Such a file fails with the same typed refusal a pack import produces,
+naming the exact project and file.
+
+What is installed is recorded the way a CurseForge pack import records it:
+provider, project id, and (because CurseForge's release identifier is its file
+id) that id in both the `version_id` and `file_id` fields, beside the digest,
+size, and address the launcher verifies and reconstructs from. Search results,
+project documents, categories responses, file listings, and pagination metadata
+are parsed, used, and dropped. Searching twice queries CurseForge twice.
+
 ## Consequences
 
 - CurseForge features are unavailable until a user configures a key, and that is
@@ -121,8 +171,8 @@ catalogs offers each secret only to its own files.
   names the pack, and reports its exact Minecraft version, loader build, and
   file counts. Only resolving those files needs the credential, and that is
   reported as a blocker on an otherwise complete description.
-- A project whose owner has turned off third-party distribution cannot be
-  imported. That is the author's decision: the API declines to say where the
+- A project whose owner has turned off third-party distribution can be neither
+  imported nor installed from the browser. That is the author's decision: the API declines to say where the
   file is, there is no second address, and assembling a CDN path out of the ids
   would be routing around it. The import stops and says which project it was.
 - The export format states no destination directory for a declared file, and the

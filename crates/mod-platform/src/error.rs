@@ -73,6 +73,15 @@ pub enum ModPlatformError {
         reference: String,
     },
 
+    /// A catalog this build records mods from but cannot browse.
+    ///
+    /// [`ModProvider`] is non-exhaustive so that a catalog can be recorded in a
+    /// retained recipe before this launcher can read it. Answering with some
+    /// other catalog's client would browse the wrong service and resolve
+    /// project ids against it, so the honest answer is a refusal.
+    #[error("{provider} is not a catalog this build can browse")]
+    ProviderNotBrowsable { provider: ModProvider },
+
     /// The reference names something that is not a mod.
     #[error("`{reference}` is a {project_type}, not a mod")]
     ProjectTypeUnsupported {
@@ -254,6 +263,7 @@ impl ModPlatformError {
             Self::CredentialUnreadable { .. } => "error-mod-credential-unreadable",
             Self::CredentialRejected { .. } => "error-mod-credential-rejected",
             Self::ResponseInvalid { .. } => "error-mod-provider-response-invalid",
+            Self::ProviderNotBrowsable { .. } => "error-mod-provider-not-browsable",
             Self::ProjectUnknown { .. } => "error-mod-project-unknown",
             Self::ProjectTypeUnsupported { .. } => "error-mod-project-type-unsupported",
             Self::VersionUnknown { .. } => "error-mod-version-unknown",
@@ -301,6 +311,7 @@ impl ModPlatformError {
             | Self::RequestFailed { provider, .. }
             | Self::ResponseInvalid { provider, .. }
             | Self::CredentialMissing { provider }
+            | Self::ProviderNotBrowsable { provider }
             | Self::CredentialUnreadable { provider, .. } => {
                 vec![("provider", provider.to_string())]
             }

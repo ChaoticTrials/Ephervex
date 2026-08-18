@@ -1,6 +1,6 @@
 //! Slint callback registration and UI model updates.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -11,6 +11,7 @@ use copypasta::{ClipboardContext, ClipboardProvider as _};
 use ephervex_core::OptionalSelection;
 use ephervex_core::live_diagnostics::{LogFilter, LogLevel, RetainedLog};
 use ephervex_i18n::{Arg, lookup, lookup_args};
+use ephervex_model::ModProvider;
 use slint::{
     ComponentHandle as _, Image, Model as _, ModelRc, SharedString, Timer, TimerMode, VecModel,
 };
@@ -1206,6 +1207,7 @@ fn register_client_actions(
 fn register_mod_actions(ui: &AppWindow, commands: &Sender<Command>) {
     register_mod_mutations(ui, commands);
     register_mod_browser(ui, commands);
+    register_mod_review(ui, commands);
 
     let sender = commands.clone();
     let handle = ui.as_weak();
@@ -1240,41 +1242,157 @@ fn register_mod_actions(ui: &AppWindow, commands: &Sender<Command>) {
     });
 }
 
-/// Finding a mod in the catalog and reviewing what installing it would involve.
+/// Searching a catalog, paging further into the results, and switching which
+/// catalog is being searched.
 ///
-/// Both handlers do the same two things and nothing else: turn a display id back
-/// into a typed one, and send a command. Searching, deciding what fits this
-/// instance, and resolving a dependency graph all happen in `ephervex-core`;
-/// this side never asks a provider anything.
+/// Deciding what fits this instance and resolving a dependency graph both
+/// happen in `ephervex-core`; this side never asks a provider anything.
 fn register_mod_browser(ui: &AppWindow, commands: &Sender<Command>) {
+    // One counter for every search request this browser ever sends, searches
+    // and "load more" alike, so two requests that end up identical in every
+    // other way (the same instance, catalog, text, and offset, asked for
+    // twice because the user switched catalog and back) still mint distinct
+    // ids. Owned here rather than read from the query/provider/offset the
+    // request carries: those are exactly the fields that can repeat.
+    let request_ids = Rc::new(Cell::new(0_u64));
+
     let sender = commands.clone();
     let handle = ui.as_weak();
-    ui.on_search_mods(move |instance, query| {
+    let ids = Rc::clone(&request_ids);
+    ui.on_search_mods(move |instance, provider, query| {
         let Some(ui) = handle.upgrade() else { return };
         let Some(instance) = backend::parse_instance_id(&instance) else {
             return;
         };
-        // What was submitted, which is not what the field says: the user may
-        // keep typing while the catalog answers, and those results are still
-        // the ones they asked for.
+        let Some(catalog) = ModProvider::parse(&provider) else {
+            return;
+        };
+        // Minted before anything about the browser's own state changes: a
+        // request id that could not be allocated must leave the browser
+        // exactly as it was, not part-way into a request that was never
+        // actually sent.
+        let Some(request_id) = next_mod_search_request_id(&ids) else {
+            return;
+        };
+        // What was submitted, which is not what the fields say: the user may
+        // keep typing, or switch catalog, while this one answers, and only the
+        // answer to what was actually asked belongs on screen.
         ui.set_mod_search_submitted(query.clone());
+        ui.set_mod_search_provider(provider);
+        ui.set_mod_search_ran(true);
+        ui.set_mod_search_loading(true);
+        ui.set_mod_search_notice(SharedString::default());
+        // A new search replaces the list rather than adding to it, so the rows
+        // on screen always belong to one question.
+        ui.set_mod_results(model(Vec::new()));
+        ui.set_mod_results_total(0);
+        ui.set_mod_results_next_offset(-1);
+        // A fresh search always starts at zero; a page arriving for any other
+        // offset belongs to a "load more" this search has superseded.
+        ui.set_mod_search_requested_offset(0);
+        // Instance, catalog, text, and offset can all repeat (typing the same
+        // query again, or switching catalog away and back), and this is what
+        // still tells this request apart from an older, unrelated one that
+        // happens to look identical.
+        ui.set_mod_search_expected_request_id(request_id.to_string().into());
         send(
             &sender,
             Command::SearchMods {
                 instance,
+                provider: catalog,
                 query: query.to_string(),
+                offset: 0,
+                request_id,
             },
         );
     });
 
     let sender = commands.clone();
     let handle = ui.as_weak();
-    ui.on_review_mod(move |instance, project| {
+    let ids = Rc::clone(&request_ids);
+    ui.on_load_more_mods(move |instance, provider, query, offset| {
         let Some(ui) = handle.upgrade() else { return };
         let Some(instance) = backend::parse_instance_id(&instance) else {
             return;
         };
+        let Some(catalog) = ModProvider::parse(&provider) else {
+            return;
+        };
+        // Minted before anything about the browser's own state changes, for
+        // the same reason a fresh search does this first: an id that could
+        // not be allocated must leave the browser exactly as it was.
+        let Some(request_id) = next_mod_search_request_id(&ids) else {
+            return;
+        };
+        // Continues the search already on screen, at the offset the provider
+        // itself named as the continuation. Nothing is fetched ahead of what
+        // was asked for, and an answer for any other offset is stale.
+        ui.set_mod_search_loading(true);
+        ui.set_mod_search_requested_offset(offset);
+        // Its own fresh id, from the same counter a fresh search uses: a
+        // "load more" is just as much an individual request as a search is,
+        // and its offset alone does not distinguish it from another one
+        // fired at the same offset for a superseded question.
+        ui.set_mod_search_expected_request_id(request_id.to_string().into());
+        send(
+            &sender,
+            Command::SearchMods {
+                instance,
+                provider: catalog,
+                query: query.to_string(),
+                offset: offset.try_into().unwrap_or(0),
+                request_id,
+            },
+        );
+    });
+
+    let handle = ui.as_weak();
+    ui.on_switch_mod_catalog(move |provider| {
+        let Some(ui) = handle.upgrade() else { return };
+        // Switching asks a different question, and everything that could let
+        // a search still in flight for the catalog just left behind land on
+        // this one has to move together, in this one step, or a late answer
+        // can still slip past the staleness guard.
+        let reset = presentation::CatalogSwitchReset::for_provider(&provider);
+        ui.set_mod_provider(provider);
+        ui.set_mod_search_provider(reset.provider.into());
+        // Retired, not just momentarily mismatched: switching back to this
+        // catalog before an old answer returns must not reinstate the exact
+        // question it was waiting on. The expected request id is retired the
+        // same way: `submitted` alone cannot survive a later search for the
+        // exact same words, which fills it back in with the exact same value.
+        ui.set_mod_search_submitted(reset.submitted.into());
+        ui.set_mod_search_expected_request_id(reset.request_id.into());
+        ui.set_mod_search_loading(reset.loading);
+        ui.set_mod_search_requested_offset(reset.requested_offset);
+        // A new catalog replaces the list rather than showing the old one's
+        // rows under a different heading.
+        ui.set_mod_results(model(Vec::new()));
+        ui.set_mod_search_ran(false);
+        ui.set_mod_search_notice(SharedString::default());
+        ui.set_mod_results_total(0);
+        ui.set_mod_results_next_offset(-1);
+    });
+}
+
+/// Finding a mod in the catalog and asking what installing it would involve.
+///
+/// Kept apart from `register_mod_browser`: a review is not a search, carries
+/// no request id or offset of its own, and does not touch any of the search
+/// staleness bookkeeping.
+fn register_mod_review(ui: &AppWindow, commands: &Sender<Command>) {
+    let sender = commands.clone();
+    let handle = ui.as_weak();
+    ui.on_review_mod(move |instance, provider, project| {
+        let Some(ui) = handle.upgrade() else { return };
+        let Some(instance) = backend::parse_instance_id(&instance) else {
+            return;
+        };
+        let Some(catalog) = ModProvider::parse(&provider) else {
+            return;
+        };
         ui.set_mod_plan_requested(project.clone());
+        ui.set_mod_plan_requested_provider(provider);
         // Reviewing is planning: the confirmation it opens is the same one the
         // linked-server section lives in, so a review already answers "and what
         // would this do to my servers".
@@ -1282,10 +1400,31 @@ fn register_mod_browser(ui: &AppWindow, commands: &Sender<Command>) {
             &sender,
             Command::PlanMod {
                 instance,
+                provider: catalog,
                 project: project.to_string(),
             },
         );
     });
+}
+
+/// The next opaque id for a mod search request, unique for the life of this
+/// process, or `None` once the counter is exhausted.
+///
+/// A plain counter rather than a timestamp or a random value: nothing about
+/// ordering or unpredictability is wanted here, only that two requests are
+/// never told apart by anything a caller could also produce by asking the
+/// same question twice. Checked rather than saturating: a counter that
+/// saturated would hand the same id, `u64::MAX`, to every request from that
+/// point on, which is exactly the collision this exists to prevent. The
+/// counter is advanced only when an id was actually handed out, so a caller
+/// that keeps asking after exhaustion keeps getting `None` rather than a
+/// repeated one. At realistic request rates this ceiling is not reachable
+/// within any process's lifetime; the caller still has to treat it as a real
+/// outcome rather than assume it away.
+fn next_mod_search_request_id(counter: &Cell<u64>) -> Option<u64> {
+    let next = counter.get().checked_add(1)?;
+    counter.set(next);
+    Some(next)
 }
 
 /// The actions that change an instance's mods, kept apart from the ones that
@@ -1355,14 +1494,20 @@ fn register_mod_mutations(ui: &AppWindow, commands: &Sender<Command>) {
 
     let sender = commands.clone();
     let handle = ui.as_weak();
-    ui.on_install_mod(move |instance, project, version| {
+    ui.on_install_mod(move |instance, provider, project, version| {
         let Some(ui) = handle.upgrade() else { return };
+        let Some(catalog) = ModProvider::parse(&provider) else {
+            return;
+        };
         if let Some(instance) = backend::parse_instance_id(&instance) {
             send(
                 &sender,
                 Command::InstallMod {
                     instance,
+                    provider: catalog,
                     project: project.to_string(),
+                    // The exact release the confirmation showed, from the
+                    // catalog the confirmation was for.
                     version: version.to_string(),
                     servers: chosen_linked_servers(&ui),
                 },
@@ -2644,20 +2789,57 @@ fn apply_mod_versions(ui: &AppWindow, data: backend::ModVersionsData) {
     ui.set_mod_versions(model(mod_version_rows(data.versions)));
 }
 
-/// Shows the hits of the search the user is currently waiting on.
+/// Shows the page of the search the user is currently waiting on.
 ///
-/// An answer is discarded when it is for another instance, and when it is for a
-/// query that has since been superseded — two searches run on their own threads
-/// and can finish in either order, so without this a slow older one could
-/// replace the newer results already on screen.
+/// An answer is discarded when it is for another instance, another catalog, a
+/// query that has since been superseded, an offset the browser is not
+/// currently waiting for a page at, or a request id other than the one this
+/// exact request was minted. The first four can all agree between two
+/// distinct requests (typing the same query again, or switching catalog away
+/// and back before an old search returns and then asking the same thing
+/// again), which is exactly why the fifth exists. Searches run on their own
+/// threads and can finish in either order, so without all five a slow older
+/// one could replace or truncate the results already shown.
 fn apply_mod_results(ui: &AppWindow, results: backend::ModResultsData) {
-    if !presentation::result_is_current(&results.instance, &ui.get_selected_instance_id()) {
+    let selected = ui.get_selected_instance_id();
+    let submitted = ui.get_mod_search_submitted();
+    let catalog = ui.get_mod_search_provider();
+    let expected_offset = u32::try_from(ui.get_mod_search_requested_offset()).unwrap_or(0);
+    let expected_request_id = ui.get_mod_search_expected_request_id();
+    if !presentation::search_page_belongs(
+        presentation::BrowserQuestion {
+            instance: &selected,
+            provider: &catalog,
+            reference: &submitted,
+        },
+        presentation::BrowserQuestion {
+            instance: &results.instance,
+            provider: &results.provider,
+            reference: &results.query,
+        },
+        results.offset,
+        expected_offset,
+        &results.request_id.to_string(),
+        &expected_request_id,
+    ) {
         return;
     }
-    if results.query != ui.get_mod_search_submitted().as_str() {
+
+    ui.set_mod_search_loading(false);
+    ui.set_mod_search_notice(results.notice.clone().into());
+    if !results.notice.is_empty() {
         return;
     }
-    ui.set_mod_results(model(mod_search_rows(results.rows)));
+
+    let mut rows: Vec<ModSearchRow> = ui.get_mod_results().iter().collect();
+    rows.extend(mod_search_rows(results.rows));
+    ui.set_mod_results_total(to_i32(usize::try_from(results.total).unwrap_or(usize::MAX)));
+    ui.set_mod_results(model(rows));
+    // The provider's own continuation, never how many rows are now on screen:
+    // a page can consume results this launcher declined to show.
+    ui.set_mod_results_next_offset(results.next_offset.map_or(-1, |offset| {
+        to_i32(usize::try_from(offset).unwrap_or(usize::MAX))
+    }));
 }
 
 /// Shows what installing a mod would involve, here and on each linked server.
@@ -2673,11 +2855,27 @@ fn apply_mod_install_plan(ui: &AppWindow, plan: backend::ModPlanData) {
     if !modal.is_empty() && modal != "mod-plan" {
         return;
     }
-    // Two reviews can be in flight; the older one must not replace the newer.
-    if plan.requested != ui.get_mod_plan_requested().as_str() {
+    // Two reviews can be in flight; the older one must not replace the newer,
+    // and neither may one for the same project id on the other catalog.
+    let selected = ui.get_selected_instance_id();
+    let requested = ui.get_mod_plan_requested();
+    let catalog = ui.get_mod_plan_requested_provider();
+    if !presentation::browser_answer_is_current(
+        presentation::BrowserQuestion {
+            instance: &selected,
+            provider: &catalog,
+            reference: &requested,
+        },
+        presentation::BrowserQuestion {
+            instance: &plan.instance,
+            provider: &plan.provider,
+            reference: &plan.requested,
+        },
+    ) {
         return;
     }
     ui.set_mod_plan_instance(plan.instance.into());
+    ui.set_mod_plan_provider(plan.provider.into());
     ui.set_mod_plan_project(plan.project.into());
     ui.set_mod_plan_title(plan.title.into());
     ui.set_mod_plan_version(plan.version.into());
@@ -2850,7 +3048,7 @@ fn mod_search_rows(rows: Vec<ModSearchData>) -> Vec<ModSearchRow> {
             title: row.title.into(),
             description: row.description.into(),
             author: row.author.into(),
-            downloads: row.downloads.into(),
+            note: row.note.into(),
         })
         .collect()
 }
@@ -2950,6 +3148,36 @@ mod tests {
         upsert_activity(&mut rows, activity("operation-id", "completed"));
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].item.status_kind, "completed");
+    }
+
+    #[test]
+    fn sequential_request_ids_are_distinct_and_start_at_one() {
+        let counter = Cell::new(0_u64);
+        assert_eq!(next_mod_search_request_id(&counter), Some(1));
+        assert_eq!(next_mod_search_request_id(&counter), Some(2));
+        assert_eq!(next_mod_search_request_id(&counter), Some(3));
+    }
+
+    #[test]
+    fn the_last_representable_request_id_is_allocated_exactly_once() {
+        let counter = Cell::new(u64::MAX - 1);
+        assert_eq!(next_mod_search_request_id(&counter), Some(u64::MAX));
+        assert_eq!(counter.get(), u64::MAX);
+    }
+
+    #[test]
+    fn request_id_allocation_at_the_ceiling_fails_closed_rather_than_repeating_it() {
+        let counter = Cell::new(u64::MAX);
+        // A failed allocation hands nothing out, so the counter is left
+        // exactly where it was rather than advancing past the ceiling.
+        assert_eq!(next_mod_search_request_id(&counter), None);
+        assert_eq!(counter.get(), u64::MAX);
+        // Every later call keeps failing the same way. In particular it never
+        // wraps back around to an id an earlier, potentially still in-flight
+        // request may already hold, and it never repeats `u64::MAX` itself.
+        assert_eq!(next_mod_search_request_id(&counter), None);
+        assert_eq!(next_mod_search_request_id(&counter), None);
+        assert_eq!(counter.get(), u64::MAX);
     }
 
     #[test]

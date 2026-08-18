@@ -53,16 +53,24 @@ pub trait ModProviderApi: std::fmt::Debug + Send + Sync {
         cancel: &CancellationToken,
     ) -> ModPlatformResult<ModProject>;
 
-    /// Every version of a project, unfiltered.
+    /// The versions of a project this instance could be offered.
     ///
-    /// Unfiltered on purpose. Filtering server-side would make the answer
-    /// depend on which filter was asked for first — the compatible-only view
-    /// and the show-incompatible view would cache different documents for the
-    /// same project — and it would leave nothing to explain an incompatible
-    /// version with. One list, filtered locally, serves both.
+    /// `target` is what the answer is *for*, not a filter the caller then has
+    /// to reapply: compatibility is still decided here in [`crate::model`], by
+    /// one implementation, so no provider can arrive at a different verdict
+    /// than another.
+    ///
+    /// What each provider does with it differs, and the difference is real
+    /// rather than incidental. A provider whose whole version list is one
+    /// cacheable document returns all of it and lets the local check explain
+    /// the versions that do not fit. A provider that pages its file listing
+    /// cannot enumerate a decade of releases to answer one question, so it asks
+    /// its own API for the release and loader in hand, at the cost of having
+    /// nothing left to explain an incompatible version with.
     async fn versions(
         &self,
         project_id: &str,
+        target: &InstanceTarget,
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> ModPlatformResult<Vec<ModVersionInfo>>;

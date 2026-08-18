@@ -56,7 +56,7 @@ use std::sync::{Arc, OnceLock};
 use ephervex_download::{AuthenticatedSource, DomainAllowlist, DownloadManager, DownloaderConfig};
 use ephervex_mod_platform::{
     CURSEFORGE_API_KEY_HEADER, CurseForgeFileRelease, CurseForgeOperation, CurseForgeProject,
-    CurseForgeProjectClasses, MINECRAFT_GAME_ID, ModPlatformError,
+    MINECRAFT_GAME_ID, ModPlatformError,
 };
 use ephervex_model::{CurseForgeFileId, CurseForgeProjectId, ModOrigin, ModProvider, SecretString};
 use ephervex_pack::{
@@ -430,54 +430,14 @@ async fn validate_project_classes(
     .collect::<Result<_, ModPlatformError>>()?;
 
     for project in classified {
-        if let Some(error) = rejection_for(&project, &classes) {
+        // The one implementation of what a project's class means, so an import
+        // and the mod browser cannot arrive at different answers about the same
+        // project.
+        if let Some(error) = classes.rejection_for(&project) {
             return Err(error.into());
         }
     }
     Ok(())
-}
-
-/// The typed failure for one classified project, or `None` if it is a Mod.
-///
-/// Three outcomes, none of which trusts the project's own display name to
-/// stand in for its class:
-///
-/// - a known non-Mod class is named by the class's own provider-returned
-///   name, from the same `GET /v1/categories` response the Mods class id
-///   came from;
-/// - a class id the categories response never listed is not guessed at:
-///   this build cannot say what it is, so it fails closed the same as a
-///   response this build could not otherwise use;
-/// - no reported class at all (`classId` is documented as nullable) is the
-///   same failure: a project this launcher cannot confirm is a Mod is never
-///   installed as though it were one.
-fn rejection_for(
-    project: &CurseForgeProject,
-    classes: &CurseForgeProjectClasses,
-) -> Option<ModPlatformError> {
-    match project.class_id {
-        Some(class_id) if classes.is_mods(class_id) => None,
-        Some(class_id) => Some(match classes.name_of(class_id) {
-            Some(name) => ModPlatformError::ProjectTypeUnsupported {
-                reference: project.id.to_string(),
-                project_type: name.to_owned(),
-            },
-            None => ModPlatformError::ResponseInvalid {
-                provider: ModProvider::CurseForge,
-                detail: format!(
-                    "project {} reports class {class_id}, which the game's category classes did not list",
-                    project.id
-                ),
-            },
-        }),
-        None => Some(ModPlatformError::ResponseInvalid {
-            provider: ModProvider::CurseForge,
-            detail: format!(
-                "project {} reports no project class, so Ephervex cannot confirm it is a mod",
-                project.id
-            ),
-        }),
-    }
 }
 
 /// Looks up every declared file, deduplicated and with bounded concurrency.

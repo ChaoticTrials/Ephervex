@@ -57,6 +57,12 @@ use crate::error::CoreResult;
 /// What a caller wants installed.
 #[derive(Debug, Clone)]
 pub struct ModInstallRequest {
+    /// Which catalog the reference below belongs to.
+    ///
+    /// Part of the request rather than an application-wide setting: a project
+    /// id means nothing without the catalog it was read from, and an instance
+    /// can hold mods from more than one.
+    pub provider: ModProvider,
     /// The project, by id or by the provider's human-typable reference.
     pub project: String,
     /// An exact version. `None` takes the newest that fits the instance.
@@ -70,10 +76,18 @@ impl ModInstallRequest {
     #[must_use]
     pub fn new(project: impl Into<String>) -> Self {
         Self {
+            provider: ModProvider::Modrinth,
             project: project.into(),
             version: None,
             optional: BTreeSet::new(),
         }
+    }
+
+    /// The catalog the project reference belongs to.
+    #[must_use]
+    pub const fn from_provider(mut self, provider: ModProvider) -> Self {
+        self.provider = provider;
+        self
     }
 
     #[must_use]
@@ -363,18 +377,24 @@ impl ManagedModSnapshot {
     /// so a project the catalog dropped stays visible under its file name.
     fn apply(&mut self, index: &ModDetailIndex) {
         for entry in &mut self.mods {
-            let Some(project_id) = entry.identity.project_id() else {
+            let (Some(provider), Some(project_id)) =
+                (entry.identity.provider(), entry.identity.project_id())
+            else {
                 continue;
             };
-            let Some(project) = index.projects.get(project_id) else {
+            // Keyed by catalog as well as by id: two catalogs spell their own
+            // ids their own way, and nothing guarantees one's project id cannot
+            // read like another's.
+            let key = (provider, project_id.to_owned());
+            let Some(project) = index.projects.get(&key) else {
                 continue;
             };
             let version = entry
                 .identity
                 .version_id()
-                .and_then(|id| index.versions.get(id));
+                .and_then(|id| index.versions.get(&(provider, id.to_owned())));
 
-            entry.icon = index.icons.get(project_id).cloned();
+            entry.icon = index.icons.get(&key).cloned();
             entry.details = Some(ModDetails {
                 title: project.title.clone(),
                 slug: project.slug.clone(),
@@ -398,28 +418,37 @@ impl ManagedModSnapshot {
 /// What one enrichment pass fetched, keyed for assembly.
 #[derive(Debug, Default)]
 struct ModDetailIndex {
-    projects: BTreeMap<String, ModProject>,
-    versions: BTreeMap<String, ModVersionInfo>,
-    icons: BTreeMap<String, PathBuf>,
+    projects: BTreeMap<ProjectKey, ModProject>,
+    versions: BTreeMap<ProjectKey, ModVersionInfo>,
+    icons: BTreeMap<ProjectKey, PathBuf>,
 }
 
+/// One catalog's own identifier, which is only meaningful together with the
+/// catalog it came from.
+type ProjectKey = (ModProvider, String);
+
 impl ModDetailIndex {
-    fn new(
+    /// Folds one catalog's answers in, leaving whatever another already
+    /// contributed in place.
+    fn absorb(
+        &mut self,
+        provider: ModProvider,
         projects: Vec<ModProject>,
         versions: Vec<ModVersionInfo>,
         icons: BTreeMap<String, PathBuf>,
-    ) -> Self {
-        Self {
-            projects: projects
+    ) {
+        self.projects.extend(
+            projects
                 .into_iter()
-                .map(|project| (project.id.clone(), project))
-                .collect(),
-            versions: versions
+                .map(|project| ((provider, project.id.clone()), project)),
+        );
+        self.versions.extend(
+            versions
                 .into_iter()
-                .map(|version| (version.id.clone(), version))
-                .collect(),
-            icons,
-        }
+                .map(|version| ((provider, version.id.clone()), version)),
+        );
+        self.icons
+            .extend(icons.into_iter().map(|(id, path)| ((provider, id), path)));
     }
 }
 
@@ -430,15 +459,16 @@ impl App {
     /// By default only mods that actually fit are returned; asking for the rest
     /// returns them annotated with why they do not, rather than offering them
     /// as installable.
-    #[instrument(skip(self, query), fields(instance = %instance))]
+    #[instrument(skip(self, query), fields(instance = %instance, provider = %catalog))]
     pub async fn search_mods(
         &self,
         instance: InstanceId,
+        catalog: ModProvider,
         query: &ModSearchQuery,
     ) -> CoreResult<ModSearchResults> {
         let record = self.client(instance)?;
         let target = target_for(&record);
-        let provider = self.mod_provider()?;
+        let provider = self.mod_provider(catalog)?;
         Ok(provider
             .search(
                 &target,
@@ -454,22 +484,25 @@ impl App {
     /// `include_incompatible` decides what the version list contains, not
     /// whether the incompatible ones are installable: an incompatible version
     /// carries its reasons and is never the default selection.
-    #[instrument(skip(self), fields(instance = %instance, project = reference))]
+    #[instrument(skip(self), fields(instance = %instance, provider = %catalog, project = reference))]
     pub async fn mod_project(
         &self,
         instance: InstanceId,
+        catalog: ModProvider,
         reference: &str,
         include_incompatible: bool,
     ) -> CoreResult<ModProjectDetails> {
         let record = self.client(instance)?;
         let target = target_for(&record);
-        let provider = self.mod_provider()?;
+        let provider = self.mod_provider(catalog)?;
         let loader = ephervex_mod_platform::loader_name_for(provider, &target)?;
 
         let reporter = OperationReporter::silent("browsing-mods");
         let cancel = CancellationToken::new();
         let project: ModProject = provider.project(reference, &reporter, &cancel).await?;
-        let versions = provider.versions(&project.id, &reporter, &cancel).await?;
+        let versions = provider
+            .versions(&project.id, &target, &reporter, &cancel)
+            .await?;
 
         let default_version =
             newest_compatible(&versions, &target, loader).map(|version| version.id);
@@ -694,28 +727,38 @@ impl App {
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<ModDetailIndex> {
-        let provider = self.mod_provider()?;
-        let projects: Vec<String> = snapshot.identified_project_ids(ModProvider::Modrinth);
-        if projects.is_empty() {
-            return Ok(ModDetailIndex::default());
-        }
-        let versions: Vec<String> = snapshot.identified_version_ids(ModProvider::Modrinth);
-
-        let projects = provider.projects_by_id(&projects, reporter, cancel).await?;
-        // A version lookup that fails is survivable in a way a project lookup
-        // is not: without it the list loses version names, with no project it
-        // loses everything. So it is asked for separately and its failure is
-        // absorbed here.
-        let versions = match provider.versions_by_id(&versions, reporter, cancel).await {
-            Ok(versions) => versions,
-            Err(error) => {
-                warn!(%error, "managed mod versions could not be fetched");
-                Vec::new()
+        let mut index = ModDetailIndex::default();
+        // An instance can hold mods from more than one catalog, and each one is
+        // asked only about its own. A catalog nothing in this instance came
+        // from is never contacted, which is what keeps a Modrinth-only instance
+        // from needing a CurseForge key to show its mod list.
+        for catalog in [ModProvider::Modrinth, ModProvider::CurseForge] {
+            let projects: Vec<String> = snapshot.identified_project_ids(catalog);
+            if projects.is_empty() {
+                continue;
             }
-        };
+            let versions: Vec<String> = snapshot.identified_version_ids(catalog);
+            let provider = self.mod_provider(catalog)?;
 
-        let icons = self.cache_artwork(&projects, reporter, cancel).await;
-        Ok(ModDetailIndex::new(projects, versions, icons))
+            let projects = provider.projects_by_id(&projects, reporter, cancel).await?;
+            // A version lookup that fails is survivable in a way a project
+            // lookup is not: without it the list loses version names, with no
+            // project it loses everything. So it is asked for separately and
+            // its failure is absorbed here.
+            let versions = match provider.versions_by_id(&versions, reporter, cancel).await {
+                Ok(versions) => versions,
+                Err(error) => {
+                    warn!(%error, provider = %catalog, "managed mod versions could not be fetched");
+                    Vec::new()
+                }
+            };
+
+            let icons = self
+                .cache_artwork(catalog, &projects, reporter, cancel)
+                .await;
+            index.absorb(catalog, projects, versions, icons);
+        }
+        Ok(index)
     }
 
     /// Fetches any project artwork that is not already cached.
@@ -725,6 +768,7 @@ impl App {
     /// the list, and the frontend draws its fallback.
     async fn cache_artwork(
         &self,
+        catalog: ModProvider,
         projects: &[ModProject],
         reporter: &OperationReporter,
         cancel: &CancellationToken,
@@ -751,10 +795,17 @@ impl App {
             }
         };
         let cache = CacheLayout::new(self.paths().cache_dir());
-        // The same host list a pack's own download addresses are held to. An
-        // icon address arrives from a provider response rather than from an
-        // archive, but it is still remote input naming a machine to talk to.
-        let allowlist = DomainAllowlist::modrinth_pack_defaults();
+        // The same host list this catalog's own download addresses are held to.
+        // An icon address arrives from a provider response rather than from an
+        // archive, but it is still remote input naming a machine to talk to,
+        // and one provider's list does not vouch for another's hosts.
+        let allowlist = match catalog {
+            ModProvider::Modrinth => DomainAllowlist::modrinth_pack_defaults(),
+            ModProvider::CurseForge => self.curseforge_artifact_hosts(),
+            // A catalog with no list of its own vouches for no host, so its
+            // artwork is simply not fetched.
+            _ => DomainAllowlist::empty(),
+        };
 
         let mut cached = BTreeMap::new();
         for (project, url) in wanted {
@@ -790,7 +841,7 @@ impl App {
         policy: InstalledPolicy,
         reporter: &OperationReporter,
     ) -> CoreResult<ModInstallPlan> {
-        let installed = self.installed_projects(record)?;
+        let installed = self.installed_projects(record, request.provider)?;
         self.resolve_against(
             &target_for(record),
             &installed,
@@ -817,7 +868,7 @@ impl App {
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<ModInstallPlan> {
-        let provider = self.mod_provider()?;
+        let provider = self.mod_provider(request.provider)?;
         let loader = ephervex_mod_platform::loader_name_for(provider, target)?;
 
         // A human-typable slug has to become an id before anything is keyed on
@@ -846,16 +897,38 @@ impl App {
     }
 
     /// What the instance already has, for the provider this browse is against.
-    fn installed_projects(&self, record: &ClientRecord) -> CoreResult<Vec<InstalledProject>> {
-        Ok(installed_projects_of(self.pack_recipe(record.id)?.as_ref()))
+    fn installed_projects(
+        &self,
+        record: &ClientRecord,
+        provider: ModProvider,
+    ) -> CoreResult<Vec<InstalledProject>> {
+        Ok(installed_projects_of(
+            self.pack_recipe(record.id)?.as_ref(),
+            provider,
+        ))
     }
 
-    /// The mod catalog, built on first use.
+    /// One mod catalog, built on first use.
     ///
-    /// Built lazily for the same reason the version catalog is: constructing it
-    /// builds an HTTP client and a TLS stack, which listing instances has no
-    /// business paying for.
-    pub(crate) fn mod_provider(&self) -> CoreResult<&dyn ModProviderApi> {
+    /// The catalog is chosen per operation rather than configured once: an
+    /// instance can hold mods from more than one, and a project id means
+    /// nothing without the catalog it was read from. Both are built lazily for
+    /// the same reason the version catalog is: constructing one builds an HTTP
+    /// client and a TLS stack, which listing instances has no business paying
+    /// for.
+    pub(crate) fn mod_provider(&self, catalog: ModProvider) -> CoreResult<&dyn ModProviderApi> {
+        match catalog {
+            ModProvider::Modrinth => self.modrinth_provider(),
+            ModProvider::CurseForge => self.curseforge_provider(),
+            // `ModProvider` is non-exhaustive so a catalog can be recorded in a
+            // retained recipe before this launcher can read it. Falling back to
+            // one of the two above would browse the wrong service and resolve
+            // its project ids against it.
+            other => Err(ModPlatformError::ProviderNotBrowsable { provider: other }.into()),
+        }
+    }
+
+    fn modrinth_provider(&self) -> CoreResult<&dyn ModProviderApi> {
         if let Some(provider) = self.mods.get() {
             return Ok(provider);
         }
@@ -870,18 +943,48 @@ impl App {
         let provider = ModrinthProvider::new(manager, CacheLayout::new(self.paths().cache_dir()))?;
         Ok(self.mods.get_or_init(|| provider))
     }
+
+    /// The CurseForge catalog, over the same authenticated transport a pack
+    /// import uses.
+    ///
+    /// Built without reading the credential: the key is fetched from the secret
+    /// store at the moment a request needs one, so a key set or removed
+    /// mid-session takes effect without rebuilding anything, and a machine that
+    /// has configured nothing can still open the browser and be told what is
+    /// missing.
+    ///
+    /// The artifact host list travels with the provider, so an address a search
+    /// answered with is held to the same allowlist a pack import's addresses
+    /// are.
+    fn curseforge_provider(&self) -> CoreResult<&dyn ModProviderApi> {
+        if let Some(provider) = self.curseforge_mods.get() {
+            return Ok(provider);
+        }
+        let provider = ephervex_mod_platform::CurseForgeProvider::with_artifact_hosts(
+            self.curseforge_api()?.clone(),
+            self.curseforge_artifact_hosts(),
+        );
+        Ok(self.curseforge_mods.get_or_init(|| provider))
+    }
 }
 
 /// The provider projects one desired state already records, for resolution.
 ///
 /// Takes the recipe rather than an instance id so that a client and a linked
 /// server produce this the same way.
-pub(crate) fn installed_projects_of(recipe: Option<&PackRecipe>) -> Vec<InstalledProject> {
+pub(crate) fn installed_projects_of(
+    recipe: Option<&PackRecipe>,
+    provider: ModProvider,
+) -> Vec<InstalledProject> {
     recipe
         .map(PackRecipe::managed_mods)
         .unwrap_or_default()
         .into_iter()
-        .filter(|managed| managed.provider == ModProvider::Modrinth)
+        // Only this catalog's mods. Project ids are the provider's own and two
+        // catalogs can spell different projects the same way, so mixing them
+        // would let one provider's install believe another's mod was already
+        // there.
+        .filter(|managed| managed.provider == provider)
         .map(|managed| InstalledProject {
             project_id: managed.project_id,
             version_id: managed.version_id,
@@ -962,9 +1065,24 @@ pub(crate) fn recipe_entry_for(
             provider: Some(provider),
             project_id: Some(planned.version.project_id.clone()),
             version_id: Some(planned.version.id.clone()),
-            file_id: None,
+            file_id: exact_file_id(provider, &planned.version.id),
         }),
     })
+}
+
+/// The exact provider file this release is, where the provider names one.
+///
+/// CurseForge's release identifier *is* its file id, so both fields carry it:
+/// the same shape a pack import records, which is what lets one reconstruction
+/// path read either. Modrinth names a version and lets that version name its
+/// files, so there is no separate file id to record and none is invented.
+fn exact_file_id(provider: ModProvider, version_id: &str) -> Option<String> {
+    match provider {
+        ModProvider::CurseForge => Some(version_id.to_owned()),
+        // Modrinth, and any catalog that has not said its release identifier
+        // is a file: nothing is recorded rather than an id invented.
+        _ => None,
+    }
 }
 
 /// Maps a provider's declared side support onto the recipe's own four states.
@@ -985,6 +1103,18 @@ const fn side_requirement(support: SideSupport) -> SideRequirement {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use ephervex_mod_platform::{ModFile, ModVersionInfo, ReleaseChannel};
+
+    /// One catalog's answers as the index that applies them.
+    fn detail_index(
+        projects: Vec<ModProject>,
+        versions: Vec<ModVersionInfo>,
+        icons: BTreeMap<String, PathBuf>,
+    ) -> ModDetailIndex {
+        let mut index = ModDetailIndex::default();
+        index.absorb(ModProvider::Modrinth, projects, versions, icons);
+        index
+    }
+
     use ephervex_model::{Hash, HashAlgorithm, ModOrigin};
 
     use super::*;
@@ -1440,7 +1570,7 @@ mod tests {
             "u6dRKJwZ".to_owned(),
             PathBuf::from("/cache/artwork/jei.png"),
         )]);
-        snapshot.apply(&ModDetailIndex::new(
+        snapshot.apply(&detail_index(
             vec![catalog_project("u6dRKJwZ", "Just Enough Items", None)],
             vec![catalog_version("Orv4ObRj", "u6dRKJwZ", "15.2.0.27")],
             icons,
@@ -1516,7 +1646,7 @@ mod tests {
             dir.path(),
         )]);
 
-        snapshot.apply(&ModDetailIndex::new(
+        snapshot.apply(&detail_index(
             vec![catalog_project("lfHFW1mp", "JourneyMap", None)],
             vec![catalog_version("GKQEbfSt", "lfHFW1mp", "5.9.18")],
             BTreeMap::new(),
@@ -1545,7 +1675,7 @@ mod tests {
         )]);
 
         // The project publishes an icon and the fetch produced nothing.
-        snapshot.apply(&ModDetailIndex::new(
+        snapshot.apply(&detail_index(
             vec![catalog_project(
                 "u6dRKJwZ",
                 "Just Enough Items",

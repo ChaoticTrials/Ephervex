@@ -5,7 +5,9 @@
 //! curseforge.rs   the API root, and what a caller has to supply to use it
 //! ├── credential  where the key comes from, without knowing where it is kept
 //! ├── api         authenticated requests, and what a failure means
-//! └── dto         CurseForge's wire shapes, declared and nothing more
+//! ├── dto         CurseForge's wire shapes, declared and nothing more
+//! ├── mapping     what those shapes mean as Ephervex's own model
+//! └── browser     the provider the mod browser and the resolver call
 //! ```
 //!
 //! # The credential is the user's, and Ephervex only borrows it
@@ -40,15 +42,18 @@
 //! header, so no other code path can inherit it by sharing the client.
 
 mod api;
+mod browser;
 mod credential;
 mod dto;
+mod mapping;
 
 pub use api::{
     CURSEFORGE_API_BASE, CURSEFORGE_API_KEY_HEADER, CurseForgeApi, CurseForgeFileRelease,
     CurseForgeOperation, CurseForgeProjectClasses, MINECRAFT_GAME_ID, credential_refusal,
 };
+pub use browser::CurseForgeProvider;
 pub use credential::{ConfiguredApiKey, CurseForgeCredentialSource};
-pub use dto::{CurseForgeGame, CurseForgeProject};
+pub use dto::{CurseForgeAuthor, CurseForgeGame, CurseForgeLogo, CurseForgeProject};
 
 /// Where a user applies for a CurseForge third-party API key.
 ///

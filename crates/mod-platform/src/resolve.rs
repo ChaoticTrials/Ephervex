@@ -617,7 +617,12 @@ impl<'a> Resolver<'a> {
     async fn versions(&self, project_id: &str) -> ModPlatformResult<Vec<ModVersionInfo>> {
         self.request
             .provider
-            .versions(project_id, self.request.reporter, self.request.cancel)
+            .versions(
+                project_id,
+                self.request.target,
+                self.request.reporter,
+                self.request.cancel,
+            )
             .await
     }
 
@@ -1113,6 +1118,7 @@ mod tests {
         async fn versions(
             &self,
             project_id: &str,
+            _target: &InstanceTarget,
             _reporter: &OperationReporter,
             _cancel: &CancellationToken,
         ) -> ModPlatformResult<Vec<ModVersionInfo>> {

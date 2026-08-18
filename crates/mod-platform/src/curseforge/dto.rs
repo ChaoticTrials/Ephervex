@@ -15,9 +15,40 @@
 use serde::Deserialize;
 
 /// The `{ "data": ... }` wrapper every documented endpoint answers with.
+///
+/// The listing endpoints add a `pagination` member beside it. It is optional
+/// here because most endpoints do not send one, and it is *read* rather than
+/// inferred: whether another page exists is a fact the API states, and
+/// deriving it from "this page came back full" guesses wrong at exactly the
+/// boundary where it matters.
 #[derive(Debug, Deserialize)]
 pub(super) struct ApiEnvelope<T> {
     pub(super) data: T,
+    #[serde(default)]
+    pub(super) pagination: Option<CurseForgePagination>,
+}
+
+/// How much of a listing there is, as the API reports it.
+///
+/// `index` and `result_count` are read together to say where the next page
+/// begins: the request's own `index` is where a caller asked this page to
+/// start, but how many raw entries the provider actually placed in it is not
+/// assumed to equal the requested page size, so it is read from the response
+/// rather than from `items.len()`. `page_size` is documented but not declared:
+/// nothing here needs to know what was asked for, only what was answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct CurseForgePagination {
+    /// Where this page starts, as the provider echoes it back.
+    #[serde(default)]
+    pub(super) index: u32,
+    /// How many raw entries this page actually carries, before this
+    /// launcher's own class and compatibility filtering narrows it.
+    #[serde(default)]
+    pub(super) result_count: u64,
+    /// How many entries the whole listing has.
+    #[serde(default)]
+    pub(super) total_count: u64,
 }
 
 /// One game, as `GET /v1/games/{gameId}` describes it.
@@ -73,6 +104,37 @@ pub struct CurseForgeProject {
     /// either: it is discovered at runtime from [`CurseForgeCategoryClass`].
     #[serde(default)]
     pub class_id: Option<u32>,
+    /// Everyone CurseForge credits for the project.
+    ///
+    /// A list rather than a single name, because that is what the API reports.
+    /// The neutral model carries one attribution string, and picking the first
+    /// entry is a display decision made where that model is built.
+    #[serde(default)]
+    pub authors: Vec<CurseForgeAuthor>,
+    /// The project's artwork, when it has any.
+    #[serde(default)]
+    pub logo: Option<CurseForgeLogo>,
+}
+
+/// One credited author of a project.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct CurseForgeAuthor {
+    pub name: String,
+}
+
+/// A project's artwork, as the API describes it.
+///
+/// An address, not an image. Only the full-size address is read: the thumbnail
+/// is the same picture at a size this launcher does not depend on, and a
+/// caller that caches artwork already bounds what it will fetch.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct CurseForgeLogo {
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 /// One top-level project class for a game, as
@@ -116,6 +178,38 @@ pub(super) struct CurseForgeFileDocument {
     /// The provider's own file name. Untrusted input: validated as a safe
     /// relative path before it is allowed to name a destination.
     pub(super) file_name: String,
+    /// The label CurseForge shows for this release.
+    ///
+    /// CurseForge publishes no separate version *number*: this one string is
+    /// the whole of what an author called the release, and nothing is parsed
+    /// out of it. Absent on responses that omit it, which is a display problem
+    /// rather than a reason to refuse a file.
+    #[serde(default)]
+    pub(super) display_name: Option<String>,
+    /// How stable the author says this file is.
+    ///
+    /// See [`RELEASE_TYPE_RELEASE`] and the two beside it for what the numbers
+    /// mean. Absent on a response that omits it.
+    #[serde(default)]
+    pub(super) release_type: Option<u32>,
+    /// When the file was published.
+    ///
+    /// Read because version ordering is by publication date: a list ordered by
+    /// anything else would make "the newest that fits" depend on the order the
+    /// API happened to answer in.
+    #[serde(default)]
+    pub(super) file_date: Option<String>,
+    /// Everything this file declares compatibility with, in one array.
+    ///
+    /// CurseForge mixes Minecraft releases and mod loader names here: a Forge
+    /// file for 1.20.1 lists both `1.20.1` and `Forge`. Splitting them is a
+    /// judgment made where this document becomes the neutral model, against
+    /// the API's own documented loader names rather than against a guess.
+    #[serde(default)]
+    pub(super) game_versions: Vec<String>,
+    /// What this file says about other projects.
+    #[serde(default)]
+    pub(super) dependencies: Vec<CurseForgeFileRelation>,
     /// The declared size, verified against the bytes actually received.
     #[serde(default)]
     pub(super) file_length: Option<u64>,
@@ -130,6 +224,37 @@ pub(super) struct CurseForgeFileDocument {
     #[serde(default)]
     pub(super) hashes: Vec<CurseForgeFileHash>,
 }
+
+/// One relation this file declares to another project.
+///
+/// CurseForge states relations project to project and never file to file, so
+/// there is no version to pin here and none is invented. What that costs is
+/// stated where dependencies are resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct CurseForgeFileRelation {
+    pub(super) mod_id: u32,
+    pub(super) relation_type: u32,
+}
+
+/// The `releaseType` values this launcher names.
+///
+/// Alpha (3) has no constant because nothing branches on it: it is what an
+/// unrecognized or absent tag already resolves to, and a second name for the
+/// same outcome would only invite the two to drift apart.
+pub(super) const RELEASE_TYPE_RELEASE: u32 = 1;
+pub(super) const RELEASE_TYPE_BETA: u32 = 2;
+
+/// The `relationType` values this launcher acts on, as the API documents them.
+///
+/// `Tool` (4) is deliberately absent: a tool is something a human might also
+/// want installed, not something this mod needs, and turning one into a
+/// dependency would install software nobody asked for.
+pub(super) const RELATION_EMBEDDED_LIBRARY: u32 = 1;
+pub(super) const RELATION_OPTIONAL_DEPENDENCY: u32 = 2;
+pub(super) const RELATION_REQUIRED_DEPENDENCY: u32 = 3;
+pub(super) const RELATION_INCOMPATIBLE: u32 = 5;
+pub(super) const RELATION_INCLUDE: u32 = 6;
 
 /// One published digest, tagged with the algorithm that produced it.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -273,5 +398,18 @@ mod tests {
         assert_eq!(envelope.data[0].slug, "mc-mods");
         assert_eq!(envelope.data[1].name, "Resource Packs");
         assert_eq!(envelope.data[1].slug, "texture-packs");
+    }
+
+    #[test]
+    fn pagination_is_read_from_the_providers_own_index_and_result_count() {
+        let envelope: ApiEnvelope<Vec<CurseForgeProject>> = serde_json::from_str(
+            r#"{"data":[],
+                "pagination":{"index":10,"pageSize":10,"resultCount":8,"totalCount":100}}"#,
+        )
+        .expect("a documented search response");
+        let pagination = envelope.pagination.expect("a pagination member");
+        assert_eq!(pagination.index, 10);
+        assert_eq!(pagination.result_count, 8);
+        assert_eq!(pagination.total_count, 100);
     }
 }

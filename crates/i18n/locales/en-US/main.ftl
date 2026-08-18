@@ -947,6 +947,9 @@ error-mod-credential-unreadable = Ephervex could not read your { $provider } API
 error-mod-credential-rejected = { $provider } refused your API key (HTTP { $status }).
 .action = The key may be invalid or no longer authorized. Check it on { $provider }, then set it again in Settings, under Providers & APIs.
 
+error-mod-provider-not-browsable = Ephervex cannot browse { $provider }.
+.action = This build records mods from { $provider } but has no browser for it.
+
 error-mod-project-unknown = No such mod.
 .action = Check the project id or slug. Ephervex looked for { $reference }.
 
@@ -1163,7 +1166,7 @@ gui-no-managed-mods-detail = Manual JARs are not adopted or modified.
 gui-mod-version-unknown = Version not recorded
 gui-mod-provider-unknown = No provider
 gui-mod-file-missing = File missing from mods folder
-gui-mod-metadata-offline = Showing recorded state only; Modrinth could not be reached.
+gui-mod-metadata-offline = Ephervex could not load live mod metadata. Recorded mod information is still shown.
 gui-modal-change-loader = Change Loader Build
 gui-loader-change-open = Change Build
 gui-loader-change-summary = Running { $value }
@@ -1201,13 +1204,21 @@ gui-mod-remove-dependencies = { $count ->
    *[other] { $count } mods were installed only for it and will go too:
 }
 gui-mod-remove-no-dependencies = Nothing else was installed only for it.
-gui-mod-remove-dependencies-unprovable = Modrinth could not confirm which mods are still needed, so none will be collected.
+gui-mod-remove-dependencies-unprovable = Ephervex could not confirm which mods are still needed, so none will be collected.
 gui-mod-remove-action = Remove Mod
-gui-add-modrinth-mods = Add Mods from Modrinth
-gui-modrinth-compatibility = Search results are constrained to this instance's exact Minecraft version and loader.
+gui-add-mods = Add Mods
+gui-catalog-compatibility = Search results are constrained to this instance's exact Minecraft version and loader.
+gui-mod-catalog = Catalog
+gui-provider-modrinth = Modrinth
+gui-provider-curseforge = CurseForge
 gui-search-compatible-mods = Search compatible mods...
+gui-mod-search-running = Searching...
+gui-no-mod-results = No matching mods
+gui-no-mod-results-detail = Nothing in this catalog matches that search for this instance's Minecraft version and loader.
+gui-load-more = Load More
+gui-open-providers-settings = Open Providers & APIs
 gui-search = Search
-gui-mod-result-meta = by { $first } | { $second } downloads
+gui-mod-result-meta = by { $first } | { $second }
 gui-review = Review
 gui-instance-settings-unavailable = Instance-owned Minecraft settings
 gui-instance-settings-unavailable-detail = The current core safely applies known Vanilla defaults when an instance is created, but does not expose a typed editor for an existing instance. Unknown and mod-added options remain untouched.

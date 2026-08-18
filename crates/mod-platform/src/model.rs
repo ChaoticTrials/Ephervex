@@ -331,7 +331,45 @@ pub struct ModSearchResults {
     /// How many the provider says match, before this launcher's own
     /// version-level verification narrows them.
     pub total_hits: u64,
+    /// The offset this page was requested at.
     pub offset: u32,
+    /// Where the provider says its next page begins, `None` once it has no
+    /// more to offer.
+    ///
+    /// Read from how much of the raw page the provider actually returned, not
+    /// from how many of `hits` survived this launcher's own compatibility and
+    /// class filtering: a page the provider considers fully consumed is fully
+    /// consumed even when this launcher declines to show some of it, and
+    /// asking for the next page at the count of what was shown would re-read
+    /// entries already seen. Can be `Some` even when `hits` is empty: a page
+    /// every entry of which was filtered out still has a next page when the
+    /// provider says so.
+    pub next_offset: Option<u32>,
+}
+
+/// Where a provider says its next page begins, given what one raw page
+/// proved.
+///
+/// `start` and `raw_count` describe the raw page as the provider returned it,
+/// before any caller-side filtering; `total` is how many entries the provider
+/// says the whole listing has. All three are the provider's own numbers.
+/// Passing how many entries a caller went on to keep instead of `raw_count`
+/// would tell two different pages to start at the same offset.
+///
+/// Guaranteed to be either `None` or strictly greater than `start`. A
+/// provider that reports `raw_count: 0` while claiming more exist (or one
+/// whose numbers overflow the neutral offset type) has not proven where a
+/// next page would begin; repeating `start` would make "Load More" request
+/// the same page forever, so this reports no continuation rather than one
+/// that cannot advance.
+#[must_use]
+pub fn next_search_offset(start: u32, raw_count: u64, total: u64) -> Option<u32> {
+    let next = u64::from(start).saturating_add(raw_count);
+    if next >= total {
+        return None;
+    }
+    let next = u32::try_from(next).ok()?;
+    (next > start).then_some(next)
 }
 
 /// A project with every version, annotated.
@@ -432,5 +470,59 @@ mod tests {
         assert_eq!(ModSearchQuery::new("jei").limited(0).limit, 1);
         assert_eq!(ModSearchQuery::new("jei").limit, DEFAULT_SEARCH_LIMIT);
         assert!(!ModSearchQuery::new("jei").include_incompatible);
+    }
+
+    #[test]
+    fn the_next_offset_is_the_raw_page_that_was_consumed_not_what_a_caller_kept() {
+        // A page starting at 0 that consumed 3 raw entries continues at 3,
+        // whatever a caller went on to filter out of them.
+        assert_eq!(next_search_offset(0, 3, 100), Some(3));
+    }
+
+    #[test]
+    fn a_raw_page_reaching_the_providers_own_total_has_no_continuation() {
+        assert_eq!(next_search_offset(0, 3, 3), None);
+        assert_eq!(next_search_offset(7, 3, 10), None);
+    }
+
+    #[test]
+    fn zero_raw_results_never_repeat_the_page_just_asked_for() {
+        // The provider claims ninety more exist but consumed none of them
+        // here. Reporting `Some(10)` would ask for the same page forever;
+        // reporting no continuation is honest about what this page proved.
+        assert_eq!(next_search_offset(10, 0, 100), None);
+    }
+
+    #[test]
+    fn ordinary_pages_keep_advancing_by_what_they_actually_consumed() {
+        assert_eq!(next_search_offset(0, 3, 100), Some(3));
+        assert_eq!(next_search_offset(10, 5, 100), Some(15));
+    }
+
+    #[test]
+    fn a_continuation_that_would_not_advance_is_never_returned() {
+        // Every case here either reaches the provider's own total or would
+        // report the offset a caller already has, and both are refused the
+        // same way: `next_search_offset` never sends a caller back to where
+        // it started.
+        for (start, raw_count, total) in [
+            // Exactly reaches the total: no more to prove.
+            (0_u32, 3_u64, 3_u64),
+            (7, 3, 10),
+            // Nothing consumed, even though the provider claims more exist.
+            (10, 0, 100),
+            (0, 0, 1),
+            // The raw count is large enough that the next offset would not
+            // fit the neutral `u32` offset type at all.
+            (u32::MAX, 5, u64::MAX),
+            (u32::MAX - 1, u64::from(u32::MAX), u64::MAX),
+        ] {
+            let continuation = next_search_offset(start, raw_count, total);
+            assert!(
+                continuation.is_none_or(|next| next > start),
+                "next_search_offset({start}, {raw_count}, {total}) = {continuation:?} \
+                 does not advance past {start}"
+            );
+        }
     }
 }

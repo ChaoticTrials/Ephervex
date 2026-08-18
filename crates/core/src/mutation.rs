@@ -287,6 +287,13 @@ pub struct ModMutationPlan {
     /// The mod the user acted on.
     pub target: PathBuf,
     pub name: String,
+    /// The catalog the acted-on mod came from, when its identity names one.
+    ///
+    /// Carried on the plan because everything downstream of it (resolving the
+    /// replacement, collecting orphans, offering the change to a linked server)
+    /// has to ask the same catalog the mod was installed from, and a project
+    /// id alone does not say which that is.
+    pub provider: Option<ModProvider>,
     /// The acted-on mod's project, when it has one.
     pub project_id: Option<String>,
     /// The exact release this would move the mod to. `None` for a removal.
@@ -363,11 +370,15 @@ impl App {
                 restriction: MutationRestriction::IdentityUnresolved,
             })?;
 
-        let provider = self.mod_provider()?;
+        // The catalog the mod was installed from, never a default: another
+        // catalog's ids resolve to something else or to nothing.
+        let provider = self.mod_provider(provider_kind)?;
         let instance_target = target_for(&record);
         let loader = ephervex_mod_platform::loader_name_for(provider, &instance_target)?;
         let project = provider.project(project_id, reporter, cancel).await?;
-        let versions: Vec<_> = provider.versions(&project.id, reporter, cancel).await?;
+        let versions: Vec<_> = provider
+            .versions(&project.id, &instance_target, reporter, cancel)
+            .await?;
 
         let newest = newest_compatible(&versions, &instance_target, loader).map(|it| it.id);
         let compatible: Vec<AnnotatedVersion> = annotate(&versions, &instance_target, loader)
@@ -575,10 +586,13 @@ impl App {
 
         let request = match choice {
             ModVersionChoice::Exact(version) => {
-                crate::mods::ModInstallRequest::new(project_id.clone()).at_version(version.clone())
+                crate::mods::ModInstallRequest::new(project_id.clone())
+                    .from_provider(context.provider())
+                    .at_version(version.clone())
             }
             ModVersionChoice::NewestCompatible => {
                 crate::mods::ModInstallRequest::new(project_id.clone())
+                    .from_provider(context.provider())
             }
         };
         let resolved = self
@@ -617,6 +631,7 @@ impl App {
             instance: context.record.id,
             target: context.entry.logical_path.clone(),
             name: display_name(&context.entry, &resolved),
+            provider: context.entry.identity.provider(),
             project_id: Some(project_id.clone()),
             candidate_version: Some(candidate.clone()),
             outcome,
@@ -668,6 +683,7 @@ impl App {
             instance: context.record.id,
             target: context.entry.logical_path.clone(),
             name: context.entry.display_name().to_owned(),
+            provider: context.entry.identity.provider(),
             project_id: Some(project_id.clone()),
             candidate_version: None,
             outcome: PlannedOutcome::Remove,
@@ -713,6 +729,7 @@ impl App {
         let recorded = scope.recipe.recorded_mods_for(scope.side);
         let candidates: Vec<&RecordedMod> = recorded
             .iter()
+            .filter(|entry| entry.identity.provider() == Some(scope.provider))
             .filter(|entry| entry.origin == ModOrigin::RequiredDependency)
             .filter(|entry| entry.identity.project_id().is_some())
             .collect();
@@ -766,6 +783,9 @@ impl App {
     ) -> CoreResult<BTreeSet<String>> {
         let mut roots: BTreeMap<String, Option<String>> = BTreeMap::new();
         for entry in recorded {
+            if entry.identity.provider() != Some(scope.provider) {
+                continue;
+            }
             if !matches!(
                 entry.origin,
                 ModOrigin::UserSelected | ModOrigin::SelectedOptionalDependency
@@ -793,10 +813,11 @@ impl App {
             roots.insert(project.to_owned(), Some(version.to_owned()));
         }
 
-        let installed = crate::mods::installed_projects_of(Some(scope.recipe));
+        let installed = crate::mods::installed_projects_of(Some(scope.recipe), scope.provider);
         let mut required = BTreeSet::new();
         for (project, version) in roots {
-            let mut request = crate::mods::ModInstallRequest::new(project);
+            let mut request =
+                crate::mods::ModInstallRequest::new(project).from_provider(scope.provider);
             if let Some(version) = version {
                 request = request.at_version(version);
             }
@@ -840,8 +861,9 @@ impl App {
         // Pinned to the exact release the plan named. If that release has been
         // withdrawn or no longer fits, the resolver refuses here — which is the
         // required behavior, and the reason the plan is not simply trusted.
-        let request =
-            crate::mods::ModInstallRequest::new(project_id.clone()).at_version(version.clone());
+        let request = crate::mods::ModInstallRequest::new(project_id.clone())
+            .from_provider(context.provider())
+            .at_version(version.clone());
         let resolved = self
             .resolve_replacement(&context.record, &request, reporter)
             .await?;
@@ -909,7 +931,21 @@ impl MutationContext {
             recipe: &self.recipe,
             side: ephervex_pack::PackSide::Client,
             target: &self.target,
+            provider: self.provider(),
         }
+    }
+
+    /// The catalog this mod came from.
+    ///
+    /// Every mutation this context reaches has a resolved identity (the
+    /// mutability check refuses before a plan is built otherwise), so the
+    /// fallback is unreachable and exists only so that a refusal is a refusal
+    /// rather than a panic.
+    fn provider(&self) -> ModProvider {
+        self.entry
+            .identity
+            .provider()
+            .unwrap_or(ModProvider::Modrinth)
     }
 }
 
@@ -924,6 +960,13 @@ pub(crate) struct DependencyScope<'a> {
     /// Which side's recorded desired state the mods are read from.
     pub side: ephervex_pack::PackSide,
     pub target: &'a InstanceTarget,
+    /// The catalog this question is about.
+    ///
+    /// Dependency graphs do not cross catalogs: a project id belongs to one
+    /// provider, and only that provider's mods can be kept alive or orphaned by
+    /// its own roots. Asking one catalog about another's ids would resolve the
+    /// wrong projects and collect mods that are still needed.
+    pub provider: ModProvider,
 }
 
 /// The entry at one logical path, or a refusal naming it.
@@ -942,14 +985,14 @@ fn entry_at<'a>(
 
 /// The projects a plan says the instance must no longer have.
 fn removals_for(plan: &ModMutationPlan) -> Vec<ManagedProject> {
+    let Some(provider) = plan.provider else {
+        // Nothing with an unproven identity reaches a plan, so this is a
+        // refusal that cannot happen rather than a case to guess at.
+        return Vec::new();
+    };
     plan.removes
         .iter()
-        .filter_map(|file| {
-            Some(ManagedProject::new(
-                ModProvider::Modrinth,
-                file.project_id.clone()?,
-            ))
-        })
+        .filter_map(|file| Some(ManagedProject::new(provider, file.project_id.clone()?)))
         .collect()
 }
 
@@ -966,7 +1009,8 @@ fn planned_files(plan: &ModInstallPlan, recipe: &PackRecipe) -> Vec<PlannedFile>
             // A mod that is already recorded keeps the ownership it has. A
             // dependency does not become a root because an unrelated update
             // resolved it again.
-            origin: recorded_origin(recipe, &planned.version.project_id).unwrap_or(planned.origin),
+            origin: recorded_origin(recipe, plan.provider, &planned.version.project_id)
+                .unwrap_or(planned.origin),
         })
         .collect()
 }
@@ -977,9 +1021,13 @@ fn planned_path(planned: &PlannedMod) -> PathBuf {
     PathBuf::from(ephervex_pack::MODS_DIR).join(name)
 }
 
-fn recorded_origin(recipe: &PackRecipe, project_id: &str) -> Option<ModOrigin> {
+fn recorded_origin(
+    recipe: &PackRecipe,
+    provider: ModProvider,
+    project_id: &str,
+) -> Option<ModOrigin> {
     recipe
-        .managed_project(ModProvider::Modrinth, project_id)
+        .managed_project(provider, project_id)
         .map(|entry| entry.origin)
 }
 
@@ -1188,6 +1236,7 @@ mod tests {
     #[test]
     fn a_plan_that_changes_nothing_says_so() {
         let plan = ModMutationPlan {
+            provider: Some(ModProvider::Modrinth),
             instance: InstanceId::new(),
             target: PathBuf::from("mods/thing.jar"),
             name: "Thing".to_owned(),
@@ -1207,6 +1256,7 @@ mod tests {
     fn a_removal_shows_the_dependencies_it_would_take_with_it() {
         let target = PathBuf::from("mods/root.jar");
         let plan = ModMutationPlan {
+            provider: Some(ModProvider::Modrinth),
             instance: InstanceId::new(),
             target: target.clone(),
             name: "Root".to_owned(),

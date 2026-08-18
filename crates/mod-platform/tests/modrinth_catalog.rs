@@ -217,6 +217,11 @@ async fn compatible_only_is_the_default_and_drops_what_the_facets_oversold() {
         "FITSNEW1",
         "the newest version that actually fits"
     );
+    // The fixture's raw page carries three hits and reports `total_hits: 3`,
+    // so the provider has been fully consumed even though only one of those
+    // three survived the compatibility check. Deriving the continuation from
+    // `hits.len() < total_hits` (1 < 3) would wrongly say there is more.
+    assert_eq!(results.next_offset, None);
 }
 
 #[tokio::test]
@@ -282,6 +287,53 @@ async fn one_search_stays_within_its_request_budget() {
 }
 
 #[tokio::test]
+async fn a_raw_page_smaller_than_the_total_continues_from_what_it_carried() {
+    // `total_hits` (5) is larger than the two raw hits this page actually
+    // carries, standing in for a page that is not the last one.
+    let catalog = Catalog::start()
+        .await
+        .serving(
+            "/v2/search",
+            r#"{"hits":[
+                {"project_id":"FITSPROJ","slug":"fits","title":"Fits","description":"",
+                 "author":"someone","client_side":"required","server_side":"required"},
+                {"project_id":"LIBPROJ","slug":"lib","title":"Library","description":"",
+                 "author":"someone","client_side":"required","server_side":"required"}
+            ],"offset":0,"limit":10,"total_hits":5}"#
+                .to_owned(),
+        )
+        .await
+        .serving(
+            "/v2/project/FITSPROJ/version",
+            fixture("versions-fits.json"),
+        )
+        .await
+        .serving(
+            "/v2/project/LIBPROJ/version",
+            fixture("versions-library.json"),
+        )
+        .await;
+
+    let results = catalog
+        .provider
+        .search(
+            &target(),
+            &ModSearchQuery::new("test"),
+            &reporter(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("search");
+
+    assert_eq!(results.hits.len(), 2, "both hits fit this instance");
+    assert_eq!(
+        results.next_offset,
+        Some(2),
+        "the raw page carried two entries; the continuation follows that count, not total_hits"
+    );
+}
+
+#[tokio::test]
 async fn a_page_size_is_clamped_before_it_reaches_the_provider() {
     let catalog = Catalog::full().await;
     catalog
@@ -319,7 +371,12 @@ async fn a_version_list_is_fetched_once_and_then_served_from_the_cache() {
     for _ in 0..2 {
         catalog
             .provider
-            .versions("FITSPROJ", &reporter(), &CancellationToken::new())
+            .versions(
+                "FITSPROJ",
+                &target(),
+                &reporter(),
+                &CancellationToken::new(),
+            )
             .await
             .expect("versions");
     }
@@ -350,7 +407,7 @@ async fn a_cached_version_list_is_named_by_a_digest_rather_than_by_the_project_t
 
     catalog
         .provider
-        .versions(&enormous, &reporter(), &CancellationToken::new())
+        .versions(&enormous, &target(), &reporter(), &CancellationToken::new())
         .await
         .expect("versions");
 
@@ -391,7 +448,7 @@ async fn a_cached_version_list_is_named_by_a_digest_rather_than_by_the_project_t
     // provider's own path without another request.
     let versions = catalog
         .provider
-        .versions(&enormous, &reporter(), &CancellationToken::new())
+        .versions(&enormous, &target(), &reporter(), &CancellationToken::new())
         .await
         .expect("versions");
     assert!(!versions.is_empty());
@@ -494,7 +551,12 @@ async fn the_primary_file_rule_is_applied_to_real_response_shapes() {
 
     let versions = catalog
         .provider
-        .versions("FILESPROJ", &reporter(), &CancellationToken::new())
+        .versions(
+            "FILESPROJ",
+            &target(),
+            &reporter(),
+            &CancellationToken::new(),
+        )
         .await
         .expect("versions");
 
@@ -522,7 +584,7 @@ async fn an_unreachable_provider_is_reported_as_such_rather_than_as_an_empty_cat
     let catalog = Catalog::start().await;
     let error = catalog
         .provider
-        .versions("NOTHING", &reporter(), &CancellationToken::new())
+        .versions("NOTHING", &target(), &reporter(), &CancellationToken::new())
         .await
         .expect_err("nothing is mocked");
     // Reported, not swallowed: an empty list would look like a mod with no

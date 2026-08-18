@@ -25,17 +25,18 @@ use std::time::Duration;
 
 use ephervex_download::{HttpConfig, Url, build_single_origin_client, check_transport, redacted};
 use ephervex_model::{
-    CurseForgeFileId, CurseForgeProjectId, Hash, HashAlgorithm, ModProvider, SecretString,
+    CurseForgeFileId, CurseForgeProjectId, Hash, HashAlgorithm, LoaderKind, ModProvider,
+    SecretString,
 };
-use reqwest::header::{ACCEPT, HeaderName, HeaderValue};
-use reqwest::{Client, Response, StatusCode};
+use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderName, HeaderValue};
+use reqwest::{Client, Method, Response, StatusCode};
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
 use super::credential::{CurseForgeCredentialSource, missing};
 use super::dto::{
     ApiEnvelope, CurseForgeCategoryClass, CurseForgeFileDocument, CurseForgeFileHash,
-    CurseForgeGame, CurseForgeProject, HASH_ALGO_SHA1,
+    CurseForgeGame, CurseForgePagination, CurseForgeProject, HASH_ALGO_SHA1,
 };
 use crate::error::{ModPlatformError, ModPlatformResult};
 use crate::model::ModFile;
@@ -231,6 +232,36 @@ impl CurseForgeApi {
         key: &SecretString,
         cancel: &CancellationToken,
     ) -> ModPlatformResult<T> {
+        self.send_with_key::<T>(Method::GET, url, None, key, cancel)
+            .await
+            .map(|envelope| envelope.0)
+    }
+
+    /// A request whose answer also reports how far into a listing it reached.
+    async fn page_with_key<T: serde::de::DeserializeOwned>(
+        &self,
+        url: &Url,
+        key: &SecretString,
+        cancel: &CancellationToken,
+    ) -> ModPlatformResult<(T, Option<CurseForgePagination>)> {
+        self.send_with_key::<T>(Method::GET, url, None, key, cancel)
+            .await
+            .map(|envelope| (envelope.0, envelope.1))
+    }
+
+    /// One authenticated request, and the envelope it answered with.
+    ///
+    /// `body`, when present, is sent as JSON: the batch endpoints are `POST`
+    /// with a list of ids precisely so a plan naming many projects costs one
+    /// round trip rather than one each.
+    async fn send_with_key<T: serde::de::DeserializeOwned>(
+        &self,
+        method: Method,
+        url: &Url,
+        body: Option<serde_json::Value>,
+        key: &SecretString,
+        cancel: &CancellationToken,
+    ) -> ModPlatformResult<(T, Option<CurseForgePagination>)> {
         let mut header = HeaderValue::from_str(key.expose()).map_err(|_| {
             // A fixed sentence, never the rejected value.
             ModPlatformError::CredentialUnreadable {
@@ -242,12 +273,22 @@ impl CurseForgeApi {
         // otherwise be retained for the life of the connection.
         header.set_sensitive(true);
 
-        let request = self
+        let mut request = self
             .client
-            .get(url.clone())
+            .request(method, url.clone())
             .header(HeaderName::from_static(CURSEFORGE_API_KEY_HEADER), header)
             .header(ACCEPT, HeaderValue::from_static("application/json"))
             .timeout(REQUEST_TIMEOUT);
+        if let Some(body) = body {
+            request = request
+                .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
+                .body(serde_json::to_vec(&body).map_err(|error| {
+                    ModPlatformError::ResponseInvalid {
+                        provider: ModProvider::CurseForge,
+                        detail: error.to_string(),
+                    }
+                })?);
+        }
 
         let response: Response = tokio::select! {
             // Biased so a request canceled before it starts wins rather than
@@ -272,7 +313,7 @@ impl CurseForgeApi {
             .await
             .map_err(|error| request_failed(&error))?;
         serde_json::from_str::<ApiEnvelope<T>>(&body)
-            .map(|envelope| envelope.data)
+            .map(|envelope| (envelope.data, envelope.pagination))
             .map_err(|error| ModPlatformError::ResponseInvalid {
                 provider: ModProvider::CurseForge,
                 detail: error.to_string(),
@@ -412,6 +453,328 @@ impl CurseForgeOperation<'_> {
             };
         normalize_file(project, file, document)
     }
+
+    /// One page of the game's Mods, narrowed to what an instance can run.
+    ///
+    /// `GET /v1/mods/search`. Four constraints always travel with it: the
+    /// game, the provider-discovered Mods class, the exact Minecraft release,
+    /// and the loader. The class filter is what keeps resource packs, worlds,
+    /// and modpacks out of a mod browser; it is not treated as proof, and each
+    /// returned project is classified again by the caller.
+    ///
+    /// A loader this launcher does not support has no filter to send, and the
+    /// search is refused rather than widened.
+    pub(super) async fn search(
+        &self,
+        game_id: u32,
+        search: &CurseForgeSearch<'_>,
+        cancel: &CancellationToken,
+    ) -> ModPlatformResult<CurseForgePage<CurseForgeProject>> {
+        let loader =
+            loader_query_value(search.loader).ok_or(ModPlatformError::LoaderCannotHostMods {
+                loader: search.loader,
+            })?;
+        let mut url = self.api.endpoint(&["mods", "search"])?;
+        {
+            let mut query = url.query_pairs_mut();
+            query
+                .append_pair("gameId", &game_id.to_string())
+                .append_pair("classId", &search.class_id.to_string())
+                .append_pair("gameVersion", search.minecraft_version)
+                .append_pair("modLoaderType", &loader.to_string())
+                .append_pair("sortField", SORT_FIELD_POPULARITY)
+                .append_pair("sortOrder", "desc")
+                .append_pair("index", &search.index.to_string())
+                .append_pair("pageSize", &search.page_size.min(MAX_PAGE_SIZE).to_string());
+            // Sent only when there is something to search for. An empty
+            // `searchFilter` is not the same request as no filter at all.
+            if !search.text.trim().is_empty() {
+                query.append_pair("searchFilter", search.text.trim());
+            }
+        }
+        let (items, pagination): (Vec<CurseForgeProject>, _) =
+            self.api.page_with_key(&url, &self.key, cancel).await?;
+        Ok(page(items, search.index, pagination))
+    }
+
+    /// Every file of one project that fits an exact Minecraft release and
+    /// loader.
+    ///
+    /// `GET /v1/mods/{modId}/files`, filtered server-side. Deliberately not the
+    /// project's whole file list: CurseForge pages that list, and a project
+    /// with a decade of releases would cost a dozen round trips to enumerate
+    /// for an answer that is thrown away by the compatibility check anyway.
+    ///
+    /// The consequence is stated rather than hidden: a file that does not fit
+    /// this instance is not returned at all, so nothing here can explain an
+    /// incompatible release the way a full listing could.
+    pub(super) async fn project_files(
+        &self,
+        project: CurseForgeProjectId,
+        minecraft_version: &str,
+        loader: LoaderKind,
+        cancel: &CancellationToken,
+    ) -> ModPlatformResult<Vec<CurseForgeFileDocument>> {
+        let loader_value =
+            loader_query_value(loader).ok_or(ModPlatformError::LoaderCannotHostMods { loader })?;
+
+        let mut collected: Vec<CurseForgeFileDocument> = Vec::new();
+        let mut index = 0_u32;
+        for _ in 0..MAX_FILE_PAGES {
+            let mut url = self
+                .api
+                .endpoint(&["mods", &project.to_string(), "files"])?;
+            url.query_pairs_mut()
+                .append_pair("gameVersion", minecraft_version)
+                .append_pair("modLoaderType", &loader_value.to_string())
+                .append_pair("index", &index.to_string())
+                .append_pair("pageSize", &MAX_PAGE_SIZE.to_string());
+
+            let (documents, pagination): (Vec<CurseForgeFileDocument>, _) =
+                match self.api.page_with_key(&url, &self.key, cancel).await {
+                    Ok(answer) => answer,
+                    // A 404 here means the project itself is gone, which is
+                    // worth saying rather than reporting as an outage.
+                    Err(ModPlatformError::HttpStatus { status, .. })
+                        if status == StatusCode::NOT_FOUND =>
+                    {
+                        return Err(ModPlatformError::ProjectUnknown {
+                            provider: ModProvider::CurseForge,
+                            reference: project.to_string(),
+                        });
+                    }
+                    Err(other) => return Err(other),
+                };
+
+            let received = documents.len();
+            collected.extend(documents);
+            // The provider's own count decides whether another page exists.
+            let more = pagination.is_some_and(|pagination| {
+                u64::from(index).saturating_add(received as u64) < pagination.total_count
+            });
+            if received == 0 || !more {
+                break;
+            }
+            index = index.saturating_add(u32::try_from(received).unwrap_or(MAX_PAGE_SIZE));
+        }
+        Ok(collected)
+    }
+
+    /// The project one slug names, if the game's Mods class has one.
+    ///
+    /// CurseForge addresses projects by number and publishes no by-slug route,
+    /// so the documented search endpoint's own `slug` filter is what answers
+    /// this. Deliberately not narrowed by Minecraft release or loader: a slug
+    /// names a project, and which of its files fit an instance is a later and
+    /// separate question.
+    pub(super) async fn project_by_slug(
+        &self,
+        game_id: u32,
+        class_id: u32,
+        slug: &str,
+        cancel: &CancellationToken,
+    ) -> ModPlatformResult<Option<CurseForgeProject>> {
+        let mut url = self.api.endpoint(&["mods", "search"])?;
+        url.query_pairs_mut()
+            .append_pair("gameId", &game_id.to_string())
+            .append_pair("classId", &class_id.to_string())
+            .append_pair("slug", slug)
+            .append_pair("pageSize", "1");
+        let (found, _): (Vec<CurseForgeProject>, _) =
+            self.api.page_with_key(&url, &self.key, cancel).await?;
+        Ok(found.into_iter().next())
+    }
+
+    /// Several projects in one request.
+    ///
+    /// `POST /v1/mods` with the ids in the body, which is the documented way to
+    /// ask about many projects at once. A finished plan needs one project
+    /// document per resolved mod, and asking one at a time would spend a
+    /// rate-limit budget on round trips.
+    pub(super) async fn projects(
+        &self,
+        projects: &[CurseForgeProjectId],
+        cancel: &CancellationToken,
+    ) -> ModPlatformResult<Vec<CurseForgeProject>> {
+        if projects.is_empty() {
+            return Ok(Vec::new());
+        }
+        let url = self.api.endpoint(&["mods"])?;
+        let ids: Vec<u32> = projects.iter().map(|project| project.get()).collect();
+        let (documents, _) = self
+            .api
+            .send_with_key::<Vec<CurseForgeProject>>(
+                Method::POST,
+                &url,
+                Some(serde_json::json!({ "modIds": ids })),
+                &self.key,
+                cancel,
+            )
+            .await?;
+        Ok(documents)
+    }
+
+    /// Several exact files in one request.
+    ///
+    /// `POST /v1/mods/files` with the file ids in the body. Each document names
+    /// the project it belongs to, which is what lets an exactly pinned file be
+    /// resolved without the caller having to know its project up front.
+    pub(super) async fn files(
+        &self,
+        files: &[CurseForgeFileId],
+        cancel: &CancellationToken,
+    ) -> ModPlatformResult<Vec<CurseForgeFileDocument>> {
+        if files.is_empty() {
+            return Ok(Vec::new());
+        }
+        let url = self.api.endpoint(&["mods", "files"])?;
+        let ids: Vec<u32> = files.iter().map(|file| file.get()).collect();
+        let (documents, _) = self
+            .api
+            .send_with_key::<Vec<CurseForgeFileDocument>>(
+                Method::POST,
+                &url,
+                Some(serde_json::json!({ "fileIds": ids })),
+                &self.key,
+                cancel,
+            )
+            .await?;
+        Ok(documents)
+    }
+}
+
+/// One page of results, with a total that is never smaller than what this page
+/// already proves exists.
+fn page<T>(
+    items: Vec<T>,
+    index: u32,
+    pagination: Option<CurseForgePagination>,
+) -> CurseForgePage<T> {
+    let proven = u64::from(index).saturating_add(items.len() as u64);
+    CurseForgePage {
+        total: pagination.map_or(proven, |pagination| pagination.total_count.max(proven)),
+        next_offset: pagination.and_then(|pagination| {
+            crate::model::next_search_offset(
+                pagination.index,
+                pagination.result_count,
+                pagination.total_count,
+            )
+        }),
+        items,
+    }
+}
+
+/// How CurseForge names the loaders Ephervex supports, and the numbers its
+/// query parameters spell them with.
+///
+/// Both halves of the pair matter and they are different things. The number is
+/// the API's `modLoaderType` enum and never leaves this module. The name is
+/// what a file document *lists itself* as supporting, and is what compatibility
+/// is decided against.
+///
+/// Only Forge and NeoForge appear, because only Forge and NeoForge are loaders
+/// this launcher installs. A loader Ephervex does not support has no entry, and
+/// [`loader_query_value`] answers `None` for it rather than falling back to
+/// some other loader's filter: a search that quietly became a Fabric search
+/// would offer mods that cannot run in the instance being browsed.
+const LOADERS: &[(LoaderKind, u32, &str)] = &[
+    (LoaderKind::Forge, 1, "Forge"),
+    (LoaderKind::NeoForge, 6, "NeoForge"),
+];
+
+/// The `modLoaderType` value a loader is filtered by, when this launcher
+/// supports it.
+pub(super) fn loader_query_value(loader: LoaderKind) -> Option<u32> {
+    LOADERS
+        .iter()
+        .find(|(kind, _, _)| *kind == loader)
+        .map(|(_, value, _)| *value)
+}
+
+/// CurseForge's own name for a loader, when this launcher supports it.
+pub(super) fn loader_name(loader: LoaderKind) -> Option<&'static str> {
+    LOADERS
+        .iter()
+        .find(|(kind, _, _)| *kind == loader)
+        .map(|(_, _, name)| *name)
+}
+
+/// Every loader name the API's `modLoaderType` enum documents.
+///
+/// Used to split a file's single `gameVersions` array (which mixes Minecraft
+/// releases and loader names) into the two things Ephervex reasons about.
+/// The list covers loaders this launcher does *not* support on purpose: a
+/// `Fabric` entry has to be recognized as a loader so that it is not mistaken
+/// for a Minecraft release, even though no Ephervex instance can use it.
+pub(super) const DOCUMENTED_LOADER_NAMES: &[&str] = &[
+    "Forge",
+    "Cauldron",
+    "LiteLoader",
+    "Fabric",
+    "Quilt",
+    "NeoForge",
+];
+
+/// The `sortField` a browse uses.
+///
+/// Popularity, descending, which is what CurseForge's own catalog opens on.
+/// One fixed order rather than a setting: the Ephervex browser exposes no sort
+/// control, and an unstated ordering that varies per provider is worse than a
+/// documented one.
+const SORT_FIELD_POPULARITY: &str = "2";
+
+/// The largest page the API will answer with.
+///
+/// The documented ceiling on `pageSize`. Requests are clamped to it rather
+/// than refused, and the launcher's own page size is smaller anyway.
+const MAX_PAGE_SIZE: u32 = 50;
+
+/// How many pages of one project's files a version listing will ask for.
+///
+/// The listing is already narrowed to one exact Minecraft release and one
+/// loader, which for a real project is a few dozen files at most, so the first
+/// page normally ends the loop. The ceiling exists so that a project with an
+/// implausible number of files cannot turn opening a version picker into an
+/// unbounded crawl.
+const MAX_FILE_PAGES: u32 = 5;
+
+/// What a search is for.
+///
+/// Every field is a constraint the browser actually applies. There is no
+/// category, author, or featured filter here, because the Ephervex browser has
+/// no control that would set one and a query parameter is not a reason to grow
+/// a UI.
+#[derive(Debug, Clone)]
+pub(super) struct CurseForgeSearch<'a> {
+    /// Free text, as the user typed it. Empty is a valid search and means
+    /// "everything that fits", which is what an empty field asks for.
+    pub text: &'a str,
+    /// The exact Minecraft release the instance runs. Never widened.
+    pub minecraft_version: &'a str,
+    /// The instance's loader.
+    pub loader: LoaderKind,
+    /// The provider-discovered Mods class. Never a hard-coded number.
+    pub class_id: u32,
+    pub index: u32,
+    pub page_size: u32,
+}
+
+/// One page of a listing, with what the provider said about the rest of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct CurseForgePage<T> {
+    pub items: Vec<T>,
+    /// How many entries the whole listing has, as the provider reported it.
+    ///
+    /// Falls back to what this page proves (the offset plus what it carried)
+    /// when a response omits `pagination`, so a caller is never told there is
+    /// more than has actually been seen.
+    pub total: u64,
+    /// Where the provider says the next page begins, read from its own
+    /// `index` and `resultCount` rather than from the offset this request
+    /// sent or how many items ended up in `items`. `None` when a response
+    /// omits `pagination` at all: without it there is nothing to fabricate a
+    /// further page from.
+    pub next_offset: Option<u32>,
 }
 
 /// One game's top-level project classes, as one [`CurseForgeOperation::project_classes`]
@@ -433,6 +796,59 @@ impl CurseForgeProjectClasses {
     #[must_use]
     pub fn is_mods(&self, class_id: u32) -> bool {
         class_id == self.mods
+    }
+
+    /// The Mods class id this response reported.
+    ///
+    /// For building a query that asks for mods and nothing else. It is this
+    /// response's own answer: a later operation asks again rather than reusing
+    /// a number this one happened to see.
+    #[must_use]
+    pub const fn mods_class_id(&self) -> u32 {
+        self.mods
+    }
+
+    /// The typed refusal for one classified project, or `None` when it is a
+    /// Mod.
+    ///
+    /// The one place that decides what a project's class means, so a pack
+    /// import and the mod browser cannot arrive at different answers about the
+    /// same project. Three outcomes, none of which trusts a project's own
+    /// display name to stand in for its class:
+    ///
+    /// - a known non-Mod class is named by the class's own provider-returned
+    ///   name, from the same categories response the Mods class id came from;
+    /// - a class id the categories response never listed is not guessed at:
+    ///   this build cannot say what it is, so it fails closed the same as a
+    ///   response this build could not otherwise use;
+    /// - no reported class at all (`classId` is documented as nullable) is the
+    ///   same failure: a project this launcher cannot confirm is a Mod is never
+    ///   treated as one.
+    #[must_use]
+    pub fn rejection_for(&self, project: &CurseForgeProject) -> Option<ModPlatformError> {
+        match project.class_id {
+            Some(class_id) if self.is_mods(class_id) => None,
+            Some(class_id) => Some(match self.name_of(class_id) {
+                Some(name) => ModPlatformError::ProjectTypeUnsupported {
+                    reference: project.id.to_string(),
+                    project_type: name.to_owned(),
+                },
+                None => ModPlatformError::ResponseInvalid {
+                    provider: ModProvider::CurseForge,
+                    detail: format!(
+                        "project {} reports class {class_id}, which the game's category classes did not list",
+                        project.id
+                    ),
+                },
+            }),
+            None => Some(ModPlatformError::ResponseInvalid {
+                provider: ModProvider::CurseForge,
+                detail: format!(
+                    "project {} reports no project class, so Ephervex cannot confirm it is a mod",
+                    project.id
+                ),
+            }),
+        }
     }
 
     /// The provider-returned name of a top-level class this response listed,
@@ -530,7 +946,7 @@ fn normalize_file(
 ///
 /// A digest whose tag and shape disagree is dropped rather than trusted:
 /// `Hash::new` enforces the hex length the algorithm has.
-fn supported_hashes(published: &[CurseForgeFileHash]) -> Vec<Hash> {
+pub(super) fn supported_hashes(published: &[CurseForgeFileHash]) -> Vec<Hash> {
     published
         .iter()
         .filter(|hash| hash.algo == HASH_ALGO_SHA1)
@@ -911,5 +1327,47 @@ mod tests {
             matches!(error, ModPlatformError::CredentialMissing { .. }),
             "{error:?}"
         );
+    }
+
+    // -- pagination continuation --------------------------------------------
+
+    fn pagination(index: u32, result_count: u64, total_count: u64) -> CurseForgePagination {
+        CurseForgePagination {
+            index,
+            result_count,
+            total_count,
+        }
+    }
+
+    #[test]
+    fn the_next_offset_is_read_from_the_providers_own_index_and_result_count() {
+        // Requested at 0, but the provider's own numbers are what decide the
+        // continuation, not the request or how many items came back.
+        let page = page(vec!["a", "b"], 0, Some(pagination(0, 2, 10)));
+        assert_eq!(page.next_offset, Some(2));
+    }
+
+    #[test]
+    fn a_page_reaching_the_providers_own_total_has_no_continuation() {
+        let page = page(vec!["a", "b"], 8, Some(pagination(8, 2, 10)));
+        assert_eq!(page.next_offset, None);
+    }
+
+    #[test]
+    fn no_pagination_member_never_fabricates_a_further_page() {
+        // A response that omits `pagination` entirely gives nothing to
+        // continue from, so this page is treated as the last one rather than
+        // guessed at from how many items it happened to carry.
+        let page = page(vec!["a", "b", "c"], 0, None);
+        assert_eq!(page.next_offset, None);
+        assert_eq!(page.total, 3);
+    }
+
+    #[test]
+    fn a_result_count_smaller_than_the_items_returned_is_still_trusted() {
+        // The provider's own count of what it consumed is authoritative even
+        // when it disagrees with how many items this page happened to carry.
+        let page = page(vec!["a", "b"], 0, Some(pagination(0, 1, 10)));
+        assert_eq!(page.next_offset, Some(1));
     }
 }

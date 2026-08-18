@@ -250,3 +250,654 @@ mod tests {
         found
     }
 }
+
+/// Browsing and installing CurseForge mods through the application.
+///
+/// Everything here runs against `wiremock` on 127.0.0.1 with an obviously fake
+/// key in an in-memory credential store. Nothing contacts CurseForge, and
+/// nothing reads the developer's own keyring.
+#[cfg(test)]
+mod browsing {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use ephervex_auth::MemoryStore;
+    use ephervex_download::OperationReporter;
+    use ephervex_mod_platform::{ModPlatformError, ModSearchQuery};
+    use ephervex_model::{LoaderKind, LoaderSelection, ModProvider, SecretString};
+    use ephervex_storage::{NewClient, Paths};
+    use sha1::{Digest as _, Sha1};
+    use tokio_util::sync::CancellationToken;
+    use wiremock::matchers::{body_json, method, path, path_regex};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use crate::App;
+    use crate::mods::ModInstallRequest;
+
+    const FAKE_KEY: &str = "test-curseforge-key-do-not-use";
+
+    /// The Mods class this fixture reports. Deliberately not the number the
+    /// production API happens to use, so an implementation that assumed one
+    /// would fail here.
+    const MODS_CLASS: u32 = 987_654;
+
+    const ROOT_PROJECT: u32 = 100;
+    const LIBRARY_PROJECT: u32 = 200;
+    const OPTIONAL_PROJECT: u32 = 300;
+    /// A project whose files never fit this instance.
+    const UNFITTING_PROJECT: u32 = 400;
+    /// A root that requires [`UNFITTING_PROJECT`].
+    const BLOCKED_PROJECT: u32 = 500;
+
+    const ROOT_NEWEST: u32 = 1001;
+    const ROOT_OLDER: u32 = 1000;
+    const LIBRARY_FILE: u32 = 2001;
+    const OPTIONAL_FILE: u32 = 3001;
+    const BLOCKED_FILE: u32 = 5001;
+
+    /// CurseForge's documented relation types.
+    const REQUIRED: u32 = 3;
+    const OPTIONAL: u32 = 2;
+
+    fn jar(project: u32, file: u32) -> Vec<u8> {
+        format!("PK\u{3}\u{4} {project}/{file}").into_bytes()
+    }
+
+    fn sha1_of(body: &[u8]) -> String {
+        let mut hasher = Sha1::new();
+        hasher.update(body);
+        hex::encode(hasher.finalize())
+    }
+
+    fn file_name(project: u32, file: u32) -> String {
+        format!("mod-{project}-{file}.jar")
+    }
+
+    /// One file document, published from the loopback server itself.
+    fn file_document(server: &MockServer, project: u32, file: u32, relations: &str) -> String {
+        let body = jar(project, file);
+        format!(
+            r#"{{"id":{file},"gameId":432,"modId":{project},"isAvailable":true,
+                "displayName":"Release {file}","fileName":"{name}","releaseType":1,
+                "fileDate":"2023-07-0{day}T10:00:00Z","fileLength":{length},
+                "downloadUrl":"{base}/files/{project}/{file}/{name}",
+                "hashes":[{{"value":"{digest}","algo":1}}],
+                "gameVersions":["1.20.1","NeoForge"],
+                "dependencies":[{relations}]}}"#,
+            name = file_name(project, file),
+            day = file % 9 + 1,
+            length = body.len(),
+            base = server.uri(),
+            digest = sha1_of(&body),
+        )
+    }
+
+    fn project_document(project: u32, name: &str) -> String {
+        format!(
+            r#"{{"id":{project},"gameId":432,"name":"{name}","slug":"mod-{project}",
+                "summary":"A test mod","classId":{MODS_CLASS},
+                "authors":[{{"id":1,"name":"a person"}}]}}"#
+        )
+    }
+
+    /// What both of the root mod's files declare: the library twice, so
+    /// deduplication is exercised, and one optional extra.
+    fn root_relations_for() -> String {
+        format!(
+            "{},{},{}",
+            relation(LIBRARY_PROJECT, REQUIRED),
+            relation(LIBRARY_PROJECT, REQUIRED),
+            relation(OPTIONAL_PROJECT, OPTIONAL),
+        )
+    }
+
+    fn relation(project: u32, kind: u32) -> String {
+        format!(r#"{{"modId":{project},"relationType":{kind}}}"#)
+    }
+
+    /// Serves one project's file listing and the bytes of every file in it.
+    async fn serve_files(server: &MockServer, project: u32, files: &[(u32, String)]) {
+        let documents: Vec<String> = files
+            .iter()
+            .map(|(file, relations)| file_document(server, project, *file, relations))
+            .collect();
+        let total = documents.len();
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/mods/{project}/files")))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                format!(
+                    r#"{{"data":[{}],"pagination":{{"totalCount":{total}}}}}"#,
+                    documents.join(",")
+                ),
+                "application/json",
+            ))
+            .mount(server)
+            .await;
+
+        for (file, _) in files {
+            let body = jar(project, *file);
+            Mock::given(method("GET"))
+                .and(path(format!(
+                    "/files/{project}/{file}/{}",
+                    file_name(project, *file)
+                )))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_raw(body, "application/java-archive"),
+                )
+                .mount(server)
+                .await;
+        }
+    }
+
+    /// A loopback CurseForge with one root mod, its library, an optional extra,
+    /// and a root whose required dependency has nothing that fits.
+    async fn catalog() -> MockServer {
+        let server = MockServer::start().await;
+        serve_categories(&server).await;
+        serve_projects(&server).await;
+        serve_every_project_file(&server).await;
+
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/search"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                format!(
+                    r#"{{"data":[{}],"pagination":{{"totalCount":1}}}}"#,
+                    project_document(ROOT_PROJECT, "Root Mod")
+                ),
+                "application/json",
+            ))
+            .mount(&server)
+            .await;
+
+        // Anything else this fixture did not declare is a 404 rather than a
+        // hang, so a wrong request fails loudly.
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/v1/.*$"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        server
+    }
+
+    async fn serve_categories(server: &MockServer) {
+        Mock::given(method("GET"))
+            .and(path("/v1/categories"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                format!(
+                    r#"{{"data":[
+                        {{"id":{MODS_CLASS},"gameId":432,"name":"Mods","slug":"mc-mods","isClass":true}},
+                        {{"id":12,"gameId":432,"name":"Resource Packs","slug":"texture-packs","isClass":true}}
+                    ]}}"#
+                ),
+                "application/json",
+            ))
+            .mount(server)
+            .await;
+    }
+
+    /// Every project's file listing, the bytes behind each file, and the batch
+    /// endpoint an exactly pinned release is fetched through.
+    async fn serve_every_project_file(server: &MockServer) {
+        // Both root files declare the library twice and the optional extra
+        // once, so deduplication and optional handling are exercised by the
+        // ordinary install path.
+        let root_relations = root_relations_for();
+        serve_files(
+            server,
+            ROOT_PROJECT,
+            &[
+                (ROOT_NEWEST, root_relations.clone()),
+                (ROOT_OLDER, root_relations),
+            ],
+        )
+        .await;
+        serve_files(server, LIBRARY_PROJECT, &[(LIBRARY_FILE, String::new())]).await;
+        serve_files(server, OPTIONAL_PROJECT, &[(OPTIONAL_FILE, String::new())]).await;
+        serve_files(
+            server,
+            BLOCKED_PROJECT,
+            &[(BLOCKED_FILE, relation(UNFITTING_PROJECT, REQUIRED))],
+        )
+        .await;
+        // Nothing this instance can run.
+        serve_files(server, UNFITTING_PROJECT, &[]).await;
+
+        // The batch file endpoint, one mock per exact file, because an exactly
+        // pinned release asks for that file and must be answered about it.
+        for (project, file, relations) in [
+            (ROOT_PROJECT, ROOT_NEWEST, root_relations_for()),
+            (ROOT_PROJECT, ROOT_OLDER, root_relations_for()),
+            (LIBRARY_PROJECT, LIBRARY_FILE, String::new()),
+            (OPTIONAL_PROJECT, OPTIONAL_FILE, String::new()),
+        ] {
+            Mock::given(method("POST"))
+                .and(path("/v1/mods/files"))
+                .and(body_json(serde_json::json!({ "fileIds": [file] })))
+                .respond_with(ResponseTemplate::new(200).set_body_raw(
+                    format!(
+                        r#"{{"data":[{}]}}"#,
+                        file_document(server, project, file, &relations)
+                    ),
+                    "application/json",
+                ))
+                .mount(server)
+                .await;
+        }
+    }
+
+    /// Every project document, one at a time and in the batch a finished plan
+    /// asks for.
+    async fn serve_projects(server: &MockServer) {
+        const PROJECTS: &[(u32, &str)] = &[
+            (ROOT_PROJECT, "Root Mod"),
+            (LIBRARY_PROJECT, "Library"),
+            (OPTIONAL_PROJECT, "Optional Extra"),
+            (UNFITTING_PROJECT, "Absent Library"),
+            (BLOCKED_PROJECT, "Blocked Mod"),
+        ];
+
+        for (project, name) in PROJECTS {
+            Mock::given(method("GET"))
+                .and(path(format!("/v1/mods/{project}")))
+                .respond_with(ResponseTemplate::new(200).set_body_raw(
+                    format!(r#"{{"data":{}}}"#, project_document(*project, name)),
+                    "application/json",
+                ))
+                .mount(server)
+                .await;
+        }
+
+        // The batch endpoint the resolver finishes a plan with.
+        let batch: Vec<String> = PROJECTS
+            .iter()
+            .map(|(project, name)| project_document(*project, name))
+            .collect();
+        Mock::given(method("POST"))
+            .and(path("/v1/mods"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                format!(r#"{{"data":[{}]}}"#, batch.join(",")),
+                "application/json",
+            ))
+            .mount(server)
+            .await;
+    }
+
+    fn store_with_key() -> Arc<dyn ephervex_auth::CredentialStore> {
+        let store = MemoryStore::new();
+        ephervex_auth::set_curseforge_api_key(&store, &SecretString::new(FAKE_KEY))
+            .expect("store the key");
+        Arc::new(store)
+    }
+
+    fn app_against(base: &Path, server: &MockServer) -> App {
+        let mut app = App::open_at(Paths::rooted_at(base)).expect("app opens");
+        app.use_loopback_curseforge(&format!("{}/v1", server.uri()), store_with_key())
+            .expect("a loopback client");
+        app
+    }
+
+    fn neoforge_instance(app: &App) -> ephervex_model::InstanceId {
+        app.create_client_for_test(NewClient::new(
+            "CurseForge repro",
+            "1.20.1",
+            LoaderSelection::exact(LoaderKind::NeoForge, "47.1.106"),
+        ))
+        .expect("create")
+        .id
+    }
+
+    fn reporter() -> OperationReporter {
+        OperationReporter::silent("curseforge-browser-test")
+    }
+
+    fn request(project: u32) -> ModInstallRequest {
+        ModInstallRequest::new(project.to_string()).from_provider(ModProvider::CurseForge)
+    }
+
+    /// Every path under a directory, so a new namespace anywhere in it shows up.
+    fn entries(root: &Path) -> Vec<std::path::PathBuf> {
+        fn walk(directory: &Path, found: &mut Vec<std::path::PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(directory) else {
+                return;
+            };
+            for entry in entries.filter_map(Result::ok) {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, found);
+                }
+                found.push(path);
+            }
+        }
+        let mut found = Vec::new();
+        walk(root, &mut found);
+        found.sort();
+        found
+    }
+
+    #[tokio::test]
+    async fn a_search_offers_the_catalogs_mods_against_this_instances_exact_target() {
+        let server = catalog().await;
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_against(base.path(), &server);
+        let instance = neoforge_instance(&app);
+
+        let results = app
+            .search_mods(
+                instance,
+                ModProvider::CurseForge,
+                &ModSearchQuery::new("root"),
+            )
+            .await
+            .expect("a search");
+        assert_eq!(results.provider, ModProvider::CurseForge);
+        assert_eq!(results.hits.len(), 1);
+        let hit = &results.hits[0];
+        assert_eq!(hit.project.id, ROOT_PROJECT.to_string());
+        assert_eq!(
+            hit.best_version.as_ref().map(|version| version.id.as_str()),
+            Some(ROOT_NEWEST.to_string().as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn reading_the_catalog_writes_nothing_to_the_cache_directory() {
+        // The published third-party API terms forbid saving what the API
+        // returns. Asserted against the launcher's real cache root, so a
+        // metadata cache wired in later would create its namespace inside it.
+        let server = catalog().await;
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_against(base.path(), &server);
+        let instance = neoforge_instance(&app);
+        let cache_root = app.paths().cache_dir().to_path_buf();
+        let before = entries(&cache_root);
+
+        app.search_mods(
+            instance,
+            ModProvider::CurseForge,
+            &ModSearchQuery::new("root"),
+        )
+        .await
+        .expect("a search");
+        app.mod_project(
+            instance,
+            ModProvider::CurseForge,
+            &ROOT_PROJECT.to_string(),
+            false,
+        )
+        .await
+        .expect("project details");
+        app.plan_mod_installation(instance, &request(ROOT_PROJECT))
+            .await
+            .expect("a plan");
+
+        assert_eq!(
+            entries(&cache_root),
+            before,
+            "a CurseForge API response was persisted"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_exactly_chosen_file_is_installed_rather_than_the_newest() {
+        let server = catalog().await;
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_against(base.path(), &server);
+        let instance = neoforge_instance(&app);
+
+        let installed = app
+            .install_mods(
+                instance,
+                &request(ROOT_PROJECT).at_version(ROOT_OLDER.to_string()),
+                &reporter(),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("an install");
+        assert_eq!(installed.plan.root.version.id, ROOT_OLDER.to_string());
+
+        let managed = app.managed_mods(instance).expect("managed mods");
+        let root = managed
+            .iter()
+            .find(|entry| entry.project_id == ROOT_PROJECT.to_string())
+            .expect("the root mod");
+        assert_eq!(root.version_id, ROOT_OLDER.to_string());
+    }
+
+    #[tokio::test]
+    async fn an_installed_mod_retains_the_exact_curseforge_identity_it_came_from() {
+        let server = catalog().await;
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_against(base.path(), &server);
+        let instance = neoforge_instance(&app);
+
+        app.install_mods(
+            instance,
+            &request(ROOT_PROJECT),
+            &reporter(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("an install");
+
+        let recipe = app
+            .pack_recipe(instance)
+            .expect("a recipe")
+            .expect("one was written");
+        let entry = recipe
+            .managed_project(ModProvider::CurseForge, &ROOT_PROJECT.to_string())
+            .expect("the root mod");
+        let identity = entry.identity.as_ref().expect("an identity");
+        assert_eq!(identity.provider, Some(ModProvider::CurseForge));
+        assert_eq!(
+            identity.project_id.as_deref(),
+            Some(ROOT_PROJECT.to_string().as_str())
+        );
+        // CurseForge's release identifier is its file id, and both fields carry
+        // it so a reconstruction needs no second metadata query.
+        assert_eq!(
+            identity.version_id.as_deref(),
+            Some(ROOT_NEWEST.to_string().as_str())
+        );
+        assert_eq!(
+            identity.file_id.as_deref(),
+            Some(ROOT_NEWEST.to_string().as_str())
+        );
+        assert_eq!(
+            entry.hashes[0].digest(),
+            sha1_of(&jar(ROOT_PROJECT, ROOT_NEWEST))
+        );
+        assert_eq!(
+            entry.logical_path,
+            std::path::PathBuf::from("mods").join(file_name(ROOT_PROJECT, ROOT_NEWEST))
+        );
+        assert!(
+            entry
+                .downloads
+                .iter()
+                .any(|url| url.starts_with(&server.uri()))
+        );
+
+        // The jar is actually in the instance, verified against that digest.
+        let record = app.client(instance).expect("the instance");
+        let game_dir = ephervex_storage::metadata::client_game_dir(&record.root);
+        assert!(game_dir.join(&entry.logical_path).is_file());
+    }
+
+    #[tokio::test]
+    async fn a_required_dependency_resolves_to_an_exact_compatible_file() {
+        let server = catalog().await;
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_against(base.path(), &server);
+        let instance = neoforge_instance(&app);
+
+        let plan = app
+            .plan_mod_installation(instance, &request(ROOT_PROJECT))
+            .await
+            .expect("a plan");
+        assert_eq!(plan.dependencies.len(), 1, "{:?}", plan.dependencies);
+        let library = &plan.dependencies[0];
+        assert_eq!(library.version.project_id, LIBRARY_PROJECT.to_string());
+        assert_eq!(library.version.id, LIBRARY_FILE.to_string());
+    }
+
+    #[tokio::test]
+    async fn a_dependency_named_twice_is_planned_once() {
+        // Both root files declare the library twice; the graph is keyed by
+        // project, so it appears once and is installed once.
+        let server = catalog().await;
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_against(base.path(), &server);
+        let instance = neoforge_instance(&app);
+
+        let installed = app
+            .install_mods(
+                instance,
+                &request(ROOT_PROJECT),
+                &reporter(),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("an install");
+        let library_entries = installed
+            .plan
+            .all_mods()
+            .into_iter()
+            .filter(|planned| planned.version.project_id == LIBRARY_PROJECT.to_string())
+            .count();
+        assert_eq!(library_entries, 1);
+
+        let managed = app.managed_mods(instance).expect("managed mods");
+        assert_eq!(
+            managed
+                .iter()
+                .filter(|entry| entry.project_id == LIBRARY_PROJECT.to_string())
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn an_optional_dependency_is_offered_rather_than_installed() {
+        let server = catalog().await;
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_against(base.path(), &server);
+        let instance = neoforge_instance(&app);
+
+        let installed = app
+            .install_mods(
+                instance,
+                &request(ROOT_PROJECT),
+                &reporter(),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("an install");
+        assert!(
+            installed
+                .plan
+                .optional
+                .iter()
+                .any(|candidate| candidate.project_id == OPTIONAL_PROJECT.to_string()),
+            "the optional extra should be offered"
+        );
+        let managed = app.managed_mods(instance).expect("managed mods");
+        assert!(
+            !managed
+                .iter()
+                .any(|entry| entry.project_id == OPTIONAL_PROJECT.to_string()),
+            "an optional dependency must not install itself"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_required_dependency_with_no_compatible_file_fails_the_whole_install() {
+        let server = catalog().await;
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_against(base.path(), &server);
+        let instance = neoforge_instance(&app);
+
+        let error = app
+            .install_mods(
+                instance,
+                &request(BLOCKED_PROJECT),
+                &reporter(),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("nothing fits");
+        assert!(
+            matches!(
+                error,
+                crate::error::CoreError::ModPlatform(ModPlatformError::NoCompatibleVersion {
+                    ref project_id,
+                    ..
+                }) if project_id == &UNFITTING_PROJECT.to_string()
+            ),
+            "{error:?}"
+        );
+        // Atomic: the root the user asked for is not installed on its own.
+        assert!(app.managed_mods(instance).expect("managed mods").is_empty());
+    }
+
+    #[tokio::test]
+    async fn one_catalogs_installed_mods_are_not_offered_to_another_as_already_present() {
+        // Project ids belong to the catalog they were read from, so a Modrinth
+        // browse must not believe a CurseForge project of the same name is
+        // already installed.
+        let server = catalog().await;
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_against(base.path(), &server);
+        let instance = neoforge_instance(&app);
+
+        app.install_mods(
+            instance,
+            &request(ROOT_PROJECT),
+            &reporter(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("an install");
+
+        let recipe = app.pack_recipe(instance).expect("a recipe");
+        assert!(
+            crate::mods::installed_projects_of(recipe.as_ref(), ModProvider::Modrinth).is_empty()
+        );
+        assert_eq!(
+            crate::mods::installed_projects_of(recipe.as_ref(), ModProvider::CurseForge).len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn browsing_without_a_key_reports_the_missing_credential() {
+        let server = catalog().await;
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = App::open_at(Paths::rooted_at(base.path())).expect("app opens");
+        app.use_loopback_curseforge(
+            &format!("{}/v1", server.uri()),
+            Arc::new(MemoryStore::new()),
+        )
+        .expect("a loopback client");
+        let instance = neoforge_instance(&app);
+
+        let error = app
+            .search_mods(
+                instance,
+                ModProvider::CurseForge,
+                &ModSearchQuery::new("root"),
+            )
+            .await
+            .expect_err("no key is configured");
+        assert!(
+            matches!(
+                error,
+                crate::error::CoreError::ModPlatform(ModPlatformError::CredentialMissing {
+                    provider: ModProvider::CurseForge
+                })
+            ),
+            "{error:?}"
+        );
+    }
+}

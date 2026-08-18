@@ -482,6 +482,158 @@ pub fn result_is_current(produced_for: &str, selected: &str) -> bool {
     !selected.is_empty() && produced_for == selected
 }
 
+/// What the mod browser is currently waiting for.
+///
+/// Every field is what was *submitted*, never what a control currently shows: a
+/// user keeps typing and switches catalog while an answer is in flight, and an
+/// answer belongs to the question that was actually asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BrowserQuestion<'a> {
+    pub instance: &'a str,
+    pub provider: &'a str,
+    /// The submitted search text, or the project a review was opened for.
+    pub reference: &'a str,
+}
+
+/// What switching the mod browser's catalog resets every piece of in-flight
+/// search state to.
+///
+/// Named as one value, applied together, rather than as separate `ui.set_*`
+/// calls decided ad hoc at the call site: a search still in flight for the
+/// catalog just left behind has to lose every way it could land on the one
+/// now selected, in the same step that selects it, or a late answer for the
+/// old catalog can still pass the staleness guard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogSwitchReset {
+    /// The provider an arriving answer is now checked against. A search still
+    /// carrying the one just left behind can never match this again.
+    pub provider: String,
+    /// The submitted-search identity, put back to nothing.
+    ///
+    /// Without this, switching away and back to the same catalog before an
+    /// old answer returns reinstates the exact question it was waiting on
+    /// (same instance, same provider, same text, same offset), and the old
+    /// answer matches again. The submitted identity has to be retired for
+    /// good, not just made momentarily wrong, so a switch back does not
+    /// resurrect it. The visible query field is a different piece of state
+    /// and keeps whatever the user typed.
+    pub submitted: String,
+    /// Never left `true`: the newly selected catalog must be searchable
+    /// immediately, not stuck disabled behind whatever was still loading for
+    /// the catalog just left.
+    pub loading: bool,
+    /// The offset the browser is waiting for a page at, put back to the
+    /// start: the old catalog's continuation belonged to a question that no
+    /// longer exists, and carrying it over would validate a page that was
+    /// never asked for on the new catalog.
+    pub requested_offset: i32,
+    /// The request the browser is waiting on, put back to nothing.
+    ///
+    /// `submitted` alone cannot survive a round trip: switching away and back
+    /// clears it, but a later search for the exact same words fills it back
+    /// in with the exact same value, and at that point instance, provider,
+    /// query, and offset can all agree with an old request again. This is
+    /// the opaque per-request identity nothing else can reconstruct, so it
+    /// has to be retired here too rather than left to be overwritten by
+    /// coincidence.
+    pub request_id: String,
+}
+
+impl CatalogSwitchReset {
+    #[must_use]
+    pub fn for_provider(provider: &str) -> Self {
+        Self {
+            provider: provider.to_owned(),
+            submitted: String::new(),
+            loading: false,
+            requested_offset: 0,
+            request_id: String::new(),
+        }
+    }
+}
+
+/// Whether an answer belongs to the question the browser is waiting on.
+///
+/// All three have to agree. The catalog is not optional: two catalogs spell
+/// project ids their own way and answer the same words differently, so a page
+/// that matched only the text could replace a page from the other one.
+#[must_use]
+pub fn browser_answer_is_current(
+    waiting: BrowserQuestion<'_>,
+    answer: BrowserQuestion<'_>,
+) -> bool {
+    result_is_current(answer.instance, waiting.instance)
+        && answer.provider == waiting.provider
+        && answer.reference == waiting.reference
+}
+
+/// Whether one page of search results belongs where the browser is currently
+/// waiting for its next page.
+///
+/// Beyond identifying the question, a page has to land at the offset the
+/// browser actually asked for, tracked independently of how many rows ended up
+/// on screen: a provider can consume more of a page than this launcher goes on
+/// to display, so comparing against the visible row count would reject the
+/// very page that was requested. A first page arriving after the user has
+/// already loaded more is rejected because its offset no longer matches what
+/// is expected, and a later page arriving after a fresh search is rejected the
+/// same way, because the fresh search reset what is expected back to zero.
+///
+/// `request_id` is checked on top of all of that, not instead of it: a search
+/// resubmitted for the exact same instance, catalog, text, and offset (typing
+/// the same query again, or switching catalog away and back before an old
+/// answer returns and then asking the same thing) makes the other four fields
+/// agree with an old, unrelated request. Only the opaque per-request identity
+/// tells the two apart, so an answer belongs here only when the request that
+/// produced it is the one this specific answer is being checked against.
+#[must_use]
+pub fn search_page_belongs(
+    waiting: BrowserQuestion<'_>,
+    answer: BrowserQuestion<'_>,
+    offset: u32,
+    expected_offset: u32,
+    request_id: &str,
+    expected_request_id: &str,
+) -> bool {
+    browser_answer_is_current(waiting, answer)
+        && offset == expected_offset
+        && request_id == expected_request_id
+}
+
+/// Whether a submitted mod search has actually finished, successfully.
+///
+/// Distinct from "quiet": a search that is still loading, was never
+/// submitted, or ended in a notice (a credential problem, an unreachable
+/// catalog) has not finished successfully, and nothing that depends on the
+/// outcome can be claimed yet.
+#[must_use]
+pub const fn mod_search_finished_successfully(
+    loading: bool,
+    ran: bool,
+    notice_is_empty: bool,
+) -> bool {
+    !loading && ran && notice_is_empty
+}
+
+/// Whether the mod browser has proven there is nothing that matches, as
+/// opposed to merely having nothing to show yet.
+///
+/// A raw provider page can be consumed entirely by defensive filtering (a
+/// class this launcher cannot confirm as a Mod, a file listing it cannot
+/// read) while later raw pages still exist. Zero visible rows is therefore
+/// not enough on its own: the final "nothing matches" claim only holds once
+/// the search actually finished and the provider has no further page to
+/// offer. While a continuation remains, the honest state is "nothing shown
+/// yet", not "nothing matches", and Load More stays the way to find out.
+#[must_use]
+pub const fn mod_browser_has_no_results(
+    finished_successfully: bool,
+    visible_rows: usize,
+    has_continuation: bool,
+) -> bool {
+    finished_successfully && visible_rows == 0 && !has_continuation
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
@@ -1149,5 +1301,393 @@ mod import_tests {
             ImportErrorKind::from_message_id("gui-import-resolution-unavailable"),
             ImportErrorKind::default()
         );
+    }
+}
+
+/// The rules that keep a late catalog answer from landing on a question the
+/// browser has moved on from.
+#[cfg(test)]
+mod browser_staleness_tests {
+    use super::*;
+
+    /// The identity of one browser question.
+    fn question<'a>(
+        instance: &'a str,
+        provider: &'a str,
+        reference: &'a str,
+    ) -> BrowserQuestion<'a> {
+        BrowserQuestion {
+            instance,
+            provider,
+            reference,
+        }
+    }
+
+    /// A request id neither side of a check cares about, for tests about one
+    /// of the other identity fields. Equal on both sides, the same way an
+    /// unrelated test passes matching offsets: the dimension being tested is
+    /// isolated by holding every other one still.
+    const IGNORED_REQUEST_ID: &str = "ignored";
+
+    #[test]
+    fn a_late_page_for_a_superseded_search_cannot_replace_the_newer_one() {
+        // Search A starts, search B starts, A finishes last. A must not land.
+        let waiting = question("client-1", "curseforge", "create");
+        assert!(!search_page_belongs(
+            waiting,
+            question("client-1", "curseforge", "jei"),
+            0,
+            0,
+            IGNORED_REQUEST_ID,
+            IGNORED_REQUEST_ID,
+        ));
+        assert!(search_page_belongs(
+            waiting,
+            question("client-1", "curseforge", "create"),
+            0,
+            0,
+            IGNORED_REQUEST_ID,
+            IGNORED_REQUEST_ID,
+        ));
+    }
+
+    #[test]
+    fn the_same_words_asked_of_another_catalog_are_a_different_question() {
+        let waiting = question("client-1", "curseforge", "jei");
+        assert!(!search_page_belongs(
+            waiting,
+            question("client-1", "modrinth", "jei"),
+            0,
+            0,
+            IGNORED_REQUEST_ID,
+            IGNORED_REQUEST_ID,
+        ));
+    }
+
+    #[test]
+    fn a_resubmitted_identical_search_is_told_apart_only_by_its_request_id() {
+        // Request #1: Modrinth "jei" at offset 0. The user then switches to
+        // CurseForge and back to Modrinth before it returns, and submits a
+        // genuinely fresh search for the exact same words. Instance,
+        // provider, query, and offset now agree between #1 and #2; only the
+        // request id still tells them apart.
+        let request_1 = question("client-1", "modrinth", "jei");
+        let request_1_id = "1";
+        let request_2 = question("client-1", "modrinth", "jei");
+        let request_2_id = "2";
+
+        // What the browser is waiting on after submitting #2.
+        let waiting = request_2;
+        let expected_request_id = request_2_id;
+
+        // 1. The fresh answer #2 is accepted.
+        assert!(search_page_belongs(
+            waiting,
+            request_2,
+            0,
+            0,
+            request_2_id,
+            expected_request_id,
+        ));
+
+        // 2. The old answer #1, arriving after #2 was submitted, is rejected
+        // even though instance, provider, query, and offset all agree with
+        // what the browser is waiting on.
+        assert!(!search_page_belongs(
+            waiting,
+            request_1,
+            0,
+            0,
+            request_1_id,
+            expected_request_id,
+        ));
+
+        // 3. The same check, unchanged, is what protects the browser whether
+        // #1 arrives while #2 is still in flight or only after #2 has
+        // already completed and its rows are already on screen: nothing
+        // about accepting #2 makes the expectation any less specific, so #1
+        // is still rejected exactly the same way.
+        assert!(!search_page_belongs(
+            waiting,
+            request_1,
+            0,
+            0,
+            request_1_id,
+            expected_request_id,
+        ));
+
+        // 4. A "load more" response is rejected on request id alone, even
+        // when its own provider/query/offset tuple matches exactly.
+        let load_more_answer = question("client-1", "modrinth", "jei");
+        assert!(!search_page_belongs(
+            waiting,
+            load_more_answer,
+            10,
+            10,
+            "some-other-load-more-request",
+            expected_request_id,
+        ));
+
+        // 5. The exact expected request id, paired with the correct existing
+        // tuple, is accepted.
+        assert!(search_page_belongs(
+            waiting,
+            request_2,
+            0,
+            0,
+            expected_request_id,
+            expected_request_id,
+        ));
+    }
+
+    #[test]
+    fn switching_catalog_resets_every_field_a_stale_answer_could_slip_past() {
+        // A Modrinth "jei" search is still in flight when the user switches
+        // the catalog chip to CurseForge, then switches back to Modrinth
+        // before that old search ever returns. No new search is submitted
+        // anywhere in between.
+        let modrinth_search_in_flight = question("client-1", "modrinth", "jei");
+        let request_1_id = "1";
+
+        let switch_to_curseforge = CatalogSwitchReset::for_provider("curseforge");
+        assert_eq!(switch_to_curseforge.provider, "curseforge");
+        assert_eq!(
+            switch_to_curseforge.submitted, "",
+            "the submitted-search identity is retired, not merely made \
+             momentarily wrong: a later switch back must not resurrect it"
+        );
+        assert_eq!(
+            switch_to_curseforge.request_id, "",
+            "the expected request id is retired the same way, in case a later \
+             search resubmits words identical enough to fill submitted back in"
+        );
+        assert!(
+            !switch_to_curseforge.loading,
+            "the newly selected catalog must be searchable immediately"
+        );
+        assert_eq!(
+            switch_to_curseforge.requested_offset, 0,
+            "the old catalog's pagination continuation does not carry over"
+        );
+
+        // What the first switch leaves the browser waiting on: nothing
+        // submitted yet, checked against CurseForge, offset back at zero, no
+        // request id that could still match anything.
+        let after_first_switch = question(
+            "client-1",
+            &switch_to_curseforge.provider,
+            &switch_to_curseforge.submitted,
+        );
+        let offset_after_first_switch =
+            u32::try_from(switch_to_curseforge.requested_offset).unwrap_or(0);
+
+        // A first-page Modrinth answer arriving at offset zero (the same
+        // offset the reset now expects) still must not land.
+        assert!(!search_page_belongs(
+            after_first_switch,
+            modrinth_search_in_flight,
+            0,
+            offset_after_first_switch,
+            request_1_id,
+            &switch_to_curseforge.request_id,
+        ));
+        // A Modrinth "load more" answer, mid-page, is rejected doubly: wrong
+        // catalog and an offset the switch already moved past.
+        assert!(!search_page_belongs(
+            after_first_switch,
+            modrinth_search_in_flight,
+            20,
+            offset_after_first_switch,
+            request_1_id,
+            &switch_to_curseforge.request_id,
+        ));
+
+        // A fresh CurseForge search submitted right after the first switch is
+        // not stale: it matches exactly what a real submission would set, so
+        // the newly selected catalog is searchable immediately.
+        let curseforge_search = question("client-1", "curseforge", "jei");
+        assert!(search_page_belongs(
+            curseforge_search,
+            curseforge_search,
+            0,
+            0,
+            IGNORED_REQUEST_ID,
+            IGNORED_REQUEST_ID,
+        ));
+
+        // The user switches back to Modrinth before the old "jei" search
+        // ever returns. If the submitted identity had only been made
+        // momentarily wrong instead of retired, this second switch would
+        // reinstate exactly the question that old search is still waiting
+        // to answer.
+        let switch_back_to_modrinth = CatalogSwitchReset::for_provider("modrinth");
+        assert_eq!(switch_back_to_modrinth.provider, "modrinth");
+        assert_eq!(switch_back_to_modrinth.submitted, "");
+        assert_eq!(switch_back_to_modrinth.request_id, "");
+        let after_switch_back = question(
+            "client-1",
+            &switch_back_to_modrinth.provider,
+            &switch_back_to_modrinth.submitted,
+        );
+        let offset_after_switch_back =
+            u32::try_from(switch_back_to_modrinth.requested_offset).unwrap_or(0);
+
+        // The old Modrinth answer is still rejected on the roundtrip: the
+        // catalog matches again, but the submitted text and request id do
+        // not, because both were retired rather than merely superseded.
+        assert!(!search_page_belongs(
+            after_switch_back,
+            modrinth_search_in_flight,
+            0,
+            offset_after_switch_back,
+            request_1_id,
+            &switch_back_to_modrinth.request_id,
+        ));
+
+        // A fresh Modrinth "jei" search submitted after switching back is not
+        // stale: it is a genuinely new question, indistinguishable in
+        // content from the old one but not confused with it, and lands
+        // normally.
+        let fresh_modrinth_search = question("client-1", "modrinth", "jei");
+        assert!(search_page_belongs(
+            fresh_modrinth_search,
+            fresh_modrinth_search,
+            0,
+            0,
+            IGNORED_REQUEST_ID,
+            IGNORED_REQUEST_ID,
+        ));
+    }
+
+    #[test]
+    fn an_answer_for_another_instance_is_discarded() {
+        let waiting = question("client-1", "curseforge", "jei");
+        assert!(!search_page_belongs(
+            waiting,
+            question("client-2", "curseforge", "jei"),
+            0,
+            0,
+            IGNORED_REQUEST_ID,
+            IGNORED_REQUEST_ID,
+        ));
+        // Nothing selected at all accepts nothing.
+        assert!(!browser_answer_is_current(
+            question("", "curseforge", "jei"),
+            question("", "curseforge", "jei")
+        ));
+    }
+
+    #[test]
+    fn a_page_only_lands_at_the_offset_the_browser_is_expecting() {
+        let waiting = question("client-1", "curseforge", "jei");
+        let answer = question("client-1", "curseforge", "jei");
+        // A "load more" was sent for offset ten, and this is its answer.
+        assert!(search_page_belongs(
+            waiting,
+            answer,
+            10,
+            10,
+            IGNORED_REQUEST_ID,
+            IGNORED_REQUEST_ID,
+        ));
+        // A re-delivered first page does not match what is now expected, even
+        // though it identifies the same question.
+        assert!(!search_page_belongs(
+            waiting,
+            answer,
+            0,
+            10,
+            IGNORED_REQUEST_ID,
+            IGNORED_REQUEST_ID,
+        ));
+        // A late "load more" page for offset ten arriving after a fresh search
+        // reset the expectation back to zero must not land either, regardless
+        // of how many raw entries the provider had consumed to build it.
+        assert!(!search_page_belongs(
+            waiting,
+            answer,
+            10,
+            0,
+            IGNORED_REQUEST_ID,
+            IGNORED_REQUEST_ID,
+        ));
+    }
+
+    #[test]
+    fn a_late_review_cannot_populate_the_project_a_user_has_moved_on_to() {
+        // Project A is reviewed, then project B; A's answer arrives last and
+        // must not fill in B's confirmation.
+        let waiting = question("client-1", "curseforge", "238222");
+        assert!(!browser_answer_is_current(
+            waiting,
+            question("client-1", "curseforge", "238223")
+        ));
+        // The same project id on the other catalog is a different project.
+        assert!(!browser_answer_is_current(
+            waiting,
+            question("client-1", "modrinth", "238222")
+        ));
+        assert!(browser_answer_is_current(
+            waiting,
+            question("client-1", "curseforge", "238222")
+        ));
+    }
+}
+
+/// Whether the mod browser's final "nothing matches" state has actually been
+/// proven, as opposed to merely having nothing on screen yet.
+#[cfg(test)]
+mod mod_browser_empty_state_tests {
+    use super::*;
+
+    /// A search that finished cleanly: not loading, ran, nothing failed.
+    fn finished(visible_rows: usize, has_continuation: bool) -> bool {
+        mod_browser_has_no_results(true, visible_rows, has_continuation)
+    }
+
+    #[test]
+    fn zero_rows_with_a_continuation_is_not_yet_a_final_no_results() {
+        // A raw page can be consumed entirely by defensive filtering while
+        // later raw pages still exist; nothing on screen is not the same
+        // claim as nothing matching, and Load More is still how to find out.
+        assert!(!finished(0, true));
+    }
+
+    #[test]
+    fn zero_rows_with_no_continuation_is_the_final_no_results() {
+        assert!(finished(0, false));
+    }
+
+    #[test]
+    fn rows_on_screen_are_never_reported_as_no_results() {
+        assert!(!finished(1, false));
+        assert!(!finished(1, true));
+    }
+
+    #[test]
+    fn only_a_search_that_finished_successfully_can_reach_the_final_state() {
+        assert!(!mod_browser_has_no_results(false, 0, false));
+    }
+
+    #[test]
+    fn loading_never_counts_as_finished() {
+        assert!(!mod_search_finished_successfully(true, true, true));
+    }
+
+    #[test]
+    fn never_submitted_never_counts_as_finished() {
+        assert!(!mod_search_finished_successfully(false, false, true));
+    }
+
+    #[test]
+    fn a_notice_takes_priority_over_a_finished_search() {
+        // A credential problem or an unreachable catalog is its own state
+        // and outranks a "nothing matches" claim.
+        assert!(!mod_search_finished_successfully(false, true, false));
+    }
+
+    #[test]
+    fn not_loading_ran_and_no_notice_is_what_finished_means() {
+        assert!(mod_search_finished_successfully(false, true, true));
     }
 }
