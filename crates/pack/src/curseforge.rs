@@ -387,16 +387,22 @@ struct RawModLoader {
 
 /// One declared file, named only by ids.
 ///
-/// `required` has no default. The export format defines no meaning for its
-/// absence, and choosing one would decide on a pack author's behalf whether a
-/// file is installed.
+/// `required` is optional in the export format, and an absent value means the
+/// same as `required: true`: the file is part of the pack as installed. Only
+/// an explicit `false` marks it as an optional pack choice.
 #[derive(Debug, Deserialize)]
 struct RawFile {
     #[serde(rename = "projectID")]
     project_id: u32,
     #[serde(rename = "fileID")]
     file_id: u32,
+    #[serde(default = "default_required")]
     required: bool,
+}
+
+/// CurseForge's own default for an omitted `required` flag: included.
+const fn default_required() -> bool {
+    true
 }
 
 #[cfg(test)]
@@ -707,10 +713,41 @@ mod tests {
     }
 
     #[test]
-    fn an_entry_with_no_inclusion_flag_is_refused_rather_than_assumed_required() {
-        let error = parse_manifest(&manifest(FORGE, r#"{"projectID": 1, "fileID": 2}"#))
-            .expect_err("must refuse");
-        assert!(matches!(error, PackError::ManifestInvalid { .. }));
+    fn an_entry_with_no_inclusion_flag_defaults_to_required_and_included() {
+        let parsed = parse_manifest(&manifest(FORGE, r#"{"projectID": 1, "fileID": 2}"#))
+            .expect("an omitted `required` flag defaults to included, per the export format");
+        assert_eq!(parsed.pending.len(), 1);
+        assert_eq!(
+            parsed.pending[0].client,
+            SideRequirement::Required,
+            "an omitted flag means the same as `required: true`"
+        );
+        assert_eq!(
+            parsed.pending[0].server,
+            SideRequirement::Unknown,
+            "inclusion says nothing about server support"
+        );
+    }
+
+    #[test]
+    fn an_omitted_flag_and_an_explicit_false_stay_distinguishable_in_one_manifest() {
+        let parsed = parse_manifest(&manifest(
+            FORGE,
+            r#"{"projectID": 1, "fileID": 2},
+               {"projectID": 3, "fileID": 4, "required": false}"#,
+        ))
+        .expect("valid");
+        assert_eq!(parsed.pending.len(), 2);
+        assert_eq!(
+            parsed.pending[0].client,
+            SideRequirement::Required,
+            "the entry with no flag is included"
+        );
+        assert_eq!(
+            parsed.pending[1].client,
+            SideRequirement::Optional,
+            "the entry with an explicit `false` stays optional"
+        );
     }
 
     #[test]
