@@ -45,7 +45,7 @@ mod dto;
 
 pub use api::{
     CURSEFORGE_API_BASE, CURSEFORGE_API_KEY_HEADER, CurseForgeApi, CurseForgeFileRelease,
-    CurseForgeOperation, MINECRAFT_GAME_ID, credential_refusal,
+    CurseForgeOperation, CurseForgeProjectClasses, MINECRAFT_GAME_ID, credential_refusal,
 };
 pub use credential::{ConfiguredApiKey, CurseForgeCredentialSource};
 pub use dto::{CurseForgeGame, CurseForgeProject};

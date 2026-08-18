@@ -18,6 +18,7 @@
 //! module documentation on [`super`] for why that is a requirement rather than
 //! an omission.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,8 +34,8 @@ use tracing::debug;
 
 use super::credential::{CurseForgeCredentialSource, missing};
 use super::dto::{
-    ApiEnvelope, CurseForgeFileDocument, CurseForgeFileHash, CurseForgeGame, CurseForgeProject,
-    HASH_ALGO_SHA1,
+    ApiEnvelope, CurseForgeCategoryClass, CurseForgeFileDocument, CurseForgeFileHash,
+    CurseForgeGame, CurseForgeProject, HASH_ALGO_SHA1,
 };
 use crate::error::{ModPlatformError, ModPlatformResult};
 use crate::model::ModFile;
@@ -47,6 +48,19 @@ pub const CURSEFORGE_API_BASE: &str = "https://api.curseforge.com/v1";
 /// A published, stable identifier: every Minecraft query on this API carries
 /// it, and it is what makes a lookup mean "Minecraft" rather than "some game".
 pub const MINECRAFT_GAME_ID: u32 = 432;
+
+/// The provider-returned slug this launcher looks for to identify Minecraft's
+/// top-level "Mods" project class.
+///
+/// Neither this slug nor a class's numeric id is published by CurseForge as a
+/// guaranteed API constant. What the documented `GET /v1/categories` endpoint
+/// does return, for the categories it currently lists, is a `slug` alongside
+/// each class's `id` and `name`; this is the Minecraft Mods class's slug as
+/// CurseForge currently serves it. [`CurseForgeOperation::project_classes`]
+/// matches against it at request time rather than assuming any numeric id,
+/// and if a future response no longer names a class this way, resolution
+/// fails closed instead of guessing a number.
+const MODS_CLASS_SLUG: &str = "mc-mods";
 
 /// The header the third-party API authenticates with.
 ///
@@ -300,6 +314,66 @@ impl CurseForgeOperation<'_> {
         &self.key
     }
 
+    /// The game's top-level project classes, this request's own answer.
+    ///
+    /// `GET /v1/categories?gameId={game}&classesOnly=true` lists every
+    /// top-level class the game currently has. Not cached beyond the caller: a
+    /// second operation asks again rather than trusting values this one
+    /// happened to see.
+    pub async fn project_classes(
+        &self,
+        game_id: u32,
+        cancel: &CancellationToken,
+    ) -> ModPlatformResult<CurseForgeProjectClasses> {
+        let mut url = self.api.endpoint(&["categories"])?;
+        url.query_pairs_mut()
+            .append_pair("gameId", &game_id.to_string())
+            .append_pair("classesOnly", "true");
+        let classes: Vec<CurseForgeCategoryClass> =
+            self.api.get_with_key(&url, &self.key, cancel).await?;
+        let mods = classes
+            .iter()
+            .find(|class| class.slug == MODS_CLASS_SLUG)
+            .map(|class| class.id)
+            .ok_or_else(|| ModPlatformError::ResponseInvalid {
+                provider: ModProvider::CurseForge,
+                detail: format!(
+                    "game {game_id} has no top-level category class named `{MODS_CLASS_SLUG}`"
+                ),
+            })?;
+        let names = classes
+            .into_iter()
+            .map(|class| (class.id, class.name))
+            .collect();
+        Ok(CurseForgeProjectClasses { mods, names })
+    }
+
+    /// One project's full metadata, including the class it belongs to.
+    ///
+    /// `GET /v1/mods/{modId}`. Distinct from [`CurseForgeApi::project`]: that
+    /// one exists for a single unauthenticated-feeling credential check and
+    /// reads the secret store on every call, which an operation classifying a
+    /// pack's many distinct projects must not do.
+    pub async fn project(
+        &self,
+        project: CurseForgeProjectId,
+        cancel: &CancellationToken,
+    ) -> ModPlatformResult<CurseForgeProject> {
+        let url = self.api.endpoint(&["mods", &project.to_string()])?;
+        match self.api.get_with_key(&url, &self.key, cancel).await {
+            Ok(document) => Ok(document),
+            // A 404 here means this id names nothing, which is worth saying
+            // rather than reporting as an outage.
+            Err(ModPlatformError::HttpStatus { status, .. }) if status == StatusCode::NOT_FOUND => {
+                Err(ModPlatformError::ProjectUnknown {
+                    provider: ModProvider::CurseForge,
+                    reference: project.to_string(),
+                })
+            }
+            Err(other) => Err(other),
+        }
+    }
+
     /// One exact file of one exact project.
     ///
     /// `GET /v1/mods/{modId}/files/{fileId}` — the endpoint that answers about
@@ -337,6 +411,39 @@ impl CurseForgeOperation<'_> {
                 Err(other) => return Err(other),
             };
         normalize_file(project, file, document)
+    }
+}
+
+/// One game's top-level project classes, as one [`CurseForgeOperation::project_classes`]
+/// request answered.
+///
+/// Answers exactly the two things a project-class check needs: whether a
+/// given class id is the Mods class, and, for a project that turns out to
+/// belong to some other class, what CurseForge itself calls that class, so a
+/// refusal can name the *class*, never the unrelated project's own display
+/// name.
+#[derive(Debug, Clone)]
+pub struct CurseForgeProjectClasses {
+    mods: u32,
+    names: HashMap<u32, String>,
+}
+
+impl CurseForgeProjectClasses {
+    /// Whether this class id is the game's Mods class.
+    #[must_use]
+    pub fn is_mods(&self, class_id: u32) -> bool {
+        class_id == self.mods
+    }
+
+    /// The provider-returned name of a top-level class this response listed,
+    /// if any of them carried this id.
+    ///
+    /// `None` for a class id this response never named: a project reporting
+    /// one is not resolved to a guessed name, and stays for the caller to
+    /// fail closed on.
+    #[must_use]
+    pub fn name_of(&self, class_id: u32) -> Option<&str> {
+        self.names.get(&class_id).map(String::as_str)
     }
 }
 

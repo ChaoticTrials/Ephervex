@@ -951,7 +951,7 @@ error-mod-project-unknown = No such mod.
 .action = Check the project id or slug. Ephervex looked for { $reference }.
 
 error-mod-project-type-unsupported = That is not a mod.
-.action = { $reference } is a { $project_type }. Modpacks are imported rather than installed into an existing instance.
+.action = { $reference } has type "{ $project_type }". Modpacks are imported rather than installed into an existing instance.
 
 error-mod-version-unknown = No such version.
 

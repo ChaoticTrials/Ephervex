@@ -81,7 +81,7 @@ async fn a_project_lookup_reads_the_numeric_identity_the_rest_of_the_api_uses() 
         .and(header(API_KEY_HEADER, FAKE_KEY))
         .respond_with(ResponseTemplate::new(200).set_body_raw(
             r#"{"data":{"id":238222,"gameId":432,"name":"Just Enough Items",
-                "slug":"jei","summary":"View items and recipes"}}"#,
+                "slug":"jei","summary":"View items and recipes","classId":6}}"#,
             "application/json",
         ))
         .mount(&server)

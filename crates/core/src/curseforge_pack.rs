@@ -55,7 +55,8 @@ use std::sync::{Arc, OnceLock};
 
 use ephervex_download::{AuthenticatedSource, DomainAllowlist, DownloadManager, DownloaderConfig};
 use ephervex_mod_platform::{
-    CURSEFORGE_API_KEY_HEADER, CurseForgeFileRelease, CurseForgeOperation, ModPlatformError,
+    CURSEFORGE_API_KEY_HEADER, CurseForgeFileRelease, CurseForgeOperation, CurseForgeProject,
+    CurseForgeProjectClasses, MINECRAFT_GAME_ID, ModPlatformError,
 };
 use ephervex_model::{CurseForgeFileId, CurseForgeProjectId, ModOrigin, ModProvider, SecretString};
 use ephervex_pack::{
@@ -136,6 +137,8 @@ impl App {
         if analysis.pending.is_empty() {
             return Ok(credential);
         }
+        validate_project_classes(&operation, &analysis.pending, cancel).await?;
+
         let pending = std::mem::take(&mut analysis.pending);
         let resolved = match resolve_files(&operation, &pending, &hosts, cancel).await {
             Ok(resolved) => resolved,
@@ -384,6 +387,99 @@ fn unusable_downloader(source: ephervex_download::DownloadError) -> PackError {
     }
 }
 
+/// Confirms every project a manifest declares belongs to CurseForge's Mods
+/// class, before any file is fetched.
+///
+/// Ephervex v1 manages Mods only. A CurseForge manifest names its files by
+/// project id alone, and nothing stops a project id from naming a Resource
+/// Pack, a World, or any other class of content: those are real CurseForge
+/// project classes, and none of them is a mod. Materializing one under
+/// `mods/` as though it were would install something the pack's own author
+/// never placed there. The whole import is refused rather than skipping the
+/// entry it cannot place: a pack missing one file it declared is not the pack
+/// its manifest describes.
+///
+/// Deduplicated by project, the same as [`resolve_files`] deduplicates by
+/// file: a pack that declares one project's optional and required files
+/// together asks about that project once.
+async fn validate_project_classes(
+    operation: &CurseForgeOperation<'_>,
+    pending: &[PendingProviderFile],
+    cancel: &CancellationToken,
+) -> CoreResult<()> {
+    let mut projects: Vec<CurseForgeProjectId> = pending
+        .iter()
+        .map(|entry| declared_ids(entry).map(|(project, _)| project))
+        .collect::<CoreResult<_>>()?;
+    projects.sort_unstable();
+    projects.dedup();
+
+    // Discovered fresh for this operation. The numeric id behind "Mods" is
+    // provider metadata, not something this launcher is allowed to assume.
+    let classes = operation.project_classes(MINECRAFT_GAME_ID, cancel).await?;
+
+    let classified: Vec<CurseForgeProject> = futures_util::stream::iter(
+        projects
+            .iter()
+            .map(|project| operation.project(*project, cancel)),
+    )
+    .buffered(LOOKUP_CONCURRENCY)
+    .collect::<Vec<_>>()
+    .await
+    .into_iter()
+    .collect::<Result<_, ModPlatformError>>()?;
+
+    for project in classified {
+        if let Some(error) = rejection_for(&project, &classes) {
+            return Err(error.into());
+        }
+    }
+    Ok(())
+}
+
+/// The typed failure for one classified project, or `None` if it is a Mod.
+///
+/// Three outcomes, none of which trusts the project's own display name to
+/// stand in for its class:
+///
+/// - a known non-Mod class is named by the class's own provider-returned
+///   name, from the same `GET /v1/categories` response the Mods class id
+///   came from;
+/// - a class id the categories response never listed is not guessed at:
+///   this build cannot say what it is, so it fails closed the same as a
+///   response this build could not otherwise use;
+/// - no reported class at all (`classId` is documented as nullable) is the
+///   same failure: a project this launcher cannot confirm is a Mod is never
+///   installed as though it were one.
+fn rejection_for(
+    project: &CurseForgeProject,
+    classes: &CurseForgeProjectClasses,
+) -> Option<ModPlatformError> {
+    match project.class_id {
+        Some(class_id) if classes.is_mods(class_id) => None,
+        Some(class_id) => Some(match classes.name_of(class_id) {
+            Some(name) => ModPlatformError::ProjectTypeUnsupported {
+                reference: project.id.to_string(),
+                project_type: name.to_owned(),
+            },
+            None => ModPlatformError::ResponseInvalid {
+                provider: ModProvider::CurseForge,
+                detail: format!(
+                    "project {} reports class {class_id}, which the game's category classes did not list",
+                    project.id
+                ),
+            },
+        }),
+        None => Some(ModPlatformError::ResponseInvalid {
+            provider: ModProvider::CurseForge,
+            detail: format!(
+                "project {} reports no project class, so Ephervex cannot confirm it is a mod",
+                project.id
+            ),
+        }),
+    }
+}
+
 /// Looks up every declared file, deduplicated and with bounded concurrency.
 ///
 /// Returns entries in the pack's own order, so the recipe reads the way the
@@ -581,6 +677,15 @@ mod tests {
 
     /// A CurseForge export declaring one required and one optional file.
     fn export_manifest() -> Vec<u8> {
+        export_manifest_with_files(&format!(
+            r#"{{"projectID": {REQUIRED_PROJECT}, "fileID": {REQUIRED_FILE}, "required": true}},
+               {{"projectID": {OPTIONAL_PROJECT}, "fileID": {OPTIONAL_FILE}, "required": false}}"#
+        ))
+    }
+
+    /// The same fixture manifest, with its own declared files, for a test
+    /// that needs a shape [`export_manifest`] does not offer.
+    fn export_manifest_with_files(files: &str) -> Vec<u8> {
         format!(
             r#"{{
                 "minecraft": {{
@@ -592,10 +697,7 @@ mod tests {
                 "name": "Repro Pack",
                 "version": "3.1.0",
                 "author": "A Reporter",
-                "files": [
-                    {{"projectID": {REQUIRED_PROJECT}, "fileID": {REQUIRED_FILE}, "required": true}},
-                    {{"projectID": {OPTIONAL_PROJECT}, "fileID": {OPTIONAL_FILE}, "required": false}}
-                ],
+                "files": [{files}],
                 "overrides": "overrides"
             }}"#
         )
@@ -627,6 +729,68 @@ mod tests {
             base = server.uri(),
             digest = sha1_of(body),
         )
+    }
+
+    /// The numeric id this test fixture's loopback server uses for the Mods
+    /// class. Deliberately not `6`, the id the production API happens to use
+    /// today: a test suite that only ever exercised the id validation is
+    /// meant to discover would still pass if the implementation quietly
+    /// started assuming a fixed number instead of discovering one.
+    const MODS_CLASS_ID: u32 = 987_654;
+
+    /// The documented shape of `GET /v1/categories?classesOnly=true`, naming
+    /// the Mods class by [`MODS_CLASS_ID`] and two decoy classes beside it, so
+    /// a test proves the right one was picked rather than the only one, and so
+    /// a non-Mod rejection has a real provider-returned class name available.
+    async fn serve_project_classes(server: &MockServer) {
+        Mock::given(method("GET"))
+            .and(path("/v1/categories"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                format!(
+                    r#"{{"data":[
+                        {{"id":{MODS_CLASS_ID},"gameId":432,"name":"Mods","slug":"mc-mods","isClass":true}},
+                        {{"id":12,"gameId":432,"name":"Resource Packs","slug":"texture-packs","isClass":true}},
+                        {{"id":17,"gameId":432,"name":"Worlds","slug":"worlds","isClass":true}}
+                    ]}}"#
+                ),
+                "application/json",
+            ))
+            .mount(server)
+            .await;
+    }
+
+    /// Serves one project's classification, as `GET /v1/mods/{id}` answers.
+    async fn serve_project_class(server: &MockServer, project: u32, name: &str, class_id: u32) {
+        serve_project_raw(server, project, name, &format!(r#""classId":{class_id}"#)).await;
+    }
+
+    /// The same, with `classId` reported as `null` (a real, schema-valid
+    /// state this build must fail closed on rather than silently accept).
+    async fn serve_project_with_no_class(server: &MockServer, project: u32, name: &str) {
+        serve_project_raw(server, project, name, r#""classId":null"#).await;
+    }
+
+    /// Serves one project's classification with a hand-written `classId`
+    /// member, so a test can name a class the categories fixture never listed.
+    async fn serve_project_raw(server: &MockServer, project: u32, name: &str, class_member: &str) {
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/mods/{project}")))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                format!(
+                    r#"{{"data":{{"id":{project},"gameId":432,"name":"{name}","slug":"{name}",{class_member}}}}}"#
+                ),
+                "application/json",
+            ))
+            .mount(server)
+            .await;
+    }
+
+    /// Classifies both of [`serve_pack`]'s declared projects as Mods, which is
+    /// what every test not specifically about classification assumes.
+    async fn serve_pack_as_mods(server: &MockServer) {
+        serve_project_classes(server).await;
+        serve_project_class(server, REQUIRED_PROJECT, "Required Mod", MODS_CLASS_ID).await;
+        serve_project_class(server, OPTIONAL_PROJECT, "Optional Mod", MODS_CLASS_ID).await;
     }
 
     /// Serves one exact file's metadata and its bytes.
@@ -710,6 +874,7 @@ mod tests {
     const OPTIONAL_BODY: &[u8] = b"the optional mod jar";
 
     async fn serve_pack(server: &MockServer) {
+        serve_pack_as_mods(server).await;
         serve_file(
             server,
             REQUIRED_PROJECT,
@@ -838,6 +1003,7 @@ mod tests {
         // answer about a *newer* file for the same project; the import must
         // refuse rather than install it.
         let server = MockServer::start().await;
+        serve_pack_as_mods(&server).await;
         Mock::given(method("GET"))
             .and(path(format!(
                 "/v1/mods/{REQUIRED_PROJECT}/files/{REQUIRED_FILE}"
@@ -871,8 +1037,11 @@ mod tests {
         assert_eq!(error.message_id(), "error-mod-file-identity-mismatch");
         assert!(app.list_clients().expect("list").is_empty());
 
-        // Only the exact endpoint was asked; nothing listed the project's
-        // versions looking for something that would fit.
+        // Only the exact file endpoint, project classification, and artifact
+        // delivery were asked; nothing listed the project's versions looking
+        // for something that would fit. A "list this project's files" request
+        // has no file id segment, which is exactly what distinguishes it from
+        // every path allowed here.
         let paths: Vec<String> = server
             .received_requests()
             .await
@@ -881,9 +1050,15 @@ mod tests {
             .map(|request| request.url.path().to_owned())
             .collect();
         assert!(
-            paths
-                .iter()
-                .all(|requested| requested.contains("/files/") || requested.starts_with("/files/")),
+            paths.iter().all(|requested| {
+                requested == "/v1/categories"
+                    || requested.contains("/files/")
+                    || requested.starts_with("/files/")
+                    // Project classification: `/v1/mods/{id}` exactly, with no
+                    // further segment, the shape a "list this project's
+                    // files" request would have and this never does.
+                    || (requested.starts_with("/v1/mods/") && !requested[9..].contains('/'))
+            }),
             "{paths:?}"
         );
     }
@@ -898,17 +1073,341 @@ mod tests {
 
         import(&app, &archive).await.expect("import");
 
-        let lookups = server
+        let recorded = server.received_requests().await.expect("recorded");
+        let file_lookups = recorded
+            .iter()
+            .filter(|request| {
+                request.url.path().contains("/files/") && !request.url.path().starts_with("/files/")
+            })
+            .count();
+        assert_eq!(
+            file_lookups, 2,
+            "one exact-file request per declared file, and no more"
+        );
+        let class_lookups = recorded
+            .iter()
+            .filter(|request| {
+                request.url.path().starts_with("/v1/mods/")
+                    && !request.url.path().contains("/files/")
+            })
+            .count();
+        assert_eq!(
+            class_lookups, 2,
+            "one classification request per declared project, and no more"
+        );
+    }
+
+    // -- project class validation -------------------------------------------
+
+    #[tokio::test]
+    async fn duplicate_manifest_entries_for_one_project_classify_it_once() {
+        // `validate_project_classes` is exercised directly rather than through
+        // a full manifest: the pack parser already collapses two declared
+        // files of one project into a conflict or a single entry (see
+        // `crates/pack/src/curseforge.rs`), so two *distinct* pending entries
+        // naming the same project cannot arrive from a real manifest. What
+        // this proves is that if they ever did, classification would still
+        // ask about that project once, not twice.
+        let server = MockServer::start().await;
+        serve_project_classes(&server).await;
+        serve_project_class(&server, REQUIRED_PROJECT, "One Project", MODS_CLASS_ID).await;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let app = app_against(dir.path(), &server);
+        let api = app.curseforge_api().expect("a configured client");
+        let operation = api.begin_operation().expect("a key is configured");
+
+        let entry_of = |file_id: u32| PendingProviderFile {
+            identity: ProviderFileIdentity {
+                provider: Some(ModProvider::CurseForge),
+                project_id: Some(REQUIRED_PROJECT.to_string()),
+                version_id: Some(file_id.to_string()),
+                file_id: Some(file_id.to_string()),
+            },
+            client: SideRequirement::Required,
+            server: SideRequirement::Unknown,
+        };
+        let pending = vec![entry_of(REQUIRED_FILE), entry_of(OPTIONAL_FILE)];
+
+        validate_project_classes(&operation, &pending, &CancellationToken::new())
+            .await
+            .expect("both entries name a Mod project");
+
+        let classifications = server
             .received_requests()
             .await
             .expect("recorded")
             .iter()
-            .filter(|request| request.url.path().starts_with("/v1/"))
+            .filter(|request| request.url.path() == format!("/v1/mods/{REQUIRED_PROJECT}"))
             .count();
         assert_eq!(
-            lookups, 2,
-            "one exact-file request per declared file, and no more"
+            classifications, 1,
+            "one project named by two pending entries is classified once"
         );
+    }
+
+    #[tokio::test]
+    async fn a_non_mod_project_refuses_the_whole_import_and_publishes_nothing() {
+        let server = MockServer::start().await;
+        serve_project_classes(&server).await;
+        serve_project_class(&server, REQUIRED_PROJECT, "Actual Mod", MODS_CLASS_ID).await;
+        // Not a mod: a resource pack, wearing the "Resource Packs" class from
+        // serve_project_classes's own fixture rather than the Mods class. The
+        // project's own display name is deliberately unrelated to its class,
+        // so a rejection that named the *project* instead of the *class*
+        // would be caught rather than passing by coincidence.
+        serve_project_class(&server, OPTIONAL_PROJECT, "Pretty Textures", 12).await;
+        serve_file(
+            &server,
+            REQUIRED_PROJECT,
+            REQUIRED_FILE,
+            "required-1.0.0.jar",
+            REQUIRED_BODY,
+        )
+        .await;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = archive_at(dir.path(), "repro.zip");
+        let app = app_against(dir.path(), &server);
+
+        let error = import(&app, &archive).await.expect_err("must refuse");
+        assert_eq!(error.message_id(), "error-mod-project-type-unsupported");
+        assert_eq!(
+            error.message_args(),
+            vec![
+                ("reference", OPTIONAL_PROJECT.to_string()),
+                ("project_type", "Resource Packs".to_owned()),
+            ],
+            "the refusal must name the class the categories response returned, \
+             never the unrelated project's own display name"
+        );
+        assert!(
+            app.list_clients().expect("list").is_empty(),
+            "a pack with one non-mod project publishes no instance at all, \
+             not a partial one missing that entry"
+        );
+
+        // The file endpoint for the rejected non-mod project's own file was
+        // never asked: rejection happens before any file is resolved.
+        let recorded = server.received_requests().await.expect("recorded");
+        assert!(
+            recorded
+                .iter()
+                .all(|request| !request.url.path().contains(&OPTIONAL_FILE.to_string())),
+            "classification must refuse before any file lookup, not skip the entry it refused"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_optional_entrys_project_must_also_be_a_mod() {
+        // The required project is a legitimate mod; only the optional entry
+        // names something else. Optional inclusion is still Mods-only.
+        let server = MockServer::start().await;
+        serve_project_classes(&server).await;
+        serve_project_class(&server, REQUIRED_PROJECT, "Actual Mod", MODS_CLASS_ID).await;
+        serve_project_class(&server, OPTIONAL_PROJECT, "A World", 17).await;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = archive_at(dir.path(), "repro.zip");
+        let app = app_against(dir.path(), &server);
+
+        let error = import(&app, &archive).await.expect_err("must refuse");
+        assert_eq!(error.message_id(), "error-mod-project-type-unsupported");
+        assert!(app.list_clients().expect("list").is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_project_reporting_no_class_fails_closed_rather_than_being_installed_as_a_mod() {
+        // `classId` is documented as nullable. A project that reports none is
+        // not a confirmed non-Mod (that would claim a class this build never
+        // saw) and not a confirmed Mod either: it must refuse the import
+        // rather than pick either.
+        let server = MockServer::start().await;
+        serve_project_classes(&server).await;
+        serve_project_class(&server, REQUIRED_PROJECT, "Actual Mod", MODS_CLASS_ID).await;
+        serve_project_with_no_class(&server, OPTIONAL_PROJECT, "No Reported Class").await;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = archive_at(dir.path(), "repro.zip");
+        let app = app_against(dir.path(), &server);
+
+        let error = import(&app, &archive).await.expect_err("must refuse");
+        assert_eq!(error.message_id(), "error-mod-provider-response-invalid");
+        assert!(
+            !matches!(
+                error,
+                CoreError::ModPlatform(ModPlatformError::ProjectTypeUnsupported { .. })
+            ),
+            "a null class is not a confirmed non-Mod class: {error:?}"
+        );
+        assert!(app.list_clients().expect("list").is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_class_id_the_categories_response_never_listed_fails_closed_rather_than_being_guessed()
+     {
+        // The project claims a class the categories fixture never named. This
+        // build has no provider-returned name for it and must not guess one,
+        // so it fails the same way an unusable response does rather than
+        // inventing a class description.
+        let server = MockServer::start().await;
+        serve_project_classes(&server).await;
+        serve_project_class(&server, REQUIRED_PROJECT, "Actual Mod", MODS_CLASS_ID).await;
+        serve_project_class(&server, OPTIONAL_PROJECT, "Something Else", 999_999).await;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = archive_at(dir.path(), "repro.zip");
+        let app = app_against(dir.path(), &server);
+
+        let error = import(&app, &archive).await.expect_err("must refuse");
+        assert_eq!(error.message_id(), "error-mod-provider-response-invalid");
+        assert!(
+            !matches!(
+                error,
+                CoreError::ModPlatform(ModPlatformError::ProjectTypeUnsupported { .. })
+            ),
+            "an unlisted class id is not a confirmed non-Mod class: {error:?}"
+        );
+        assert!(app.list_clients().expect("list").is_empty());
+    }
+
+    #[tokio::test]
+    async fn mods_class_discovery_does_not_depend_on_any_fixed_numeric_id() {
+        // A second server whose Mods class carries a different unusual id
+        // than the shared fixture's, so this test cannot pass by accident on
+        // whatever number the other tests happen to share.
+        const OTHER_MODS_CLASS_ID: u32 = 555_111;
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/categories"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                format!(
+                    r#"{{"data":[
+                        {{"id":41,"gameId":432,"name":"Resource Packs","slug":"texture-packs","isClass":true}},
+                        {{"id":{OTHER_MODS_CLASS_ID},"gameId":432,"name":"Mods","slug":"mc-mods","isClass":true}}
+                    ]}}"#
+                ),
+                "application/json",
+            ))
+            .mount(&server)
+            .await;
+        serve_project_class(&server, REQUIRED_PROJECT, "Actual Mod", OTHER_MODS_CLASS_ID).await;
+        serve_project_class(&server, OPTIONAL_PROJECT, "Also A Mod", OTHER_MODS_CLASS_ID).await;
+        serve_file(
+            &server,
+            REQUIRED_PROJECT,
+            REQUIRED_FILE,
+            "required-1.0.0.jar",
+            REQUIRED_BODY,
+        )
+        .await;
+        serve_file(
+            &server,
+            OPTIONAL_PROJECT,
+            OPTIONAL_FILE,
+            "optional-1.0.0.jar",
+            OPTIONAL_BODY,
+        )
+        .await;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = archive_at(dir.path(), "repro.zip");
+        let app = app_against(dir.path(), &server);
+
+        import(&app, &archive).await.expect(
+            "the Mods class this server discovers is not the one every other test's fixture uses",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_successfully_classified_pack_keeps_exact_client_and_server_semantics() {
+        let server = MockServer::start().await;
+        serve_pack(&server).await;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = archive_at(dir.path(), "repro.zip");
+        let app = app_against(dir.path(), &server);
+
+        let imported = import(&app, &archive).await.expect("import");
+        let recipe = app
+            .pack_recipe(imported.record.id)
+            .expect("query")
+            .expect("a recipe");
+
+        let required = recipe
+            .files
+            .iter()
+            .find(|file| file.logical_path == Path::new("mods/required-1.0.0.jar"))
+            .expect("the required file is in the recipe");
+        assert_eq!(required.client, SideRequirement::Required);
+        assert_eq!(
+            required.server,
+            SideRequirement::Unknown,
+            "classification decides whether a project is a mod, never server support"
+        );
+
+        let optional = recipe
+            .files
+            .iter()
+            .find(|file| file.logical_path == Path::new("mods/optional-1.0.0.jar"))
+            .expect("the optional file is in the recipe");
+        assert_eq!(
+            optional.client,
+            SideRequirement::Optional,
+            "an explicit `required: false` survives classification unchanged"
+        );
+        assert_eq!(optional.server, SideRequirement::Unknown);
+    }
+
+    #[tokio::test]
+    async fn no_classification_metadata_is_ever_written_to_the_shared_cache() {
+        let server = MockServer::start().await;
+        serve_pack(&server).await;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = archive_at(dir.path(), "repro.zip");
+        let app = app_against(dir.path(), &server);
+
+        import(&app, &archive).await.expect("import");
+
+        // The only files a CurseForge import ever leaves in the shared cache
+        // are verified artifact bytes, addressed by their own hash. Nothing
+        // named after a project, a class, or the categories endpoint exists
+        // anywhere under it.
+        let cache_dir = app.paths().cache_dir();
+        let mut found_metadata_file = false;
+        for entry in walkdir_files(cache_dir) {
+            let name = entry
+                .file_name()
+                .map(|name| name.to_string_lossy().to_ascii_lowercase())
+                .unwrap_or_default();
+            if name.contains("categor") || name.contains("class") || name.contains("mods") {
+                found_metadata_file = true;
+            }
+        }
+        assert!(
+            !found_metadata_file,
+            "no CurseForge classification metadata may be persisted"
+        );
+    }
+
+    /// Every file under `root`, recursively, with no external dependency: the
+    /// shared cache layout is a handful of directories deep at most.
+    fn walkdir_files(root: &Path) -> Vec<std::path::PathBuf> {
+        let mut files = Vec::new();
+        let mut stack = vec![root.to_owned()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else {
+                    files.push(path);
+                }
+            }
+        }
+        files
     }
 
     // -- verification and failure ------------------------------------------
@@ -916,6 +1415,7 @@ mod tests {
     #[tokio::test]
     async fn a_body_that_does_not_match_the_published_digest_publishes_no_instance() {
         let server = MockServer::start().await;
+        serve_pack_as_mods(&server).await;
         Mock::given(method("GET"))
             .and(path(format!(
                 "/v1/mods/{REQUIRED_PROJECT}/files/{REQUIRED_FILE}"
@@ -967,6 +1467,7 @@ mod tests {
     #[tokio::test]
     async fn a_file_whose_author_forbids_third_party_downloads_stops_the_import_explicitly() {
         let server = MockServer::start().await;
+        serve_pack_as_mods(&server).await;
         Mock::given(method("GET"))
             .and(path(format!(
                 "/v1/mods/{REQUIRED_PROJECT}/files/{REQUIRED_FILE}"
@@ -1081,6 +1582,7 @@ mod tests {
     #[tokio::test]
     async fn a_download_address_off_the_permitted_hosts_is_refused_rather_than_followed() {
         let server = MockServer::start().await;
+        serve_pack_as_mods(&server).await;
         Mock::given(method("GET"))
             .and(path(format!(
                 "/v1/mods/{REQUIRED_PROJECT}/files/{REQUIRED_FILE}"
@@ -1295,6 +1797,7 @@ mod tests {
     /// An unauthenticated attempt is answered rather than ignored, so a test can
     /// tell "nothing was sent" from "something was sent without the key".
     async fn serve_pack_guarded(server: &MockServer) {
+        serve_pack_as_mods(server).await;
         for (project, file, name, body) in [
             (
                 REQUIRED_PROJECT,
@@ -1475,8 +1978,9 @@ mod tests {
         let imported = import_then_evict(&app, &archive).await;
         let (metadata_before, _) = artifact_requests(&server, "/v1/").await;
         assert_eq!(
-            metadata_before, 2,
-            "one exact-file lookup per declared file during import, and no more"
+            metadata_before, 5,
+            "one categories lookup, one classification and one exact-file \
+             lookup per declared project during import, and no more"
         );
 
         let target = reconstruct_server(&app, &imported, &dir.path().join("server"))

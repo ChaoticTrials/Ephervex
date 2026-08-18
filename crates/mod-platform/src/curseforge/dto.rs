@@ -62,6 +62,36 @@ pub struct CurseForgeProject {
     /// The one-line description CurseForge shows in a listing.
     #[serde(default)]
     pub summary: String,
+    /// The numeric id of the top-level project class this project belongs to
+    /// (Mods, Resource Packs, Worlds, and so on).
+    ///
+    /// The upstream schema documents this member as nullable, and it is kept
+    /// that way rather than defaulted to some assumed class: a project with no
+    /// reported class is a real, schema-valid state, and treating it as though
+    /// it were the Mods class (or any other) would accept something Ephervex
+    /// never confirmed. Which numeric value *means* Mods is never assumed
+    /// either: it is discovered at runtime from [`CurseForgeCategoryClass`].
+    #[serde(default)]
+    pub class_id: Option<u32>,
+}
+
+/// One top-level project class for a game, as
+/// `GET /v1/categories?classesOnly=true` describes it.
+///
+/// A "class" is CurseForge's own term for a project's top-level kind (Mods,
+/// Resource Packs, Worlds, Bukkit Plugins, and so on), and `classesOnly=true`
+/// is what limits the response to exactly those, rather than every
+/// subcategory beneath them. `slug` is the identifier this launcher matches
+/// the Mods class by; `id` is only meaningful once matched, and is not
+/// assumed to be any particular number. `name` is kept so a project belonging
+/// to some other class can be described by the provider's own name for that
+/// class, rather than by the unrelated project's own display name.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct CurseForgeCategoryClass {
+    pub(super) id: u32,
+    pub(super) name: String,
+    pub(super) slug: String,
 }
 
 /// One file of one project, as `GET /v1/mods/{modId}/files/{fileId}` describes
@@ -140,12 +170,13 @@ mod tests {
     fn a_project_document_keeps_the_game_it_belongs_to() {
         let envelope: ApiEnvelope<CurseForgeProject> = serde_json::from_str(
             r#"{"data":{"id":238222,"gameId":432,"name":"Just Enough Items","slug":"jei",
-                "summary":"View items and recipes","downloadCount":1}}"#,
+                "summary":"View items and recipes","downloadCount":1,"classId":6}}"#,
         )
         .expect("a documented project response");
         assert_eq!(envelope.data.game_id, 432);
         assert_eq!(envelope.data.slug, "jei");
         assert_eq!(envelope.data.summary, "View items and recipes");
+        assert_eq!(envelope.data.class_id, Some(6));
     }
 
     #[test]
@@ -205,5 +236,42 @@ mod tests {
         let parsed: Result<ApiEnvelope<CurseForgeProject>, _> =
             serde_json::from_str(r#"{"data":{"id":238222,"name":"Just Enough Items"}}"#);
         assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn a_project_reporting_no_class_parses_as_none_rather_than_failing() {
+        // The upstream schema documents `classId` as nullable. A schema-valid
+        // `null` is not this DTO's business to reject: only the caller that
+        // needs proof of the Mods class can decide what a missing class means.
+        let envelope: ApiEnvelope<CurseForgeProject> = serde_json::from_str(
+            r#"{"data":{"id":238222,"gameId":432,"name":"Just Enough Items","slug":"jei",
+                "classId":null}}"#,
+        )
+        .expect("a schema-valid null must parse, not fail");
+        assert_eq!(envelope.data.class_id, None);
+    }
+
+    #[test]
+    fn a_project_omitting_the_class_member_entirely_also_parses_as_none() {
+        let envelope: ApiEnvelope<CurseForgeProject> = serde_json::from_str(
+            r#"{"data":{"id":238222,"gameId":432,"name":"Just Enough Items","slug":"jei"}}"#,
+        )
+        .expect("an omitted optional member must parse, not fail");
+        assert_eq!(envelope.data.class_id, None);
+    }
+
+    #[test]
+    fn a_top_level_class_document_carries_the_id_and_name_its_slug_names() {
+        let envelope: ApiEnvelope<Vec<CurseForgeCategoryClass>> = serde_json::from_str(
+            r#"{"data":[{"id":6,"gameId":432,"name":"Mods","slug":"mc-mods","isClass":true},
+                {"id":12,"gameId":432,"name":"Resource Packs","slug":"texture-packs","isClass":true}]}"#,
+        )
+        .expect("a documented categories response");
+        assert_eq!(envelope.data.len(), 2);
+        assert_eq!(envelope.data[0].id, 6);
+        assert_eq!(envelope.data[0].name, "Mods");
+        assert_eq!(envelope.data[0].slug, "mc-mods");
+        assert_eq!(envelope.data[1].name, "Resource Packs");
+        assert_eq!(envelope.data[1].slug, "texture-packs");
     }
 }
