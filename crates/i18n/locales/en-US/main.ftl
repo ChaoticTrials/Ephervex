@@ -1575,6 +1575,7 @@ gui-import-optional-count = { $count ->
 gui-import-analyzing = Reading the archive...
 gui-import-resolving = Resolving files from the provider...
 gui-import-resolution-unavailable = The import worker could not start to resolve provider files.
+gui-import-open-providers = Open Providers & APIs
 gui-created-entity = Created "{ $value }".
 gui-imported-pack = Imported "{ $value }".
 gui-folder-unavailable = Folder unavailable.

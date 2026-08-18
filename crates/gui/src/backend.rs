@@ -31,8 +31,8 @@ use ephervex_model::{
 };
 
 use crate::presentation::{
-    ActivityPresentation, ImportPresentation, InstancePresentation, ServerPresentation,
-    diagnostic_kind_label, diagnostic_scope_label,
+    ActivityPresentation, ImportErrorKind, ImportFailure, ImportPresentation, InstancePresentation,
+    ServerPresentation, diagnostic_kind_label, diagnostic_scope_label,
 };
 
 type CancellationRegistry = Arc<Mutex<HashMap<String, CancellationToken>>>;
@@ -690,7 +690,7 @@ pub enum Event {
     ImportAnalyzed {
         generation: u64,
         archive: PathBuf,
-        result: Result<ImportPresentation, String>,
+        result: Result<ImportPresentation, ImportFailure>,
     },
     /// Provider resolution for a pending archive finished.
     ///
@@ -699,7 +699,7 @@ pub enum Event {
     /// still names the attempt it is tracking.
     ImportResolved {
         generation: u64,
-        result: Result<ImportPresentation, String>,
+        result: Result<ImportPresentation, ImportFailure>,
     },
     /// An `ImportPack` submission reached a terminal outcome (success,
     /// failure, cancellation, or a setup failure before the operation could
@@ -899,7 +899,7 @@ fn run_worker(
                             let _ = events.send(Event::ImportAnalyzed {
                                 generation,
                                 archive: path,
-                                result: Err(localized_error(&error)),
+                                result: Err(import_failure(&error)),
                             });
                         }
                     },
@@ -2989,14 +2989,17 @@ fn spawn_import_resolution(
         move |events| {
             let _ = events.send(Event::ImportResolved {
                 generation,
-                result: Err(lookup("gui-import-resolution-unavailable")),
+                result: Err(ImportFailure {
+                    message: lookup("gui-import-resolution-unavailable"),
+                    kind: ImportErrorKind::default(),
+                }),
             });
         },
         move |app, events, runtime| {
             let result = runtime.block_on(app.resolve_pack(&mut analysis, &cancel));
             let outcome = match result {
                 Ok(()) => Ok(ImportPresentation::from_analysis(&analysis)),
-                Err(error) => Err(localized_error(&error)),
+                Err(error) => Err(import_failure(&error)),
             };
             let _ = events.send(Event::ImportResolved {
                 generation,
@@ -3237,6 +3240,18 @@ fn localized_error(error: &CoreError) -> String {
         message.push_str(&action);
     }
     message
+}
+
+/// The import modal's own error type: the same localized text
+/// [`localized_error`] produces, plus the coarse category
+/// [`ImportErrorKind::from_message_id`] reads off the error's stable id.
+/// Classifying here, where the typed [`CoreError`] is still in hand, is what
+/// keeps the modal from ever having to pattern-match localized prose.
+fn import_failure(error: &CoreError) -> ImportFailure {
+    ImportFailure {
+        message: localized_error(error),
+        kind: ImportErrorKind::from_message_id(error.message_id()),
+    }
 }
 
 fn localized_value(message_id: &str, value: &str) -> String {

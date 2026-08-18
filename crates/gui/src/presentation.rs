@@ -935,6 +935,75 @@ impl ImportPresentation {
     }
 }
 
+/// A coarse category for an import analysis/resolution failure, used only to
+/// decide what the modal shows alongside the error text (for example, an
+/// affordance to open Providers & APIs). Classified from the core error's own
+/// stable message id, never from its localized prose: the id is a contract,
+/// the text is not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ImportErrorKind {
+    /// No CurseForge API key is configured at all.
+    MissingCredential,
+    /// A key is configured, but the provider refused it.
+    RejectedCredential,
+    /// The exact file the pack declares could not be found or served.
+    FileUnavailable,
+    /// The exact file's author does not permit third-party downloads.
+    DistributionRestricted,
+    /// The archive or its manifest could not be understood.
+    MalformedPack,
+    /// The pack declares a mod loader Ephervex does not support.
+    UnsupportedLoader,
+    /// Any other failure: an ordinary network/provider problem, or a local
+    /// setup failure with no core error behind it at all.
+    #[default]
+    Other,
+}
+
+impl ImportErrorKind {
+    #[must_use]
+    pub fn from_message_id(message_id: &str) -> Self {
+        match message_id {
+            "error-mod-credential-missing" | "error-mod-credential-unreadable" => {
+                Self::MissingCredential
+            }
+            "error-mod-credential-rejected" => Self::RejectedCredential,
+            "error-mod-file-unknown" | "error-mod-file-unavailable" => Self::FileUnavailable,
+            "error-mod-file-distribution-restricted" => Self::DistributionRestricted,
+            "error-pack-manifest-missing"
+            | "error-pack-manifest-invalid"
+            | "error-pack-manifest-unsupported-version"
+            | "error-pack-manifest-type-unsupported" => Self::MalformedPack,
+            "error-pack-loader-unsupported" => Self::UnsupportedLoader,
+            _ => Self::Other,
+        }
+    }
+
+    /// The Slint-facing kebab-case name, matching this codebase's convention
+    /// for string-typed status properties (`import-status-kind` and the
+    /// like).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MissingCredential => "missing-credential",
+            Self::RejectedCredential => "rejected-credential",
+            Self::FileUnavailable => "file-unavailable",
+            Self::DistributionRestricted => "distribution-restricted",
+            Self::MalformedPack => "malformed-pack",
+            Self::UnsupportedLoader => "unsupported-loader",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// A localized import failure, carrying both the text the modal shows and
+/// the stable category it was classified from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportFailure {
+    pub message: String,
+    pub kind: ImportErrorKind,
+}
+
 #[cfg(test)]
 mod import_tests {
     use super::*;
@@ -1013,5 +1082,72 @@ mod import_tests {
         facts.needs_provider_resolution = true;
         assert!(facts.optional.is_empty());
         assert_eq!(facts.optional_count, 3);
+    }
+
+    #[test]
+    fn each_classified_message_id_maps_to_its_own_error_kind() {
+        let cases = [
+            (
+                "error-mod-credential-missing",
+                ImportErrorKind::MissingCredential,
+            ),
+            (
+                "error-mod-credential-unreadable",
+                ImportErrorKind::MissingCredential,
+            ),
+            (
+                "error-mod-credential-rejected",
+                ImportErrorKind::RejectedCredential,
+            ),
+            ("error-mod-file-unknown", ImportErrorKind::FileUnavailable),
+            (
+                "error-mod-file-unavailable",
+                ImportErrorKind::FileUnavailable,
+            ),
+            (
+                "error-mod-file-distribution-restricted",
+                ImportErrorKind::DistributionRestricted,
+            ),
+            (
+                "error-pack-manifest-missing",
+                ImportErrorKind::MalformedPack,
+            ),
+            (
+                "error-pack-manifest-invalid",
+                ImportErrorKind::MalformedPack,
+            ),
+            (
+                "error-pack-manifest-unsupported-version",
+                ImportErrorKind::MalformedPack,
+            ),
+            (
+                "error-pack-manifest-type-unsupported",
+                ImportErrorKind::MalformedPack,
+            ),
+            (
+                "error-pack-loader-unsupported",
+                ImportErrorKind::UnsupportedLoader,
+            ),
+            ("error-pack-download-failed", ImportErrorKind::Other),
+            ("error-some-unrelated-id", ImportErrorKind::Other),
+        ];
+        for (message_id, expected) in cases {
+            assert_eq!(
+                ImportErrorKind::from_message_id(message_id),
+                expected,
+                "{message_id}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unclassified_message_id_defaults_to_the_same_kind_as_a_setup_failure() {
+        // A setup failure (the backend thread never reached a core error at
+        // all) and an ordinary unclassified provider failure must look the
+        // same to the modal: neither gets a special affordance.
+        assert_eq!(
+            ImportErrorKind::from_message_id("gui-import-resolution-unavailable"),
+            ImportErrorKind::default()
+        );
     }
 }

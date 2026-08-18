@@ -20,7 +20,10 @@ use crate::backend::{
     DiagnosticData, Event, JavaData, LiveLogLine, LiveLogSource, LiveLogUpdate, ManagedModData,
     ModSearchData, PreferenceData, ServerWorkspaceData, SettingsData, Snapshot,
 };
-use crate::presentation::{self, ImportPresentation, parse_network, validate_ip, validate_port};
+use crate::presentation::{
+    self, ImportErrorKind, ImportFailure, ImportPresentation, parse_network, validate_ip,
+    validate_port,
+};
 use crate::ui::{
     AccountRow, ActivityRow, AppWindow, DiagnosticRow, GuiI18n, ImportOptionRow, InstanceRow,
     JavaRow, LinkedTargetRow, LogChunk, ModRow, ModSearchRow, ModVersionRow, PendingEntityRow,
@@ -423,6 +426,7 @@ fn render_import_flow(ui: &AppWindow, state: &ImportFlowState) {
     ui.set_import_status_kind(status_kind.into());
     ui.set_import_ready(state.is_ready());
     ui.set_modal_error(state.error.clone().into());
+    ui.set_import_error_kind(state.error_kind.as_str().into());
 
     let (format, header, author, minecraft, loader, required, optional) = match &state.presentation
     {
@@ -641,6 +645,10 @@ struct ImportFlowState {
     /// edit survives everything except a genuinely new archive pick.
     name_edited: bool,
     error: String,
+    /// The category `error` was classified from, so the modal can offer a
+    /// state-specific affordance (like opening Providers & APIs for a
+    /// credential problem) without ever pattern-matching `error`'s text.
+    error_kind: ImportErrorKind,
 }
 
 impl ImportFlowState {
@@ -692,7 +700,7 @@ impl ImportFlowState {
         &mut self,
         generation: u64,
         archive: PathBuf,
-        result: Result<ImportPresentation, String>,
+        result: Result<ImportPresentation, ImportFailure>,
     ) -> bool {
         if self.tracked_generation != Some(generation) {
             return false;
@@ -700,6 +708,7 @@ impl ImportFlowState {
         self.archive = archive;
         self.options.clear();
         self.error.clear();
+        self.error_kind = ImportErrorKind::default();
         self.name_edited = false;
         self.suggested_name.clear();
         match result {
@@ -713,9 +722,10 @@ impl ImportFlowState {
                 };
                 self.presentation = Some(presentation);
             }
-            Err(message) => {
+            Err(failure) => {
                 self.presentation = None;
-                self.error = message;
+                self.error = failure.message;
+                self.error_kind = failure.kind;
                 self.phase = ImportPhase::Failed;
             }
         }
@@ -728,7 +738,11 @@ impl ImportFlowState {
     /// attempt this flow is tracking, because a newer archive superseded it
     /// or the modal was closed. The caller has nothing further to render in
     /// that case.
-    fn resolved(&mut self, generation: u64, result: Result<ImportPresentation, String>) -> bool {
+    fn resolved(
+        &mut self,
+        generation: u64,
+        result: Result<ImportPresentation, ImportFailure>,
+    ) -> bool {
         if self.tracked_generation != Some(generation) {
             return false;
         }
@@ -741,9 +755,10 @@ impl ImportFlowState {
                 self.phase = ImportPhase::Ready;
                 self.presentation = Some(presentation);
             }
-            Err(message) => {
+            Err(failure) => {
                 self.presentation = None;
-                self.error = message;
+                self.error = failure.message;
+                self.error_kind = failure.kind;
                 self.phase = ImportPhase::Failed;
             }
         }
@@ -3593,6 +3608,13 @@ mod tests {
         assert_eq!(rows[0].value, "70");
     }
 
+    fn failure(message: &str) -> ImportFailure {
+        ImportFailure {
+            message: message.to_owned(),
+            kind: ImportErrorKind::Other,
+        }
+    }
+
     fn resolved_presentation(name: &str, needs_resolution: bool) -> ImportPresentation {
         ImportPresentation {
             format: "CurseForge".to_owned(),
@@ -3694,7 +3716,7 @@ mod tests {
         let first = flow.begin_attempt();
         let second = flow.begin_attempt();
 
-        let applied = flow.analyzed(first, PathBuf::from("a.zip"), Err("broken".to_owned()));
+        let applied = flow.analyzed(first, PathBuf::from("a.zip"), Err(failure("broken")));
         assert!(!applied);
         assert_eq!(flow.phase, ImportPhase::Analyzing, "attempt 2 is untouched");
         assert!(flow.error.is_empty());
@@ -3723,11 +3745,12 @@ mod tests {
         assert!(flow.analyzed(
             generation,
             PathBuf::from("broken.zip"),
-            Err("not a pack".to_owned())
+            Err(failure("not a pack"))
         ));
         assert_eq!(flow.phase, ImportPhase::Failed);
         assert!(!flow.is_ready());
         assert_eq!(flow.error, "not a pack");
+        assert_eq!(flow.error_kind, ImportErrorKind::Other);
     }
 
     #[test]
@@ -3806,7 +3829,7 @@ mod tests {
             Ok(resolved_presentation("Pack B", true)),
         );
 
-        let applied = flow.resolved(first, Err("stale failure".to_owned()));
+        let applied = flow.resolved(first, Err(failure("stale failure")));
         assert!(!applied);
         assert_eq!(
             flow.phase,
@@ -3826,7 +3849,13 @@ mod tests {
             Ok(resolved_presentation("Example Pack", true)),
         );
 
-        let applied = flow.resolved(first, Err("missing CurseForge API key".to_owned()));
+        let applied = flow.resolved(
+            first,
+            Err(ImportFailure {
+                message: "missing CurseForge API key".to_owned(),
+                kind: ImportErrorKind::MissingCredential,
+            }),
+        );
         assert!(applied);
         assert_eq!(flow.phase, ImportPhase::Failed);
         assert!(!flow.is_ready());
@@ -3835,6 +3864,7 @@ mod tests {
             "a failed analysis must not be submittable"
         );
         assert_eq!(flow.error, "missing CurseForge API key");
+        assert_eq!(flow.error_kind, ImportErrorKind::MissingCredential);
 
         // Choosing another archive recovers normally.
         let second = flow.begin_attempt();
@@ -3845,6 +3875,11 @@ mod tests {
         );
         assert!(flow.is_ready());
         assert!(flow.error.is_empty());
+        assert_eq!(
+            flow.error_kind,
+            ImportErrorKind::default(),
+            "a fresh attempt clears the previous failure's category too"
+        );
     }
 
     #[test]
