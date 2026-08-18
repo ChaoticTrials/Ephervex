@@ -27,8 +27,8 @@ use ephervex_download::{
 };
 use ephervex_model::LoaderKind;
 use ephervex_pack::{
-    ExtractionLimits, MaterializeRequest, OptionalSelection, PackArchive, PackError, PackFormat,
-    PackPolicy, PackSide, SideRequirement, analyze, materialize, retained_recipe,
+    ExtractionLimits, MaterializeRequest, OpenArtifacts, OptionalSelection, PackArchive, PackError,
+    PackFormat, PackPolicy, PackSide, SideRequirement, analyze, materialize, retained_recipe,
 };
 use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{method, path as path_matcher};
@@ -180,7 +180,7 @@ async fn import(
         source_dir: &imported.source,
         manager: &loopback_manager(),
         cache: &CacheLayout::new(workspace.join("cache")),
-        authenticated: None,
+        credentials: &OpenArtifacts,
         reporter: &OperationReporter::silent("modrinth-pack-import"),
         cancel: &CancellationToken::new(),
     })
@@ -364,7 +364,7 @@ async fn importing_the_same_pack_twice_costs_no_second_download() {
                 .join(format!("instance-{run}/.launcher/source")),
             manager: &loopback_manager(),
             cache: &cache,
-            authenticated: None,
+            credentials: &OpenArtifacts,
             reporter: &OperationReporter::silent("modrinth-pack-import"),
             cancel: &CancellationToken::new(),
         })
@@ -412,7 +412,7 @@ async fn a_hash_mismatch_fails_the_import_rather_than_installing_the_file() {
         source_dir: &workspace.path().join("instance/.launcher/source"),
         manager: &loopback_manager(),
         cache: &CacheLayout::new(workspace.path().join("cache")),
-        authenticated: None,
+        credentials: &OpenArtifacts,
         reporter: &OperationReporter::silent("modrinth-pack-import"),
         cancel: &CancellationToken::new(),
     })

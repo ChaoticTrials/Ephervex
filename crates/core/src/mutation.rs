@@ -49,7 +49,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use ephervex_download::{CacheLayout, DownloadManager, DownloaderConfig, OperationReporter};
+use ephervex_download::{CacheLayout, OperationReporter};
 use ephervex_mod_platform::{
     AnnotatedVersion, InstalledPolicy, InstanceTarget, ModInstallPlan, ModProject, PlanWarning,
     PlannedMod, annotate, newest_compatible,
@@ -862,14 +862,7 @@ impl App {
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<()> {
-        let manager = DownloadManager::new(DownloaderConfig {
-            http: self.http_config(),
-            ..DownloaderConfig::default()
-        })
-        .map_err(|source| PackError::DownloadFailed {
-            path: context.entry.file_name.clone(),
-            source: Box::new(source),
-        })?;
+        let manager = self.artifact_manager()?;
 
         let retired = ephervex_storage::metadata::retired_dir(&context.record.root);
         // Anything an interrupted mutation could not clean up goes now, so the
@@ -886,7 +879,10 @@ impl App {
             fetch: ArtifactFetch {
                 manager: &manager,
                 cache: &CacheLayout::new(self.paths().cache_dir()),
-                authenticated: None,
+                // Asked per file from its own provider identity, so a mutation
+                // touching mods from two catalogs offers each secret only to the
+                // artifacts it belongs to.
+                credentials: &self.provider_credentials(),
                 reporter,
                 cancel,
             },

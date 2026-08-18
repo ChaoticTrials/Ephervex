@@ -859,6 +859,11 @@ error-pack-download-url-rejected = One of the pack's files is hosted somewhere E
 error-pack-download-failed = A file from the pack could not be downloaded or did not match its checksum.
 .action = Ephervex deleted the bad file rather than installing it. Check the network connection and try again.
 
+# The verified copy is no longer in the shared cache, so the file has to be
+# fetched again from a provider that only serves it to an authenticated request.
+error-pack-artifact-credential-unavailable = { $file } has to be downloaded again, and the API key its provider requires is not available.
+.action = Add the provider's API key under Providers & APIs, then try again.
+
 error-pack-write-failed = A file from the pack could not be written.
 .action = Check permissions and free space at { $path }.
 

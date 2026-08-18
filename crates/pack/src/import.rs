@@ -33,14 +33,14 @@
 //! remain, so the layer that resolves them cannot be skipped by accident.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
-use ephervex_download::{AuthenticatedSource, CacheLayout, DownloadManager, OperationReporter};
+use ephervex_download::{CacheLayout, DownloadManager, OperationReporter};
 use ephervex_model::{ImportSourceKind, LoaderSelection};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument};
 
 use crate::archive::PackArchive;
+use crate::credentials::ArtifactCredentials;
 use crate::curseforge::{self, ParsedExport};
 use crate::detect::PackFormat;
 use crate::error::{PackError, PackResult};
@@ -297,9 +297,10 @@ pub struct MaterializeRequest<'a> {
     pub source_dir: &'a Path,
     pub manager: &'a DownloadManager,
     pub cache: &'a CacheLayout,
-    /// The credential this import's artifact downloads may carry, for a
-    /// provider that authenticates them. `None` for every open source.
-    pub authenticated: Option<&'a Arc<AuthenticatedSource>>,
+    /// Where a credential comes from for a provider that serves its artifacts
+    /// only to an authenticated request. Consulted per file, and only for a file
+    /// this import actually has to fetch.
+    pub credentials: &'a dyn ArtifactCredentials,
     pub reporter: &'a OperationReporter,
     pub cancel: &'a CancellationToken,
 }
@@ -316,14 +317,14 @@ pub async fn materialize(request: MaterializeRequest<'_>) -> PackResult<Material
         source_dir,
         manager,
         cache,
-        authenticated,
+        credentials,
         reporter,
         cancel,
     } = request;
     let fetch = install::ArtifactFetch {
         manager,
         cache,
-        authenticated,
+        credentials,
         reporter,
         cancel,
     };
@@ -459,6 +460,7 @@ mod tests {
     use std::io::Write as _;
 
     use super::*;
+    use crate::credentials::OpenArtifacts;
 
     fn zip_file(path: &Path, entries: &[(&str, &[u8])]) {
         let file = std::fs::File::create(path).expect("create archive");
@@ -635,7 +637,7 @@ mod tests {
             source_dir: &dir.path().join("instance/.launcher/source"),
             manager: &manager,
             cache: &CacheLayout::new(dir.path().join("cache")),
-            authenticated: None,
+            credentials: &OpenArtifacts,
             reporter: &OperationReporter::silent("test-import"),
             cancel: &CancellationToken::new(),
         })
@@ -695,7 +697,7 @@ mod tests {
             source_dir: &source,
             manager: &manager,
             cache: &CacheLayout::new(dir.path().join("cache")),
-            authenticated: None,
+            credentials: &OpenArtifacts,
             reporter: &OperationReporter::silent("test-import"),
             cancel: &CancellationToken::new(),
         })

@@ -431,23 +431,42 @@ fn supported_hashes(published: &[CurseForgeFileHash]) -> Vec<Hash> {
         .collect()
 }
 
+/// Whether this status is CurseForge refusing the credential rather than
+/// failing the request, and the typed failure it means.
+///
+/// `401` and `403` are the two the user can act on: the key is wrong, expired,
+/// or no longer authorized, and the answer is to set a new one. Everything else
+/// is a status about the request.
+///
+/// Public because the API is not the only thing that sends the key. An artifact
+/// download carries it too, and it refuses a bad one with the same statuses —
+/// so the decision of what those statuses mean is made once, here, rather than
+/// once per caller that has to make it.
+#[must_use]
+pub fn credential_refusal(status: u16) -> Option<ModPlatformError> {
+    (status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN).then_some(
+        ModPlatformError::CredentialRejected {
+            provider: ModProvider::CurseForge,
+            status,
+        },
+    )
+}
+
 /// Turns a non-success status into the failure it means.
 ///
-/// `401` and `403` are the two the user can act on, and they get the sentence
-/// that says so. Everything else — including the `3xx` that a refused
-/// cross-origin redirect leaves behind — is a status this launcher cannot use.
+/// Everything a [`credential_refusal`] does not claim — including the `3xx` that
+/// a refused cross-origin redirect leaves behind — is a status this launcher
+/// cannot use.
 fn classify(status: StatusCode) -> ModPlatformResult<()> {
     if status.is_success() {
         return Ok(());
     }
-    let provider = ModProvider::CurseForge;
     let status = status.as_u16();
     Err(
-        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-            ModPlatformError::CredentialRejected { provider, status }
-        } else {
-            ModPlatformError::HttpStatus { provider, status }
-        },
+        credential_refusal(status).unwrap_or(ModPlatformError::HttpStatus {
+            provider: ModProvider::CurseForge,
+            status,
+        }),
     )
 }
 

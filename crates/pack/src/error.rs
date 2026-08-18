@@ -21,6 +21,7 @@ use std::path::PathBuf;
 
 use ephervex_download::{DownloadError, UrlPolicyError};
 
+use crate::credentials::CredentialUnavailable;
 use crate::detect::PackFormat;
 
 /// Anything importing or reading back a pack can fail with.
@@ -174,6 +175,21 @@ pub enum PackError {
         source: Box<DownloadError>,
     },
 
+    /// An artifact's provider serves it only to an authenticated request, the
+    /// verified copy is not in the shared cache, and no credential could be
+    /// obtained.
+    ///
+    /// Deliberately not a download failure. Nothing was sent and nothing was
+    /// refused: the missing piece is a setting, and the provider layer's own
+    /// error says which of "absent", "unreadable", or "rejected" it is so a
+    /// frontend can send the user to the right place.
+    #[error("`{path}` needs a provider credential that is not available")]
+    ArtifactCredentialUnavailable {
+        path: String,
+        #[source]
+        source: CredentialUnavailable,
+    },
+
     /// A file could not be written into the instance.
     #[error("could not write {path}")]
     Unwritable {
@@ -306,6 +322,9 @@ impl PackError {
             Self::FileDownloadsMissing { .. } => "error-pack-file-downloads-missing",
             Self::DownloadUrlRejected { .. } => "error-pack-download-url-rejected",
             Self::DownloadFailed { .. } => "error-pack-download-failed",
+            Self::ArtifactCredentialUnavailable { .. } => {
+                "error-pack-artifact-credential-unavailable"
+            }
             Self::Unwritable { .. } => "error-pack-write-failed",
             Self::RecipeUnreadable { .. } => "error-pack-recipe-unreadable",
             Self::RecipeInvalid { .. } => "error-pack-recipe-invalid",
@@ -430,7 +449,8 @@ impl PackError {
             Self::FileHashesMissing { path }
             | Self::FileDownloadsMissing { path }
             | Self::DownloadUrlRejected { path, .. }
-            | Self::DownloadFailed { path, .. } => vec![("file", path.clone())],
+            | Self::DownloadFailed { path, .. }
+            | Self::ArtifactCredentialUnavailable { path, .. } => vec![("file", path.clone())],
             Self::RecipeUnsupportedVersion {
                 found, supported, ..
             } => vec![
@@ -613,6 +633,12 @@ mod tests {
             },
             PackError::DestinationCollision {
                 name: "mods/a.jar".to_owned(),
+            },
+            PackError::ArtifactCredentialUnavailable {
+                path: "mods/a.jar".to_owned(),
+                source: crate::credentials::CredentialUnavailable::new(std::io::Error::other(
+                    "a provider layer failure",
+                )),
             },
             PackError::Canceled,
         ]

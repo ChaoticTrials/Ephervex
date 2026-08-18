@@ -42,7 +42,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use ephervex_download::{CacheLayout, DownloadManager, DownloaderConfig, OperationReporter};
+use ephervex_download::{CacheLayout, OperationReporter};
 use ephervex_mod_platform::{
     Compatibility, IncompatibilityReason, InstalledPolicy, InstanceTarget, ModInstallPlan,
     ModPlatformError, ModProject, ModVersionInfo, PlannedMod, SideSupport,
@@ -50,7 +50,7 @@ use ephervex_mod_platform::{
 use ephervex_model::{InstanceId, LoaderSelection, ModProvider, ServerId};
 use ephervex_pack::{
     ArtifactFetch, ManagedMutation, ManagedMutationReport, ManagedProject, OptionalSelection,
-    PackError, PackFileRecipe, PackRecipe, PackSide, SideRequirement, SourceStore,
+    PackFileRecipe, PackRecipe, PackSide, SideRequirement, SourceStore,
 };
 use ephervex_server::classify_runtime;
 use ephervex_storage::ServerRecord;
@@ -1162,14 +1162,7 @@ impl App {
             removals,
         } = mutation;
 
-        let manager = DownloadManager::new(DownloaderConfig {
-            http: self.http_config(),
-            ..DownloaderConfig::default()
-        })
-        .map_err(|source| PackError::DownloadFailed {
-            path: game_dir.display().to_string(),
-            source: Box::new(source),
-        })?;
+        let manager = self.artifact_manager()?;
 
         // Anything an interrupted mutation could not clean up goes now, so the
         // directory cannot grow across operations.
@@ -1186,8 +1179,9 @@ impl App {
                 manager: &manager,
                 cache: &CacheLayout::new(self.paths().cache_dir()),
                 // Every address a recipe entry carries was already checked when
-                // it was recorded, and none of them authenticates.
-                authenticated: None,
+                // it was recorded. Whether fetching one needs a credential is
+                // its provider's business, and is asked per file.
+                credentials: &self.provider_credentials(),
                 reporter,
                 cancel,
             },

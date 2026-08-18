@@ -16,7 +16,8 @@ use ephervex_auth::AuthError;
 use ephervex_java::JavaError;
 use ephervex_loaders::LoaderError;
 use ephervex_minecraft::{LaunchError, MinecraftError};
-use ephervex_pack::PackError;
+use ephervex_mod_platform::ModPlatformError;
+use ephervex_pack::{CredentialUnavailable, PackError};
 use ephervex_server::ServerError;
 use ephervex_storage::StorageError;
 
@@ -66,12 +67,16 @@ pub enum CoreError {
     Preference(#[from] ephervex_options::InvalidPreferenceValue),
 
     /// Reading, validating, or materializing an imported pack.
+    ///
+    /// Constructed through the conversion below rather than by `#[from]`, so a
+    /// pack failure that is really a provider-credential failure arrives as
+    /// [`Self::ModPlatform`] and keeps the vocabulary a frontend routes on.
     #[error(transparent)]
-    Pack(#[from] PackError),
+    Pack(PackError),
 
     /// Searching a mod catalog, or resolving a mod's dependencies.
     #[error(transparent)]
-    ModPlatform(#[from] ephervex_mod_platform::ModPlatformError),
+    ModPlatform(#[from] ModPlatformError),
 
     /// Installing or launching a version.
     ///
@@ -160,6 +165,33 @@ pub enum CoreError {
     /// still needs.
     #[error("`{path}` has no provider identity, so the instance's dependencies cannot be proven")]
     ModIdentityIncomplete { path: std::path::PathBuf },
+}
+
+/// Lifts a pack failure into the error frontends see.
+///
+/// One case is not a pack failure at all. Materializing retained desired state
+/// can discover that an artifact's verified copy is no longer in the shared
+/// cache and that its provider will only serve it to an authenticated request;
+/// `ephervex-pack` cannot name that provider's error type, so it carries the
+/// original through and this is where it is taken back out. What reaches a
+/// frontend is therefore the same typed credential failure a provider request
+/// would have produced — absent key, unreadable key, refused key — rather than a
+/// download failure it could only report as "something went wrong".
+impl From<PackError> for CoreError {
+    fn from(error: PackError) -> Self {
+        let PackError::ArtifactCredentialUnavailable { path, source } = error else {
+            return Self::Pack(error);
+        };
+        match source.into_inner().downcast::<ModPlatformError>() {
+            Ok(platform) => Self::ModPlatform(*platform),
+            // Something else entirely, which keeps the pack crate's own wording
+            // rather than being described as a catalog failure it is not.
+            Err(other) => Self::Pack(PackError::ArtifactCredentialUnavailable {
+                path,
+                source: CredentialUnavailable::from_boxed(other),
+            }),
+        }
+    }
 }
 
 impl CoreError {

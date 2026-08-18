@@ -26,10 +26,10 @@ use ephervex_model::{
     Hash, HashAlgorithm, ImportSourceKind, LoaderKind, LoaderSelection, ModOrigin, ModProvider,
 };
 use ephervex_pack::{
-    ArtifactFetch, MaterializeRequest, OptionalSelection, OverrideScope, PackError, PackFileRecipe,
-    PackFormat, PackPolicy, PackRecipe, PackSide, ProviderFileIdentity, ProviderRecipeMetadata,
-    RECIPE_VERSION, ServerMaterializeRequest, SideRequirement, SourceStore, analyze, materialize,
-    materialize_server_recipe,
+    ArtifactFetch, MaterializeRequest, OpenArtifacts, OptionalSelection, OverrideScope, PackError,
+    PackFileRecipe, PackFormat, PackPolicy, PackRecipe, PackSide, ProviderFileIdentity,
+    ProviderRecipeMetadata, RECIPE_VERSION, ServerMaterializeRequest, SideRequirement, SourceStore,
+    analyze, materialize, materialize_server_recipe,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -112,7 +112,7 @@ async fn import_into(
         source_dir: source,
         manager: &manager,
         cache: &cache,
-        authenticated: None,
+        credentials: &OpenArtifacts,
         reporter: &OperationReporter::silent("curseforge-pack-import"),
         cancel: &CancellationToken::new(),
     })
@@ -356,7 +356,7 @@ async fn a_normalized_curseforge_recipe_reconstructs_a_server_through_the_generi
             manager: &manager,
             cache: &cache,
             // Reconstruction needs no provider credential of any kind.
-            authenticated: None,
+            credentials: &OpenArtifacts,
             reporter: &OperationReporter::silent("server-content"),
             cancel: &CancellationToken::new(),
         },
@@ -385,7 +385,7 @@ async fn a_normalized_curseforge_recipe_reconstructs_a_server_through_the_generi
         fetch: ArtifactFetch {
             manager: &manager,
             cache: &cache,
-            authenticated: None,
+            credentials: &OpenArtifacts,
             reporter: &OperationReporter::silent("server-content"),
             cancel: &CancellationToken::new(),
         },

@@ -25,11 +25,20 @@
 //!
 //! # The credential
 //!
-//! Read once per import, held for that import's request sequence, and dropped
-//! with it. It travels to the API origin, which the API client scopes it to,
-//! and to CurseForge's own delivery hosts, which
-//! [`AuthenticatedSource`] scopes it to. It reaches nothing else, appears in no
-//! recipe, no retained source, no error, and no log line.
+//! Read once per operation, held for that operation's request sequence, and
+//! dropped with it. It travels to the API origin, which the API client scopes it
+//! to, and to CurseForge's own delivery hosts, which [`AuthenticatedSource`]
+//! scopes it to. It reaches nothing else, appears in no recipe, no retained
+//! source, no error, and no log line.
+//!
+//! An import is not the only operation that needs one. Retained desired state
+//! records everything needed to identify and verify an artifact, so nothing
+//! rebuilt from a recipe asks the API what an instance contains — but the bytes
+//! still come from CurseForge, which serves them only to an authenticated
+//! request. So an artifact whose verified copy is still in the shared store is
+//! installed with no credential at all, and one the cache budget has collected
+//! needs the key back. [`ProviderCredentials`] is where that decision is made,
+//! per artifact and from the provider identity the recipe records.
 //!
 //! # Nothing an API answer says is written down
 //!
@@ -40,17 +49,18 @@
 //! dropped. See ADR 0022.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use ephervex_download::{AuthenticatedSource, DomainAllowlist, DownloadManager, DownloaderConfig};
 use ephervex_mod_platform::{
     CURSEFORGE_API_KEY_HEADER, CurseForgeFileRelease, CurseForgeOperation, ModPlatformError,
 };
-use ephervex_model::{CurseForgeFileId, CurseForgeProjectId, ModOrigin, ModProvider};
+use ephervex_model::{CurseForgeFileId, CurseForgeProjectId, ModOrigin, ModProvider, SecretString};
 use ephervex_pack::{
-    MODS_DIR, PackAnalysis, PackError, PackFileRecipe, PackFormat, PendingProviderFile,
-    ProviderFileIdentity,
+    ArtifactCredentials, CredentialUnavailable, MODS_DIR, PackAnalysis, PackError, PackFileRecipe,
+    PackFormat, PendingProviderFile, ProviderFileIdentity,
 };
 use futures_util::StreamExt as _;
 use reqwest::header::HeaderName;
@@ -121,11 +131,7 @@ impl App {
         // which an unconfigured launcher fails without contacting anyone.
         let operation = api.begin_operation()?;
         let hosts = self.curseforge_artifact_hosts();
-        let credential = Arc::new(AuthenticatedSource::new(
-            HeaderName::from_static(CURSEFORGE_API_KEY_HEADER),
-            operation.credential().clone(),
-            hosts.clone(),
-        ));
+        let credential = self.curseforge_artifact_credential(operation.credential().clone())?;
 
         if analysis.pending.is_empty() {
             return Ok(credential);
@@ -174,33 +180,195 @@ impl App {
         DomainAllowlist::curseforge_artifact_defaults()
     }
 
-    /// A download manager whose redirects cannot leave a credential's hosts.
+    /// Wraps a CurseForge API key as a credential an artifact download may
+    /// carry.
     ///
-    /// The ordinary manager follows a redirect anywhere, which is right for an
-    /// unauthenticated artifact and wrong for one carrying a secret: a `302` to
-    /// another host would hand the key to whoever the response named. So an
-    /// authenticated operation gets a manager built around a client that stops
-    /// at the same host list the credential is scoped to.
-    ///
-    /// Everything else about it is the shared downloader: bounded concurrency,
-    /// atomic publication, hash and size verification, cancellation, and the
-    /// same content-addressed store.
-    pub(crate) fn artifact_manager(
+    /// The key is scoped twice over: to the delivery hosts
+    /// [`Self::curseforge_artifact_hosts`] names, and to a redirect policy that
+    /// cannot leave them, which the credential builds and owns. Both scopes
+    /// travel with the request that carries the secret rather than with the
+    /// manager that sends it, so a batch containing artifacts from other
+    /// providers is neither offered this key nor governed by these redirect
+    /// rules.
+    pub(crate) fn curseforge_artifact_credential(
         &self,
-        authenticated: Option<&Arc<AuthenticatedSource>>,
-    ) -> CoreResult<DownloadManager> {
-        let http = self.http_config();
+        key: SecretString,
+    ) -> CoreResult<Arc<AuthenticatedSource>> {
+        let source = AuthenticatedSource::new(
+            HeaderName::from_static(CURSEFORGE_API_KEY_HEADER),
+            key,
+            self.curseforge_artifact_hosts(),
+            &self.http_config(),
+        )
+        .map_err(unusable_downloader)?;
+        Ok(Arc::new(source))
+    }
+
+    /// The shared downloader every artifact operation uses.
+    ///
+    /// One manager for a whole operation whatever mix of providers it touches:
+    /// redirect containment for an authenticated request is the credential's,
+    /// not the manager's, so there is no longer a version of this that has to be
+    /// built differently depending on who the pack came from.
+    pub(crate) fn artifact_manager(&self) -> CoreResult<DownloadManager> {
         let config = DownloaderConfig {
-            http: http.clone(),
+            http: self.http_config(),
             ..DownloaderConfig::default()
         };
-        let Some(_) = authenticated else {
-            return Ok(DownloadManager::new(config).map_err(unusable_downloader)?);
-        };
-        let client =
-            ephervex_download::build_allowlisted_client(&http, &self.curseforge_artifact_hosts())
-                .map_err(unusable_downloader)?;
-        Ok(DownloadManager::with_client(client, config))
+        Ok(DownloadManager::new(config).map_err(unusable_downloader)?)
+    }
+
+    /// The credentials an artifact operation may need, read on demand.
+    ///
+    /// See [`ProviderCredentials`] for why even a fully retained recipe can
+    /// still need one, and why it is asked for per file.
+    pub(crate) fn provider_credentials(&self) -> ProviderCredentials<'_> {
+        ProviderCredentials {
+            app: self,
+            curseforge: OnceLock::new(),
+        }
+    }
+}
+
+/// Supplies the provider credential a single retained artifact needs.
+///
+/// # Why retained desired state can still need one
+///
+/// A recipe entry records the exact addresses, digests, and size of its
+/// artifact, and that is all the launcher needs to *identify and verify* it —
+/// forever, offline, and without asking any provider anything. What it does not
+/// change is who serves the bytes. One provider serves its artifacts only to a
+/// request carrying an API key, so re-fetching such a file after its verified
+/// copy has been collected out of the shared artifact cache needs that key,
+/// even though nothing about the file itself is in question.
+///
+/// The consequences are worth stating in both directions:
+///
+/// * a verified artifact still in the shared cache is installed without any
+///   credential, any provider request, or any configuration at all — which is
+///   what keeps an installed instance working on a machine that has configured
+///   nothing;
+/// * an artifact that has to come back over the network is subject to whatever
+///   its own provider requires.
+///
+/// # One credential per provider, chosen per file
+///
+/// The decision is made from [`ProviderFileIdentity::provider`], the durable
+/// fact the recipe records, and from nothing else — never from an address, a
+/// filename, a digest, or the format the pack was originally imported from. A
+/// desired state naming files from several providers therefore offers each
+/// secret only to its own artifacts.
+///
+/// The secret store is read at most once per provider per operation, and the
+/// result is dropped with the operation.
+///
+/// # The three ways a credential can be the answer
+///
+/// Absent and unreadable are decided here, before anything is sent. Refused
+/// cannot be: a key that is present and syntactically usable is only wrong
+/// according to the host that declines to serve the artifact. So that verdict
+/// arrives afterwards, as the status of an authenticated artifact request, and
+/// [`ArtifactCredentials::rejected`] is where it is turned back into the same
+/// typed failure the API would have produced. Nothing speculative is sent to
+/// find out first, and nothing is re-resolved through the API to recover.
+pub(crate) struct ProviderCredentials<'a> {
+    app: &'a App,
+    /// Built on the first CurseForge artifact this operation actually fetches,
+    /// and never for an operation that fetches none.
+    curseforge: OnceLock<Arc<AuthenticatedSource>>,
+}
+
+impl fmt::Debug for ProviderCredentials<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Names what this is and never what it holds, nor whether it holds
+        // anything: "a key has been read" is not a fact worth logging.
+        formatter.write_str("ProviderCredentials")
+    }
+}
+
+impl ProviderCredentials<'_> {
+    /// Reuses a CurseForge credential this operation has already read.
+    ///
+    /// An import resolves the pack's declared files against the API first, which
+    /// reads the key; handing that one over is what keeps the download half from
+    /// going back to the secret store for the same value.
+    #[must_use]
+    pub(crate) fn holding_curseforge(self, credential: Arc<AuthenticatedSource>) -> Self {
+        let _ = self.curseforge.set(credential);
+        self
+    }
+
+    fn curseforge(&self) -> Result<Arc<AuthenticatedSource>, CredentialUnavailable> {
+        if let Some(credential) = self.curseforge.get() {
+            return Ok(Arc::clone(credential));
+        }
+        let api = self
+            .app
+            .curseforge_api()
+            .map_err(|error| CredentialUnavailable::new(unavailable(&error)))?;
+        // Reads the secret store, and fails with
+        // `ModPlatformError::CredentialMissing` when nothing is configured —
+        // before any request is made, and without degrading into an
+        // unauthenticated attempt the provider could only refuse.
+        let key = api
+            .begin_operation()
+            .map_err(CredentialUnavailable::new)?
+            .credential()
+            .clone();
+        let credential = self
+            .app
+            .curseforge_artifact_credential(key)
+            .map_err(|error| CredentialUnavailable::new(unavailable(&error)))?;
+        let _ = self.curseforge.set(Arc::clone(&credential));
+        Ok(credential)
+    }
+}
+
+impl ArtifactCredentials for ProviderCredentials<'_> {
+    fn credential_for(
+        &self,
+        identity: Option<&ProviderFileIdentity>,
+    ) -> Result<Option<Arc<AuthenticatedSource>>, CredentialUnavailable> {
+        match identity.and_then(|identity| identity.provider) {
+            Some(ModProvider::CurseForge) => self.curseforge().map(Some),
+            // Every other catalog publishes its artifacts openly, as does a file
+            // whose identity names no catalog at all. A catalog added later that
+            // does authenticate its downloads is handled by adding an arm here,
+            // and until then it is offered nothing rather than somebody else's
+            // secret.
+            _ => Ok(None),
+        }
+    }
+
+    fn rejected(
+        &self,
+        identity: Option<&ProviderFileIdentity>,
+        status: u16,
+    ) -> Option<CredentialUnavailable> {
+        match identity.and_then(|identity| identity.provider) {
+            // The same reading the API client gives these statuses, from the
+            // same function: a delivery host refusing the key means what the
+            // API refusing it means, and the user's next step is identical.
+            Some(ModProvider::CurseForge) => {
+                ephervex_mod_platform::credential_refusal(status).map(CredentialUnavailable::new)
+            }
+            // Nothing else was issued a credential, so nothing else can have had
+            // one refused: whatever this status is, it is about the download.
+            _ => None,
+        }
+    }
+}
+
+/// Reports a credential this launcher could not assemble as a provider
+/// credential failure rather than as whatever it was underneath.
+///
+/// The user-facing outcome is the same either way — CurseForge cannot be used
+/// until something is fixed — and keeping one shape means a frontend has one
+/// place to route from.
+fn unavailable(error: &crate::error::CoreError) -> ModPlatformError {
+    ModPlatformError::CredentialUnreadable {
+        provider: ModProvider::CurseForge,
+        detail: error.to_string(),
     }
 }
 
@@ -364,7 +532,9 @@ mod tests {
     use std::path::Path;
 
     use ephervex_auth::{CredentialStore, MemoryStore};
-    use ephervex_download::{ArtifactCache, CacheLayout, ContentStore, OperationReporter};
+    use ephervex_download::{
+        ArtifactCache, CacheLayout, ContentStore, FileExtension, OperationReporter,
+    };
     use ephervex_model::{
         ArtifactCacheLimit, Hash, HashAlgorithm, ImportSourceKind, LoaderKind, SecretString,
         StorageClass,
@@ -372,10 +542,12 @@ mod tests {
     use ephervex_pack::{OptionalSelection, PackSide, SideRequirement, SourceStore};
     use ephervex_storage::Paths;
     use sha1::{Digest as _, Sha1};
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
+    use crate::error::CoreError;
     use crate::import::ImportRequest;
+    use crate::server::ServerCreateOptions;
 
     use super::*;
 
@@ -480,6 +652,24 @@ mod tests {
     fn app_against(base: &Path, server: &MockServer) -> App {
         let mut app = App::open_at(Paths::rooted_at(base)).expect("app opens");
         app.use_loopback_curseforge(&format!("{}/v1", server.uri()), store_with_key())
+            .expect("a loopback client");
+        app
+    }
+
+    /// The same, with a key the delivery host will not accept.
+    ///
+    /// Syntactically usable and wrong, which is the case no check before the
+    /// request can catch: only the host that serves the artifact can say the key
+    /// is not one it honors.
+    fn app_with_a_stale_key(base: &Path, server: &MockServer) -> App {
+        let store = MemoryStore::new();
+        ephervex_auth::set_curseforge_api_key(
+            &store,
+            &SecretString::new("test-curseforge-key-that-was-revoked"),
+        )
+        .expect("store the key");
+        let mut app = App::open_at(Paths::rooted_at(base)).expect("app opens");
+        app.use_loopback_curseforge(&format!("{}/v1", server.uri()), Arc::new(store))
             .expect("a loopback client");
         app
     }
@@ -1084,6 +1274,442 @@ mod tests {
                 .as_ref()
                 .and_then(|identity| identity.file_id.as_deref()),
             Some("4593548")
+        );
+    }
+
+    // -- retained artifacts fetched again ----------------------------------
+    //
+    // A recipe records exactly what an artifact is and where it came from, which
+    // is all the launcher needs to install it from the shared cache. It is not
+    // all that is needed to *fetch* it: CurseForge serves its files only to an
+    // authenticated request, so an artifact that has been collected out of the
+    // cache needs the key back before a linked server can be built from the
+    // client's retained desired state.
+
+    const MODRINTH_BODY: &[u8] = b"a mod from the other catalog";
+    const MODRINTH_PATH: &str = "mods/from-modrinth.jar";
+
+    /// Serves the pack's metadata, and its artifacts only to a request carrying
+    /// the API key.
+    ///
+    /// An unauthenticated attempt is answered rather than ignored, so a test can
+    /// tell "nothing was sent" from "something was sent without the key".
+    async fn serve_pack_guarded(server: &MockServer) {
+        for (project, file, name, body) in [
+            (
+                REQUIRED_PROJECT,
+                REQUIRED_FILE,
+                "required-1.0.0.jar",
+                REQUIRED_BODY,
+            ),
+            (
+                OPTIONAL_PROJECT,
+                OPTIONAL_FILE,
+                "optional-1.0.0.jar",
+                OPTIONAL_BODY,
+            ),
+        ] {
+            Mock::given(method("GET"))
+                .and(path(format!("/v1/mods/{project}/files/{file}")))
+                .respond_with(ResponseTemplate::new(200).set_body_raw(
+                    file_document(server, project, file, name, body),
+                    "application/json",
+                ))
+                .mount(server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path(format!("/files/{project}/{file}/{name}")))
+                .and(header(CURSEFORGE_API_KEY_HEADER, FAKE_KEY))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_raw(body.to_vec(), "application/java-archive"),
+                )
+                .mount(server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path(format!("/files/{project}/{file}/{name}")))
+                .respond_with(ResponseTemplate::new(403))
+                .mount(server)
+                .await;
+        }
+    }
+
+    /// How many artifact requests this server has been sent, and how many of
+    /// them carried the key.
+    async fn artifact_requests(server: &MockServer, prefix: &str) -> (usize, usize) {
+        let recorded = server.received_requests().await.expect("recorded");
+        let matching = recorded
+            .iter()
+            .filter(|request| request.url.path().starts_with(prefix));
+        let total = matching.clone().count();
+        let authenticated = matching
+            .filter(|request| request.headers.contains_key(CURSEFORGE_API_KEY_HEADER))
+            .count();
+        (total, authenticated)
+    }
+
+    /// Imports the pack and then removes every reusable artifact, which is the
+    /// state a later operation finds after the cache has been collected.
+    async fn import_then_evict(app: &App, archive: &Path) -> crate::import::ImportedPack {
+        let imported = import(app, archive).await.expect("import");
+        let report = ArtifactCache::new(CacheLayout::new(app.paths().cache_dir()))
+            .clear()
+            .await
+            .expect("clear");
+        assert!(
+            report.removed_entries > 0,
+            "nothing was in the shared cache"
+        );
+        imported
+    }
+
+    /// The reconstruction a "Create Server" runs once Java and the loader are
+    /// out of the way, against a staging root of this test's own.
+    async fn reconstruct_server(
+        app: &App,
+        imported: &crate::import::ImportedPack,
+        staging: &Path,
+    ) -> CoreResult<PathBuf> {
+        let recipe = app
+            .pack_recipe(imported.record.id)
+            .expect("query")
+            .expect("an imported instance has a recipe");
+        let client_source = app.pack_source_dir(imported.record.id).expect("source dir");
+        let target = staging.join("minecraft");
+        let options = ServerCreateOptions {
+            java_path: None,
+            install_java_if_missing: false,
+            // The pack declares nothing about servers, so the file this test
+            // cares about is confirmed explicitly rather than assumed.
+            confirmed_unknown: OptionalSelection::of(["mods/required-1.0.0.jar"]),
+        };
+        app.materialize_linked_server_recipe(
+            &recipe,
+            &client_source,
+            &target,
+            &staging.join(".launcher/source"),
+            &options,
+            &CancellationToken::new(),
+        )
+        .await?;
+        Ok(target)
+    }
+
+    /// A retained entry from the other catalog, served by the same loopback host.
+    ///
+    /// What makes it the other catalog is its identity, which is the only thing
+    /// credential selection is allowed to read.
+    fn modrinth_entry(server: &MockServer) -> PackFileRecipe {
+        PackFileRecipe {
+            logical_path: PathBuf::from(MODRINTH_PATH),
+            hashes: vec![Hash::new(HashAlgorithm::Sha1, &sha1_of(MODRINTH_BODY)).expect("digest")],
+            downloads: vec![format!("{}/modrinth/from-modrinth.jar", server.uri())],
+            size: Some(MODRINTH_BODY.len() as u64),
+            client: SideRequirement::Required,
+            server: SideRequirement::Required,
+            selected: None,
+            origin: ModOrigin::UserSelected,
+            identity: Some(ProviderFileIdentity {
+                provider: Some(ModProvider::Modrinth),
+                project_id: Some("AABBCCDD".to_owned()),
+                version_id: Some("1".to_owned()),
+                file_id: None,
+            }),
+        }
+    }
+
+    fn shared_cache_path(app: &App, body: &[u8]) -> PathBuf {
+        let digest = Hash::new(HashAlgorithm::Sha1, &sha1_of(body)).expect("a digest");
+        CacheLayout::new(app.paths().cache_dir()).content(
+            ContentStore::Downloads,
+            &digest,
+            Some(&FileExtension::new("jar").expect("an extension")),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_retained_curseforge_artifact_is_authenticated_when_the_cache_no_longer_has_it() {
+        let server = MockServer::start().await;
+        serve_pack_guarded(&server).await;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = archive_at(dir.path(), "repro.zip");
+        let app = app_against(dir.path(), &server);
+
+        let imported = import_then_evict(&app, &archive).await;
+        let (before, _) = artifact_requests(&server, "/files/").await;
+
+        let target = reconstruct_server(&app, &imported, &dir.path().join("server"))
+            .await
+            .expect("the server reconstructs from the retained recipe");
+
+        assert_eq!(
+            std::fs::read(target.join("mods/required-1.0.0.jar")).expect("read"),
+            REQUIRED_BODY,
+            "the server owns its own verified copy"
+        );
+        assert_eq!(
+            std::fs::read(shared_cache_path(&app, REQUIRED_BODY)).expect("read"),
+            REQUIRED_BODY,
+            "the artifact re-entered the shared content-addressed store"
+        );
+
+        let (total, authenticated) = artifact_requests(&server, "/files/").await;
+        assert!(total > before, "the artifact was not fetched again");
+        assert_eq!(
+            total, authenticated,
+            "every retained CurseForge artifact request carried the key"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cached_retained_curseforge_artifact_needs_no_key_and_contacts_nobody() {
+        let server = MockServer::start().await;
+        serve_pack_guarded(&server).await;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = archive_at(dir.path(), "repro.zip");
+        let app = app_against(dir.path(), &server);
+        let imported = import(&app, &archive).await.expect("import");
+        assert!(
+            shared_cache_path(&app, REQUIRED_BODY).is_file(),
+            "the import left the artifact in the shared cache"
+        );
+
+        // A launcher that has never configured CurseForge, and a CurseForge that
+        // is not there at all: reading the key would fail, and so would any
+        // request. Reconstruction must depend on neither.
+        let unconfigured = app_without_a_key(dir.path(), &server);
+        drop(server);
+
+        let target = reconstruct_server(&unconfigured, &imported, &dir.path().join("server"))
+            .await
+            .expect("a verified cache entry is installable without a provider");
+        assert_eq!(
+            std::fs::read(target.join("mods/required-1.0.0.jar")).expect("read"),
+            REQUIRED_BODY
+        );
+    }
+
+    #[tokio::test]
+    async fn a_retained_curseforge_artifact_with_no_key_fails_as_a_credential_problem() {
+        let server = MockServer::start().await;
+        serve_pack_guarded(&server).await;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = archive_at(dir.path(), "repro.zip");
+        let app = app_against(dir.path(), &server);
+        let imported = import_then_evict(&app, &archive).await;
+        let (before, _) = artifact_requests(&server, "/files/").await;
+
+        let unconfigured = app_without_a_key(dir.path(), &server);
+        let error = reconstruct_server(&unconfigured, &imported, &dir.path().join("server"))
+            .await
+            .expect_err("an artifact that has to be fetched needs the key");
+
+        assert_eq!(
+            error.message_id(),
+            "error-mod-credential-missing",
+            "the user is told to configure CurseForge, not that a download failed"
+        );
+        let (after, _) = artifact_requests(&server, "/files/").await;
+        assert_eq!(
+            after, before,
+            "nothing was sent unauthenticated to see whether it might work"
+        );
+    }
+
+    #[tokio::test]
+    async fn only_the_curseforge_artifacts_of_a_mixed_recipe_are_authenticated() {
+        let server = MockServer::start().await;
+        serve_pack_guarded(&server).await;
+        // The other catalog's artifact, redirected once to a host the CurseForge
+        // allowlist does not contain. Following it is correct — this request
+        // carries no CurseForge secret — and proves that one provider's redirect
+        // containment did not become everybody's.
+        let elsewhere = format!(
+            "http://localhost:{}/relocated/from-modrinth.jar",
+            server.address().port()
+        );
+        Mock::given(method("GET"))
+            .and(path("/modrinth/from-modrinth.jar"))
+            .respond_with(ResponseTemplate::new(302).insert_header("location", elsewhere.as_str()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/relocated/from-modrinth.jar"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(MODRINTH_BODY.to_vec(), "application/java-archive"),
+            )
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = archive_at(dir.path(), "repro.zip");
+        let app = app_against(dir.path(), &server);
+        let imported = import_then_evict(&app, &archive).await;
+
+        // A desired state naming files from two catalogs, which is what an
+        // instance becomes as soon as a mod is installed into an imported pack.
+        let source = SourceStore::new(app.pack_source_dir(imported.record.id).expect("source dir"));
+        let mut recipe = source.read_recipe().expect("the retained recipe");
+        recipe.files.push(modrinth_entry(&server));
+        source
+            .write_recipe(&recipe)
+            .expect("retain the mixed recipe");
+
+        let target = reconstruct_server(&app, &imported, &dir.path().join("server"))
+            .await
+            .expect("both catalogs' artifacts are fetched");
+        assert_eq!(
+            std::fs::read(target.join("mods/required-1.0.0.jar")).expect("read"),
+            REQUIRED_BODY
+        );
+        assert_eq!(
+            std::fs::read(target.join(MODRINTH_PATH)).expect("read"),
+            MODRINTH_BODY,
+            "an unauthenticated download still follows an ordinary redirect"
+        );
+
+        let (curseforge, curseforge_authenticated) = artifact_requests(&server, "/files/").await;
+        assert!(curseforge > 0 && curseforge == curseforge_authenticated);
+        for prefix in ["/modrinth/", "/relocated/"] {
+            let (total, authenticated) = artifact_requests(&server, prefix).await;
+            assert!(total > 0, "{prefix} was never fetched");
+            assert_eq!(
+                authenticated, 0,
+                "{prefix} was offered another provider's credential"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_retained_curseforge_artifact_cannot_be_redirected_off_its_permitted_hosts() {
+        let server = MockServer::start().await;
+        serve_pack_guarded(&server).await;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = archive_at(dir.path(), "repro.zip");
+        let app = app_against(dir.path(), &server);
+        let imported = import_then_evict(&app, &archive).await;
+
+        // The same address the recipe records now answers with a redirect to a
+        // host the credential's allowlist does not name. `localhost` resolves to
+        // the same loopback server, so the only thing standing between the key
+        // and that endpoint is the redirect policy.
+        server.reset().await;
+        let elsewhere = format!(
+            "http://localhost:{}/leaked/required-1.0.0.jar",
+            server.address().port()
+        );
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/files/{REQUIRED_PROJECT}/{REQUIRED_FILE}/required-1.0.0.jar"
+            )))
+            .respond_with(ResponseTemplate::new(302).insert_header("location", elsewhere.as_str()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/leaked/required-1.0.0.jar"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(REQUIRED_BODY.to_vec(), "application/java-archive"),
+            )
+            .mount(&server)
+            .await;
+
+        let error = reconstruct_server(&app, &imported, &dir.path().join("server"))
+            .await
+            .expect_err("a redirect off the permitted hosts is refused, not followed");
+        assert_eq!(error.message_id(), "error-pack-download-failed");
+
+        let (leaked, _) = artifact_requests(&server, "/leaked/").await;
+        assert_eq!(
+            leaked, 0,
+            "the credential followed a redirect off its hosts"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_key_the_delivery_host_refuses_is_reported_as_a_refused_key() {
+        // Nothing before the request can find this out: the key is present,
+        // readable, and syntactically fine, and only the host that serves the
+        // artifact knows it is no longer honored. The answer still has to reach
+        // the user as "your key was refused" rather than as a failed download,
+        // because those have different next steps.
+        let server = MockServer::start().await;
+        serve_pack_guarded(&server).await;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = archive_at(dir.path(), "repro.zip");
+        let app = app_against(dir.path(), &server);
+        let imported = import_then_evict(&app, &archive).await;
+
+        let stale = app_with_a_stale_key(dir.path(), &server);
+        let error = reconstruct_server(&stale, &imported, &dir.path().join("server"))
+            .await
+            .expect_err("the delivery host refuses the configured key");
+
+        assert!(
+            matches!(
+                error,
+                CoreError::ModPlatform(ModPlatformError::CredentialRejected {
+                    provider: ModProvider::CurseForge,
+                    status: 403,
+                })
+            ),
+            "{error:?}"
+        );
+        assert_eq!(error.message_id(), "error-mod-credential-rejected");
+        assert_ne!(error.message_id(), "error-pack-download-failed");
+
+        // The attempt was authenticated, and the key went only to the routes it
+        // is issued for: the API during the import, and the delivery addresses
+        // the recipe records. Nothing followed the refusal anywhere else.
+        let (total, authenticated) = artifact_requests(&server, "/files/").await;
+        assert!(total > 0 && total == authenticated);
+        for request in server.received_requests().await.expect("recorded") {
+            let route = request.url.path().to_owned();
+            assert!(
+                route.starts_with("/v1/") || route.starts_with("/files/"),
+                "the key reached `{route}`"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn another_catalog_refusing_a_retained_artifact_is_not_a_curseforge_key_problem() {
+        // The identical status, for a file whose durable identity names another
+        // catalog and which therefore carried no credential at all.
+        let server = MockServer::start().await;
+        serve_pack_guarded(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/modrinth/from-modrinth.jar"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = archive_at(dir.path(), "repro.zip");
+        let app = app_against(dir.path(), &server);
+        let imported = import_then_evict(&app, &archive).await;
+
+        let source = SourceStore::new(app.pack_source_dir(imported.record.id).expect("source dir"));
+        let mut recipe = source.read_recipe().expect("the retained recipe");
+        recipe.files.push(modrinth_entry(&server));
+        source
+            .write_recipe(&recipe)
+            .expect("retain the mixed recipe");
+
+        let error = reconstruct_server(&app, &imported, &dir.path().join("server"))
+            .await
+            .expect_err("the other catalog refused the download");
+        assert_eq!(
+            error.message_id(),
+            "error-pack-download-failed",
+            "another provider's refusal was blamed on the CurseForge key: {error:?}"
+        );
+
+        let (_, modrinth_authenticated) = artifact_requests(&server, "/modrinth/").await;
+        assert_eq!(
+            modrinth_authenticated, 0,
+            "the CurseForge key was offered to another catalog"
         );
     }
 

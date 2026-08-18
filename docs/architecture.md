@@ -352,6 +352,22 @@ and describing the archive stays local either way — only the resolution step
 needs a credential, and analysis reports that as a blocker rather than failing
 to identify the file (ADR 0022).
 
+A recipe entry records the exact addresses, digests, and size of its artifact,
+which is everything needed to identify and verify it: nothing built from retained
+desired state asks a provider what an instance contains. Serving the bytes is a
+separate question. Materialization probes the shared artifact cache first, and a
+verified entry is installed with no credential and no request, which is why an
+installed instance and its linked servers keep working with no provider
+configured. Only an artifact the cache no longer holds is fetched, and only then
+is a credential asked for — per file, from the provider identity that file's own
+recipe entry records, so a desired state naming several catalogs offers each
+secret only to its own artifacts. A refusal is attributed to the credential only
+when the request actually carried one and the provider uses that status to refuse
+credentials, so an ordinary `403` from a host that was never offered a secret
+stays an ordinary download failure. A cache that cannot be *read* is neither: it
+is a local storage failure, reported as itself rather than recovered from by
+fetching.
+
 ## Mod-installation data flow
 
 ```text
@@ -474,8 +490,12 @@ installed as a default header, and its client refuses to follow a redirect that
 leaves the CurseForge API origin, so no response can direct the launcher to hand
 the key to another host. An artifact download applies the same rule to a
 different boundary: the header travels only to CurseForge's own explicitly
-listed delivery hosts, through a client whose redirects cannot leave that list.
-One import reads the credential once and holds it for that operation's requests
+listed delivery hosts, and the client whose redirects cannot leave that list is
+owned by the credential itself rather than by the downloader. That is what lets
+one operation fetch artifacts from several providers through one download
+manager: the authenticated request is confined, and an unrelated provider's
+download keeps the ordinary redirect policy and is never offered the header.
+An operation reads the credential once and holds it for that operation's requests
 and no longer. Frontends learn whether a key is configured and never what it
 is.
 

@@ -23,8 +23,8 @@ use ephervex_model::{
     ArtifactCacheLimit, Hash, HashAlgorithm, LoaderKind, LoaderSelection, ModOrigin,
 };
 use ephervex_pack::{
-    ArtifactFetch, FileInstall, OptionalSelection, PackFileRecipe, PackRecipe, PackSide,
-    ServerMaterializeRequest, SideRequirement, SourceStore, install_files,
+    ArtifactFetch, FileInstall, OpenArtifacts, OptionalSelection, PackFileRecipe, PackRecipe,
+    PackSide, ServerMaterializeRequest, SideRequirement, SourceStore, install_files,
     materialize_server_recipe,
 };
 use tokio_util::sync::CancellationToken;
@@ -107,7 +107,7 @@ async fn a_mod_installed_into_a_client_instance_survives_eviction_of_its_cache_e
         fetch: ArtifactFetch {
             manager: &manager(),
             cache: &layout,
-            authenticated: None,
+            credentials: &OpenArtifacts,
             reporter: &reporter(),
             cancel: &CancellationToken::new(),
         },
@@ -157,7 +157,7 @@ async fn a_reconstructed_server_survives_a_full_clear_of_the_reusable_cache() {
         fetch: ArtifactFetch {
             manager: &manager(),
             cache: &layout,
-            authenticated: None,
+            credentials: &OpenArtifacts,
             reporter: &reporter(),
             cancel: &CancellationToken::new(),
         },

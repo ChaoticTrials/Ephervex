@@ -51,6 +51,7 @@
 //!   file with no verifiable hash is never fetched.
 
 pub mod archive;
+pub mod credentials;
 pub mod curseforge;
 pub mod detect;
 pub mod error;
@@ -65,6 +66,7 @@ pub mod recipe;
 pub mod store;
 
 pub use archive::{ExtractionLimits, ExtractionReport, PackArchive};
+pub use credentials::{ArtifactCredentials, CredentialUnavailable, OpenArtifacts};
 pub use detect::{
     CURSEFORGE_MANIFEST, MODRINTH_INDEX, PRISM_PACK, PackFormat, has_mrpack_extension, identify,
 };

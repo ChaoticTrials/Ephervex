@@ -9,8 +9,8 @@ use ephervex_model::{
     Hash, HashAlgorithm, ImportSourceKind, LoaderKind, LoaderSelection, ModOrigin, ModProvider,
 };
 use ephervex_pack::{
-    ArtifactFetch, OptionalSelection, OverrideLayer, OverrideScope, PackError, PackFileRecipe,
-    PackRecipe, ProviderFileIdentity, ProviderRecipeMetadata, RECIPE_VERSION,
+    ArtifactFetch, OpenArtifacts, OptionalSelection, OverrideLayer, OverrideScope, PackError,
+    PackFileRecipe, PackRecipe, ProviderFileIdentity, ProviderRecipeMetadata, RECIPE_VERSION,
     ServerMaterializeRequest, SideRequirement, SourceStore, materialize_server_recipe,
 };
 use tokio_util::sync::CancellationToken;
@@ -183,7 +183,7 @@ async fn reconstruct(
         fetch: ArtifactFetch {
             manager: &manager,
             cache,
-            authenticated: None,
+            credentials: &OpenArtifacts,
             reporter: &OperationReporter::silent("server-reconstruction-test"),
             cancel: &CancellationToken::new(),
         },

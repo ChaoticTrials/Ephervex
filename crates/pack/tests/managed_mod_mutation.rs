@@ -17,9 +17,9 @@ use ephervex_download::{
 };
 use ephervex_model::{Hash, HashAlgorithm, LoaderKind, LoaderSelection, ModOrigin, ModProvider};
 use ephervex_pack::{
-    ArtifactFetch, ManagedMutation, ManagedMutationReport, ManagedProject, PackError,
-    PackFileRecipe, PackRecipe, PackSide, ProviderFileIdentity, SideRequirement, SourceStore,
-    mutate_managed,
+    ArtifactFetch, ManagedMutation, ManagedMutationReport, ManagedProject, OpenArtifacts,
+    PackError, PackFileRecipe, PackRecipe, PackSide, ProviderFileIdentity, SideRequirement,
+    SourceStore, mutate_managed,
 };
 use sha1::{Digest as _, Sha1};
 use sha2::Sha512;
@@ -166,7 +166,7 @@ async fn mutate(
         fetch: ArtifactFetch {
             manager: &manager(),
             cache: &instance.cache,
-            authenticated: None,
+            credentials: &OpenArtifacts,
             reporter: &OperationReporter::silent("mutating-mods"),
             cancel: &CancellationToken::new(),
         },

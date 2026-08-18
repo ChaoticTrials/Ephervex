@@ -33,20 +33,42 @@
 //!
 //! The instance still owns its own copy of every mod: `mods/`, `config/`, and
 //! overrides are instance-local.
+//!
+//! # What a recipe entry is enough for, and what it is not
+//!
+//! An entry records the exact addresses, digests, and size of its artifact, plus
+//! the provider identity it came from. That is everything needed to *identify
+//! and verify* the file, which is why nothing here consults a provider to find
+//! out what an instance is supposed to contain, and why a materialization can
+//! run with no network at all when the shared cache still holds what it needs.
+//!
+//! It is not everything needed to *serve* the bytes. A provider may hand out its
+//! artifacts only to an authenticated request, so an entry whose verified copy
+//! the cache budget has since collected needs that provider's credential back
+//! before it can be fetched again. The two halves stay separate here: the cache
+//! is probed first, a hit is installed with no credential and no request, and
+//! only a genuine fetch asks [`ArtifactCredentials`] — per file, from the
+//! provider identity that file's own entry records.
+//!
+//! A cache that cannot be *read* belongs to neither half. It is a local storage
+//! failure and is reported as one: recovering from it by fetching would ask for
+//! a credential on the strength of a filesystem fault, for an artifact no
+//! request was ever going to be made for.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ephervex_download::{
-    AuthenticatedSource, CacheLayout, ContentStore, DownloadManager, DownloadRequest,
-    FileExtension, OperationReporter, Url, UrlPolicyError,
+    AuthenticatedSource, CacheLayout, ContentStore, DownloadError, DownloadManager,
+    DownloadOutcome, DownloadRequest, FileExtension, OperationReporter, Url, UrlPolicyError,
 };
 use ephervex_model::Hash;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument, warn};
 
 use crate::archive::{ExtractionLimits, ExtractionReport, PackArchive};
+use crate::credentials::ArtifactCredentials;
 use crate::error::{PackError, PackResult};
 use crate::path::{contained_join, is_reserved, safe_relative_path};
 use crate::recipe::{
@@ -74,22 +96,23 @@ pub struct MaterializedFiles {
 /// cache.
 ///
 /// Grouped because these five always travel together and are meaningless apart:
-/// where artifacts go, who fetches them, what credential this operation may
-/// spend, and how progress and cancellation are reported. Passing them as one
-/// value is also what keeps a new one — `authenticated` was the last — from
-/// growing every signature between here and the download manager.
+/// where artifacts go, who fetches them, which provider credentials are
+/// available should one turn out to be needed, and how progress and
+/// cancellation are reported. Passing them as one value is also what keeps a
+/// new one from growing every signature between here and the download manager.
 #[derive(Debug, Clone, Copy)]
 pub struct ArtifactFetch<'a> {
     pub manager: &'a DownloadManager,
     pub cache: &'a CacheLayout,
-    /// The credential this operation's artifact requests may carry.
+    /// Where a credential comes from when an artifact's provider requires one
+    /// to serve it.
     ///
-    /// `None` for every source that publishes its files openly, which is all of
-    /// them but one. A source that needs one supplies it here rather than
-    /// having it installed on the download manager, so an unauthenticated
-    /// Mojang or Modrinth request made through the same manager cannot inherit
-    /// it.
-    pub authenticated: Option<&'a Arc<AuthenticatedSource>>,
+    /// Asked per file and only for a file that is about to be fetched. A
+    /// verified copy already in the shared cache is installed without consulting
+    /// this at all, which is the whole reason an installed instance keeps
+    /// working on a machine that has configured no provider. See
+    /// [`ArtifactCredentials`].
+    pub credentials: &'a dyn ArtifactCredentials,
     pub reporter: &'a OperationReporter,
     pub cancel: &'a CancellationToken,
 }
@@ -330,20 +353,79 @@ fn preflight_destinations(wanted: &[&PackFileRecipe], game_dir: &Path) -> PackRe
 /// Fetches every file into the verified shared cache.
 ///
 /// Shared by pack materialization and managed-mod installation so there is one
-/// definition of "fetch these files": one batch for the download manager's
-/// bounded concurrency and aggregated progress, falling back to a per-file,
-/// per-address walk when the batch fails. A `downloads` array with more than one
-/// entry is a mirror list, and using only the first would throw away the
-/// source's own answer to a CDN outage.
+/// definition of "fetch these files": probe the shared cache, then one batch of
+/// whatever is left for the download manager's bounded concurrency and
+/// aggregated progress, falling back to a per-file, per-address walk when the
+/// batch fails. A `downloads` array with more than one entry is a mirror list,
+/// and using only the first would throw away the source's own answer to a CDN
+/// outage.
+///
+/// # Why the cache is probed here rather than left to the manager
+///
+/// The manager would find the same entry on its own, and for an artifact that
+/// needs no credential nothing would be gained. The difference is the artifact
+/// that does: asking a provider for one means reading a secret store, and
+/// failing when it holds nothing. A file whose verified copy is already on this
+/// machine must not fail for want of a key it is not going to spend, so the
+/// probe decides which files are genuinely going to be fetched and only those
+/// ask for a credential.
 ///
 /// Returns outcomes positionally matching `files`.
 pub(crate) async fn fetch_all(
     files: &[&PackFileRecipe],
     fetch: ArtifactFetch<'_>,
-) -> PackResult<Vec<ephervex_download::DownloadOutcome>> {
+) -> PackResult<Vec<DownloadOutcome>> {
+    let mut outcomes: Vec<Option<DownloadOutcome>> = (0..files.len()).map(|_| None).collect();
+    let mut missing = Vec::new();
+    for (index, file) in files.iter().enumerate() {
+        if fetch.cancel.is_cancelled() {
+            return Err(PackError::Canceled);
+        }
+        // Built without a credential: the probe only reads a path this crate
+        // derived from the file's own strongest digest.
+        let probe = primary_request(file, fetch, None)?;
+        match fetch.manager.cached(&probe).await {
+            Ok(Some(outcome)) => outcomes[index] = Some(outcome),
+            // Nothing usable is there. An entry that failed revalidation has
+            // already been discarded by the probe, so this is the ordinary
+            // "fetch it" answer.
+            Ok(None) => missing.push(index),
+            // The cache could not be read, which is not the same thing and must
+            // not be recovered from by fetching. A local storage fault says
+            // nothing about whether the network is needed, and treating it as a
+            // miss would go on to ask a provider for a credential — turning an
+            // unreadable cache path into "your API key is missing", for an
+            // artifact no request was ever going to be made for.
+            Err(source) => {
+                return Err(PackError::DownloadFailed {
+                    path: file.display_name(),
+                    source: Box::new(source),
+                });
+            }
+        }
+    }
+    // Deliberately not short-circuited when everything was cached: the batch
+    // still reports its own beginning and completion, so a frontend showing an
+    // operation sees the same lifecycle whether or not any bytes moved.
+    let wanted: Vec<&PackFileRecipe> = missing.iter().map(|index| files[*index]).collect();
+    let fetched = fetch_missing(&wanted, fetch).await?;
+    for (index, outcome) in missing.into_iter().zip(fetched) {
+        outcomes[index] = Some(outcome);
+    }
+    Ok(outcomes.into_iter().flatten().collect())
+}
+
+/// Fetches the files the shared cache does not already hold.
+async fn fetch_missing(
+    files: &[&PackFileRecipe],
+    fetch: ArtifactFetch<'_>,
+) -> PackResult<Vec<DownloadOutcome>> {
     let requests: Vec<DownloadRequest> = files
         .iter()
-        .map(|file| primary_request(file, fetch))
+        .map(|file| {
+            let credential = credential_for(file, fetch)?;
+            primary_request(file, fetch, credential.as_ref())
+        })
         .collect::<PackResult<_>>()?;
 
     match fetch
@@ -351,27 +433,57 @@ pub(crate) async fn fetch_all(
         .download_all(&requests, fetch.reporter, fetch.cancel)
         .await
     {
-        Ok(outcomes) => Ok(outcomes),
+        // The batch answers positionally, and the caller places each outcome
+        // against the file that asked for it. A short answer is therefore
+        // treated as a failed batch rather than trusted, because the
+        // alternative is installing fewer files than the recipe named without
+        // saying so.
+        Ok(outcomes) if outcomes.len() == requests.len() => Ok(outcomes),
         Err(error) if error.is_cancellation() => Err(PackError::Canceled),
-        Err(error) => {
-            warn!(
-                %error,
-                "a download failed; retrying each file against its remaining addresses"
-            );
+        outcome => {
+            if let Err(error) = &outcome {
+                warn!(
+                    %error,
+                    "a download failed; retrying each file against its remaining addresses"
+                );
+            }
             fetch_one_by_one(files, fetch).await
         }
     }
 }
 
+/// The credential this file's provider requires to serve it, if any.
+///
+/// Decided from the durable provider identity the recipe records and from
+/// nothing else — not the address, not the filename, not the format the pack was
+/// imported from — so a mixed desired state offers each provider's secret only
+/// to its own artifacts.
+fn credential_for(
+    file: &PackFileRecipe,
+    fetch: ArtifactFetch<'_>,
+) -> PackResult<Option<Arc<AuthenticatedSource>>> {
+    fetch
+        .credentials
+        .credential_for(file.identity.as_ref())
+        .map_err(|source| PackError::ArtifactCredentialUnavailable {
+            path: file.display_name(),
+            source,
+        })
+}
+
 /// One download request per file, using its first permitted address.
-fn primary_request(file: &PackFileRecipe, fetch: ArtifactFetch<'_>) -> PackResult<DownloadRequest> {
+fn primary_request(
+    file: &PackFileRecipe,
+    fetch: ArtifactFetch<'_>,
+    credential: Option<&Arc<AuthenticatedSource>>,
+) -> PackResult<DownloadRequest> {
     let address = file
         .downloads
         .first()
         .ok_or_else(|| PackError::FileDownloadsMissing {
             path: file.display_name(),
         })?;
-    request_for(file, address, fetch)
+    request_for(file, address, fetch, credential)
 }
 
 /// Builds a verified request for one address.
@@ -379,6 +491,7 @@ fn request_for(
     file: &PackFileRecipe,
     address: &str,
     fetch: ArtifactFetch<'_>,
+    credential: Option<&Arc<AuthenticatedSource>>,
 ) -> PackResult<DownloadRequest> {
     let hash = strongest_hash(file)?;
     let destination =
@@ -404,7 +517,7 @@ fn request_for(
     if let Some(size) = file.size {
         request = request.sized(size);
     }
-    if let Some(source) = fetch.authenticated {
+    if let Some(source) = credential {
         // The source decides whether this particular address may receive the
         // credential; attaching it here only offers it.
         request = request.authenticated_by(Arc::clone(source));
@@ -441,7 +554,7 @@ fn extension_of(file: &PackFileRecipe) -> Option<FileExtension> {
 async fn fetch_one_by_one(
     files: &[&PackFileRecipe],
     fetch: ArtifactFetch<'_>,
-) -> PackResult<Vec<ephervex_download::DownloadOutcome>> {
+) -> PackResult<Vec<DownloadOutcome>> {
     let cancel = fetch.cancel;
     let mut outcomes = Vec::with_capacity(files.len());
     for file in files {
@@ -453,10 +566,18 @@ async fn fetch_one_by_one(
                 path: file.display_name(),
             });
         }
-        let mut last_error = None;
+        let credential = credential_for(file, fetch)?;
+        let mut last_failure = None;
         let mut fetched = None;
         for address in &file.downloads {
-            let request = request_for(file, address, fetch)?;
+            let request = request_for(file, address, fetch, credential.as_ref())?;
+            // Whether the credential was *sent*, not merely offered: a source
+            // declines to attach itself to an address outside its permitted
+            // hosts, and a refusal from such an address is nobody's credential
+            // problem.
+            let authenticated = credential
+                .as_ref()
+                .is_some_and(|source| source.permits(request.url()));
             match fetch
                 .manager
                 .download(&request, fetch.reporter, cancel)
@@ -469,19 +590,16 @@ async fn fetch_one_by_one(
                 Err(error) if error.is_cancellation() => return Err(PackError::Canceled),
                 Err(error) => {
                     warn!(file = %file.display_name(), %error, "a pack download address failed");
-                    last_error = Some(error);
+                    last_failure = Some((error, authenticated));
                 }
             }
         }
-        match (fetched, last_error) {
+        match (fetched, last_failure) {
             (Some(outcome), _) => outcomes.push(outcome),
             // The loop ran at least once — an empty address list was refused
             // above — so a file that was not fetched has a failure to report.
-            (None, Some(error)) => {
-                return Err(PackError::DownloadFailed {
-                    path: file.display_name(),
-                    source: Box::new(error),
-                });
+            (None, Some((error, authenticated))) => {
+                return Err(download_failure(file, fetch, authenticated, error));
             }
             (None, None) => {
                 return Err(PackError::FileDownloadsMissing {
@@ -491,6 +609,48 @@ async fn fetch_one_by_one(
         }
     }
     Ok(outcomes)
+}
+
+/// Turns a failed transfer into the failure a caller should act on.
+///
+/// Almost always a download failure, and deliberately so: a refusal from an
+/// address is normally about the address. The exception is a request that
+/// carried a provider's credential and came back with a status that provider
+/// uses to refuse one — there the actionable fact is the credential, not the
+/// download, and only the layer that issued it can say so. See
+/// [`ArtifactCredentials::rejected`].
+fn download_failure(
+    file: &PackFileRecipe,
+    fetch: ArtifactFetch<'_>,
+    authenticated: bool,
+    error: DownloadError,
+) -> PackError {
+    if authenticated
+        && let Some(status) = refused_with(&error)
+        && let Some(source) = fetch.credentials.rejected(file.identity.as_ref(), status)
+    {
+        return PackError::ArtifactCredentialUnavailable {
+            path: file.display_name(),
+            source,
+        };
+    }
+    PackError::DownloadFailed {
+        path: file.display_name(),
+        source: Box::new(error),
+    }
+}
+
+/// The HTTP status a transfer ended on, seen through the retry wrapper.
+///
+/// `None` for everything that is not a status at all — a transport fault, a
+/// cancellation, a local write — because none of those is a provider saying
+/// anything about a credential.
+fn refused_with(error: &DownloadError) -> Option<u16> {
+    match error {
+        DownloadError::HttpStatus { status, .. } => Some(*status),
+        DownloadError::RetriesExhausted { source, .. } => refused_with(source),
+        _ => None,
+    }
 }
 
 /// Copies a verified cache entry into the instance.
@@ -869,6 +1029,7 @@ mod tests {
     use super::*;
     use ephervex_model::ModOrigin;
 
+    use crate::credentials::OpenArtifacts;
     use crate::recipe::{OverrideScope, ProviderRecipeMetadata, RECIPE_VERSION, SideRequirement};
 
     const SHA1: &str = "da39a3ee5e6b4b0d3255bfef95601890afd80709";
@@ -897,12 +1058,11 @@ mod tests {
         cache: &'a CacheLayout,
         reporter: &'a OperationReporter,
         cancel: &'a CancellationToken,
-        authenticated: Option<&'a Arc<AuthenticatedSource>>,
     ) -> ArtifactFetch<'a> {
         ArtifactFetch {
             manager,
             cache,
-            authenticated,
+            credentials: &OpenArtifacts,
             reporter,
             cancel,
         }
@@ -917,8 +1077,8 @@ mod tests {
             DownloadManager::new(ephervex_download::DownloaderConfig::default()).expect("manager");
         let reporter = OperationReporter::silent("test");
         let cancel = CancellationToken::new();
-        let fetch = offline_fetch(&manager, &cache, &reporter, &cancel, None);
-        let request = primary_request(&file("mods/some mod.jar"), fetch).expect("request");
+        let fetch = offline_fetch(&manager, &cache, &reporter, &cancel);
+        let request = primary_request(&file("mods/some mod.jar"), fetch, None).expect("request");
         let destination = request.destination().to_string_lossy().into_owned();
 
         assert!(destination.starts_with("/cache/ephervex/downloads/sha512/cf/"));
@@ -947,7 +1107,8 @@ mod tests {
         entry.logical_path = PathBuf::from("config/no-extension");
         let request = primary_request(
             &entry,
-            offline_fetch(&manager, &cache, &reporter, &cancel, None),
+            offline_fetch(&manager, &cache, &reporter, &cancel),
+            None,
         )
         .expect("request");
         assert!(
@@ -965,15 +1126,20 @@ mod tests {
             DownloadManager::new(ephervex_download::DownloaderConfig::default()).expect("manager");
         let reporter = OperationReporter::silent("test");
         let cancel = CancellationToken::new();
-        let source = Arc::new(AuthenticatedSource::new(
-            reqwest::header::HeaderName::from_static("x-api-key"),
-            ephervex_model::SecretString::new("test-key-do-not-use"),
-            ephervex_download::DomainAllowlist::curseforge_artifact_defaults(),
-        ));
+        let source = Arc::new(
+            AuthenticatedSource::new(
+                reqwest::header::HeaderName::from_static("x-api-key"),
+                ephervex_model::SecretString::new("test-key-do-not-use"),
+                ephervex_download::DomainAllowlist::curseforge_artifact_defaults(),
+                &ephervex_download::HttpConfig::default(),
+            )
+            .expect("a credential builds its containment client"),
+        );
 
         let authenticated = primary_request(
             &file("mods/a.jar"),
-            offline_fetch(&manager, &cache, &reporter, &cancel, Some(&source)),
+            offline_fetch(&manager, &cache, &reporter, &cancel),
+            Some(&source),
         )
         .expect("request");
         assert_eq!(
@@ -992,7 +1158,8 @@ mod tests {
 
         let open = primary_request(
             &file("mods/a.jar"),
-            offline_fetch(&manager, &cache, &reporter, &cancel, None),
+            offline_fetch(&manager, &cache, &reporter, &cancel),
+            None,
         )
         .expect("request");
         assert!(open.authenticated_source().is_none());

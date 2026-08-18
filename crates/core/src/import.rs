@@ -27,9 +27,8 @@
 //! anything, and the launcher should not offer to launch one.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
-use ephervex_download::{AuthenticatedSource, CacheLayout, OperationReporter};
+use ephervex_download::{CacheLayout, OperationReporter};
 use ephervex_minecraft::{MinecraftError, MinecraftVersionId};
 use ephervex_model::{InstanceId, StorageClass};
 use ephervex_options::PreferenceApplication;
@@ -42,6 +41,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument, warn};
 
 use crate::app::App;
+use crate::curseforge_pack::ProviderCredentials;
 use crate::error::CoreResult;
 
 /// What a caller wants imported.
@@ -116,15 +116,16 @@ impl ImportedPack {
 /// One request to lay an analyzed pack down into an instance.
 ///
 /// A struct rather than seven positional arguments, and the field that made it
-/// worth having is `authenticated`: a caller assembling it has to say out loud
-/// whether this import spends a credential.
+/// worth having is `credentials`: a caller assembling it has to say out loud
+/// where a credential comes from if one of this pack's files turns out to need
+/// one.
 #[derive(Debug)]
 struct MaterializePack<'a> {
     archive: &'a mut PackArchive,
     analysis: &'a PackAnalysis,
     record: &'a ClientRecord,
     selection: &'a OptionalSelection,
-    authenticated: Option<&'a Arc<AuthenticatedSource>>,
+    credentials: &'a ProviderCredentials<'a>,
     reporter: &'a OperationReporter,
     cancel: &'a CancellationToken,
 }
@@ -178,6 +179,13 @@ impl App {
         // declares that no longer exists, and a file whose author does not
         // permit third-party downloads all fail here, with nothing created.
         let authenticated = self.prepare_provider_files(&mut analysis, cancel).await?;
+        // The resolution above already read whatever secret store this pack's
+        // provider needs, so the download half reuses that value rather than
+        // reading it again.
+        let credentials = match authenticated {
+            Some(credential) => self.provider_credentials().holding_curseforge(credential),
+            None => self.provider_credentials(),
+        };
 
         let name = request
             .name
@@ -199,7 +207,7 @@ impl App {
                 analysis: &analysis,
                 record: &record,
                 selection: &request.selection,
-                authenticated: authenticated.as_ref(),
+                credentials: &credentials,
                 reporter,
                 cancel,
             })
@@ -283,13 +291,11 @@ impl App {
             analysis,
             record,
             selection,
-            authenticated,
+            credentials,
             reporter,
             cancel,
         } = request;
-        // Authenticated when the pack's source needs it, which also scopes the
-        // client's redirects to the hosts that credential may reach.
-        let manager = self.artifact_manager(authenticated)?;
+        let manager = self.artifact_manager()?;
 
         Ok(ephervex_pack::materialize(MaterializeRequest {
             archive,
@@ -300,7 +306,7 @@ impl App {
             source_dir: &ephervex_storage::metadata::source_dir(&record.root),
             manager: &manager,
             cache: &CacheLayout::new(self.paths().cache_dir()),
-            authenticated,
+            credentials,
             reporter,
             cancel,
         })

@@ -561,14 +561,7 @@ impl App {
             .map(|planned| recipe_entry(planned, plan.provider))
             .collect::<Result<_, _>>()?;
 
-        let manager = DownloadManager::new(DownloaderConfig {
-            http: self.http_config(),
-            ..DownloaderConfig::default()
-        })
-        .map_err(|source| PackError::DownloadFailed {
-            path: request.project.clone(),
-            source: Box::new(source),
-        })?;
+        let manager = self.artifact_manager()?;
 
         let installation = ephervex_pack::install_managed(ManagedModInstall {
             recipe: &mut recipe,
@@ -578,7 +571,11 @@ impl App {
             fetch: ArtifactFetch {
                 manager: &manager,
                 cache: &CacheLayout::new(self.paths().cache_dir()),
-                authenticated: None,
+                // Asked per file, from each entry's own provider identity: a
+                // batch may install a Modrinth mod beside a repair of a
+                // CurseForge one, and only the latter may be offered the
+                // CurseForge key.
+                credentials: &self.provider_credentials(),
                 reporter,
                 cancel,
             },

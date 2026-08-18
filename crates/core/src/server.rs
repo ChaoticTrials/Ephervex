@@ -5,7 +5,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
-use ephervex_download::{CacheLayout, DownloadManager, DownloaderConfig, OperationReporter};
+use ephervex_download::{CacheLayout, OperationReporter};
 use ephervex_model::{
     AccountKind, AttentionReason, ImportSourceKind, JavaOverride, JvmSettings, OperationId,
     ServerId, ServerInstallation, ServerLaunch, ServerRelativePath,
@@ -370,7 +370,12 @@ impl App {
         Ok(Some((store.dir().to_path_buf(), recipe)))
     }
 
-    async fn materialize_linked_server_recipe(
+    /// Lays a linked server's content down from the client's retained recipe.
+    ///
+    /// Crate-visible because it is the seam a server creation is built from:
+    /// everything before it is Java and loader installation, and everything the
+    /// recipe itself decides happens here.
+    pub(crate) async fn materialize_linked_server_recipe(
         &self,
         recipe: &PackRecipe,
         client_source: &Path,
@@ -379,14 +384,7 @@ impl App {
         options: &ServerCreateOptions,
         cancel: &CancellationToken,
     ) -> CoreResult<Vec<PathBuf>> {
-        let manager = DownloadManager::new(DownloaderConfig {
-            http: self.http_config(),
-            ..DownloaderConfig::default()
-        })
-        .map_err(|source| PackError::DownloadFailed {
-            path: recipe.original_name.clone(),
-            source: Box::new(source),
-        })?;
+        let manager = self.artifact_manager()?;
         let materialized = ephervex_pack::materialize_server_recipe(ServerMaterializeRequest {
             recipe,
             confirmed_unknown: &options.confirmed_unknown,
@@ -396,12 +394,16 @@ impl App {
             fetch: ArtifactFetch {
                 manager: &manager,
                 cache: &CacheLayout::new(self.paths().cache_dir()),
-                // Reconstruction needs no provider credential, whichever
-                // provider the pack came from: it installs from the addresses
-                // and digests the recipe already records. A linked server can
-                // therefore be rebuilt on a machine that has never configured
-                // one.
-                authenticated: None,
+                // Reconstruction installs from the addresses and digests the
+                // recipe already records, and never asks a provider what this
+                // instance contains. Whether the *bytes* still need fetching is
+                // a separate question: an artifact whose verified copy is in the
+                // shared cache is copied straight out of it, and one that has
+                // been collected out of it has to come back from its source,
+                // which for some providers means authenticating. So a credential
+                // is available here and is asked for per file, only when a fetch
+                // is unavoidable.
+                credentials: &self.provider_credentials(),
                 reporter: &OperationReporter::silent("server-content"),
                 cancel,
             },

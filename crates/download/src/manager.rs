@@ -38,7 +38,7 @@ use tracing::{debug, trace, warn};
 
 use crate::allowlist::{DomainAllowlist, UrlPolicyError, check_transport, redacted};
 use crate::cache::PART_SUFFIX;
-use crate::client::{HttpConfig, build_client};
+use crate::client::{HttpConfig, build_allowlisted_client, build_client};
 use crate::error::{ArtifactStep, AttemptFailure, DownloadError};
 use crate::progress::{ByteTally, OperationReporter};
 use crate::retry::{RetryPolicy, retry_after};
@@ -77,7 +77,8 @@ pub struct DownloadOutcome {
     pub source: ArtifactSource,
 }
 
-/// A credential one narrow set of hosts is allowed to receive.
+/// A credential one narrow set of hosts is allowed to receive, together with
+/// the HTTP client that keeps a redirect from taking it anywhere else.
 ///
 /// The provider-neutral answer to a single problem: one artifact source
 /// authenticates its downloads, and every other source must not learn its
@@ -86,31 +87,55 @@ pub struct DownloadOutcome {
 /// caches. So it travels with the one request that needs it, and only reaches a
 /// host the caller has explicitly vouched for.
 ///
-/// Redirects are the other half of the containment and are *not* enforced here,
-/// because a redirect is decided inside the HTTP client: a manager that sends
-/// these must be built with a client whose redirect policy refuses to leave the
-/// same host set — see
-/// [`build_allowlisted_client`](crate::build_allowlisted_client).
+/// Redirects are the other half of that containment, and they are decided
+/// inside an HTTP client rather than per header — so the client that enforces
+/// them is built here and owned here. Two properties follow, and both are
+/// required once one operation can fetch artifacts from several providers:
+///
+/// * a request carrying this credential is sent through a client whose redirect
+///   policy refuses to leave `hosts`, so a `302` cannot hand the secret to
+///   whoever the response named;
+/// * a request that carries no credential keeps the ordinary redirect policy,
+///   because one provider's containment rules have no business constraining
+///   another provider's CDN.
 #[derive(Debug, Clone)]
 pub struct AuthenticatedSource {
     header: HeaderName,
     secret: SecretString,
     hosts: DomainAllowlist,
+    /// The client every request carrying this credential is sent through. See
+    /// [`build_allowlisted_client`](crate::build_allowlisted_client).
+    client: Client,
 }
 
 impl AuthenticatedSource {
-    /// A credential header and the hosts permitted to receive it.
+    /// A credential header, the hosts permitted to receive it, and the
+    /// redirect containment that keeps it there.
     ///
     /// The header name is `'static` rather than caller-supplied text: a
     /// credential header is part of a provider's protocol, not something a
     /// remote answer gets to choose.
-    #[must_use]
-    pub fn new(header: HeaderName, secret: SecretString, hosts: DomainAllowlist) -> Self {
-        Self {
+    ///
+    /// Fallible because the containment client is built here: a credential that
+    /// cannot be confined is not one this launcher will send.
+    pub fn new(
+        header: HeaderName,
+        secret: SecretString,
+        hosts: DomainAllowlist,
+        http: &HttpConfig,
+    ) -> Result<Self, DownloadError> {
+        let client = build_allowlisted_client(http, &hosts)?;
+        Ok(Self {
             header,
             secret,
             hosts,
-        }
+            client,
+        })
+    }
+
+    /// The client a request carrying this credential must be sent through.
+    fn client(&self) -> &Client {
+        &self.client
     }
 
     /// Whether this address may receive the credential.
@@ -427,6 +452,39 @@ impl DownloadManager {
         &self.config
     }
 
+    /// Answers whether the artifact this request describes is already in the
+    /// cache, without contacting anyone.
+    ///
+    /// The same revalidation [`Self::download`] performs before it reaches for
+    /// the network, exposed so a caller can act on the answer rather than
+    /// re-deriving it: an entry is trusted only when its size and every
+    /// published digest match, and one that does not match is discarded here
+    /// exactly as it would be there.
+    ///
+    /// The point of having it is that some downloads have a *precondition* that
+    /// a cache hit makes unnecessary. Fetching a provider's credential is the
+    /// one that matters: reading a secret store, and failing when it holds
+    /// nothing, is the wrong outcome for an artifact that is already on this
+    /// machine and verified. So the probe comes first and the precondition is
+    /// only paid for by a fetch that is genuinely going to happen.
+    ///
+    /// A `Some` outcome is as good as one from [`Self::download`] and may be
+    /// used in its place; the file is not fetched or re-hashed a second time.
+    ///
+    /// The transport policy is deliberately not applied. It governs requests,
+    /// and this makes none: what is on disk has already been verified against
+    /// the digests the request names, and refusing it over the address it once
+    /// came from would make an installed instance depend on that address still
+    /// being acceptable.
+    pub async fn cached(
+        &self,
+        request: &DownloadRequest,
+    ) -> Result<Option<DownloadOutcome>, DownloadError> {
+        let destination_lock = destination_lock(&request.destination);
+        let _destination_guard = destination_lock.lock().await;
+        revalidate_cached(request).await
+    }
+
     /// Fetches one artifact, reporting byte progress.
     pub async fn download(
         &self,
@@ -685,7 +743,17 @@ impl Transfer<'_, '_> {
     }
 
     async fn send(&self, resuming: bool) -> Result<Response, AttemptFailure> {
-        let mut builder = self.manager.client.get(self.request.url.clone());
+        // A request carrying a credential goes through that credential's own
+        // client, whose redirect policy cannot leave the hosts the secret is
+        // scoped to. Everything else keeps the manager's ordinary client, so one
+        // provider's containment never becomes another provider's redirect rule
+        // in a batch that mixes them.
+        let client = self
+            .request
+            .authenticated
+            .as_ref()
+            .map_or(&self.manager.client, |source| source.client());
+        let mut builder = client.get(self.request.url.clone());
         if let Some(source) = &self.request.authenticated
             && let Some(value) = source.header_value(&self.request.url)
         {
@@ -939,6 +1007,24 @@ async fn already_cached(
     request: &DownloadRequest,
     cursor: &mut ProgressCursor<'_>,
 ) -> Result<Option<DownloadOutcome>, DownloadError> {
+    let cached = revalidate_cached(request).await?;
+    if let Some(outcome) = &cached {
+        cursor.report(outcome.bytes, Some(outcome.bytes));
+    }
+    Ok(cached)
+}
+
+/// Revalidates whatever is at a request's destination, discarding it unless it
+/// is the artifact the request describes.
+///
+/// The one definition of "this cache entry can be trusted": the file exists, it
+/// is a regular file, its length is the declared size, and every published
+/// digest matches. Anything else is removed, because a cache path whose contents
+/// do not match the request is worse than an empty one — the atomicity invariant
+/// entitles the rest of the launcher to treat presence as proof.
+async fn revalidate_cached(
+    request: &DownloadRequest,
+) -> Result<Option<DownloadOutcome>, DownloadError> {
     let destination = &request.destination;
     let metadata = match fs::symlink_metadata(destination).await {
         Ok(metadata) if metadata.is_file() => metadata,
@@ -984,7 +1070,6 @@ async fn already_cached(
         return Ok(None);
     }
 
-    cursor.report(bytes, Some(bytes));
     Ok(Some(DownloadOutcome {
         path: destination.clone(),
         bytes,
@@ -1212,11 +1297,15 @@ mod tests {
     const FAKE_KEY: &str = "test-provider-key-do-not-use";
 
     fn curseforge_source() -> Arc<AuthenticatedSource> {
-        Arc::new(AuthenticatedSource::new(
-            HeaderName::from_static("x-api-key"),
-            SecretString::new(FAKE_KEY),
-            DomainAllowlist::curseforge_artifact_defaults(),
-        ))
+        Arc::new(
+            AuthenticatedSource::new(
+                HeaderName::from_static("x-api-key"),
+                SecretString::new(FAKE_KEY),
+                DomainAllowlist::curseforge_artifact_defaults(),
+                &HttpConfig::default(),
+            )
+            .expect("a credential builds its containment client"),
+        )
     }
 
     fn url(address: &str) -> Url {

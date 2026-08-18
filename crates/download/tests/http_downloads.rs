@@ -512,6 +512,164 @@ async fn a_corrupt_cache_entry_is_reverified_and_replaced() {
 }
 
 #[tokio::test]
+async fn the_cache_probe_answers_from_disk_alone_and_agrees_with_a_download() {
+    // The probe exists so a caller can find out whether a fetch is going to
+    // happen *before* paying whatever a fetch costs it — reading a provider
+    // credential, most of all. It must therefore reach nobody, and it must
+    // apply the same revalidation a download would.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/artifact.jar"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+
+    let dir = TempDir::new().expect("temp dir");
+    let destination = dir.path().join("artifact.jar");
+    let manager = manager(RetryPolicy::none());
+    let probe = request(&server, "/artifact.jar", &destination)
+        .verifying(sha1_of(BODY))
+        .sized(BODY.len() as u64);
+
+    assert!(
+        manager
+            .cached(&probe)
+            .await
+            .expect("a probe of nothing")
+            .is_none(),
+        "an absent artifact is not a cache hit"
+    );
+
+    std::fs::write(&destination, BODY).expect("seed the cache");
+    let hit = manager
+        .cached(&probe)
+        .await
+        .expect("a probe of a valid entry")
+        .expect("the entry matches its request");
+    assert_eq!(hit.source, ArtifactSource::AlreadyCached);
+    assert_eq!(hit.bytes, BODY.len() as u64);
+    assert_eq!(hit.path, destination);
+
+    assert!(
+        server
+            .received_requests()
+            .await
+            .expect("recording enabled")
+            .is_empty(),
+        "the probe contacted the artifact's source"
+    );
+}
+
+#[tokio::test]
+async fn the_cache_probe_discards_an_entry_that_does_not_match_its_request() {
+    // The same rule a download applies: presence at a cache path only means
+    // something because a mismatching file is removed rather than trusted.
+    let server = MockServer::start().await;
+    let dir = TempDir::new().expect("temp dir");
+    let destination = dir.path().join("artifact.jar");
+    std::fs::write(&destination, vec![b'x'; BODY.len()]).expect("seed a corrupt entry");
+
+    let probe = request(&server, "/artifact.jar", &destination)
+        .verifying(sha1_of(BODY))
+        .sized(BODY.len() as u64);
+    assert!(
+        manager(RetryPolicy::none())
+            .cached(&probe)
+            .await
+            .expect("a probe of a corrupt entry")
+            .is_none()
+    );
+    assert!(
+        !destination.exists(),
+        "a cache entry that does not match its request must not survive the probe"
+    );
+}
+
+#[tokio::test]
+async fn a_credential_confines_its_own_redirects_without_confining_anything_else() {
+    // Redirect containment travels with the credential rather than with the
+    // manager, which is what lets one batch fetch an authenticated artifact and
+    // an unrelated provider's artifact through the same downloader: the
+    // authenticated request is stopped at its allowlist, and the open one still
+    // follows the redirect its own CDN answers with.
+    let server = MockServer::start().await;
+    let elsewhere = format!("http://localhost:{}/elsewhere.jar", server.address().port());
+    for route in ["/authenticated.jar", "/open.jar"] {
+        Mock::given(method("GET"))
+            .and(path(route))
+            .respond_with(ResponseTemplate::new(302).insert_header("location", elsewhere.as_str()))
+            .mount(&server)
+            .await;
+    }
+    Mock::given(method("GET"))
+        .and(path("/elsewhere.jar"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(BODY))
+        .mount(&server)
+        .await;
+
+    // `127.0.0.1` and `localhost` are the same machine and different hosts,
+    // which is exactly the shape of the leak this guards against.
+    let credential = Arc::new(
+        ephervex_download::AuthenticatedSource::new(
+            reqwest::header::HeaderName::from_static("x-api-key"),
+            ephervex_model::SecretString::new("test-key-do-not-use"),
+            ephervex_download::DomainAllowlist::for_loopback_tests("127.0.0.1"),
+            &HttpConfig::for_loopback_tests(),
+        )
+        .expect("a credential builds its containment client"),
+    );
+
+    let dir = TempDir::new().expect("temp dir");
+    let manager = manager(RetryPolicy::none());
+    let reporter = OperationReporter::silent("download");
+    let cancel = CancellationToken::new();
+
+    let confined = dir.path().join("authenticated.jar");
+    let error = manager
+        .download(
+            &request(&server, "/authenticated.jar", &confined)
+                .verifying(sha1_of(BODY))
+                .authenticated_by(Arc::clone(&credential)),
+            &reporter,
+            &cancel,
+        )
+        .await
+        .expect_err("a redirect off the permitted hosts is refused");
+    assert!(
+        matches!(error, DownloadError::HttpStatus { status: 302, .. }),
+        "{error:?}"
+    );
+    assert!(!confined.exists());
+
+    let open = dir.path().join("open.jar");
+    let outcome = manager
+        .download(
+            &request(&server, "/open.jar", &open).verifying(sha1_of(BODY)),
+            &reporter,
+            &cancel,
+        )
+        .await
+        .expect("an unauthenticated download still follows an ordinary redirect");
+    assert_eq!(outcome.source, ArtifactSource::Network);
+    assert_eq!(std::fs::read(&open).expect("artifact"), BODY);
+
+    let recorded = server.received_requests().await.expect("recording enabled");
+    let reached_elsewhere: Vec<_> = recorded
+        .iter()
+        .filter(|request| request.url.path() == "/elsewhere.jar")
+        .collect();
+    assert_eq!(
+        reached_elsewhere.len(),
+        1,
+        "only the unauthenticated download may leave the origin"
+    );
+    assert!(
+        !reached_elsewhere[0].headers.contains_key("x-api-key"),
+        "the credential reached a host outside its allowlist"
+    );
+}
+
+#[tokio::test]
 async fn every_request_identifies_ephervex_and_its_project_url() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

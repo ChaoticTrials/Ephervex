@@ -56,7 +56,9 @@ ephervex api clear-curseforge-key
 
 ## What it is used for
 
-Importing a CurseForge modpack export. The archive itself is read locally, so
+Importing a CurseForge modpack export, and fetching a CurseForge artifact again
+after the shared artifact cache has been collected. The archive itself is read
+locally, so
 Ephervex identifies the file, names the pack, and reports its exact Minecraft
 version, loader build, and file counts with no key configured at all. What needs
 the key is looking those files up: a CurseForge manifest names each one by
@@ -67,6 +69,15 @@ The key travels to two places and nowhere else: the CurseForge API, and
 CurseForge's own file-delivery hosts. Ephervex will not follow a redirect that
 leaves either, so no response can send the key somewhere it was not issued for,
 and one import reads it once rather than once per file.
+
+Once a pack is installed, the instance owns its own copy of every file and needs
+nothing from CurseForge to run. Building a linked server from it, or repairing a
+mod, reads the instance's retained recipe rather than the API — but the files
+those operations install come out of the shared artifact cache, and if the cache
+budget has since collected one, the bytes have to come back from CurseForge. That
+download needs the key, and Ephervex reports a missing, unreadable, or refused
+key as exactly that rather than as a failed download. Raising the artifact cache
+budget, or leaving it unlimited, is what avoids the situation.
 
 Some projects have third-party distribution turned off by their authors. The API
 answers about such a file and declines to say where it is, so Ephervex cannot

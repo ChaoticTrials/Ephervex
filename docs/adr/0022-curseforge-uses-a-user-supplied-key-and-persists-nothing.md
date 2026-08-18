@@ -82,9 +82,23 @@ and dropped, exactly as this ADR requires of every other CurseForge request.
 **Artifacts use the shared verified store.** A downloaded jar is content the
 provider published a hash for, addressed in `downloads/` by that hash, subject
 to the ordinary reusable-cache budget and collection. It is not API response
-data. Because everything a reconstruction needs is in the recipe, a linked
-server can be rebuilt from a CurseForge-imported client with no credential
-configured at all.
+data.
+
+**Retained metadata identifies an artifact; it does not serve one.** Everything
+a reconstruction needs to know is in the recipe, so nothing rebuilt from retained
+desired state ever asks the API what an instance contains. Whether the *bytes*
+still have to be fetched is a separate question with two answers. A verified copy
+in the shared store is installed with no credential, no request, and no
+configuration, which is what keeps an installed instance and its linked servers
+working on a machine that has never configured CurseForge. A copy the cache
+budget has since collected has to come back from the address the recipe records,
+and CurseForge serves that address only to an authenticated request — so the key
+is required again at that point. A missing, unreadable, or refused key is
+reported as the same actionable setting a first import reports; a delivery host
+answering `401` or `403` to a request that carried the key is read exactly as the
+API answering the same way, from one definition of what those statuses mean. The credential is chosen per artifact
+from the provider identity the recipe records, so a desired state naming several
+catalogs offers each secret only to its own files.
 
 ## Consequences
 
