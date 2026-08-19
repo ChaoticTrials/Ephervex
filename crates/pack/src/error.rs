@@ -141,6 +141,23 @@ pub enum PackError {
     #[error("the pack declares file `{file_id}` of `{project_id}` as both required and optional")]
     PackEntryInclusionConflict { project_id: String, file_id: String },
 
+    /// A pack declares a project whose provider-managed content class this
+    /// build does not import.
+    ///
+    /// Distinct from a mod browser refusing the same project: a modpack
+    /// import legitimately imports more than mods (a CurseForge Resource Pack,
+    /// for instance), so this names the *pack's* refusal of a class it still
+    /// does not know how to place, rather than reusing the mod browser's "not
+    /// a mod" wording.
+    #[error(
+        "the pack declares project `{reference}` as {provider} content of type `{project_type}`, which Ephervex cannot import"
+    )]
+    ProviderContentUnsupported {
+        provider: ephervex_model::ModProvider,
+        reference: String,
+        project_type: String,
+    },
+
     /// Materialization was asked for while the pack still had files only its
     /// provider can describe.
     ///
@@ -317,6 +334,7 @@ impl PackError {
             Self::PackEntryIdInvalid { .. } => "error-pack-entry-id-invalid",
             Self::PackEntryConflict { .. } => "error-pack-entry-conflict",
             Self::PackEntryInclusionConflict { .. } => "error-pack-entry-inclusion-conflict",
+            Self::ProviderContentUnsupported { .. } => "error-pack-provider-content-unsupported",
             Self::ProviderFilesUnresolved { .. } => "error-pack-provider-files-unresolved",
             Self::FileHashesMissing { .. } => "error-pack-file-hashes-missing",
             Self::FileDownloadsMissing { .. } => "error-pack-file-downloads-missing",
@@ -372,28 +390,23 @@ impl PackError {
     /// beyond the path [`Self::failing_path`] already exposes.
     ///
     /// One list per variant rather than an accessor per field, so a new
-    /// refusal carries its arguments beside its message id.
+    /// refusal carries its arguments beside its message id. Split across two
+    /// helpers purely for length; the split has no meaning a caller depends
+    /// on.
     #[must_use]
     pub fn message_args(&self) -> Vec<(&'static str, String)> {
-        match self {
-            Self::ManagedIdentityMissing { path } => vec![("path", path.clone())],
-            Self::ManagedVersionConflict {
-                provider,
-                project_id,
-                installed,
-                requested,
-            } => vec![
-                ("provider", provider.to_string()),
-                ("project", project_id.clone()),
-                ("installed", installed.clone()),
-                ("requested", requested.clone()),
-            ],
-            Self::DestinationCollision { name } => vec![("name", name.clone())],
+        self.manifest_and_entry_args()
+            .or_else(|| self.file_and_recipe_args())
+            .unwrap_or_default()
+    }
+
+    /// Arguments for refusals about the manifest and the entries it declares.
+    fn manifest_and_entry_args(&self) -> Option<Vec<(&'static str, String)>> {
+        let args = match self {
             // Names the detected format so the user is told what the file
             // *is*, rather than only that it is not importable.
             Self::FormatUnsupported { format } => vec![("format", format.to_string())],
             Self::ManifestMissing { entry } => vec![("entry", (*entry).to_owned())],
-
             Self::ManifestUnsupportedVersion {
                 entry,
                 found,
@@ -426,6 +439,15 @@ impl PackError {
                 ("project", project_id.clone()),
                 ("file_id", file_id.clone()),
             ],
+            Self::ProviderContentUnsupported {
+                provider,
+                reference,
+                project_type,
+            } => vec![
+                ("provider", provider.to_string()),
+                ("reference", reference.clone()),
+                ("project_type", project_type.clone()),
+            ],
             Self::ProviderFilesUnresolved { remaining, first } => vec![
                 ("remaining", remaining.to_string()),
                 ("project", first.clone()),
@@ -446,6 +468,28 @@ impl PackError {
                 ("allowed", allowed.to_string()),
                 ("reached", reached.to_string()),
             ],
+            _ => return None,
+        };
+        Some(args)
+    }
+
+    /// Arguments for refusals about a pack's own files, its retained state,
+    /// and its managed mods.
+    fn file_and_recipe_args(&self) -> Option<Vec<(&'static str, String)>> {
+        let args = match self {
+            Self::ManagedIdentityMissing { path } => vec![("path", path.clone())],
+            Self::ManagedVersionConflict {
+                provider,
+                project_id,
+                installed,
+                requested,
+            } => vec![
+                ("provider", provider.to_string()),
+                ("project", project_id.clone()),
+                ("installed", installed.clone()),
+                ("requested", requested.clone()),
+            ],
+            Self::DestinationCollision { name } => vec![("name", name.clone())],
             Self::FileHashesMissing { path }
             | Self::FileDownloadsMissing { path }
             | Self::DownloadUrlRejected { path, .. }
@@ -471,8 +515,9 @@ impl PackError {
                 ("client_loader", client_loader.clone()),
                 ("recipe_loader", recipe_loader.clone()),
             ],
-            _ => Vec::new(),
-        }
+            _ => return None,
+        };
+        Some(args)
     }
 
     /// Whether the user stopped this rather than something failing.
@@ -554,6 +599,11 @@ mod tests {
             PackError::PackEntryInclusionConflict {
                 project_id: "238222".to_owned(),
                 file_id: "1".to_owned(),
+            },
+            PackError::ProviderContentUnsupported {
+                provider: ephervex_model::ModProvider::CurseForge,
+                reference: "580181".to_owned(),
+                project_type: "Worlds".to_owned(),
             },
             PackError::ProviderFilesUnresolved {
                 remaining: 3,

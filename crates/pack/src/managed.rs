@@ -44,6 +44,14 @@ use crate::store::SourceStore;
 /// directory.
 pub const MODS_DIR: &str = "mods";
 
+/// The directory a pack-declared resource pack is installed into, relative to
+/// the game directory.
+///
+/// Never a managed mod's own directory: a provider-declared resource pack is
+/// pack-owned desired state, routed here instead of [`MODS_DIR`] precisely so
+/// it is never read back as one.
+pub const RESOURCEPACKS_DIR: &str = "resourcepacks";
+
 /// What installing a set of managed mods produced.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ManagedModInstallation {

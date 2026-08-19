@@ -49,7 +49,8 @@ mod mapping;
 
 pub use api::{
     CURSEFORGE_API_BASE, CURSEFORGE_API_KEY_HEADER, CurseForgeApi, CurseForgeFileRelease,
-    CurseForgeOperation, CurseForgeProjectClasses, MINECRAFT_GAME_ID, credential_refusal,
+    CurseForgeOperation, CurseForgeProjectClass, CurseForgeProjectClasses, MINECRAFT_GAME_ID,
+    credential_refusal,
 };
 pub use browser::CurseForgeProvider;
 pub use credential::{ConfiguredApiKey, CurseForgeCredentialSource};

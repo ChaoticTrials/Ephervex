@@ -57,8 +57,8 @@ mod test_support;
 pub use curseforge::{
     CURSEFORGE_API_BASE, CURSEFORGE_API_KEY_HEADER, CURSEFORGE_API_KEY_HELP, ConfiguredApiKey,
     CurseForgeApi, CurseForgeCredentialSource, CurseForgeFileRelease, CurseForgeGame,
-    CurseForgeOperation, CurseForgeProject, CurseForgeProjectClasses, CurseForgeProvider,
-    MINECRAFT_GAME_ID, credential_refusal,
+    CurseForgeOperation, CurseForgeProject, CurseForgeProjectClass, CurseForgeProjectClasses,
+    CurseForgeProvider, MINECRAFT_GAME_ID, credential_refusal,
 };
 pub use error::{ModPlatformError, ModPlatformResult};
 pub use model::{

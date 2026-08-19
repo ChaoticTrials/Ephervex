@@ -81,7 +81,9 @@ pub use install::{
     ServerMaterializeRequest, apply_overrides, apply_retained_overrides, install_files,
     materialize_server_recipe,
 };
-pub use managed::{MODS_DIR, ManagedModInstall, ManagedModInstallation, install_managed};
+pub use managed::{
+    MODS_DIR, ManagedModInstall, ManagedModInstallation, RESOURCEPACKS_DIR, install_managed,
+};
 pub use mutate::{
     ManagedMutation, ManagedMutationReport, ManagedProject, ReplacedMod, clear_retired,
     mutate_managed, projected,

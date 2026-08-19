@@ -488,13 +488,20 @@ impl PackFileRecipe {
 
     /// The managed mod this entry records, if it is one.
     ///
-    /// A file qualifies only when it names a provider, a project, *and* a
-    /// version: those are what make it re-resolvable. A pack-declared file has
-    /// none of them and is correctly not a managed mod — it is still installed
-    /// and still part of the server plan, just not something the mod browser
-    /// owns. A jar someone dropped into `mods/` has no entry here at all.
+    /// Two conditions, both necessary, the same as [`Self::is_mod_file`]
+    /// checks for [`Self::recorded_mod`]: the entry must be a jar directly in
+    /// `mods/`, and it must name a provider, a project, *and* a version:
+    /// those are what make it re-resolvable. A provider-declared file outside
+    /// `mods/`, a CurseForge Resource Pack included, can carry that same full
+    /// identity for exact reconstruction and still correctly not be a managed
+    /// mod: it is still installed and still part of the server plan, just not
+    /// something the mod browser owns. A jar someone dropped into `mods/` has
+    /// no entry here at all.
     #[must_use]
     pub fn managed_mod(&self) -> Option<ManagedMod> {
+        if !self.is_mod_file() {
+            return None;
+        }
         let identity = self.identity.as_ref()?;
         Some(ManagedMod {
             provider: identity.provider?,

@@ -844,6 +844,9 @@ error-pack-entry-conflict = The pack asks for two different versions of the same
 error-pack-entry-inclusion-conflict = The pack lists the same file as both required and optional.
 .action = File { $file_id } of project { $project } appears twice with different answers, so what the pack wants installed is not clear.
 
+error-pack-provider-content-unsupported = This { $provider } modpack contains provider-managed content Ephervex cannot import.
+.action = Project { $reference } has type "{ $project_type }".
+
 error-pack-provider-files-unresolved = { $remaining } of the pack's files have not been looked up yet.
 .action = Ephervex stopped rather than installing a pack with those files missing.
 

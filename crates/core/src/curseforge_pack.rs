@@ -56,12 +56,12 @@ use std::sync::{Arc, OnceLock};
 use ephervex_download::{AuthenticatedSource, DomainAllowlist, DownloadManager, DownloaderConfig};
 use ephervex_mod_platform::{
     CURSEFORGE_API_KEY_HEADER, CurseForgeFileRelease, CurseForgeOperation, CurseForgeProject,
-    MINECRAFT_GAME_ID, ModPlatformError,
+    CurseForgeProjectClass, MINECRAFT_GAME_ID, ModPlatformError,
 };
 use ephervex_model::{CurseForgeFileId, CurseForgeProjectId, ModOrigin, ModProvider, SecretString};
 use ephervex_pack::{
     ArtifactCredentials, CredentialUnavailable, MODS_DIR, PackAnalysis, PackError, PackFileRecipe,
-    PackFormat, PendingProviderFile, ProviderFileIdentity,
+    PackFormat, PendingProviderFile, ProviderFileIdentity, RESOURCEPACKS_DIR,
 };
 use futures_util::StreamExt as _;
 use reqwest::header::HeaderName;
@@ -69,7 +69,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument};
 
 use crate::app::App;
-use crate::error::CoreResult;
+use crate::error::{CoreError, CoreResult};
 
 /// How many exact-file lookups one import runs at once.
 ///
@@ -137,10 +137,10 @@ impl App {
         if analysis.pending.is_empty() {
             return Ok(credential);
         }
-        validate_project_classes(&operation, &analysis.pending, cancel).await?;
+        let classes = classify_projects(&operation, &analysis.pending, cancel).await?;
 
         let pending = std::mem::take(&mut analysis.pending);
-        let resolved = match resolve_files(&operation, &pending, &hosts, cancel).await {
+        let resolved = match resolve_files(&operation, &pending, &classes, &hosts, cancel).await {
             Ok(resolved) => resolved,
             Err(error) => {
                 // The analysis is left describing the pack it describes: a
@@ -387,26 +387,56 @@ fn unusable_downloader(source: ephervex_download::DownloadError) -> PackError {
     }
 }
 
-/// Confirms every project a manifest declares belongs to CurseForge's Mods
-/// class, before any file is fetched.
+/// Where a CurseForge pack-import project's exact file lands, once its class
+/// has been confirmed against this operation's own category response.
 ///
-/// Ephervex v1 manages Mods only. A CurseForge manifest names its files by
-/// project id alone, and nothing stops a project id from naming a Resource
-/// Pack, a World, or any other class of content: those are real CurseForge
-/// project classes, and none of them is a mod. Materializing one under
-/// `mods/` as though it were would install something the pack's own author
-/// never placed there. The whole import is refused rather than skipping the
-/// entry it cannot place: a pack missing one file it declared is not the pack
-/// its manifest describes.
+/// Narrower than [`CurseForgeProjectClass`] on purpose: by the time a
+/// [`PackFileRecipe`] is built, a project this build does not import has
+/// already turned into a refusal in [`classify_projects`], so
+/// [`recipe_entry`] only ever has to route between the classes the pack
+/// importer actually accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PackContentClass {
+    Mods,
+    ResourcePacks,
+}
+
+impl PackContentClass {
+    /// The directory this class installs into, relative to the game
+    /// directory.
+    const fn logical_dir(self) -> &'static str {
+        match self {
+            Self::Mods => MODS_DIR,
+            Self::ResourcePacks => RESOURCEPACKS_DIR,
+        }
+    }
+}
+
+/// Confirms every project a manifest declares against CurseForge's own
+/// category classes, before any file is fetched, and says where each one's
+/// file belongs.
+///
+/// A CurseForge manifest names its files by project id alone, and nothing
+/// stops a project id from naming a Resource Pack, a World, or any other
+/// class of content. Unlike the standalone mod browser, a modpack import
+/// legitimately contains more than Mods: a confirmed Mod routes to `mods/`
+/// and a confirmed Resource Pack routes to `resourcepacks/`, both by the one
+/// authoritative classification [`ephervex_mod_platform::CurseForgeProjectClasses::classify`]
+/// provides. Every other known class is a pack the whole import refuses
+/// rather than silently omits, and a class this build cannot confirm at all
+/// (a missing `classId`, or one the categories response never listed) fails
+/// the same way rather than being guessed at from a file name or a title. A
+/// pack missing one file it declared, or carrying one this build cannot
+/// place, is not the pack its manifest describes.
 ///
 /// Deduplicated by project, the same as [`resolve_files`] deduplicates by
 /// file: a pack that declares one project's optional and required files
 /// together asks about that project once.
-async fn validate_project_classes(
+async fn classify_projects(
     operation: &CurseForgeOperation<'_>,
     pending: &[PendingProviderFile],
     cancel: &CancellationToken,
-) -> CoreResult<()> {
+) -> CoreResult<BTreeMap<CurseForgeProjectId, PackContentClass>> {
     let mut projects: Vec<CurseForgeProjectId> = pending
         .iter()
         .map(|entry| declared_ids(entry).map(|(project, _)| project))
@@ -414,10 +444,14 @@ async fn validate_project_classes(
     projects.sort_unstable();
     projects.dedup();
 
-    // Discovered fresh for this operation. The numeric id behind "Mods" is
-    // provider metadata, not something this launcher is allowed to assume.
+    // Discovered fresh for this operation. Which numeric id means "Mods" and
+    // which means "Resource Packs" is provider metadata, not something this
+    // launcher is allowed to assume.
     let classes = operation.project_classes(MINECRAFT_GAME_ID, cancel).await?;
 
+    // `buffered` yields responses in the same order the requests were made,
+    // so this stays lined up with `projects` without re-deriving an identity
+    // from the response.
     let classified: Vec<CurseForgeProject> = futures_util::stream::iter(
         projects
             .iter()
@@ -429,15 +463,28 @@ async fn validate_project_classes(
     .into_iter()
     .collect::<Result<_, ModPlatformError>>()?;
 
-    for project in classified {
-        // The one implementation of what a project's class means, so an import
-        // and the mod browser cannot arrive at different answers about the same
-        // project.
-        if let Some(error) = classes.rejection_for(&project) {
-            return Err(error.into());
-        }
-    }
-    Ok(())
+    projects
+        .into_iter()
+        .zip(classified)
+        .map(|(id, project)| {
+            let content = match classes.classify(&project)? {
+                CurseForgeProjectClass::Mods => PackContentClass::Mods,
+                CurseForgeProjectClass::ResourcePacks => PackContentClass::ResourcePacks,
+                // A real, known CurseForge class this build still does not
+                // import. Named in pack-import terms: a modpack legitimately
+                // contains more than mods, so this is not the mod browser's
+                // "not a mod" refusal.
+                CurseForgeProjectClass::Other(project_type) => {
+                    return Err(CoreError::from(PackError::ProviderContentUnsupported {
+                        provider: ModProvider::CurseForge,
+                        reference: project.id.to_string(),
+                        project_type,
+                    }));
+                }
+            };
+            Ok((id, content))
+        })
+        .collect()
 }
 
 /// Looks up every declared file, deduplicated and with bounded concurrency.
@@ -447,6 +494,7 @@ async fn validate_project_classes(
 async fn resolve_files(
     operation: &CurseForgeOperation<'_>,
     pending: &[PendingProviderFile],
+    classes: &BTreeMap<CurseForgeProjectId, PackContentClass>,
     hosts: &DomainAllowlist,
     cancel: &CancellationToken,
 ) -> CoreResult<Vec<PackFileRecipe>> {
@@ -498,7 +546,19 @@ async fn resolve_files(
                     project_id: identity.0.to_string(),
                     file_id: identity.1.to_string(),
                 })?;
-            recipe_entry(entry, release, hosts)
+            let content_class = classes
+                .get(&identity.0)
+                .copied()
+                // Unreachable: `classes` was built from this same `pending`
+                // list's projects, so every one of them has an entry.
+                .ok_or_else(|| ModPlatformError::ResponseInvalid {
+                    provider: ModProvider::CurseForge,
+                    detail: format!(
+                        "project {} was resolved without being classified first",
+                        identity.0
+                    ),
+                })?;
+            recipe_entry(entry, release, content_class, hosts)
         })
         .collect()
 }
@@ -530,17 +590,23 @@ fn declared_ids(
 
 /// One resolved file as the recipe entry that records it.
 ///
-/// The side requirements come from the *pack*, not from the API: pack inclusion
-/// is what the manifest stated, and CurseForge's file document says nothing
-/// about servers at all. Everything the API contributes is what the launcher
-/// needs to fetch and verify an artifact.
+/// The destination directory comes from the project's confirmed class, never
+/// from the file's own name or extension: a `.zip` is not evidence that a
+/// project is a Resource Pack, and a provider-declared Resource Pack is never
+/// routed as though it were a mod. The side requirements come from the
+/// *pack*, not from the API: pack inclusion is what the manifest stated, and
+/// CurseForge's file document says nothing about servers at all. Everything
+/// the API contributes is what the launcher needs to fetch and verify an
+/// artifact.
 fn recipe_entry(
     entry: &PendingProviderFile,
     release: &CurseForgeFileRelease,
+    content_class: PackContentClass,
     hosts: &DomainAllowlist,
 ) -> CoreResult<PackFileRecipe> {
     // The file name comes from a provider and is untrusted: it is validated as
-    // a single safe path component before it can name a destination.
+    // a single safe path component before it can name a destination, the same
+    // way regardless of which directory it is about to be joined onto.
     let name = ephervex_pack::safe_file_name(&release.artifact.file_name).ok_or_else(|| {
         PackError::EntryPathUnsafe {
             entry: release.artifact.file_name.clone(),
@@ -559,7 +625,7 @@ fn recipe_entry(
             })?;
 
     Ok(PackFileRecipe {
-        logical_path: PathBuf::from(MODS_DIR).join(name),
+        logical_path: PathBuf::from(content_class.logical_dir()).join(name),
         hashes: release.artifact.hashes.clone(),
         downloads: vec![address.to_string()],
         size: release.artifact.size,
@@ -698,10 +764,22 @@ mod tests {
     /// started assuming a fixed number instead of discovering one.
     const MODS_CLASS_ID: u32 = 987_654;
 
+    /// The numeric id this test fixture's loopback server uses for the
+    /// Resource Packs class. Arbitrary, on the same terms as
+    /// [`MODS_CLASS_ID`]: a fixture that only ever exercised discovery would
+    /// still pass if the implementation started assuming this number instead.
+    const RESOURCE_PACKS_CLASS_ID: u32 = 12;
+
+    /// The numeric id this test fixture's loopback server uses for the Worlds
+    /// class, a real CurseForge class this build does not import and never
+    /// will in this suite: it stands in for "a known but unsupported class".
+    const WORLDS_CLASS_ID: u32 = 17;
+
     /// The documented shape of `GET /v1/categories?classesOnly=true`, naming
-    /// the Mods class by [`MODS_CLASS_ID`] and two decoy classes beside it, so
-    /// a test proves the right one was picked rather than the only one, and so
-    /// a non-Mod rejection has a real provider-returned class name available.
+    /// the Mods and Resource Packs classes by their own ids and one decoy
+    /// class beside them, so a test proves the right one was picked rather
+    /// than the only one, and so a refusal has a real provider-returned class
+    /// name available.
     async fn serve_project_classes(server: &MockServer) {
         Mock::given(method("GET"))
             .and(path("/v1/categories"))
@@ -709,8 +787,8 @@ mod tests {
                 format!(
                     r#"{{"data":[
                         {{"id":{MODS_CLASS_ID},"gameId":432,"name":"Mods","slug":"mc-mods","isClass":true}},
-                        {{"id":12,"gameId":432,"name":"Resource Packs","slug":"texture-packs","isClass":true}},
-                        {{"id":17,"gameId":432,"name":"Worlds","slug":"worlds","isClass":true}}
+                        {{"id":{RESOURCE_PACKS_CLASS_ID},"gameId":432,"name":"Resource Packs","slug":"texture-packs","isClass":true}},
+                        {{"id":{WORLDS_CLASS_ID},"gameId":432,"name":"Worlds","slug":"worlds","isClass":true}}
                     ]}}"#
                 ),
                 "application/json",
@@ -810,11 +888,17 @@ mod tests {
     }
 
     fn archive_at(dir: &Path, name: &str) -> std::path::PathBuf {
+        archive_with_manifest(dir, name, &export_manifest())
+    }
+
+    /// The same fixture archive, with its own manifest, for a test that needs
+    /// a shape [`export_manifest`] does not declare.
+    fn archive_with_manifest(dir: &Path, name: &str, manifest: &[u8]) -> std::path::PathBuf {
         let archive = dir.join(name);
         zip_file(
             &archive,
             &[
-                ("manifest.json", &export_manifest()),
+                ("manifest.json", manifest),
                 ("overrides/config/repro.toml", b"debug = true\n" as &[u8]),
             ],
         );
@@ -832,6 +916,49 @@ mod tests {
 
     const REQUIRED_BODY: &[u8] = b"the required mod jar";
     const OPTIONAL_BODY: &[u8] = b"the optional mod jar";
+    const RESOURCE_PACK_BODY: &[u8] = b"the resource pack zip";
+    const RESOURCE_PACK_FILE_NAME: &str = "faithful-32x.zip";
+
+    /// A manifest declaring [`REQUIRED_PROJECT`] and, also required so it
+    /// lands on disk without a selection, [`OPTIONAL_PROJECT`]: reused here
+    /// as the Resource Pack project rather than the optional mod
+    /// [`export_manifest`] declares it as.
+    fn export_manifest_with_a_required_resource_pack() -> Vec<u8> {
+        export_manifest_with_files(&format!(
+            r#"{{"projectID": {REQUIRED_PROJECT}, "fileID": {REQUIRED_FILE}, "required": true}},
+               {{"projectID": {OPTIONAL_PROJECT}, "fileID": {OPTIONAL_FILE}, "required": true}}"#
+        ))
+    }
+
+    /// Classifies [`REQUIRED_PROJECT`] as a Mod and [`OPTIONAL_PROJECT`] as a
+    /// Resource Pack, and serves both of their exact declared files.
+    async fn serve_pack_with_a_resource_pack(server: &MockServer) {
+        serve_project_classes(server).await;
+        serve_project_class(server, REQUIRED_PROJECT, "Actual Mod", MODS_CLASS_ID).await;
+        serve_project_class(
+            server,
+            OPTIONAL_PROJECT,
+            "Faithful",
+            RESOURCE_PACKS_CLASS_ID,
+        )
+        .await;
+        serve_file(
+            server,
+            REQUIRED_PROJECT,
+            REQUIRED_FILE,
+            "required-1.0.0.jar",
+            REQUIRED_BODY,
+        )
+        .await;
+        serve_file(
+            server,
+            OPTIONAL_PROJECT,
+            OPTIONAL_FILE,
+            RESOURCE_PACK_FILE_NAME,
+            RESOURCE_PACK_BODY,
+        )
+        .await;
+    }
 
     async fn serve_pack(server: &MockServer) {
         serve_pack_as_mods(server).await;
@@ -1061,8 +1188,8 @@ mod tests {
 
     #[tokio::test]
     async fn duplicate_manifest_entries_for_one_project_classify_it_once() {
-        // `validate_project_classes` is exercised directly rather than through
-        // a full manifest: the pack parser already collapses two declared
+        // `classify_projects` is exercised directly rather than through a
+        // full manifest: the pack parser already collapses two declared
         // files of one project into a conflict or a single entry (see
         // `crates/pack/src/curseforge.rs`), so two *distinct* pending entries
         // naming the same project cannot arrive from a real manifest. What
@@ -1089,7 +1216,7 @@ mod tests {
         };
         let pending = vec![entry_of(REQUIRED_FILE), entry_of(OPTIONAL_FILE)];
 
-        validate_project_classes(&operation, &pending, &CancellationToken::new())
+        classify_projects(&operation, &pending, &CancellationToken::new())
             .await
             .expect("both entries name a Mod project");
 
@@ -1107,16 +1234,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_non_mod_project_refuses_the_whole_import_and_publishes_nothing() {
+    async fn a_known_unsupported_class_refuses_the_whole_pack_import_in_pack_context() {
         let server = MockServer::start().await;
         serve_project_classes(&server).await;
         serve_project_class(&server, REQUIRED_PROJECT, "Actual Mod", MODS_CLASS_ID).await;
-        // Not a mod: a resource pack, wearing the "Resource Packs" class from
-        // serve_project_classes's own fixture rather than the Mods class. The
-        // project's own display name is deliberately unrelated to its class,
-        // so a rejection that named the *project* instead of the *class*
-        // would be caught rather than passing by coincidence.
-        serve_project_class(&server, OPTIONAL_PROJECT, "Pretty Textures", 12).await;
+        // A real, known CurseForge class this build still does not import: a
+        // World, wearing the "Worlds" class from serve_project_classes's own
+        // fixture. The project's own display name is deliberately unrelated
+        // to its class, so a rejection that named the *project* instead of
+        // the *class* would be caught rather than passing by coincidence.
+        serve_project_class(&server, OPTIONAL_PROJECT, "A Neat World", WORLDS_CLASS_ID).await;
         serve_file(
             &server,
             REQUIRED_PROJECT,
@@ -1131,24 +1258,30 @@ mod tests {
         let app = app_against(dir.path(), &server);
 
         let error = import(&app, &archive).await.expect_err("must refuse");
-        assert_eq!(error.message_id(), "error-mod-project-type-unsupported");
+        // The pack-import refusal, not the mod browser's "not a mod" wording:
+        // a modpack legitimately contains more than mods.
+        assert_eq!(
+            error.message_id(),
+            "error-pack-provider-content-unsupported"
+        );
         assert_eq!(
             error.message_args(),
             vec![
+                ("provider", "CurseForge".to_owned()),
                 ("reference", OPTIONAL_PROJECT.to_string()),
-                ("project_type", "Resource Packs".to_owned()),
+                ("project_type", "Worlds".to_owned()),
             ],
             "the refusal must name the class the categories response returned, \
              never the unrelated project's own display name"
         );
         assert!(
             app.list_clients().expect("list").is_empty(),
-            "a pack with one non-mod project publishes no instance at all, \
+            "a pack with one unsupported-class project publishes no instance at all, \
              not a partial one missing that entry"
         );
 
-        // The file endpoint for the rejected non-mod project's own file was
-        // never asked: rejection happens before any file is resolved.
+        // The file endpoint for the rejected project's own file was never
+        // asked: rejection happens before any file is resolved.
         let recorded = server.received_requests().await.expect("recorded");
         assert!(
             recorded
@@ -1159,20 +1292,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_optional_entrys_project_must_also_be_a_mod() {
+    async fn an_optional_entrys_project_must_also_be_an_importable_class() {
         // The required project is a legitimate mod; only the optional entry
-        // names something else. Optional inclusion is still Mods-only.
+        // names a class this build does not import. Optional inclusion does
+        // not exempt a project from classification, even though the pack
+        // importer now accepts more than one class overall.
         let server = MockServer::start().await;
         serve_project_classes(&server).await;
         serve_project_class(&server, REQUIRED_PROJECT, "Actual Mod", MODS_CLASS_ID).await;
-        serve_project_class(&server, OPTIONAL_PROJECT, "A World", 17).await;
+        serve_project_class(&server, OPTIONAL_PROJECT, "A World", WORLDS_CLASS_ID).await;
 
         let dir = tempfile::tempdir().expect("temp dir");
         let archive = archive_at(dir.path(), "repro.zip");
         let app = app_against(dir.path(), &server);
 
         let error = import(&app, &archive).await.expect_err("must refuse");
-        assert_eq!(error.message_id(), "error-mod-project-type-unsupported");
+        assert_eq!(
+            error.message_id(),
+            "error-pack-provider-content-unsupported"
+        );
         assert!(app.list_clients().expect("list").is_empty());
     }
 
@@ -1276,6 +1414,385 @@ mod tests {
 
         import(&app, &archive).await.expect(
             "the Mods class this server discovers is not the one every other test's fixture uses",
+        );
+    }
+
+    // -- resource packs ------------------------------------------------------
+
+    #[tokio::test]
+    async fn resource_packs_class_discovery_does_not_depend_on_any_fixed_numeric_id() {
+        // A second server whose Mods and Resource Packs classes both carry
+        // different unusual ids than the shared fixture's, so this test
+        // cannot pass by accident on whatever numbers the other tests share.
+        const OTHER_MODS_CLASS_ID: u32 = 444_222;
+        const OTHER_RESOURCE_PACKS_CLASS_ID: u32 = 333_777;
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/categories"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                format!(
+                    r#"{{"data":[
+                        {{"id":{OTHER_RESOURCE_PACKS_CLASS_ID},"gameId":432,"name":"Resource Packs","slug":"texture-packs","isClass":true}},
+                        {{"id":{OTHER_MODS_CLASS_ID},"gameId":432,"name":"Mods","slug":"mc-mods","isClass":true}}
+                    ]}}"#
+                ),
+                "application/json",
+            ))
+            .mount(&server)
+            .await;
+        serve_project_class(&server, REQUIRED_PROJECT, "Actual Mod", OTHER_MODS_CLASS_ID).await;
+        serve_project_class(
+            &server,
+            OPTIONAL_PROJECT,
+            "Faithful",
+            OTHER_RESOURCE_PACKS_CLASS_ID,
+        )
+        .await;
+        serve_file(
+            &server,
+            REQUIRED_PROJECT,
+            REQUIRED_FILE,
+            "required-1.0.0.jar",
+            REQUIRED_BODY,
+        )
+        .await;
+        serve_file(
+            &server,
+            OPTIONAL_PROJECT,
+            OPTIONAL_FILE,
+            RESOURCE_PACK_FILE_NAME,
+            RESOURCE_PACK_BODY,
+        )
+        .await;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = archive_with_manifest(
+            dir.path(),
+            "repro.zip",
+            &export_manifest_with_a_required_resource_pack(),
+        );
+        let app = app_against(dir.path(), &server);
+
+        let imported = import(&app, &archive).await.expect(
+            "the Resource Packs class this server discovers is not the one every other test's fixture uses",
+        );
+        let game = ephervex_storage::metadata::client_game_dir(&imported.record.root);
+        assert_eq!(
+            std::fs::read(game.join("resourcepacks").join(RESOURCE_PACK_FILE_NAME)).expect("read"),
+            RESOURCE_PACK_BODY,
+            "routed correctly even though this server's Resource Packs class id \
+             differs from every other test's"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_manifest_resource_pack_is_imported_and_routed_to_resourcepacks() {
+        let server = MockServer::start().await;
+        serve_pack_with_a_resource_pack(&server).await;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = archive_with_manifest(
+            dir.path(),
+            "repro.zip",
+            &export_manifest_with_a_required_resource_pack(),
+        );
+        let app = app_against(dir.path(), &server);
+
+        let imported = import(&app, &archive).await.expect("import");
+        let game = ephervex_storage::metadata::client_game_dir(&imported.record.root);
+        assert_eq!(
+            std::fs::read(game.join("mods/required-1.0.0.jar")).expect("read"),
+            REQUIRED_BODY
+        );
+        assert_eq!(
+            std::fs::read(game.join("resourcepacks").join(RESOURCE_PACK_FILE_NAME)).expect("read"),
+            RESOURCE_PACK_BODY,
+            "a confirmed Resource Pack project routes to resourcepacks/, never mods/"
+        );
+
+        let recipe = imported.recipe();
+        assert_eq!(recipe.files.len(), 2);
+        let resource_pack = recipe
+            .files
+            .iter()
+            .find(|file| {
+                file.logical_path == Path::new("resourcepacks").join(RESOURCE_PACK_FILE_NAME)
+            })
+            .expect("the resource pack is in the recipe");
+        assert_eq!(resource_pack.origin, ModOrigin::PackDeclared);
+        assert_eq!(resource_pack.client, SideRequirement::Required);
+        assert_eq!(
+            resource_pack.server,
+            SideRequirement::Unknown,
+            "the export format states nothing about servers, resource packs included"
+        );
+        let identity = resource_pack.identity.as_ref().expect("an identity");
+        assert_eq!(identity.provider, Some(ModProvider::CurseForge));
+        assert_eq!(identity.project_id.as_deref(), Some("306612"));
+        assert_eq!(
+            identity.file_id.as_deref(),
+            Some("4593600"),
+            "the exact manifest file id survives resolution"
+        );
+        assert_eq!(identity.version_id.as_deref(), Some("4593600"));
+        assert!(
+            !resource_pack.hashes.is_empty(),
+            "a provider-published digest survives resolution and stays verifiable"
+        );
+
+        // Not a managed mod: fully identified, and still never surfaced by
+        // either the resolver-facing list or the frontend-facing snapshot.
+        let managed = recipe.managed_mods();
+        assert_eq!(managed.len(), 1, "only the actual mod is a managed mod");
+        assert_eq!(managed[0].project_id, "238222");
+        assert!(
+            managed.iter().all(|mod_| mod_.project_id != "306612"),
+            "the resource pack must never appear as a managed mod: {managed:?}"
+        );
+
+        let snapshot = app
+            .managed_mod_snapshot(imported.record.id)
+            .expect("snapshot");
+        assert_eq!(
+            snapshot.mods.len(),
+            1,
+            "the resource pack is not part of the managed-mod snapshot either"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_optional_manifest_entry_may_declare_a_resource_pack() {
+        // The manifest's own required/optional semantics are unaffected by a
+        // project's class: an optional Resource Pack is recorded and left
+        // uninstalled by default, exactly like an optional mod.
+        let server = MockServer::start().await;
+        serve_project_classes(&server).await;
+        serve_project_class(&server, REQUIRED_PROJECT, "Actual Mod", MODS_CLASS_ID).await;
+        serve_project_class(
+            &server,
+            OPTIONAL_PROJECT,
+            "Faithful",
+            RESOURCE_PACKS_CLASS_ID,
+        )
+        .await;
+        serve_file(
+            &server,
+            REQUIRED_PROJECT,
+            REQUIRED_FILE,
+            "required-1.0.0.jar",
+            REQUIRED_BODY,
+        )
+        .await;
+        serve_file(
+            &server,
+            OPTIONAL_PROJECT,
+            OPTIONAL_FILE,
+            RESOURCE_PACK_FILE_NAME,
+            RESOURCE_PACK_BODY,
+        )
+        .await;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        // The unmodified fixture manifest: REQUIRED_PROJECT is required,
+        // OPTIONAL_PROJECT is `required: false`.
+        let archive = archive_at(dir.path(), "repro.zip");
+        let app = app_against(dir.path(), &server);
+
+        let imported = import(&app, &archive).await.expect("import");
+        let game = ephervex_storage::metadata::client_game_dir(&imported.record.root);
+        assert!(
+            !game
+                .join("resourcepacks")
+                .join(RESOURCE_PACK_FILE_NAME)
+                .exists(),
+            "an optional resource pack nobody selected is not installed, same as an optional mod"
+        );
+
+        let recipe = imported.recipe();
+        let resource_pack = recipe
+            .files
+            .iter()
+            .find(|file| {
+                file.logical_path == Path::new("resourcepacks").join(RESOURCE_PACK_FILE_NAME)
+            })
+            .expect("the optional resource pack is still recorded in the recipe");
+        assert_eq!(resource_pack.client, SideRequirement::Optional);
+        assert_eq!(
+            resource_pack.selected,
+            Some(false),
+            "the user was asked and said no, the same default an optional mod gets"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_retained_resource_pack_reconstructs_under_resourcepacks_on_a_server() {
+        let server = MockServer::start().await;
+        serve_pack_with_a_resource_pack(&server).await;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = archive_with_manifest(
+            dir.path(),
+            "repro.zip",
+            &export_manifest_with_a_required_resource_pack(),
+        );
+        let app = app_against(dir.path(), &server);
+        let imported = import(&app, &archive).await.expect("import");
+
+        // Nothing below this line may contact anyone: reconstruction works
+        // from the retained recipe and the shared artifact cache alone.
+        drop(server);
+
+        let target = reconstruct_server_confirming(
+            &app,
+            &imported,
+            &dir.path().join("server"),
+            OptionalSelection::of([
+                "mods/required-1.0.0.jar".to_owned(),
+                format!("resourcepacks/{RESOURCE_PACK_FILE_NAME}"),
+            ]),
+        )
+        .await
+        .expect("reconstruction");
+
+        assert_eq!(
+            std::fs::read(target.join("resourcepacks").join(RESOURCE_PACK_FILE_NAME))
+                .expect("read"),
+            RESOURCE_PACK_BODY,
+            "the retained resource pack reconstructs back under resourcepacks/"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unclassified_projects_zip_shaped_name_is_not_treated_as_a_resource_pack() {
+        // A project reporting no class at all, whose title and slug are
+        // deliberately shaped like a resource pack's. None of that is
+        // evidence: only a confirmed `classId` is.
+        let server = MockServer::start().await;
+        serve_project_classes(&server).await;
+        serve_project_class(&server, REQUIRED_PROJECT, "Actual Mod", MODS_CLASS_ID).await;
+        serve_project_with_no_class(&server, OPTIONAL_PROJECT, "Faithful.zip").await;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = archive_at(dir.path(), "repro.zip");
+        let app = app_against(dir.path(), &server);
+
+        let error = import(&app, &archive).await.expect_err("must refuse");
+        assert_eq!(error.message_id(), "error-mod-provider-response-invalid");
+        assert!(
+            !matches!(
+                error,
+                CoreError::Pack(PackError::ProviderContentUnsupported { .. })
+            ),
+            "a null class is not a confirmed Resource Pack, or any other confirmed class: {error:?}"
+        );
+        assert!(app.list_clients().expect("list").is_empty());
+
+        // The name never made classification look at a file at all.
+        let recorded = server.received_requests().await.expect("recorded");
+        assert!(
+            recorded
+                .iter()
+                .all(|request| !request.url.path().contains(&OPTIONAL_FILE.to_string())),
+            "a `.zip`-shaped title must not substitute for a confirmed class"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unsafe_resource_pack_file_name_cannot_escape_resourcepacks() {
+        let server = MockServer::start().await;
+        serve_project_classes(&server).await;
+        serve_project_class(&server, REQUIRED_PROJECT, "Actual Mod", MODS_CLASS_ID).await;
+        serve_project_class(
+            &server,
+            OPTIONAL_PROJECT,
+            "Faithful",
+            RESOURCE_PACKS_CLASS_ID,
+        )
+        .await;
+        serve_file(
+            &server,
+            REQUIRED_PROJECT,
+            REQUIRED_FILE,
+            "required-1.0.0.jar",
+            REQUIRED_BODY,
+        )
+        .await;
+        // A confirmed Resource Pack whose provider-published file name is not
+        // a single safe path component. The same validation every provider
+        // file name gets, regardless of which directory it would land in.
+        serve_file(
+            &server,
+            OPTIONAL_PROJECT,
+            OPTIONAL_FILE,
+            "../escape.zip",
+            RESOURCE_PACK_BODY,
+        )
+        .await;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = archive_at(dir.path(), "repro.zip");
+        let app = app_against(dir.path(), &server);
+
+        let error = import(&app, &archive).await.expect_err("must refuse");
+        assert_eq!(error.message_id(), "error-pack-entry-unsafe");
+        assert!(app.list_clients().expect("list").is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_restricted_resource_pack_file_refuses_the_whole_import_atomically() {
+        let server = MockServer::start().await;
+        serve_project_classes(&server).await;
+        serve_project_class(&server, REQUIRED_PROJECT, "Actual Mod", MODS_CLASS_ID).await;
+        serve_project_class(
+            &server,
+            OPTIONAL_PROJECT,
+            "Faithful",
+            RESOURCE_PACKS_CLASS_ID,
+        )
+        .await;
+        serve_file(
+            &server,
+            REQUIRED_PROJECT,
+            REQUIRED_FILE,
+            "required-1.0.0.jar",
+            REQUIRED_BODY,
+        )
+        .await;
+        // A confirmed Resource Pack whose author disabled third-party
+        // downloads: the same conservative refusal a restricted mod gets,
+        // never a substitution and never an omission.
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/v1/mods/{OPTIONAL_PROJECT}/files/{OPTIONAL_FILE}"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                format!(
+                    r#"{{"data":{{"id":{OPTIONAL_FILE},"gameId":432,"modId":{OPTIONAL_PROJECT},
+                        "isAvailable":true,"fileName":"restricted.zip","fileLength":10,
+                        "downloadUrl":null,"hashes":[]}}}}"#
+                ),
+                "application/json",
+            ))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = archive_at(dir.path(), "repro.zip");
+        let app = app_against(dir.path(), &server);
+
+        let error = import(&app, &archive).await.expect_err("must refuse");
+        assert_eq!(error.message_id(), "error-mod-file-distribution-restricted");
+        assert!(app.list_clients().expect("list").is_empty());
+        let fetches = server
+            .received_requests()
+            .await
+            .expect("recorded")
+            .iter()
+            .filter(|request| request.url.path().starts_with("/files/"))
+            .count();
+        assert_eq!(
+            fetches, 0,
+            "nothing went looking for the file anywhere else"
         );
     }
 
@@ -1833,6 +2350,26 @@ mod tests {
         imported: &crate::import::ImportedPack,
         staging: &Path,
     ) -> CoreResult<PathBuf> {
+        // The pack declares nothing about servers, so the file this suite's
+        // fixture cares about is confirmed explicitly rather than assumed.
+        reconstruct_server_confirming(
+            app,
+            imported,
+            staging,
+            OptionalSelection::of(["mods/required-1.0.0.jar"]),
+        )
+        .await
+    }
+
+    /// The same reconstruction, confirming whichever undeclared-server files
+    /// the caller names instead of always [`reconstruct_server`]'s one
+    /// required mod.
+    async fn reconstruct_server_confirming(
+        app: &App,
+        imported: &crate::import::ImportedPack,
+        staging: &Path,
+        confirmed_unknown: OptionalSelection,
+    ) -> CoreResult<PathBuf> {
         let recipe = app
             .pack_recipe(imported.record.id)
             .expect("query")
@@ -1842,9 +2379,7 @@ mod tests {
         let options = ServerCreateOptions {
             java_path: None,
             install_java_if_missing: false,
-            // The pack declares nothing about servers, so the file this test
-            // cares about is confirmed explicitly rather than assumed.
-            confirmed_unknown: OptionalSelection::of(["mods/required-1.0.0.jar"]),
+            confirmed_unknown,
         };
         app.materialize_linked_server_recipe(
             &recipe,

@@ -63,6 +63,17 @@ pub const MINECRAFT_GAME_ID: u32 = 432;
 /// fails closed instead of guessing a number.
 const MODS_CLASS_SLUG: &str = "mc-mods";
 
+/// The provider-returned slug this launcher looks for to identify Minecraft's
+/// top-level "Resource Packs" project class, on the same terms as
+/// [`MODS_CLASS_SLUG`]: not a guaranteed API constant, and matched at request
+/// time against whatever the categories response currently names.
+///
+/// Unlike Mods, a response that does not currently name this class is not a
+/// hard failure: only a CurseForge modpack import ever asks whether a project
+/// belongs to it, and a mod-browsing operation that will never ask must not
+/// fail on its account. See [`CurseForgeProjectClasses::classify`].
+const RESOURCE_PACKS_CLASS_SLUG: &str = "texture-packs";
+
 /// The header the third-party API authenticates with.
 ///
 /// Public because the same header is what an authenticated *artifact* request
@@ -382,11 +393,20 @@ impl CurseForgeOperation<'_> {
                     "game {game_id} has no top-level category class named `{MODS_CLASS_SLUG}`"
                 ),
             })?;
+        // Opportunistic, unlike Mods: see `RESOURCE_PACKS_CLASS_SLUG`.
+        let resource_packs = classes
+            .iter()
+            .find(|class| class.slug == RESOURCE_PACKS_CLASS_SLUG)
+            .map(|class| class.id);
         let names = classes
             .into_iter()
             .map(|class| (class.id, class.name))
             .collect();
-        Ok(CurseForgeProjectClasses { mods, names })
+        Ok(CurseForgeProjectClasses {
+            mods,
+            resource_packs,
+            names,
+        })
     }
 
     /// One project's full metadata, including the class it belongs to.
@@ -780,14 +800,19 @@ pub(super) struct CurseForgePage<T> {
 /// One game's top-level project classes, as one [`CurseForgeOperation::project_classes`]
 /// request answered.
 ///
-/// Answers exactly the two things a project-class check needs: whether a
-/// given class id is the Mods class, and, for a project that turns out to
-/// belong to some other class, what CurseForge itself calls that class, so a
-/// refusal can name the *class*, never the unrelated project's own display
-/// name.
+/// The one authoritative reading of what a project's `classId` means: which
+/// numeric id is Mods, which is Resource Packs where the response named one,
+/// and what CurseForge itself calls every other class it listed, so a refusal
+/// can name the *class*, never the unrelated project's own display name.
+/// [`Self::classify`] is where that reading happens; what an operation does
+/// with the result is that operation's own policy, not this type's.
 #[derive(Debug, Clone)]
 pub struct CurseForgeProjectClasses {
     mods: u32,
+    /// The Resource Packs class id, when this response named one. See
+    /// [`RESOURCE_PACKS_CLASS_SLUG`] for why this is optional where
+    /// [`Self::mods`] is not.
+    resource_packs: Option<u32>,
     names: HashMap<u32, String>,
 }
 
@@ -796,6 +821,12 @@ impl CurseForgeProjectClasses {
     #[must_use]
     pub fn is_mods(&self, class_id: u32) -> bool {
         class_id == self.mods
+    }
+
+    /// Whether this class id is the game's Resource Packs class.
+    #[must_use]
+    pub fn is_resource_packs(&self, class_id: u32) -> bool {
+        Some(class_id) == self.resource_packs
     }
 
     /// The Mods class id this response reported.
@@ -808,46 +839,84 @@ impl CurseForgeProjectClasses {
         self.mods
     }
 
-    /// The typed refusal for one classified project, or `None` when it is a
-    /// Mod.
+    /// The one authoritative reading of a project's provider class.
     ///
-    /// The one place that decides what a project's class means, so a pack
-    /// import and the mod browser cannot arrive at different answers about the
-    /// same project. Three outcomes, none of which trusts a project's own
-    /// display name to stand in for its class:
+    /// Every caller, the mod browser and a CurseForge pack import alike,
+    /// classifies a project through this method rather than re-deriving what
+    /// a `classId` means, so the two cannot arrive at different answers about
+    /// the same project. What differs between them is *policy*: which classes
+    /// each operation accepts, and what it does with one it does not. This
+    /// method only classifies; see [`Self::rejection_for`] for the
+    /// mod-browser policy built on top of it.
     ///
-    /// - a known non-Mod class is named by the class's own provider-returned
-    ///   name, from the same categories response the Mods class id came from;
-    /// - a class id the categories response never listed is not guessed at:
-    ///   this build cannot say what it is, so it fails closed the same as a
-    ///   response this build could not otherwise use;
-    /// - no reported class at all (`classId` is documented as nullable) is the
-    ///   same failure: a project this launcher cannot confirm is a Mod is never
-    ///   treated as one.
-    #[must_use]
-    pub fn rejection_for(&self, project: &CurseForgeProject) -> Option<ModPlatformError> {
-        match project.class_id {
-            Some(class_id) if self.is_mods(class_id) => None,
-            Some(class_id) => Some(match self.name_of(class_id) {
-                Some(name) => ModPlatformError::ProjectTypeUnsupported {
-                    reference: project.id.to_string(),
-                    project_type: name.to_owned(),
-                },
-                None => ModPlatformError::ResponseInvalid {
-                    provider: ModProvider::CurseForge,
-                    detail: format!(
-                        "project {} reports class {class_id}, which the game's category classes did not list",
-                        project.id
-                    ),
-                },
-            }),
-            None => Some(ModPlatformError::ResponseInvalid {
+    /// Fails closed rather than returning a class, for two cases neither of
+    /// which is guessed at:
+    ///
+    /// - no reported class at all (`classId` is documented as nullable);
+    /// - a class id this response's own categories never listed.
+    ///
+    /// Never derived from anything but `classId` itself: not a file name, not
+    /// an extension, not the project's title or slug.
+    pub fn classify(
+        &self,
+        project: &CurseForgeProject,
+    ) -> ModPlatformResult<CurseForgeProjectClass> {
+        let class_id = project
+            .class_id
+            .ok_or_else(|| ModPlatformError::ResponseInvalid {
                 provider: ModProvider::CurseForge,
                 detail: format!(
-                    "project {} reports no project class, so Ephervex cannot confirm it is a mod",
+                    "project {} reports no project class, so Ephervex cannot confirm its content type",
+                    project.id
+                ),
+            })?;
+        if self.is_mods(class_id) {
+            return Ok(CurseForgeProjectClass::Mods);
+        }
+        if self.is_resource_packs(class_id) {
+            return Ok(CurseForgeProjectClass::ResourcePacks);
+        }
+        match self.name_of(class_id) {
+            Some(name) => Ok(CurseForgeProjectClass::Other(name.to_owned())),
+            None => Err(ModPlatformError::ResponseInvalid {
+                provider: ModProvider::CurseForge,
+                detail: format!(
+                    "project {} reports class {class_id}, which the game's category classes did not list",
                     project.id
                 ),
             }),
+        }
+    }
+
+    /// The typed refusal for one classified project, or `None` when it is a
+    /// Mod.
+    ///
+    /// The mod-browser policy built on [`Self::classify`]: Ephervex v1
+    /// browses and manages Mods only, so every other class, Resource Packs
+    /// included, is refused by the provider's own name for it. A CurseForge
+    /// modpack import applies its own, wider policy directly on
+    /// [`Self::classify`] instead of calling this.
+    #[must_use]
+    pub fn rejection_for(&self, project: &CurseForgeProject) -> Option<ModPlatformError> {
+        match self.classify(project) {
+            Ok(CurseForgeProjectClass::Mods) => None,
+            Ok(CurseForgeProjectClass::ResourcePacks) => {
+                Some(ModPlatformError::ProjectTypeUnsupported {
+                    reference: project.id.to_string(),
+                    project_type: self
+                        .resource_packs
+                        .and_then(|id| self.name_of(id))
+                        .unwrap_or("Resource Packs")
+                        .to_owned(),
+                })
+            }
+            Ok(CurseForgeProjectClass::Other(project_type)) => {
+                Some(ModPlatformError::ProjectTypeUnsupported {
+                    reference: project.id.to_string(),
+                    project_type,
+                })
+            }
+            Err(error) => Some(error),
         }
     }
 
@@ -861,6 +930,25 @@ impl CurseForgeProjectClasses {
     pub fn name_of(&self, class_id: u32) -> Option<&str> {
         self.names.get(&class_id).map(String::as_str)
     }
+}
+
+/// One project's provider-managed content class, as
+/// [`CurseForgeProjectClasses::classify`] authoritatively read it.
+///
+/// Classification is the one fact every caller agrees on; what to do about it
+/// is not. The mod browser and a CurseForge pack import both classify a
+/// project through the same method and then apply their own, different
+/// policy to the result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CurseForgeProjectClass {
+    /// Minecraft's top-level Mods class.
+    Mods,
+    /// Minecraft's top-level Resource Packs class.
+    ResourcePacks,
+    /// A top-level class this build does not special-case, named the way
+    /// CurseForge itself names it in the same categories response that
+    /// answered which class is Mods.
+    Other(String),
 }
 
 /// One exact CurseForge file, normalized and checked against what was asked
