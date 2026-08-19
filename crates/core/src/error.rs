@@ -66,6 +66,30 @@ pub enum CoreError {
     #[error(transparent)]
     Preference(#[from] ephervex_options::InvalidPreferenceValue),
 
+    /// A configured value that does not fit the product preference it names.
+    ///
+    /// The generic engine's counterpart to [`Self::Preference`]: it names the
+    /// stable preference id rather than one of the seven facade keys, and it
+    /// is refused when the batch is saved rather than skipped at every later
+    /// instance creation.
+    #[error(transparent)]
+    PreferenceValue(#[from] ephervex_options::PreferenceValueError),
+
+    /// A preference id this build has no product descriptor for.
+    ///
+    /// Reading configuration written by a newer Ephervex leaves such an id
+    /// alone; deliberately *writing* one is a caller mistake, because nothing
+    /// in this build could ever apply it.
+    #[error("`{id}` is not a Minecraft preference this build offers")]
+    PreferenceUnrecognized { id: String },
+
+    /// The bundled product preference catalog could not be read.
+    ///
+    /// A broken build rather than anything a user did, so it stays reportable
+    /// instead of aborting the process.
+    #[error("the bundled Minecraft preference catalog is unusable: {detail}")]
+    PreferenceCatalogUnusable { detail: String },
+
     /// Reading, validating, or materializing an imported pack.
     ///
     /// Constructed through the conversion below rather than by `#[from]`, so a
@@ -224,6 +248,9 @@ impl CoreError {
             Self::Launch(error) => error.message_id(),
             Self::Options(error) => error.message_id(),
             Self::Preference(error) => error.message_id(),
+            Self::PreferenceValue(error) => error.message_id(),
+            Self::PreferenceUnrecognized { .. } => "error-options-preference-unrecognized",
+            Self::PreferenceCatalogUnusable { .. } => "error-options-preference-catalog-invalid",
             Self::Pack(error) => error.message_id(),
             Self::ModPlatform(error) => error.message_id(),
             Self::Server(error) => error.message_id(),
@@ -398,6 +425,9 @@ impl CoreError {
             | Self::Launch(_)
             | Self::Options(_)
             | Self::Preference(_)
+            | Self::PreferenceValue(_)
+            | Self::PreferenceUnrecognized { .. }
+            | Self::PreferenceCatalogUnusable { .. }
             | Self::ModPlatform(_)
             | Self::Pack(_)
             | Self::Server(_)
@@ -450,6 +480,9 @@ impl CoreError {
             | Self::ArtifactCacheLimitInvalid(_)
             | Self::JavaSettingsInvalid { .. }
             | Self::Preference(_)
+            | Self::PreferenceValue(_)
+            | Self::PreferenceUnrecognized { .. }
+            | Self::PreferenceCatalogUnusable { .. }
             | Self::ModPlatform(_)
             | Self::Connect(_)
             | Self::LoaderFamilyFixed { .. }

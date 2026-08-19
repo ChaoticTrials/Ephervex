@@ -32,8 +32,8 @@ use ephervex_core::{
     MAX_SEARCH_MATCHES, MINECRAFT_EULA_REFERENCE, ManagedInstallation, ManagedMod, ModInstallPlan,
     ModInstallRequest, ModProjectDetails, ModSearchQuery, ModSearchResults, NetworkAccess,
     NewClient, NewServer, OperationReporter, OptionalSelection, OutputLine, PackAnalysis,
-    PackRecipe, PackSide, Paths, PlanWarning, PlannedMod, PreferenceApplication, PreferenceKey,
-    ReconciliationReport, ReleaseListing, RequirementBasis, RuntimeClassification,
+    PackRecipe, PackSide, Paths, PlanWarning, PlannedMod, PreferenceApplication, PreferenceId,
+    PreferenceKey, ReconciliationReport, ReleaseListing, RequirementBasis, RuntimeClassification,
     RuntimeInventory, SearchOptions, SecretString, ServerCommitWarning, ServerCreateOptions,
     ServerEvent, ServerFolder, ServerNetworkSettings, ServerObserver, ServerPersistenceHealth,
     ServerRecord, ServerWarning, Session, SideRequirement, SkipReason, TextAnchor, TextView,
@@ -4076,11 +4076,11 @@ fn print_created_instance(app: &App, created: &CreatedClient, json: bool) -> any
     // "nobody has established what this release does" are different answers
     // and get different sentences.
     let version = created.record.minecraft_version.as_str();
-    for key in &applied.unsupported {
-        print_preference_note("preferences-unsupported-for-version", *key, version);
+    for id in &applied.unsupported {
+        print_preference_note("preferences-unsupported-for-version", id, version);
     }
-    for key in &applied.unknown {
-        print_preference_note("preferences-unverified-for-version", *key, version);
+    for id in &applied.unknown {
+        print_preference_note("preferences-unverified-for-version", id, version);
     }
     for skipped in &applied.skipped {
         let message = match skipped.reason {
@@ -4088,19 +4088,19 @@ fn print_created_instance(app: &App, created: &CreatedClient, json: bool) -> any
             SkipReason::LanguageAbsent => "preferences-language-absent",
             _ => "preferences-value-not-applied",
         };
-        print_preference_note(message, skipped.key, version);
+        print_preference_note(message, &skipped.id, version);
     }
     Ok(())
 }
 
 /// Prints one "this preference was not applied" line.
-fn print_preference_note(message: &str, key: PreferenceKey, version: &str) {
+fn print_preference_note(message: &str, id: &PreferenceId, version: &str) {
     eprintln!(
         "{}",
         ephervex_i18n::lookup_args(
             message,
             [
-                ("preference", MessageArg::from(key.as_str())),
+                ("preference", MessageArg::from(id.as_str())),
                 ("version", MessageArg::from(version)),
             ]
         )
@@ -4121,7 +4121,7 @@ fn preferences_applied_json(applied: Option<&PreferenceApplication>) -> serde_js
                 .iter()
                 .map(|skipped| {
                     serde_json::json!({
-                        "preference": skipped.key.as_str(),
+                        "preference": skipped.id.as_str(),
                         "reason": skipped.reason.as_str(),
                     })
                 })
@@ -4130,8 +4130,8 @@ fn preferences_applied_json(applied: Option<&PreferenceApplication>) -> serde_js
     })
 }
 
-fn preference_names(keys: &[PreferenceKey]) -> Vec<&'static str> {
-    keys.iter().map(|key| key.as_str()).collect()
+fn preference_names(ids: &[PreferenceId]) -> Vec<&str> {
+    ids.iter().map(PreferenceId::as_str).collect()
 }
 
 /// Prints the outcome of an open-folder action.

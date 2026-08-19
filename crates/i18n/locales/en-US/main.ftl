@@ -264,6 +264,16 @@ error-options-unwritable = The instance's Minecraft settings file could not be w
 error-options-preference-value-invalid = That is not a usable value for this setting.
 .action = Expected { $syntax }.
 
+# $preference is a stable setting id and is never translated.
+error-options-preference-value-unusable = The configured value for { $preference } cannot be used for this setting.
+.action = Choose a value this setting accepts and save again.
+
+error-options-preference-unrecognized = That is not a Minecraft setting this version of Ephervex offers.
+.action = Check the setting name, or update Ephervex.
+
+error-options-preference-catalog-invalid = The Minecraft settings this version of Ephervex offers could not be read.
+.action = No settings file was changed. Reinstall Ephervex if this persists.
+
 ## Minecraft version metadata 
 #
 # Version ids, release channels, and file paths are never translated; they are

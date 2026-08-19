@@ -277,16 +277,16 @@ impl App {
     /// applies fewer preferences and writes nothing it cannot vouch for.
     pub async fn preference_context(&self, minecraft_version: &str) -> PreferenceContext {
         let compatibility = self.cached_minecraft_options().await;
-        let loaded = self.minecraft_preferences();
-        let language = match loaded.preferences.language.get() {
+        let language = match self.managed_language_code() {
             // Nothing to verify: the language is not managed, so no catalog is
-            // read for it either.
+            // read for it either. A catalog failure therefore cannot reach any
+            // other preference.
             None => LanguageAvailability::Unverified,
             Some(code) => match self
                 .cached_minecraft_language_catalog(minecraft_version)
                 .await
             {
-                Some(catalog) if catalog.contains(code) => LanguageAvailability::Verified,
+                Some(catalog) if catalog.contains(&code) => LanguageAvailability::Verified,
                 Some(_) => LanguageAvailability::Absent,
                 None => LanguageAvailability::Unverified,
             },
@@ -294,6 +294,23 @@ impl App {
         PreferenceContext {
             compatibility,
             language,
+        }
+    }
+
+    /// The managed language code, whichever way it was configured.
+    ///
+    /// The one preference whose validity is not a property of `options.txt`:
+    /// which codes a release accepts comes from that release's own catalog, so
+    /// it has to be resolved before anything is written and it must not block
+    /// anything else when it cannot be.
+    fn managed_language_code(&self) -> Option<String> {
+        let catalog = self.minecraft_preference_catalog().ok()?;
+        let id = PreferenceKey::Language.id();
+        let loaded =
+            crate::minecraft_preferences::configured_minecraft_preferences(self.config(), catalog);
+        match loaded.preferences.get(&id)?.applied_value()? {
+            ephervex_options::MinecraftPreferenceValue::LanguageCode(code) => Some(code.clone()),
+            _ => None,
         }
     }
 
@@ -323,14 +340,26 @@ impl App {
         record: &ClientRecord,
         context: &PreferenceContext,
     ) -> CoreResult<PreferenceApplication> {
-        let loaded = self.minecraft_preferences();
+        let catalog = self.minecraft_preference_catalog()?;
+        let loaded =
+            crate::minecraft_preferences::configured_minecraft_preferences(self.config(), catalog);
         for rejected in &loaded.rejected {
             warn!(%rejected, "a configured Minecraft preference was not applied");
         }
-        Ok(ephervex_options::apply_to_game_directory(
+        if loaded.unrecognized > 0 {
+            // Written by a newer Ephervex, or retired by this one. Left in the
+            // configuration file exactly as it was; there is simply nothing
+            // this build could apply it to.
+            warn!(
+                count = loaded.unrecognized,
+                "ignoring configured Minecraft preferences this build has no descriptor for"
+            );
+        }
+        Ok(ephervex_options::apply_managed_preferences(
             &ephervex_storage::metadata::client_game_dir(&record.root),
             &record.minecraft_version,
             &loaded.preferences,
+            catalog,
             &context.compatibility,
             context.language,
         )?)

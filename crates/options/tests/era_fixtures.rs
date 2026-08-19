@@ -15,8 +15,8 @@ use std::path::Path;
 
 use ephervex_options::{
     GlobalMinecraftPreferences, GuiScalePreference, LanguageAvailability, Managed,
-    OPTIONS_FILE_NAME, OptionsCompatibility, ParsedOptions, PreferenceApplication, PreferenceKey,
-    PreferenceSupport, VERSION_KEY, WindowSize, apply_to_game_directory,
+    OPTIONS_FILE_NAME, OptionsCompatibility, ParsedOptions, PreferenceApplication, PreferenceId,
+    PreferenceKey, PreferenceSupport, VERSION_KEY, WindowSize, apply_to_game_directory,
 };
 
 /// One era fixture: a release and a real file from it.
@@ -92,7 +92,12 @@ fn apply_in(
 }
 
 /// The options keys one preference resolves to for one release.
-fn touched_keys(era: &Era, key: PreferenceKey) -> Vec<String> {
+fn touched_keys(era: &Era, id: &PreferenceId) -> Vec<String> {
+    let key = PreferenceKey::ALL
+        .iter()
+        .copied()
+        .find(|key| key.id() == *id)
+        .expect("the report only names the seven facade preferences");
     match OptionsCompatibility::bundled().support(key, era.version) {
         PreferenceSupport::Authoritative(fields) => fields
             .iter()
@@ -135,8 +140,8 @@ fn applying_preferences_changes_only_the_lines_it_names() {
         let (after, report) = apply(era, &everything_managed());
 
         let mut touched: Vec<String> = Vec::new();
-        for key in &report.applied {
-            touched.extend(touched_keys(era, *key));
+        for id in &report.applied {
+            touched.extend(touched_keys(era, id));
         }
 
         // Every key the file had is still there, and every one no preference
@@ -205,7 +210,7 @@ fn simulation_distance_is_unsupported_before_the_release_that_introduced_it() {
                 assert!(
                     report
                         .unsupported
-                        .contains(&PreferenceKey::SimulationDistance),
+                        .contains(&PreferenceKey::SimulationDistance.id()),
                     "{} predates simulation distance",
                     era.version
                 );
@@ -215,7 +220,7 @@ fn simulation_distance_is_unsupported_before_the_release_that_introduced_it() {
             _ => assert!(
                 !report
                     .unsupported
-                    .contains(&PreferenceKey::SimulationDistance),
+                    .contains(&PreferenceKey::SimulationDistance.id()),
                 "{} has a simulation distance",
                 era.version
             ),

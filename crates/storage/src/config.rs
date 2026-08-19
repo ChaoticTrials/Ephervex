@@ -1982,6 +1982,38 @@ reference = ""
     }
 
     #[test]
+    fn a_preference_id_from_a_newer_build_survives_a_load_and_save_cycle() {
+        // An open map is what makes the preference surface grow without a
+        // schema change, and the other half of that bargain is that an older
+        // build must not discard an id it has no descriptor for.
+        let text = "schema_version = 1\n\
+             [minecraft_preferences.fullscreen]\n\
+             enabled = true\n\
+             value = \"true\"\n\
+             [minecraft_preferences.a_setting_from_the_future]\n\
+             enabled = true\n\
+             value = \"17\"\n";
+        let mut config = Config::from_toml_str(text).expect("parse");
+        assert_eq!(config.minecraft_preferences.len(), 2);
+
+        // Saving one known preference must not touch the other entry.
+        config
+            .minecraft_preferences
+            .insert("fullscreen".to_owned(), PreferenceSetting::managed("false"));
+        let round_tripped =
+            Config::from_toml_str(&config.to_toml_string().expect("serialize")).expect("re-parse");
+
+        assert_eq!(
+            round_tripped.minecraft_preferences["a_setting_from_the_future"],
+            PreferenceSetting::managed("17")
+        );
+        assert_eq!(
+            round_tripped.minecraft_preferences["fullscreen"].value,
+            "false"
+        );
+    }
+
+    #[test]
     fn fresh_configuration_has_no_minecraft_preference_overrides() {
         let config = Config::default();
         assert!(config.minecraft_preferences.is_empty());

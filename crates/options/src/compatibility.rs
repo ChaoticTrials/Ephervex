@@ -34,9 +34,10 @@
 //! A remote document that is invalid, truncated, from a newer format, or older
 //! than what shipped is not adopted, and the build carries on with what it has.
 
-use crate::codec::{OptionCodec, SettingValue};
+use crate::catalog::{FieldRole, MinecraftPreferenceDescriptor};
+use crate::codec::OptionCodec;
 use crate::dataset::{OptionsDataset, Representation};
-use crate::preferences::{GlobalMinecraftPreferences, PreferenceKey};
+use crate::preferences::PreferenceKey;
 
 /// Which part of a preference one options key holds.
 ///
@@ -50,6 +51,21 @@ pub enum PreferenceComponent {
 }
 
 impl PreferenceComponent {
+    /// The component one product descriptor field holds.
+    ///
+    /// The two vocabularies are deliberately the same distinction under two
+    /// names: the generated catalog spells it [`FieldRole`], and the
+    /// compatibility layer has spelled it this way since the seven-preference
+    /// engine.
+    #[must_use]
+    pub const fn of_field_role(role: FieldRole) -> Self {
+        match role {
+            FieldRole::Value => Self::Value,
+            FieldRole::Width => Self::Width,
+            FieldRole::Height => Self::Height,
+        }
+    }
+
     /// A short stable name, for developer logs.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -100,7 +116,44 @@ pub enum PreferenceSupport<'a> {
     Unknown,
 }
 
+/// What a release lets Ephervex do with one preference, without borrowing the
+/// dataset that proved it.
+///
+/// The same three answers as [`PreferenceSupport`], for a report or a settings
+/// screen that outlives the compatibility document's borrow. Unknown stays a
+/// separate answer here too: collapsing it into unsupported would turn "nobody
+/// has analyzed this release yet" into "this release does not have the
+/// setting".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReleaseSupport {
+    Authoritative,
+    Unsupported,
+    Unknown,
+}
+
+impl ReleaseSupport {
+    /// A short stable name, for developer logs and reports.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Authoritative => "authoritative",
+            Self::Unsupported => "unsupported",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 impl PreferenceSupport<'_> {
+    /// The same answer, without the dataset borrow.
+    #[must_use]
+    pub const fn release_support(&self) -> ReleaseSupport {
+        match self {
+            Self::Authoritative(_) => ReleaseSupport::Authoritative,
+            Self::Unsupported => ReleaseSupport::Unsupported,
+            Self::Unknown => ReleaseSupport::Unknown,
+        }
+    }
+
     /// The fields to write, if there are any.
     #[must_use]
     pub fn fields(&self) -> &[ResolvedField<'_>] {
@@ -220,9 +273,51 @@ impl OptionsCompatibility {
             .map(|schema| schema.id.as_str())
     }
 
-    /// What this release lets Ephervex do with one preference.
+    /// What this release lets Ephervex do with one of the seven preferences
+    /// that predate the generated product catalog.
     #[must_use]
     pub fn support(&self, key: PreferenceKey, minecraft_version: &str) -> PreferenceSupport<'_> {
+        self.resolve_components(minecraft_version, dataset_settings(key).iter().copied())
+    }
+
+    /// What this release lets Ephervex do with one product preference.
+    ///
+    /// The generic form of [`Self::support`], and the one a settings screen
+    /// asks. The descriptor's own fields decide which canonical settings are
+    /// involved, so remote compatibility data can extend a shipped preference
+    /// to a new release without ever being able to re-point it at a different
+    /// Minecraft setting.
+    #[must_use]
+    pub fn descriptor_support(
+        &self,
+        descriptor: &MinecraftPreferenceDescriptor,
+        minecraft_version: &str,
+    ) -> PreferenceSupport<'_> {
+        self.resolve_components(
+            minecraft_version,
+            descriptor.fields.iter().map(|field| {
+                (
+                    PreferenceComponent::of_field_role(field.role),
+                    field.canonical_id.as_str(),
+                )
+            }),
+        )
+    }
+
+    /// Resolves one preference's canonical settings against one exact release.
+    ///
+    /// Exact matching only, and a compound is authoritative only when *every*
+    /// component is: half a window size is not a window size, and a release
+    /// nobody has analyzed is unknown rather than assumed to match the one
+    /// before it.
+    fn resolve_components<'a, I>(
+        &self,
+        minecraft_version: &str,
+        settings: I,
+    ) -> PreferenceSupport<'_>
+    where
+        I: IntoIterator<Item = (PreferenceComponent, &'a str)>,
+    {
         let Some(schema) = self.dataset.schema_for(minecraft_version) else {
             // An unmapped release is the case a launcher meets the day after a
             // Minecraft release. It stays usable; it just gets no managed
@@ -231,11 +326,13 @@ impl OptionsCompatibility {
         };
 
         let mut fields = Vec::new();
+        let mut expected = 0_usize;
         let mut unsupported = false;
-        for (component, setting) in dataset_settings(key) {
+        for (component, setting) in settings {
+            expected += 1;
             match self.dataset.representation(schema, setting) {
                 Some(representation) => fields.push(ResolvedField {
-                    component: *component,
+                    component,
                     representation,
                 }),
                 None if schema.unsupported.iter().any(|entry| entry == setting) => {
@@ -245,7 +342,7 @@ impl OptionsCompatibility {
             }
         }
 
-        if fields.len() == dataset_settings(key).len() {
+        if expected > 0 && fields.len() == expected {
             PreferenceSupport::Authoritative(fields)
         } else if unsupported {
             // A preference whose keys are only partly present cannot be
@@ -254,6 +351,30 @@ impl OptionsCompatibility {
         } else {
             PreferenceSupport::Unknown
         }
+    }
+
+    /// What one exact release lets Ephervex do with every shipped product
+    /// preference.
+    ///
+    /// The whole answer a settings screen needs to explain why a row is inert,
+    /// resolved once per release rather than per row.
+    #[must_use]
+    pub fn catalog_release_support(
+        &self,
+        catalog: &crate::catalog::MinecraftPreferenceCatalog,
+        minecraft_version: &str,
+    ) -> std::collections::BTreeMap<String, ReleaseSupport> {
+        catalog
+            .descriptors
+            .iter()
+            .map(|descriptor| {
+                (
+                    descriptor.id.clone(),
+                    self.descriptor_support(descriptor, minecraft_version)
+                        .release_support(),
+                )
+            })
+            .collect()
     }
 
     /// Every preference this release can express, for a settings screen that
@@ -270,53 +391,6 @@ impl OptionsCompatibility {
                 )
             })
             .collect()
-    }
-}
-
-/// One component of a managed preference, in release-neutral form.
-///
-/// `None` when the preference is not managed, which is how "leave the
-/// instance's own value alone" reaches every caller without a flag to forget.
-#[must_use]
-pub fn component_value(
-    preferences: &GlobalMinecraftPreferences,
-    key: PreferenceKey,
-    component: PreferenceComponent,
-) -> Option<SettingValue> {
-    match (key, component) {
-        (PreferenceKey::GuiScale, _) => preferences
-            .gui_scale
-            .get()
-            .map(|scale| SettingValue::Integer(scale.option_number())),
-        (PreferenceKey::Language, _) => preferences
-            .language
-            .get()
-            .map(|code| SettingValue::Text(code.clone())),
-        (PreferenceKey::Fullscreen, _) => preferences
-            .fullscreen
-            .get()
-            .map(|on| SettingValue::Boolean(*on)),
-        (PreferenceKey::WindowSize, PreferenceComponent::Width) => preferences
-            .window_size
-            .get()
-            .map(|size| SettingValue::Integer(i64::from(size.width))),
-        (PreferenceKey::WindowSize, PreferenceComponent::Height) => preferences
-            .window_size
-            .get()
-            .map(|size| SettingValue::Integer(i64::from(size.height))),
-        (PreferenceKey::WindowSize, PreferenceComponent::Value) => None,
-        (PreferenceKey::Fov, _) => preferences
-            .fov
-            .get()
-            .map(|degrees| SettingValue::Decimal(*degrees)),
-        (PreferenceKey::RenderDistance, _) => preferences
-            .render_distance
-            .get()
-            .map(|chunks| SettingValue::Integer(i64::from(*chunks))),
-        (PreferenceKey::SimulationDistance, _) => preferences
-            .simulation_distance
-            .get()
-            .map(|chunks| SettingValue::Integer(i64::from(*chunks))),
     }
 }
 
@@ -338,7 +412,7 @@ pub fn codec_of<'a>(field: &ResolvedField<'a>) -> &'a OptionCodec {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
-    use crate::preferences::{GuiScalePreference, Managed, WindowSize};
+    use crate::codec::SettingValue;
 
     fn compatibility() -> OptionsCompatibility {
         OptionsCompatibility::bundled()
@@ -456,44 +530,6 @@ mod tests {
             OptionsCompatibility::resolve(Some(older)).source(),
             CompatibilitySource::Bundled,
             "a rolled-back feed must not downgrade a build"
-        );
-    }
-
-    #[test]
-    fn an_unmanaged_preference_yields_no_component_value_at_all() {
-        let mut preferences = GlobalMinecraftPreferences {
-            gui_scale: Managed::apply(GuiScalePreference::Fixed(2)),
-            window_size: Managed::apply(WindowSize {
-                width: 1920,
-                height: 1080,
-            }),
-            ..GlobalMinecraftPreferences::default()
-        };
-        assert_eq!(
-            component_value(
-                &preferences,
-                PreferenceKey::GuiScale,
-                PreferenceComponent::Value
-            ),
-            Some(SettingValue::Integer(2))
-        );
-        assert_eq!(
-            component_value(
-                &preferences,
-                PreferenceKey::WindowSize,
-                PreferenceComponent::Height
-            ),
-            Some(SettingValue::Integer(1080))
-        );
-
-        preferences.gui_scale.enabled = false;
-        assert_eq!(
-            component_value(
-                &preferences,
-                PreferenceKey::GuiScale,
-                PreferenceComponent::Value
-            ),
-            None
         );
     }
 }

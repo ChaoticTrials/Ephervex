@@ -25,14 +25,17 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::codec::Unrepresentable;
+use crate::catalog::MinecraftPreferenceCatalog;
+use crate::codec::{OptionCodec, SettingValue, Unrepresentable};
 use crate::compatibility::{
-    CompatibilitySource, OptionsCompatibility, PreferenceSupport, component_value,
-    needs_language_catalog,
+    CompatibilitySource, OptionsCompatibility, PreferenceComponent, PreferenceSupport,
+    ResolvedField, needs_language_catalog,
 };
 use crate::error::OptionsError;
 use crate::file::ParsedOptions;
-use crate::preferences::{GlobalMinecraftPreferences, PreferenceKey};
+use crate::input::InputBinding;
+use crate::preference::{ConfiguredPreferences, MinecraftPreferenceValue, PreferenceId};
+use crate::preferences::GlobalMinecraftPreferences;
 
 /// The name of Minecraft's own settings file inside a game directory.
 pub const OPTIONS_FILE_NAME: &str = "options.txt";
@@ -69,6 +72,9 @@ pub enum SkipReason {
     LanguageAbsent,
     /// No language catalog for the release was available to check against.
     LanguageUnverified,
+    /// The configured input has no representation in the key storage form
+    /// this release uses.
+    InputUnavailable,
 }
 
 impl SkipReason {
@@ -82,6 +88,7 @@ impl SkipReason {
             Self::TypeMismatch => "type-mismatch",
             Self::LanguageAbsent => "language-absent",
             Self::LanguageUnverified => "language-unverified",
+            Self::InputUnavailable => "input-unavailable",
         }
     }
 }
@@ -98,10 +105,123 @@ impl From<Unrepresentable> for SkipReason {
 }
 
 /// One managed preference that was not written, and why.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkippedPreference {
-    pub key: PreferenceKey,
+    pub id: PreferenceId,
     pub reason: SkipReason,
+}
+
+/// What one configured preference resolves to for one exact release.
+///
+/// The four "not written" answers are deliberately separate. A settings
+/// screen has to be able to say *why* a row is inert, and "this release has no
+/// such setting", "nobody has established what this release does", and "this
+/// release cannot express the value you chose" are three different sentences
+/// with three different remedies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreferenceDisposition {
+    /// Managed, authoritative for this release, and the configured value
+    /// encodes through the release's own proven codec.
+    Writable,
+    /// Configured but not applied to new instances.
+    Unmanaged,
+    /// This build has no product descriptor for the id.
+    Unrecognized,
+    /// This release provably has no such setting.
+    Unsupported,
+    /// Nothing is established about how this release stores it.
+    Unknown,
+    /// This release has the setting, but cannot express the configured value.
+    NotRepresentable(SkipReason),
+}
+
+impl PreferenceDisposition {
+    /// A short stable name, for developer logs and reports.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Writable => "writable",
+            Self::Unmanaged => "unmanaged",
+            Self::Unrecognized => "unrecognized",
+            Self::Unsupported => "unsupported",
+            Self::Unknown => "unknown",
+            Self::NotRepresentable(_) => "not-representable",
+        }
+    }
+
+    /// Whether this preference would change the instance's file.
+    #[must_use]
+    pub const fn is_writable(&self) -> bool {
+        matches!(self, Self::Writable)
+    }
+}
+
+/// One configured preference resolved against one exact release.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedPreference {
+    pub id: PreferenceId,
+    pub disposition: PreferenceDisposition,
+    /// The exact `options.txt` assignments this preference produces, empty
+    /// unless the disposition is [`PreferenceDisposition::Writable`]. All of
+    /// them or none: a compound preference never contributes half its keys.
+    writes: Vec<(String, String)>,
+}
+
+impl PlannedPreference {
+    /// The `options.txt` assignments this preference would make.
+    #[must_use]
+    pub fn writes(&self) -> &[(String, String)] {
+        &self.writes
+    }
+}
+
+/// What applying the configured preferences to one release would do, resolved
+/// without touching any instance.
+///
+/// The dry form of [`apply_managed_preferences`], so a settings screen can
+/// show an exact per-release preview and a creation can decide what it is
+/// about to write before it writes anything.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreferencePlan {
+    /// The release this plan was resolved for.
+    pub minecraft_version: String,
+    /// The schema family this release resolved to, or `None` when the release
+    /// is not in the compatibility dataset at all.
+    pub schema: Option<String>,
+    /// Whether the knowledge used was the bundled baseline or the remote feed.
+    pub source: CompatibilitySource,
+    /// Every configured preference, in id order.
+    pub entries: Vec<PlannedPreference>,
+}
+
+impl PreferencePlan {
+    /// One preference's resolution, or `None` when it is not configured.
+    #[must_use]
+    pub fn entry(&self, id: &PreferenceId) -> Option<&PlannedPreference> {
+        self.entries.iter().find(|entry| entry.id == *id)
+    }
+
+    /// The ids that would be written, in id order.
+    #[must_use]
+    pub fn writable(&self) -> Vec<PreferenceId> {
+        self.ids_with(PreferenceDisposition::is_writable)
+    }
+
+    fn ids_with(&self, predicate: impl Fn(&PreferenceDisposition) -> bool) -> Vec<PreferenceId> {
+        self.entries
+            .iter()
+            .filter(|entry| predicate(&entry.disposition))
+            .map(|entry| entry.id.clone())
+            .collect()
+    }
+
+    /// Every assignment this plan makes, in id order.
+    fn assignments(&self) -> Vec<(String, String)> {
+        self.entries
+            .iter()
+            .flat_map(|entry| entry.writes.iter().cloned())
+            .collect()
+    }
 }
 
 /// What applying global preferences to one instance did.
@@ -125,13 +245,16 @@ pub struct PreferenceApplication {
     /// Whether the instance had no `options.txt` before this.
     pub created_file: bool,
     /// Preferences that were managed and written.
-    pub applied: Vec<PreferenceKey>,
+    pub applied: Vec<PreferenceId>,
     /// Preferences that were managed but which this Minecraft release provably
     /// does not have.
-    pub unsupported: Vec<PreferenceKey>,
+    pub unsupported: Vec<PreferenceId>,
     /// Preferences whose representation has not been established for this
     /// release. Never written, and deliberately not reported as unsupported.
-    pub unknown: Vec<PreferenceKey>,
+    pub unknown: Vec<PreferenceId>,
+    /// Preferences configured under an id this build has no descriptor for.
+    /// Left in the configuration file untouched and never applied.
+    pub unrecognized: Vec<PreferenceId>,
     /// Preferences the release does have, but whose configured value it cannot
     /// express.
     pub skipped: Vec<SkippedPreference>,
@@ -145,84 +268,177 @@ impl PreferenceApplication {
     }
 }
 
-/// Applies the managed global preferences to `<game_dir>/options.txt`.
+/// Resolves every configured preference against one exact Minecraft release,
+/// without reading or writing any instance.
 ///
-/// Reads the existing file when there is one — an imported pack may ship its
-/// own — merges only the managed keys into it, and writes it back atomically.
-/// A pack's file with nothing to apply is not rewritten, so an import that
-/// changes nothing leaves the bytes it was given.
-pub fn apply_to_game_directory(
-    game_dir: &Path,
+/// Nothing here guesses. A release the dataset does not name resolves to
+/// [`PreferenceDisposition::Unknown`] for everything, a value outside a
+/// release's proven domain resolves to
+/// [`PreferenceDisposition::NotRepresentable`] rather than being moved to the
+/// nearest value the release would accept, and a compound preference resolves
+/// as one unit.
+#[must_use]
+pub fn plan_managed_preferences(
     minecraft_version: &str,
-    preferences: &GlobalMinecraftPreferences,
+    preferences: &ConfiguredPreferences,
+    catalog: &MinecraftPreferenceCatalog,
     compatibility: &OptionsCompatibility,
     language: LanguageAvailability,
-) -> Result<PreferenceApplication, OptionsError> {
-    let path = game_dir.join(OPTIONS_FILE_NAME);
-    let mut report = PreferenceApplication {
-        path: path.clone(),
+) -> PreferencePlan {
+    let mut entries = Vec::with_capacity(preferences.len());
+
+    for (id, configured) in preferences.iter() {
+        let disposition = if configured.managed {
+            resolve_one(
+                id,
+                &configured.value,
+                minecraft_version,
+                catalog,
+                compatibility,
+                language,
+            )
+        } else {
+            (PreferenceDisposition::Unmanaged, Vec::new())
+        };
+        entries.push(PlannedPreference {
+            id: id.clone(),
+            disposition: disposition.0,
+            writes: disposition.1,
+        });
+    }
+
+    PreferencePlan {
         minecraft_version: minecraft_version.to_owned(),
         schema: compatibility
             .schema_id(minecraft_version)
             .map(str::to_owned),
         source: compatibility.source(),
+        entries,
+    }
+}
+
+/// Resolves one managed preference, and the assignments it would make.
+fn resolve_one(
+    id: &PreferenceId,
+    value: &MinecraftPreferenceValue,
+    minecraft_version: &str,
+    catalog: &MinecraftPreferenceCatalog,
+    compatibility: &OptionsCompatibility,
+    language: LanguageAvailability,
+) -> (PreferenceDisposition, Vec<(String, String)>) {
+    let Some(descriptor) = catalog.descriptor(id.as_str()) else {
+        return (PreferenceDisposition::Unrecognized, Vec::new());
+    };
+    if descriptor.validate_value(value).is_err() {
+        // A value that does not fit the product descriptor cannot be
+        // meaningfully asked about a release, and must never be repaired into
+        // one that does.
+        return (
+            PreferenceDisposition::NotRepresentable(SkipReason::TypeMismatch),
+            Vec::new(),
+        );
+    }
+
+    let fields = match compatibility.descriptor_support(descriptor, minecraft_version) {
+        PreferenceSupport::Unsupported => return (PreferenceDisposition::Unsupported, Vec::new()),
+        PreferenceSupport::Unknown => return (PreferenceDisposition::Unknown, Vec::new()),
+        PreferenceSupport::Authoritative(fields) => fields,
+    };
+
+    if needs_language_catalog(&fields) && language != LanguageAvailability::Verified {
+        let reason = match language {
+            LanguageAvailability::Absent => SkipReason::LanguageAbsent,
+            _ => SkipReason::LanguageUnverified,
+        };
+        return (PreferenceDisposition::NotRepresentable(reason), Vec::new());
+    }
+
+    match encode_fields(value, &fields) {
+        Ok(writes) => (PreferenceDisposition::Writable, writes),
+        Err(reason) => (PreferenceDisposition::NotRepresentable(reason), Vec::new()),
+    }
+}
+
+/// Applies the configured global preferences to `<game_dir>/options.txt`.
+///
+/// Reads the existing file when there is one (an imported pack may ship its
+/// own), merges only the writable preferences into it, and writes it back
+/// atomically. A pack's file with nothing to apply is not rewritten, so an
+/// import that changes nothing leaves the bytes it was given.
+pub fn apply_managed_preferences(
+    game_dir: &Path,
+    minecraft_version: &str,
+    preferences: &ConfiguredPreferences,
+    catalog: &MinecraftPreferenceCatalog,
+    compatibility: &OptionsCompatibility,
+    language: LanguageAvailability,
+) -> Result<PreferenceApplication, OptionsError> {
+    let plan = plan_managed_preferences(
+        minecraft_version,
+        preferences,
+        catalog,
+        compatibility,
+        language,
+    );
+    apply_plan(game_dir, &plan)
+}
+
+/// Writes one already-resolved plan into an instance's options file.
+///
+/// Split from [`plan_managed_preferences`] so that everything which can decide
+/// *not* to write has already decided before the file is touched.
+pub fn apply_plan(
+    game_dir: &Path,
+    plan: &PreferencePlan,
+) -> Result<PreferenceApplication, OptionsError> {
+    let path = game_dir.join(OPTIONS_FILE_NAME);
+    let mut report = PreferenceApplication {
+        path: path.clone(),
+        minecraft_version: plan.minecraft_version.clone(),
+        schema: plan.schema.clone(),
+        source: plan.source,
         created_file: false,
         applied: Vec::new(),
         unsupported: Vec::new(),
         unknown: Vec::new(),
+        unrecognized: Vec::new(),
         skipped: Vec::new(),
     };
 
-    let mut writes: Vec<(String, String)> = Vec::new();
-    for key in preferences.managed_keys() {
-        match compatibility.support(key, minecraft_version) {
-            PreferenceSupport::Unsupported => {
+    for entry in &plan.entries {
+        match &entry.disposition {
+            PreferenceDisposition::Writable => report.applied.push(entry.id.clone()),
+            PreferenceDisposition::Unmanaged => {}
+            PreferenceDisposition::Unrecognized => {
+                report.unrecognized.push(entry.id.clone());
+            }
+            PreferenceDisposition::Unsupported => {
                 tracing::debug!(
-                    preference = %key,
-                    version = minecraft_version,
+                    preference = %entry.id,
+                    version = plan.minecraft_version,
                     "skipping a managed preference; this Minecraft release has no setting for it"
                 );
-                report.unsupported.push(key);
+                report.unsupported.push(entry.id.clone());
             }
-            PreferenceSupport::Unknown => {
+            PreferenceDisposition::Unknown => {
                 tracing::info!(
-                    preference = %key,
-                    version = minecraft_version,
+                    preference = %entry.id,
+                    version = plan.minecraft_version,
                     "skipping a managed preference; how this Minecraft release stores it has not been established"
                 );
-                report.unknown.push(key);
+                report.unknown.push(entry.id.clone());
             }
-            PreferenceSupport::Authoritative(fields) => {
-                if needs_language_catalog(&fields) && language != LanguageAvailability::Verified {
-                    let reason = match language {
-                        LanguageAvailability::Absent => SkipReason::LanguageAbsent,
-                        _ => SkipReason::LanguageUnverified,
-                    };
-                    tracing::info!(
-                        preference = %key,
-                        version = minecraft_version,
-                        reason = reason.as_str(),
-                        "skipping the managed language preference; support could not be verified for this release"
-                    );
-                    report.skipped.push(SkippedPreference { key, reason });
-                    continue;
-                }
-
-                match encode_fields(preferences, key, &fields) {
-                    Ok(encoded) => {
-                        writes.extend(encoded);
-                        report.applied.push(key);
-                    }
-                    Err(reason) => {
-                        tracing::info!(
-                            preference = %key,
-                            version = minecraft_version,
-                            reason = reason.as_str(),
-                            "skipping a managed preference; this Minecraft release cannot express the configured value"
-                        );
-                        report.skipped.push(SkippedPreference { key, reason });
-                    }
-                }
+            PreferenceDisposition::NotRepresentable(reason) => {
+                tracing::info!(
+                    preference = %entry.id,
+                    version = plan.minecraft_version,
+                    reason = reason.as_str(),
+                    "skipping a managed preference; this Minecraft release cannot express the configured value"
+                );
+                report.skipped.push(SkippedPreference {
+                    id: entry.id.clone(),
+                    reason: *reason,
+                });
             }
         }
     }
@@ -230,11 +446,12 @@ pub fn apply_to_game_directory(
     let existing = read_options(&path)?;
     report.created_file = existing.is_none();
 
+    let writes = plan.assignments();
     if writes.is_empty() {
         // Writing the file back would rewrite an imported pack's own options
         // for no reason.
         tracing::debug!(
-            version = minecraft_version,
+            version = plan.minecraft_version,
             "no global Minecraft preferences to apply; leaving options.txt alone"
         );
         report.applied.clear();
@@ -249,7 +466,7 @@ pub fn apply_to_game_directory(
 
     tracing::info!(
         path = %path.display(),
-        version = minecraft_version,
+        version = plan.minecraft_version,
         schema = report.schema.as_deref().unwrap_or("unmapped"),
         source = report.source.as_str(),
         created = report.created_file,
@@ -259,27 +476,117 @@ pub fn apply_to_game_directory(
     Ok(report)
 }
 
+/// Applies the seven preferences that predate the generated product catalog.
+///
+/// The compatibility facade over [`apply_managed_preferences`], kept so the
+/// existing configuration and command-line vocabulary keeps working
+/// unchanged. It resolves through exactly the same engine.
+pub fn apply_to_game_directory(
+    game_dir: &Path,
+    minecraft_version: &str,
+    preferences: &GlobalMinecraftPreferences,
+    compatibility: &OptionsCompatibility,
+    language: LanguageAvailability,
+) -> Result<PreferenceApplication, OptionsError> {
+    let catalog = match MinecraftPreferenceCatalog::bundled_shared() {
+        Ok(catalog) => catalog,
+        Err(error) => {
+            // A broken bundled catalog is a broken build, not something the
+            // user did. Report it and create the instance anyway rather than
+            // failing a creation over a settings file.
+            tracing::error!(%error, "the bundled Minecraft preference catalog is unusable");
+            return Ok(PreferenceApplication {
+                path: game_dir.join(OPTIONS_FILE_NAME),
+                minecraft_version: minecraft_version.to_owned(),
+                schema: compatibility
+                    .schema_id(minecraft_version)
+                    .map(str::to_owned),
+                source: compatibility.source(),
+                created_file: false,
+                applied: Vec::new(),
+                unsupported: Vec::new(),
+                unknown: Vec::new(),
+                unrecognized: Vec::new(),
+                skipped: Vec::new(),
+            });
+        }
+    };
+    let loaded = preferences.to_configured(catalog);
+    apply_managed_preferences(
+        game_dir,
+        minecraft_version,
+        &loaded.preferences,
+        catalog,
+        compatibility,
+        language,
+    )
+}
+
 /// Encodes every component of one preference, or none of them.
 ///
 /// All or nothing on purpose: a window size whose width was writable and whose
 /// height was not would configure half a window.
 fn encode_fields(
-    preferences: &GlobalMinecraftPreferences,
-    key: PreferenceKey,
-    fields: &[crate::compatibility::ResolvedField<'_>],
+    value: &MinecraftPreferenceValue,
+    fields: &[ResolvedField<'_>],
 ) -> Result<Vec<(String, String)>, SkipReason> {
     let mut encoded = Vec::with_capacity(fields.len());
     for field in fields {
-        let Some(value) = component_value(preferences, key, field.component) else {
-            // Only reachable if a managed preference has no value for a
-            // component the dataset expects, which is a build-level mismatch
-            // rather than anything the user did.
-            return Err(SkipReason::TypeMismatch);
-        };
-        let text = field.representation.codec.encode(&value)?;
+        let codec = &field.representation.codec;
+        let setting = setting_value_for(value, field.component, codec)?;
+        let text = codec.encode(&setting)?;
         encoded.push((field.representation.key.clone(), text));
     }
     Ok(encoded)
+}
+
+/// Turns one typed preference value into the release-neutral value one
+/// options key holds.
+///
+/// The codec is consulted rather than guessed at for the two shapes whose
+/// storage form is genuinely a per-release fact: an enumeration is persisted
+/// as an id in some releases and a token in others, and a key binding is a
+/// numeric scan code before 1.13 and a name afterwards. Everything else has
+/// exactly one release-neutral form.
+fn setting_value_for(
+    value: &MinecraftPreferenceValue,
+    component: PreferenceComponent,
+    codec: &OptionCodec,
+) -> Result<SettingValue, SkipReason> {
+    match value {
+        MinecraftPreferenceValue::Boolean(on) => Ok(SettingValue::Boolean(*on)),
+        MinecraftPreferenceValue::Integer(number) => Ok(SettingValue::Integer(*number)),
+        MinecraftPreferenceValue::Decimal(number) => Ok(SettingValue::Decimal(number.get())),
+        MinecraftPreferenceValue::Text(text) | MinecraftPreferenceValue::LanguageCode(text) => {
+            Ok(SettingValue::Text(text.clone()))
+        }
+        MinecraftPreferenceValue::Enum(technical) => match codec {
+            OptionCodec::EnumId { .. } => technical
+                .parse()
+                .map(SettingValue::Integer)
+                .map_err(|_| SkipReason::NotInDomain),
+            OptionCodec::EnumToken { .. } => Ok(SettingValue::Text(technical.clone())),
+            _ => Err(SkipReason::TypeMismatch),
+        },
+        MinecraftPreferenceValue::KeyBinding(binding) => encode_binding(*binding, codec),
+        MinecraftPreferenceValue::WindowSize(size) => match component {
+            PreferenceComponent::Width => Ok(SettingValue::Integer(i64::from(size.width))),
+            PreferenceComponent::Height => Ok(SettingValue::Integer(i64::from(size.height))),
+            PreferenceComponent::Value => Err(SkipReason::TypeMismatch),
+        },
+    }
+}
+
+/// Turns one binding into the value the release's key storage form holds.
+fn encode_binding(_binding: InputBinding, codec: &OptionCodec) -> Result<SettingValue, SkipReason> {
+    match codec {
+        // Both key storage eras are recognised representations; turning a
+        // release-neutral binding into either one is not yet implemented, and
+        // a launcher that guessed at a scan code would write a binding the
+        // user never chose.
+        OptionCodec::KeyCodeLwjgl2 | OptionCodec::KeyNameGlfw => Err(SkipReason::InputUnavailable),
+        _ => Err(SkipReason::TypeMismatch),
+    }
 }
 
 /// Reads an instance's options file, or `None` when it has none yet.
@@ -323,7 +630,7 @@ fn write_options(path: &Path, text: &str) -> Result<(), OptionsError> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
-    use crate::preferences::{GuiScalePreference, Managed, WindowSize};
+    use crate::preferences::{GuiScalePreference, Managed, PreferenceKey, WindowSize};
 
     fn gui_scale_only() -> GlobalMinecraftPreferences {
         GlobalMinecraftPreferences {
@@ -366,7 +673,8 @@ mod tests {
         assert!(legacy.created_file && modern.created_file);
         assert_eq!(
             legacy.applied,
-            vec![PreferenceKey::GuiScale, PreferenceKey::Fov]
+            vec![PreferenceKey::Fov.id(), PreferenceKey::GuiScale.id()],
+            "a report is ordered by stable id, never by a settings screen's order"
         );
 
         let legacy_text = std::fs::read_to_string(old.join(OPTIONS_FILE_NAME)).expect("read");
@@ -394,7 +702,7 @@ mod tests {
 
         let report = apply(&game, "1.20.1", &gui_scale_only());
         assert!(!report.created_file);
-        assert_eq!(report.applied, vec![PreferenceKey::GuiScale]);
+        assert_eq!(report.applied, vec![PreferenceKey::GuiScale.id()]);
 
         let text = std::fs::read_to_string(game.join(OPTIONS_FILE_NAME)).expect("read");
         assert_eq!(
@@ -428,7 +736,10 @@ mod tests {
         };
 
         let report = apply(&game, "1.12.2", &preferences);
-        assert_eq!(report.unsupported, vec![PreferenceKey::SimulationDistance]);
+        assert_eq!(
+            report.unsupported,
+            vec![PreferenceKey::SimulationDistance.id()]
+        );
         assert!(report.applied.is_empty());
         assert!(
             !game.join(OPTIONS_FILE_NAME).exists(),
@@ -445,7 +756,7 @@ mod tests {
 
         let report = apply(&game, "26.99", &gui_scale_only());
         assert_eq!(report.schema, None);
-        assert_eq!(report.unknown, vec![PreferenceKey::GuiScale]);
+        assert_eq!(report.unknown, vec![PreferenceKey::GuiScale.id()]);
         assert!(report.applied.is_empty());
         assert!(!game.join(OPTIONS_FILE_NAME).exists());
     }
@@ -478,7 +789,7 @@ mod tests {
             assert_eq!(
                 report.skipped,
                 vec![SkippedPreference {
-                    key: PreferenceKey::Language,
+                    id: PreferenceKey::Language.id(),
                     reason: expected
                 }]
             );
@@ -488,7 +799,7 @@ mod tests {
         let game = base.path().join("verified");
         std::fs::create_dir_all(&game).expect("mkdir");
         let report = apply(&game, "1.12.2", &preferences);
-        assert_eq!(report.applied, vec![PreferenceKey::Language]);
+        assert_eq!(report.applied, vec![PreferenceKey::Language.id()]);
         assert!(
             std::fs::read_to_string(game.join(OPTIONS_FILE_NAME))
                 .expect("read")
@@ -506,7 +817,7 @@ mod tests {
         };
 
         let report = apply(&game, "26.2", &preferences);
-        assert_eq!(report.applied, vec![PreferenceKey::SimulationDistance]);
+        assert_eq!(report.applied, vec![PreferenceKey::SimulationDistance.id()]);
         assert!(report.skipped.is_empty());
         assert!(
             std::fs::read_to_string(game.join(OPTIONS_FILE_NAME))
@@ -528,7 +839,7 @@ mod tests {
         };
 
         let report = apply(&game, "1.12.2", &preferences);
-        assert_eq!(report.applied, vec![PreferenceKey::WindowSize]);
+        assert_eq!(report.applied, vec![PreferenceKey::WindowSize.id()]);
         let text = std::fs::read_to_string(game.join(OPTIONS_FILE_NAME)).expect("read");
         assert!(text.contains("overrideWidth:1920"));
         assert!(text.contains("overrideHeight:1080"));

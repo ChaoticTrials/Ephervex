@@ -370,6 +370,20 @@ impl MinecraftPreferenceCatalog {
         Ok(catalog)
     }
 
+    /// The bundled catalog, read once for the whole process.
+    ///
+    /// [`Self::bundled`] parses and revalidates a document of nearly two
+    /// hundred descriptors every call, which is fine at startup and wasteful
+    /// on a path that resolves a preference per instance creation. The
+    /// document is build input, so reading it once is safe; the failure is
+    /// still returned rather than swallowed, because a broken build should be
+    /// reportable rather than fatal.
+    pub fn bundled_shared() -> Result<&'static Self, &'static CatalogError> {
+        static BUNDLED: std::sync::OnceLock<Result<MinecraftPreferenceCatalog, CatalogError>> =
+            std::sync::OnceLock::new();
+        BUNDLED.get_or_init(Self::bundled).as_ref()
+    }
+
     /// Reads and structurally validates a document, without checking it
     /// against any compatibility dataset yet.
     ///

@@ -1,4 +1,14 @@
-//! The normalized global preference model.
+//! The seven-preference facade that predates the generated product catalog.
+//!
+//! # What this module is now
+//!
+//! [`crate::preference`] is the engine: stable ids, typed values, and a sparse
+//! configured set covering every preference the bundled catalog exposes. This
+//! module is the vocabulary the configuration file and the command line have
+//! used since before that engine existed - `gui_scale`, `fov`, `render_distance`
+//! and four more - kept working unchanged, resolving through exactly the same
+//! engine. The seven ids here are the catalog's own ids for the same
+//! preferences, so one configuration entry means one thing to both.
 //!
 //! # Why this is a model rather than a stored `options.txt`
 //!
@@ -11,7 +21,7 @@
 //!
 //! So preferences are held as *typed values with names of their own*, and
 //! turning one into a line of a particular release's `options.txt` is the
-//! version adapters' job ([`crate::adapter`]).
+//! compatibility layer's job ([`crate::compatibility`] and [`crate::codec`]).
 //!
 //! # Why every preference carries an `enabled` flag
 //!
@@ -25,6 +35,12 @@
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
+
+use crate::catalog::MinecraftPreferenceCatalog;
+use crate::preference::{
+    ConfiguredPreference, ConfiguredPreferences, LoadedConfiguredPreferences,
+    MinecraftPreferenceValue, PreferenceId,
+};
 
 /// One global preference, and whether Ephervex applies it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -172,6 +188,16 @@ impl PreferenceKey {
             Self::RenderDistance => "render_distance",
             Self::SimulationDistance => "simulation_distance",
         }
+    }
+
+    /// The stable product preference id this key names.
+    ///
+    /// The seven keys that predate the generated product catalog use exactly
+    /// the ids the catalog gives them, so one configuration entry means the
+    /// same preference to both the facade and the generic engine.
+    #[must_use]
+    pub fn id(self) -> PreferenceId {
+        PreferenceId::compiled_in(self.as_str())
     }
 
     /// Parses a configuration or command-line name.
@@ -331,6 +357,24 @@ impl PreferenceValue {
                 Ok(Self::SimulationDistance(chunks))
             }
         }
+    }
+
+    /// The same value in the generic engine's typed form.
+    ///
+    /// `None` only for a field of view built out of a number that is not a
+    /// real one, which the parser cannot produce.
+    #[must_use]
+    pub fn to_preference_value(&self) -> Option<MinecraftPreferenceValue> {
+        Some(match self {
+            Self::GuiScale(scale) => MinecraftPreferenceValue::Integer(scale.option_number()),
+            Self::Language(code) => MinecraftPreferenceValue::LanguageCode(code.clone()),
+            Self::Fullscreen(on) => MinecraftPreferenceValue::Boolean(*on),
+            Self::WindowSize(size) => MinecraftPreferenceValue::WindowSize(*size),
+            Self::Fov(degrees) => MinecraftPreferenceValue::decimal(*degrees)?,
+            Self::RenderDistance(chunks) | Self::SimulationDistance(chunks) => {
+                MinecraftPreferenceValue::Integer(i64::from(*chunks))
+            }
+        })
     }
 
     /// The canonical text form, as stored in `config.toml`.
@@ -515,6 +559,53 @@ impl GlobalMinecraftPreferences {
         LoadedPreferences {
             preferences,
             rejected,
+        }
+    }
+
+    /// The same preferences in the generic engine's typed, sparse form.
+    ///
+    /// Only preferences the catalog still describes come through, so the
+    /// facade cannot ask the engine to write a setting this build no longer
+    /// exposes. A value the descriptor refuses is reported rather than
+    /// repaired, exactly as a configured one is.
+    #[must_use]
+    pub fn to_configured(
+        &self,
+        catalog: &MinecraftPreferenceCatalog,
+    ) -> LoadedConfiguredPreferences {
+        let mut preferences = ConfiguredPreferences::new();
+        let mut rejected = Vec::new();
+        let mut unrecognized = 0_usize;
+
+        for key in PreferenceKey::ALL {
+            let id = key.id();
+            let Some(descriptor) = catalog.descriptor(id.as_str()) else {
+                unrecognized += 1;
+                continue;
+            };
+            // The `None` case is only reachable for a field of view a caller
+            // built out of a number that is not a real one.
+            let Some(value) = self.value(*key).to_preference_value() else {
+                unrecognized += 1;
+                continue;
+            };
+            if let Err(error) = descriptor.validate_value(&value) {
+                rejected.push(error);
+                continue;
+            }
+            preferences.insert(
+                id,
+                ConfiguredPreference {
+                    managed: self.is_managed(*key),
+                    value,
+                },
+            );
+        }
+
+        LoadedConfiguredPreferences {
+            preferences,
+            rejected,
+            unrecognized,
         }
     }
 

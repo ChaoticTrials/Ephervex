@@ -38,6 +38,7 @@ pub mod linked_mods;
 pub mod live_diagnostics;
 pub mod loader;
 pub mod logging;
+pub mod minecraft_preferences;
 pub mod mods;
 pub mod mutation;
 pub mod server;
@@ -69,6 +70,10 @@ pub use linked_mods::{
 };
 pub use loader::{IncompatibleMod, LoaderVersionChange, LoaderVersionPlan};
 pub use logging::{DEFAULT_LOG_DIRECTIVES, init_tracing};
+pub use minecraft_preferences::{
+    MinecraftPreferenceEntry, MinecraftPreferenceSnapshot, PreferenceChange, PreferenceEdit,
+    configured_minecraft_preferences,
+};
 pub use mods::{
     InstalledMods, InstancePackSource, ManagedModEntry, ManagedModSnapshot, MetadataAvailability,
     ModDetails, ModInstallRequest, ModPresence,
@@ -163,10 +168,15 @@ pub use ephervex_model::{
     MAX_ARTIFACT_CACHE_LIMIT_BYTES, ServerInstallation, ServerRelativePath, format_binary_bytes,
 };
 pub use ephervex_options::{
-    CompatibilitySource, GlobalMinecraftPreferences, GuiScalePreference, InvalidPreferenceValue,
-    LanguageAvailability, LoadedPreferences, Managed, OPTIONS_FILE_NAME, OptionsCompatibility,
-    PreferenceApplication, PreferenceKey, PreferenceSupport, PreferenceValue, SkipReason,
-    SkippedPreference, WindowSize,
+    CompatibilitySource, ConfiguredPreference, ConfiguredPreferences, FiniteDecimal,
+    GlobalMinecraftPreferences, GuiScalePreference, InputBinding, InvalidPreferenceId,
+    InvalidPreferenceValue, LanguageAvailability, LoadedConfiguredPreferences, LoadedPreferences,
+    Managed, MinecraftPreferenceCatalog, MinecraftPreferenceDescriptor, MinecraftPreferenceValue,
+    MouseButton, OPTIONS_FILE_NAME, OptionsCompatibility, PhysicalKey, PlannedPreference,
+    PreferenceApplication, PreferenceCategory, PreferenceDisposition, PreferenceId, PreferenceKey,
+    PreferencePlan, PreferencePresentation, PreferenceSupport, PreferenceValue,
+    PreferenceValueError, PreferenceValueProblem, PreferenceValueShape, PresentationTier,
+    ReleaseSupport, SkipReason, SkippedPreference, WindowSize,
 };
 pub use ephervex_pack::{
     AppliedLayer, ExtractionLimits, ManagedMod, ManagedModInstallation, ManagedMutationReport,

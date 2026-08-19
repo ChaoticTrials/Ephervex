@@ -242,6 +242,22 @@ Global Minecraft preferences are normalized values, never a copied
 proof of what that release stores, which is generated rather than written
 (ADR 0017).
 
+Two generated documents answer two different questions. The bundled product
+catalog (`crates/options/data/minecraft-preferences.json`) says which settings
+this build exposes and what product shape each has; it is application-owned and
+has no remote form. The compatibility dataset says how one exact release
+persists a canonical setting; it is bundled and may also arrive from the remote
+feed. A compatibility update can extend an already-shipped preference to a new
+Minecraft release, and can never make a new preference exist.
+
+A configured preference is a stable id and one typed value. Configuration is
+sparse: an absent id means Ephervex has no opinion about that setting, which is
+different from managing it to a value that happens to match. Ids written by a
+newer build are carried through a load and save cycle untouched and are never
+presented or applied. Global preferences are defaults for instances created or
+imported from here on; changing one never revisits an instance that exists, and
+duplication keeps the copied instance's own file.
+
 ```text
 official client JAR
    │ tools/minecraft-options/update.py, static analysis, never executed

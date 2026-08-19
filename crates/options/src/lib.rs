@@ -3,9 +3,24 @@
 //!
 //! # The feature in one sentence
 //!
-//! Configure a handful of Minecraft settings once, and have every *newly
-//! created or imported* client instance come up with them applied — without
-//! ever copying one release's `options.txt` into another release's instance.
+//! Configure Minecraft settings once, and have every *newly created or
+//! imported* client instance come up with them applied, without ever copying
+//! one release's `options.txt` into another release's instance.
+//!
+//! # Two generated documents, two different questions
+//!
+//! * [`MinecraftPreferenceCatalog`] answers "which settings does this Ephervex
+//!   build expose, and what product shape does each have". It is bundled,
+//!   application-owned, and has no remote form at all.
+//! * [`OptionsDataset`] answers "how does this exact Minecraft release persist
+//!   this canonical setting". It ships bundled and may also arrive from a
+//!   remote feed.
+//!
+//! [`ConfiguredPreferences`] is where the two meet: a sparse, typed set of
+//! values keyed by [`PreferenceId`], resolved against one exact release by
+//! [`plan_managed_preferences`] and written by [`apply_managed_preferences`].
+//! A compatibility update can extend a shipped preference to a new Minecraft
+//! release; it can never make a new preference exist.
 //!
 //! # Four rules, and where each is enforced
 //!
@@ -57,11 +72,14 @@ pub mod dataset;
 pub mod error;
 pub mod feed;
 pub mod file;
+pub mod input;
+pub mod preference;
 pub mod preferences;
 
 pub use apply::{
-    LanguageAvailability, OPTIONS_FILE_NAME, PreferenceApplication, SkipReason, SkippedPreference,
-    apply_to_game_directory,
+    LanguageAvailability, OPTIONS_FILE_NAME, PlannedPreference, PreferenceApplication,
+    PreferenceDisposition, PreferencePlan, SkipReason, SkippedPreference,
+    apply_managed_preferences, apply_plan, apply_to_game_directory, plan_managed_preferences,
 };
 pub use catalog::{
     CatalogError, EnumValuePresentation, FieldRole, KeyBindingDefaultPresentation,
@@ -72,7 +90,7 @@ pub use catalog::{
 pub use codec::{OptionCodec, SettingValue, Unrepresentable};
 pub use compatibility::{
     CompatibilitySource, OptionsCompatibility, PreferenceComponent, PreferenceSupport,
-    ResolvedField,
+    ReleaseSupport, ResolvedField,
 };
 pub use dataset::{
     DATASET_FORMAT_VERSION, DatasetError, OptionsDataset, RegistrySetting, ReleaseMapping,
@@ -84,6 +102,12 @@ pub use feed::{
     OPTIONS_FEED_CACHE_KEY, OptionsFeed,
 };
 pub use file::{ParsedOptions, VERSION_KEY};
+pub use input::{InputBinding, MouseButton, PhysicalKey};
+pub use preference::{
+    ConfiguredPreference, ConfiguredPreferences, FiniteDecimal, InvalidPreferenceId,
+    LoadedConfiguredPreferences, MinecraftPreferenceValue, PreferenceId, PreferenceValueError,
+    PreferenceValueProblem, PreferenceValueShape,
+};
 pub use preferences::{
     GlobalMinecraftPreferences, GuiScalePreference, InvalidPreferenceValue, LoadedPreferences,
     MAXIMUM_FOV_DEGREES, MINIMUM_FOV_DEGREES, Managed, PreferenceKey, PreferenceValue, WindowSize,
