@@ -32,10 +32,12 @@ from pathlib import Path
 from typing import Any
 
 import dataset
+import preferences
 
 TOOL_DIR = Path(__file__).resolve().parent
 REPO_ROOT = TOOL_DIR.parent.parent
 BUNDLED_DATASET = REPO_ROOT / "crates" / "options" / "data" / "minecraft-options.json"
+BUNDLED_PREFERENCE_CATALOG = REPO_ROOT / "crates" / "options" / "data" / "minecraft-preferences.json"
 DEFAULT_CACHE = TOOL_DIR / ".cache"
 
 MANIFEST_URL = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
@@ -203,12 +205,44 @@ def read_bundled() -> dict[str, Any] | None:
     return json.loads(BUNDLED_DATASET.read_text(encoding="utf-8"))
 
 
+def read_bundled_preferences() -> dict[str, Any] | None:
+    if not BUNDLED_PREFERENCE_CATALOG.exists():
+        return None
+    return json.loads(BUNDLED_PREFERENCE_CATALOG.read_text(encoding="utf-8"))
+
+
+def preference_catalog_candidates(
+    document: dict[str, Any], preference_catalog: dict[str, Any] | None
+) -> list[str]:
+    """Current, manageable settings this compatibility update recorded that
+    the bundled product catalog does not yet expose or explicitly exclude.
+
+    Read-only: this never regenerates or writes the catalog. Growing the
+    product surface is a separate, reviewed action
+    (`preferences.py --from-analysis ...`), never a side effect of an ordinary
+    compatibility update.
+    """
+    if preference_catalog is None:
+        return []
+    accounted = {
+        field["canonical_id"] for descriptor in preference_catalog["descriptors"] for field in descriptor["fields"]
+    }
+    accounted.update(exclusion["canonical_id"] for exclusion in preference_catalog["exclusions"])
+    registry = {entry["id"]: entry for entry in document["setting_registry"]}
+    return sorted(
+        setting_id
+        for setting_id in document["current_canonical_setting_ids"]
+        if setting_id not in accounted and registry[setting_id]["manageable"]
+    )
+
+
 def summarize(
     document: dict[str, Any],
     previous: dict[str, Any] | None,
     changes: list[dict[str, str]],
     records: list[dict[str, Any]],
     catalog: dict[str, Any] | None,
+    preference_catalog: dict[str, Any] | None = None,
 ) -> list[str]:
     lines: list[str] = []
     mapping = {entry["minecraft_version"]: entry["schema"] for entry in document["releases"]}
@@ -255,6 +289,17 @@ def summarize(
         )
         lines.append(
             "  recorded as data only; exposing one as an Ephervex preference needs an application release"
+        )
+
+    candidates = preference_catalog_candidates(document, preference_catalog)
+    if candidates:
+        lines.append(
+            f"{len(candidates)} product-catalog candidate(s) need application review: "
+            f"{', '.join(candidates[:8])}"
+        )
+        lines.append(
+            "  the bundled preference catalog does not expose or exclude them yet; review with "
+            "preferences.py before they can appear on a settings screen"
         )
 
     if catalog is not None:
@@ -382,7 +427,7 @@ def main() -> int:
     feed.parent.mkdir(parents=True, exist_ok=True)
     feed.write_text(text, encoding="utf-8")
 
-    for line in summarize(merged, previous, changes, records, catalog):
+    for line in summarize(merged, previous, changes, records, catalog, read_bundled_preferences()):
         print(line)
     print(f"bundled dataset: {BUNDLED_DATASET}")
     print(f"remote feed to publish: {feed}")

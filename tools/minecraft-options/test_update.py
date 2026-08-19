@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 
 import dataset
+import preferences
 import update
 from test_dataset import REQUIRED, release, setting
 
@@ -84,6 +85,42 @@ class MaintainerSummary(unittest.TestCase):
         self.assertEqual(update.application_review_reasons(records, document), [])
         summary = update.summarize(document, None, [], records, None)
         self.assertTrue(any("recorded as data only" in line for line in summary))
+
+
+class ProductCatalogReview(unittest.TestCase):
+    """The passive, read-only notice that tells a maintainer a routine
+    compatibility update surfaced a setting the bundled product catalog does
+    not yet know about. Never a write: growing the catalog stays a separate,
+    reviewed action."""
+
+    def test_a_new_manageable_setting_absent_from_the_catalog_is_flagged(self):
+        previous, _ = dataset.merge(None, [release("1.20.1", REQUIRED)])
+        preference_catalog = preferences.build(previous)
+        records = [release("1.20.2", REQUIRED + [setting("newCurrentOption")])]
+        document, changes = dataset.merge(previous, records)
+
+        summary = update.summarize(document, previous, changes, records, None, preference_catalog)
+        self.assertTrue(
+            any(
+                "newCurrentOption" in line and "need application review" in line
+                for line in summary
+            )
+        )
+
+    def test_settings_the_catalog_already_accounts_for_are_not_flagged(self):
+        previous, _ = dataset.merge(None, [release("1.20.1", REQUIRED)])
+        preference_catalog = preferences.build(previous)
+        records = [release("1.20.2", REQUIRED)]
+        document, changes = dataset.merge(previous, records)
+
+        summary = update.summarize(document, previous, changes, records, None, preference_catalog)
+        self.assertFalse(any("need application review" in line for line in summary))
+
+    def test_no_bundled_catalog_yet_means_no_review_notice(self):
+        records = [release("26.2", REQUIRED)]
+        document, _ = dataset.merge(None, records)
+        summary = update.summarize(document, None, [], records, None, None)
+        self.assertFalse(any("need application review" in line for line in summary))
 
 
 if __name__ == "__main__":

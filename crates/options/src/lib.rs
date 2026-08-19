@@ -50,6 +50,7 @@
 //! verdict as [`LanguageAvailability`].
 
 pub mod apply;
+pub mod catalog;
 pub mod codec;
 pub mod compatibility;
 pub mod dataset;
@@ -61,6 +62,12 @@ pub mod preferences;
 pub use apply::{
     LanguageAvailability, OPTIONS_FILE_NAME, PreferenceApplication, SkipReason, SkippedPreference,
     apply_to_game_directory,
+};
+pub use catalog::{
+    CatalogError, EnumValuePresentation, FieldRole, KeyBindingDefaultPresentation,
+    MinecraftPreferenceCatalog, MinecraftPreferenceDescriptor, PREFERENCE_CATALOG_FORMAT_VERSION,
+    PreferenceCategory, PreferenceExclusion, PreferenceField, PreferencePresentation,
+    PresentationTier,
 };
 pub use codec::{OptionCodec, SettingValue, Unrepresentable};
 pub use compatibility::{
