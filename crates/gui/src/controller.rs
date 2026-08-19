@@ -1195,7 +1195,20 @@ fn register_client_actions(
     });
 
     let sender = commands.clone();
+    let handle = ui.as_weak();
     ui.on_load_instance_workspace(move |id| {
+        let Some(ui) = handle.upgrade() else { return };
+        // Opening an instance is where the preferred catalog applies: a
+        // preference decides what the browser starts on, and never moves the
+        // catalog out from under a search the user is already reading. An
+        // unresolvable recorded name leaves the browser where it is rather
+        // than searching one catalog while the setting names another; the
+        // settings screen is where that name is reported.
+        let preferred = ui.get_default_mod_catalog();
+        if let Some(catalog) = presentation::catalog_to_open_on(&preferred, &ui.get_mod_provider())
+        {
+            show_mod_catalog(&ui, catalog);
+        }
         if let Some(id) = backend::parse_instance_id(&id) {
             send(&sender, Command::LoadInstanceWorkspace(id));
         }
@@ -1349,30 +1362,39 @@ fn register_mod_browser(ui: &AppWindow, commands: &Sender<Command>) {
     let handle = ui.as_weak();
     ui.on_switch_mod_catalog(move |provider| {
         let Some(ui) = handle.upgrade() else { return };
-        // Switching asks a different question, and everything that could let
-        // a search still in flight for the catalog just left behind land on
-        // this one has to move together, in this one step, or a late answer
-        // can still slip past the staleness guard.
-        let reset = presentation::CatalogSwitchReset::for_provider(&provider);
-        ui.set_mod_provider(provider);
-        ui.set_mod_search_provider(reset.provider.into());
-        // Retired, not just momentarily mismatched: switching back to this
-        // catalog before an old answer returns must not reinstate the exact
-        // question it was waiting on. The expected request id is retired the
-        // same way: `submitted` alone cannot survive a later search for the
-        // exact same words, which fills it back in with the exact same value.
-        ui.set_mod_search_submitted(reset.submitted.into());
-        ui.set_mod_search_expected_request_id(reset.request_id.into());
-        ui.set_mod_search_loading(reset.loading);
-        ui.set_mod_search_requested_offset(reset.requested_offset);
-        // A new catalog replaces the list rather than showing the old one's
-        // rows under a different heading.
-        ui.set_mod_results(model(Vec::new()));
-        ui.set_mod_search_ran(false);
-        ui.set_mod_search_notice(SharedString::default());
-        ui.set_mod_results_total(0);
-        ui.set_mod_results_next_offset(-1);
+        show_mod_catalog(&ui, &provider);
     });
+}
+
+/// Points the browser at one catalog and retires everything the previous one
+/// could still be answered by.
+///
+/// Switching asks a different question, and everything that could let a search
+/// still in flight for the catalog just left behind land on this one has to
+/// move together, in this one step, or a late answer can still slip past the
+/// staleness guard. Shared with opening an instance so that arriving at the
+/// browser on the preferred catalog invalidates exactly as much as clicking the
+/// chip for it does, rather than through a second set of rules.
+fn show_mod_catalog(ui: &AppWindow, provider: &str) {
+    let reset = presentation::CatalogSwitchReset::for_provider(provider);
+    ui.set_mod_provider(provider.into());
+    ui.set_mod_search_provider(reset.provider.into());
+    // Retired, not just momentarily mismatched: switching back to this
+    // catalog before an old answer returns must not reinstate the exact
+    // question it was waiting on. The expected request id is retired the
+    // same way: `submitted` alone cannot survive a later search for the
+    // exact same words, which fills it back in with the exact same value.
+    ui.set_mod_search_submitted(reset.submitted.into());
+    ui.set_mod_search_expected_request_id(reset.request_id.into());
+    ui.set_mod_search_loading(reset.loading);
+    ui.set_mod_search_requested_offset(reset.requested_offset);
+    // A new catalog replaces the list rather than showing the old one's
+    // rows under a different heading.
+    ui.set_mod_results(model(Vec::new()));
+    ui.set_mod_search_ran(false);
+    ui.set_mod_search_notice(SharedString::default());
+    ui.set_mod_results_total(0);
+    ui.set_mod_results_next_offset(-1);
 }
 
 /// Finding a mod in the catalog and asking what installing it would involve.
@@ -2357,6 +2379,23 @@ fn register_provider_identifiers(ui: &AppWindow, commands: &Sender<Command>) {
     ui.on_reset_microsoft_client_id(move || send(&sender, Command::ResetMicrosoftClientId));
     let sender = commands.clone();
     ui.on_reset_user_agent(move || send(&sender, Command::ResetUserAgent));
+
+    let sender = commands.clone();
+    ui.on_choose_default_mod_catalog(move |catalog| {
+        // An empty string is the reset action, and any other unparsable value
+        // is dropped rather than turned into a catalog nobody picked.
+        let chosen = if catalog.is_empty() {
+            None
+        } else {
+            match ModProvider::parse(&catalog) {
+                Some(provider) => Some(provider),
+                None => return,
+            }
+        };
+        // Nothing is written to the view here. The chips follow the stored
+        // value, which arrives in the snapshot a successful write sends.
+        send(&sender, Command::SaveDefaultModCatalog { catalog: chosen });
+    });
 }
 
 /// The CurseForge credential actions: set or replace, remove, and apply for a
@@ -2499,6 +2538,9 @@ fn apply_snapshot(ui: &AppWindow, snapshot: Snapshot) {
     // Presence only. There is deliberately no `set_curseforge_api_key` here:
     // a snapshot must not be able to put a stored secret into a text field.
     ui.set_curseforge_key_configured(settings.curseforge_key_present);
+    ui.set_default_mod_catalog(settings.default_mod_catalog.clone().into());
+    ui.set_configured_mod_catalog(settings.configured_mod_catalog.clone().into());
+    ui.set_default_mod_catalog_is_custom(settings.mod_catalog_origin.is_override());
     ui.set_application_text_scale(i32::from(settings.text_scale_percent));
     ui.set_technical_text_size(i32::from(settings.technical_text_size_pixels));
     ui.global::<Theme>()
@@ -3635,6 +3677,41 @@ mod tests {
         assert!(source.contains("root.default-persistent-root"));
         assert!(backend.contains(".pick_folder()"));
         assert!(backend.contains("Event::StorageRootPicked(path)"));
+    }
+
+    #[test]
+    fn the_preferred_catalog_row_shows_the_stored_value_and_writes_through_core() {
+        let source = include_str!("ui.rs");
+        let backend = include_str!("backend.rs");
+        // One callback into Rust, which is the only way the setting changes:
+        // the view has no path to the settings file of its own.
+        assert!(source.contains("callback choose-default-mod-catalog(string)"));
+        assert!(backend.contains("Command::SaveDefaultModCatalog"));
+        assert!(backend.contains("app.set_default_mod_catalog(catalog)"));
+        // The chips follow the stored value, so a refused write cannot leave a
+        // catalog selected that was never recorded.
+        assert!(source.contains("selected: root.default-mod-catalog == \"modrinth\""));
+        assert!(source.contains("selected: root.default-mod-catalog == \"curseforge\""));
+        // A name a newer Ephervex recorded is reported as itself.
+        assert!(source.contains("root.configured-mod-catalog"));
+        assert!(source.contains("gui-preferred-mod-catalog-unrecognized"));
+        // It lives in the settings surface that already exists.
+        assert!(source.contains("root.workspace-tab == \"Providers & APIs\""));
+    }
+
+    #[test]
+    fn the_preferred_catalog_is_applied_when_an_instance_workspace_opens() {
+        let source = include_str!("controller.rs");
+        // The lifecycle point the preference applies at, and the same reset a
+        // chip click uses, so an in-flight search cannot survive the move.
+        assert!(source.contains("presentation::catalog_to_open_on("));
+        assert!(source.contains("fn show_mod_catalog(ui: &AppWindow, provider: &str)"));
+        // Applying a settings snapshot writes the three settings properties and
+        // never the browser's own catalog: saving an unrelated setting must not
+        // move a browser the user is in the middle of reading.
+        let applied = source.split("fn apply_snapshot").nth(1).unwrap_or_default();
+        assert!(applied.contains("ui.set_default_mod_catalog("));
+        assert!(!applied.contains("ui.set_mod_provider("));
     }
 
     #[test]

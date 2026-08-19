@@ -30,7 +30,7 @@ pub use ids::{InstanceId, OperationId, ServerId};
 pub use instance::{AttentionReason, ImportSourceKind, InstanceKind};
 pub use java::{JavaOverride, JvmSettings};
 pub use loader::{LoaderKind, LoaderSelection, LoaderVersionMode};
-pub use mods::{CurseForgeFileId, CurseForgeProjectId, ModOrigin, ModProvider};
+pub use mods::{CurseForgeFileId, CurseForgeProjectId, DefaultModCatalog, ModOrigin, ModProvider};
 pub use operation::{Operation, OperationStatus, Progress};
 pub use secret::{REDACTED, SecretString};
 pub use server::{

@@ -13,7 +13,9 @@ use ephervex_core::{
     RuntimeClassification, ServerRecord, ServerStatus, format_binary_bytes,
 };
 use ephervex_i18n::{Arg, lookup, lookup_args};
-use ephervex_model::{LoaderKind, Operation, OperationStatus, StorageClass};
+use ephervex_model::{
+    DefaultModCatalog, LoaderKind, ModProvider, Operation, OperationStatus, StorageClass,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstancePresentation {
@@ -493,6 +495,51 @@ pub struct BrowserQuestion<'a> {
     pub provider: &'a str,
     /// The submitted search text, or the project a review was opened for.
     pub reference: &'a str,
+}
+
+/// How the settings view shows the recorded mod-catalog preference.
+///
+/// Three fields rather than one, because the view has three different things to
+/// say: which chip is selected, what the file actually records, and whether the
+/// user chose it at all. Collapsing them would either lose the difference
+/// between Ephervex's default and a user picking the same catalog, or show a
+/// name written by a newer Ephervex as though it were one of this build's.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CatalogPreferenceView {
+    /// The catalog id whose chip is selected, empty when the recorded name is
+    /// not one this build can resolve.
+    pub selected: String,
+    /// The recorded name exactly as stored, empty when nothing is recorded.
+    pub configured: String,
+    /// Whether the user chose it, as opposed to taking the default.
+    pub chosen: bool,
+}
+
+impl CatalogPreferenceView {
+    #[must_use]
+    pub fn of(preference: &DefaultModCatalog) -> Self {
+        Self {
+            selected: preference
+                .resolved()
+                .map(ModProvider::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            configured: preference.stored().to_owned(),
+            chosen: preference.is_chosen(),
+        }
+    }
+}
+
+/// The catalog the browser should open on, or `None` to leave it alone.
+///
+/// Nothing moves when the browser is already showing the preferred catalog, and
+/// nothing moves when the recorded name is one this build cannot resolve:
+/// switching then would search a catalog the setting does not name and present
+/// its results as though the preference had been honored. The settings screen
+/// is where an unresolvable name is reported.
+#[must_use]
+pub fn catalog_to_open_on<'a>(preferred: &'a str, showing: &str) -> Option<&'a str> {
+    (!preferred.is_empty() && preferred != showing).then_some(preferred)
 }
 
 /// What switching the mod browser's catalog resets every piece of in-flight
@@ -1305,6 +1352,92 @@ mod import_tests {
 }
 
 /// The rules that keep a late catalog answer from landing on a question the
+/// The recorded catalog preference as the settings view and the browser read
+/// it.
+#[cfg(test)]
+mod catalog_preference_tests {
+    use super::*;
+
+    #[test]
+    fn nothing_recorded_selects_the_built_in_catalog_and_shows_no_override() {
+        let view = CatalogPreferenceView::of(&DefaultModCatalog::BuiltIn);
+        assert_eq!(view.selected, "modrinth");
+        assert_eq!(view.configured, "");
+        assert!(!view.chosen);
+    }
+
+    #[test]
+    fn a_recorded_catalog_is_shown_as_the_users_own_choice() {
+        let view = CatalogPreferenceView::of(&DefaultModCatalog::Selected(ModProvider::CurseForge));
+        assert_eq!(view.selected, "curseforge");
+        assert_eq!(view.configured, "curseforge");
+        assert!(view.chosen);
+
+        // The same catalog Ephervex would have used anyway is still a decision,
+        // and the view has to be able to say so.
+        let matching =
+            CatalogPreferenceView::of(&DefaultModCatalog::Selected(ModProvider::Modrinth));
+        assert_eq!(matching.selected, "modrinth");
+        assert!(matching.chosen);
+    }
+
+    #[test]
+    fn a_catalog_this_build_cannot_resolve_is_shown_as_itself_with_nothing_selected() {
+        let view = CatalogPreferenceView::of(&DefaultModCatalog::Unrecognized(
+            "a-later-catalog".to_owned(),
+        ));
+        assert_eq!(
+            view.selected, "",
+            "no chip may claim to be the catalog the setting names"
+        );
+        assert_eq!(view.configured, "a-later-catalog");
+        assert!(view.chosen);
+    }
+
+    #[test]
+    fn opening_an_instance_moves_the_browser_to_the_preferred_catalog() {
+        assert_eq!(
+            catalog_to_open_on("curseforge", "modrinth"),
+            Some("curseforge")
+        );
+    }
+
+    #[test]
+    fn a_browser_already_on_the_preferred_catalog_is_left_alone() {
+        // Nothing to reset, so an in-flight search for that same catalog keeps
+        // its identity rather than being retired for no reason.
+        assert_eq!(catalog_to_open_on("curseforge", "curseforge"), None);
+    }
+
+    #[test]
+    fn an_unresolvable_preference_never_moves_the_browser_to_another_catalog() {
+        assert_eq!(catalog_to_open_on("", "modrinth"), None);
+    }
+
+    #[test]
+    fn opening_on_the_preferred_catalog_retires_the_in_flight_request() {
+        // The same reset a chip click applies, so an answer for the catalog
+        // the browser was on cannot land under the one it opened on.
+        let reset = CatalogSwitchReset::for_provider("curseforge");
+        assert!(!search_page_belongs(
+            BrowserQuestion {
+                instance: "client-1",
+                provider: &reset.provider,
+                reference: &reset.submitted,
+            },
+            BrowserQuestion {
+                instance: "client-1",
+                provider: "modrinth",
+                reference: "jei",
+            },
+            reset.requested_offset.try_into().unwrap_or(0),
+            0,
+            &reset.request_id,
+            "7",
+        ));
+    }
+}
+
 /// browser has moved on from.
 #[cfg(test)]
 mod browser_staleness_tests {

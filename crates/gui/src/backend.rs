@@ -247,6 +247,10 @@ pub enum Command {
         custom_unit: String,
     },
     ClearArtifactCache,
+    /// Record which catalog the mod browser opens on, or clear the choice.
+    SaveDefaultModCatalog {
+        catalog: Option<ModProvider>,
+    },
     SaveDisplaySettings {
         text_scale: ephervex_core::ApplicationTextScale,
         technical_text_size: ephervex_core::TechnicalTextSize,
@@ -372,6 +376,20 @@ pub struct SettingsData {
     /// could travel in, so no view can render it and no snapshot can carry it
     /// into a log or a crash report.
     pub curseforge_key_present: bool,
+    /// The catalog the mod browser opens on, as a provider id, or empty when
+    /// the recorded name is one this build cannot resolve.
+    ///
+    /// Policy only. It says which catalog a user wants to look in first and
+    /// carries nothing about reaching it: `curseforge_key_present` above is a
+    /// separate fact, from the keyring rather than from this setting.
+    pub default_mod_catalog: String,
+    /// The catalog name exactly as recorded, empty when nothing is recorded.
+    ///
+    /// Shown rather than resolved so a name written by a newer Ephervex is
+    /// reported as itself instead of appearing as one of this build's catalogs.
+    pub configured_mod_catalog: String,
+    /// Whether the user chose a catalog, as opposed to taking the default.
+    pub mod_catalog_origin: SettingOrigin,
     pub text_scale_percent: u16,
     pub technical_text_size_pixels: u16,
     pub show_linked_servers: bool,
@@ -1777,6 +1795,20 @@ fn run_worker(
                     let _ = events.send(event);
                 }
             }
+            Command::SaveDefaultModCatalog { catalog } => {
+                let stored = app.set_default_mod_catalog(catalog);
+                let confirmed = stored.is_ok();
+                for event in default_mod_catalog_events(&stored) {
+                    let _ = events.send(event);
+                }
+                // Only a write that reached disk refreshes the view. The chips
+                // read the stored value and nothing else, so a refused write
+                // leaves the previous choice selected rather than the one that
+                // was asked for.
+                if confirmed {
+                    send_snapshot(&app, &events);
+                }
+            }
             Command::SaveDisplaySettings {
                 text_scale,
                 technical_text_size,
@@ -2010,6 +2042,7 @@ fn application_settings(app: &App) -> Result<SettingsData, CoreError> {
     let java = app.java_settings();
     let server = app.server_application_settings();
     let cache_limit = app.artifact_cache_limit();
+    let catalog = crate::presentation::CatalogPreferenceView::of(&app.default_mod_catalog());
     let choices = crate::presentation::cache_limit_choices();
     let (custom_value, custom_unit) = crate::presentation::cache_limit_custom_fields(cache_limit);
     Ok(SettingsData {
@@ -2027,6 +2060,9 @@ fn application_settings(app: &App) -> Result<SettingsData, CoreError> {
         user_agent: api.user_agent,
         effective_user_agent: api.effective_user_agent,
         curseforge_key_present: api.curseforge_api_key_present,
+        default_mod_catalog: catalog.selected,
+        configured_mod_catalog: catalog.configured,
+        mod_catalog_origin: origin(catalog.chosen),
         text_scale_percent: display.text_scale.percent(),
         technical_text_size_pixels: display.technical_text_size.pixels(),
         show_linked_servers: display.show_linked_servers,
@@ -3809,6 +3845,20 @@ fn localized_count(message_id: &str, count: usize) -> String {
     lookup_args(message_id, [("count", Arg::from(count))])
 }
 
+/// What a finished write of the preferred catalog tells the user.
+///
+/// A refusal produces the failure and nothing else: no "saved" toast, and no
+/// caller-visible signal that the view should start showing the new value.
+fn default_mod_catalog_events(stored: &Result<(), CoreError>) -> Vec<Event> {
+    match stored {
+        Ok(()) => vec![Event::Toast {
+            message: lookup("gui-preferred-mod-catalog-saved"),
+            error: false,
+        }],
+        Err(error) => vec![error_toast(error)],
+    }
+}
+
 fn send_error(events: &Sender<Event>, error: &CoreError) {
     let _ = events.send(error_toast(error));
 }
@@ -4136,5 +4186,30 @@ mod tests {
         assert!(source.contains("let _ = launch_forward.await"));
         assert!(source.contains("let _ = server_forward.await"));
         assert!(source.matches("send_snapshot(&app, &events)").count() >= 2);
+    }
+    #[test]
+    fn a_recorded_catalog_is_confirmed_once() {
+        let events = default_mod_catalog_events(&Ok(()));
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events.first(),
+            Some(Event::Toast { error: false, .. })
+        ));
+    }
+
+    #[test]
+    fn a_catalog_that_could_not_be_written_is_never_reported_as_saved() {
+        let events = default_mod_catalog_events(&Err(busy_cache()));
+        assert_eq!(events.len(), 1);
+        assert!(
+            matches!(events.first(), Some(Event::Toast { error: true, .. })),
+            "a refused write produces the failure and no confirmation"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::Snapshot(_))),
+            "nothing refreshes the view, so the chips keep showing the stored catalog"
+        );
     }
 }

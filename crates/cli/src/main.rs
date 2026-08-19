@@ -41,7 +41,8 @@ use ephervex_core::{
 };
 use ephervex_i18n::Arg as MessageArg;
 use ephervex_model::{
-    InstanceId, LoaderKind, LoaderSelection, ModProvider, OperationId, ServerId, StorageClass,
+    DefaultModCatalog, InstanceId, LoaderKind, LoaderSelection, ModProvider, OperationId, ServerId,
+    StorageClass,
 };
 
 #[derive(Debug, Parser)]
@@ -197,9 +198,8 @@ struct ImportArgs {
 ///
 /// CurseForge needs your own API key, stored with
 /// `ephervex api set-curseforge-key`.
-#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+#[derive(Debug, Clone, Copy, ValueEnum)]
 enum CatalogArg {
-    #[default]
     Modrinth,
     /// Spelled the way CurseForge spells it, rather than the hyphenated name
     /// derived from the variant.
@@ -216,6 +216,19 @@ impl CatalogArg {
     }
 }
 
+/// The catalog a command works in: the one named on the command line, or the
+/// one the settings record.
+///
+/// No clap default, so that leaving `--provider` off reads the same durable
+/// preference the desktop app browses with instead of a second default that
+/// could disagree with it.
+fn catalog_or_preference(app: &App, named: Option<CatalogArg>) -> anyhow::Result<ModProvider> {
+    match named {
+        Some(catalog) => Ok(catalog.provider()),
+        None => Ok(app.browsing_catalog()?),
+    }
+}
+
 /// Mods are searched for, inspected, and installed against one instance,
 /// because whether a mod fits depends entirely on that instance's exact
 /// Minecraft version and mod loader.
@@ -227,9 +240,9 @@ enum ModCommand {
         instance: InstanceId,
         /// What to search for.
         query: String,
-        /// Which catalog to search.
-        #[arg(long, value_enum, default_value_t = CatalogArg::Modrinth)]
-        provider: CatalogArg,
+        /// Which catalog to search. Defaults to your preferred catalog.
+        #[arg(long, value_enum)]
+        provider: Option<CatalogArg>,
         /// Show at most this many results.
         #[arg(long, default_value_t = DEFAULT_SEARCH_LIMIT)]
         limit: u8,
@@ -248,9 +261,9 @@ enum ModCommand {
         instance: InstanceId,
         /// The mod, by its project id or slug in the chosen catalog.
         project: String,
-        /// Which catalog the mod is on.
-        #[arg(long, value_enum, default_value_t = CatalogArg::Modrinth)]
-        provider: CatalogArg,
+        /// Which catalog the mod is on. Defaults to your preferred catalog.
+        #[arg(long, value_enum)]
+        provider: Option<CatalogArg>,
         /// Also list versions that do not fit, with the reason each one does
         /// not.
         #[arg(long)]
@@ -281,6 +294,20 @@ enum ModCommand {
         #[command(flatten)]
         selection: ModSelectionArgs,
     },
+    /// Show or set which catalog mod commands use when none is named.
+    ///
+    /// The same setting the desktop app's mod browser opens on. Local only:
+    /// naming a catalog records a preference and contacts nothing, and a
+    /// CurseForge API key is still needed at the moment a CurseForge request
+    /// is actually made.
+    Catalog {
+        /// The catalog to prefer. Omit to show the current setting.
+        #[arg(value_enum)]
+        catalog: Option<CatalogArg>,
+        /// Go back to Ephervex's own default catalog.
+        #[arg(long, conflicts_with = "catalog")]
+        clear: bool,
+    },
     /// List the mods installed into an instance through a provider.
     ///
     /// Jars you placed in the mods folder yourself are not listed: Ephervex has
@@ -294,9 +321,9 @@ enum ModCommand {
 /// Which version, and which optional extras, an install should take.
 #[derive(Debug, Args)]
 struct ModSelectionArgs {
-    /// Which catalog the mod is on.
-    #[arg(long, value_enum, default_value_t = CatalogArg::Modrinth)]
-    provider: CatalogArg,
+    /// Which catalog the mod is on. Defaults to your preferred catalog.
+    #[arg(long, value_enum)]
+    provider: Option<CatalogArg>,
     /// Install this exact version instead of the newest compatible one.
     ///
     /// Preserved exactly. If it does not fit the instance, the install is
@@ -311,9 +338,9 @@ struct ModSelectionArgs {
 }
 
 impl ModSelectionArgs {
-    fn request(&self, project: &str) -> ModInstallRequest {
+    fn request(&self, project: &str, catalog: ModProvider) -> ModInstallRequest {
         let request = ModInstallRequest::new(project)
-            .from_provider(self.provider.provider())
+            .from_provider(catalog)
             .selecting_optional(self.optional.clone());
         match &self.version {
             Some(version) => request.at_version(version),
@@ -1058,11 +1085,11 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
             run_api_command(&mut app, command, cli.json)
         }
         Command::Mod { command } => {
-            let app = open_app()?;
-            // Every one of these talks to a provider, so they all need an
+            let mut app = open_app()?;
+            // All but the catalog setting talk to a provider, so they need an
             // executor, for the same reason the Minecraft commands do.
             let runtime = tokio::runtime::Runtime::new()?;
-            runtime.block_on(run_mod_command(&app, command, cli.json))
+            runtime.block_on(run_mod_command(&mut app, command, cli.json))
         }
         Command::Logs { command } => {
             // Reading a file and listing a directory need no executor.
@@ -2286,7 +2313,7 @@ fn list_servers(app: &App, json: bool) -> anyhow::Result<()> {
 
 // ------------------------------------------------------------------- mods
 
-async fn run_mod_command(app: &App, command: &ModCommand, json: bool) -> anyhow::Result<()> {
+async fn run_mod_command(app: &mut App, command: &ModCommand, json: bool) -> anyhow::Result<()> {
     match command {
         ModCommand::Search {
             instance,
@@ -2300,9 +2327,8 @@ async fn run_mod_command(app: &App, command: &ModCommand, json: bool) -> anyhow:
                 .limited(*limit)
                 .from_offset(*offset)
                 .including_incompatible(*include_incompatible);
-            let results = app
-                .search_mods(*instance, provider.provider(), &query)
-                .await?;
+            let catalog = catalog_or_preference(app, *provider)?;
+            let results = app.search_mods(*instance, catalog, &query).await?;
             print_mod_search(&results, json);
         }
         ModCommand::Show {
@@ -2311,13 +2337,9 @@ async fn run_mod_command(app: &App, command: &ModCommand, json: bool) -> anyhow:
             provider,
             include_incompatible,
         } => {
+            let catalog = catalog_or_preference(app, *provider)?;
             let details = app
-                .mod_project(
-                    *instance,
-                    provider.provider(),
-                    project,
-                    *include_incompatible,
-                )
+                .mod_project(*instance, catalog, project, *include_incompatible)
                 .await?;
             print_mod_project(&details, json);
         }
@@ -2326,8 +2348,9 @@ async fn run_mod_command(app: &App, command: &ModCommand, json: bool) -> anyhow:
             project,
             selection,
         } => {
+            let catalog = catalog_or_preference(app, selection.provider)?;
             let plan = app
-                .plan_mod_installation(*instance, &selection.request(project))
+                .plan_mod_installation(*instance, &selection.request(project, catalog))
                 .await?;
             print_mod_plan(&plan, json);
         }
@@ -2336,19 +2359,65 @@ async fn run_mod_command(app: &App, command: &ModCommand, json: bool) -> anyhow:
             project,
             selection,
         } => {
+            let catalog = catalog_or_preference(app, selection.provider)?;
             let installed = app
                 .install_mods(
                     *instance,
-                    &selection.request(project),
+                    &selection.request(project, catalog),
                     &OperationReporter::silent("installing-mods"),
                     &CancellationToken::new(),
                 )
                 .await?;
             print_installed_mods(&installed, json);
         }
+        ModCommand::Catalog { catalog, clear } => {
+            run_mod_catalog(app, *catalog, *clear, json)?;
+        }
         ModCommand::List { instance } => {
             let mods = app.managed_mods(*instance)?;
             print_managed_mods(&mods, json);
+        }
+    }
+    Ok(())
+}
+
+/// Shows or records which catalog mod commands use when none is named.
+///
+/// Nothing here is asked of a catalog: the setting is which one to look in, so
+/// it is answerable with no network and with no key stored. A name this build
+/// cannot resolve is reported as exactly that and left in the file, because the
+/// Ephervex that wrote it knows a catalog this one does not.
+fn run_mod_catalog(
+    app: &mut App,
+    catalog: Option<CatalogArg>,
+    clear: bool,
+    json: bool,
+) -> anyhow::Result<()> {
+    if catalog.is_some() || clear {
+        app.set_default_mod_catalog(catalog.map(CatalogArg::provider))?;
+    }
+
+    let preference = app.default_mod_catalog();
+    let effective = preference.resolved();
+    if json {
+        print_json(&serde_json::json!({
+            "catalog": effective.map(ModProvider::as_str),
+            "configured": preference.stored(),
+            "chosen": preference.is_chosen(),
+            "recognized": effective.is_some(),
+        }));
+    } else {
+        match effective {
+            Some(provider) => println!("{}", provider.as_str()),
+            None => println!("{}", preference.stored()),
+        }
+        if !preference.is_chosen() {
+            eprintln!(
+                "the default, used because no catalog is recorded: {}",
+                DefaultModCatalog::BUILT_IN.as_str()
+            );
+        } else if effective.is_none() {
+            eprintln!("not a catalog this version knows; the recorded value is kept");
         }
     }
     Ok(())

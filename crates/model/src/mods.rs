@@ -206,6 +206,79 @@ impl ModOrigin {
     }
 }
 
+/// The catalog a mod browser opens on, as durable user policy.
+///
+/// # Why three states rather than a [`ModProvider`]
+///
+/// "Nothing recorded" and "recorded as Modrinth" resolve to the same catalog
+/// today and are not the same fact: the first is Ephervex's own default, which
+/// a later release is free to revisit, and the second is a choice the user made
+/// that happens to agree with it. A settings screen shows them differently, and
+/// collapsing them would silently promote a default into a decision.
+///
+/// [`Self::Unrecognized`] exists because this value is written by whichever
+/// Ephervex the user ran last. A newer one may know a catalog this build does
+/// not, and the honest answer is to say so and leave the recorded name alone
+/// rather than to read it as one of the catalogs this build happens to have.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DefaultModCatalog {
+    /// Nothing is recorded, so [`DefaultModCatalog::BUILT_IN`] applies.
+    BuiltIn,
+    /// The user chose this catalog.
+    Selected(ModProvider),
+    /// A catalog name this build cannot resolve, preserved exactly as stored.
+    Unrecognized(String),
+}
+
+impl DefaultModCatalog {
+    /// The catalog Ephervex browses when the user has expressed no preference.
+    pub const BUILT_IN: ModProvider = ModProvider::Modrinth;
+
+    /// Reads a stored name, where empty or whitespace means "nothing recorded".
+    #[must_use]
+    pub fn from_stored(value: &str) -> Self {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return Self::BuiltIn;
+        }
+        ModProvider::parse(trimmed)
+            .map_or_else(|| Self::Unrecognized(trimmed.to_owned()), Self::Selected)
+    }
+
+    /// The name to store, empty when nothing is recorded.
+    ///
+    /// An unrecognized name round-trips unchanged, so running this build does
+    /// not cost the user a preference a newer one understands.
+    #[must_use]
+    pub fn stored(&self) -> &str {
+        match self {
+            Self::BuiltIn => "",
+            Self::Selected(provider) => provider.as_str(),
+            Self::Unrecognized(value) => value,
+        }
+    }
+
+    /// The catalog to browse, or `None` when the recorded name is unrecognized.
+    ///
+    /// Deliberately not falling back to [`Self::BUILT_IN`] here: a caller that
+    /// substitutes has to do it in the open, where it can also tell the user
+    /// that the catalog they asked for is not the one being searched.
+    #[must_use]
+    pub const fn resolved(&self) -> Option<ModProvider> {
+        match self {
+            Self::BuiltIn => Some(Self::BUILT_IN),
+            Self::Selected(provider) => Some(*provider),
+            Self::Unrecognized(_) => None,
+        }
+    }
+
+    /// Whether the user recorded a choice, as opposed to taking the default.
+    #[must_use]
+    pub const fn is_chosen(&self) -> bool {
+        !matches!(self, Self::BuiltIn)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -251,5 +324,39 @@ mod tests {
         assert_eq!(json, "\"modrinth\"");
         let back: ModProvider = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back, ModProvider::Modrinth);
+    }
+    #[test]
+    fn no_recorded_catalog_is_the_built_in_default_rather_than_a_choice() {
+        let absent = DefaultModCatalog::from_stored("");
+        assert_eq!(absent, DefaultModCatalog::BuiltIn);
+        assert!(!absent.is_chosen());
+        assert_eq!(absent.resolved(), Some(ModProvider::Modrinth));
+        assert_eq!(absent.stored(), "");
+        assert_eq!(DefaultModCatalog::from_stored("   "), absent);
+    }
+
+    #[test]
+    fn a_recorded_catalog_stays_a_choice_even_when_it_matches_the_default() {
+        let chosen = DefaultModCatalog::from_stored("modrinth");
+        assert_eq!(chosen, DefaultModCatalog::Selected(ModProvider::Modrinth));
+        assert!(chosen.is_chosen());
+        assert_ne!(chosen, DefaultModCatalog::BuiltIn);
+        assert_eq!(chosen.resolved(), DefaultModCatalog::BuiltIn.resolved());
+    }
+
+    #[test]
+    fn a_catalog_name_this_build_does_not_know_resolves_to_nothing_and_is_kept() {
+        let future = DefaultModCatalog::from_stored("a-later-catalog");
+        assert_eq!(
+            future,
+            DefaultModCatalog::Unrecognized("a-later-catalog".to_owned())
+        );
+        assert!(future.is_chosen());
+        assert_eq!(
+            future.resolved(),
+            None,
+            "an unknown catalog must not read as one this build happens to have"
+        );
+        assert_eq!(future.stored(), "a-later-catalog");
     }
 }

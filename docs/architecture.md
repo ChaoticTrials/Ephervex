@@ -425,6 +425,16 @@ whose jar is absent from `mods/` is reported as missing rather than forgotten.
 The frontends consume one snapshot from the application service and never read a
 recipe, call a provider, or interpret a file name themselves.
 
+Which catalog to browse is a preference, not desired state. The settings file
+records a preferred catalog under `[mods]`; the mod browser opens on it, and the
+CLI reads it wherever `--provider` is left off. It decides how a future choice is
+presented and nothing else: it never rewrites the catalog identity of an
+installed mod, is never consulted for a retained recipe, and naming a catalog
+explicitly bypasses it entirely. Nothing about reaching a catalog lives there.
+A CurseForge API key remains a keyring credential (ADR 0004, ADR 0022), so
+preferring CurseForge is answerable offline and with no key stored, and the key
+is still checked by the request that needs it.
+
 An explicit mod decision can be carried from a client to its linked servers
 (ADR 0021). The exact release the client settles on is the release every
 selected server is evaluated for; no server runs its own newest-compatible
@@ -559,6 +569,15 @@ change only after the atomic write succeeds.
 
 Configuration holds settings and never cache contents: what the launcher happens
 to have downloaded is a fact about the filesystem, not a preference.
+
+Where a setting names something an enumeration could hold, it is stored as text
+and resolved on read, so three states stay distinguishable: nothing recorded,
+which is Ephervex's own default and free to change between releases; a value the
+user chose, even one that happens to match that default; and a value this build
+cannot resolve, which a newer Ephervex may have written. The third is reported
+as itself and written back unchanged rather than read as one of the values this
+build does know, and it costs the user that one setting instead of the whole
+file. The preferred mod catalog under `[mods]` is stored this way.
 
 Errors are typed by domain and composed through `CoreError`. User-visible text
 uses Fluent message IDs and typed arguments, while paths, versions, hashes, and

@@ -41,7 +41,9 @@ use ephervex_mod_platform::{
     ModSearchQuery, ModSearchResults, ModVersionInfo, ModrinthProvider, PlannedMod, SideSupport,
     annotate, newest_compatible,
 };
-use ephervex_model::{Hash, ImportSourceKind, InstanceId, ModOrigin, ModProvider};
+use ephervex_model::{
+    DefaultModCatalog, Hash, ImportSourceKind, InstanceId, ModOrigin, ModProvider,
+};
 use ephervex_pack::{
     ArtifactFetch, ManagedMod, ManagedModInstall, ManagedModInstallation, ModIdentity, PackError,
     PackFileRecipe, PackRecipe, PackSide, ProviderFileIdentity, RecordedMod, SideRequirement,
@@ -52,7 +54,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument, warn};
 
 use crate::app::App;
-use crate::error::CoreResult;
+use crate::error::{CoreError, CoreResult};
 
 /// What a caller wants installed.
 #[derive(Debug, Clone)]
@@ -453,6 +455,45 @@ impl ModDetailIndex {
 }
 
 impl App {
+    /// The catalog the mod browser opens on, as the user's own policy.
+    ///
+    /// Policy, not capability: this says nothing about whether the catalog can
+    /// be reached. A CurseForge preference is answerable offline and with no
+    /// API key stored, and the credential is checked by the request that needs
+    /// it, not by reading a setting.
+    #[must_use]
+    pub fn default_mod_catalog(&self) -> DefaultModCatalog {
+        self.config().mods.default_catalog()
+    }
+
+    /// The catalog to browse first, refusing a name this build cannot resolve.
+    ///
+    /// Substituting the built-in default here would search a catalog the user
+    /// did not ask for and report the results as though the preference had been
+    /// honored, so an unresolvable name is an error a caller can explain and
+    /// step past by naming a catalog outright.
+    pub fn browsing_catalog(&self) -> CoreResult<ModProvider> {
+        let preference = self.default_mod_catalog();
+        preference
+            .resolved()
+            .ok_or_else(|| CoreError::ModCatalogPreferenceUnrecognized {
+                configured: preference.stored().to_owned(),
+            })
+    }
+
+    /// Records which catalog the browser should open on, or clears the choice.
+    ///
+    /// `None` returns the user to Ephervex's own default rather than writing
+    /// today's default down as a decision.
+    ///
+    /// Only future browsing is affected. Installed mods keep the catalog
+    /// identity they were resolved against, and no recipe is rewritten: which
+    /// catalog a user prefers to look in is not what an instance has to
+    /// reproduce (ADR 0012).
+    pub fn set_default_mod_catalog(&mut self, catalog: Option<ModProvider>) -> CoreResult<()> {
+        self.mutate_config(|config| config.mods.set_default_catalog(catalog))
+    }
+
     /// Searches a provider for mods that fit one instance.
     ///
     /// Compatibility is the instance's own exact Minecraft version and loader.
@@ -1730,5 +1771,189 @@ mod tests {
             "a mod with no proven release contributes no version to look up"
         );
         assert_eq!(snapshot.missing().count(), 3);
+    }
+    /// An application rooted in a directory nothing else touches.
+    fn app_rooted_at(base: &Path) -> App {
+        App::open_at(ephervex_storage::Paths::rooted_at(base)).expect("open")
+    }
+
+    #[test]
+    fn a_first_run_browses_the_built_in_catalog_and_writes_no_settings_file() {
+        let root = tempfile::tempdir().expect("temp");
+        let app = app_rooted_at(root.path());
+
+        assert_eq!(app.default_mod_catalog(), DefaultModCatalog::BuiltIn);
+        assert_eq!(
+            app.browsing_catalog().expect("resolve"),
+            ModProvider::Modrinth
+        );
+        assert!(
+            !app.paths().config_file().exists(),
+            "reading a preference must not create the settings file"
+        );
+    }
+
+    #[test]
+    fn a_chosen_catalog_applies_immediately_and_survives_reopening() {
+        let root = tempfile::tempdir().expect("temp");
+        {
+            let mut app = app_rooted_at(root.path());
+            app.set_default_mod_catalog(Some(ModProvider::CurseForge))
+                .expect("record");
+            assert_eq!(
+                app.browsing_catalog().expect("resolve"),
+                ModProvider::CurseForge,
+                "the next operation in this process uses the new value"
+            );
+        }
+
+        let reopened = app_rooted_at(root.path());
+        assert_eq!(
+            reopened.default_mod_catalog(),
+            DefaultModCatalog::Selected(ModProvider::CurseForge)
+        );
+        assert_eq!(
+            reopened.browsing_catalog().expect("resolve"),
+            ModProvider::CurseForge
+        );
+    }
+
+    #[test]
+    fn clearing_the_catalog_returns_to_the_built_in_default() {
+        let root = tempfile::tempdir().expect("temp");
+        let mut app = app_rooted_at(root.path());
+        app.set_default_mod_catalog(Some(ModProvider::CurseForge))
+            .expect("record");
+        app.set_default_mod_catalog(None).expect("clear");
+
+        assert_eq!(app.default_mod_catalog(), DefaultModCatalog::BuiltIn);
+        assert_eq!(
+            app.browsing_catalog().expect("resolve"),
+            ModProvider::Modrinth
+        );
+    }
+
+    #[test]
+    fn recording_a_catalog_leaves_every_other_setting_alone() {
+        let root = tempfile::tempdir().expect("temp");
+        let mut app = app_rooted_at(root.path());
+        app.set_show_linked_servers(true).expect("linked servers");
+        app.set_application_display_settings(
+            ephervex_storage::ApplicationTextScale::Large,
+            ephervex_storage::TechnicalTextSize::Compact,
+        )
+        .expect("display");
+        let before = app.config().clone();
+
+        app.set_default_mod_catalog(Some(ModProvider::CurseForge))
+            .expect("record");
+
+        let after = app.config();
+        assert_eq!(after.display, before.display);
+        assert_eq!(after.java, before.java);
+        assert_eq!(after.server_defaults, before.server_defaults);
+        assert_eq!(after.api, before.api);
+        assert_eq!(after.minecraft_preferences, before.minecraft_preferences);
+        assert_ne!(after.mods, before.mods);
+    }
+
+    #[test]
+    fn a_catalog_a_newer_ephervex_recorded_is_reported_rather_than_substituted() {
+        let root = tempfile::tempdir().expect("temp");
+        {
+            let mut app = app_rooted_at(root.path());
+            app.set_show_linked_servers(true).expect("linked servers");
+            let mut config = app.config().clone();
+            config.mods.default_catalog = "a-later-catalog".to_owned();
+            config.save(app.paths()).expect("write");
+        }
+
+        let app = app_rooted_at(root.path());
+        assert_eq!(
+            app.default_mod_catalog(),
+            DefaultModCatalog::Unrecognized("a-later-catalog".to_owned())
+        );
+        // Every other setting in the same file is still readable.
+        assert!(app.config().display.show_linked_servers);
+
+        let refusal = app.browsing_catalog().expect_err("no catalog to browse");
+        assert_eq!(
+            refusal.message_id(),
+            "error-mod-catalog-preference-unrecognized"
+        );
+        assert!(
+            refusal
+                .message_args()
+                .iter()
+                .any(|(_, value)| value == "a-later-catalog"),
+            "the refusal names the value that was recorded"
+        );
+    }
+
+    #[test]
+    fn an_unrecognized_catalog_survives_changing_an_unrelated_setting() {
+        let root = tempfile::tempdir().expect("temp");
+        {
+            let app = app_rooted_at(root.path());
+            let mut config = app.config().clone();
+            config.mods.default_catalog = "a-later-catalog".to_owned();
+            config.save(app.paths()).expect("write");
+        }
+
+        let mut app = app_rooted_at(root.path());
+        app.set_show_linked_servers(true).expect("linked servers");
+
+        let reopened = app_rooted_at(root.path());
+        assert_eq!(
+            reopened.default_mod_catalog(),
+            DefaultModCatalog::Unrecognized("a-later-catalog".to_owned()),
+            "an older build must not spend the user's preference to save an unrelated one"
+        );
+    }
+
+    #[test]
+    fn changing_the_preferred_catalog_leaves_existing_instances_untouched() {
+        let root = tempfile::tempdir().expect("temp");
+        let mut app = app_rooted_at(root.path());
+        let record = app
+            .create_client_for_test(ephervex_storage::NewClient::new(
+                "Catalog repro",
+                "1.20.1",
+                ephervex_model::LoaderSelection::exact(
+                    ephervex_model::LoaderKind::NeoForge,
+                    "47.1.106",
+                ),
+            ))
+            .expect("create");
+
+        app.set_default_mod_catalog(Some(ModProvider::CurseForge))
+            .expect("record");
+
+        let after = app.client(record.id).expect("read back");
+        assert_eq!(after.minecraft_version, record.minecraft_version);
+        assert_eq!(after.loader, record.loader);
+        assert_eq!(after.root, record.root);
+        assert_eq!(
+            app.managed_mods(record.id).expect("mods"),
+            Vec::new(),
+            "a preference is not desired state, so nothing was added to the instance"
+        );
+    }
+
+    #[test]
+    fn the_recorded_catalog_never_carries_credential_material() {
+        let root = tempfile::tempdir().expect("temp");
+        let mut app = app_rooted_at(root.path());
+        app.set_default_mod_catalog(Some(ModProvider::CurseForge))
+            .expect("record");
+
+        let written = std::fs::read_to_string(app.paths().config_file()).expect("read");
+        assert!(written.contains("curseforge"));
+        for marker in ephervex_storage::SECRET_KEY_MARKERS {
+            assert!(
+                !written.to_ascii_lowercase().contains(marker),
+                "naming CurseForge as a catalog must not put anything credential-shaped in the file"
+            );
+        }
     }
 }

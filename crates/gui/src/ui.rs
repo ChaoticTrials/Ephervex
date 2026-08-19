@@ -1391,6 +1391,14 @@ slint::slint! {
         // What the user is typing right now, and nothing else. Cleared on
         // submit and never written from a snapshot.
         in-out property <string> curseforge-api-key;
+        // Which catalog the mod browser opens on, as the settings file records
+        // it. Written only from a snapshot of what is stored, so a refused save
+        // leaves the previous choice selected rather than the attempted one.
+        in-out property <string> default-mod-catalog;
+        // The recorded name exactly as stored, shown when it is a catalog this
+        // build cannot resolve.
+        in-out property <string> configured-mod-catalog;
+        in-out property <bool> default-mod-catalog-is-custom;
         in-out property <string> persistent-root;
         in-out property <string> default-persistent-root;
         in-out property <bool> persistent-root-is-custom;
@@ -1483,6 +1491,7 @@ slint::slint! {
         callback save-api-settings(string, string);
         callback reset-microsoft-client-id();
         callback reset-user-agent();
+        callback choose-default-mod-catalog(string);
         callback save-curseforge-api-key(string);
         callback remove-curseforge-api-key();
         callback open-curseforge-key-help();
@@ -1881,6 +1890,15 @@ slint::slint! {
                             for account in root.accounts : Rectangle { height: 78px; border-radius: 8px; border-width: account.is-default ? 2px : 1px; border-color: account.is-default ? Theme.accent : Theme.border; background: Theme.surface; HorizontalLayout { padding: 12px; spacing: 8px; VerticalLayout { Heading { text: account.name; font-size: 14px; } BodyText { text: account.kind + " | " + account.credential-state; } } if account.is-default : Pill { text: GuiI18n.text("gui-default"); tone-color: Theme.accent; } if !account.is-default : AppButton { text: GuiI18n.text("gui-make-default"); width: 130px; clicked => { root.set-default-account(account.id); } } AppButton { text: GuiI18n.text("gui-remove"); width: 110px; tone: "danger"; clicked => { root.remove-account(account.id); } } } }
                         }
                         if root.workspace-tab == "Providers & APIs" : VerticalLayout { spacing: 14px;
+                            SectionTitle { title: GuiI18n.text("gui-preferred-mod-catalog"); detail: GuiI18n.text("gui-preferred-mod-catalog-detail"); }
+                            Rectangle { height: 146px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface; VerticalLayout { padding: 16px; spacing: 8px;
+                                HorizontalLayout { Heading { text: GuiI18n.text("gui-preferred-mod-catalog-heading"); font-size: Theme.row-heading-size; } Rectangle { horizontal-stretch: 1; } Pill { text: root.default-mod-catalog-is-custom ? GuiI18n.text("gui-override") : GuiI18n.text("gui-default"); tone-color: root.default-mod-catalog-is-custom ? Theme.accent : Theme.text-secondary; } }
+                                // Applied the moment a chip is clicked, and the selection follows
+                                // the stored value rather than the click: a save that fails leaves
+                                // the previous catalog selected instead of the one that was asked for.
+                                HorizontalLayout { spacing: 8px; FilterChip { text: GuiI18n.text("gui-provider-modrinth"); accessible-name: GuiI18n.text("gui-provider-modrinth"); selected: root.default-mod-catalog == "modrinth"; clicked => { root.choose-default-mod-catalog("modrinth"); } } FilterChip { text: GuiI18n.text("gui-provider-curseforge"); accessible-name: GuiI18n.text("gui-provider-curseforge"); selected: root.default-mod-catalog == "curseforge"; clicked => { root.choose-default-mod-catalog("curseforge"); } } Rectangle { horizontal-stretch: 1; } if root.default-mod-catalog-is-custom : AppButton { text: GuiI18n.text("gui-reset-default"); clicked => { root.choose-default-mod-catalog(""); } } }
+                                BodyText { text: root.default-mod-catalog == "" ? GuiI18n.value("gui-preferred-mod-catalog-unrecognized", root.configured-mod-catalog) : GuiI18n.text("gui-preferred-mod-catalog-note"); color: Theme.text-muted; wrap: word-wrap; }
+                            } }
                             SectionTitle { title: GuiI18n.text("gui-provider-identifiers"); detail: GuiI18n.text("gui-provider-identifiers-detail"); }
                             Rectangle { height: 146px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface; VerticalLayout { padding: 16px; spacing: 8px;
                                 HorizontalLayout { Heading { text: GuiI18n.text("gui-microsoft-client-id"); font-size: Theme.row-heading-size; } Rectangle { horizontal-stretch: 1; } Pill { text: root.microsoft-client-id-is-custom ? GuiI18n.text("gui-override") : GuiI18n.text("gui-default"); tone-color: root.microsoft-client-id-is-custom ? Theme.accent : Theme.text-secondary; } }

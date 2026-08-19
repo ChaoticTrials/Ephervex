@@ -20,7 +20,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use ephervex_model::{
-    AccountKind, ArtifactCacheLimit, DEFAULT_ARTIFACT_CACHE_LIMIT_BYTES, OperatorPermissionLevel,
+    AccountKind, ArtifactCacheLimit, DEFAULT_ARTIFACT_CACHE_LIMIT_BYTES, DefaultModCatalog,
+    ModProvider, OperatorPermissionLevel,
 };
 
 use crate::paths::{PathError, Paths};
@@ -286,6 +287,48 @@ impl PreferenceSetting {
     }
 }
 
+/// Durable policy for browsing mod catalogs.
+///
+/// # What is deliberately absent
+///
+/// Nothing a catalog needs to be *reached*. A CurseForge API key is a
+/// credential and lives in the keyring (ADR 0004), and whether one is stored is
+/// a fact about the keyring rather than a setting; neither belongs in a file
+/// users attach to bug reports. Naming CurseForge here says which catalog the
+/// user wants to browse first, not that they can.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ModsConfig {
+    /// The catalog the mod browser opens on, empty for Ephervex's own default.
+    ///
+    /// A string rather than an enum on purpose. A newer Ephervex may know a
+    /// catalog this build does not, and a typed field would fail the whole
+    /// document over one value; this keeps the rest of the file readable, keeps
+    /// the recorded name intact, and leaves resolving it to
+    /// [`DefaultModCatalog`], which can say "not this build" instead of
+    /// guessing.
+    pub default_catalog: String,
+    /// Keys this build does not know about. See [`Config::unknown`].
+    #[serde(flatten)]
+    pub unknown: toml::Table,
+}
+
+impl ModsConfig {
+    /// The recorded catalog policy.
+    #[must_use]
+    pub fn default_catalog(&self) -> DefaultModCatalog {
+        DefaultModCatalog::from_stored(&self.default_catalog)
+    }
+
+    /// Records a catalog choice, or clears it back to Ephervex's own default.
+    pub fn set_default_catalog(&mut self, catalog: Option<ModProvider>) {
+        catalog
+            .map(ModProvider::as_str)
+            .unwrap_or_default()
+            .clone_into(&mut self.default_catalog);
+    }
+}
+
 /// How a test server binds to the network.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -539,6 +582,8 @@ pub struct Config {
     /// rather than a fixed struct because the set of managed keys grows with
     /// the version-aware options adapters.
     pub minecraft_preferences: BTreeMap<String, PreferenceSetting>,
+    /// Policy for browsing mod catalogs. Which catalog, never how to reach one.
+    pub mods: ModsConfig,
     pub server_defaults: ServerDefaults,
     pub eula: EulaConfig,
     pub api: ApiConfig,
@@ -572,6 +617,7 @@ impl Default for Config {
             display: ApplicationDisplayConfig::default(),
             java: JavaConfig::default(),
             minecraft_preferences: BTreeMap::new(),
+            mods: ModsConfig::default(),
             server_defaults: ServerDefaults::default(),
             eula: EulaConfig::default(),
             api: ApiConfig::default(),
@@ -1275,6 +1321,118 @@ reference = ""
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn a_configuration_without_a_mods_table_browses_the_built_in_catalog() {
+        // Every configuration written before the preference existed looks like
+        // this, and must keep behaving the way the launcher already did.
+        let config = Config::from_toml_str(DEFAULT_CONFIG_EXAMPLE).expect("parse");
+        assert_eq!(config.mods.default_catalog(), DefaultModCatalog::BuiltIn);
+        assert_eq!(
+            config.mods.default_catalog().resolved(),
+            Some(ModProvider::Modrinth)
+        );
+    }
+
+    #[test]
+    fn a_recorded_catalog_round_trips_through_the_file() {
+        let mut config = Config::default();
+        config
+            .mods
+            .set_default_catalog(Some(ModProvider::CurseForge));
+        let text = config.to_toml_string().expect("serialize");
+        assert!(text.contains("default_catalog = \"curseforge\""));
+
+        let reloaded = Config::from_toml_str(&text).expect("re-parse");
+        assert_eq!(
+            reloaded.mods.default_catalog(),
+            DefaultModCatalog::Selected(ModProvider::CurseForge)
+        );
+    }
+
+    #[test]
+    fn recording_the_built_in_catalog_is_kept_apart_from_recording_nothing() {
+        let mut config = Config::default();
+        config.mods.set_default_catalog(Some(ModProvider::Modrinth));
+        let stored =
+            Config::from_toml_str(&config.to_toml_string().expect("serialize")).expect("re-parse");
+        assert_eq!(
+            stored.mods.default_catalog(),
+            DefaultModCatalog::Selected(ModProvider::Modrinth)
+        );
+
+        config.mods.set_default_catalog(None);
+        let cleared =
+            Config::from_toml_str(&config.to_toml_string().expect("serialize")).expect("re-parse");
+        assert_eq!(cleared.mods.default_catalog(), DefaultModCatalog::BuiltIn);
+    }
+
+    #[test]
+    fn a_catalog_a_newer_ephervex_recorded_is_kept_rather_than_reinterpreted() {
+        let text =
+            format!("{DEFAULT_CONFIG_EXAMPLE}\n[mods]\ndefault_catalog = \"a-later-catalog\"\n");
+        let config = Config::from_toml_str(&text).expect("parse");
+        assert_eq!(
+            config.mods.default_catalog(),
+            DefaultModCatalog::Unrecognized("a-later-catalog".to_owned()),
+        );
+        // The rest of the file is still readable: one value this build cannot
+        // resolve costs the user that value, not the whole configuration.
+        assert_eq!(config.language, "en-US");
+
+        let rewritten = config.to_toml_string().expect("serialize");
+        assert!(rewritten.contains("a-later-catalog"));
+        assert_eq!(Config::from_toml_str(&rewritten).expect("re-parse"), config);
+    }
+
+    #[test]
+    fn a_malformed_catalog_value_fails_the_document_rather_than_inventing_one() {
+        // A type the field cannot hold is a broken file, not a preference: the
+        // load fails and nothing is silently substituted.
+        let text = format!("{DEFAULT_CONFIG_EXAMPLE}\n[mods]\ndefault_catalog = 7\n");
+        assert!(matches!(
+            Config::from_toml_str(&text),
+            Err(ConfigError::Invalid { .. })
+        ));
+    }
+
+    #[test]
+    fn unknown_keys_inside_the_mods_table_survive() {
+        let text = format!(
+            "{DEFAULT_CONFIG_EXAMPLE}\n[mods]\ndefault_catalog = \"\"\nfuture_mod_option = \"q\"\n"
+        );
+        let config = Config::from_toml_str(&text).expect("parse");
+        assert_eq!(
+            config
+                .mods
+                .unknown
+                .get("future_mod_option")
+                .and_then(toml::Value::as_str),
+            Some("q")
+        );
+        assert!(
+            config
+                .to_toml_string()
+                .expect("serialize")
+                .contains("future_mod_option")
+        );
+    }
+
+    #[test]
+    fn the_recorded_catalog_carries_no_credential_material() {
+        let mut config = Config::default();
+        config
+            .mods
+            .set_default_catalog(Some(ModProvider::CurseForge));
+        let text = config.to_toml_string().expect("serialize");
+        assert!(config.find_secret_looking_key().is_none());
+        for marker in SECRET_KEY_MARKERS {
+            assert!(
+                !text.to_ascii_lowercase().contains(marker),
+                "the configuration file must not gain a credential-looking key"
+            );
+        }
     }
 
     #[test]

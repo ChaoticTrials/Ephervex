@@ -778,6 +778,9 @@ error-mod-not-managed = That mod is no longer part of this instance.
 error-mod-identity-incomplete = One of this instance's mods has no provider identity, so its dependencies cannot be worked out.
 .action = Mods with no identity have to be managed by hand.
 
+error-mod-catalog-preference-unrecognized = "{ $catalog }" is not a mod catalog this version of Ephervex knows.
+.action = Choose a catalog in Settings, or name one for this command. The stored value is left alone.
+
 # Why a mod belongs to an instance. Kept distinct because they are different
 # things to look at and, later, different things to change.
 mod-origin-pack-declared = From pack
@@ -1413,6 +1416,12 @@ gui-default = DEFAULT
 gui-make-default = Make Default
 gui-remove = Remove...
 gui-provider-detail = Provider configuration remains scoped. Stored secrets are reported only as present or absent.
+gui-preferred-mod-catalog = Mod catalog
+gui-preferred-mod-catalog-detail = Which catalog the mod browser opens on. Individual searches and installs can still name either one.
+gui-preferred-mod-catalog-heading = Preferred catalog
+gui-preferred-mod-catalog-note = Applies to browsing from here on. Mods already installed keep the catalog they came from.
+gui-preferred-mod-catalog-unrecognized = "{ $value }" is not a catalog this version knows. It is kept as it is; choose one above to browse.
+gui-preferred-mod-catalog-saved = Preferred mod catalog saved.
 gui-provider-identifiers = Provider identity
 gui-provider-identifiers-detail = Overrides are advanced settings. Empty fields use the effective defaults shown below.
 gui-microsoft-client-id = Microsoft application Client ID

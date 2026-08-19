@@ -157,6 +157,15 @@ pub enum CoreError {
     #[error("{incompatible} installed mods do not fit the selected loader build")]
     LoaderChangeBlockedByMods { incompatible: usize },
 
+    /// The recorded default mod catalog is a name this build cannot resolve.
+    ///
+    /// A newer Ephervex may know a catalog this one does not, and the recorded
+    /// name is kept rather than rewritten. Reported instead of quietly browsing
+    /// the built-in default, which would search one catalog while the user's
+    /// setting names another.
+    #[error("`{configured}` is not a mod catalog this version of Ephervex knows")]
+    ModCatalogPreferenceUnrecognized { configured: String },
+
     /// Working out which dependencies are still needed requires every root's
     /// project, and one of them has none.
     ///
@@ -227,6 +236,9 @@ impl CoreError {
             Self::ModNotManaged { .. } => "error-mod-not-managed",
             Self::ModMutationRestricted { restriction, .. } => restriction.message_id(),
             Self::ModIdentityIncomplete { .. } => "error-mod-identity-incomplete",
+            Self::ModCatalogPreferenceUnrecognized { .. } => {
+                "error-mod-catalog-preference-unrecognized"
+            }
         }
     }
 
@@ -247,6 +259,9 @@ impl CoreError {
             Self::LoaderFamilyFixed { loader } => vec![("loader", loader.to_string())],
             Self::LoaderChangeBlockedByMods { incompatible } => {
                 vec![("count", incompatible.to_string())]
+            }
+            Self::ModCatalogPreferenceUnrecognized { configured } => {
+                vec![("catalog", configured.clone())]
             }
             Self::Preference(error) => vec![("syntax", error.syntax.to_owned())],
             Self::JavaSettingsInvalid {
@@ -392,6 +407,7 @@ impl CoreError {
             | Self::ModIdentityIncomplete { .. }
             | Self::LoaderFamilyFixed { .. }
             | Self::LoaderChangeBlockedByMods { .. }
+            | Self::ModCatalogPreferenceUnrecognized { .. }
             | Self::ArtworkUnusable { .. } => None,
         }
     }
@@ -438,6 +454,7 @@ impl CoreError {
             | Self::Connect(_)
             | Self::LoaderFamilyFixed { .. }
             | Self::LoaderChangeBlockedByMods { .. }
+            | Self::ModCatalogPreferenceUnrecognized { .. }
             | Self::ArtworkUnusable { .. } => None,
         }
     }
