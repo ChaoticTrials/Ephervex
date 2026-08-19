@@ -82,7 +82,8 @@ pub use install::{
     materialize_server_recipe,
 };
 pub use managed::{
-    MODS_DIR, ManagedModInstall, ManagedModInstallation, RESOURCEPACKS_DIR, install_managed,
+    MODS_DIR, ManagedModInstall, ManagedModInstallation, RESOURCEPACKS_DIR, SHADERPACKS_DIR,
+    install_managed,
 };
 pub use mutate::{
     ManagedMutation, ManagedMutationReport, ManagedProject, ReplacedMod, clear_retired,

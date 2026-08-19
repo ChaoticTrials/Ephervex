@@ -74,6 +74,13 @@ const MODS_CLASS_SLUG: &str = "mc-mods";
 /// fail on its account. See [`CurseForgeProjectClasses::classify`].
 const RESOURCE_PACKS_CLASS_SLUG: &str = "texture-packs";
 
+/// The provider-returned slug this launcher looks for to identify Minecraft's
+/// top-level "Shader Packs" project class, on the same terms as
+/// [`RESOURCE_PACKS_CLASS_SLUG`]: not a guaranteed API constant, matched at
+/// request time, and optional rather than a hard failure when a response does
+/// not currently name it.
+const SHADER_PACKS_CLASS_SLUG: &str = "shaders";
+
 /// The header the third-party API authenticates with.
 ///
 /// Public because the same header is what an authenticated *artifact* request
@@ -398,6 +405,11 @@ impl CurseForgeOperation<'_> {
             .iter()
             .find(|class| class.slug == RESOURCE_PACKS_CLASS_SLUG)
             .map(|class| class.id);
+        // Opportunistic on the same terms: see `SHADER_PACKS_CLASS_SLUG`.
+        let shader_packs = classes
+            .iter()
+            .find(|class| class.slug == SHADER_PACKS_CLASS_SLUG)
+            .map(|class| class.id);
         let names = classes
             .into_iter()
             .map(|class| (class.id, class.name))
@@ -405,6 +417,7 @@ impl CurseForgeOperation<'_> {
         Ok(CurseForgeProjectClasses {
             mods,
             resource_packs,
+            shader_packs,
             names,
         })
     }
@@ -801,11 +814,12 @@ pub(super) struct CurseForgePage<T> {
 /// request answered.
 ///
 /// The one authoritative reading of what a project's `classId` means: which
-/// numeric id is Mods, which is Resource Packs where the response named one,
-/// and what CurseForge itself calls every other class it listed, so a refusal
-/// can name the *class*, never the unrelated project's own display name.
-/// [`Self::classify`] is where that reading happens; what an operation does
-/// with the result is that operation's own policy, not this type's.
+/// numeric id is Mods, which is Resource Packs or Shader Packs where the
+/// response named one, and what CurseForge itself calls every other class it
+/// listed, so a refusal can name the *class*, never the unrelated project's
+/// own display name. [`Self::classify`] is where that reading happens; what
+/// an operation does with the result is that operation's own policy, not
+/// this type's.
 #[derive(Debug, Clone)]
 pub struct CurseForgeProjectClasses {
     mods: u32,
@@ -813,6 +827,9 @@ pub struct CurseForgeProjectClasses {
     /// [`RESOURCE_PACKS_CLASS_SLUG`] for why this is optional where
     /// [`Self::mods`] is not.
     resource_packs: Option<u32>,
+    /// The Shader Packs class id, on the same optional terms as
+    /// [`Self::resource_packs`]. See [`SHADER_PACKS_CLASS_SLUG`].
+    shader_packs: Option<u32>,
     names: HashMap<u32, String>,
 }
 
@@ -827,6 +844,12 @@ impl CurseForgeProjectClasses {
     #[must_use]
     pub fn is_resource_packs(&self, class_id: u32) -> bool {
         Some(class_id) == self.resource_packs
+    }
+
+    /// Whether this class id is the game's Shader Packs class.
+    #[must_use]
+    pub fn is_shader_packs(&self, class_id: u32) -> bool {
+        Some(class_id) == self.shader_packs
     }
 
     /// The Mods class id this response reported.
@@ -876,6 +899,9 @@ impl CurseForgeProjectClasses {
         if self.is_resource_packs(class_id) {
             return Ok(CurseForgeProjectClass::ResourcePacks);
         }
+        if self.is_shader_packs(class_id) {
+            return Ok(CurseForgeProjectClass::ShaderPacks);
+        }
         match self.name_of(class_id) {
             Some(name) => Ok(CurseForgeProjectClass::Other(name.to_owned())),
             None => Err(ModPlatformError::ResponseInvalid {
@@ -893,9 +919,9 @@ impl CurseForgeProjectClasses {
     ///
     /// The mod-browser policy built on [`Self::classify`]: Ephervex v1
     /// browses and manages Mods only, so every other class, Resource Packs
-    /// included, is refused by the provider's own name for it. A CurseForge
-    /// modpack import applies its own, wider policy directly on
-    /// [`Self::classify`] instead of calling this.
+    /// and Shader Packs included, is refused by the provider's own name for
+    /// it. A CurseForge modpack import applies its own, wider policy directly
+    /// on [`Self::classify`] instead of calling this.
     #[must_use]
     pub fn rejection_for(&self, project: &CurseForgeProject) -> Option<ModPlatformError> {
         match self.classify(project) {
@@ -907,6 +933,16 @@ impl CurseForgeProjectClasses {
                         .resource_packs
                         .and_then(|id| self.name_of(id))
                         .unwrap_or("Resource Packs")
+                        .to_owned(),
+                })
+            }
+            Ok(CurseForgeProjectClass::ShaderPacks) => {
+                Some(ModPlatformError::ProjectTypeUnsupported {
+                    reference: project.id.to_string(),
+                    project_type: self
+                        .shader_packs
+                        .and_then(|id| self.name_of(id))
+                        .unwrap_or("Shader Packs")
                         .to_owned(),
                 })
             }
@@ -945,6 +981,8 @@ pub enum CurseForgeProjectClass {
     Mods,
     /// Minecraft's top-level Resource Packs class.
     ResourcePacks,
+    /// Minecraft's top-level Shader Packs class.
+    ShaderPacks,
     /// A top-level class this build does not special-case, named the way
     /// CurseForge itself names it in the same categories response that
     /// answered which class is Mods.

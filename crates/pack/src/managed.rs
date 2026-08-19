@@ -52,6 +52,10 @@ pub const MODS_DIR: &str = "mods";
 /// it is never read back as one.
 pub const RESOURCEPACKS_DIR: &str = "resourcepacks";
 
+/// The directory a pack-declared shader pack is installed into, relative to
+/// the game directory, on the same terms as [`RESOURCEPACKS_DIR`].
+pub const SHADERPACKS_DIR: &str = "shaderpacks";
+
 /// What installing a set of managed mods produced.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ManagedModInstallation {

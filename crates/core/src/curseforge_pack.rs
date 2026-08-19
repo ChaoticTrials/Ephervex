@@ -61,7 +61,7 @@ use ephervex_mod_platform::{
 use ephervex_model::{CurseForgeFileId, CurseForgeProjectId, ModOrigin, ModProvider, SecretString};
 use ephervex_pack::{
     ArtifactCredentials, CredentialUnavailable, MODS_DIR, PackAnalysis, PackError, PackFileRecipe,
-    PackFormat, PendingProviderFile, ProviderFileIdentity, RESOURCEPACKS_DIR,
+    PackFormat, PendingProviderFile, ProviderFileIdentity, RESOURCEPACKS_DIR, SHADERPACKS_DIR,
 };
 use futures_util::StreamExt as _;
 use reqwest::header::HeaderName;
@@ -399,6 +399,7 @@ fn unusable_downloader(source: ephervex_download::DownloadError) -> PackError {
 enum PackContentClass {
     Mods,
     ResourcePacks,
+    ShaderPacks,
 }
 
 impl PackContentClass {
@@ -408,6 +409,7 @@ impl PackContentClass {
         match self {
             Self::Mods => MODS_DIR,
             Self::ResourcePacks => RESOURCEPACKS_DIR,
+            Self::ShaderPacks => SHADERPACKS_DIR,
         }
     }
 }
@@ -419,9 +421,10 @@ impl PackContentClass {
 /// A CurseForge manifest names its files by project id alone, and nothing
 /// stops a project id from naming a Resource Pack, a World, or any other
 /// class of content. Unlike the standalone mod browser, a modpack import
-/// legitimately contains more than Mods: a confirmed Mod routes to `mods/`
-/// and a confirmed Resource Pack routes to `resourcepacks/`, both by the one
-/// authoritative classification [`ephervex_mod_platform::CurseForgeProjectClasses::classify`]
+/// legitimately contains more than Mods: a confirmed Mod routes to `mods/`,
+/// a confirmed Resource Pack routes to `resourcepacks/`, and a confirmed
+/// Shader Pack routes to `shaderpacks/`, all by the one authoritative
+/// classification [`ephervex_mod_platform::CurseForgeProjectClasses::classify`]
 /// provides. Every other known class is a pack the whole import refuses
 /// rather than silently omits, and a class this build cannot confirm at all
 /// (a missing `classId`, or one the categories response never listed) fails
@@ -470,6 +473,7 @@ async fn classify_projects(
             let content = match classes.classify(&project)? {
                 CurseForgeProjectClass::Mods => PackContentClass::Mods,
                 CurseForgeProjectClass::ResourcePacks => PackContentClass::ResourcePacks,
+                CurseForgeProjectClass::ShaderPacks => PackContentClass::ShaderPacks,
                 // A real, known CurseForge class this build still does not
                 // import. Named in pack-import terms: a modpack legitimately
                 // contains more than mods, so this is not the mod browser's
@@ -770,16 +774,20 @@ mod tests {
     /// still pass if the implementation started assuming this number instead.
     const RESOURCE_PACKS_CLASS_ID: u32 = 12;
 
+    /// The numeric id this test fixture's loopback server uses for the Shader
+    /// Packs class. Arbitrary, on the same terms as [`MODS_CLASS_ID`].
+    const SHADER_PACKS_CLASS_ID: u32 = 19;
+
     /// The numeric id this test fixture's loopback server uses for the Worlds
     /// class, a real CurseForge class this build does not import and never
     /// will in this suite: it stands in for "a known but unsupported class".
     const WORLDS_CLASS_ID: u32 = 17;
 
     /// The documented shape of `GET /v1/categories?classesOnly=true`, naming
-    /// the Mods and Resource Packs classes by their own ids and one decoy
-    /// class beside them, so a test proves the right one was picked rather
-    /// than the only one, and so a refusal has a real provider-returned class
-    /// name available.
+    /// the Mods, Resource Packs, and Shader Packs classes by their own ids
+    /// and one decoy class beside them, so a test proves the right one was
+    /// picked rather than the only one, and so a refusal has a real
+    /// provider-returned class name available.
     async fn serve_project_classes(server: &MockServer) {
         Mock::given(method("GET"))
             .and(path("/v1/categories"))
@@ -788,6 +796,7 @@ mod tests {
                     r#"{{"data":[
                         {{"id":{MODS_CLASS_ID},"gameId":432,"name":"Mods","slug":"mc-mods","isClass":true}},
                         {{"id":{RESOURCE_PACKS_CLASS_ID},"gameId":432,"name":"Resource Packs","slug":"texture-packs","isClass":true}},
+                        {{"id":{SHADER_PACKS_CLASS_ID},"gameId":432,"name":"Shaders","slug":"shaders","isClass":true}},
                         {{"id":{WORLDS_CLASS_ID},"gameId":432,"name":"Worlds","slug":"worlds","isClass":true}}
                     ]}}"#
                 ),
@@ -918,6 +927,8 @@ mod tests {
     const OPTIONAL_BODY: &[u8] = b"the optional mod jar";
     const RESOURCE_PACK_BODY: &[u8] = b"the resource pack zip";
     const RESOURCE_PACK_FILE_NAME: &str = "faithful-32x.zip";
+    const SHADER_PACK_BODY: &[u8] = b"the shader pack zip";
+    const SHADER_PACK_FILE_NAME: &str = "complementary-r5.zip";
 
     /// A manifest declaring [`REQUIRED_PROJECT`] and, also required so it
     /// lands on disk without a selection, [`OPTIONAL_PROJECT`]: reused here
@@ -928,6 +939,12 @@ mod tests {
             r#"{{"projectID": {REQUIRED_PROJECT}, "fileID": {REQUIRED_FILE}, "required": true}},
                {{"projectID": {OPTIONAL_PROJECT}, "fileID": {OPTIONAL_FILE}, "required": true}}"#
         ))
+    }
+
+    /// The same shape, with [`OPTIONAL_PROJECT`] reused as a Shader Pack
+    /// project instead.
+    fn export_manifest_with_a_required_shader_pack() -> Vec<u8> {
+        export_manifest_with_a_required_resource_pack()
     }
 
     /// Classifies [`REQUIRED_PROJECT`] as a Mod and [`OPTIONAL_PROJECT`] as a
@@ -956,6 +973,36 @@ mod tests {
             OPTIONAL_FILE,
             RESOURCE_PACK_FILE_NAME,
             RESOURCE_PACK_BODY,
+        )
+        .await;
+    }
+
+    /// The same shape as [`serve_pack_with_a_resource_pack`], classifying
+    /// [`OPTIONAL_PROJECT`] as a Shader Pack instead.
+    async fn serve_pack_with_a_shader_pack(server: &MockServer) {
+        serve_project_classes(server).await;
+        serve_project_class(server, REQUIRED_PROJECT, "Actual Mod", MODS_CLASS_ID).await;
+        serve_project_class(
+            server,
+            OPTIONAL_PROJECT,
+            "Complementary",
+            SHADER_PACKS_CLASS_ID,
+        )
+        .await;
+        serve_file(
+            server,
+            REQUIRED_PROJECT,
+            REQUIRED_FILE,
+            "required-1.0.0.jar",
+            REQUIRED_BODY,
+        )
+        .await;
+        serve_file(
+            server,
+            OPTIONAL_PROJECT,
+            OPTIONAL_FILE,
+            SHADER_PACK_FILE_NAME,
+            SHADER_PACK_BODY,
         )
         .await;
     }
@@ -1663,14 +1710,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unclassified_projects_zip_shaped_name_is_not_treated_as_a_resource_pack() {
+    async fn an_unclassified_projects_zip_shaped_name_is_not_treated_as_a_provider_pack() {
         // A project reporting no class at all, whose title and slug are
-        // deliberately shaped like a resource pack's. None of that is
-        // evidence: only a confirmed `classId` is.
+        // deliberately shaped like a resource pack's or a shader pack's.
+        // None of that is evidence: only a confirmed `classId` is.
         let server = MockServer::start().await;
         serve_project_classes(&server).await;
         serve_project_class(&server, REQUIRED_PROJECT, "Actual Mod", MODS_CLASS_ID).await;
-        serve_project_with_no_class(&server, OPTIONAL_PROJECT, "Faithful.zip").await;
+        serve_project_with_no_class(&server, OPTIONAL_PROJECT, "Complementary Faithful.zip").await;
 
         let dir = tempfile::tempdir().expect("temp dir");
         let archive = archive_at(dir.path(), "repro.zip");
@@ -1683,7 +1730,8 @@ mod tests {
                 error,
                 CoreError::Pack(PackError::ProviderContentUnsupported { .. })
             ),
-            "a null class is not a confirmed Resource Pack, or any other confirmed class: {error:?}"
+            "a null class is not a confirmed Resource Pack, Shader Pack, or any other \
+             confirmed class: {error:?}"
         );
         assert!(app.list_clients().expect("list").is_empty());
 
@@ -1794,6 +1842,267 @@ mod tests {
             fetches, 0,
             "nothing went looking for the file anywhere else"
         );
+    }
+
+    // -- shader packs ---------------------------------------------------------
+    //
+    // The same routing architecture as resource packs, exercised more lightly:
+    // the invariants (fail-closed discovery, exact-file safety, atomicity) are
+    // already proven generically above, so these confirm the third destination
+    // without re-proving each of those from scratch.
+
+    #[tokio::test]
+    async fn shader_packs_class_discovery_does_not_depend_on_any_fixed_numeric_id() {
+        // A server whose Mods and Shader Packs classes both carry different
+        // unusual ids than the shared fixture's.
+        const OTHER_MODS_CLASS_ID: u32 = 222_444;
+        const OTHER_SHADER_PACKS_CLASS_ID: u32 = 777_333;
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/categories"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                format!(
+                    r#"{{"data":[
+                        {{"id":{OTHER_SHADER_PACKS_CLASS_ID},"gameId":432,"name":"Shaders","slug":"shaders","isClass":true}},
+                        {{"id":{OTHER_MODS_CLASS_ID},"gameId":432,"name":"Mods","slug":"mc-mods","isClass":true}}
+                    ]}}"#
+                ),
+                "application/json",
+            ))
+            .mount(&server)
+            .await;
+        serve_project_class(&server, REQUIRED_PROJECT, "Actual Mod", OTHER_MODS_CLASS_ID).await;
+        serve_project_class(
+            &server,
+            OPTIONAL_PROJECT,
+            "Complementary",
+            OTHER_SHADER_PACKS_CLASS_ID,
+        )
+        .await;
+        serve_file(
+            &server,
+            REQUIRED_PROJECT,
+            REQUIRED_FILE,
+            "required-1.0.0.jar",
+            REQUIRED_BODY,
+        )
+        .await;
+        serve_file(
+            &server,
+            OPTIONAL_PROJECT,
+            OPTIONAL_FILE,
+            SHADER_PACK_FILE_NAME,
+            SHADER_PACK_BODY,
+        )
+        .await;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = archive_with_manifest(
+            dir.path(),
+            "repro.zip",
+            &export_manifest_with_a_required_shader_pack(),
+        );
+        let app = app_against(dir.path(), &server);
+
+        let imported = import(&app, &archive).await.expect(
+            "the Shader Packs class this server discovers is not the one every other test's fixture uses",
+        );
+        let game = ephervex_storage::metadata::client_game_dir(&imported.record.root);
+        assert_eq!(
+            std::fs::read(game.join("shaderpacks").join(SHADER_PACK_FILE_NAME)).expect("read"),
+            SHADER_PACK_BODY,
+            "routed correctly even though this server's Shader Packs class id \
+             differs from every other test's"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_manifest_shader_pack_is_imported_and_routed_to_shaderpacks() {
+        let server = MockServer::start().await;
+        serve_pack_with_a_shader_pack(&server).await;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = archive_with_manifest(
+            dir.path(),
+            "repro.zip",
+            &export_manifest_with_a_required_shader_pack(),
+        );
+        let app = app_against(dir.path(), &server);
+
+        let imported = import(&app, &archive).await.expect("import");
+        let game = ephervex_storage::metadata::client_game_dir(&imported.record.root);
+        assert_eq!(
+            std::fs::read(game.join("mods/required-1.0.0.jar")).expect("read"),
+            REQUIRED_BODY
+        );
+        assert_eq!(
+            std::fs::read(game.join("shaderpacks").join(SHADER_PACK_FILE_NAME)).expect("read"),
+            SHADER_PACK_BODY,
+            "a confirmed Shader Pack project routes to shaderpacks/, never mods/"
+        );
+
+        let recipe = imported.recipe();
+        assert_eq!(recipe.files.len(), 2);
+        let shader_pack = recipe
+            .files
+            .iter()
+            .find(|file| file.logical_path == Path::new("shaderpacks").join(SHADER_PACK_FILE_NAME))
+            .expect("the shader pack is in the recipe");
+        assert_eq!(shader_pack.origin, ModOrigin::PackDeclared);
+        assert_eq!(shader_pack.client, SideRequirement::Required);
+        assert_eq!(
+            shader_pack.server,
+            SideRequirement::Unknown,
+            "the export format states nothing about servers, shader packs included"
+        );
+        let identity = shader_pack.identity.as_ref().expect("an identity");
+        assert_eq!(identity.provider, Some(ModProvider::CurseForge));
+        assert_eq!(identity.project_id.as_deref(), Some("306612"));
+        assert_eq!(
+            identity.file_id.as_deref(),
+            Some("4593600"),
+            "the exact manifest file id survives resolution"
+        );
+        assert!(
+            !shader_pack.hashes.is_empty(),
+            "a provider-published digest survives resolution and stays verifiable"
+        );
+
+        // Not a managed mod, fully identified or not: neither the
+        // resolver-facing list nor the frontend-facing snapshot see it.
+        let managed = recipe.managed_mods();
+        assert_eq!(managed.len(), 1, "only the actual mod is a managed mod");
+        assert!(
+            managed.iter().all(|mod_| mod_.project_id != "306612"),
+            "the shader pack must never appear as a managed mod: {managed:?}"
+        );
+        let snapshot = app
+            .managed_mod_snapshot(imported.record.id)
+            .expect("snapshot");
+        assert_eq!(
+            snapshot.mods.len(),
+            1,
+            "the shader pack is not part of the managed-mod snapshot either"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_retained_shader_pack_reconstructs_under_shaderpacks_on_a_server() {
+        let server = MockServer::start().await;
+        serve_pack_with_a_shader_pack(&server).await;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = archive_with_manifest(
+            dir.path(),
+            "repro.zip",
+            &export_manifest_with_a_required_shader_pack(),
+        );
+        let app = app_against(dir.path(), &server);
+        let imported = import(&app, &archive).await.expect("import");
+
+        // Nothing below this line may contact anyone: reconstruction works
+        // from the retained recipe and the shared artifact cache alone.
+        drop(server);
+
+        let target = reconstruct_server_confirming(
+            &app,
+            &imported,
+            &dir.path().join("server"),
+            OptionalSelection::of([
+                "mods/required-1.0.0.jar".to_owned(),
+                format!("shaderpacks/{SHADER_PACK_FILE_NAME}"),
+            ]),
+        )
+        .await
+        .expect("reconstruction");
+
+        assert_eq!(
+            std::fs::read(target.join("shaderpacks").join(SHADER_PACK_FILE_NAME)).expect("read"),
+            SHADER_PACK_BODY,
+            "the retained shader pack reconstructs back under shaderpacks/"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unsafe_shader_pack_file_name_cannot_escape_shaderpacks() {
+        let server = MockServer::start().await;
+        serve_project_classes(&server).await;
+        serve_project_class(&server, REQUIRED_PROJECT, "Actual Mod", MODS_CLASS_ID).await;
+        serve_project_class(
+            &server,
+            OPTIONAL_PROJECT,
+            "Complementary",
+            SHADER_PACKS_CLASS_ID,
+        )
+        .await;
+        serve_file(
+            &server,
+            REQUIRED_PROJECT,
+            REQUIRED_FILE,
+            "required-1.0.0.jar",
+            REQUIRED_BODY,
+        )
+        .await;
+        serve_file(
+            &server,
+            OPTIONAL_PROJECT,
+            OPTIONAL_FILE,
+            "../escape.zip",
+            SHADER_PACK_BODY,
+        )
+        .await;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = archive_at(dir.path(), "repro.zip");
+        let app = app_against(dir.path(), &server);
+
+        let error = import(&app, &archive).await.expect_err("must refuse");
+        assert_eq!(error.message_id(), "error-pack-entry-unsafe");
+        assert!(app.list_clients().expect("list").is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_restricted_shader_pack_file_refuses_the_whole_import_atomically() {
+        let server = MockServer::start().await;
+        serve_project_classes(&server).await;
+        serve_project_class(&server, REQUIRED_PROJECT, "Actual Mod", MODS_CLASS_ID).await;
+        serve_project_class(
+            &server,
+            OPTIONAL_PROJECT,
+            "Complementary",
+            SHADER_PACKS_CLASS_ID,
+        )
+        .await;
+        serve_file(
+            &server,
+            REQUIRED_PROJECT,
+            REQUIRED_FILE,
+            "required-1.0.0.jar",
+            REQUIRED_BODY,
+        )
+        .await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/v1/mods/{OPTIONAL_PROJECT}/files/{OPTIONAL_FILE}"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                format!(
+                    r#"{{"data":{{"id":{OPTIONAL_FILE},"gameId":432,"modId":{OPTIONAL_PROJECT},
+                        "isAvailable":true,"fileName":"restricted.zip","fileLength":10,
+                        "downloadUrl":null,"hashes":[]}}}}"#
+                ),
+                "application/json",
+            ))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = archive_at(dir.path(), "repro.zip");
+        let app = app_against(dir.path(), &server);
+
+        let error = import(&app, &archive).await.expect_err("must refuse");
+        assert_eq!(error.message_id(), "error-mod-file-distribution-restricted");
+        assert!(app.list_clients().expect("list").is_empty());
     }
 
     #[tokio::test]

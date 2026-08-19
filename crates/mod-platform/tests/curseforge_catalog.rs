@@ -36,6 +36,9 @@ const MODS_CLASS: u32 = 9911;
 /// A class that is not Mods, so a project carrying it must not be offered.
 const RESOURCE_PACK_CLASS: u32 = 9912;
 
+/// Another class that is not Mods, on the same terms as [`RESOURCE_PACK_CLASS`].
+const SHADER_PACK_CLASS: u32 = 9913;
+
 const JEI_PROJECT: u32 = 238_222;
 const JEI_FILE: u32 = 4_593_548;
 
@@ -43,7 +46,8 @@ fn categories() -> String {
     format!(
         r#"{{"data":[
             {{"id":{MODS_CLASS},"gameId":432,"name":"Mods","slug":"mc-mods","isClass":true}},
-            {{"id":{RESOURCE_PACK_CLASS},"gameId":432,"name":"Resource Packs","slug":"texture-packs","isClass":true}}
+            {{"id":{RESOURCE_PACK_CLASS},"gameId":432,"name":"Resource Packs","slug":"texture-packs","isClass":true}},
+            {{"id":{SHADER_PACK_CLASS},"gameId":432,"name":"Shaders","slug":"shaders","isClass":true}}
         ]}}"#
     )
 }
@@ -561,6 +565,43 @@ async fn a_project_of_another_class_is_refused_by_name_rather_than_installed() {
             error,
             ModPlatformError::ProjectTypeUnsupported { ref project_type, .. }
                 if project_type == "Resource Packs"
+        ),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_shader_pack_project_is_refused_by_name_rather_than_installed() {
+    // The pack importer now accepts Shader Packs; the standalone browser does
+    // not, and must keep refusing one by the provider's own class name.
+    let server = MockServer::start().await;
+    serve_categories(&server).await;
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/v1/mods/\d+$"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            format!(
+                r#"{{"data":{}}}"#,
+                project_document(
+                    1001,
+                    "Complementary",
+                    "complementary",
+                    &SHADER_PACK_CLASS.to_string()
+                )
+            ),
+            "application/json",
+        ))
+        .mount(&server)
+        .await;
+
+    let error = provider_against(&server, Some(FAKE_KEY))
+        .project("1001", &reporter(), &CancellationToken::new())
+        .await
+        .expect_err("a shader pack is not a mod");
+    assert!(
+        matches!(
+            error,
+            ModPlatformError::ProjectTypeUnsupported { ref project_type, .. }
+                if project_type == "Shaders"
         ),
         "{error:?}"
     );
