@@ -537,31 +537,66 @@ const MOUSE_PREFIX: &str = "mouse:";
 
 /// A mouse button, as Minecraft's own input constants distinguish them.
 ///
-/// `Extra` carries the zero-based button index the window system reports;
-/// [`Self::name`] renders it the way Minecraft labels it, which is one-based.
+/// Closed and data-free on purpose. The window system reports a button as a
+/// number, and only some of those numbers are buttons Minecraft can name; a
+/// variant carrying a raw index would let a caller build a button that has no
+/// name, writes a token nothing can read back, and therefore stops surviving a
+/// restart. Every value of this type has a name, an encoding, and a durable
+/// text form, and the only way in from a raw index is
+/// [`MouseButton::from_index`].
+///
+/// `Left`, `Right`, and `Middle` are the buttons Minecraft names; the rest it
+/// labels by number, one-based, so window-system button `3` is `4`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum MouseButton {
     Left,
     Right,
     Middle,
-    /// A button beyond the three named ones. Zero-based, and never one of
-    /// `0`, `1`, or `2`, which are the three named buttons.
-    Extra(u8),
+    Button4,
+    Button5,
+    Button6,
+    Button7,
+    Button8,
 }
+
+/// Every mouse button, ordered by the index the window system reports.
+const MOUSE_BUTTONS: &[MouseButton] = &[
+    MouseButton::Left,
+    MouseButton::Right,
+    MouseButton::Middle,
+    MouseButton::Button4,
+    MouseButton::Button5,
+    MouseButton::Button6,
+    MouseButton::Button7,
+    MouseButton::Button8,
+];
 
 impl MouseButton {
     /// The highest zero-based button index Minecraft's input layer reports.
     pub const MAXIMUM_INDEX: u8 = 7;
 
-    /// The button for one zero-based index, or `None` when no such button
-    /// exists.
+    /// Every button this build can express, in index order.
+    pub fn all() -> impl Iterator<Item = Self> {
+        MOUSE_BUTTONS.iter().copied()
+    }
+
+    /// The button for one zero-based index the window system reported, or
+    /// `None` when no Minecraft button corresponds to it.
+    ///
+    /// The one entrance from a raw index, and the one a later key-capture
+    /// screen uses: a press of a button outside this range produces nothing
+    /// rather than a value that cannot be stored.
     #[must_use]
     pub const fn from_index(index: u8) -> Option<Self> {
         match index {
             0 => Some(Self::Left),
             1 => Some(Self::Right),
             2 => Some(Self::Middle),
-            3..=Self::MAXIMUM_INDEX => Some(Self::Extra(index)),
+            3 => Some(Self::Button4),
+            4 => Some(Self::Button5),
+            5 => Some(Self::Button6),
+            6 => Some(Self::Button7),
+            7 => Some(Self::Button8),
             _ => None,
         }
     }
@@ -573,39 +608,40 @@ impl MouseButton {
             Self::Left => 0,
             Self::Right => 1,
             Self::Middle => 2,
-            Self::Extra(index) => index,
+            Self::Button4 => 3,
+            Self::Button5 => 4,
+            Self::Button6 => 5,
+            Self::Button7 => 6,
+            Self::Button8 => 7,
         }
     }
 
     /// The name Minecraft gives this button, which is one-based for every
     /// button past the middle one.
     #[must_use]
-    pub fn name(self) -> String {
+    pub const fn name(self) -> &'static str {
         match self {
-            Self::Left => "left".to_owned(),
-            Self::Right => "right".to_owned(),
-            Self::Middle => "middle".to_owned(),
-            Self::Extra(index) => (u16::from(index) + 1).to_string(),
+            Self::Left => "left",
+            Self::Right => "right",
+            Self::Middle => "middle",
+            Self::Button4 => "4",
+            Self::Button5 => "5",
+            Self::Button6 => "6",
+            Self::Button7 => "7",
+            Self::Button8 => "8",
         }
     }
 
     /// Reads a button back from [`Self::name`].
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
-        match name {
-            "left" => Some(Self::Left),
-            "right" => Some(Self::Right),
-            "middle" => Some(Self::Middle),
-            _ => {
-                let label: u16 = name.parse().ok()?;
-                let index = label.checked_sub(1)?;
-                let index = u8::try_from(index).ok()?;
-                match Self::from_index(index) {
-                    Some(Self::Extra(index)) => Some(Self::Extra(index)),
-                    _ => None,
-                }
-            }
-        }
+        Self::all().find(|button| button.name() == name)
+    }
+}
+
+impl fmt::Display for MouseButton {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
     }
 }
 
@@ -748,30 +784,48 @@ mod tests {
     #[test]
     fn a_mouse_button_is_named_the_way_minecraft_labels_it() {
         // Minecraft names the three known buttons and labels the rest
-        // one-based, so button index 3 is `4`.
+        // one-based, so window-system button 3 is `4`.
         assert_eq!(MouseButton::Left.name(), "left");
         assert_eq!(MouseButton::Right.name(), "right");
         assert_eq!(MouseButton::Middle.name(), "middle");
-        assert_eq!(MouseButton::Extra(3).name(), "4");
-        assert_eq!(MouseButton::Extra(7).name(), "8");
+        assert_eq!(MouseButton::Button4.name(), "4");
+        assert_eq!(MouseButton::Button8.name(), "8");
+    }
 
-        for button in [
-            MouseButton::Left,
-            MouseButton::Right,
-            MouseButton::Middle,
-            MouseButton::Extra(3),
-            MouseButton::Extra(7),
-        ] {
-            assert_eq!(MouseButton::from_name(&button.name()), Some(button));
+    #[test]
+    fn every_constructible_mouse_button_has_a_name_and_an_index_that_agree() {
+        // The type is closed precisely so this holds for every value there is,
+        // rather than for the values a caller remembered to build correctly.
+        let mut names = BTreeSet::new();
+        for button in MouseButton::all() {
+            assert!(names.insert(button.name()), "{button} repeats a name");
+            assert_eq!(MouseButton::from_name(button.name()), Some(button));
             assert_eq!(MouseButton::from_index(button.index()), Some(button));
         }
-        assert_eq!(MouseButton::from_index(8), None);
+        assert_eq!(names.len(), MOUSE_BUTTONS.len());
+    }
+
+    #[test]
+    fn a_window_system_index_outside_minecrafts_range_produces_no_button() {
+        // The one entrance from a raw index, and the boundary a later key
+        // capture screen relies on.
+        assert_eq!(MouseButton::from_index(0), Some(MouseButton::Left));
         assert_eq!(
-            MouseButton::from_name("1"),
-            None,
-            "the first three buttons have names, not numbers"
+            MouseButton::from_index(MouseButton::MAXIMUM_INDEX),
+            Some(MouseButton::Button8)
         );
-        assert_eq!(MouseButton::from_name("9"), None);
+        for index in [MouseButton::MAXIMUM_INDEX + 1, 100, u8::MAX] {
+            assert_eq!(MouseButton::from_index(index), None, "{index}");
+        }
+    }
+
+    #[test]
+    fn a_button_name_is_never_read_back_as_one_of_the_named_buttons() {
+        // `key.mouse.1` is not how Minecraft spells the left button, so
+        // accepting it would invent a second spelling of one identity.
+        for hostile in ["1", "2", "3", "9", "0", "-1", "", "Left"] {
+            assert_eq!(MouseButton::from_name(hostile), None, "{hostile:?}");
+        }
     }
 
     #[test]
@@ -784,11 +838,50 @@ mod tests {
                 "key:left.shift",
             ),
             (InputBinding::Mouse(MouseButton::Left), "mouse:left"),
-            (InputBinding::Mouse(MouseButton::Extra(3)), "mouse:4"),
+            (InputBinding::Mouse(MouseButton::Button4), "mouse:4"),
         ];
         for (binding, text) in cases {
             assert_eq!(binding.to_stored_text(), text);
             assert_eq!(InputBinding::parse_stored(text), Some(binding));
+        }
+    }
+
+    #[test]
+    fn every_binding_this_build_can_construct_survives_durable_storage() {
+        // The closed types are what make this exhaustive rather than a sample:
+        // a binding a settings screen can produce and a launcher can store but
+        // not read back would silently disappear on the next start.
+        let bindings = std::iter::once(InputBinding::Unbound)
+            .chain(PhysicalKey::all().map(InputBinding::Keyboard))
+            .chain(MouseButton::all().map(InputBinding::Mouse));
+        for binding in bindings {
+            let text = binding.to_stored_text();
+            assert_eq!(
+                InputBinding::parse_stored(&text),
+                Some(binding),
+                "{text} did not survive"
+            );
+        }
+    }
+
+    #[test]
+    fn every_binding_this_build_can_construct_has_a_modern_encoding() {
+        // The pre-1.13 era deliberately has no encoding for a mouse button or
+        // an unbound key, but the era that does must cover everything the
+        // model can express.
+        let bindings = std::iter::once(InputBinding::Unbound)
+            .chain(PhysicalKey::all().map(InputBinding::Keyboard))
+            .chain(MouseButton::all().map(InputBinding::Mouse));
+        for binding in bindings {
+            let name = binding.to_glfw_name();
+            assert!(
+                name.starts_with(GLFW_KEYBOARD_PREFIX) || name.starts_with(GLFW_MOUSE_PREFIX),
+                "{name}"
+            );
+            assert!(
+                name.len() > GLFW_MOUSE_PREFIX.len(),
+                "{name} names no input at all"
+            );
         }
     }
 

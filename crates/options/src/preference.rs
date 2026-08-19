@@ -1079,7 +1079,7 @@ mod tests {
             .expect("valid");
         assert_eq!(
             binding,
-            MinecraftPreferenceValue::KeyBinding(InputBinding::Mouse(MouseButton::Extra(3)))
+            MinecraftPreferenceValue::KeyBinding(InputBinding::Mouse(MouseButton::Button4))
         );
         assert_eq!(
             descriptor("keybind_advancements")

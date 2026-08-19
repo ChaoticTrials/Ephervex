@@ -24,6 +24,8 @@
 //! ids written by a newer Ephervex that this build has no descriptor for -
 //! are carried through untouched.
 
+use std::collections::BTreeMap;
+
 use ephervex_options::{
     ConfiguredPreferences, LoadedConfiguredPreferences, MinecraftPreferenceCatalog,
     MinecraftPreferenceDescriptor, MinecraftPreferenceValue, PreferenceId, PreferencePlan,
@@ -100,11 +102,28 @@ pub struct MinecraftPreferenceSnapshot {
 }
 
 /// What one edit does to one preference.
+///
+/// Management state and the preference's own value are two axes, and an edit
+/// says something about both or forgets the preference entirely. There is
+/// deliberately no edit that turns management off *and* has to invent a value:
+/// a preference with nothing stored has nothing to remember, and writing a
+/// placeholder would create a configuration row whose next read is "unusable".
 #[derive(Debug, Clone, PartialEq)]
 pub enum PreferenceChange {
-    /// Apply this value to instances created from here on.
-    Manage(MinecraftPreferenceValue),
-    /// Stop applying the preference, keeping its value for later.
+    /// Record this preference's value and whether Ephervex applies it.
+    ///
+    /// `managed: false` with a value is a real, storable state: the user chose
+    /// a value and chose not to apply it yet.
+    Set {
+        managed: bool,
+        value: MinecraftPreferenceValue,
+    },
+    /// Stop applying a preference that is already configured, keeping the
+    /// exact value it has.
+    ///
+    /// A preference with nothing stored stays unconfigured: there is no value
+    /// to remember, and Ephervex having no opinion is already the state this
+    /// would be asking for.
     Unmanage,
     /// Forget the preference entirely, so Ephervex has no opinion about it.
     Reset,
@@ -118,16 +137,32 @@ pub struct PreferenceEdit {
 }
 
 impl PreferenceEdit {
-    /// An edit that manages one preference at one value.
+    /// An edit that applies one preference at one value.
     #[must_use]
     pub const fn manage(id: PreferenceId, value: MinecraftPreferenceValue) -> Self {
         Self {
             id,
-            change: PreferenceChange::Manage(value),
+            change: PreferenceChange::Set {
+                managed: true,
+                value,
+            },
         }
     }
 
-    /// An edit that stops applying one preference, keeping its value.
+    /// An edit that records one preference's value without applying it.
+    #[must_use]
+    pub const fn remember(id: PreferenceId, value: MinecraftPreferenceValue) -> Self {
+        Self {
+            id,
+            change: PreferenceChange::Set {
+                managed: false,
+                value,
+            },
+        }
+    }
+
+    /// An edit that stops applying a preference that already has a value,
+    /// keeping that value.
     #[must_use]
     pub const fn unmanage(id: PreferenceId) -> Self {
         Self {
@@ -250,8 +285,10 @@ impl App {
         edits: &[PreferenceEdit],
     ) -> CoreResult<()> {
         let catalog = self.minecraft_preference_catalog()?;
-        let mut planned: Vec<(&PreferenceId, Option<PreferenceSetting>)> =
-            Vec::with_capacity(edits.len());
+        // Each id's final state, resolved before anything is written. Edits
+        // are folded in order, so a batch that names one preference twice
+        // persists what the last edit asked for.
+        let mut planned: BTreeMap<String, Option<PreferenceSetting>> = BTreeMap::new();
 
         for edit in edits {
             let Some(descriptor) = catalog.descriptor(edit.id.as_str()) else {
@@ -260,44 +297,60 @@ impl App {
                 });
             };
             let setting = match &edit.change {
-                PreferenceChange::Manage(value) => {
+                PreferenceChange::Set { managed, value } => {
+                    // Validated whether or not it is applied: a value stored
+                    // now is a value some later instance creation reads.
                     descriptor.validate_value(value)?;
                     Some(PreferenceSetting {
-                        enabled: true,
+                        enabled: *managed,
                         value: value.to_stored_text(),
                     })
                 }
-                PreferenceChange::Unmanage => Some(PreferenceSetting {
-                    enabled: false,
+                PreferenceChange::Unmanage => {
                     // Keeping the stored value is the whole difference between
                     // "stop applying this" and "forget this": turning
                     // management back on should restore what the user chose.
-                    value: self
-                        .config()
-                        .minecraft_preferences
-                        .get(edit.id.as_str())
-                        .map(|setting| setting.value.clone())
-                        .unwrap_or_default(),
-                }),
+                    // With nothing stored there is nothing to keep, and a row
+                    // holding no value at all is not a preference.
+                    self.staged_or_stored(&planned, edit.id.as_str())
+                        .map(|stored| PreferenceSetting {
+                            enabled: false,
+                            value: stored.value,
+                        })
+                }
                 PreferenceChange::Reset => None,
             };
-            planned.push((&edit.id, setting));
+            planned.insert(edit.id.as_str().to_owned(), setting);
         }
 
         self.mutate_config(|config| {
             for (id, setting) in planned {
                 match setting {
                     Some(setting) => {
-                        config
-                            .minecraft_preferences
-                            .insert(id.as_str().to_owned(), setting);
+                        config.minecraft_preferences.insert(id, setting);
                     }
                     None => {
-                        config.minecraft_preferences.remove(id.as_str());
+                        config.minecraft_preferences.remove(&id);
                     }
                 }
             }
         })
+    }
+
+    /// What one preference holds partway through a batch: whatever an earlier
+    /// edit in the same batch staged, else what the configuration file has.
+    ///
+    /// `None` means the preference has no value at all at this point, which is
+    /// the case an edit must never paper over with a placeholder.
+    fn staged_or_stored(
+        &self,
+        planned: &BTreeMap<String, Option<PreferenceSetting>>,
+        id: &str,
+    ) -> Option<PreferenceSetting> {
+        match planned.get(id) {
+            Some(staged) => staged.clone(),
+            None => self.config().minecraft_preferences.get(id).cloned(),
+        }
     }
 }
 
@@ -308,7 +361,8 @@ mod tests {
 
     use ephervex_model::LoaderSelection;
     use ephervex_options::{
-        InputBinding, LanguageAvailability, OPTIONS_FILE_NAME, PhysicalKey, PreferenceDisposition,
+        InputBinding, LanguageAvailability, MouseButton, OPTIONS_FILE_NAME, PhysicalKey,
+        PreferenceDisposition,
     };
     use ephervex_storage::{ClientRecord, NewClient, Paths};
 
@@ -492,6 +546,234 @@ mod tests {
             .expect_err("nothing in this build could ever apply it");
         assert_eq!(error.message_id(), "error-options-preference-unrecognized");
         assert!(app.config().minecraft_preferences.is_empty());
+    }
+
+    #[test]
+    fn unmanaging_a_preference_that_was_never_configured_writes_no_row_at_all() {
+        // A row with no value is not a preference: the next read rejects it as
+        // unusable, so the launcher would have manufactured a broken setting
+        // out of an operation that meant "do not apply this".
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+
+        app.save_global_minecraft_preferences(&[PreferenceEdit::unmanage(id("render_distance"))])
+            .expect("unmanage");
+
+        assert!(
+            app.config().minecraft_preferences.is_empty(),
+            "nothing was configured, so nothing is stored"
+        );
+        let loaded = app.configured_minecraft_preferences().expect("configured");
+        assert!(loaded.rejected.is_empty(), "no unusable row was invented");
+        assert!(loaded.preferences.is_empty());
+    }
+
+    #[test]
+    fn no_edit_can_leave_a_stored_preference_without_a_readable_value() {
+        // The whole batch surface, run over one never-configured preference
+        // and one configured one, must never produce a row the reader refuses.
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        app.save_global_minecraft_preferences(&[PreferenceEdit::manage(
+            id("fov"),
+            MinecraftPreferenceValue::decimal(90.0).expect("finite"),
+        )])
+        .expect("seed");
+
+        for edit in [
+            PreferenceEdit::unmanage(id("render_distance")),
+            PreferenceEdit::reset(id("render_distance")),
+            PreferenceEdit::unmanage(id("fov")),
+            PreferenceEdit::remember(id("gui_scale"), MinecraftPreferenceValue::Integer(2)),
+        ] {
+            app.save_global_minecraft_preferences(std::slice::from_ref(&edit))
+                .unwrap_or_else(|error| panic!("{edit:?}: {error}"));
+            assert!(
+                app.config()
+                    .minecraft_preferences
+                    .values()
+                    .all(|setting| !setting.value.is_empty()),
+                "{edit:?} stored a row with no value"
+            );
+            assert!(
+                app.configured_minecraft_preferences()
+                    .expect("configured")
+                    .rejected
+                    .is_empty(),
+                "{edit:?} stored a value the reader refuses"
+            );
+        }
+    }
+
+    #[test]
+    fn a_value_chosen_without_being_applied_is_stored_exactly_and_survives_a_restart() {
+        // The two axes a settings screen edits separately: what the value is,
+        // and whether Ephervex applies it.
+        let base = tempfile::tempdir().expect("temp dir");
+        {
+            let mut app = app_rooted_at(base.path());
+            app.save_global_minecraft_preferences(&[
+                PreferenceEdit::remember(
+                    id("window_size"),
+                    MinecraftPreferenceValue::WindowSize(ephervex_options::WindowSize {
+                        width: 2560,
+                        height: 1440,
+                    }),
+                ),
+                PreferenceEdit::remember(
+                    id("keybind_advancements"),
+                    MinecraftPreferenceValue::KeyBinding(InputBinding::Mouse(MouseButton::Button5)),
+                ),
+            ])
+            .expect("save");
+        }
+
+        let reopened = app_rooted_at(base.path());
+        let loaded = reopened
+            .configured_minecraft_preferences()
+            .expect("configured");
+        assert!(loaded.rejected.is_empty());
+
+        let window = loaded
+            .preferences
+            .get(&id("window_size"))
+            .expect("still configured");
+        assert!(!window.managed);
+        assert_eq!(
+            window.value,
+            MinecraftPreferenceValue::WindowSize(ephervex_options::WindowSize {
+                width: 2560,
+                height: 1440,
+            })
+        );
+        assert_eq!(window.applied_value(), None, "and it is not applied");
+
+        let binding = loaded
+            .preferences
+            .get(&id("keybind_advancements"))
+            .expect("still configured");
+        assert_eq!(
+            binding.value,
+            MinecraftPreferenceValue::KeyBinding(InputBinding::Mouse(MouseButton::Button5)),
+            "a mouse button beyond the named three survives storage exactly"
+        );
+    }
+
+    #[test]
+    fn a_disabled_toggle_and_a_toggle_set_to_false_stay_two_separate_facts() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        app.save_global_minecraft_preferences(&[
+            PreferenceEdit::manage(id("fullscreen"), MinecraftPreferenceValue::Boolean(false)),
+            PreferenceEdit::remember(
+                id("ambient_occlusion"),
+                MinecraftPreferenceValue::Boolean(false),
+            ),
+        ])
+        .expect("save");
+
+        let loaded = app.configured_minecraft_preferences().expect("configured");
+        let applied = loaded.preferences.get(&id("fullscreen")).expect("stored");
+        let remembered = loaded
+            .preferences
+            .get(&id("ambient_occlusion"))
+            .expect("stored");
+
+        assert_eq!(applied.value, remembered.value, "the same value");
+        assert_eq!(
+            applied.applied_value(),
+            Some(&MinecraftPreferenceValue::Boolean(false)),
+            "managing a toggle to false writes false"
+        );
+        assert_eq!(
+            remembered.applied_value(),
+            None,
+            "and not managing it writes nothing at all"
+        );
+
+        let record = create(&app, "Toggles", "1.20.1");
+        let options = options_of(&record).expect("options");
+        assert!(options.contains("fullscreen:false"));
+        assert!(!options.contains("ao:"), "{options}");
+    }
+
+    #[test]
+    fn one_batch_can_change_a_value_while_leaving_it_unapplied() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        app.save_global_minecraft_preferences(&[PreferenceEdit::manage(
+            id("render_distance"),
+            MinecraftPreferenceValue::Integer(16),
+        )])
+        .expect("save");
+
+        app.save_global_minecraft_preferences(&[PreferenceEdit::remember(
+            id("render_distance"),
+            MinecraftPreferenceValue::Integer(24),
+        )])
+        .expect("save");
+
+        let stored = &app.config().minecraft_preferences["render_distance"];
+        assert_eq!(stored.value, "24");
+        assert!(!stored.enabled);
+
+        let record = create(&app, "Unapplied", "1.20.1");
+        assert!(
+            options_of(&record).is_none(),
+            "an unapplied preference writes no file"
+        );
+    }
+
+    #[test]
+    fn unmanaging_after_setting_in_one_batch_keeps_the_value_the_batch_chose() {
+        // Edits fold in order, so the pair a settings draft ends on is what is
+        // written, and it is written once.
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        app.save_global_minecraft_preferences(&[
+            PreferenceEdit::manage(id("gui_scale"), MinecraftPreferenceValue::Integer(3)),
+            PreferenceEdit::unmanage(id("gui_scale")),
+        ])
+        .expect("save");
+
+        let stored = &app.config().minecraft_preferences["gui_scale"];
+        assert_eq!(stored.value, "3");
+        assert!(!stored.enabled);
+    }
+
+    #[test]
+    fn an_id_written_by_a_newer_build_survives_every_kind_of_edit() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        app.mutate_config(|config| {
+            config.minecraft_preferences.insert(
+                "a_setting_from_the_future".to_owned(),
+                PreferenceSetting::managed("17"),
+            );
+        })
+        .expect("seed");
+
+        for edit in [
+            PreferenceEdit::manage(
+                id("fov"),
+                MinecraftPreferenceValue::decimal(90.0).expect("finite"),
+            ),
+            PreferenceEdit::remember(
+                id("fov"),
+                MinecraftPreferenceValue::decimal(80.0).expect("finite"),
+            ),
+            PreferenceEdit::unmanage(id("fov")),
+            PreferenceEdit::unmanage(id("render_distance")),
+            PreferenceEdit::reset(id("fov")),
+        ] {
+            app.save_global_minecraft_preferences(std::slice::from_ref(&edit))
+                .unwrap_or_else(|error| panic!("{edit:?}: {error}"));
+            assert_eq!(
+                app.config().minecraft_preferences["a_setting_from_the_future"],
+                PreferenceSetting::managed("17"),
+                "{edit:?} disturbed an id it has nothing to do with"
+            );
+        }
     }
 
     #[test]

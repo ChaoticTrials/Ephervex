@@ -505,7 +505,7 @@ mod tests {
             ),
             (InputBinding::Mouse(MouseButton::Left), "key.mouse.left"),
             (InputBinding::Mouse(MouseButton::Middle), "key.mouse.middle"),
-            (InputBinding::Mouse(MouseButton::Extra(3)), "key.mouse.4"),
+            (InputBinding::Mouse(MouseButton::Button4), "key.mouse.4"),
             (InputBinding::Unbound, "key.keyboard.unknown"),
         ];
         for (binding, expected) in cases {
@@ -550,7 +550,7 @@ mod tests {
             InputBinding::Keyboard(PhysicalKey::KeypadEqual),
             InputBinding::Keyboard(PhysicalKey::PrintScreen),
             InputBinding::Mouse(MouseButton::Left),
-            InputBinding::Mouse(MouseButton::Extra(3)),
+            InputBinding::Mouse(MouseButton::Button4),
             InputBinding::Unbound,
         ];
         for binding in refused {
