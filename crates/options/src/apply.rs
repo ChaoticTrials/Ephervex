@@ -33,7 +33,6 @@ use crate::compatibility::{
 };
 use crate::error::OptionsError;
 use crate::file::ParsedOptions;
-use crate::input::InputBinding;
 use crate::preference::{ConfiguredPreferences, MinecraftPreferenceValue, PreferenceId};
 use crate::preferences::GlobalMinecraftPreferences;
 
@@ -100,6 +99,7 @@ impl From<Unrepresentable> for SkipReason {
             Unrepresentable::NotInDomain => Self::NotInDomain,
             Unrepresentable::Unwritable => Self::Unwritable,
             Unrepresentable::TypeMismatch => Self::TypeMismatch,
+            Unrepresentable::InputUnavailable => Self::InputUnavailable,
         }
     }
 }
@@ -568,24 +568,12 @@ fn setting_value_for(
             OptionCodec::EnumToken { .. } => Ok(SettingValue::Text(technical.clone())),
             _ => Err(SkipReason::TypeMismatch),
         },
-        MinecraftPreferenceValue::KeyBinding(binding) => encode_binding(*binding, codec),
+        MinecraftPreferenceValue::KeyBinding(binding) => Ok(SettingValue::KeyBinding(*binding)),
         MinecraftPreferenceValue::WindowSize(size) => match component {
             PreferenceComponent::Width => Ok(SettingValue::Integer(i64::from(size.width))),
             PreferenceComponent::Height => Ok(SettingValue::Integer(i64::from(size.height))),
             PreferenceComponent::Value => Err(SkipReason::TypeMismatch),
         },
-    }
-}
-
-/// Turns one binding into the value the release's key storage form holds.
-fn encode_binding(_binding: InputBinding, codec: &OptionCodec) -> Result<SettingValue, SkipReason> {
-    match codec {
-        // Both key storage eras are recognised representations; turning a
-        // release-neutral binding into either one is not yet implemented, and
-        // a launcher that guessed at a scan code would write a binding the
-        // user never chose.
-        OptionCodec::KeyCodeLwjgl2 | OptionCodec::KeyNameGlfw => Err(SkipReason::InputUnavailable),
-        _ => Err(SkipReason::TypeMismatch),
     }
 }
 

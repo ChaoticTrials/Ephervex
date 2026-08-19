@@ -30,6 +30,8 @@ use std::fmt;
 
 use serde::Deserialize;
 
+use crate::input::InputBinding;
+
 /// One release's storage form for one setting.
 ///
 /// Deserialized from the compatibility dataset. Unknown variant names are a
@@ -80,6 +82,10 @@ pub enum SettingValue {
     /// Held in the unit the settings screen shows, never in a stored form.
     Decimal(f64),
     Text(String),
+    /// Held as physical input, never as one era's spelling of it. Which of the
+    /// two spellings a release uses is the codec's decision, exactly as the
+    /// field-of-view transform is.
+    KeyBinding(InputBinding),
 }
 
 /// Why a value cannot be written through a release's own representation.
@@ -101,6 +107,10 @@ pub enum Unrepresentable {
     /// Contains something that would not survive the file's own line format.
     #[error("the value cannot be written as one options file line")]
     Unwritable,
+    /// The physical input has no established representation in the key storage
+    /// form this release uses.
+    #[error("this release's key storage form cannot express that input")]
+    InputUnavailable,
 }
 
 impl OptionCodec {
@@ -163,9 +173,11 @@ impl OptionCodec {
                     Err(Unrepresentable::NotInDomain)
                 }
             }
-            // Key bindings have no Ephervex preference behind them, so there is
-            // nothing to encode into one. The representation is still carried
-            // so the dataset describes the release completely.
+            (Self::KeyNameGlfw, SettingValue::KeyBinding(binding)) => Ok(binding.to_glfw_name()),
+            (Self::KeyCodeLwjgl2, SettingValue::KeyBinding(binding)) => binding
+                .to_lwjgl2_code()
+                .map(|code| code.to_string())
+                .ok_or(Unrepresentable::InputUnavailable),
             _ => Err(Unrepresentable::TypeMismatch),
         }
     }
@@ -293,6 +305,7 @@ fn format_decimal(value: f64) -> String {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
+    use crate::input::{MouseButton, PhysicalKey};
 
     fn parse(json: &str) -> Result<OptionCodec, serde_json::Error> {
         serde_json::from_str(json)
@@ -476,11 +489,112 @@ mod tests {
     }
 
     #[test]
-    fn a_key_binding_representation_has_no_preference_to_encode_into_it() {
+    fn a_modern_release_stores_a_binding_as_the_name_the_game_gives_it() {
+        // 1.13 onward writes `key_key.attack:key.mouse.left` and friends, and
+        // an explicitly unbound key as the unknown-key name.
+        let modern = OptionCodec::KeyNameGlfw;
+        let cases = [
+            (InputBinding::Keyboard(PhysicalKey::W), "key.keyboard.w"),
+            (
+                InputBinding::Keyboard(PhysicalKey::LeftShift),
+                "key.keyboard.left.shift",
+            ),
+            (
+                InputBinding::Keyboard(PhysicalKey::KeypadEqual),
+                "key.keyboard.keypad.equal",
+            ),
+            (InputBinding::Mouse(MouseButton::Left), "key.mouse.left"),
+            (InputBinding::Mouse(MouseButton::Middle), "key.mouse.middle"),
+            (InputBinding::Mouse(MouseButton::Extra(3)), "key.mouse.4"),
+            (InputBinding::Unbound, "key.keyboard.unknown"),
+        ];
+        for (binding, expected) in cases {
+            assert_eq!(
+                modern.encode(&SettingValue::KeyBinding(binding)).unwrap(),
+                expected,
+                "{binding}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pre_1_13_release_stores_a_keyboard_binding_as_its_own_scan_code() {
+        // The same physical keys the modern era names, in the numeric code
+        // space `org.lwjgl.input.Keyboard` used.
+        let legacy = OptionCodec::KeyCodeLwjgl2;
+        for (key, expected) in [
+            (PhysicalKey::W, "17"),
+            (PhysicalKey::LeftShift, "42"),
+            (PhysicalKey::Escape, "1"),
+            (PhysicalKey::F3, "61"),
+            (PhysicalKey::Up, "200"),
+        ] {
+            assert_eq!(
+                legacy
+                    .encode(&SettingValue::KeyBinding(InputBinding::Keyboard(key)))
+                    .unwrap(),
+                expected,
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_input_the_pre_1_13_era_does_not_establish_is_refused_rather_than_substituted() {
+        // Two keys have no scan code in that era's reference table, and
+        // neither its mouse encoding nor its unbound marker is established by
+        // Ephervex's compatibility research. Writing a plausible number would
+        // bind the action to whatever that number turns out to mean.
+        let legacy = OptionCodec::KeyCodeLwjgl2;
+        let refused = [
+            InputBinding::Keyboard(PhysicalKey::KeypadEqual),
+            InputBinding::Keyboard(PhysicalKey::PrintScreen),
+            InputBinding::Mouse(MouseButton::Left),
+            InputBinding::Mouse(MouseButton::Extra(3)),
+            InputBinding::Unbound,
+        ];
+        for binding in refused {
+            assert_eq!(
+                legacy.encode(&SettingValue::KeyBinding(binding)),
+                Err(Unrepresentable::InputUnavailable),
+                "{binding}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_key_storage_form_accepts_nothing_but_a_binding() {
         for codec in [OptionCodec::KeyCodeLwjgl2, OptionCodec::KeyNameGlfw] {
             assert_eq!(
                 codec.encode(&SettingValue::Integer(17)),
-                Err(Unrepresentable::TypeMismatch)
+                Err(Unrepresentable::TypeMismatch),
+                "a raw number is not a binding, whatever the era stores"
+            );
+            assert_eq!(
+                codec.encode(&SettingValue::Text("key.keyboard.w".to_owned())),
+                Err(Unrepresentable::TypeMismatch),
+                "one era's spelling is not the release-neutral value either"
+            );
+        }
+    }
+
+    #[test]
+    fn a_binding_is_not_accepted_by_a_codec_that_stores_something_else() {
+        let binding = SettingValue::KeyBinding(InputBinding::Keyboard(PhysicalKey::W));
+        for codec in [
+            OptionCodec::Boolean,
+            OptionCodec::Text,
+            OptionCodec::LanguageCode,
+            OptionCodec::Integer {
+                min: None,
+                max: None,
+            },
+            OptionCodec::EnumId { values: vec![0, 1] },
+        ] {
+            assert_eq!(
+                codec.encode(&binding),
+                Err(Unrepresentable::TypeMismatch),
+                "{codec}"
             );
         }
     }

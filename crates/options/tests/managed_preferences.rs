@@ -14,9 +14,9 @@ use std::path::Path;
 
 use ephervex_options::{
     ConfiguredPreference, ConfiguredPreferences, InputBinding, LanguageAvailability,
-    MinecraftPreferenceCatalog, MinecraftPreferenceValue, OPTIONS_FILE_NAME, OptionsCompatibility,
-    ParsedOptions, PhysicalKey, PreferenceDisposition, PreferenceId, ReleaseSupport, SkipReason,
-    apply_managed_preferences, plan_managed_preferences,
+    MinecraftPreferenceCatalog, MinecraftPreferenceValue, MouseButton, OPTIONS_FILE_NAME,
+    OptionsCompatibility, ParsedOptions, PhysicalKey, PreferenceDisposition, PreferenceId,
+    ReleaseSupport, SkipReason, apply_managed_preferences, plan_managed_preferences,
 };
 
 /// The releases every cross-era assertion runs against: the pre-1.13 storage
@@ -252,28 +252,77 @@ fn a_window_size_is_written_whole_or_not_at_all() {
 }
 
 #[test]
-fn a_key_binding_is_configurable_but_not_yet_written_to_any_release() {
-    // Both key storage eras are recognised representations. Turning a
-    // release-neutral binding into either one is not implemented, and a
-    // launcher that guessed at a scan code would write a binding the user
-    // never chose, so this reports rather than approximates.
+fn a_binding_reaches_each_era_in_that_eras_own_spelling() {
+    // One release-neutral binding, two incompatible storage forms, and no
+    // file copied between them.
     let binding =
         MinecraftPreferenceValue::KeyBinding(InputBinding::Keyboard(PhysicalKey::LeftShift));
-    for version in RELEASES {
-        assert_eq!(
-            disposition(version, "keybind_advancements", binding.clone()),
-            PreferenceDisposition::NotRepresentable(SkipReason::InputUnavailable),
-            "{version}"
-        );
+    let preferences = managed(&[("keybind_advancements", binding)]);
+
+    assert!(
+        applied_text("1.12.2", &preferences).contains("key_key.advancements:42"),
+        "1.12.2 stores the LWJGL 2 scan code"
+    );
+    for version in ["1.16.5", "1.20.1", "26.2"] {
         assert!(
-            !applied_text(
-                version,
-                &managed(&[("keybind_advancements", binding.clone())])
-            )
-            .contains("key_key.advancements"),
-            "{version}"
+            applied_text(version, &preferences)
+                .contains("key_key.advancements:key.keyboard.left.shift"),
+            "{version} stores the serialized key name"
         );
     }
+}
+
+#[test]
+fn a_mouse_binding_and_an_unbound_key_reach_the_releases_that_establish_them() {
+    for (value, expected) in [
+        (
+            MinecraftPreferenceValue::KeyBinding(InputBinding::Mouse(MouseButton::Middle)),
+            "key_key.advancements:key.mouse.middle",
+        ),
+        (
+            MinecraftPreferenceValue::KeyBinding(InputBinding::Unbound),
+            "key_key.advancements:key.keyboard.unknown",
+        ),
+    ] {
+        let preferences = managed(&[("keybind_advancements", value.clone())]);
+        assert!(
+            applied_text("1.20.1", &preferences).contains(expected),
+            "1.20.1 {expected}"
+        );
+
+        // The pre-1.13 era stores mouse buttons and an unbound marker in the
+        // same field, but Ephervex's compatibility research establishes
+        // neither, so nothing is written rather than something plausible.
+        assert_eq!(
+            disposition("1.12.2", "keybind_advancements", value),
+            PreferenceDisposition::NotRepresentable(SkipReason::InputUnavailable)
+        );
+    }
+}
+
+#[test]
+fn a_key_the_pre_1_13_era_has_no_code_for_is_refused_rather_than_approximated() {
+    // `keypad.equal` exists in the modern name space and has no scan code in
+    // the pre-1.13 one. Binding an action to a neighboring key would be worse
+    // than not binding it.
+    let value =
+        MinecraftPreferenceValue::KeyBinding(InputBinding::Keyboard(PhysicalKey::KeypadEqual));
+    assert_eq!(
+        disposition("1.12.2", "keybind_advancements", value.clone()),
+        PreferenceDisposition::NotRepresentable(SkipReason::InputUnavailable)
+    );
+    assert!(
+        !applied_text(
+            "1.12.2",
+            &managed(&[("keybind_advancements", value.clone())])
+        )
+        .contains("key_key.advancements"),
+    );
+    assert_eq!(
+        disposition("1.20.1", "keybind_advancements", value),
+        PreferenceDisposition::Writable,
+        "the modern era names it"
+    );
 }
 
 // ----------------------------------------------------------------- application

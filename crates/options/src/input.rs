@@ -11,7 +11,9 @@
 //! Ephervex supports.
 //!
 //! So a binding is held as a physical key, and turning one into an exact
-//! release's text is the compatibility layer's job.
+//! release's text is [`crate::codec::OptionCodec`]'s job, exactly as the
+//! field-of-view transform is: the release's own representation decides which
+//! era it is in, and this module only says what the input *is*.
 //!
 //! # Where the names come from
 //!
@@ -382,6 +384,134 @@ impl PhysicalKey {
         }
     }
 
+    /// The `org.lwjgl.input.Keyboard` scan code releases before 1.13 store for
+    /// this key, or `None` when that era has no code for it.
+    ///
+    /// `None` is a refusal, not a gap to paper over: a key with no proven
+    /// pre-1.13 code cannot be written into a pre-1.13 instance, and picking a
+    /// neighboring code would bind an action to a key nobody chose.
+    ///
+    /// The table is the analyzer's own LWJGL 2 reference constants, which it
+    /// cross-checks against the 1.12.2-to-1.13 default binding pairs it
+    /// observes in the client JARs themselves.
+    #[must_use]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per named physical key; exhaustiveness is the point and splitting it would only hide which keys are covered"
+    )]
+    #[expect(
+        clippy::match_same_arms,
+        reason = "one arm per named physical key, kept in the reference table's own order so the two stay reviewable side by side"
+    )]
+    pub const fn lwjgl2_code(self) -> Option<i64> {
+        match self {
+            Self::Space => Some(57),
+            Self::Apostrophe => Some(40),
+            Self::Comma => Some(51),
+            Self::Minus => Some(12),
+            Self::Period => Some(52),
+            Self::Slash => Some(53),
+            Self::Digit0 => Some(11),
+            Self::Digit1 => Some(2),
+            Self::Digit2 => Some(3),
+            Self::Digit3 => Some(4),
+            Self::Digit4 => Some(5),
+            Self::Digit5 => Some(6),
+            Self::Digit6 => Some(7),
+            Self::Digit7 => Some(8),
+            Self::Digit8 => Some(9),
+            Self::Digit9 => Some(10),
+            Self::Semicolon => Some(39),
+            Self::Equal => Some(13),
+            Self::A => Some(30),
+            Self::B => Some(48),
+            Self::C => Some(46),
+            Self::D => Some(32),
+            Self::E => Some(18),
+            Self::F => Some(33),
+            Self::G => Some(34),
+            Self::H => Some(35),
+            Self::I => Some(23),
+            Self::J => Some(36),
+            Self::K => Some(37),
+            Self::L => Some(38),
+            Self::M => Some(50),
+            Self::N => Some(49),
+            Self::O => Some(24),
+            Self::P => Some(25),
+            Self::Q => Some(16),
+            Self::R => Some(19),
+            Self::S => Some(31),
+            Self::T => Some(20),
+            Self::U => Some(22),
+            Self::V => Some(47),
+            Self::W => Some(17),
+            Self::X => Some(45),
+            Self::Y => Some(21),
+            Self::Z => Some(44),
+            Self::LeftBracket => Some(26),
+            Self::Backslash => Some(43),
+            Self::RightBracket => Some(27),
+            Self::GraveAccent => Some(41),
+            Self::Escape => Some(1),
+            Self::Enter => Some(28),
+            Self::Tab => Some(15),
+            Self::Backspace => Some(14),
+            Self::Insert => Some(210),
+            Self::Delete => Some(211),
+            Self::Right => Some(205),
+            Self::Left => Some(203),
+            Self::Down => Some(208),
+            Self::Up => Some(200),
+            Self::PageUp => Some(201),
+            Self::PageDown => Some(209),
+            Self::Home => Some(199),
+            Self::End => Some(207),
+            Self::CapsLock => Some(58),
+            Self::ScrollLock => Some(70),
+            Self::NumLock => Some(69),
+            Self::PrintScreen => None,
+            Self::Pause => Some(197),
+            Self::F1 => Some(59),
+            Self::F2 => Some(60),
+            Self::F3 => Some(61),
+            Self::F4 => Some(62),
+            Self::F5 => Some(63),
+            Self::F6 => Some(64),
+            Self::F7 => Some(65),
+            Self::F8 => Some(66),
+            Self::F9 => Some(67),
+            Self::F10 => Some(68),
+            Self::F11 => Some(87),
+            Self::F12 => Some(88),
+            Self::Keypad0 => Some(82),
+            Self::Keypad1 => Some(79),
+            Self::Keypad2 => Some(80),
+            Self::Keypad3 => Some(81),
+            Self::Keypad4 => Some(75),
+            Self::Keypad5 => Some(76),
+            Self::Keypad6 => Some(77),
+            Self::Keypad7 => Some(71),
+            Self::Keypad8 => Some(72),
+            Self::Keypad9 => Some(73),
+            Self::KeypadDecimal => Some(83),
+            Self::KeypadDivide => Some(181),
+            Self::KeypadMultiply => Some(55),
+            Self::KeypadSubtract => Some(74),
+            Self::KeypadAdd => Some(78),
+            Self::KeypadEnter => Some(156),
+            Self::KeypadEqual => None,
+            Self::LeftShift => Some(42),
+            Self::LeftControl => Some(29),
+            Self::LeftAlt => Some(56),
+            Self::LeftWin => Some(219),
+            Self::RightShift => Some(54),
+            Self::RightControl => Some(157),
+            Self::RightAlt => Some(184),
+            Self::RightWin => Some(220),
+        }
+    }
+
     /// Reads a key back from [`Self::name`].
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
@@ -498,7 +628,48 @@ pub enum InputBinding {
     Mouse(MouseButton),
 }
 
+/// The name Minecraft gives a binding that is deliberately bound to nothing,
+/// from 1.13 onward.
+pub(crate) const GLFW_UNBOUND_NAME: &str = "key.keyboard.unknown";
+/// The prefix 1.13-and-later releases give a keyboard binding.
+pub(crate) const GLFW_KEYBOARD_PREFIX: &str = "key.keyboard.";
+/// The prefix 1.13-and-later releases give a mouse binding.
+pub(crate) const GLFW_MOUSE_PREFIX: &str = "key.mouse.";
+
 impl InputBinding {
+    /// The exact text a 1.13-and-later release stores for this binding.
+    ///
+    /// Every case is proven: the analyzer recovers key bindings from those
+    /// releases as `key.keyboard.<name>`, `key.mouse.<name>`, and
+    /// `key.keyboard.unknown` for a default it proved is unbound.
+    #[must_use]
+    pub fn to_glfw_name(self) -> String {
+        match self {
+            Self::Unbound => GLFW_UNBOUND_NAME.to_owned(),
+            Self::Keyboard(key) => format!("{GLFW_KEYBOARD_PREFIX}{}", key.name()),
+            Self::Mouse(button) => format!("{GLFW_MOUSE_PREFIX}{}", button.name()),
+        }
+    }
+
+    /// The scan code a release before 1.13 stores for this binding, or `None`
+    /// when that era's storage form for it is not established.
+    ///
+    /// Only keyboard bindings are established. The pre-1.13 era does store
+    /// mouse buttons and an unbound marker in the same field, but nothing in
+    /// Ephervex's compatibility research proves *how*: the analyzer recovers
+    /// no pre-1.13 mouse or unbound default, and the one reference table it
+    /// does cross-check covers keyboard scan codes only. Writing a number
+    /// nobody proved would bind an action to whatever that number turns out to
+    /// mean, so this returns `None` and the preference is reported as
+    /// unwritable for that release instead.
+    #[must_use]
+    pub const fn to_lwjgl2_code(self) -> Option<i64> {
+        match self {
+            Self::Keyboard(key) => key.lwjgl2_code(),
+            Self::Unbound | Self::Mouse(_) => None,
+        }
+    }
+
     /// The durable text form stored in configuration.
     #[must_use]
     pub fn to_stored_text(self) -> String {
