@@ -27,9 +27,10 @@
 use std::collections::BTreeMap;
 
 use ephervex_options::{
-    ConfiguredPreferences, LoadedConfiguredPreferences, MinecraftPreferenceCatalog,
-    MinecraftPreferenceDescriptor, MinecraftPreferenceValue, PreferenceId, PreferencePlan,
-    PreferenceValueShape, ReleaseSupport,
+    CompatibilitySource, ConfiguredPreference, ConfiguredPreferences, LanguageAvailability,
+    LoadedConfiguredPreferences, MinecraftPreferenceCatalog, MinecraftPreferenceDescriptor,
+    MinecraftPreferenceValue, PreferenceDisposition, PreferenceId, PreferencePlan,
+    PreferenceValueShape, ReleaseSupport, SkipReason,
 };
 use ephervex_storage::{Config, PreferenceSetting};
 use tracing::instrument;
@@ -99,6 +100,34 @@ pub struct MinecraftPreferenceSnapshot {
     /// How many configured ids this build has no descriptor for. They stay in
     /// the configuration file untouched.
     pub unrecognized: usize,
+}
+
+/// What one exact Minecraft release could do with preference values a settings
+/// screen is still holding.
+///
+/// The saved-configuration dry run is
+/// [`App::validate_global_minecraft_preferences_for`]; this is the same
+/// question asked about values nobody has committed yet, so a screen can show
+/// an honest per-release status for the row the user is editing right now
+/// without writing anything first.
+///
+/// Support and representability are kept apart because they are different
+/// sentences: a release either has the setting or does not, and separately
+/// either can or cannot express the exact value in hand.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MinecraftPreferencePreview {
+    /// The release this preview was resolved for.
+    pub minecraft_version: String,
+    /// Whether the knowledge used was the bundled baseline or the remote feed.
+    pub source: CompatibilitySource,
+    /// Every shipped product preference's support for this release, keyed by
+    /// stable product id. Complete: a preference nobody has configured still
+    /// has an answer.
+    pub support: BTreeMap<String, ReleaseSupport>,
+    /// Why the release could not express a drafted value, for the drafted ids
+    /// where that is the case. An id absent from this map either has no
+    /// drafted value or has one the release encodes.
+    pub unrepresentable: BTreeMap<String, SkipReason>,
 }
 
 /// What one edit does to one preference.
@@ -270,6 +299,61 @@ impl App {
             &self.minecraft_options(),
             language,
         ))
+    }
+
+    /// What one exact release could do with a caller-supplied draft, without
+    /// touching the configuration file or any instance.
+    ///
+    /// Takes the typed values rather than reading the stored ones, which is
+    /// the whole point: a settings screen previews what the user has chosen so
+    /// far, and that is by definition not what is saved. Nothing here mutates,
+    /// and nothing about the draft is remembered afterwards.
+    ///
+    /// Representability is resolved as though every drafted value were
+    /// applied, including the ones the draft currently leaves unmanaged. A
+    /// remembered value is a value the user may switch on next, so "this
+    /// release cannot express it" is worth saying before they do.
+    pub fn preview_minecraft_preference_draft(
+        &self,
+        minecraft_version: &str,
+        draft: &ConfiguredPreferences,
+        language: LanguageAvailability,
+    ) -> CoreResult<MinecraftPreferencePreview> {
+        let catalog = self.minecraft_preference_catalog()?;
+        let compatibility = self.minecraft_options();
+        let support = compatibility.catalog_release_support(catalog, minecraft_version);
+
+        let mut as_applied = ConfiguredPreferences::new();
+        for (id, configured) in draft.iter() {
+            as_applied.insert(
+                id.clone(),
+                ConfiguredPreference::managed(configured.value.clone()),
+            );
+        }
+        let plan = ephervex_options::plan_managed_preferences(
+            minecraft_version,
+            &as_applied,
+            catalog,
+            &compatibility,
+            language,
+        );
+        let unrepresentable = plan
+            .entries
+            .iter()
+            .filter_map(|entry| match &entry.disposition {
+                PreferenceDisposition::NotRepresentable(reason) => {
+                    Some((entry.id.as_str().to_owned(), *reason))
+                }
+                _ => None,
+            })
+            .collect();
+
+        Ok(MinecraftPreferencePreview {
+            minecraft_version: minecraft_version.to_owned(),
+            source: compatibility.source(),
+            support,
+            unrepresentable,
+        })
     }
 
     /// Applies a batch of preference edits, or none of them.
@@ -939,5 +1023,196 @@ mod tests {
             "guiScale:4\nrenderDistance:32\n",
             "a duplicate keeps what it copied"
         );
+    }
+
+    /// The preview's own fixture: a draft built without touching configuration.
+    fn draft(entries: Vec<(&str, bool, MinecraftPreferenceValue)>) -> ConfiguredPreferences {
+        let mut draft = ConfiguredPreferences::new();
+        for (name, managed, value) in entries {
+            draft.insert(
+                id(name),
+                if managed {
+                    ConfiguredPreference::managed(value)
+                } else {
+                    ConfiguredPreference::remembered(value)
+                },
+            );
+        }
+        draft
+    }
+
+    #[test]
+    fn previewing_a_draft_answers_for_every_shipped_preference_without_storing_anything() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let catalog = app.minecraft_preference_catalog().expect("catalog");
+
+        let preview = app
+            .preview_minecraft_preference_draft(
+                "1.21.1",
+                &draft(vec![(
+                    "fullscreen",
+                    true,
+                    MinecraftPreferenceValue::Boolean(true),
+                )]),
+                LanguageAvailability::Unverified,
+            )
+            .expect("preview");
+
+        assert_eq!(preview.minecraft_version, "1.21.1");
+        assert_eq!(preview.support.len(), catalog.descriptors.len());
+        assert_eq!(
+            preview.support.get("fullscreen"),
+            Some(&ReleaseSupport::Authoritative)
+        );
+        assert!(preview.unrepresentable.is_empty());
+        assert!(
+            app.config().minecraft_preferences.is_empty(),
+            "a preview must not configure anything"
+        );
+    }
+
+    #[test]
+    fn a_release_nobody_analyzed_previews_as_unknown_rather_than_unsupported() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+
+        let preview = app
+            .preview_minecraft_preference_draft(
+                "99.99.99",
+                &ConfiguredPreferences::new(),
+                LanguageAvailability::Unverified,
+            )
+            .expect("preview");
+
+        assert!(
+            preview
+                .support
+                .values()
+                .all(|support| *support == ReleaseSupport::Unknown),
+            "an unanalyzed release establishes nothing about any preference"
+        );
+    }
+
+    #[test]
+    fn a_preference_a_release_provably_lacks_previews_as_unsupported() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+
+        let preview = app
+            .preview_minecraft_preference_draft(
+                "1.12.2",
+                &ConfiguredPreferences::new(),
+                LanguageAvailability::Unverified,
+            )
+            .expect("preview");
+
+        assert_eq!(
+            preview.support.get("simulation_distance"),
+            Some(&ReleaseSupport::Unsupported),
+            "the setting did not exist that far back"
+        );
+    }
+
+    #[test]
+    fn an_authoritative_preference_whose_draft_value_cannot_encode_is_reported_separately() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+
+        let preview = app
+            .preview_minecraft_preference_draft(
+                "1.12.2",
+                &draft(vec![(
+                    "keybind_attack",
+                    true,
+                    MinecraftPreferenceValue::KeyBinding(InputBinding::Mouse(MouseButton::Left)),
+                )]),
+                LanguageAvailability::Unverified,
+            )
+            .expect("preview");
+
+        assert_eq!(
+            preview.support.get("keybind_attack"),
+            Some(&ReleaseSupport::Authoritative),
+            "the release has the binding"
+        );
+        assert_eq!(
+            preview.unrepresentable.get("keybind_attack"),
+            Some(&SkipReason::InputUnavailable),
+            "but nothing proves how that era stores a mouse binding"
+        );
+    }
+
+    #[test]
+    fn a_remembered_draft_value_is_still_checked_for_representability() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+
+        let preview = app
+            .preview_minecraft_preference_draft(
+                "1.12.2",
+                &draft(vec![(
+                    "keybind_attack",
+                    false,
+                    MinecraftPreferenceValue::KeyBinding(InputBinding::Unbound),
+                )]),
+                LanguageAvailability::Unverified,
+            )
+            .expect("preview");
+
+        assert_eq!(
+            preview.unrepresentable.get("keybind_attack"),
+            Some(&SkipReason::InputUnavailable),
+            "a value the user may switch on next is worth previewing now"
+        );
+    }
+
+    #[test]
+    fn previewing_a_draft_never_reads_or_writes_the_saved_preferences() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        app.save_global_minecraft_preferences(&[PreferenceEdit::manage(
+            id("gui_scale"),
+            MinecraftPreferenceValue::Integer(3),
+        )])
+        .expect("save");
+        let stored = app.config().minecraft_preferences.clone();
+
+        let preview = app
+            .preview_minecraft_preference_draft(
+                "1.21.1",
+                &draft(vec![(
+                    "gui_scale",
+                    true,
+                    MinecraftPreferenceValue::Integer(2),
+                )]),
+                LanguageAvailability::Unverified,
+            )
+            .expect("preview");
+
+        assert!(preview.unrepresentable.is_empty());
+        assert_eq!(
+            app.config().minecraft_preferences,
+            stored,
+            "the saved value is untouched by a preview of a different one"
+        );
+    }
+
+    #[test]
+    fn window_size_previews_as_one_product_status_rather_than_two_fields() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+
+        let preview = app
+            .preview_minecraft_preference_draft(
+                "1.21.1",
+                &ConfiguredPreferences::new(),
+                LanguageAvailability::Unverified,
+            )
+            .expect("preview");
+
+        assert!(preview.support.contains_key("window_size"));
+        assert!(!preview.support.contains_key("overrideWidth"));
+        assert!(!preview.support.contains_key("overrideHeight"));
     }
 }

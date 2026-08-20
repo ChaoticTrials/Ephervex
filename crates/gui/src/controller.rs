@@ -19,8 +19,9 @@ use slint::{
 use crate::backend::{
     self, AccountData, ActivityData, ArtifactCacheStatusData, Command, DiagnosticContent,
     DiagnosticData, Event, JavaData, LiveLogLine, LiveLogSource, LiveLogUpdate, ManagedModData,
-    ModSearchData, PreferenceData, ServerWorkspaceData, SettingsData, Snapshot,
+    ModSearchData, ServerWorkspaceData, SettingsData, Snapshot,
 };
+use crate::minecraft_defaults::{self, LanguageCatalogState, MinecraftDefaultsModel};
 use crate::presentation::{
     self, ImportErrorKind, ImportFailure, ImportPresentation, parse_network, validate_ip,
     validate_port,
@@ -28,7 +29,7 @@ use crate::presentation::{
 use crate::ui::{
     AccountRow, ActivityRow, AppWindow, DiagnosticRow, GuiI18n, ImportOptionRow, InstanceRow,
     JavaRow, LinkedTargetRow, LogChunk, ModRow, ModSearchRow, ModVersionRow, PendingEntityRow,
-    PreferenceRow, ServerRow, Theme,
+    ServerRow, Theme,
 };
 
 pub struct Controller {
@@ -860,6 +861,7 @@ pub fn attach(ui: &AppWindow) -> Controller {
     let creations = Rc::new(RefCell::new(CreationTracker::default()));
     let live_viewer = Rc::new(RefCell::new(LiveViewerState::default()));
     let import_flow = Rc::new(RefCell::new(ImportFlowState::default()));
+    let minecraft = Rc::new(RefCell::new(MinecraftDefaultsModel::new()));
     register_i18n(ui);
     register_toasts(ui);
     register_callbacks(
@@ -868,6 +870,7 @@ pub fn attach(ui: &AppWindow) -> Controller {
         Rc::clone(&creations),
         &live_viewer,
         &import_flow,
+        &minecraft,
     );
 
     let weak = ui.as_weak();
@@ -876,6 +879,8 @@ pub fn attach(ui: &AppWindow) -> Controller {
     let poll_creations = Rc::clone(&creations);
     let poll_live_viewer = Rc::clone(&live_viewer);
     let poll_import_flow = Rc::clone(&import_flow);
+    let poll_minecraft = Rc::clone(&minecraft);
+    let poll_commands = backend.commands.clone();
     let poll_timer = Timer::default();
     poll_timer.start(TimerMode::Repeated, Duration::from_millis(80), move || {
         let Some(ui) = weak.upgrade() else {
@@ -903,6 +908,8 @@ pub fn attach(ui: &AppWindow) -> Controller {
                     &poll_activities,
                     &poll_creations,
                     &poll_import_flow,
+                    &poll_minecraft,
+                    &poll_commands,
                 ),
             }
         }
@@ -967,6 +974,7 @@ fn register_callbacks(
     creations: Rc<RefCell<CreationTracker>>,
     live_viewer: &Rc<RefCell<LiveViewerState>>,
     import_flow: &Rc<RefCell<ImportFlowState>>,
+    minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
 ) {
     register_catalog_actions(ui, commands);
     register_client_actions(ui, commands, Rc::clone(&creations));
@@ -1050,6 +1058,7 @@ fn register_callbacks(
     register_diagnostics(ui, commands);
     register_live_viewer(ui, commands, live_viewer);
     register_settings(ui, commands);
+    register_minecraft_defaults(ui, commands, minecraft);
 
     let weak = ui.as_weak();
     ui.on_copy_text(move |text| {
@@ -1934,26 +1943,572 @@ fn register_settings(ui: &AppWindow, commands: &Sender<Command>) {
             );
         },
     );
+}
 
-    let sender = commands.clone();
-    ui.on_save_preference(move |key, value| {
-        if let Some(key) = ephervex_core::PreferenceKey::parse(&key) {
-            send(
-                &sender,
-                Command::SetPreference {
-                    key,
-                    value: value.into(),
-                },
-            );
+/// The Minecraft defaults screen: one draft, one atomic save.
+///
+/// Every callback here edits the draft and nothing else. There is deliberately
+/// no path from this screen that writes an instance's `options.txt`: the only
+/// mutation it can produce is [`Command::SaveMinecraftPreferences`], which
+/// changes what the *next* instance is created with.
+#[allow(clippy::too_many_lines)]
+fn register_minecraft_defaults(
+    ui: &AppWindow,
+    commands: &Sender<Command>,
+    minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
+) {
+    ui.set_minecraft_categories(model(
+        minecraft_defaults::CATEGORIES
+            .iter()
+            .map(|category| SharedString::from(minecraft_defaults::category_label(*category)))
+            .collect(),
+    ));
+
+    // -- what is shown. None of these touch the draft.
+    let handle = ui.as_weak();
+    let state = Rc::clone(minecraft);
+    ui.on_minecraft_select_category(move |index| {
+        let Some(ui) = handle.upgrade() else { return };
+        if let Ok(index) = usize::try_from(index) {
+            state.borrow_mut().select_category(index);
         }
+        ui.set_minecraft_capturing_id(SharedString::default());
+        render_minecraft(&ui, &state);
     });
 
-    let sender = commands.clone();
-    ui.on_reset_preference(move |key| {
-        if let Some(key) = ephervex_core::PreferenceKey::parse(&key) {
-            send(&sender, Command::ResetPreference(key));
-        }
+    let handle = ui.as_weak();
+    let state = Rc::clone(minecraft);
+    ui.on_minecraft_set_query(move |query| {
+        let Some(ui) = handle.upgrade() else { return };
+        state.borrow_mut().set_query(&query);
+        ui.set_minecraft_capturing_id(SharedString::default());
+        render_minecraft(&ui, &state);
     });
+
+    let handle = ui.as_weak();
+    let state = Rc::clone(minecraft);
+    ui.on_minecraft_set_show_advanced(move |show| {
+        let Some(ui) = handle.upgrade() else { return };
+        state.borrow_mut().set_show_advanced(show);
+        ui.set_minecraft_capturing_id(SharedString::default());
+        render_minecraft(&ui, &state);
+    });
+
+    // -- the compatibility preview, which changes what rows say and never
+    //    what they hold.
+    let handle = ui.as_weak();
+    let state = Rc::clone(minecraft);
+    let sender = commands.clone();
+    ui.on_minecraft_set_preview_release(move |release| {
+        let Some(ui) = handle.upgrade() else { return };
+        // Selecting the release already selected asks nothing new, so no
+        // request is minted for it.
+        if !state.borrow_mut().set_preview_release(&release) {
+            return;
+        }
+        render_minecraft(&ui, &state);
+        request_minecraft_preview(&ui, &state, &sender);
+        request_minecraft_languages(&ui, &state, &sender, true);
+    });
+
+    let handle = ui.as_weak();
+    let state = Rc::clone(minecraft);
+    let sender = commands.clone();
+    ui.on_minecraft_retry_languages(move || {
+        let Some(ui) = handle.upgrade() else { return };
+        request_minecraft_languages(&ui, &state, &sender, true);
+        render_minecraft(&ui, &state);
+    });
+
+    // -- the draft itself.
+    register_minecraft_editors(ui, commands, minecraft);
+    register_minecraft_capture(ui, commands, minecraft);
+
+    let handle = ui.as_weak();
+    let state = Rc::clone(minecraft);
+    let sender = commands.clone();
+    ui.on_minecraft_save_defaults(move || {
+        let Some(ui) = handle.upgrade() else { return };
+        // Marked in flight the instant the batch is taken and released only by
+        // a completion, so one click cannot become two batches.
+        let Some(edits) = state.borrow_mut().begin_save() else {
+            return;
+        };
+        refresh_minecraft_totals(&ui, &state);
+        send(&sender, Command::SaveMinecraftPreferences { edits });
+    });
+
+    let handle = ui.as_weak();
+    let state = Rc::clone(minecraft);
+    let sender = commands.clone();
+    ui.on_minecraft_discard_defaults(move || {
+        let Some(ui) = handle.upgrade() else { return };
+        state.borrow_mut().discard();
+        ui.set_minecraft_capturing_id(SharedString::default());
+        render_minecraft(&ui, &state);
+        request_minecraft_preview(&ui, &state, &sender);
+    });
+}
+
+/// The value editors, each of which changes exactly one preference's draft.
+fn register_minecraft_editors(
+    ui: &AppWindow,
+    commands: &Sender<Command>,
+    minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
+) {
+    let handle = ui.as_weak();
+    let state = Rc::clone(minecraft);
+    let sender = commands.clone();
+    ui.on_minecraft_set_managed(move |id, managed| {
+        edit_minecraft_draft(&handle, &state, &sender, &id, |model, id| {
+            model.set_managed(id, managed);
+        });
+    });
+
+    let handle = ui.as_weak();
+    let state = Rc::clone(minecraft);
+    let sender = commands.clone();
+    ui.on_minecraft_set_boolean(move |id, on| {
+        edit_minecraft_draft(&handle, &state, &sender, &id, |model, id| {
+            model.set_boolean(id, on);
+        });
+    });
+
+    let handle = ui.as_weak();
+    let state = Rc::clone(minecraft);
+    let sender = commands.clone();
+    ui.on_minecraft_set_number(move |id, number| {
+        edit_minecraft_draft(&handle, &state, &sender, &id, |model, id| {
+            model.set_number(id, f64::from(number));
+        });
+    });
+
+    let handle = ui.as_weak();
+    let state = Rc::clone(minecraft);
+    let sender = commands.clone();
+    ui.on_minecraft_set_enumeration(move |id, index| {
+        edit_minecraft_draft(&handle, &state, &sender, &id, |model, id| {
+            if let Ok(index) = usize::try_from(index) {
+                model.set_enumeration(id, index);
+            }
+        });
+    });
+
+    let handle = ui.as_weak();
+    let state = Rc::clone(minecraft);
+    let sender = commands.clone();
+    ui.on_minecraft_set_language(move |id, index| {
+        edit_minecraft_draft(&handle, &state, &sender, &id, |model, id| {
+            if let Ok(index) = usize::try_from(index) {
+                model.set_language(id, index);
+            }
+        });
+    });
+
+    // Typing is recorded without rebuilding the rows: rebuilding them would
+    // recreate the field the user is in and take the focus with it. Only the
+    // figures that decide whether Save is offered are refreshed live.
+    let handle = ui.as_weak();
+    let state = Rc::clone(minecraft);
+    ui.on_minecraft_edit_number(move |id, text| {
+        let Some(ui) = handle.upgrade() else { return };
+        let Some(id) = minecraft_preference_id(&id) else {
+            return;
+        };
+        state.borrow_mut().set_number_text(&id, &text);
+        refresh_minecraft_totals(&ui, &state);
+    });
+
+    let handle = ui.as_weak();
+    let state = Rc::clone(minecraft);
+    ui.on_minecraft_edit_window(move |id, width, height| {
+        let Some(ui) = handle.upgrade() else { return };
+        let Some(id) = minecraft_preference_id(&id) else {
+            return;
+        };
+        state.borrow_mut().set_window_size(&id, &width, &height);
+        refresh_minecraft_totals(&ui, &state);
+    });
+
+    let handle = ui.as_weak();
+    let state = Rc::clone(minecraft);
+    let sender = commands.clone();
+    ui.on_minecraft_commit_number(move |id, text| {
+        edit_minecraft_draft(&handle, &state, &sender, &id, |model, id| {
+            model.set_number_text(id, &text);
+        });
+    });
+
+    let handle = ui.as_weak();
+    let state = Rc::clone(minecraft);
+    let sender = commands.clone();
+    ui.on_minecraft_commit_window(move |id, width, height| {
+        edit_minecraft_draft(&handle, &state, &sender, &id, |model, id| {
+            model.set_window_size(id, &width, &height);
+        });
+    });
+
+    let handle = ui.as_weak();
+    let state = Rc::clone(minecraft);
+    let sender = commands.clone();
+    ui.on_minecraft_commit_text(move |id, text| {
+        edit_minecraft_draft(&handle, &state, &sender, &id, |model, id| {
+            model.set_text(id, &text);
+        });
+    });
+
+    let handle = ui.as_weak();
+    let state = Rc::clone(minecraft);
+    let sender = commands.clone();
+    ui.on_minecraft_forget_preference(move |id| {
+        edit_minecraft_draft(
+            &handle,
+            &state,
+            &sender,
+            &id,
+            MinecraftDefaultsModel::reset_row,
+        );
+    });
+}
+
+/// Entering, leaving, and completing key capture.
+///
+/// Beginning and cancelling deliberately do not rebuild the rows: the control
+/// that just took focus lives inside the row, and rebuilding would destroy it
+/// mid-capture. That is why the capturing row is named by a property beside
+/// the model rather than by a field inside it.
+fn register_minecraft_capture(
+    ui: &AppWindow,
+    commands: &Sender<Command>,
+    minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
+) {
+    let handle = ui.as_weak();
+    let state = Rc::clone(minecraft);
+    ui.on_minecraft_begin_capture(move |id| {
+        let Some(ui) = handle.upgrade() else { return };
+        let Some(parsed) = minecraft_preference_id(&id) else {
+            return;
+        };
+        state.borrow_mut().begin_capture(&parsed);
+        ui.set_minecraft_capturing_id(id);
+    });
+
+    let handle = ui.as_weak();
+    let state = Rc::clone(minecraft);
+    ui.on_minecraft_cancel_capture(move || {
+        let Some(ui) = handle.upgrade() else { return };
+        state.borrow_mut().cancel_capture();
+        ui.set_minecraft_capturing_id(SharedString::default());
+    });
+
+    let handle = ui.as_weak();
+    let state = Rc::clone(minecraft);
+    let sender = commands.clone();
+    ui.on_minecraft_captured_key(move |id, reported| {
+        let Some(ui) = handle.upgrade() else { return };
+        let Some(parsed) = minecraft_preference_id(&id) else {
+            return;
+        };
+        // The toolkit reports a character. Which key that identifies, and
+        // whether it identifies one at all, is decided in Rust.
+        let Some(character) = reported.chars().next() else {
+            return;
+        };
+        let outcome = state.borrow_mut().capture_key(&parsed, character);
+        apply_capture_outcome(&ui, &state, &sender, outcome);
+    });
+
+    let handle = ui.as_weak();
+    let state = Rc::clone(minecraft);
+    let sender = commands.clone();
+    ui.on_minecraft_captured_mouse(move |id, reported| {
+        let Some(ui) = handle.upgrade() else { return };
+        let Some(parsed) = minecraft_preference_id(&id) else {
+            return;
+        };
+        let outcome = state.borrow_mut().capture_mouse(&parsed, &reported);
+        apply_capture_outcome(&ui, &state, &sender, outcome);
+    });
+}
+
+/// What the screen does once a capture has resolved.
+///
+/// A refused press leaves capture open and changes nothing, so the user can
+/// simply press something else. Every other outcome ends capture.
+fn apply_capture_outcome(
+    ui: &AppWindow,
+    minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
+    commands: &Sender<Command>,
+    outcome: minecraft_defaults::CaptureOutcome,
+) {
+    use minecraft_defaults::CaptureOutcome;
+
+    if outcome == CaptureOutcome::Refused {
+        ui.invoke_present_toast(lookup("gui-minecraft-capture-refused").into(), true);
+        return;
+    }
+    ui.set_minecraft_capturing_id(SharedString::default());
+    render_minecraft(ui, minecraft);
+    if outcome != CaptureOutcome::Canceled {
+        request_minecraft_preview(ui, minecraft, commands);
+    }
+}
+
+/// Applies one draft edit and shows the result.
+///
+/// Identity is the stable product id the row carries, never its position, so
+/// an edit lands on the preference it was made against however the list has
+/// been filtered or sorted since.
+fn edit_minecraft_draft(
+    handle: &slint::Weak<AppWindow>,
+    minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
+    commands: &Sender<Command>,
+    id: &SharedString,
+    edit: impl FnOnce(&mut MinecraftDefaultsModel, &ephervex_core::PreferenceId),
+) {
+    let Some(ui) = handle.upgrade() else { return };
+    let Some(id) = minecraft_preference_id(id) else {
+        return;
+    };
+    edit(&mut minecraft.borrow_mut(), &id);
+    render_minecraft(&ui, minecraft);
+    request_minecraft_preview(&ui, minecraft, commands);
+}
+
+/// Reads a row's stable product id, refusing anything that is not one.
+fn minecraft_preference_id(id: &SharedString) -> Option<ephervex_core::PreferenceId> {
+    ephervex_core::PreferenceId::parse(id.as_str()).ok()
+}
+
+/// Shows one scope's diagnostic files, with nothing selected yet.
+///
+/// A new listing clears the previous selection along with it: leaving a file's
+/// content on screen under a different scope's list is how a reader ends up
+/// reading the wrong crash report.
+fn apply_diagnostic_listing(
+    ui: &AppWindow,
+    rows: Vec<DiagnosticData>,
+    scope: &str,
+    scope_id: &str,
+    kind: &str,
+) {
+    ui.set_diagnostics(model(diagnostic_rows(rows)));
+    ui.set_selected_diagnostic_scope(scope.into());
+    ui.set_selected_diagnostic_id(scope_id.into());
+    ui.set_selected_diagnostic_kind(kind.into());
+    ui.set_selected_diagnostic_name(SharedString::default());
+    ui.set_diagnostic_content(SharedString::default());
+    ui.set_diagnostic_path(SharedString::default());
+    ui.set_diagnostic_title(SharedString::default());
+}
+
+/// What the reusable artifact cache's own answers do to the storage page.
+fn apply_artifact_cache_event(ui: &AppWindow, event: Event) {
+    match event {
+        Event::ArtifactCacheStatus(status) => apply_artifact_cache_status(ui, status),
+        // No new figure to show, so the previous one stands. What must not
+        // stand is the clearing state: the toast beside this event is the
+        // whole answer, and the button has to be usable again.
+        Event::ArtifactCacheClearFinished => ui.set_artifact_cache_clearing(false),
+        // Every other event is read by `apply_event`, which routed the two
+        // above here.
+        _ => {}
+    }
+}
+
+/// Renders a fresh view of everything core holds.
+///
+/// The Minecraft defaults screen asks its two background questions again from
+/// here, because a refreshed baseline can change both what the draft is and
+/// what a release would do with it.
+fn apply_snapshot_event(
+    ui: &AppWindow,
+    snapshot: Snapshot,
+    creations: &Rc<RefCell<CreationTracker>>,
+    minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
+    commands: &Sender<Command>,
+) {
+    apply_snapshot(ui, snapshot, minecraft);
+    apply_pending_creations(ui, &creations.borrow());
+    request_minecraft_preview(ui, minecraft, commands);
+    request_minecraft_languages(ui, minecraft, commands, false);
+}
+
+/// What the Minecraft defaults screen does with its own background answers.
+///
+/// Both metadata answers are checked against the request they belong to before
+/// anything is rendered: a reply resolved for a release the user has since
+/// moved off must never replace the one they are looking at.
+fn apply_minecraft_event(
+    ui: &AppWindow,
+    event: Event,
+    minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
+    commands: &Sender<Command>,
+) {
+    match event {
+        Event::MinecraftPreferencesSaveFinished { succeeded } => {
+            // Either way the save is over, so the screen stops holding itself
+            // disabled. That is the whole point of a completion event: a
+            // refused batch must leave Save and Discard usable again, and a
+            // generic error carries no such promise because any unrelated
+            // background work can raise one.
+            //
+            // On failure nothing about the draft is touched: not the overlay,
+            // not the baseline, and not the text a user is part-way through
+            // typing. The reason has already arrived as its own error.
+            minecraft.borrow_mut().finish_save(succeeded);
+            render_minecraft(ui, minecraft);
+        }
+        Event::MinecraftPreferencePreview {
+            generation,
+            minecraft: release,
+            preview,
+        } => {
+            let accepted = {
+                let mut model = minecraft.borrow_mut();
+                let accepted = model.accepts_preview_result(generation, &release);
+                if accepted {
+                    model.apply_preview(preview);
+                }
+                accepted
+            };
+            if accepted {
+                render_minecraft(ui, minecraft);
+            }
+        }
+        Event::MinecraftLanguages {
+            generation,
+            minecraft: release,
+            languages,
+        } => {
+            let accepted = {
+                let mut model = minecraft.borrow_mut();
+                let accepted = model.accepts_language_result(generation, &release);
+                if accepted {
+                    model.apply_languages(match languages {
+                        Some(languages) => LanguageCatalogState::Available(languages),
+                        None => LanguageCatalogState::Unavailable,
+                    });
+                }
+                accepted
+            };
+            if accepted {
+                render_minecraft(ui, minecraft);
+                // The language verdict is part of what a release can do with
+                // the draft, so the preview is asked again now that it is
+                // known.
+                request_minecraft_preview(ui, minecraft, commands);
+            }
+        }
+        // Every other event is read by `apply_event`, which is what routed
+        // the three above here.
+        _ => {}
+    }
+}
+
+/// Rebuilds the visible rows and everything derived from the draft.
+fn render_minecraft(ui: &AppWindow, minecraft: &Rc<RefCell<MinecraftDefaultsModel>>) {
+    let state = minecraft.borrow();
+    ui.set_minecraft_preference_rows(model(state.rows()));
+    ui.set_minecraft_category_index(to_i32(state.category_index()));
+    ui.set_minecraft_show_advanced(state.show_advanced());
+    ui.set_minecraft_preview_release(state.preview_release().into());
+    ui.set_minecraft_languages_available(matches!(
+        state.languages(),
+        LanguageCatalogState::Available(_)
+    ));
+    ui.set_minecraft_preserved_notice(
+        preserved_notice("gui-minecraft-preserved-notice", state.unrecognized()).into(),
+    );
+    ui.set_minecraft_unusable_notice(
+        preserved_notice("gui-minecraft-unusable-notice", state.unusable()).into(),
+    );
+    drop(state);
+    refresh_minecraft_totals(ui, minecraft);
+}
+
+/// Refreshes only what decides whether the draft can be saved.
+///
+/// Separate from [`render_minecraft`] so a keystroke in a numeric field can
+/// keep Save honest without rebuilding the field being typed into.
+fn refresh_minecraft_totals(ui: &AppWindow, minecraft: &Rc<RefCell<MinecraftDefaultsModel>>) {
+    let state = minecraft.borrow();
+    // Mirrored from the model rather than tracked beside it, so the screen
+    // cannot stay disabled after the model considers the save finished.
+    ui.set_minecraft_saving(state.is_saving());
+    ui.set_minecraft_dirty(state.is_dirty());
+    ui.set_minecraft_can_save(state.can_save());
+    ui.set_minecraft_dirty_count(to_i32(state.dirty_count()));
+    ui.set_minecraft_total_count(to_i32(state.entries().len()));
+}
+
+/// One low-emphasis sentence about configuration this build leaves alone, or
+/// nothing at all when there is none.
+fn preserved_notice(message: &str, count: usize) -> String {
+    if count == 0 {
+        return String::new();
+    }
+    lookup_args(message, [("count", Arg::from(count))])
+}
+
+/// Asks what the previewed release would do with the draft as it now stands.
+fn request_minecraft_preview(
+    ui: &AppWindow,
+    minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
+    commands: &Sender<Command>,
+) {
+    let mut state = minecraft.borrow_mut();
+    if state.preview_release().is_empty() {
+        return;
+    }
+    // An identity that could not be minted means no request is sent at all:
+    // reusing one would let an older answer be mistaken for this one.
+    let Some(generation) = state.next_preview_request() else {
+        return;
+    };
+    let request = Command::PreviewMinecraftPreferences {
+        generation,
+        minecraft: state.preview_release().to_owned(),
+        draft: state.draft_preferences(),
+        language: state.language_availability(),
+    };
+    drop(state);
+    let _ = ui;
+    send(commands, request);
+}
+
+/// Asks for the previewed release's own language list.
+///
+/// Only the language row depends on the answer, and a failure to get one is
+/// reported there rather than anywhere else. `force` re-asks for a release
+/// whose list is already resolved, which is what the retry action needs.
+fn request_minecraft_languages(
+    ui: &AppWindow,
+    minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
+    commands: &Sender<Command>,
+    force: bool,
+) {
+    let mut state = minecraft.borrow_mut();
+    if state.preview_release().is_empty() {
+        return;
+    }
+    if !force && matches!(state.languages(), LanguageCatalogState::Available(_)) {
+        return;
+    }
+    // Minted before the row is told anything is loading, so a request that
+    // cannot be identified leaves the language row exactly as it was rather
+    // than waiting forever on an answer nobody asked for.
+    let Some(generation) = state.next_language_request() else {
+        return;
+    };
+    state.apply_languages(LanguageCatalogState::Loading);
+    let request = Command::LoadMinecraftLanguages {
+        generation,
+        minecraft: state.preview_release().to_owned(),
+    };
+    drop(state);
+    ui.set_minecraft_languages_available(false);
+    send(commands, request);
 }
 
 fn register_display_settings(ui: &AppWindow, commands: &Sender<Command>) {
@@ -1995,24 +2550,27 @@ fn parse_java_memory(minimum: &str, maximum: &str) -> Result<(u32, u32), String>
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_event(
     ui: &AppWindow,
     event: Event,
     activities: &Rc<RefCell<Vec<ActivityData>>>,
     creations: &Rc<RefCell<CreationTracker>>,
     import_flow: &Rc<RefCell<ImportFlowState>>,
+    minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
+    commands: &Sender<Command>,
 ) {
     match event {
         Event::Snapshot(snapshot) => {
-            apply_snapshot(ui, snapshot);
-            apply_pending_creations(ui, &creations.borrow());
+            apply_snapshot_event(ui, snapshot, creations, minecraft, commands);
         }
-        Event::ArtifactCacheStatus(status) => apply_artifact_cache_status(ui, status),
-        Event::ArtifactCacheClearFinished => {
-            // No new figure to show, so the previous one stands. What must not
-            // stand is the clearing state: the toast beside this event is the
-            // whole answer, and the button has to be usable again.
-            ui.set_artifact_cache_clearing(false);
+        Event::MinecraftPreferencesSaveFinished { .. }
+        | Event::MinecraftPreferencePreview { .. }
+        | Event::MinecraftLanguages { .. } => {
+            apply_minecraft_event(ui, event, minecraft, commands);
+        }
+        Event::ArtifactCacheStatus(_) | Event::ArtifactCacheClearFinished => {
+            apply_artifact_cache_event(ui, event);
         }
         Event::MinecraftReleases(versions) => apply_minecraft_releases(ui, versions),
         Event::LoaderVersions {
@@ -2044,16 +2602,7 @@ fn apply_event(
             scope,
             scope_id,
             kind,
-        } => {
-            ui.set_diagnostics(model(diagnostic_rows(rows)));
-            ui.set_selected_diagnostic_scope(scope.into());
-            ui.set_selected_diagnostic_id(scope_id.into());
-            ui.set_selected_diagnostic_kind(kind.into());
-            ui.set_selected_diagnostic_name(SharedString::default());
-            ui.set_diagnostic_content(SharedString::default());
-            ui.set_diagnostic_path(SharedString::default());
-            ui.set_diagnostic_title(SharedString::default());
-        }
+        } => apply_diagnostic_listing(ui, rows, &scope, &scope_id, &kind),
         Event::DiagnosticContent(content) => apply_diagnostic_content(ui, content),
         Event::DiagnosticUnavailable(message) => {
             ui.set_diagnostic_title(lookup("gui-diagnostic-unavailable").into());
@@ -2508,12 +3057,16 @@ fn apply_artifact_cache_status(ui: &AppWindow, status: ArtifactCacheStatusData) 
     ui.set_artifact_cache_clearing(false);
 }
 
-fn apply_snapshot(ui: &AppWindow, snapshot: Snapshot) {
+fn apply_snapshot(
+    ui: &AppWindow,
+    snapshot: Snapshot,
+    minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
+) {
     let Snapshot {
         instances,
         servers,
         accounts,
-        preferences,
+        minecraft_preferences,
         settings,
         eula,
     } = snapshot;
@@ -2523,7 +3076,10 @@ fn apply_snapshot(ui: &AppWindow, snapshot: Snapshot) {
     apply_instance_snapshot(ui, instances);
     apply_server_snapshot(ui, servers);
     ui.set_accounts(model(account_rows(accounts)));
-    ui.set_preferences(model(preference_rows(preferences)));
+    // A refresh happens for reasons unrelated to this screen, so the model
+    // folds the confirmed state under whatever is unsaved rather than over it.
+    minecraft.borrow_mut().apply_snapshot(minecraft_preferences);
+    render_minecraft(ui, minecraft);
     apply_artifact_cache_settings(ui, &settings);
     ui.set_storage_root(settings.storage_root.into());
     ui.set_persistent_root(settings.persistent_root.into());
@@ -2788,23 +3344,6 @@ fn account_rows(rows: Vec<AccountData>) -> Vec<AccountRow> {
             kind: row.kind.into(),
             is_default: row.is_default,
             credential_state: row.credential_state.into(),
-        })
-        .collect()
-}
-
-fn preference_rows(rows: Vec<PreferenceData>) -> Vec<PreferenceRow> {
-    rows.into_iter()
-        .map(|row| {
-            let numeric_value = row.value.parse::<f32>().unwrap_or_default();
-            PreferenceRow {
-                key: row.key.into(),
-                label: row.label.into(),
-                value: row.value.into(),
-                customized: row.customized,
-                kind: row.kind.into(),
-                syntax: row.syntax.into(),
-                numeric_value,
-            }
         })
         .collect()
 }
@@ -3160,6 +3699,7 @@ fn to_i32(value: usize) -> i32 {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use crate::presentation::ActivityPresentation;
     use ephervex_core::ArtifactCacheLimit;
     use ephervex_i18n::has;
@@ -3503,17 +4043,21 @@ mod tests {
     }
 
     #[test]
-    fn minecraft_preferences_customize_on_edit_and_reset_without_a_management_toggle() {
+    fn minecraft_defaults_separate_management_from_the_value_and_never_persist_per_row() {
         let source = include_str!("ui.rs");
-        let reset = "gui-reset";
-        assert!(source.contains(&format!(
-            r#"if item.customized : AppButton {{ text: GuiI18n.text("{reset}")"#
-        )));
-        assert!(source.contains(
-            "Toggle { checked: item.value == \"true\"; toggled(value) => { root.save(item.key"
-        ));
-        assert!(!source.contains("checked: item.enabled"));
-        assert!(!source.contains("enabled: item.enabled"));
+        // Management and the value are two controls, because a preference
+        // Ephervex does not apply is not the same as a toggle set to false.
+        assert!(source.contains("checked: root.item.managed;"));
+        assert!(source.contains("enabled: root.item.can-manage;"));
+        assert!(source.contains("checked: root.item.bool-value;"));
+        // One draft, saved as one batch. No row carries its own persistence.
+        assert!(source.contains("root.minecraft-save-defaults()"));
+        assert!(source.contains("root.minecraft-discard-defaults()"));
+        assert!(
+            !source.contains("save-preference"),
+            "the per-row persistence this screen replaces must be gone"
+        );
+        assert!(!source.contains("reset-preference"));
     }
 
     #[test]
@@ -3547,9 +4091,64 @@ mod tests {
     #[test]
     fn settings_use_scrollable_reusable_preference_rows() {
         let source = include_str!("ui.rs");
-        assert!(source.contains("component PreferenceCard inherits Rectangle"));
-        assert!(source.contains("for pref in root.preferences : PreferenceCard { item: pref;"));
+        // One reusable row component drives every preference: nearly two
+        // hundred hand-written rows would be a second copy of the catalog.
+        assert!(source.contains("component MinecraftPreferenceRowCard inherits Rectangle"));
+        assert!(
+            source
+                .contains("for row in root.minecraft-preference-rows : MinecraftPreferenceRowCard")
+        );
         assert!(source.contains("ScrollView { viewport-width: self.width;"));
+    }
+
+    #[test]
+    fn a_finished_minecraft_save_is_the_only_thing_that_releases_the_screen() {
+        let backend = include_str!("backend.rs");
+        // Both outcomes send the completion, so a refused batch cannot leave
+        // the screen disabled waiting for an event that never comes.
+        assert!(backend.contains("Event::MinecraftPreferencesSaveFinished { succeeded }"));
+        assert!(backend.contains("let succeeded = outcome.is_ok();"));
+        assert!(
+            !backend.contains("Event::MinecraftPreferencesSaved"),
+            "the success-only event it replaces must be gone"
+        );
+
+        let controller = include_str!("controller.rs");
+        // The flag is mirrored from the model rather than set beside it, and
+        // the completion is the only place it is released.
+        assert!(controller.contains("ui.set_minecraft_saving(state.is_saving());"));
+        assert!(controller.contains("minecraft.borrow_mut().finish_save(succeeded);"));
+        let production = controller.split("#[cfg(test)]").next().unwrap_or_default();
+        assert_eq!(
+            production.matches("set_minecraft_saving(").count(),
+            1,
+            "the in-flight flag has exactly one writer"
+        );
+        // A generic error must never be mistaken for this save completing:
+        // the flag is released from the completion arm and nowhere else.
+        assert!(production.contains("fn refresh_minecraft_totals"));
+    }
+
+    #[test]
+    fn minecraft_defaults_keep_release_rules_out_of_the_frontend() {
+        let source = include_str!("ui.rs");
+        let start = source
+            .find("component MinecraftPreferenceRowCard inherits Rectangle")
+            .expect("the preference row component");
+        let end = source[start..]
+            .find("\n    component ")
+            .map_or(source.len(), |offset| start + offset);
+        let row_component = &source[start..end];
+        // Which release does what is core's answer, delivered per row as a
+        // status. A version compared inside the row would be a second,
+        // unreviewable compatibility rule living in the frontend.
+        for release in ["1.12.2", "1.13", "1.20.1", "1.21", "26.2"] {
+            assert!(
+                !row_component.contains(release),
+                "the row must not carry a per-version Minecraft rule ({release})"
+            );
+        }
+        assert!(row_component.contains("root.item.status-kind"));
     }
 
     #[test]
@@ -3709,7 +4308,12 @@ mod tests {
         // Applying a settings snapshot writes the three settings properties and
         // never the browser's own catalog: saving an unrelated setting must not
         // move a browser the user is in the middle of reading.
-        let applied = source.split("fn apply_snapshot").nth(1).unwrap_or_default();
+        // The whole signature, so a neighbouring reader whose name merely
+        // starts the same way cannot be inspected in its place.
+        let applied = source
+            .split("fn apply_snapshot(")
+            .nth(1)
+            .unwrap_or_default();
         assert!(applied.contains("ui.set_default_mod_catalog("));
         assert!(!applied.contains("ui.set_mod_provider("));
     }
@@ -3896,21 +4500,6 @@ mod tests {
         // Both events that can end a clear release the guard the button set, so
         // a clear that reports only a failure cannot leave it disabled.
         assert!(backend.contains("Event::ArtifactCacheClearFinished"));
-    }
-
-    #[test]
-    fn fov_presentation_keeps_core_degree_semantics() {
-        let rows = preference_rows(vec![PreferenceData {
-            key: "fov".to_owned(),
-            label: "Field of View".to_owned(),
-            value: "70".to_owned(),
-            customized: true,
-            kind: "slider".to_owned(),
-            syntax: "field of view in degrees, 30 to 110".to_owned(),
-        }]);
-
-        assert!((rows[0].numeric_value - 70.0).abs() < f32::EPSILON);
-        assert_eq!(rows[0].value, "70");
     }
 
     fn failure(message: &str) -> ImportFailure {

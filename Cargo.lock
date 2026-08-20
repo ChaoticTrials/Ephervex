@@ -1623,6 +1623,7 @@ dependencies = [
  "ephervex-model",
  "rfd",
  "slint",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",

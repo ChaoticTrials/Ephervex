@@ -200,14 +200,47 @@ slint::slint! {
         compatible: string,
     }
 
-    export struct PreferenceRow {
-        key: string,
+    // One product preference as the Minecraft defaults screen renders it.
+    //
+    // Everything a row needs and nothing it has to work out for itself: the
+    // editor to use, the value to show, whether Ephervex applies it, and what
+    // the previewed release does with it are all decided in Rust against the
+    // bundled catalog and core's own compatibility answer.
+    export struct MinecraftPreferenceRow {
+        id: string,
         label: string,
-        value: string,
-        customized: bool,
-        kind: string,
-        syntax: string,
-        numeric-value: float,
+        technical-id: string,
+        // Non-empty on the first row of a group, so one flat list still reads
+        // as sections.
+        section-heading: string,
+        editor: string,
+        advanced: bool,
+        managed: bool,
+        can-manage: bool,
+        manage-hint: string,
+        state-text: string,
+        can-reset: bool,
+        dirty: bool,
+        bool-value: bool,
+        // The numeric field's text, the window size's width, or the free-text
+        // value, depending on the editor.
+        text-value: string,
+        height-text: string,
+        number-value: float,
+        number-min: float,
+        number-max: float,
+        number-step: float,
+        number-readout: string,
+        number-hint: string,
+        enum-labels: [string],
+        enum-index: int,
+        binding-label: string,
+        invalid: bool,
+        validation: string,
+        notice: string,
+        status: string,
+        status-kind: string,
+        status-detail: string,
     }
 
     export struct PendingEntityRow {
@@ -287,7 +320,7 @@ slint::slint! {
         horizontal-stretch: 0;
         border-radius: 6px;
         border-width: 1px;
-        border-color: tone == "primary" ? Theme.accent : tone == "danger" ? Theme.danger : Theme.border;
+        border-color: !enabled ? Theme.border : tone == "primary" ? Theme.accent : tone == "danger" ? Theme.danger : Theme.border;
         background: !enabled ? Theme.surface : area.pressed ? Theme.background : area.has-hover ? (tone == "primary" ? rgb(54, 139, 147) : tone == "danger" ? rgb(123, 48, 56) : Theme.elevated) : tone == "primary" ? rgb(45, 125, 132) : tone == "danger" ? rgb(97, 39, 46) : Theme.surface;
         accessible-role: button;
         accessible-label: text;
@@ -335,6 +368,7 @@ slint::slint! {
         in property <InputType> input-type: InputType.text;
         callback accepted();
         callback edited(string);
+        callback focus-lost();
         height: 36px;
         min-width: 120px;
         border-radius: 6px;
@@ -354,6 +388,9 @@ slint::slint! {
             vertical-alignment: center;
             accepted => { root.accepted(); }
             edited => { root.edited(self.text); }
+            // A field whose value is part of a larger draft has to be able to
+            // say "I am done" without the user pressing Enter.
+            changed has-focus => { if (!self.has-focus) { root.focus-lost(); } }
         }
         if root.text == "" : Text {
             x: 11px; width: parent.width - 22px; height: parent.height;
@@ -835,54 +872,313 @@ slint::slint! {
         }
     }
 
-    component PreferenceCard inherits Rectangle {
-        in property <PreferenceRow> item;
-        in property <bool> compact;
-        callback save(string, string);
-        callback reset(string);
-        height: 92px;
-        border-radius: 8px;
+    // What one exact Minecraft release does with one row.
+    //
+    // The badge says it in words rather than in color alone, and carries the
+    // full sentence as its accessible label so a screen reader gets the
+    // reason, not just the verdict.
+    component CompatibilityBadge inherits Rectangle {
+        in property <string> text;
+        in property <string> kind;
+        in property <string> detail;
+        property <color> tone: root.kind == "supported" ? Theme.success
+            : root.kind == "unavailable" ? Theme.text-muted
+            : root.kind == "unrepresentable" ? Theme.danger
+            : Theme.warning;
+        visible: root.text != "";
+        width: root.text == "" ? 0px : label.preferred-width + 18px;
+        height: 24px;
+        horizontal-stretch: 0;
+        border-radius: 5px;
         border-width: 1px;
-        border-color: Theme.border;
-        background: Theme.surface;
-        HorizontalLayout {
-            padding: 14px;
-            spacing: 14px;
-            VerticalLayout {
-                width: root.compact ? 170px : 245px;
-                spacing: 4px;
-                HorizontalLayout { spacing: 8px;
-                    Heading { text: item.label; font-size: Theme.row-heading-size; }
-                    if item.customized : Pill { text: GuiI18n.text("gui-customized"); tone-color: Theme.accent-secondary; }
+        border-color: root.tone.with-alpha(0.55);
+        background: root.tone.with-alpha(0.12);
+        accessible-role: AccessibleRole.text;
+        accessible-label: root.detail == "" ? root.text : root.text + ". " + root.detail;
+        label := Text {
+            text: root.text;
+            color: root.tone;
+            font-size: Theme.caption-size;
+            font-weight: 600;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
+    // A key binding, captured from this control's own focused input.
+    //
+    // Nothing here listens outside the window: the control takes focus, reads
+    // the next key or mouse press delivered to it, and hands the raw report to
+    // Rust, which decides whether Minecraft can name it. Escape leaves the
+    // binding alone, Delete and Backspace unbind it, and losing focus is the
+    // same as cancelling.
+    component PreferenceKeyBindingEditor inherits Rectangle {
+        in property <string> text;
+        in property <bool> capturing;
+        in property <string> accessible-name;
+        callback begin();
+        callback cancel();
+        // The pressed text, exactly as the toolkit reported it. What that
+        // identifies, and whether it identifies anything at all, is decided
+        // in Rust.
+        callback captured-key(string);
+        callback captured-mouse(string);
+        height: 34px;
+        // Wide enough for the capture prompt and for the longest binding name
+        // a mouse button produces, so neither is elided into a guess.
+        min-width: 210px;
+        horizontal-stretch: 0;
+        border-radius: 6px;
+        border-width: root.capturing ? 2px : 1px;
+        border-color: root.capturing ? Theme.accent : scope.has-focus ? Theme.accent : Theme.border;
+        background: root.capturing ? rgb(22, 56, 62) : Theme.background;
+        accessible-role: button;
+        accessible-label: root.accessible-name;
+        accessible-value: root.text;
+        accessible-action-default => { root.begin(); scope.focus(); }
+        Text {
+            x: 10px;
+            width: parent.width - 20px;
+            height: parent.height;
+            text: root.capturing ? GuiI18n.text("gui-minecraft-press-input") : root.text;
+            color: root.capturing ? Theme.accent : Theme.text;
+            font-size: Theme.body-size;
+            font-weight: root.capturing ? 600 : 400;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        scope := FocusScope {
+            width: 100%;
+            height: 100%;
+            key-pressed(event) => {
+                if (!root.capturing) {
+                    return reject;
                 }
-                BodyText { text: item.syntax; color: Theme.text-muted; wrap: word-wrap; }
+                root.captured-key(event.text);
+                return accept;
+            }
+            changed has-focus => {
+                if (!self.has-focus && root.capturing) {
+                    root.cancel();
+                }
+            }
+            TouchArea {
+                width: 100%;
+                height: 100%;
+                mouse-cursor: pointer;
+                pointer-event(event) => {
+                    if (event.kind != PointerEventKind.down) {
+                        return;
+                    }
+                    scope.focus();
+                    if (root.capturing) {
+                        root.captured-mouse(
+                            event.button == PointerEventButton.left ? "left"
+                            : event.button == PointerEventButton.right ? "right"
+                            : event.button == PointerEventButton.middle ? "middle"
+                            : event.button == PointerEventButton.back ? "back"
+                            : event.button == PointerEventButton.forward ? "forward"
+                            : "other");
+                    } else if (event.button == PointerEventButton.left) {
+                        root.begin();
+                    }
+                }
+            }
+        }
+    }
+
+    // One catalog-driven preference row: its identity and state on the first
+    // line, its editor on the second, and any reason it will not be written
+    // underneath.
+    component MinecraftPreferenceRowCard inherits Rectangle {
+        in property <MinecraftPreferenceRow> item;
+        in property <bool> compact;
+        in property <bool> capturing;
+        in property <bool> languages-available;
+        callback set-managed(string, bool);
+        callback set-boolean(string, bool);
+        callback set-number(string, float);
+        callback edit-number(string, string);
+        callback commit-number(string, string);
+        callback set-enumeration(string, int);
+        callback set-language(string, int);
+        callback edit-window(string, string, string);
+        callback commit-window(string, string, string);
+        callback commit-text(string, string);
+        callback forget(string);
+        callback begin-capture(string);
+        callback cancel-capture();
+        callback captured-key(string, string);
+        callback captured-mouse(string, string);
+        callback retry-languages();
+        property <length> heading-height: root.item.section-heading == "" ? 0px : 42px * Theme.text-scale;
+        property <length> detail-lines: ((root.item.invalid ? 22px : 0px) + (root.item.notice == "" ? 0px : 22px) + (root.item.status-detail == "" ? 0px : 22px)) * Theme.text-scale;
+        height: root.heading-height + 104px * Theme.text-scale + root.detail-lines;
+        background: transparent;
+        VerticalLayout {
+            spacing: 0px;
+            if root.item.section-heading != "" : Rectangle {
+                height: root.heading-height;
+                VerticalLayout {
+                    alignment: end;
+                    padding-bottom: 7px;
+                    Eyebrow { text: root.item.section-heading; }
+                }
             }
             Rectangle {
-                horizontal-stretch: 1;
-                if item.kind == "boolean" : HorizontalLayout {
-                    alignment: end;
-                    spacing: 10px;
-                    BodyText { text: item.value == "true" ? GuiI18n.text("gui-enabled") : GuiI18n.text("gui-disabled"); }
-                    Toggle { checked: item.value == "true"; toggled(value) => { root.save(item.key, value ? "true" : "false"); } }
-                    if item.customized : AppButton { text: GuiI18n.text("gui-reset"); clicked => { root.reset(item.key); } }
-                }
-                if item.kind == "choice" : HorizontalLayout {
-                    alignment: end;
-                    spacing: 8px;
-                    ComboBox { model: ["auto", "1", "2", "3", "4"]; current-index: item.value == "1" ? 1 : item.value == "2" ? 2 : item.value == "3" ? 3 : item.value == "4" ? 4 : 0; selected(value) => { root.save(item.key, value); } width: 210px; }
-                    if item.customized : AppButton { text: GuiI18n.text("gui-reset"); clicked => { root.reset(item.key); } }
-                }
-                if item.kind == "slider" : HorizontalLayout {
-                    spacing: 12px;
-                    fov := Slider { minimum: 30; maximum: 110; step: 1; value: item.numeric-value; released(value) => { root.save(item.key, "" + round(value)); } }
-                    BodyText { text: round(fov.value) == 70 ? GuiI18n.text("gui-fov-normal") : round(fov.value) == 110 ? GuiI18n.text("gui-fov-quake-pro") : round(fov.value) + " deg"; width: 90px; }
-                    if item.customized : AppButton { text: GuiI18n.text("gui-reset"); clicked => { root.reset(item.key); } }
-                }
-                if item.kind == "integer" || item.kind == "text" : HorizontalLayout {
-                    spacing: 8px;
-                    pref-editor := TextField { text: item.value; input-type: item.kind == "integer" ? InputType.number : InputType.text; horizontal-stretch: 1; accepted => { root.save(item.key, self.text); } }
-                    AppButton { text: GuiI18n.text("gui-apply"); width: 92px; clicked => { root.save(item.key, pref-editor.text); } }
-                    if item.customized : AppButton { text: GuiI18n.text("gui-reset"); clicked => { root.reset(item.key); } }
+                border-radius: 8px;
+                border-width: 1px;
+                border-color: root.item.dirty ? Theme.accent.with-alpha(0.65) : Theme.border;
+                background: Theme.surface;
+                VerticalLayout {
+                    padding: 12px;
+                    spacing: 6px;
+                    // No explicit alignment on either line: an aligned layout
+                    // keeps every child at its preferred width, which would
+                    // collapse the stretching label column and push the row's
+                    // contents into a huddle at one edge.
+                    HorizontalLayout {
+                        spacing: 10px;
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            alignment: center;
+                            spacing: 1px;
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Text { text: root.item.label; color: Theme.text; font-size: Theme.row-heading-size; font-weight: 600; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
+                                if root.item.advanced : Pill { text: GuiI18n.text("gui-minecraft-advanced"); tone-color: Theme.accent-secondary; }
+                                if root.item.dirty : Pill { text: GuiI18n.text("gui-minecraft-unsaved"); tone-color: Theme.accent; }
+                            }
+                            Text { text: root.item.technical-id; color: Theme.text-muted; font-size: Theme.caption-size; font-family: "monospace"; overflow: elide; }
+                        }
+                        VerticalLayout { alignment: center; horizontal-stretch: 0;
+                            CompatibilityBadge { text: root.item.status; kind: root.item.status-kind; detail: root.item.status-detail; }
+                        }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            horizontal-stretch: 0;
+                            alignment: end;
+                            if !root.compact : Text { text: GuiI18n.text("gui-minecraft-manage"); color: root.item.can-manage ? Theme.text-secondary : Theme.text-muted; font-size: Theme.label-size; vertical-alignment: center; horizontal-alignment: right; }
+                            Toggle {
+                                accessible-name: GuiI18n.values("gui-minecraft-manage-row", GuiI18n.text("gui-minecraft-manage"), root.item.label);
+                                checked: root.item.managed;
+                                enabled: root.item.can-manage;
+                                toggled(value) => { root.set-managed(root.item.id, value); }
+                            }
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 10px;
+                        if root.item.editor == "toggle" : Toggle {
+                            accessible-name: root.item.label;
+                            checked: root.item.bool-value;
+                            toggled(value) => { root.set-boolean(root.item.id, value); }
+                        }
+                        if root.item.editor == "number" : number-field := TextField {
+                            width: root.compact ? 150px : 190px;
+                            accessible-name: root.item.label;
+                            invalid: root.item.invalid;
+                            input-type: InputType.text;
+                            text: root.item.text-value;
+                            edited(value) => { root.edit-number(root.item.id, value); }
+                            accepted => { root.commit-number(root.item.id, number-field.text); }
+                            focus-lost => { root.commit-number(root.item.id, number-field.text); }
+                        }
+                        if root.item.editor == "slider" : Slider {
+                            width: root.compact ? 170px : 240px;
+                            accessible-label: root.item.label;
+                            minimum: root.item.number-min;
+                            maximum: root.item.number-max;
+                            step: root.item.number-step;
+                            // Committed on release rather than on every
+                            // movement: the row re-renders when the draft
+                            // changes, and a control that rebuilt itself
+                            // mid-drag would drop the drag.
+                            value: root.item.number-value;
+                            released(value) => { root.set-number(root.item.id, value); }
+                        }
+                        // Wide enough for the longest reading a slider
+                        // produces, so a named endpoint is never cut in half.
+                        if root.item.editor == "slider" : BodyText { text: root.item.number-readout; color: Theme.text; width: 150px; }
+                        // Shown only where the reading says more than the
+                        // number itself does, such as a scale of zero that
+                        // means "pick one to fit the window".
+                        if root.item.editor == "number" && root.item.number-hint != "" : BodyText { text: root.item.number-hint; color: Theme.text; horizontal-stretch: 0; }
+                        if root.item.editor == "enum" : enum-box := ComboBox {
+                            width: root.compact ? 210px : 280px;
+                            accessible-label: root.item.label;
+                            model: root.item.enum-labels;
+                            current-index: root.item.enum-index;
+                            selected => { root.set-enumeration(root.item.id, enum-box.current-index); }
+                        }
+                        if root.item.editor == "language" && root.languages-available : language-box := ComboBox {
+                            width: root.compact ? 240px : 330px;
+                            accessible-label: root.item.label;
+                            model: root.item.enum-labels;
+                            current-index: root.item.enum-index;
+                            selected => { root.set-language(root.item.id, language-box.current-index); }
+                        }
+                        if root.item.editor == "language" && !root.languages-available : AppButton {
+                            text: GuiI18n.text("gui-minecraft-language-retry");
+                            clicked => { root.retry-languages(); }
+                        }
+                        if root.item.editor == "keybinding" : PreferenceKeyBindingEditor {
+                            text: root.item.binding-label;
+                            capturing: root.capturing;
+                            accessible-name: root.item.label;
+                            begin => { root.begin-capture(root.item.id); }
+                            cancel => { root.cancel-capture(); }
+                            captured-key(reported) => { root.captured-key(root.item.id, reported); }
+                            captured-mouse(reported) => { root.captured-mouse(root.item.id, reported); }
+                        }
+                        // One product preference, so both numbers are read
+                        // and committed together: half a window size is not a
+                        // window size.
+                        if root.item.editor == "window" : HorizontalLayout {
+                            spacing: 8px;
+                            alignment: center;
+                            FieldLabel { text: GuiI18n.text("gui-minecraft-width"); vertical-alignment: center; }
+                            width-field := TextField {
+                                width: 96px;
+                                accessible-name: GuiI18n.text("gui-minecraft-width");
+                                invalid: root.item.invalid;
+                                text: root.item.text-value;
+                                edited(value) => { root.edit-window(root.item.id, value, height-field.text); }
+                                accepted => { root.commit-window(root.item.id, width-field.text, height-field.text); }
+                                focus-lost => { root.commit-window(root.item.id, width-field.text, height-field.text); }
+                            }
+                            FieldLabel { text: GuiI18n.text("gui-minecraft-height"); vertical-alignment: center; }
+                            height-field := TextField {
+                                width: 96px;
+                                accessible-name: GuiI18n.text("gui-minecraft-height");
+                                invalid: root.item.invalid;
+                                text: root.item.height-text;
+                                edited(value) => { root.edit-window(root.item.id, width-field.text, value); }
+                                accepted => { root.commit-window(root.item.id, width-field.text, height-field.text); }
+                                focus-lost => { root.commit-window(root.item.id, width-field.text, height-field.text); }
+                            }
+                        }
+                        if root.item.editor == "text" : text-field := TextField {
+                            width: root.compact ? 210px : 280px;
+                            accessible-name: root.item.label;
+                            text: root.item.text-value;
+                            accepted => { root.commit-text(root.item.id, text-field.text); }
+                            focus-lost => { root.commit-text(root.item.id, text-field.text); }
+                        }
+                        Rectangle { horizontal-stretch: 1; min-width: 8px; }
+                        // Never elided: which of absent, chosen, and applied
+                        // a row is in is the sentence this screen exists to
+                        // make legible, and the spacer beside it can shrink.
+                        BodyText { text: root.item.state-text; color: Theme.text-muted; horizontal-stretch: 0; }
+                        if root.item.can-reset : AppButton {
+                            text: GuiI18n.text("gui-minecraft-forget");
+                            min-width: 116px;
+                            clicked => { root.forget(root.item.id); }
+                        }
+                    }
+                    if root.item.invalid : Text { text: root.item.validation; color: Theme.danger; font-size: Theme.caption-size; overflow: elide; }
+                    if root.item.notice != "" : Text { text: root.item.notice; color: Theme.warning; font-size: Theme.caption-size; overflow: elide; }
+                    if root.item.status-detail != "" : Text { text: root.item.status-detail; color: Theme.text-muted; font-size: Theme.caption-size; overflow: elide; }
                 }
             }
         }
@@ -1198,7 +1494,26 @@ slint::slint! {
         in-out property <[ActivityRow]> activities;
         in-out property <[AccountRow]> accounts;
         in-out property <[JavaRow]> java-runtimes;
-        in-out property <[PreferenceRow]> preferences;
+        // -- Minecraft defaults for future client instances.
+        in-out property <[MinecraftPreferenceRow]> minecraft-preference-rows;
+        in-out property <[string]> minecraft-categories;
+        in-out property <int> minecraft-category-index: 0;
+        in-out property <string> minecraft-query;
+        in-out property <bool> minecraft-show-advanced: false;
+        // The row waiting for a key or mouse press, by product id. Kept out of
+        // the row model on purpose: entering capture must not rebuild the
+        // rows, because rebuilding them would destroy the control that just
+        // took focus.
+        in-out property <string> minecraft-capturing-id;
+        in-out property <bool> minecraft-languages-available: false;
+        in-out property <string> minecraft-preview-release;
+        in-out property <bool> minecraft-dirty: false;
+        in-out property <bool> minecraft-can-save: false;
+        in-out property <int> minecraft-dirty-count: 0;
+        in-out property <int> minecraft-total-count: 0;
+        in-out property <string> minecraft-preserved-notice;
+        in-out property <string> minecraft-unusable-notice;
+        in-out property <bool> minecraft-saving: false;
         in-out property <[PendingEntityRow]> pending-instances;
         in-out property <[PendingEntityRow]> pending-servers;
         in-out property <[PendingEntityRow]> linked-pending-servers;
@@ -1505,8 +1820,28 @@ slint::slint! {
         callback save-linked-server-settings(bool, bool, int);
         callback refresh-java();
         callback save-java-settings(bool, bool, string, string, string);
-        callback save-preference(string, string);
-        callback reset-preference(string);
+        callback minecraft-select-category(int);
+        callback minecraft-set-query(string);
+        callback minecraft-set-show-advanced(bool);
+        callback minecraft-set-preview-release(string);
+        callback minecraft-set-managed(string, bool);
+        callback minecraft-set-boolean(string, bool);
+        callback minecraft-set-number(string, float);
+        callback minecraft-edit-number(string, string);
+        callback minecraft-commit-number(string, string);
+        callback minecraft-set-enumeration(string, int);
+        callback minecraft-set-language(string, int);
+        callback minecraft-edit-window(string, string, string);
+        callback minecraft-commit-window(string, string, string);
+        callback minecraft-commit-text(string, string);
+        callback minecraft-forget-preference(string);
+        callback minecraft-begin-capture(string);
+        callback minecraft-cancel-capture();
+        callback minecraft-captured-key(string, string);
+        callback minecraft-captured-mouse(string, string);
+        callback minecraft-retry-languages();
+        callback minecraft-save-defaults();
+        callback minecraft-discard-defaults();
         callback cancel-operation(string);
         callback present-toast(string, bool);
         callback queue-toast(string, bool);
@@ -1830,7 +2165,7 @@ slint::slint! {
                     Rectangle { width: 208px; background: Theme.surface; border-width: 1px; border-color: Theme.border; VerticalLayout { padding: 14px; spacing: 5px; Eyebrow { text: GuiI18n.text("gui-settings-heading"); }
                         Rectangle { height: 5px; }
                         SettingsNavItem { label: GuiI18n.text("gui-settings-general"); selected: root.workspace-tab == "General"; clicked => { root.workspace-tab = "General"; } }
-                        SettingsNavItem { label: GuiI18n.text("gui-settings-minecraft"); selected: root.workspace-tab == "Minecraft"; clicked => { root.workspace-tab = "Minecraft"; } }
+                        SettingsNavItem { label: GuiI18n.text("gui-settings-minecraft"); selected: root.workspace-tab == "Minecraft"; clicked => { root.workspace-tab = "Minecraft"; root.request-version-catalog(); } }
                         SettingsNavItem { label: GuiI18n.text("gui-settings-java"); selected: root.workspace-tab == "Java"; clicked => { root.workspace-tab = "Java"; } }
                         SettingsNavItem { label: GuiI18n.text("gui-settings-accounts"); selected: root.workspace-tab == "Accounts"; clicked => { root.workspace-tab = "Accounts"; } }
                         SettingsNavItem { label: GuiI18n.text("gui-settings-providers"); selected: root.workspace-tab == "Providers & APIs"; clicked => { root.workspace-tab = "Providers & APIs"; } }
@@ -1868,10 +2203,89 @@ slint::slint! {
                             HorizontalLayout { spacing: 12px; alignment: center; VerticalLayout { FieldLabel { text: GuiI18n.text("gui-default-operator-level"); } BodyText { text: GuiI18n.text("gui-default-operator-level-detail"); color: Theme.text-muted; } } Rectangle { horizontal-stretch: 1; } ComboBox { accessible-label: GuiI18n.text("gui-default-operator-level"); width: 220px; model: [GuiI18n.text("gui-operator-level-1"), GuiI18n.text("gui-operator-level-2"), GuiI18n.text("gui-operator-level-3"), GuiI18n.text("gui-operator-level-4")]; current-index: root.operator-permission-level - 1; selected(value) => { root.operator-permission-level = value == GuiI18n.text("gui-operator-level-1") ? 1 : value == GuiI18n.text("gui-operator-level-2") ? 2 : value == GuiI18n.text("gui-operator-level-3") ? 3 : 4; } } }
                             HorizontalLayout { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-save-server-defaults"); tone: "primary"; clicked => { root.save-linked-server-settings(root.show-linked-servers, root.make-default-account-operator, root.operator-permission-level); } } }
                         }
+                        // The screen keeps its own height and scrolls only the
+                        // rows, so the category tabs, the filter, and Save and
+                        // Discard stay reachable however long the list is.
                         if root.workspace-tab == "Minecraft" : VerticalLayout { spacing: 12px;
-                            SectionTitle { title: GuiI18n.text("gui-display-gameplay-defaults"); detail: ""; }
-                            for pref in root.preferences : PreferenceCard { item: pref; compact: root.compact-layout; save(key, value) => { root.save-preference(key, value); } reset(key) => { root.reset-preference(key); } }
-                            BodyText { text: GuiI18n.text("gui-options-unavailable-detail"); color: Theme.text-muted; wrap: word-wrap; }
+                            height: max(360px, root.height - 258px);
+                            if root.minecraft-preserved-notice != "" : Rectangle { height: max(46px, preserved-text.preferred-height + 22px); border-radius: 6px; border-width: 1px; border-color: Theme.border; background: Theme.surface;
+                                preserved-text := BodyText { x: 12px; width: parent.width - 24px; text: root.minecraft-preserved-notice; color: Theme.text-muted; wrap: word-wrap; }
+                            }
+                            if root.minecraft-unusable-notice != "" : Rectangle { height: max(46px, unusable-text.preferred-height + 22px); border-radius: 6px; border-width: 1px; border-color: Theme.warning.with-alpha(0.55); background: Theme.surface;
+                                unusable-text := BodyText { x: 12px; width: parent.width - 24px; text: root.minecraft-unusable-notice; color: Theme.warning; wrap: word-wrap; }
+                            }
+                            // The five stable catalog categories. They wrap
+                            // rather than shrink, so a narrow window keeps
+                            // every tab readable and reachable.
+                            Rectangle { height: category-tabs.preferred-height; vertical-stretch: 0; background: transparent;
+                                category-tabs := HorizontalLayout { spacing: 4px; alignment: start;
+                                    for category[index] in root.minecraft-categories : WorkspaceTab {
+                                        text: category;
+                                        min-width: max(88px, self.preferred-width);
+                                        selected: index == root.minecraft-category-index;
+                                        clicked => { root.minecraft-select-category(index); }
+                                    }
+                                }
+                            }
+                            Divider { }
+                            HorizontalLayout { spacing: 10px; alignment: center; vertical-stretch: 0;
+                                filter-field := TextField {
+                                    horizontal-stretch: 1;
+                                    max-width: 340px;
+                                    placeholder: GuiI18n.text("gui-minecraft-filter");
+                                    accessible-name: GuiI18n.text("gui-minecraft-filter");
+                                    input-type: InputType.search;
+                                    edited(value) => { root.minecraft-query = value; root.minecraft-set-query(value); }
+                                }
+                                if root.minecraft-query != "" : AppButton { text: GuiI18n.text("gui-clear"); min-width: 84px; clicked => { filter-field.text = ""; root.minecraft-query = ""; root.minecraft-set-query(""); } }
+                                Rectangle { horizontal-stretch: 1; min-width: 4px; }
+                                BodyText { text: GuiI18n.text("gui-minecraft-show-advanced"); horizontal-stretch: 0; }
+                                Toggle { accessible-name: GuiI18n.text("gui-minecraft-show-advanced"); checked: root.minecraft-show-advanced; toggled(value) => { root.minecraft-set-show-advanced(value); } }
+                            }
+                            HorizontalLayout { spacing: 10px; alignment: center; vertical-stretch: 0;
+                                VerticalLayout { horizontal-stretch: 1; spacing: 2px;
+                                    FieldLabel { text: GuiI18n.text("gui-minecraft-preview"); }
+                                    BodyText { text: GuiI18n.text("gui-minecraft-preview-detail"); color: Theme.text-muted; wrap: word-wrap; }
+                                }
+                                preview-box := ComboBox {
+                                    width: root.compact-layout ? 150px : 190px;
+                                    accessible-label: GuiI18n.text("gui-minecraft-preview");
+                                    model: root.minecraft-releases;
+                                    current-value: root.minecraft-preview-release;
+                                    selected(value) => { root.minecraft-set-preview-release(value); }
+                                }
+                            }
+                            ScrollView { vertical-stretch: 1; viewport-width: self.width; VerticalLayout { alignment: start; spacing: 12px;
+                            if root.minecraft-preference-rows.length == 0 : EmptyState { title: GuiI18n.text("gui-minecraft-no-matches"); message: GuiI18n.text("gui-minecraft-no-matches-detail"); }
+                            for row in root.minecraft-preference-rows : MinecraftPreferenceRowCard {
+                                item: row;
+                                compact: root.compact-layout;
+                                capturing: root.minecraft-capturing-id == row.id;
+                                languages-available: root.minecraft-languages-available;
+                                set-managed(id, on) => { root.minecraft-set-managed(id, on); }
+                                set-boolean(id, on) => { root.minecraft-set-boolean(id, on); }
+                                set-number(id, value) => { root.minecraft-set-number(id, value); }
+                                edit-number(id, value) => { root.minecraft-edit-number(id, value); }
+                                commit-number(id, value) => { root.minecraft-commit-number(id, value); }
+                                set-enumeration(id, index) => { root.minecraft-set-enumeration(id, index); }
+                                set-language(id, index) => { root.minecraft-set-language(id, index); }
+                                edit-window(id, width, height) => { root.minecraft-edit-window(id, width, height); }
+                                commit-window(id, width, height) => { root.minecraft-commit-window(id, width, height); }
+                                commit-text(id, value) => { root.minecraft-commit-text(id, value); }
+                                forget(id) => { root.minecraft-forget-preference(id); }
+                                begin-capture(id) => { root.minecraft-begin-capture(id); }
+                                cancel-capture => { root.minecraft-cancel-capture(); }
+                                captured-key(id, reported) => { root.minecraft-captured-key(id, reported); }
+                                captured-mouse(id, reported) => { root.minecraft-captured-mouse(id, reported); }
+                                retry-languages => { root.minecraft-retry-languages(); }
+                            }
+                            } }
+                            Divider { }
+                            HorizontalLayout { spacing: 10px; alignment: center; vertical-stretch: 0;
+                                BodyText { text: root.minecraft-dirty ? GuiI18n.count("gui-minecraft-unsaved-count", root.minecraft-dirty-count) : GuiI18n.count("gui-minecraft-total-count", root.minecraft-total-count); color: root.minecraft-dirty ? Theme.accent : Theme.text-muted; horizontal-stretch: 1; wrap: word-wrap; }
+                                AppButton { text: GuiI18n.text("gui-discard-changes"); enabled: root.minecraft-dirty && !root.minecraft-saving; clicked => { root.minecraft-discard-defaults(); } }
+                                AppButton { text: GuiI18n.text("gui-save-changes"); tone: "primary"; enabled: root.minecraft-can-save && !root.minecraft-saving; clicked => { root.minecraft-save-defaults(); } }
+                            }
                         }
                         if root.workspace-tab == "Java" : VerticalLayout { spacing: 12px;
                             VerticalLayout { spacing: 6px;

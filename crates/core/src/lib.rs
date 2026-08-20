@@ -71,8 +71,8 @@ pub use linked_mods::{
 pub use loader::{IncompatibleMod, LoaderVersionChange, LoaderVersionPlan};
 pub use logging::{DEFAULT_LOG_DIRECTIVES, init_tracing};
 pub use minecraft_preferences::{
-    MinecraftPreferenceEntry, MinecraftPreferenceSnapshot, PreferenceChange, PreferenceEdit,
-    configured_minecraft_preferences,
+    MinecraftPreferenceEntry, MinecraftPreferencePreview, MinecraftPreferenceSnapshot,
+    PreferenceChange, PreferenceEdit, configured_minecraft_preferences,
 };
 pub use mods::{
     InstalledMods, InstancePackSource, ManagedModEntry, ManagedModSnapshot, MetadataAvailability,
@@ -166,6 +166,9 @@ pub use ephervex_model::{
     ARTIFACT_CACHE_LIMIT_PRESETS, ArtifactCacheLimit, ArtifactCacheLimitError, ByteUnit,
     ConnectionTarget, DEFAULT_ARTIFACT_CACHE_LIMIT_BYTES, JavaOverride, JvmSettings,
     MAX_ARTIFACT_CACHE_LIMIT_BYTES, ServerInstallation, ServerRelativePath, format_binary_bytes,
+};
+pub use ephervex_options::catalog::{
+    EnumValuePresentation, KeyBindingDefaultPresentation, PreferenceExclusion, PreferenceField,
 };
 pub use ephervex_options::{
     CompatibilitySource, ConfiguredPreference, ConfiguredPreferences, FiniteDecimal,

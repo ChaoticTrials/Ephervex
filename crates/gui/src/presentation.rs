@@ -9,8 +9,8 @@ use std::net::IpAddr;
 use ephervex_core::{
     ARTIFACT_CACHE_LIMIT_PRESETS, ArtifactCacheLimit, ArtifactCacheLimitError, ByteUnit,
     ClientRecord, DEFAULT_ARTIFACT_CACHE_LIMIT_BYTES, DiagnosticKind, DiagnosticScope,
-    LaunchAndConnectAvailability, NetworkAccess, PackAnalysis, PackSide, PreferenceKey,
-    RuntimeClassification, ServerRecord, ServerStatus, format_binary_bytes,
+    LaunchAndConnectAvailability, NetworkAccess, PackAnalysis, PackSide, RuntimeClassification,
+    ServerRecord, ServerStatus, format_binary_bytes,
 };
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use ephervex_model::{
@@ -358,11 +358,6 @@ pub fn validate_ip(value: &str, required: bool) -> ValidationResult {
     } else {
         invalid(&lookup("gui-ip-invalid"))
     }
-}
-
-#[must_use]
-pub fn known_vanilla_preferences() -> &'static [PreferenceKey] {
-    PreferenceKey::ALL
 }
 
 #[must_use]
@@ -868,16 +863,6 @@ mod tests {
         assert!(!validate_ip("localhost", true).valid);
         assert!(!validate_ip("", true).valid);
         assert!(validate_ip("", false).valid);
-    }
-
-    #[test]
-    fn only_known_vanilla_preferences_are_presented() {
-        let names = known_vanilla_preferences()
-            .iter()
-            .map(|key| key.as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(names.len(), PreferenceKey::ALL.len());
-        assert!(!names.iter().any(|name| name.starts_with("mod")));
     }
 
     #[test]

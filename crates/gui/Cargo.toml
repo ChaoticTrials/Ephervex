@@ -30,3 +30,8 @@ copypasta.workspace = true
 rfd.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+# A disposable launcher root, so the settings screen's save path can be proven
+# against a real configuration file rather than a stand-in for one.
+tempfile.workspace = true

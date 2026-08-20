@@ -15,14 +15,18 @@ use ephervex_core::live_diagnostics::TailedLine;
 use ephervex_core::{
     App, AuthEvent, AuthObserver, CancellationToken, ClientFolder, ClientModOutcome, ClientModPlan,
     CoreError, CoreResult, DiagnosticKind, DiagnosticRequest, DiagnosticScope, EulaStatus,
-    GlobalMinecraftPreferences, ImportRequest, LaunchAndConnectObserver, LaunchAndConnectOptions,
-    LaunchEvent, LaunchObserver, LaunchOptions, LinkedModOutcome, LinkedModPlan, LinkedModRequest,
-    LinkedTargetPlan, LinkedTargetResult, LinkedTargetState, LoginOptions, ManagedModEntry,
-    ManagedModSnapshot, MetadataAvailability, ModDetails, ModInstallPlan, ModMutability,
-    ModMutation, ModMutationPlan, ModSearchQuery, MutationRestriction, NewClient, NewServer,
-    OperationReporter, OptionalSelection, PackAnalysis, Paths, PlannedOutcome, PreferenceKey,
-    ProgressSink, SearchOptions, ServerCreateOptions, ServerEvent, ServerFolder,
-    ServerNetworkSettings, ServerObserver, SideRequirement,
+    ImportRequest, LaunchAndConnectObserver, LaunchAndConnectOptions, LaunchEvent, LaunchObserver,
+    LaunchOptions, LinkedModOutcome, LinkedModPlan, LinkedModRequest, LinkedTargetPlan,
+    LinkedTargetResult, LinkedTargetState, LoginOptions, ManagedModEntry, ManagedModSnapshot,
+    MetadataAvailability, ModDetails, ModInstallPlan, ModMutability, ModMutation, ModMutationPlan,
+    ModSearchQuery, MutationRestriction, NewClient, NewServer, OperationReporter,
+    OptionalSelection, PackAnalysis, Paths, PlannedOutcome, ProgressSink, SearchOptions,
+    ServerCreateOptions, ServerEvent, ServerFolder, ServerNetworkSettings, ServerObserver,
+    SideRequirement,
+};
+use ephervex_core::{
+    ConfiguredPreferences, LanguageAvailability, LanguageEntry, MinecraftPreferencePreview,
+    MinecraftPreferenceSnapshot, PreferenceEdit,
 };
 use ephervex_i18n::{Arg, lookup, lookup_args, lookup_attribute, lookup_attribute_args};
 use ephervex_model::{
@@ -268,11 +272,32 @@ pub enum Command {
         maximum_mib: u32,
         preferred_path: String,
     },
-    SetPreference {
-        key: PreferenceKey,
-        value: String,
+    /// Applies one whole draft of global Minecraft defaults, or none of it.
+    ///
+    /// A batch rather than a row: core validates every edit before writing
+    /// anything, so a draft carrying one unusable value leaves the
+    /// configuration exactly as it was.
+    SaveMinecraftPreferences {
+        edits: Vec<PreferenceEdit>,
     },
-    ResetPreference(PreferenceKey),
+    /// Resolves what one exact release would do with a draft nobody has saved.
+    ///
+    /// `generation` is minted by the controller when the request is sent, so a
+    /// late answer for a release the user has already moved off can be
+    /// discarded instead of being rendered over the current one.
+    PreviewMinecraftPreferences {
+        generation: u64,
+        minecraft: String,
+        draft: ConfiguredPreferences,
+        language: LanguageAvailability,
+    },
+    /// Resolves one release's own language catalog for the settings screen.
+    ///
+    /// Carries a `generation` for the same staleness reason as the preview.
+    LoadMinecraftLanguages {
+        generation: u64,
+        minecraft: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -319,7 +344,8 @@ pub struct Snapshot {
     pub instances: Vec<InstancePresentation>,
     pub servers: Vec<ServerPresentation>,
     pub accounts: Vec<AccountData>,
-    pub preferences: Vec<PreferenceData>,
+    /// Every shipped product preference and what is configured for it.
+    pub minecraft_preferences: MinecraftPreferenceSnapshot,
     pub settings: SettingsData,
     pub eula: EulaData,
 }
@@ -331,16 +357,6 @@ pub struct AccountData {
     pub kind: String,
     pub is_default: bool,
     pub credential_state: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct PreferenceData {
-    pub key: String,
-    pub label: String,
-    pub value: String,
-    pub customized: bool,
-    pub kind: String,
-    pub syntax: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -699,6 +715,39 @@ pub struct JavaData {
 pub enum Event {
     Snapshot(Snapshot),
     MinecraftReleases(Vec<String>),
+    /// One save of the global Minecraft defaults reached a terminal outcome.
+    ///
+    /// Always sent, whichever way the batch ended, because the settings
+    /// screen disables itself while a save is in flight and only a completion
+    /// may release that. A generic error carries no such promise: it can come
+    /// from any unrelated background work, so it must never be read as this
+    /// save finishing.
+    ///
+    /// On success it follows the refreshed snapshot, so a receiver acting on
+    /// it has already seen what core confirmed. On failure core wrote nothing
+    /// and there is no snapshot to send, so the draft the user still has is
+    /// the correct thing to keep.
+    MinecraftPreferencesSaveFinished {
+        succeeded: bool,
+    },
+    /// What one exact release would do with the draft that was previewed.
+    ///
+    /// A receiver must discard this unless `generation` still names the
+    /// request it is waiting on: switching release and back mints a new
+    /// generation, so the first request's late answer stays refusable even
+    /// though its release matches again.
+    MinecraftPreferencePreview {
+        generation: u64,
+        minecraft: String,
+        preview: MinecraftPreferencePreview,
+    },
+    /// One release's language catalog, or `None` when it could not be
+    /// resolved. Checked against `generation` exactly like the preview.
+    MinecraftLanguages {
+        generation: u64,
+        minecraft: String,
+        languages: Option<Vec<LanguageEntry>>,
+    },
     LoaderVersions {
         form: String,
         loader: LoaderKind,
@@ -1884,31 +1933,100 @@ fn run_worker(
                     Err(error) => send_error(&events, &error),
                 }
             }
-            Command::SetPreference { key, value } => {
-                let result = app.set_minecraft_preference(key, &value).map(|_| ());
-                match result {
+            Command::SaveMinecraftPreferences { edits } => {
+                let outcome = app.save_global_minecraft_preferences(&edits);
+                let succeeded = outcome.is_ok();
+                match outcome {
                     Ok(()) => {
                         let _ = events.send(Event::Toast {
-                            message: lookup("gui-minecraft-default-saved"),
+                            message: lookup("gui-minecraft-defaults-saved"),
                             error: false,
                         });
+                        // The snapshot first, so the confirmed baseline is in
+                        // place before the draft is reconciled against it.
                         send_snapshot(&app, &events);
+                    }
+                    // The batch is validated before anything is written, so a
+                    // refusal leaves the configuration exactly as it was and
+                    // the user keeps the draft they still have, with the
+                    // reason for the refusal.
+                    Err(error) => send_error(&events, &error),
+                }
+                let _ = events.send(Event::MinecraftPreferencesSaveFinished { succeeded });
+            }
+            Command::PreviewMinecraftPreferences {
+                generation,
+                minecraft,
+                draft,
+                language,
+            } => {
+                // Uses whatever compatibility knowledge is already cached and
+                // never reaches the network, so a preview cannot make the
+                // settings screen wait on a metadata host.
+                let _ = runtime.block_on(app.cached_minecraft_options());
+                match app.preview_minecraft_preference_draft(&minecraft, &draft, language) {
+                    Ok(preview) => {
+                        let _ = events.send(Event::MinecraftPreferencePreview {
+                            generation,
+                            minecraft,
+                            preview,
+                        });
                     }
                     Err(error) => send_error(&events, &error),
                 }
             }
-            Command::ResetPreference(key) => match app.reset_minecraft_preference(key) {
-                Ok(()) => {
-                    let _ = events.send(Event::Toast {
-                        message: lookup("gui-minecraft-default-reset"),
-                        error: false,
-                    });
-                    send_snapshot(&app, &events);
-                }
-                Err(error) => send_error(&events, &error),
-            },
+            Command::LoadMinecraftLanguages {
+                generation,
+                minecraft,
+            } => {
+                load_language_catalog(app.paths().clone(), generation, minecraft, &events);
+            }
         }
     }
+}
+
+/// Resolves one release's language catalog and reports it back.
+///
+/// On its own thread for the same reason warming has one: resolving may fetch
+/// Mojang metadata, and the command loop must stay responsive. A failure is
+/// reported as "no catalog" rather than as an error, because it concerns
+/// exactly one preference and must leave every other one editable.
+fn load_language_catalog(paths: Paths, generation: u64, minecraft: String, events: &Sender<Event>) {
+    let spawned = events.clone();
+    let requested = minecraft.clone();
+    if let Err(error) = thread::Builder::new()
+        .name("ephervex-language-list".to_owned())
+        .spawn(move || {
+            let languages = language_catalog_of(paths, &requested);
+            let _ = spawned.send(Event::MinecraftLanguages {
+                generation,
+                minecraft: requested,
+                languages,
+            });
+        })
+    {
+        tracing::warn!(%error, "could not schedule language catalog resolution");
+        let _ = events.send(Event::MinecraftLanguages {
+            generation,
+            minecraft,
+            languages: None,
+        });
+    }
+}
+
+/// One release's languages, or `None` when nothing could be resolved.
+fn language_catalog_of(paths: Paths, minecraft: &str) -> Option<Vec<LanguageEntry>> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .inspect_err(|error| tracing::warn!(%error, "could not start language catalog resolution"))
+        .ok()?;
+    let app = App::open_at(paths)
+        .inspect_err(|error| tracing::warn!(%error, "could not open the language catalog cache"))
+        .ok()?;
+    runtime
+        .block_on(app.minecraft_language_catalog(minecraft))
+        .map(|catalog| catalog.languages)
 }
 
 fn warm_language_catalog(paths: Paths, minecraft: &str) {
@@ -2013,15 +2131,10 @@ fn snapshot(app: &App) -> Result<Snapshot, CoreError> {
             },
         })
         .collect();
-    let loaded = app.minecraft_preferences();
-    let inherited = GlobalMinecraftPreferences::default();
-    let preferences = PreferenceKey::ALL
-        .iter()
-        .map(|key| preference_data(*key, &loaded.preferences, &inherited))
-        .collect();
-    if !loaded.rejected.is_empty() {
+    let minecraft_preferences = app.global_minecraft_preference_snapshot()?;
+    if !minecraft_preferences.unusable.is_empty() {
         tracing::warn!(
-            count = loaded.rejected.len(),
+            count = minecraft_preferences.unusable.len(),
             "some configured Minecraft preferences are invalid"
         );
     }
@@ -2029,7 +2142,7 @@ fn snapshot(app: &App) -> Result<Snapshot, CoreError> {
         instances: instance_rows,
         servers: server_rows,
         accounts,
-        preferences,
+        minecraft_preferences,
         settings: application_settings(app)?,
         eula: eula_data(&app.server_eula_status()),
     })
@@ -2171,27 +2284,6 @@ const fn origin(is_override: bool) -> SettingOrigin {
         SettingOrigin::Override
     } else {
         SettingOrigin::Default
-    }
-}
-
-fn preference_data(
-    key: PreferenceKey,
-    preferences: &GlobalMinecraftPreferences,
-    inherited: &GlobalMinecraftPreferences,
-) -> PreferenceData {
-    let customized = preferences.is_managed(key);
-    PreferenceData {
-        key: key.as_str().to_owned(),
-        label: preference_label(key),
-        value: if customized {
-            preferences.value(key)
-        } else {
-            inherited.value(key)
-        }
-        .to_setting_value(),
-        customized,
-        kind: preference_kind(key).to_owned(),
-        syntax: key.value_syntax().to_owned(),
     }
 }
 
@@ -3917,28 +4009,6 @@ fn eula_data(status: &EulaStatus) -> EulaData {
     }
 }
 
-fn preference_label(key: PreferenceKey) -> String {
-    match key {
-        PreferenceKey::GuiScale => lookup("gui-preference-gui-scale"),
-        PreferenceKey::Language => lookup("gui-preference-language"),
-        PreferenceKey::Fullscreen => lookup("gui-preference-fullscreen"),
-        PreferenceKey::WindowSize => lookup("gui-preference-window-size"),
-        PreferenceKey::Fov => lookup("gui-preference-fov"),
-        PreferenceKey::RenderDistance => lookup("gui-preference-render-distance"),
-        PreferenceKey::SimulationDistance => lookup("gui-preference-simulation-distance"),
-    }
-}
-
-fn preference_kind(key: PreferenceKey) -> &'static str {
-    match key {
-        PreferenceKey::Fullscreen => "boolean",
-        PreferenceKey::GuiScale => "choice",
-        PreferenceKey::Fov => "slider",
-        PreferenceKey::RenderDistance | PreferenceKey::SimulationDistance => "integer",
-        PreferenceKey::Language | PreferenceKey::WindowSize => "text",
-    }
-}
-
 fn scope_parts(scope: DiagnosticScope) -> (&'static str, String) {
     match scope {
         DiagnosticScope::Client(id) => ("client", id.to_string()),
@@ -4141,21 +4211,6 @@ mod tests {
         assert!(!rendered.contains("{$"));
         assert!(!rendered.contains("{ $"));
         assert!(rendered.contains("Expected"));
-    }
-
-    #[test]
-    fn unmanaged_remembered_values_are_presented_as_inherited_defaults() {
-        let loaded = GlobalMinecraftPreferences::from_settings([("render_distance", false, "16")]);
-        let inherited = GlobalMinecraftPreferences::default();
-
-        let row = preference_data(
-            PreferenceKey::RenderDistance,
-            &loaded.preferences,
-            &inherited,
-        );
-
-        assert!(!row.customized);
-        assert_eq!(row.value, "12");
     }
 
     #[test]
