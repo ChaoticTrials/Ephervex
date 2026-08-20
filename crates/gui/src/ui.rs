@@ -215,9 +215,7 @@ slint::slint! {
         section-heading: string,
         editor: string,
         advanced: bool,
-        managed: bool,
-        can-manage: bool,
-        manage-hint: string,
+        overridden: bool,
         state-text: string,
         can-reset: bool,
         dirty: bool,
@@ -995,7 +993,6 @@ slint::slint! {
         in property <bool> compact;
         in property <bool> capturing;
         in property <bool> languages-available;
-        callback set-managed(string, bool);
         callback set-boolean(string, bool);
         callback set-number(string, float);
         callback edit-number(string, string);
@@ -1047,24 +1044,13 @@ slint::slint! {
                                 spacing: 8px;
                                 Text { text: root.item.label; color: Theme.text; font-size: Theme.row-heading-size; font-weight: 600; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
                                 if root.item.advanced : Pill { text: GuiI18n.text("gui-minecraft-advanced"); tone-color: Theme.accent-secondary; }
+                                if root.item.overridden : Pill { text: GuiI18n.text("gui-minecraft-state-overridden"); tone-color: Theme.success; }
                                 if root.item.dirty : Pill { text: GuiI18n.text("gui-minecraft-unsaved"); tone-color: Theme.accent; }
                             }
                             Text { text: root.item.technical-id; color: Theme.text-muted; font-size: Theme.caption-size; font-family: "monospace"; overflow: elide; }
                         }
                         VerticalLayout { alignment: center; horizontal-stretch: 0;
                             CompatibilityBadge { text: root.item.status; kind: root.item.status-kind; detail: root.item.status-detail; }
-                        }
-                        HorizontalLayout {
-                            spacing: 8px;
-                            horizontal-stretch: 0;
-                            alignment: end;
-                            if !root.compact : Text { text: GuiI18n.text("gui-minecraft-manage"); color: root.item.can-manage ? Theme.text-secondary : Theme.text-muted; font-size: Theme.label-size; vertical-alignment: center; horizontal-alignment: right; }
-                            Toggle {
-                                accessible-name: GuiI18n.values("gui-minecraft-manage-row", GuiI18n.text("gui-minecraft-manage"), root.item.label);
-                                checked: root.item.managed;
-                                enabled: root.item.can-manage;
-                                toggled(value) => { root.set-managed(root.item.id, value); }
-                            }
                         }
                     }
                     HorizontalLayout {
@@ -1169,7 +1155,7 @@ slint::slint! {
                         // Never elided: which of absent, chosen, and applied
                         // a row is in is the sentence this screen exists to
                         // make legible, and the spacer beside it can shrink.
-                        BodyText { text: root.item.state-text; color: Theme.text-muted; horizontal-stretch: 0; }
+                        if root.item.state-text != "" : BodyText { text: root.item.state-text; color: Theme.text-muted; horizontal-stretch: 0; }
                         if root.item.can-reset : AppButton {
                             text: GuiI18n.text("gui-minecraft-forget");
                             min-width: 116px;
@@ -1824,7 +1810,6 @@ slint::slint! {
         callback minecraft-set-query(string);
         callback minecraft-set-show-advanced(bool);
         callback minecraft-set-preview-release(string);
-        callback minecraft-set-managed(string, bool);
         callback minecraft-set-boolean(string, bool);
         callback minecraft-set-number(string, float);
         callback minecraft-edit-number(string, string);
@@ -2262,7 +2247,6 @@ slint::slint! {
                                 compact: root.compact-layout;
                                 capturing: root.minecraft-capturing-id == row.id;
                                 languages-available: root.minecraft-languages-available;
-                                set-managed(id, on) => { root.minecraft-set-managed(id, on); }
                                 set-boolean(id, on) => { root.minecraft-set-boolean(id, on); }
                                 set-number(id, value) => { root.minecraft-set-number(id, value); }
                                 edit-number(id, value) => { root.minecraft-edit-number(id, value); }

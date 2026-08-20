@@ -2059,15 +2059,6 @@ fn register_minecraft_editors(
     let handle = ui.as_weak();
     let state = Rc::clone(minecraft);
     let sender = commands.clone();
-    ui.on_minecraft_set_managed(move |id, managed| {
-        edit_minecraft_draft(&handle, &state, &sender, &id, |model, id| {
-            model.set_managed(id, managed);
-        });
-    });
-
-    let handle = ui.as_weak();
-    let state = Rc::clone(minecraft);
-    let sender = commands.clone();
     ui.on_minecraft_set_boolean(move |id, on| {
         edit_minecraft_draft(&handle, &state, &sender, &id, |model, id| {
             model.set_boolean(id, on);
@@ -4043,13 +4034,26 @@ mod tests {
     }
 
     #[test]
-    fn minecraft_defaults_separate_management_from_the_value_and_never_persist_per_row() {
+    fn minecraft_defaults_have_one_axis_and_never_persist_per_row() {
         let source = include_str!("ui.rs");
-        // Management and the value are two controls, because a preference
-        // Ephervex does not apply is not the same as a toggle set to false.
-        assert!(source.contains("checked: root.item.managed;"));
-        assert!(source.contains("enabled: root.item.can-manage;"));
+        // One axis: the value is the override. There is no second control
+        // asking whether the value the user just chose should count.
         assert!(source.contains("checked: root.item.bool-value;"));
+        // The management control this replaces must be gone from the row,
+        // along with every property that fed it.
+        let start = source
+            .find("component MinecraftPreferenceRowCard inherits Rectangle")
+            .expect("the preference row component");
+        let end = source[start..]
+            .find("\n    component ")
+            .map_or(source.len(), |offset| start + offset);
+        let row = &source[start..end];
+        assert!(!row.contains("root.item.managed"));
+        assert!(!row.contains("can-manage"));
+        assert!(!row.contains("manage-hint"));
+        assert!(!row.contains("set-managed"));
+        assert!(row.contains("root.item.overridden"));
+
         // One draft, saved as one batch. No row carries its own persistence.
         assert!(source.contains("root.minecraft-save-defaults()"));
         assert!(source.contains("root.minecraft-discard-defaults()"));

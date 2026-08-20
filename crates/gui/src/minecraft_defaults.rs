@@ -429,38 +429,61 @@ fn humanize_words(text: &str) -> String {
 
 /// What the screen currently holds for one preference.
 ///
-/// The three states core distinguishes, in one shape: nothing at all
-/// (`value: None`), a value that is not applied, and a value that is. A
-/// toggle's `Boolean(false)` and management being off are separate facts here
-/// for exactly the reason they are separate in core.
+/// What the screen holds for one preference.
+///
+/// The product has one axis: a preference either has an override this build
+/// applies, or it has none. Choosing a value is what creates the override and
+/// Reset is what removes it, so there is no second action to perform and no
+/// state between the two.
+///
+/// `managed` is kept because configuration can still describe one: a value
+/// stored by an older Ephervex that was deliberately not applied. That is read
+/// faithfully and left alone, and is never something this screen produces. A
+/// toggle's `Boolean(false)` is a real override, as distinct from having none
+/// as it has always been.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DraftState {
     /// Whether Ephervex applies this preference to new instances.
     pub managed: bool,
-    /// The chosen value, or `None` when Ephervex has no opinion at all.
+    /// The stored value, or `None` when nothing is stored at all.
     pub value: Option<MinecraftPreferenceValue>,
 }
 
 impl DraftState {
-    /// Whether Ephervex has no opinion about this preference.
+    /// Whether this build applies a value here.
+    ///
+    /// A value configuration retains without applying is not an override: the
+    /// row reads as having none, and what is stored stays stored until that
+    /// exact row is edited or reset.
+    #[must_use]
+    pub const fn is_overridden(&self) -> bool {
+        self.managed && self.value.is_some()
+    }
+
+    /// Whether anything is stored for this preference at all.
     #[must_use]
     pub const fn is_absent(&self) -> bool {
         self.value.is_none()
     }
+
+    /// An override at one value.
+    #[must_use]
+    const fn overriding(value: MinecraftPreferenceValue) -> Self {
+        Self {
+            managed: true,
+            value: Some(value),
+        }
+    }
 }
 
-/// How one row's value reached the screen.
+/// Whether a row currently overrides what Minecraft would do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueOrigin {
-    /// Chosen and applied to new instances.
-    Managed,
-    /// Chosen, and deliberately not applied.
-    Remembered,
-    /// Nothing is chosen; the catalog's proven default is shown so the row is
-    /// not blank. It is not stored, and opening this screen does not store it.
-    CatalogDefault,
-    /// Nothing is chosen and the catalog proved no default either.
-    Unset,
+    /// This build applies the value shown.
+    Overridden,
+    /// This build applies nothing here, so the row shows what the catalog
+    /// proved Minecraft does. Showing it stores nothing.
+    NotOverridden,
 }
 
 impl ValueOrigin {
@@ -468,10 +491,8 @@ impl ValueOrigin {
     #[must_use]
     pub const fn message_id(self) -> &'static str {
         match self {
-            Self::Managed => "gui-minecraft-state-managed",
-            Self::Remembered => "gui-minecraft-state-remembered",
-            Self::CatalogDefault => "gui-minecraft-state-default",
-            Self::Unset => "gui-minecraft-state-unset",
+            Self::Overridden => "gui-minecraft-state-overridden",
+            Self::NotOverridden => "gui-minecraft-state-not-overridden",
         }
     }
 }
@@ -707,10 +728,13 @@ impl MinecraftDefaultsModel {
         self.overlay
             .iter()
             .map(|(id, state)| match &state.value {
+                // Choosing a value is what creates the override, so every
+                // value this screen sends is one it applies. There is no edit
+                // it can make that records a value without applying it.
                 Some(value) => PreferenceEdit {
                     id: id.clone(),
                     change: PreferenceChange::Set {
-                        managed: state.managed,
+                        managed: true,
                         value: value.clone(),
                     },
                 },
@@ -762,18 +786,23 @@ impl MinecraftDefaultsModel {
     /// proven default, else nothing.
     #[must_use]
     pub fn shown_value(&self, id: &PreferenceId) -> Option<MinecraftPreferenceValue> {
-        self.state_of(id).value.or_else(|| self.catalog_default(id))
+        let state = self.state_of(id);
+        if state.is_overridden() {
+            return state.value;
+        }
+        // Including for a value configuration retains without applying: the
+        // row is not overridden, so it shows what Minecraft would do rather
+        // than a value nothing is going to write.
+        self.catalog_default(id)
     }
 
-    /// How one row's shown value came to be there.
+    /// Whether this row overrides what Minecraft would do.
     #[must_use]
     pub fn origin_of(&self, id: &PreferenceId) -> ValueOrigin {
-        let state = self.state_of(id);
-        match (state.value.is_some(), state.managed) {
-            (true, true) => ValueOrigin::Managed,
-            (true, false) => ValueOrigin::Remembered,
-            (false, _) if self.catalog_default(id).is_some() => ValueOrigin::CatalogDefault,
-            (false, _) => ValueOrigin::Unset,
+        if self.state_of(id).is_overridden() {
+            ValueOrigin::Overridden
+        } else {
+            ValueOrigin::NotOverridden
         }
     }
 }
@@ -887,48 +916,11 @@ pub enum CaptureOutcome {
 }
 
 impl MinecraftDefaultsModel {
-    /// Applies or stops applying one preference.
-    ///
-    /// Turning management on needs a value, and takes the one the row is
-    /// already showing - the user's own, or the catalog's proven default,
-    /// which becomes an explicit choice at that moment. A row with neither has
-    /// nothing to apply, so the request is refused rather than inventing one.
-    pub fn set_managed(&mut self, id: &PreferenceId, managed: bool) -> bool {
-        let state = self.state_of(id);
-        if !managed {
-            // Keeping the value is the whole difference between "stop applying
-            // this" and "forget it": switching back on restores the choice.
-            self.set_state(
-                id,
-                DraftState {
-                    managed: false,
-                    value: state.value,
-                },
-            );
-            return true;
-        }
-        let Some(value) = state.value.or_else(|| self.catalog_default(id)) else {
-            return false;
-        };
-        self.set_state(
-            id,
-            DraftState {
-                managed: true,
-                value: Some(value),
-            },
-        );
-        true
-    }
-
-    /// Chooses a boolean value, leaving management exactly as it is.
+    /// Chooses a boolean value, which overrides the preference.
     pub fn set_boolean(&mut self, id: &PreferenceId, on: bool) {
-        let managed = self.state_of(id).managed;
         self.set_state(
             id,
-            DraftState {
-                managed,
-                value: Some(MinecraftPreferenceValue::Boolean(on)),
-            },
+            DraftState::overriding(MinecraftPreferenceValue::Boolean(on)),
         );
     }
 
@@ -945,14 +937,7 @@ impl MinecraftDefaultsModel {
             return;
         };
         let value = MinecraftPreferenceValue::Enum(chosen.technical_value.clone());
-        let managed = self.state_of(id).managed;
-        self.set_state(
-            id,
-            DraftState {
-                managed,
-                value: Some(value),
-            },
-        );
+        self.set_state(id, DraftState::overriding(value));
     }
 
     /// Chooses a language by position in the release's own catalog.
@@ -964,14 +949,7 @@ impl MinecraftDefaultsModel {
             return;
         };
         let value = MinecraftPreferenceValue::LanguageCode(entry.code.clone());
-        let managed = self.state_of(id).managed;
-        self.set_state(
-            id,
-            DraftState {
-                managed,
-                value: Some(value),
-            },
-        );
+        self.set_state(id, DraftState::overriding(value));
     }
 
     /// Chooses a numeric value from a bounded control.
@@ -1000,14 +978,7 @@ impl MinecraftDefaultsModel {
             return;
         };
         self.pending.remove(id);
-        let managed = self.state_of(id).managed;
-        self.set_state(
-            id,
-            DraftState {
-                managed,
-                value: Some(value),
-            },
-        );
+        self.set_state(id, DraftState::overriding(value));
     }
 
     /// Records what a numeric field currently holds.
@@ -1023,14 +994,7 @@ impl MinecraftDefaultsModel {
             return;
         };
         if let Ok(value) = read_number(&descriptor, text) {
-            let managed = self.state_of(id).managed;
-            self.set_state(
-                id,
-                DraftState {
-                    managed,
-                    value: Some(value),
-                },
-            );
+            self.set_state(id, DraftState::overriding(value));
         }
     }
 
@@ -1044,26 +1008,15 @@ impl MinecraftDefaultsModel {
             },
         );
         if let Ok(value) = read_window_size(width, height) {
-            let managed = self.state_of(id).managed;
-            self.set_state(
-                id,
-                DraftState {
-                    managed,
-                    value: Some(value),
-                },
-            );
+            self.set_state(id, DraftState::overriding(value));
         }
     }
 
     /// Records free text for the one presentation kind that takes it.
     pub fn set_text(&mut self, id: &PreferenceId, text: &str) {
-        let managed = self.state_of(id).managed;
         self.set_state(
             id,
-            DraftState {
-                managed,
-                value: Some(MinecraftPreferenceValue::Text(text.to_owned())),
-            },
+            DraftState::overriding(MinecraftPreferenceValue::Text(text.to_owned())),
         );
     }
 
@@ -1380,13 +1333,9 @@ impl MinecraftDefaultsModel {
     }
 
     fn set_binding(&mut self, id: &PreferenceId, binding: InputBinding) {
-        let managed = self.state_of(id).managed;
         self.set_state(
             id,
-            DraftState {
-                managed,
-                value: Some(MinecraftPreferenceValue::KeyBinding(binding)),
-            },
+            DraftState::overriding(MinecraftPreferenceValue::KeyBinding(binding)),
         );
     }
 
@@ -1566,7 +1515,14 @@ impl MinecraftDefaultsModel {
         };
         let drafted = self.entries.iter().find_map(|entry| {
             let id = PreferenceId::parse(entry.id()).ok()?;
-            match self.state_of(&id).value {
+            let state = self.state_of(&id);
+            // Same rule as the drafted values themselves: a language
+            // configuration retains without applying is not the language this
+            // screen is choosing, so it settles nothing about a release.
+            if !state.is_overridden() {
+                return None;
+            }
+            match state.value {
                 Some(MinecraftPreferenceValue::LanguageCode(code)) => Some(code),
                 _ => None,
             }
@@ -1624,17 +1580,19 @@ impl MinecraftDefaultsModel {
                 continue;
             };
             let state = self.state_of(&id);
+            // Only what this screen would actually apply. A value
+            // configuration retains without applying is not part of the
+            // question being asked: the row shows what Minecraft would do, so
+            // answering about the retained value instead would attach a
+            // compatibility error to a value nothing is going to write and
+            // that the user cannot even see.
+            if !state.is_overridden() {
+                continue;
+            }
             let Some(value) = state.value else {
                 continue;
             };
-            draft.insert(
-                id,
-                if state.managed {
-                    ConfiguredPreference::managed(value)
-                } else {
-                    ConfiguredPreference::remembered(value)
-                },
-            );
+            draft.insert(id, ConfiguredPreference::managed(value));
         }
         draft
     }
@@ -1859,14 +1817,17 @@ impl MinecraftDefaultsModel {
             section_heading: section_heading.into(),
             editor: editor.as_str().into(),
             advanced: descriptor.tier == PresentationTier::Advanced,
-            managed: state.managed,
-            can_manage: shown.is_some(),
-            manage_hint: if shown.is_some() {
-                SharedString::default()
-            } else {
-                lookup("gui-minecraft-manage-needs-value").into()
+            overridden: origin == ValueOrigin::Overridden,
+            // An overridden row says so with its pill and its Reset action,
+            // so the caption is only worth spending a line on for a row that
+            // is showing what Minecraft would do.
+            state_text: match origin {
+                ValueOrigin::Overridden => SharedString::default(),
+                ValueOrigin::NotOverridden => lookup(origin.message_id()).into(),
             },
-            state_text: lookup(origin.message_id()).into(),
+            // Offered whenever configuration holds anything for this row,
+            // including a value an older Ephervex stored without applying, so
+            // there is always a way to clear it.
             can_reset: !state.is_absent(),
             dirty: self.overlay.contains_key(&id),
             enum_index: -1,
@@ -2211,7 +2172,7 @@ mod tests {
         let model = loaded_model();
         let fov = id("fov");
 
-        assert_eq!(model.origin_of(&fov), ValueOrigin::CatalogDefault);
+        assert_eq!(model.origin_of(&fov), ValueOrigin::NotOverridden);
         assert_eq!(model.state_of(&fov), DraftState::default());
         assert_eq!(
             model.shown_value(&fov),
@@ -2225,52 +2186,60 @@ mod tests {
     }
 
     #[test]
-    fn absent_remembered_and_managed_stay_three_separate_states() {
+    fn choosing_the_value_the_catalog_proves_is_still_an_explicit_override() {
+        let mut model = loaded_model();
+        let fov = id("fov");
+        let default = model.catalog_default(&fov).expect("a proven default");
+
+        model.set_number(&fov, 70.0);
+
+        assert_eq!(model.state_of(&fov).value, Some(default));
+        assert!(
+            model.state_of(&fov).is_overridden(),
+            "an explicit choice is an override even where it agrees with Minecraft"
+        );
+        assert_eq!(
+            model.edits().len(),
+            1,
+            "and it is saved rather than optimized away"
+        );
+    }
+
+    #[test]
+    fn a_row_is_either_overridden_or_not_and_choosing_a_value_is_what_overrides_it() {
         let mut model = loaded_model();
         let scale = id("gui_scale");
 
-        assert_eq!(model.origin_of(&scale), ValueOrigin::CatalogDefault);
+        assert_eq!(model.origin_of(&scale), ValueOrigin::NotOverridden);
+        assert!(model.state_of(&scale).is_absent());
 
+        // One action, not two: the value is the override.
         model.set_number_text(&scale, "3");
-        assert_eq!(
-            model.origin_of(&scale),
-            ValueOrigin::Remembered,
-            "choosing a value does not by itself apply it"
-        );
+        assert_eq!(model.origin_of(&scale), ValueOrigin::Overridden);
+        assert!(model.state_of(&scale).is_overridden());
         assert_eq!(
             model.state_of(&scale).value,
             Some(MinecraftPreferenceValue::Integer(3))
         );
 
-        assert!(model.set_managed(&scale, true));
-        assert_eq!(model.origin_of(&scale), ValueOrigin::Managed);
-
-        model.set_managed(&scale, false);
-        assert_eq!(
-            model.state_of(&scale).value,
-            Some(MinecraftPreferenceValue::Integer(3)),
-            "turning management off keeps the chosen value"
-        );
-
         model.reset_row(&scale);
         assert_eq!(
             model.origin_of(&scale),
-            ValueOrigin::CatalogDefault,
-            "reset forgets the preference entirely"
+            ValueOrigin::NotOverridden,
+            "and Reset is the only thing that takes it away"
         );
         assert!(model.state_of(&scale).is_absent());
     }
 
     #[test]
-    fn a_toggle_set_to_false_is_not_the_same_as_management_being_off() {
+    fn a_toggle_set_to_false_is_a_real_override_rather_than_the_absence_of_one() {
         let mut model = loaded_model();
         let fullscreen = id("fullscreen");
 
         model.set_boolean(&fullscreen, false);
-        assert!(model.set_managed(&fullscreen, true));
 
         let state = model.state_of(&fullscreen);
-        assert!(state.managed);
+        assert!(state.is_overridden(), "false is a value like any other");
         assert_eq!(state.value, Some(MinecraftPreferenceValue::Boolean(false)));
         assert_eq!(
             model.edits(),
@@ -2283,23 +2252,21 @@ mod tests {
     }
 
     #[test]
-    fn management_cannot_be_turned_on_for_a_preference_with_no_proven_default() {
+    fn a_row_with_no_proven_default_starts_blank_and_overrides_once_a_value_is_given() {
         let mut model = loaded_model();
         // The catalog proves no default window size: it would be the display's.
         let window = id("window_size");
+        assert_eq!(model.origin_of(&window), ValueOrigin::NotOverridden);
 
-        assert!(
-            !model.set_managed(&window, true),
-            "there is nothing to apply, and nothing may be invented"
-        );
         assert!(model.state_of(&window).is_absent());
-        assert!(!model.is_dirty());
+        assert!(!model.is_dirty(), "and showing the row stores nothing");
 
         model.set_window_size(&window, "1280", "720");
         assert!(
-            model.set_managed(&window, true),
-            "a value the user chose makes it applicable"
+            model.state_of(&window).is_overridden(),
+            "one compound value, overriding in one action"
         );
+        assert_eq!(model.edits().len(), 1);
     }
 
     #[test]
@@ -2429,7 +2396,6 @@ mod tests {
     fn the_draft_becomes_one_batch_naming_only_what_changed() {
         let mut model = loaded_model();
         model.set_boolean(&id("fullscreen"), true);
-        model.set_managed(&id("fullscreen"), true);
         model.set_number(&id("sound_volume_music"), 25.0);
 
         let edits = model.edits();
@@ -2463,29 +2429,135 @@ mod tests {
         );
     }
 
-    #[test]
-    fn unmanaging_a_configured_preference_keeps_its_value_in_the_batch() {
-        let mut model = MinecraftDefaultsModel::new();
+    /// A snapshot in which one preference is configured the way an older
+    /// Ephervex could leave it: a value stored without being applied.
+    fn snapshot_with_retained_value(
+        name: &str,
+        value: &MinecraftPreferenceValue,
+    ) -> MinecraftPreferenceSnapshot {
         let mut snapshot = bundled_snapshot();
         for entry in &mut snapshot.entries {
-            if entry.id() == "gui_scale" {
-                entry.managed = true;
-                entry.value = Some(MinecraftPreferenceValue::Integer(2));
+            if entry.id() == name {
+                entry.managed = false;
+                entry.value = Some(value.clone());
             }
         }
-        model.apply_snapshot(snapshot);
+        snapshot
+    }
 
-        model.set_managed(&id("gui_scale"), false);
-        let edits = model.edits();
-        assert_eq!(edits.len(), 1);
+    #[test]
+    fn a_value_configuration_retains_without_applying_reads_as_not_overridden() {
+        let mut model = MinecraftDefaultsModel::new();
+        model.apply_snapshot(snapshot_with_retained_value(
+            "gui_scale",
+            &MinecraftPreferenceValue::Integer(2),
+        ));
+        let scale = id("gui_scale");
+
         assert_eq!(
-            edits[0].change,
-            PreferenceChange::Set {
-                managed: false,
-                value: MinecraftPreferenceValue::Integer(2)
-            },
-            "stopping application must not forget the value"
+            model.origin_of(&scale),
+            ValueOrigin::NotOverridden,
+            "nothing is applied here, so the row does not claim to override"
         );
+        assert_eq!(
+            model.shown_value(&scale),
+            model.catalog_default(&scale),
+            "and it shows what Minecraft would do rather than the retained value"
+        );
+        assert!(
+            !model.is_dirty() && model.edits().is_empty(),
+            "reading it changes nothing"
+        );
+    }
+
+    #[test]
+    fn a_retained_value_survives_a_save_that_does_not_name_its_row() {
+        let mut model = MinecraftDefaultsModel::new();
+        model.apply_snapshot(snapshot_with_retained_value(
+            "gui_scale",
+            &MinecraftPreferenceValue::Integer(2),
+        ));
+
+        model.set_boolean(&id("fullscreen"), true);
+        let edits = model.edits();
+
+        assert_eq!(edits.len(), 1, "only the row that was edited is named");
+        assert_eq!(edits[0].id.as_str(), "fullscreen");
+        assert!(
+            !edits.iter().any(|edit| edit.id.as_str() == "gui_scale"),
+            "so the retained value is left exactly as configuration has it"
+        );
+    }
+
+    #[test]
+    fn editing_a_retained_row_turns_it_into_an_applied_override() {
+        let mut model = MinecraftDefaultsModel::new();
+        model.apply_snapshot(snapshot_with_retained_value(
+            "gui_scale",
+            &MinecraftPreferenceValue::Integer(2),
+        ));
+
+        model.set_number_text(&id("gui_scale"), "4");
+
+        assert!(model.state_of(&id("gui_scale")).is_overridden());
+        assert_eq!(
+            model.edits(),
+            vec![ephervex_core::PreferenceEdit::manage(
+                id("gui_scale"),
+                MinecraftPreferenceValue::Integer(4)
+            )]
+        );
+    }
+
+    #[test]
+    fn resetting_a_retained_row_removes_it_rather_than_leaving_it_stored() {
+        let mut model = MinecraftDefaultsModel::new();
+        model.apply_snapshot(snapshot_with_retained_value(
+            "gui_scale",
+            &MinecraftPreferenceValue::Integer(2),
+        ));
+
+        model.reset_row(&id("gui_scale"));
+
+        assert_eq!(
+            model.edits(),
+            vec![ephervex_core::PreferenceEdit::reset(id("gui_scale"))],
+            "an explicit reset clears what configuration was holding"
+        );
+    }
+
+    #[test]
+    fn no_action_on_this_screen_can_store_a_value_without_applying_it() {
+        let mut model = MinecraftDefaultsModel::new();
+        model.apply_snapshot(snapshot_with_retained_value(
+            "gui_scale",
+            &MinecraftPreferenceValue::Integer(2),
+        ));
+
+        // One of every editor, plus a reset, plus a row left alone.
+        model.set_boolean(&id("fullscreen"), false);
+        model.set_number_text(&id("render_distance"), "16");
+        model.set_number(&id("sound_volume_master"), 40.0);
+        model.set_enumeration(&id("attack_indicator"), 2);
+        model.set_window_size(&id("window_size"), "1280", "720");
+        model.set_binding(
+            &id("keybind_sneak"),
+            InputBinding::Keyboard(PhysicalKey::F5),
+        );
+        model.set_text(&id("gui_scale"), "ignored");
+        model.reset_row(&id("gui_scale"));
+
+        for edit in model.edits() {
+            match edit.change {
+                PreferenceChange::Set { managed, .. } => {
+                    assert!(managed, "`{}` was stored without being applied", edit.id);
+                }
+                PreferenceChange::Reset => {}
+                PreferenceChange::Unmanage => {
+                    panic!("`{}` was unmanaged, which this screen cannot do", edit.id)
+                }
+            }
+        }
     }
 
     #[test]
@@ -2525,7 +2597,7 @@ mod tests {
         let mut snapshot = bundled_snapshot();
         for entry in &mut snapshot.entries {
             if entry.id() == "render_distance" {
-                entry.managed = false;
+                entry.managed = true;
                 entry.value = Some(MinecraftPreferenceValue::Integer(24));
             }
         }
@@ -2949,7 +3021,7 @@ mod tests {
         let mut snapshot = bundled_snapshot();
         for entry in &mut snapshot.entries {
             if entry.id() == "render_distance" {
-                entry.managed = false;
+                entry.managed = true;
                 entry.value = Some(MinecraftPreferenceValue::Integer(24));
             }
         }
@@ -2966,7 +3038,6 @@ mod tests {
         let mut model = loaded_model();
         model.set_number_text(&id("render_distance"), "24");
         model.set_boolean(&id("fullscreen"), true);
-        model.set_managed(&id("fullscreen"), true);
         let submitted = model.begin_save().expect("a batch");
         assert!(model.is_saving());
 
@@ -3021,7 +3092,7 @@ mod tests {
         let mut snapshot = bundled_snapshot();
         for entry in &mut snapshot.entries {
             if entry.id() == "render_distance" {
-                entry.managed = false;
+                entry.managed = true;
                 entry.value = Some(MinecraftPreferenceValue::Integer(24));
             }
         }
@@ -3212,7 +3283,6 @@ mod tests {
     fn changing_the_previewed_release_moves_no_configured_value() {
         let mut model = loaded_model();
         model.set_number(&id("sound_volume_master"), 30.0);
-        model.set_managed(&id("sound_volume_master"), true);
         let before = model.edits();
 
         assert!(model.set_preview_release("1.20.1"));
@@ -3278,7 +3348,6 @@ mod tests {
     fn the_preview_is_asked_about_the_draft_rather_than_about_what_is_saved() {
         let mut model = loaded_model();
         model.set_boolean(&id("fullscreen"), true);
-        model.set_managed(&id("fullscreen"), true);
         model.set_number(&id("sound_volume_music"), 20.0);
 
         let draft = model.draft_preferences();
@@ -3291,8 +3360,90 @@ mod tests {
             draft
                 .get(&id("sound_volume_music"))
                 .map(|entry| entry.managed),
-            Some(false),
-            "a remembered value travels too, so its representability can be shown"
+            Some(true),
+            "choosing a value is what applies it, so both travel as applied"
+        );
+    }
+
+    #[test]
+    fn a_value_configuration_retains_without_applying_is_not_part_of_the_preview() {
+        let mut model = MinecraftDefaultsModel::new();
+        model.apply_snapshot(snapshot_with_retained_value(
+            "gui_scale",
+            &MinecraftPreferenceValue::Integer(3),
+        ));
+        model.set_boolean(&id("fullscreen"), true);
+
+        let draft = model.draft_preferences();
+
+        assert_eq!(
+            draft.get(&id("gui_scale")),
+            None,
+            "a value nothing is going to write is not part of the question"
+        );
+        assert_eq!(
+            draft.get(&id("fullscreen")).map(|entry| entry.managed),
+            Some(true),
+            "and an active override is, as something that would be applied"
+        );
+        assert_eq!(draft.len(), 1);
+    }
+
+    #[test]
+    fn a_retained_value_a_release_cannot_express_never_marks_the_row_unrepresentable() {
+        let mut model = MinecraftDefaultsModel::new();
+        // A binding no pre-1.13 release can store, retained without being
+        // applied by an older Ephervex.
+        model.apply_snapshot(snapshot_with_retained_value(
+            "keybind_attack",
+            &MinecraftPreferenceValue::KeyBinding(InputBinding::Mouse(MouseButton::Left)),
+        ));
+        model.set_preview_release("1.12.2");
+
+        let draft = model.draft_preferences();
+        assert!(
+            draft.get(&id("keybind_attack")).is_none(),
+            "core is never asked about a value this screen would not write"
+        );
+
+        // Core answering only about support, as it now would.
+        model.apply_preview(preview_of(
+            "1.12.2",
+            &[("keybind_attack", ReleaseSupport::Authoritative)],
+            &[],
+        ));
+
+        assert_eq!(
+            model.status_of(&id("keybind_attack")),
+            Some(CompatibilityStatus::Supported),
+            "the row must not report a problem with a value it is not showing"
+        );
+        assert_eq!(
+            model.origin_of(&id("keybind_attack")),
+            ValueOrigin::NotOverridden
+        );
+    }
+
+    #[test]
+    fn editing_a_retained_row_brings_it_back_into_the_preview() {
+        let mut model = MinecraftDefaultsModel::new();
+        model.apply_snapshot(snapshot_with_retained_value(
+            "gui_scale",
+            &MinecraftPreferenceValue::Integer(3),
+        ));
+        assert!(model.draft_preferences().get(&id("gui_scale")).is_none());
+
+        model.set_number_text(&id("gui_scale"), "4");
+
+        let draft = model.draft_preferences();
+        assert_eq!(
+            draft.get(&id("gui_scale")).map(|entry| entry.value.clone()),
+            Some(MinecraftPreferenceValue::Integer(4)),
+            "an override is asked about, and at the value the user chose"
+        );
+        assert_eq!(
+            draft.get(&id("gui_scale")).map(|entry| entry.managed),
+            Some(true)
         );
     }
 
@@ -3369,7 +3520,6 @@ mod tests {
 
         // Every other preference stays editable and saveable.
         model.set_boolean(&id("chat_colors"), false);
-        assert!(model.set_managed(&id("chat_colors"), true));
         assert!(model.can_save());
         assert!(
             model
@@ -3420,6 +3570,61 @@ mod tests {
             model.state_of(&id("language")).value,
             Some(MinecraftPreferenceValue::LanguageCode("de_de".to_owned())),
             "and the choice itself is untouched by which release is previewed"
+        );
+    }
+
+    #[test]
+    fn a_retained_language_settles_nothing_about_a_release() {
+        let mut model = MinecraftDefaultsModel::new();
+        // A code no release lists, retained without being applied.
+        model.apply_snapshot(snapshot_with_retained_value(
+            "language",
+            &MinecraftPreferenceValue::LanguageCode("qya_aa".to_owned()),
+        ));
+        model.select_category(4);
+        model.apply_languages(LanguageCatalogState::Available(official_languages()));
+
+        assert_eq!(
+            model.language_availability(),
+            ephervex_core::LanguageAvailability::Unverified,
+            "a language this screen is not applying cannot be absent from a release"
+        );
+        assert!(model.draft_preferences().get(&id("language")).is_none());
+
+        let row = status_row(&model, "language");
+        assert!(
+            row.notice.is_empty(),
+            "and the row reports no problem with a code it is not showing"
+        );
+        assert_eq!(model.origin_of(&id("language")), ValueOrigin::NotOverridden);
+    }
+
+    #[test]
+    fn choosing_a_language_makes_it_the_one_a_release_is_asked_about() {
+        let mut model = MinecraftDefaultsModel::new();
+        model.apply_snapshot(snapshot_with_retained_value(
+            "language",
+            &MinecraftPreferenceValue::LanguageCode("qya_aa".to_owned()),
+        ));
+        model.select_category(4);
+        model.apply_languages(LanguageCatalogState::Available(official_languages()));
+
+        model.set_language(&id("language"), 1);
+
+        assert_eq!(
+            model.state_of(&id("language")).value,
+            Some(MinecraftPreferenceValue::LanguageCode("de_de".to_owned()))
+        );
+        assert_eq!(
+            model.language_availability(),
+            ephervex_core::LanguageAvailability::Verified
+        );
+        assert_eq!(
+            model
+                .draft_preferences()
+                .get(&id("language"))
+                .map(|entry| entry.managed),
+            Some(true)
         );
     }
 
