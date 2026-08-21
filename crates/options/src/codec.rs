@@ -70,7 +70,17 @@ pub enum OptionCodec {
     /// An enumeration persisted as one of a fixed set of integer ids.
     EnumId { values: Vec<i64> },
     /// An enumeration persisted as one of a fixed set of string tokens.
-    EnumToken { tokens: Vec<String> },
+    ///
+    /// `quoted` says whether the release writes the token as a JSON string.
+    /// A release that saves its options by encoding each one with its codec
+    /// writes `renderClouds:"true"`; one that prints the token directly writes
+    /// `renderClouds:true`. Which it does is a fact about that release, not
+    /// about how modern it looks, so it travels with the codec.
+    EnumToken {
+        tokens: Vec<String>,
+        #[serde(default)]
+        quoted: bool,
+    },
 }
 
 /// A value on its way into one options file, in the release-neutral form the
@@ -166,12 +176,15 @@ impl OptionCodec {
                     Err(Unrepresentable::NotInDomain)
                 }
             }
-            (Self::EnumToken { tokens }, SettingValue::Text(token)) => {
-                if tokens.iter().any(|candidate| candidate == token) {
-                    Ok(token.clone())
-                } else {
-                    Err(Unrepresentable::NotInDomain)
+            (Self::EnumToken { tokens, quoted }, SettingValue::Text(token)) => {
+                if !tokens.iter().any(|candidate| candidate == token) {
+                    return Err(Unrepresentable::NotInDomain);
                 }
+                Ok(if *quoted {
+                    format!("\"{token}\"")
+                } else {
+                    token.clone()
+                })
             }
             (Self::KeyNameGlfw, SettingValue::KeyBinding(binding)) => Ok(binding.to_glfw_name()),
             (Self::KeyCodeLwjgl2, SettingValue::KeyBinding(binding)) => binding
@@ -209,7 +222,7 @@ impl OptionCodec {
                 max,
             } => offset.is_finite() && scale.is_finite() && *scale != 0.0 && bounded(*min, *max),
             Self::EnumId { values } => !values.is_empty(),
-            Self::EnumToken { tokens } => {
+            Self::EnumToken { tokens, .. } => {
                 !tokens.is_empty() && tokens.iter().all(|token| writable(token).is_ok())
             }
             _ => true,
@@ -363,9 +376,26 @@ mod tests {
                 },
             ),
             (
+                r#"{"kind":"enum_token","tokens":["left","right"],"quoted":false}"#,
+                OptionCodec::EnumToken {
+                    tokens: vec!["left".to_owned(), "right".to_owned()],
+                    quoted: false,
+                },
+            ),
+            (
+                r#"{"kind":"enum_token","tokens":["left","right"],"quoted":true}"#,
+                OptionCodec::EnumToken {
+                    tokens: vec!["left".to_owned(), "right".to_owned()],
+                    quoted: true,
+                },
+            ),
+            (
+                // A document written before releases were known to differ says
+                // nothing, which is the unquoted form every one of them used.
                 r#"{"kind":"enum_token","tokens":["left","right"]}"#,
                 OptionCodec::EnumToken {
                     tokens: vec!["left".to_owned(), "right".to_owned()],
+                    quoted: false,
                 },
             ),
         ];
@@ -391,17 +421,37 @@ mod tests {
     }
 
     #[test]
-    fn the_modern_field_of_view_is_written_in_degrees_as_the_game_writes_it() {
-        let modern = OptionCodec::Decimal {
+    fn a_plain_decimal_is_written_as_the_number_it_is() {
+        let plain = OptionCodec::Decimal {
             min: Some(30.0),
             max: Some(110.0),
         };
-        assert_eq!(modern.encode(&SettingValue::Decimal(70.0)).unwrap(), "70.0");
-        assert_eq!(modern.encode(&SettingValue::Decimal(82.5)).unwrap(), "82.5");
+        assert_eq!(plain.encode(&SettingValue::Decimal(70.0)).unwrap(), "70.0");
+        assert_eq!(plain.encode(&SettingValue::Decimal(82.5)).unwrap(), "82.5");
         assert_eq!(
-            modern.encode(&SettingValue::Decimal(120.0)),
+            plain.encode(&SettingValue::Decimal(120.0)),
             Err(Unrepresentable::OutOfRange)
         );
+    }
+
+    #[test]
+    fn a_token_is_quoted_only_where_the_release_writes_its_options_as_json() {
+        let tokens = vec!["fast".to_owned(), "true".to_owned()];
+        let raw = OptionCodec::EnumToken {
+            tokens: tokens.clone(),
+            quoted: false,
+        };
+        let json = OptionCodec::EnumToken {
+            tokens,
+            quoted: true,
+        };
+        let value = SettingValue::Text("true".to_owned());
+        assert_eq!(raw.encode(&value).unwrap(), "true");
+        assert_eq!(json.encode(&value).unwrap(), "\"true\"");
+        // The domain is the same either way; only how it is spelled differs.
+        let outside = SettingValue::Text("fancy".to_owned());
+        assert_eq!(raw.encode(&outside), Err(Unrepresentable::NotInDomain));
+        assert_eq!(json.encode(&outside), Err(Unrepresentable::NotInDomain));
     }
 
     #[test]
@@ -426,6 +476,7 @@ mod tests {
         };
         let tokens = OptionCodec::EnumToken {
             tokens: vec!["left".to_owned(), "right".to_owned()],
+            quoted: false,
         };
         assert_eq!(ids.encode(&SettingValue::Integer(2)).unwrap(), "2");
         assert_eq!(

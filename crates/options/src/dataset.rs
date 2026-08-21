@@ -92,6 +92,15 @@ pub struct SchemaFamily {
 pub struct ReleaseMapping {
     pub minecraft_version: String,
     pub schema: String,
+    /// The data version this release stamps into its own options file.
+    ///
+    /// The game reads it back to decide which of its historical fixes the rest
+    /// of the file still needs, so a file without one is treated as predating
+    /// every one of them. `None` where the generator could not read it, which
+    /// leaves a file this build creates without the line rather than carrying
+    /// a number from a different release.
+    #[serde(default)]
+    pub data_version: Option<i64>,
 }
 
 /// The generated compatibility dataset.
@@ -206,6 +215,16 @@ impl OptionsDataset {
         self.schemas
             .iter()
             .find(|schema| schema.id == mapping.schema)
+    }
+
+    /// The data version one release stamps into its own options file, when
+    /// the generator could read it.
+    #[must_use]
+    pub fn data_version_for(&self, minecraft_version: &str) -> Option<i64> {
+        self.releases
+            .iter()
+            .find(|release| release.minecraft_version == minecraft_version)?
+            .data_version
     }
 
     /// The representation one family gives one canonical setting.

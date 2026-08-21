@@ -26,10 +26,13 @@ use std::fmt;
 
 /// The `options.txt` key holding the release's own data version.
 ///
-/// Never written by Ephervex and never copied between releases: it tells the
-/// game which historical fixes to apply to the rest of the file, so a value
-/// from another release is worse than no value at all. It survives an edit for
-/// the same reason every other unmanaged line does.
+/// It tells the game which of its historical fixes the rest of the file still
+/// needs, so a value from another release is worse than no value at all. Two
+/// rules follow, and they are not the same rule: a file Ephervex creates is
+/// marked with the data version of the exact release it is for, because a file
+/// without one is read as predating every fix the game has ever shipped; a
+/// file that already exists keeps whatever marker it came with, which survives
+/// an edit for the same reason every other unmanaged line does.
 pub const VERSION_KEY: &str = "version";
 
 /// One line of an `options.txt`.

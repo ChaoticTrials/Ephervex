@@ -121,6 +121,65 @@ fn every_fixture_round_trips_byte_for_byte_before_anything_is_applied() {
     }
 }
 
+/// Writing back exactly what a fixture already holds must not change a byte.
+///
+/// This is the assertion that catches an encoding the dataset has wrong. Each
+/// fixture is a file in the shape its release writes; asking this build to
+/// apply the very values that file already expresses must therefore reproduce
+/// it. When the two disagree, one of them is wrong about the release, and it
+/// is not the game.
+///
+/// The field of view is the case that made this test necessary: the file holds
+/// `fov:0.0`, which is the default seventy degrees through the transform every
+/// release stores it with. A build that thought a modern release wrote degrees
+/// would put `fov:70.0` here and this test would say so.
+#[test]
+fn applying_what_a_fixture_already_says_rewrites_none_of_it() {
+    for era in ERAS {
+        let modern = era.version != "1.12.2" && era.version != "1.16.5";
+        let preferences = GlobalMinecraftPreferences {
+            fov: Managed::apply(70.0),
+            gui_scale: Managed::apply(GuiScalePreference::Auto),
+            language: Managed::apply("en_us".to_owned()),
+            fullscreen: Managed::apply(false),
+            render_distance: Managed::apply(if era.version == "1.12.2" { 8 } else { 12 }),
+            // A key an era does not have is left unmanaged rather than
+            // written and refused: this test is about what the file already
+            // says, and these two are absent from the eras that skip them.
+            simulation_distance: if modern {
+                Managed::apply(12)
+            } else {
+                Managed::ignore(12)
+            },
+            window_size: {
+                let none = WindowSize {
+                    width: 0,
+                    height: 0,
+                };
+                if era.version == "1.12.2" {
+                    Managed::apply(none)
+                } else {
+                    Managed::ignore(none)
+                }
+            },
+        };
+
+        let base = tempfile::tempdir().expect("temp dir");
+        let (_, report) = apply_in(base.path(), era, &preferences);
+        let text = std::fs::read_to_string(base.path().join(OPTIONS_FILE_NAME)).expect("read back");
+        assert!(
+            !report.applied.is_empty(),
+            "{} wrote nothing, so this proves nothing",
+            era.version
+        );
+        assert_eq!(
+            text, era.text,
+            "{} was rewritten by values it already held",
+            era.version
+        );
+    }
+}
+
 #[test]
 fn every_era_fixture_belongs_to_a_release_the_dataset_can_answer_for() {
     let compatibility = OptionsCompatibility::bundled();
@@ -182,20 +241,15 @@ fn the_same_normalized_preference_lands_correctly_in_every_era() {
 }
 
 #[test]
-fn the_field_of_view_is_written_in_each_eras_own_encoding() {
-    // 1.12.2 through 1.18.2 store `(degrees - 70) / 40`; 1.19 onward store the
-    // degrees. Writing one era's number into another is exactly the corruption
-    // the generated dataset exists to prevent.
-    let expected = [
-        ("1.12.2", "0.5"),
-        ("1.16.5", "0.5"),
-        ("1.20.1", "90.0"),
-        ("26.1", "90.0"),
-    ];
-    for (version, stored) in expected {
-        let era = ERAS.iter().find(|era| era.version == version).expect("era");
+fn the_field_of_view_is_stored_scaled_rather_than_in_degrees() {
+    // No release has ever put degrees in the file: every one of them stores
+    // `(degrees - 70) / 40`, which is why each fixture's own default reads
+    // `fov:0.0` rather than `fov:70.0`. Releases from 1.19 reach that
+    // arithmetic through the option's codec instead of a field transform,
+    // which changes where it is written down and not what lands in the file.
+    for era in ERAS {
         let (applied, _) = apply(era, &everything_managed());
-        assert_eq!(applied.get("fov"), Some(stored), "{version}");
+        assert_eq!(applied.get("fov"), Some("0.5"), "{}", era.version);
     }
 }
 

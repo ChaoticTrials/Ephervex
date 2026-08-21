@@ -105,15 +105,18 @@ fn one_global_preference_reaches_two_minecraft_versions_without_copying_a_file()
     assert!(legacy_options.contains("guiScale:3"), "{legacy_options}");
     assert!(modern_options.contains("guiScale:3"), "{modern_options}");
 
-    // Neither file was copied from anywhere: a copied one would carry the
-    // other release's data-version marker, which is exactly the corruption
-    // forbids inventing.
-    for options in [&legacy_options, &modern_options] {
-        assert!(
-            !options.contains("version:"),
-            "an Ephervex-written options file claims no data version: {options}"
-        );
-    }
+    // Each file is marked with its own release's data version, which is what
+    // tells the game how much of its own history to apply to the rest of the
+    // file. Neither was copied from the other: the markers differ, and 1.12.2
+    // has none to give because its client jar never carried one.
+    assert!(
+        modern_options.contains("version:3465"),
+        "1.20.1 marks its own file: {modern_options}"
+    );
+    assert!(
+        !legacy_options.contains("version:"),
+        "1.12.2 has no data version to claim: {legacy_options}"
+    );
 
     // Each release resolves to its own schema family, and the report says
     // which one and where the knowledge came from.

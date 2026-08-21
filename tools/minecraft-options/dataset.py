@@ -142,6 +142,12 @@ def representation_issue(setting: dict[str, Any], code_space: str | None) -> str
         transform = setting.get("value_to_storage")
         if transform and not (_AFFINE.match(transform) or _OFFSET.match(transform)):
             return "unrecognized storage transform"
+        # A codec that transforms the value on its way to the file, through
+        # arithmetic the analyzer could not read, is not a setting stored
+        # as-is. Treating an unread transform as no transform is how a value
+        # gets written through the wrong arithmetic.
+        if setting.get("transform_resolved") is False:
+            return "the storage transform could not be read"
         if transform and (match := _AFFINE.match(transform)) and _number(match.group(2)) == 0:
             return "storage transform has a zero scale"
         contradiction = _default_domain_contradiction(setting)
@@ -231,7 +237,13 @@ def _enum_codec(setting: dict[str, Any]) -> dict[str, Any] | None:
         return {"kind": "enum_id", "values": ids} if len(ids) == len(values) else None
     if form == "string_token":
         tokens = sorted({v["persisted"] for v in values if isinstance(v.get("persisted"), str)})
-        return {"kind": "enum_token", "tokens": tokens} if len(tokens) == len(values) else None
+        if len(tokens) != len(values):
+            return None
+        # A release that writes its options as JSON puts a token in quotes.
+        # Which releases do is a fact about each one's persistence path, so it
+        # travels with the codec rather than being inferred downstream.
+        return {"kind": "enum_token", "tokens": tokens,
+                "quoted": setting.get("file_quoting") == "json_string"}
     return None
 
 
@@ -365,7 +377,9 @@ def assemble(
             for schema_id in sorted(schemas)
         ],
         "releases": [
-            {"minecraft_version": version, "schema": schema_id}
+            {"minecraft_version": version, "schema": schema_id,
+             **({"data_version": releases["data_versions"][version]}
+                if releases.get("data_versions", {}).get(version) is not None else {})}
             for version, schema_id in sorted(releases["mapping"].items(), key=lambda x: version_key(x[0]))
         ],
     }
@@ -418,6 +432,12 @@ def merge(
         if previous
         else {}
     )
+    data_versions: dict[str, int] = (
+        {entry["minecraft_version"]: entry["data_version"] for entry in previous["releases"]
+         if entry.get("data_version") is not None}
+        if previous
+        else {}
+    )
 
     analysed = sorted(analysed, key=lambda record: version_key(record["minecraft_version"]))
     if analysed:
@@ -465,6 +485,8 @@ def merge(
 
     for record in analysed:
         version = record["minecraft_version"]
+        if record.get("data_version") is not None:
+            data_versions[version] = record["data_version"]
         schema = schema_for(record, setting_registry)
         schema_id = fingerprint(schema)
         existing = mapping.get(version)
@@ -486,13 +508,14 @@ def merge(
     # dead weight across regenerations.
     live = set(mapping.values())
     schemas = {schema_id: schema for schema_id, schema in schemas.items() if schema_id in live}
+    data_versions = {version: value for version, value in data_versions.items() if version in mapping}
 
     revision = previous["revision"] if previous else 1
     document = assemble(
         setting_registry,
         current_canonical_setting_ids,
         canonical_version,
-        {"schemas": schemas, "mapping": mapping},
+        {"schemas": schemas, "mapping": mapping, "data_versions": data_versions},
         revision,
     )
     unpublished_shape_migration = previous is not None and "setting_registry" not in previous

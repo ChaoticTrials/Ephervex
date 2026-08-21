@@ -273,6 +273,13 @@ impl OptionsCompatibility {
             .map(|schema| schema.id.as_str())
     }
 
+    /// The data version this release stamps into its own options file, when
+    /// the compatibility data knows it.
+    #[must_use]
+    pub fn data_version(&self, minecraft_version: &str) -> Option<i64> {
+        self.dataset.data_version_for(minecraft_version)
+    }
+
     /// What this release lets Ephervex do with one of the seven preferences
     /// that predate the generated product catalog.
     #[must_use]
@@ -435,23 +442,28 @@ mod tests {
     }
 
     #[test]
-    fn the_field_of_view_encoding_differs_by_era_exactly_as_the_research_proved() {
+    fn the_field_of_view_is_stored_scaled_in_every_era_the_dataset_covers() {
+        // The file has never held degrees. Every release stores
+        // `(degrees - 70) / 40`, which is why the game's own files read
+        // `fov:0.0` at the default of 70 rather than `fov:70.0`. Releases from
+        // 1.19 reach that arithmetic through a codec rather than a field
+        // transform, which is a difference in where it is written down and not
+        // in what lands in the file.
         let dataset = compatibility();
-        let legacy = dataset.support(PreferenceKey::Fov, "1.18.2");
-        let modern = dataset.support(PreferenceKey::Fov, "1.19");
-
-        let legacy_codec = codec_of(&legacy.fields()[0]);
-        let modern_codec = codec_of(&modern.fields()[0]);
-        assert_eq!(
-            legacy_codec.encode(&SettingValue::Decimal(90.0)).unwrap(),
-            "0.5",
-            "1.18.2 stores (degrees - 70) / 40"
-        );
-        assert_eq!(
-            modern_codec.encode(&SettingValue::Decimal(90.0)).unwrap(),
-            "90.0",
-            "1.19 stores degrees"
-        );
+        for version in ["1.12.2", "1.16.5", "1.18.2", "1.19", "1.20.1", "26.2"] {
+            let support = dataset.support(PreferenceKey::Fov, version);
+            let codec = codec_of(&support.fields()[0]);
+            assert_eq!(
+                codec.encode(&SettingValue::Decimal(90.0)).unwrap(),
+                "0.5",
+                "{version} stores (degrees - 70) / 40"
+            );
+            assert_eq!(
+                codec.encode(&SettingValue::Decimal(70.0)).unwrap(),
+                "0.0",
+                "{version} stores its own default as zero"
+            );
+        }
     }
 
     #[test]

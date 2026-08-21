@@ -30,7 +30,7 @@ difficulty:2
 graphicsMode:1
 ao:2
 biomeBlendRadius:2
-renderClouds:"true"
+renderClouds:true
 resourcePacks:[]
 incompatibleResourcePacks:[]
 lastServer:
@@ -38,7 +38,7 @@ lang:en_us
 soundDevice:""
 chatVisibility:0
 chatOpacity:1.0
-mainHand:"right"
+mainHand:right
 narrator:0
 key_key.attack:key.mouse.left
 key_key.use:key.mouse.right

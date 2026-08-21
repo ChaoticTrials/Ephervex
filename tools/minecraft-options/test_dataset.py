@@ -68,13 +68,17 @@ REQUIRED = [
 ]
 
 
-def release(version: str, settings: list[dict], code_space: str = "glfw") -> dict:
-    return {
+def release(version: str, settings: list[dict], code_space: str = "glfw",
+            data_version: int | None = None) -> dict:
+    record = {
         "minecraft_version": version,
         "extraction_complete": True,
         "keybinding_code_space": code_space,
         "settings": copy.deepcopy(settings),
     }
+    if data_version is not None:
+        record["data_version"] = data_version
+    return record
 
 
 class CodecDerivation(unittest.TestCase):
@@ -106,6 +110,23 @@ class CodecDerivation(unittest.TestCase):
         self.assertEqual(
             codec, {"kind": "scaled_decimal", "offset": 70, "scale": 40, "min": None, "max": None}
         )
+
+    def test_a_transform_the_analyzer_could_not_read_is_not_no_transform(self):
+        # A codec that changes the value on its way to the file, through
+        # arithmetic nobody could read, leaves the setting unknown. Reading it
+        # as stored-as-is is how a value goes into the file through the wrong
+        # arithmetic, which is exactly what a scaled field of view did.
+        unread = setting("fov", kind="number")
+        unread["transform_resolved"] = False
+        self.assertIsNone(dataset.codec_for(unread, "glfw"))
+        self.assertEqual(
+            dataset.representation_issue(unread, "glfw"),
+            "the storage transform could not be read",
+        )
+        # A setting with no transform at all is still stored as it stands.
+        plain = setting("fov", kind="number")
+        plain["transform_resolved"] = None
+        self.assertEqual(dataset.codec_for(plain, "glfw"), {"kind": "decimal", "min": None, "max": None})
 
     def test_a_transform_the_generator_cannot_type_leaves_the_setting_unknown(self):
         # The alternative would be carrying an expression into the dataset, and
@@ -140,7 +161,23 @@ class CodecDerivation(unittest.TestCase):
         )
         self.assertEqual(dataset.codec_for(by_id, "glfw"), {"kind": "enum_id", "values": [0, 1, 2]})
         self.assertEqual(
-            dataset.codec_for(by_token, "glfw"), {"kind": "enum_token", "tokens": ["left", "right"]}
+            dataset.codec_for(by_token, "glfw"),
+            {"kind": "enum_token", "tokens": ["left", "right"], "quoted": False},
+        )
+        # The same enum on a release that writes its options as JSON arrives in
+        # the file inside quotes, which is a different representation of the
+        # same domain rather than a different domain.
+        quoted = setting(
+            "mainHand",
+            kind="enum",
+            domain_confidence="high",
+            allowed={"persisted_form": "string_token",
+                     "values": [{"persisted": "right"}, {"persisted": "left"}]},
+        )
+        quoted["file_quoting"] = "json_string"
+        self.assertEqual(
+            dataset.codec_for(quoted, "glfw"),
+            {"kind": "enum_token", "tokens": ["left", "right"], "quoted": True},
         )
 
     def test_a_low_confidence_extraction_is_never_promoted_to_a_representation(self):
@@ -191,6 +228,23 @@ class Merging(unittest.TestCase):
         self.assertEqual(mapping["1.20.1"], mapping["1.20.2"])
         self.assertEqual(len(second["schemas"]), 1)
         self.assertIn("existing schema", changes[-1]["detail"])
+
+    def test_a_release_carries_the_data_version_it_stamps_into_the_file(self):
+        # The number a release writes as `version:` is what tells it which
+        # historical fixes the rest of the file still needs. It belongs to the
+        # release, so it travels with the release rather than being guessed
+        # from a version number or copied from a neighbour.
+        document, _ = dataset.merge(None, [release("1.20.1", REQUIRED, data_version=3465)])
+        entry = next(r for r in document["releases"] if r["minecraft_version"] == "1.20.1")
+        self.assertEqual(entry["data_version"], 3465)
+
+        # A release whose data version could not be read carries none at all,
+        # rather than a neighbour's.
+        document, _ = dataset.merge(document, [release("1.20.2", REQUIRED)])
+        entry = next(r for r in document["releases"] if r["minecraft_version"] == "1.20.2")
+        self.assertNotIn("data_version", entry)
+        kept = next(r for r in document["releases"] if r["minecraft_version"] == "1.20.1")
+        self.assertEqual(kept["data_version"], 3465)
 
     def test_regenerating_the_same_inputs_does_not_move_the_revision(self):
         first, _ = dataset.merge(None, [release("1.20.1", REQUIRED)])

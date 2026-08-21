@@ -524,11 +524,13 @@ mod tests {
         assert!(old_options.contains("guiScale:3"), "{old_options}");
         assert!(new_options.contains("guiScale:3"), "{new_options}");
 
-        // Neither instance inherited the other's file: a copied one would
-        // carry the other release's data-version marker.
+        // Neither instance inherited the other's file. Each is marked with
+        // its own release's data version, so a copied one would carry the
+        // wrong marker rather than merely the wrong settings; 1.12.2's client
+        // jar never carried one to read.
+        assert!(new_options.contains("version:3465"), "{new_options}");
         assert!(!old_options.contains("version:"), "{old_options}");
-        assert!(!new_options.contains("version:"), "{new_options}");
-        assert_eq!(old_options, new_options, "only the managed key was written");
+        assert_ne!(old_options, new_options, "each file is its own release's");
     }
 
     #[test]

@@ -32,7 +32,7 @@ use crate::compatibility::{
     ResolvedField, needs_language_catalog,
 };
 use crate::error::OptionsError;
-use crate::file::ParsedOptions;
+use crate::file::{ParsedOptions, VERSION_KEY};
 use crate::preference::{ConfiguredPreferences, MinecraftPreferenceValue, PreferenceId};
 use crate::preferences::GlobalMinecraftPreferences;
 
@@ -190,6 +190,9 @@ pub struct PreferencePlan {
     pub schema: Option<String>,
     /// Whether the knowledge used was the bundled baseline or the remote feed.
     pub source: CompatibilitySource,
+    /// The data version this release stamps into its own options file, when
+    /// the compatibility data knows it.
+    pub data_version: Option<i64>,
     /// Every configured preference, in id order.
     pub entries: Vec<PlannedPreference>,
 }
@@ -313,6 +316,7 @@ pub fn plan_managed_preferences(
             .schema_id(minecraft_version)
             .map(str::to_owned),
         source: compatibility.source(),
+        data_version: compatibility.data_version(minecraft_version),
         entries,
     }
 }
@@ -459,6 +463,17 @@ pub fn apply_plan(
     }
 
     let mut updated = existing.unwrap_or_else(ParsedOptions::empty);
+    // A file this build creates has to say which release wrote it. The game
+    // reads that back to decide which of its historical fixes the rest of the
+    // file still needs, and a file without one is treated as predating every
+    // one of them, which is how a perfectly good setting arrives in the game
+    // discarded. An existing file keeps its own marker: it belongs to whoever
+    // wrote it, and another release's value is worse than none.
+    if report.created_file
+        && let Some(data_version) = plan.data_version
+    {
+        updated.set(VERSION_KEY, data_version.to_string());
+    }
     for (key, value) in writes {
         updated.set(&key, value);
     }
@@ -669,16 +684,46 @@ mod tests {
         let modern_text = std::fs::read_to_string(new.join(OPTIONS_FILE_NAME)).expect("read");
         assert!(legacy_text.contains("guiScale:3"));
         assert!(modern_text.contains("guiScale:3"));
+        for (version, text) in [("1.12.2", &legacy_text), ("1.20.1", &modern_text)] {
+            assert!(
+                text.contains("fov:0.5"),
+                "{version} stores (degrees - 70) / 40, got {text:?}"
+            );
+        }
+        // A file this build creates says which release wrote it. Without it
+        // the game reads the file as predating every fix it has ever shipped
+        // and throws the settings away.
         assert!(
-            legacy_text.contains("fov:0.5"),
-            "1.12.2 stores (degrees - 70) / 40, got {legacy_text:?}"
+            modern_text.contains("version:3465"),
+            "1.20.1 marks its own file, got {modern_text:?}"
         );
+        // 1.12.2's client jar carries no data version to read, so its file is
+        // left unmarked rather than marked with a number from a release that
+        // is not this one. That is the same file this build wrote before, and
+        // no worse than it.
         assert!(
-            modern_text.contains("fov:90.0"),
-            "1.20.1 stores degrees, got {modern_text:?}"
+            !legacy_text.contains("version:"),
+            "an unknown data version is not invented, got {legacy_text:?}"
         );
-        assert!(!legacy_text.contains("version:"));
-        assert!(!modern_text.contains("version:"));
+    }
+
+    #[test]
+    fn a_data_version_is_read_for_the_release_being_written_and_no_other() {
+        // The number is the release's own. Reading one release's marker for
+        // another is how a file gets the wrong historical fixes applied to it.
+        let compatibility = OptionsCompatibility::bundled();
+        assert_eq!(compatibility.data_version("1.20.1"), Some(3465));
+        assert_eq!(compatibility.data_version("1.12.2"), None);
+        assert_eq!(compatibility.data_version("not-a-release"), None);
+
+        let plan = plan_managed_preferences(
+            "1.20.1",
+            &ConfiguredPreferences::default(),
+            MinecraftPreferenceCatalog::bundled_shared().expect("the bundled catalog"),
+            &compatibility,
+            LanguageAvailability::Verified,
+        );
+        assert_eq!(plan.data_version, Some(3465));
     }
 
     #[test]

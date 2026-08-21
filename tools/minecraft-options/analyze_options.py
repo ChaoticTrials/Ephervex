@@ -163,8 +163,43 @@ class Disassembler:
         self.jar = jar
         self.available = class_names
         self.cache: dict[str, str] = {}
+        self.verbose_cache: dict[str, str] = {}
         self.errors: list[dict[str, str]] = []
         self.calls = 0
+
+    def verbose(self, class_name: str) -> str:
+        """Disassembly including the constant pool and bootstrap methods.
+
+        Only the bootstrap table is wanted, and only javap's verbose form
+        prints it. An `invokedynamic` instruction names nothing but an index
+        into that table, so it is the one place the method a lambda actually
+        calls is written down.
+        """
+        key = class_name.replace(".", "/")
+        if key in self.verbose_cache:
+            return self.verbose_cache[key]
+        if key not in self.available:
+            self.verbose_cache[key] = ""
+            return ""
+        binary = shutil.which("javap")
+        if not binary:
+            self.errors.append({"class": key, "error": "javap unavailable"})
+            self.verbose_cache[key] = ""
+            return ""
+        try:
+            self.calls += 1
+            p = subprocess.run([binary, "-classpath", str(self.jar), "-p", "-v",
+                                key.replace("/", ".")],
+                               check=False, capture_output=True, text=True, timeout=120)
+            text = p.stdout
+            if p.returncode:
+                self.errors.append({"class": key,
+                                    "error": p.stderr.strip() or f"javap exit {p.returncode}"})
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            self.errors.append({"class": key, "error": str(exc)})
+            text = ""
+        self.verbose_cache[key] = text
+        return text
 
     def get(self, class_name: str) -> str:
         key = class_name.replace(".", "/")
@@ -351,6 +386,89 @@ def formula(ops: list[dict[str, Any]], var: str = "x") -> str | None:
         expr = f"({expr} {step['op']} {text})"
     return expr
 
+
+
+# ---------------------------------------------------------------------------
+# Lambda bodies behind `invokedynamic`
+# ---------------------------------------------------------------------------
+
+M_INDY = re.compile(r"^InvokeDynamic #(\d+):")
+BSM_ENTRY = re.compile(r"^\s{2}(\d+): #\d+ REF_invoke\w+ ")
+BSM_TARGET = re.compile(r"^\s+#\d+ REF_invoke\w+ ([\w/$]+)\.([\w$<>]+):(\(\S*\)\S+)$")
+
+
+def bootstrap_targets(verbose_text: str) -> dict[int, tuple[str, str, str]]:
+    """Bootstrap index -> the method a lambda at that index actually calls.
+
+    javap's verbose form lists each bootstrap method and its arguments; for a
+    `LambdaMetafactory` call site the second argument is a method handle naming
+    the synthetic method the lambda compiled into. Reading it is what makes a
+    lambda's arithmetic recoverable, rather than the guesswork of matching a
+    descriptor against every method in the class.
+    """
+    targets: dict[int, tuple[str, str, str]] = {}
+    index: int | None = None
+    in_table = False
+    for line in verbose_text.splitlines():
+        if line.startswith("BootstrapMethods:"):
+            in_table = True
+            continue
+        if not in_table:
+            continue
+        if line and not line.startswith(" "):
+            break
+        entry = BSM_ENTRY.match(line)
+        if entry:
+            index = int(entry.group(1))
+            continue
+        target = BSM_TARGET.match(line)
+        if target and index is not None and index not in targets:
+            targets[index] = (target.group(1), target.group(2), target.group(3))
+    return targets
+
+
+def lambda_arithmetic(members: list[Member], owner: str, name: str,
+                      descriptor: str) -> list[dict[str, Any]] | None:
+    """The constant arithmetic one synthetic lambda performs, if it is that
+    simple.
+
+    Obfuscated releases reuse short method names, so the descriptor decides
+    which overload this is; a name that matches more than one signature is
+    left unresolved rather than guessed at.
+    """
+    params, ret = split_descriptor(descriptor)
+    wanted = [java_type(p) for p in params]
+    want_ret = java_type(ret)
+    matches = [m for m in members if m.name == name and member_types(m) == (wanted, want_ret)]
+    if len(matches) != 1:
+        return None
+    return arithmetic_chain(matches[0].insns)
+
+
+def java_type(descriptor: str) -> str:
+    """One JVM type descriptor as javap prints it in a signature."""
+    depth = 0
+    while descriptor.startswith("["):
+        depth += 1
+        descriptor = descriptor[1:]
+    primitives = {"I": "int", "J": "long", "D": "double", "F": "float", "Z": "boolean",
+                  "B": "byte", "C": "char", "S": "short", "V": "void"}
+    if descriptor.startswith("L"):
+        name = descriptor[1:-1].replace("/", ".").replace("$", ".")
+    else:
+        name = primitives.get(descriptor, descriptor)
+    return name + "[]" * depth
+
+
+def member_types(member: Member) -> tuple[list[str], str]:
+    """One parsed member's parameter and return types, as javap printed them."""
+    sig = SIGNATURE_RE.match(member.signature.rstrip(";").strip())
+    if not sig:
+        return ([], "")
+    head = sig.group("head").split()
+    ret = head[-1] if head else ""
+    params = [p.strip().split()[0] for p in sig.group("params").split(",") if p.strip()]
+    return ([p.replace("$", ".") for p in params], ret.replace("$", "."))
 
 def invert_ops(ops: list[dict[str, Any]]) -> list[dict[str, Any]]:
     inverse = {"*": "/", "/": "*", "+": "-", "-": "+"}
@@ -1025,7 +1143,8 @@ def classify_value_set(dis: Disassembler, class_name: str) -> dict[str, Any]:
 
 
 def extract_option_instances(dis: Disassembler, members: list[Member],
-                             option_class: str) -> dict[str, dict[str, Any]]:
+                             option_class: str,
+                             owner: str | None = None) -> dict[str, dict[str, Any]]:
     """Recover OptionInstance definitions keyed by the field they are stored in."""
     out: dict[str, dict[str, Any]] = {}
     for m in members:
@@ -1055,14 +1174,59 @@ def extract_option_instances(dis: Disassembler, members: list[Member],
             if translation is None:
                 continue
             first = next(j for j, x in enumerate(window) if x.string() == translation)
-            record = analyse_option_window(dis, window[first:], option_class)
+            record = analyse_option_window(dis, window[first:], option_class, members, owner)
             record["translation_key"] = translation
             record["field"] = field
             out[field] = record
     return out
 
 
-def analyse_option_window(dis: Disassembler, window: list[Insn], option_class: str) -> dict[str, Any]:
+def xmap_transform(dis: Disassembler, before: list[Insn], members: list[Member] | None,
+                   owner: str | None) -> list[dict[str, Any]] | None:
+    """The value-to-storage arithmetic of a `Codec.xmap` pair.
+
+    `xmap(to, from)` takes the storage-to-value function first and the
+    value-to-storage function second, so the second of the two lambdas
+    immediately before the call is the one that decides what lands in the file.
+    Both are recovered and checked against each other: the pair must agree on
+    each other's types and one must undo the other. A pair that does not is
+    left unresolved, because a half-understood transform is how a value gets
+    written through the wrong arithmetic.
+    """
+    if not members or not owner:
+        return None
+    indy = [ins for ins in before[-6:] if ins.op == "invokedynamic"]
+    if len(indy) < 2:
+        return None
+    targets = bootstrap_targets(dis.verbose(owner))
+    pair = []
+    for ins in indy[-2:]:
+        m = M_INDY.match(ins.comment)
+        if not m:
+            return None
+        target = targets.get(int(m.group(1)))
+        if not target:
+            return None
+        pair.append(target)
+    (_, decode_name, decode_desc), (_, encode_name, encode_desc) = pair
+    decode_params, decode_ret = split_descriptor(decode_desc)
+    encode_params, encode_ret = split_descriptor(encode_desc)
+    if len(decode_params) != 1 or len(encode_params) != 1:
+        return None
+    if decode_params[0] != encode_ret or encode_params[0] != decode_ret:
+        return None
+    encode = lambda_arithmetic(members, owner, encode_name, encode_desc)
+    decode = lambda_arithmetic(members, owner, decode_name, decode_desc)
+    if not encode or not decode:
+        return None
+    if invert_ops(encode) != decode:
+        return None
+    return encode
+
+
+def analyse_option_window(dis: Disassembler, window: list[Insn], option_class: str,
+                         members: list[Member] | None = None,
+                         owner: str | None = None) -> dict[str, Any]:
     record: dict[str, Any] = {"type": "unknown", "default": None, "numeric": None,
                               "allowed_values": None, "file_encoding": None,
                               "value_set": None, "codec": None, "notes": []}
@@ -1072,6 +1236,8 @@ def analyse_option_window(dis: Disassembler, window: list[Insn], option_class: s
     enum_class: str | None = None
     enum_codec_field: str | None = None
     xmap = False
+    xmap_ops: list[dict[str, Any]] | None = None
+    xmap_unresolved = False
     factory_desc: str | None = None
     ctor_desc: str | None = None
 
@@ -1091,8 +1257,17 @@ def analyse_option_window(dis: Disassembler, window: list[Insn], option_class: s
                 if len(vals) >= 2:
                     codec_range = vals[-2:]
                 codec_kind = "number"
-        if ref and ref[1] == "xmap":
+        # Two different `xmap`s reach this window. One belongs to the codec and
+        # decides what lands in the file; the other belongs to the option's own
+        # slider and only maps slider positions onto the value the user picks.
+        # Only the codec's changes what is written.
+        if ref and ref[1] == "xmap" and (ref[0] or "").startswith("com/mojang/serialization"):
             xmap = True
+            resolved = xmap_transform(dis, window[:idx], members, owner)
+            if resolved is None:
+                xmap_unresolved = True
+            else:
+                xmap_ops = resolved
         if fld and fld[0] == "com/mojang/serialization/Codec":
             codec_kind = {"DOUBLE": "number", "FLOAT": "number", "INT": "integer",
                           "BOOL": "boolean", "STRING": "string", "LONG": "integer"}.get(fld[1], codec_kind)
@@ -1242,7 +1417,21 @@ def analyse_option_window(dis: Disassembler, window: list[Insn], option_class: s
         record["numeric"] = {"min": codec_range[0], "max": codec_range[1],
                              "step": 1 if record["type"] == "integer" else None, "clamped": True}
     record["value_set"] = value_set
-    record["codec"] = {"kind": codec_kind, "xmap": xmap, "explicit_range": codec_range}
+    record["codec"] = {"kind": codec_kind, "xmap": xmap, "explicit_range": codec_range,
+                       "transform_resolved": None if not xmap else not xmap_unresolved}
+    if xmap_ops:
+        record["value_to_storage"] = formula(xmap_ops, "value")
+        record["storage_to_value"] = formula(invert_ops(xmap_ops), "file")
+        record["transform_ops"] = xmap_ops
+        record["notes"].append(
+            f"the persisted value is the UI value through {record['value_to_storage']}")
+    elif xmap_unresolved:
+        # The codec transforms the value on its way to the file and this
+        # analyzer could not read how. Saying nothing here is what lets a
+        # generator assume the value is stored as-is, which is worse than
+        # admitting the setting is not understood.
+        record["notes"].append("the persisted codec transforms the value through an xmap this "
+                               "analyzer could not read")
     record["default"] = default_value
     record["default_confidence"] = default_conf
     if record["type"] == "unknown" and isinstance(default_value, bool):
@@ -1691,7 +1880,8 @@ def analyze_jar(path: Path, root: Path) -> dict[str, Any]:
                     "string_token": "enum serialized string token"}.get(form, "enum, codec unresolved")
         else:
             visitor = extract_visitor(dis, members, option_class)
-            defs = extract_option_instances(dis, members, option_class) if option_class else {}
+            defs = (extract_option_instances(dis, members, option_class, roots[0] if roots else None)
+                    if option_class else {})
             for key, record in visitor.items():
                 merged = dict(record)
                 if record.get("kind") == "option_instance" and record.get("field") in defs:
@@ -1900,6 +2090,26 @@ def representation(setting: dict[str, Any]) -> str:
     ])
 
 
+def file_quoting(record: dict[str, Any]) -> str:
+    """Whether the release writes this setting's value as JSON or as raw text.
+
+    A release that keeps its options in `OptionInstance` writes each one by
+    encoding it with the option's own codec and printing the resulting JSON, so
+    anything whose JSON form is a string arrives in the file inside quotes:
+    `renderClouds:"true"`. Everything written by the older direct path is
+    printed as it stands: `renderClouds:true`. The difference is per setting and
+    per release, not a matter of how modern the release looks, so it is read off
+    the persistence path each time rather than assumed from a version number.
+    """
+    if record.get("kind") != "option_instance":
+        return "raw"
+    json_string = record.get("type") == "string"
+    allowed = record.get("allowed_values") or {}
+    if allowed.get("persisted_form") == "string_token":
+        json_string = True
+    return "json_string" if json_string else "json"
+
+
 def build_setting(version: str | None, sha: str, root_class: str | None, key: str,
                   record: dict[str, Any]) -> dict[str, Any]:
     field = record.get("field")
@@ -1928,6 +2138,10 @@ def build_setting(version: str | None, sha: str, root_class: str | None, key: st
                                  if record.get("value_to_storage") or record.get("storage_to_value") else None),
         "value_to_storage": record.get("value_to_storage"),
         "storage_to_value": record.get("storage_to_value"),
+        "file_quoting": file_quoting(record),
+        # False when the persisted codec transforms the value and this analyzer
+        # could not read how, which is not the same as no transform at all.
+        "transform_resolved": (record.get("codec") or {}).get("transform_resolved"),
         "ui_domain": record.get("ui_domain"),
         "support_status": "supported",
         "type_confidence": "high" if typ not in ("unknown",) else "unknown",
@@ -2029,6 +2243,11 @@ def normalize(record: dict[str, Any]) -> dict[str, Any]:
     return {"schema_version": 2, "tool_version": TOOL_VERSION, "jar_id": record["jar_id"],
             "minecraft_version": version, "jar_sha256": sha,
             "persistence_era": analysis.get("persistence_era"),
+            # The release's own data version, which it stamps into the file as
+            # `version:` and reads back to decide which historical fixes the
+            # rest of the file still needs. A file without one is treated as
+            # predating all of them.
+            "data_version": (analysis.get("schema_marker") or {}).get("value"),
             "keybinding_code_space": analysis.get("keybinding_code_space"),
             "extraction_complete": analysis.get("extraction_complete", False),
             "analysis_scope": "static targeted options root plus directly referenced helper classes",
@@ -2673,10 +2892,12 @@ def report(inventory: list[dict[str, Any]], latest: dict[str, Any] | None,
                   "keys included)."]
 
     lines += ["", "## 12. Ambiguities that static analysis cannot settle", "",
-              "- Lambda bodies referenced through `invokedynamic` are compiled into synthetic methods whose "
-              "arithmetic the analyzer only resolves when it is inlined at the construction site; a handful of "
-              "UI-side slider label transforms therefore stay unresolved. They do not affect the persisted "
-              "value, which is fixed by the codec.",
+              "- Lambda bodies referenced through `invokedynamic` are compiled into synthetic methods, which "
+              "the analyzer resolves through the class's bootstrap-method table. A codec's own `xmap` pair is "
+              "read this way and reported as the setting's storage transform; a pair whose arithmetic is not "
+              "constant folding, or whose two halves do not undo each other, is reported as unresolved rather "
+              "than as no transform at all. UI-side slider transforms are deliberately not read: they change "
+              "which values a slider offers, not what is written.",
               "- Enum options whose codec is neither `Codec.INT`-derived nor `StringRepresentable`-derived are "
               "reported with `persisted_form: unknown` rather than a guess.",
               "- Whether the client rewrites an unknown key on save (rather than preserving it) cannot be "

@@ -179,26 +179,52 @@ fn an_authoritative_release_that_cannot_express_the_value_stays_its_own_answer()
 
 #[test]
 fn a_number_outside_a_releases_proven_domain_is_refused_rather_than_clamped() {
-    // A clamp writes a render distance the user never chose into every
-    // instance created afterwards.
-    let far = MinecraftPreferenceValue::Integer(999);
+    // A clamp writes a value the user never chose into every instance created
+    // afterwards. The field of view is the one refused here because it is a
+    // domain every release actually proves: a render distance maximum is
+    // chosen by runtime branches, so no release proves one and there is
+    // nothing to refuse against.
+    // A value this build offers that one release will not take: the menu
+    // background blur runs to ten here, and 1.20.5 accepted only zero to one.
+    let beyond = MinecraftPreferenceValue::Integer(6);
     assert_eq!(
-        disposition("1.20.1", "render_distance", far.clone()),
+        disposition("1.20.5", "menu_background_blurriness", beyond.clone()),
         PreferenceDisposition::NotRepresentable(SkipReason::OutOfRange),
-        "1.20.1 proved a 2..32 domain"
-    );
-    assert_eq!(
-        disposition("26.2", "render_distance", far),
-        PreferenceDisposition::Writable,
-        "26.2 proved no domain, so the codec has nothing to refuse"
+        "1.20.5 proved a 0..1 domain"
     );
     assert!(
         !applied_text(
-            "1.20.1",
-            &managed(&[("render_distance", MinecraftPreferenceValue::Integer(999))])
+            "1.20.5",
+            &managed(&[("menu_background_blurriness", beyond.clone())])
         )
-        .contains("renderDistance"),
+        .contains("menuBackgroundBlurriness"),
         "nothing at all is written for a value the release refuses"
+    );
+    assert_eq!(
+        disposition("26.2", "menu_background_blurriness", beyond),
+        PreferenceDisposition::Writable,
+        "a later release widened the domain, so the same number is writable there"
+    );
+    assert_eq!(
+        disposition(
+            "1.20.1",
+            "render_distance",
+            MinecraftPreferenceValue::Integer(999)
+        ),
+        PreferenceDisposition::Writable,
+        "no release proves a render distance domain, so the codec has nothing to refuse"
+    );
+    // An older release proves the field of view transform but never proved its
+    // endpoints, so a number outside them is written rather than refused
+    // against a domain nobody established.
+    assert_eq!(
+        disposition(
+            "1.12.2",
+            "fov",
+            MinecraftPreferenceValue::decimal(110.0).expect("a number")
+        ),
+        PreferenceDisposition::Writable,
+        "1.12.2 proved no field of view domain"
     );
 }
 
@@ -336,14 +362,14 @@ fn a_managed_value_writes_the_exact_text_the_release_stores() {
         ),
         ("gui_scale", MinecraftPreferenceValue::Integer(3)),
     ]);
-    assert!(
-        applied_text("1.12.2", &preferences).contains("fov:0.5"),
-        "1.12.2 stores (degrees - 70) / 40"
-    );
-    assert!(
-        applied_text("1.20.1", &preferences).contains("fov:90.0"),
-        "1.20.1 stores degrees"
-    );
+    // Every release stores `(degrees - 70) / 40`. None of them has ever put
+    // degrees in the file.
+    for version in RELEASES {
+        assert!(
+            applied_text(version, &preferences).contains("fov:0.5"),
+            "{version} stores (degrees - 70) / 40"
+        );
+    }
     for version in RELEASES {
         assert!(
             applied_text(version, &preferences).contains("guiScale:3"),
@@ -408,13 +434,16 @@ fn nothing_is_reported_as_applied_that_was_not_written() {
     // preference must never appear as a success.
     let preferences = managed(&[
         ("simulation_distance", MinecraftPreferenceValue::Integer(10)),
-        ("render_distance", MinecraftPreferenceValue::Integer(999)),
+        (
+            "menu_background_blurriness",
+            MinecraftPreferenceValue::Integer(6),
+        ),
         ("gui_scale", MinecraftPreferenceValue::Integer(2)),
     ]);
     let base = tempfile::tempdir().expect("temp dir");
     let report = apply(
         base.path(),
-        "1.20.1",
+        "1.20.5",
         &preferences,
         LanguageAvailability::Verified,
     );
@@ -426,14 +455,14 @@ fn nothing_is_reported_as_applied_that_was_not_written() {
     assert!(report.unsupported.is_empty());
     assert!(report.unknown.is_empty());
     assert_eq!(report.skipped.len(), 1);
-    assert_eq!(report.skipped[0].id, id("render_distance"));
+    assert_eq!(report.skipped[0].id, id("menu_background_blurriness"));
     assert_eq!(report.skipped[0].reason, SkipReason::OutOfRange);
 
     let text = std::fs::read_to_string(base.path().join(OPTIONS_FILE_NAME)).expect("read");
     assert!(text.contains("guiScale:2"));
     assert!(text.contains("simulationDistance:10"));
     assert!(
-        !text.contains("renderDistance"),
+        !text.contains("menuBackgroundBlurriness"),
         "a refused value leaves no trace"
     );
 }
