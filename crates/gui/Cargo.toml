@@ -31,6 +31,13 @@ rfd.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
+# Keeping a window on an aspect ratio is the window manager's job, and X11 is
+# where a window can ask for it. Linux only, because no other display protocol
+# this build targets has an equivalent.
+[target.'cfg(target_os = "linux")'.dependencies]
+raw-window-handle.workspace = true
+x11rb.workspace = true
+
 [dev-dependencies]
 # A disposable launcher root, so the settings screen's save path can be proven
 # against a real configuration file rather than a stand-in for one.

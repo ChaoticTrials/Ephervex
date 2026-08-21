@@ -92,6 +92,7 @@ reqwest = { version = "0.13.4", default-features = false, features = ["form", "g
 rfd = "0.17.2"
 quick-xml = { version = "0.38.4", features = ["serialize"] }
 rusqlite = { version = "0.40.1", features = ["bundled"] }
+raw-window-handle = "0.6.2"
 rust-embed = "8.12.0"
 rustix = { version = "1.1.4", features = ["fs", "process"] }
 semver = "1.0.28"
@@ -99,7 +100,9 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha1 = "0.11.0"
 sha2 = "0.11.0"
-slint = "1.17.1"
+# `raw-window-handle-06` exposes a window's native handle, which is how a
+# window can be given a size constraint the toolkit does not model itself.
+slint = { version = "1.17.1", features = ["raw-window-handle-06"] }
 sysinfo = "0.39.6"
 tar = "0.4.46"
 tempfile = "3.27.0"
@@ -111,6 +114,9 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 unic-langid = "0.9.6"
 uuid = { version = "1.24.0", features = ["v4", "serde"] }
+# Reaches one X11 window property the toolkit does not model: the aspect a
+# window manager may resize a window through.
+x11rb = "0.13.2"
 zip = "8.6.0"
 
 # --- test-only ---

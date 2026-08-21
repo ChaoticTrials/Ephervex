@@ -9,6 +9,7 @@ pub mod presentation;
 // workspace-wide unsafe-code denial.
 #[allow(unsafe_code)]
 pub mod ui;
+pub mod window_aspect;
 
 #[cfg(test)]
 mod test_support;

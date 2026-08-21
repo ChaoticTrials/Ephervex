@@ -8,12 +8,13 @@ use std::sync::mpsc::Sender;
 use std::time::Duration;
 
 use copypasta::{ClipboardContext, ClipboardProvider as _};
-use ephervex_core::OptionalSelection;
 use ephervex_core::live_diagnostics::{LogFilter, LogLevel, RetainedLog};
+use ephervex_core::{OptionalSelection, WindowSize};
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use ephervex_model::ModProvider;
 use slint::{
-    ComponentHandle as _, Image, Model as _, ModelRc, SharedString, Timer, TimerMode, VecModel,
+    ComponentHandle as _, Image, LogicalSize, Model as _, ModelRc, SharedString, Timer, TimerMode,
+    VecModel,
 };
 
 use crate::backend::{
@@ -21,7 +22,9 @@ use crate::backend::{
     DiagnosticData, Event, JavaData, LiveLogLine, LiveLogSource, LiveLogUpdate, ManagedModData,
     ModSearchData, ServerWorkspaceData, SettingsData, Snapshot,
 };
-use crate::minecraft_defaults::{self, LanguageCatalogState, MinecraftDefaultsModel};
+use crate::minecraft_defaults::{
+    self, LanguageCatalogState, MinecraftDefaultsModel, WindowAspect, WindowAxis, window_anchor,
+};
 use crate::presentation::{
     self, ImportErrorKind, ImportFailure, ImportPresentation, parse_network, validate_ip,
     validate_port,
@@ -29,8 +32,9 @@ use crate::presentation::{
 use crate::ui::{
     AccountRow, ActivityRow, AppWindow, DiagnosticRow, GuiI18n, ImportOptionRow, InstanceRow,
     JavaRow, LinkedTargetRow, LogChunk, ModRow, ModSearchRow, ModVersionRow, PendingEntityRow,
-    ServerRow, Theme,
+    ServerRow, Theme, WindowSizePreview,
 };
+use crate::window_aspect;
 
 pub struct Controller {
     _poll_timer: Timer,
@@ -949,7 +953,12 @@ fn register_toasts(ui: &AppWindow) {
     });
 }
 
-fn register_i18n(ui: &AppWindow) {
+/// Every window gets its own copy of the translation globals, so each one is
+/// given the same lookups rather than rendering its message ids.
+fn register_i18n<'a, T: slint::ComponentHandle + 'a>(ui: &'a T)
+where
+    GuiI18n<'a>: slint::Global<'a, T>,
+{
     let i18n = ui.global::<GuiI18n>();
     i18n.on_text(|id| lookup(id.as_str()).into());
     i18n.on_count(|id, count| lookup_args(id.as_str(), [("count", Arg::from(count))]).into());
@@ -1963,6 +1972,12 @@ fn register_minecraft_defaults(
             .map(|category| SharedString::from(minecraft_defaults::category_label(*category)))
             .collect(),
     ));
+    ui.set_minecraft_aspect_labels(model(
+        minecraft_defaults::WINDOW_ASPECTS
+            .iter()
+            .map(|aspect| SharedString::from(aspect.label()))
+            .collect(),
+    ));
 
     // -- what is shown. None of these touch the draft.
     let handle = ui.as_weak();
@@ -2056,6 +2071,7 @@ fn register_minecraft_editors(
     commands: &Sender<Command>,
     minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
 ) {
+    let picker = WindowSizePicker::default();
     let handle = ui.as_weak();
     let state = Rc::clone(minecraft);
     let sender = commands.clone();
@@ -2130,15 +2146,7 @@ fn register_minecraft_editors(
         });
     });
 
-    let handle = ui.as_weak();
-    let state = Rc::clone(minecraft);
-    let sender = commands.clone();
-    ui.on_minecraft_commit_window(move |id, width, height| {
-        edit_minecraft_draft(&handle, &state, &sender, &id, |model, id| {
-            model.set_window_size(id, &width, &height);
-        });
-    });
-
+    register_minecraft_window_picker(ui, commands, minecraft, &picker);
     let handle = ui.as_weak();
     let state = Rc::clone(minecraft);
     let sender = commands.clone();
@@ -2151,6 +2159,7 @@ fn register_minecraft_editors(
     let handle = ui.as_weak();
     let state = Rc::clone(minecraft);
     let sender = commands.clone();
+    let following = picker.clone();
     ui.on_minecraft_forget_preference(move |id| {
         edit_minecraft_draft(
             &handle,
@@ -2159,7 +2168,394 @@ fn register_minecraft_editors(
             &id,
             MinecraftDefaultsModel::reset_row,
         );
+        follow_window_size(&following, &state, &id);
     });
+}
+
+/// The sizing window, and the size this build last put it on.
+///
+/// Cheap to clone: every holder shares the one window and the one token.
+#[derive(Default, Clone)]
+struct WindowSizePicker {
+    window: Rc<RefCell<Option<WindowSizePreview>>>,
+    /// The row the window is currently standing for, when it is up.
+    showing: Rc<RefCell<Option<ephervex_core::PreferenceId>>>,
+    /// The size the window itself last reported.
+    ///
+    /// The window's own history, which is what says which edge is being
+    /// dragged. While a ratio is held this deliberately differs from the size
+    /// on record, so the value cannot stand in for it.
+    reported: Rc<Cell<Option<WindowSize>>>,
+    /// The edge this drag is driving, decided once and held until it settles.
+    driving: Rc<Cell<Option<WindowAxis>>>,
+    /// Fires once the window has stopped moving.
+    ///
+    /// A window manager resizes a window from the pointer for as long as the
+    /// user holds it, and resizing it from here at the same time is two
+    /// parties dragging one window. So a held ratio moves the numbers as the
+    /// user drags and moves the window itself once, after the drag is over.
+    settle: Rc<Timer>,
+    /// The size this build put the window on, held until the window reports a
+    /// different one.
+    ///
+    /// A window reports the size it was given exactly as it reports a size the
+    /// user dragged it to, and the two mean opposite things: opening a window
+    /// to look at a size must store nothing, while dragging it is the choice
+    /// itself. It also reports its width and its height as two separate
+    /// changes, so one size arrives more than once. While the window is still
+    /// on the size this build put it on, nothing has moved and nothing is
+    /// stored; the first size that is not that one clears this, and every
+    /// report after it is the user's.
+    applied: Rc<Cell<Option<WindowSize>>>,
+}
+
+/// How long the window has to hold still before it is taken to be at rest.
+const WINDOW_SETTLE: Duration = Duration::from_millis(250);
+
+/// How long to wait before saying the aspect again after a size is applied.
+///
+/// Long enough for the toolkit to have republished the window's size limits,
+/// which it does after a size change and which drops the one field it does not
+/// model.
+const ASPECT_REPUBLISH: Duration = Duration::from_millis(80);
+
+/// The ratio the picker is holding the window to, if any.
+fn held_ratio(minecraft: &Rc<RefCell<MinecraftDefaultsModel>>) -> Option<(u32, u32)> {
+    let model = minecraft.borrow();
+    model
+        .window_aspect()
+        .ratio()
+        .filter(|_| model.window_locked())
+}
+
+/// Says on the window's face what size it is, and asks its manager to keep it
+/// on the chosen shape.
+///
+/// The ratio goes out as an aspect the manager holds the window to, so every
+/// edge and corner keeps working and the manager moves whichever one the user
+/// is not holding. Re-sent on each report because the toolkit rewrites the
+/// same property whenever the window's own size limits change.
+fn describe_window(
+    window: &WindowSizePreview,
+    minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
+    size: WindowSize,
+) {
+    let held = held_ratio(minecraft);
+    window.set_readout(window_size_readout(size).into());
+    window.set_holds_ratio(held.is_some());
+    window_aspect::hold(window.window(), held);
+}
+
+/// Says the aspect again once the toolkit has finished republishing the
+/// window's size limits over it.
+fn republish_aspect(window: &WindowSizePreview, ratio: Option<(u32, u32)>) {
+    let again = window.as_weak();
+    Timer::single_shot(ASPECT_REPUBLISH, move || {
+        if let Some(window) = again.upgrade() {
+            window_aspect::hold(window.window(), ratio);
+        }
+    });
+}
+
+/// Puts the window on one exact size.
+fn put_window_on(window: &WindowSizePreview, applied: &Cell<Option<WindowSize>>, size: WindowSize) {
+    applied.set(Some(size));
+    window
+        .window()
+        .set_size(LogicalSize::new(to_edge(size.width), to_edge(size.height)));
+}
+
+impl WindowSizePicker {
+    /// Puts the window on one exact size and says so on its face.
+    fn put_on(
+        &self,
+        window: &WindowSizePreview,
+        minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
+        size: WindowSize,
+    ) {
+        describe_window(window, minecraft, size);
+        put_window_on(window, &self.applied, size);
+        // Applying a size is what makes the toolkit republish the limits, so
+        // this is where the aspect has to be said twice.
+        republish_aspect(window, held_ratio(minecraft));
+    }
+
+    /// Follows one row's size while the window is standing for that row.
+    ///
+    /// The window is what the setting looks like, so a size the row takes from
+    /// anywhere - a ratio, a typed pair, a reset - moves the window with it. A
+    /// window left showing a size the setting no longer holds is the one thing
+    /// a picker made of a real window exists to rule out.
+    fn follow(
+        &self,
+        minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
+        id: &ephervex_core::PreferenceId,
+    ) {
+        if self.showing.borrow().as_ref() != Some(id) {
+            return;
+        }
+        let slot = self.window.borrow();
+        let Some(window) = slot.as_ref() else { return };
+        if !window.window().is_visible() {
+            return;
+        }
+        let size = minecraft.borrow().window_start(id);
+        self.put_on(window, minecraft, size);
+    }
+
+    /// Takes the window off screen, keeping it for the next time.
+    fn hide(&self) {
+        if let Some(window) = self.window.borrow().as_ref() {
+            let _ = window.hide();
+        }
+        self.showing.borrow_mut().take();
+        self.reported.set(None);
+        self.driving.set(None);
+    }
+}
+
+/// The window size picker: the two exact fields, the ratio it projects with,
+/// and the window that is the size they describe.
+fn register_minecraft_window_picker(
+    ui: &AppWindow,
+    commands: &Sender<Command>,
+    minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
+    picker: &WindowSizePicker,
+) {
+    // Which field was edited is which edge a held ratio keeps, so the two
+    // fields commit through their own axis rather than a shared guess.
+    let handle = ui.as_weak();
+    let state = Rc::clone(minecraft);
+    let sender = commands.clone();
+    let following = picker.clone();
+    ui.on_minecraft_commit_window_width(move |id, width, height| {
+        edit_minecraft_row(&handle, &state, &sender, &id, |model, id| {
+            model.commit_window_size(id, &width, &height, WindowAxis::Width);
+        });
+        follow_window_size(&following, &state, &id);
+    });
+
+    let handle = ui.as_weak();
+    let state = Rc::clone(minecraft);
+    let sender = commands.clone();
+    let following = picker.clone();
+    ui.on_minecraft_commit_window_height(move |id, width, height| {
+        edit_minecraft_row(&handle, &state, &sender, &id, |model, id| {
+            model.commit_window_size(id, &width, &height, WindowAxis::Height);
+        });
+        follow_window_size(&following, &state, &id);
+    });
+
+    let handle = ui.as_weak();
+    let state = Rc::clone(minecraft);
+    let sender = commands.clone();
+    let following = picker.clone();
+    ui.on_minecraft_set_window_aspect(move |id, index| {
+        let Ok(index) = usize::try_from(index) else {
+            return;
+        };
+        let Some(aspect) = WindowAspect::at(index) else {
+            return;
+        };
+        edit_minecraft_row(&handle, &state, &sender, &id, |model, id| {
+            model.set_window_aspect(id, aspect);
+        });
+        follow_window_size(&following, &state, &id);
+    });
+
+    let handle = ui.as_weak();
+    let state = Rc::clone(minecraft);
+    let sender = commands.clone();
+    let following = picker.clone();
+    ui.on_minecraft_set_window_lock(move |id, held| {
+        edit_minecraft_row(&handle, &state, &sender, &id, |model, id| {
+            model.set_window_locked(id, held);
+        });
+        follow_window_size(&following, &state, &id);
+    });
+
+    // The picker is a real window. Opening it looks at the row and writes
+    // nothing; only a resize is a choice, and each one settles the row on its
+    // own so the rest of the screen is left alone.
+    let handle = ui.as_weak();
+    let state = Rc::clone(minecraft);
+    let sender = commands.clone();
+    let opening = picker.clone();
+    ui.on_minecraft_open_window_preview(move |id| {
+        let Some(ui) = handle.upgrade() else { return };
+        let Some(id) = minecraft_preference_id(&id) else {
+            return;
+        };
+        let start = state.borrow().window_start(&id);
+        let mut slot = opening.window.borrow_mut();
+        if slot.is_none() {
+            let Ok(window) = WindowSizePreview::new() else {
+                return;
+            };
+            window.set_minimum_edge(minimum_window_edge());
+            register_i18n(&window);
+            *slot = Some(window);
+        }
+        let Some(window) = slot.as_ref() else { return };
+        // Rewired on every open, so the window always reports to the row that
+        // opened it.
+        register_window_size_preview(window, &ui, &state, &sender, &id, &opening);
+        opening.showing.borrow_mut().replace(id);
+        opening.reported.set(Some(start));
+        opening.driving.set(None);
+        opening.put_on(window, &state, start);
+        let _ = window.show();
+    });
+
+    // Closing the application takes the sizing window with it: Slint runs the
+    // loop until the last window closes, so one left open would keep the
+    // application alive with no way back to it.
+    let closing = picker.clone();
+    ui.window().on_close_requested(move || {
+        closing.hide();
+        slint::CloseRequestResponse::HideWindow
+    });
+}
+
+/// Closes out a resize once the window has stopped moving.
+///
+/// Restarted by every report, so it runs at the end of a run of them rather
+/// than during it: the previewed release is asked about the new value once,
+/// where a question per pointer movement would be a question per frame. The
+/// edge the gesture was driving is released here too, so the next drag decides
+/// its own.
+///
+/// It deliberately does not resize the window. A window manager owns the
+/// window for as long as the user holds it, and there is no way from here to
+/// tell "held still" from "let go": resizing it on a guess means this build
+/// and the pointer both dragging one window, which climbs away from the user
+/// as each correction gives the manager a larger frame to re-derive from.
+/// Sizes this build chooses are pushed only at moments it starts itself.
+fn settle_window_size(
+    picker: &WindowSizePicker,
+    ui: &slint::Weak<AppWindow>,
+    minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
+    commands: &Sender<Command>,
+) {
+    let handle = ui.clone();
+    let state = Rc::clone(minecraft);
+    let sender = commands.clone();
+    // Only the pieces the settling needs, so the timer holds nothing that
+    // holds the timer.
+    let driving = Rc::clone(&picker.driving);
+    picker
+        .settle
+        .start(TimerMode::SingleShot, WINDOW_SETTLE, move || {
+            driving.set(None);
+            let Some(ui) = handle.upgrade() else { return };
+            request_minecraft_preview(&ui, &state, &sender);
+        });
+}
+
+/// Moves the sizing window onto whatever one row now holds.
+fn follow_window_size(
+    picker: &WindowSizePicker,
+    minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
+    id: &SharedString,
+) {
+    if let Some(id) = minecraft_preference_id(id) {
+        picker.follow(minecraft, &id);
+    }
+}
+
+/// The exact size one window stands for, as its own title says it.
+fn window_size_readout(size: WindowSize) -> String {
+    lookup_args(
+        "gui-minecraft-window-preview-readout",
+        [
+            ("width", Arg::from(size.width.to_string().as_str())),
+            ("height", Arg::from(size.height.to_string().as_str())),
+        ],
+    )
+}
+
+/// One window edge as the toolkit measures it.
+#[allow(clippy::cast_precision_loss)]
+fn to_edge(edge: u32) -> f32 {
+    edge as f32
+}
+
+/// One window edge as this build stores it, or `None` for a figure no window
+/// on screen could report.
+///
+/// The ceiling is the largest edge the display server itself can express, so
+/// this refuses a nonsensical figure rather than imposing a limit on what may
+/// be configured: the fields still take any size Minecraft would.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn from_edge(edge: f32) -> Option<u32> {
+    let rounded = edge.round();
+    (rounded.is_finite() && rounded >= 0.0 && rounded <= f32::from(u16::MAX))
+        .then_some(rounded as u32)
+}
+
+/// The smallest window this build accepts, in the toolkit's own units.
+fn minimum_window_edge() -> f32 {
+    to_edge(WindowSize::MINIMUM_EDGE)
+}
+
+/// Wires one sizing window to the row it is sizing.
+///
+/// The window is the value: its size goes to the model as-is, and the exact
+/// size the model settles on comes back to the window when the two differ, so
+/// a held ratio is visible on screen rather than only in the fields. That
+/// correction reports the size it just applied, which the model then leaves
+/// alone, so the two agree after one step instead of chasing each other.
+fn register_window_size_preview(
+    window: &WindowSizePreview,
+    ui: &AppWindow,
+    minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
+    commands: &Sender<Command>,
+    id: &ephervex_core::PreferenceId,
+    picker: &WindowSizePicker,
+) {
+    let ui_handle = ui.as_weak();
+    let ui_settling = ui.as_weak();
+    let state = Rc::clone(minecraft);
+    let sender = commands.clone();
+    let preference = id.clone();
+    let resized = window.as_weak();
+    let gesture = picker.clone();
+    window.on_resized(move |width, height| {
+        let Some(ui) = ui_handle.upgrade() else {
+            return;
+        };
+        let (Some(width), Some(height)) = (from_edge(width), from_edge(height)) else {
+            return;
+        };
+        let reported = WindowSize { width, height };
+        let previous = gesture.reported.replace(Some(reported));
+        // The window arriving on the size this build just gave it is not the
+        // user moving anything.
+        if gesture.applied.get() == Some(reported) {
+            return;
+        }
+        gesture.applied.set(None);
+        // One edge for the whole drag: decided by the first report that moves
+        // the window, and kept until the window is at rest again.
+        let anchor = gesture
+            .driving
+            .get()
+            .or_else(|| previous.and_then(|previous| window_anchor(previous, reported)))
+            .unwrap_or(WindowAxis::Width);
+        gesture.driving.set(Some(anchor));
+
+        let exact = state.borrow_mut().fit_window(&preference, reported, anchor);
+        if let Some(window) = resized.upgrade() {
+            // Also republishes the height a held ratio allows, so the manager
+            // clamps the next movement of this same drag to it.
+            describe_window(&window, &state, exact.unwrap_or(reported));
+        }
+        refresh_minecraft_row(&ui, &state, &preference);
+        settle_window_size(&gesture, &ui_settling, &state, &sender);
+    });
+
+    let dismissed = picker.clone();
+    window.on_dismissed(move || dismissed.hide());
 }
 
 /// Entering, leaving, and completing key capture.
@@ -2263,6 +2659,28 @@ fn edit_minecraft_draft(
     };
     edit(&mut minecraft.borrow_mut(), &id);
     render_minecraft(&ui, minecraft);
+    request_minecraft_preview(&ui, minecraft, commands);
+}
+
+/// One committed edit to a row whose own controls have to survive it.
+///
+/// The draft changes exactly as it does for any other edit, but only the
+/// edited row is written back. Rebuilding the list would recreate the control
+/// the user is still in, which is how tabbing from one window size field to
+/// the other loses the field it just moved to.
+fn edit_minecraft_row(
+    handle: &slint::Weak<AppWindow>,
+    minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
+    commands: &Sender<Command>,
+    id: &SharedString,
+    edit: impl FnOnce(&mut MinecraftDefaultsModel, &ephervex_core::PreferenceId),
+) {
+    let Some(ui) = handle.upgrade() else { return };
+    let Some(id) = minecraft_preference_id(id) else {
+        return;
+    };
+    edit(&mut minecraft.borrow_mut(), &id);
+    refresh_minecraft_row(&ui, minecraft, &id);
     request_minecraft_preview(&ui, minecraft, commands);
 }
 
@@ -2414,6 +2832,24 @@ fn render_minecraft(ui: &AppWindow, minecraft: &Rc<RefCell<MinecraftDefaultsMode
     ui.set_minecraft_unusable_notice(
         preserved_notice("gui-minecraft-unusable-notice", state.unusable()).into(),
     );
+    drop(state);
+    refresh_minecraft_totals(ui, minecraft);
+}
+
+/// Refreshes one row in place, leaving every other row's element alone.
+///
+/// Replacing the whole list rebuilds the elements in it, which would take the
+/// pointer's grip on a control mid-gesture with it. Only the row that changed
+/// is written back.
+fn refresh_minecraft_row(
+    ui: &AppWindow,
+    minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
+    id: &ephervex_core::PreferenceId,
+) {
+    let state = minecraft.borrow();
+    if let Some((index, row)) = state.row_at(id) {
+        ui.get_minecraft_preference_rows().set_row_data(index, row);
+    }
     drop(state);
     refresh_minecraft_totals(ui, minecraft);
 }
@@ -4153,6 +4589,123 @@ mod tests {
             );
         }
         assert!(row_component.contains("root.item.status-kind"));
+    }
+
+    #[test]
+    fn the_window_size_is_picked_with_a_window_rather_than_a_drawing_of_one() {
+        let source = include_str!("ui.rs");
+        // The picker is an actual window the window manager sizes, so what the
+        // user sees on screen is the window they are asking Minecraft for.
+        assert!(source.contains("export component WindowSizePreview inherits Window {"));
+        assert!(
+            !source.contains("WindowSizeCanvas"),
+            "the drawn stand-in it replaces must be gone"
+        );
+        let controller = include_str!("controller.rs");
+        let production = controller.split("#[cfg(test)]").next().unwrap_or_default();
+        let preview = source
+            .split("export component WindowSizePreview inherits Window {")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    export component ").next())
+            .expect("the sizing window's own markup");
+        // The smallest window this build accepts is one rule in one place.
+        assert!(preview.contains("min-width: root.minimum-edge;"));
+        assert!(preview.contains("min-height: root.minimum-edge;"));
+        // A held ratio reaches the window manager as an aspect rather than as
+        // a size the window refuses, so every edge and corner keeps working
+        // and the manager moves the one the user is not holding. Nothing here
+        // resizes a window somebody else is dragging.
+        assert!(
+            !preview.contains("max-height:"),
+            "a ratio must not be kept by taking away the window's own handles"
+        );
+        assert!(production.contains("window_aspect::hold(window.window(), held);"));
+
+        let aspect = include_str!("window_aspect.rs");
+        assert!(aspect.contains("hints.aspect = ratio.and_then("));
+        // Read before writing: the rest of that property is the toolkit's.
+        assert!(aspect.contains("WmSizeHints::get_normal_hints(&connection, identity)"));
+        assert!(
+            aspect.contains("#[cfg(not(target_os = \"linux\"))]"),
+            "a platform without the property still gets a working picker"
+        );
+
+        let start = source
+            .find("component MinecraftPreferenceRowCard inherits Rectangle")
+            .expect("the preference row component");
+        let end = source[start..]
+            .find("\n    component ")
+            .map_or(source.len(), |offset| start + offset);
+        let row_component = &source[start..end];
+        assert!(row_component.contains("root.open-window-preview(root.item.id)"));
+        for drawn in ["preview-across", "preview-down", "can-resize"] {
+            assert!(
+                !row_component.contains(drawn),
+                "the row has no rectangle left to describe ({drawn})"
+            );
+        }
+
+        assert!(production.contains("window.set_minimum_edge(minimum_window_edge());"));
+        assert!(
+            production.contains(
+                "fn minimum_window_edge() -> f32 {\n    to_edge(WindowSize::MINIMUM_EDGE)"
+            )
+        );
+        // The window reports a size and the model answers with the exact one.
+        assert!(
+            production.contains("state.borrow_mut().fit_window(&preference, reported, anchor);")
+        );
+        // A window manager owns the window for as long as the user holds it,
+        // and "held still" cannot be told from "let go". Resizing it on that
+        // guess puts this build and the pointer on the same window, which
+        // climbs away from the user, so a drag is never answered with a size.
+        assert!(
+            production.contains("settle_window_size(&gesture, &ui_settling, &state, &sender);")
+        );
+        assert!(production.contains(".start(TimerMode::SingleShot, WINDOW_SETTLE, move || {"));
+        let settling = production
+            .split("fn settle_window_size(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .unwrap_or_default();
+        assert!(
+            !settling.contains("put_window_on"),
+            "settling a drag must not resize the window the user is holding"
+        );
+        assert!(
+            !production
+                .contains("request_minecraft_preview(&ui, &state, &sender);\n        refresh"),
+            "the previewed release must not be asked once per pointer movement"
+        );
+        // One edge for the whole drag, taken from the window's own history.
+        assert!(production.contains("window_anchor(previous, reported)"));
+        assert!(production.contains("gesture.driving.set(Some(anchor));"));
+        // The edited field decides which edge a held ratio keeps, so the axis
+        // travels with the commit instead of being guessed downstream.
+        assert!(
+            production
+                .contains("model.commit_window_size(id, &width, &height, WindowAxis::Width);")
+        );
+        assert!(
+            production
+                .contains("model.commit_window_size(id, &width, &height, WindowAxis::Height);")
+        );
+        for owned_by_the_model in ["project_height", "project_width", "projection_of"] {
+            assert!(
+                !production.contains(owned_by_the_model),
+                "the controller must forward the size rather than repeat the model's arithmetic \
+                 ({owned_by_the_model})"
+            );
+        }
+        // A resize settles its own row, so the control the pointer is on and
+        // the field the user is in both survive it.
+        assert!(production.contains("refresh_minecraft_row(&ui, &state, &preference);"));
+        assert!(
+            production.contains("ui.get_minecraft_preference_rows().set_row_data(index, row);")
+        );
+        // An orphaned sizing window would hold the event loop open with no way
+        // back to the application.
+        assert!(production.contains("ui.window().on_close_requested(move || {"));
     }
 
     #[test]

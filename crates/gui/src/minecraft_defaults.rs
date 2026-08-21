@@ -429,6 +429,155 @@ fn humanize_words(text: &str) -> String {
 
 /// What the screen currently holds for one preference.
 ///
+/// The aspect ratios the window size picker offers.
+///
+/// Closed and UI-owned: this is how the picker projects one edge from the
+/// other, not something Minecraft stores. Each fixed ratio is an exact pair of
+/// whole numbers, so `16:10` never becomes `1.6` and two ratios that round to
+/// the same decimal stay distinct.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WindowAspect {
+    /// Width and height move independently.
+    #[default]
+    Free,
+    Ratio16x9,
+    Ratio16x10,
+    Ratio21x9,
+    Ratio4x3,
+}
+
+/// Every ratio the picker offers, in the order it presents them.
+pub const WINDOW_ASPECTS: [WindowAspect; 5] = [
+    WindowAspect::Free,
+    WindowAspect::Ratio16x9,
+    WindowAspect::Ratio16x10,
+    WindowAspect::Ratio21x9,
+    WindowAspect::Ratio4x3,
+];
+
+impl WindowAspect {
+    /// The exact whole-number pair this ratio projects with, or `None` for a
+    /// free-form size.
+    #[must_use]
+    pub const fn ratio(self) -> Option<(u32, u32)> {
+        match self {
+            Self::Free => None,
+            Self::Ratio16x9 => Some((16, 9)),
+            Self::Ratio16x10 => Some((16, 10)),
+            Self::Ratio21x9 => Some((21, 9)),
+            Self::Ratio4x3 => Some((4, 3)),
+        }
+    }
+
+    /// How the ratio reads on screen.
+    #[must_use]
+    pub fn label(self) -> String {
+        match self.ratio() {
+            None => lookup("gui-minecraft-aspect-free"),
+            Some((width, height)) => lookup_args(
+                "gui-minecraft-aspect-ratio",
+                [
+                    ("first", Arg::from(width.to_string().as_str())),
+                    ("second", Arg::from(height.to_string().as_str())),
+                ],
+            ),
+        }
+    }
+
+    /// The ratio at one position in [`WINDOW_ASPECTS`].
+    #[must_use]
+    pub fn at(index: usize) -> Option<Self> {
+        WINDOW_ASPECTS.get(index).copied()
+    }
+
+    /// Where this ratio sits in [`WINDOW_ASPECTS`].
+    #[must_use]
+    pub fn position(self) -> usize {
+        WINDOW_ASPECTS
+            .iter()
+            .position(|candidate| *candidate == self)
+            .unwrap_or(0)
+    }
+}
+
+/// Which edge the user changed, and therefore which one holds still while the
+/// other is projected from it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowAxis {
+    Width,
+    Height,
+}
+
+/// The edge a window manager moved between two sizes of the same window.
+///
+/// Both edges compared against the window's own previous size, not against
+/// the value on record: while a ratio is held those two deliberately differ,
+/// and it is the window the user is dragging.
+///
+/// A corner moves both edges at once, so the one that moved further in
+/// proportion is taken as the one being driven. Deciding this once for a whole
+/// gesture is what keeps it steady: recomputing it per report would let a
+/// diagonal drag flip between edges and jitter the size it produces. `None`
+/// when neither edge moved, which is nothing to anchor.
+#[must_use]
+pub fn window_anchor(previous: WindowSize, reported: WindowSize) -> Option<WindowAxis> {
+    let moved = |before: u32, after: u32| {
+        let before = f64::from(before.max(1));
+        (f64::from(after) - before).abs() / before
+    };
+    let across = moved(previous.width, reported.width);
+    let down = moved(previous.height, reported.height);
+    if across == 0.0 && down == 0.0 {
+        return None;
+    }
+    Some(if down > across {
+        WindowAxis::Height
+    } else {
+        WindowAxis::Width
+    })
+}
+
+/// The height an exact ratio gives one width.
+///
+/// Rounded to the nearest whole number with ties going up, which is the one
+/// rounding rule every projection here uses. Widened to 64 bits first, so a
+/// large edge cannot overflow on the way, and refused rather than moved when
+/// the result is not a size this build accepts: a projection landing under the
+/// minimum edge is not a size to quietly repair.
+#[must_use]
+pub fn project_height(width: u32, ratio: (u32, u32)) -> Option<u32> {
+    project_edge(width, ratio.1, ratio.0)
+}
+
+/// The width an exact ratio gives one height, by the same rule.
+#[must_use]
+pub fn project_width(height: u32, ratio: (u32, u32)) -> Option<u32> {
+    project_edge(height, ratio.0, ratio.1)
+}
+
+/// `edge * numerator / denominator`, rounded half up, or `None` when the
+/// result is not a usable edge.
+fn project_edge(edge: u32, numerator: u32, denominator: u32) -> Option<u32> {
+    let denominator = u64::from(denominator);
+    if denominator == 0 {
+        return None;
+    }
+    let scaled = u64::from(edge).checked_mul(u64::from(numerator))?;
+    let rounded = scaled.checked_add(denominator / 2)? / denominator;
+    let rounded = u32::try_from(rounded).ok()?;
+    (rounded >= WindowSize::MINIMUM_EDGE).then_some(rounded)
+}
+
+/// The window Minecraft itself opens at.
+///
+/// Somewhere to start and nothing more: it is the size the sizing window
+/// appears at for a row that has none of its own, and it is never stored. An
+/// override exists only once the user has actually resized that window.
+pub const WINDOW_START: WindowSize = WindowSize {
+    width: 854,
+    height: 480,
+};
+
 /// What the screen holds for one preference.
 ///
 /// The product has one axis: a preference either has an override this build
@@ -609,6 +758,13 @@ pub struct MinecraftDefaultsModel {
     /// clear this. It lives beside the draft rather than in the view, so the
     /// flag and the draft it guards cannot drift apart.
     saving: bool,
+    /// The window size picker's own state.
+    ///
+    /// How the picker projects one edge from the other, and nothing Minecraft
+    /// stores: no edit carries it, no configuration row holds it, and it
+    /// starts over with the screen.
+    window_aspect: WindowAspect,
+    window_locked: bool,
 }
 
 impl MinecraftDefaultsModel {
@@ -1010,6 +1166,196 @@ impl MinecraftDefaultsModel {
         if let Ok(value) = read_window_size(width, height) {
             self.set_state(id, DraftState::overriding(value));
         }
+    }
+
+    /// The ratio the window size picker is projecting with.
+    ///
+    /// Editor state, not Minecraft data: nothing here reaches configuration,
+    /// and it is expected to start over when the screen is reopened.
+    #[must_use]
+    pub const fn window_aspect(&self) -> WindowAspect {
+        self.window_aspect
+    }
+
+    /// Whether the picker is holding its ratio while the size changes.
+    #[must_use]
+    pub const fn window_locked(&self) -> bool {
+        self.window_locked
+    }
+
+    /// The exact size the picker is presenting as an override right now, if
+    /// any.
+    ///
+    /// Deliberately fail-closed, because this is the only value the ratio and
+    /// the drag handle are ever allowed to move. Three things that look like a
+    /// size are refused here: the catalog's proven default, which is
+    /// presentation and belongs to Minecraft rather than to this build; a
+    /// value configuration retains without applying, which this screen shows
+    /// as no override and must not quietly activate; and field text that does
+    /// not yet read as a size, because moving a size the user is part-way
+    /// through retyping would discard what they typed.
+    fn active_window_size(&self, id: &PreferenceId) -> Option<WindowSize> {
+        let state = self.state_of(id);
+        if !state.is_overridden() || self.problem_of(id).is_some() {
+            return None;
+        }
+        // Text in the fields is what the user is looking at, so it is what a
+        // ratio or a drag continues from once it reads as a size.
+        if let Some(text) = self.pending.get(id) {
+            let PendingText::Window { width, height } = text else {
+                return None;
+            };
+            return match read_window_size(width, height) {
+                Ok(MinecraftPreferenceValue::WindowSize(size)) => Some(size),
+                _ => None,
+            };
+        }
+        match state.value {
+            Some(MinecraftPreferenceValue::WindowSize(size)) => Some(size),
+            _ => None,
+        }
+    }
+
+    /// The size to open the sizing window at.
+    ///
+    /// The row's own size when it has one, else the window Minecraft itself
+    /// opens at. Reading it stores nothing: opening a window is a way to look
+    /// at a size, not a way to choose one.
+    #[must_use]
+    pub fn window_start(&self, id: &PreferenceId) -> WindowSize {
+        self.active_window_size(id).unwrap_or(WINDOW_START)
+    }
+
+    /// Chooses the ratio the picker projects with.
+    ///
+    /// A fixed ratio holds itself on selection and keeps the width, projecting
+    /// the height from it. Free releases the hold and leaves both edges
+    /// exactly as they are. Either way the ratio itself is presentation: it
+    /// moves a size that is already an override, and a row that has none gets
+    /// none invented for it.
+    pub fn set_window_aspect(&mut self, id: &PreferenceId, aspect: WindowAspect) {
+        self.window_aspect = aspect;
+        self.window_locked = aspect.ratio().is_some();
+        self.apply_window_ratio(id, WindowAxis::Width);
+    }
+
+    /// Holds or releases the selected ratio.
+    ///
+    /// Holding projects the height from the width that is already there;
+    /// releasing keeps the ratio selected and both edges untouched, so the
+    /// next edit moves one edge on its own.
+    pub fn set_window_locked(&mut self, id: &PreferenceId, locked: bool) {
+        self.window_locked = locked;
+        if locked {
+            self.apply_window_ratio(id, WindowAxis::Width);
+        }
+    }
+
+    /// Records the two fields and, while the ratio is held, projects the edge
+    /// the user did not touch from the one they did.
+    ///
+    /// The edited field is the anchor: entering a width keeps that width and
+    /// moves the height, and entering a height does the reverse.
+    ///
+    /// The pair on screen is read exactly once here, and that reading is the
+    /// only thing a projection may continue from. Text that is not a size
+    /// therefore ends the commit: it stays exactly as typed, the row stays
+    /// invalid and unsaveable, and no earlier value is projected in its place.
+    /// Half-finished input is a state to report, not one to repair.
+    pub fn commit_window_size(
+        &mut self,
+        id: &PreferenceId,
+        width: &str,
+        height: &str,
+        anchor: WindowAxis,
+    ) {
+        self.pending.insert(
+            id.clone(),
+            PendingText::Window {
+                width: width.to_owned(),
+                height: height.to_owned(),
+            },
+        );
+        let Ok(MinecraftPreferenceValue::WindowSize(size)) = read_window_size(width, height) else {
+            return;
+        };
+        match self.projection_of(size, anchor) {
+            Some(projected) => self.store_window_size(id, projected),
+            None => self.set_state(
+                id,
+                DraftState::overriding(MinecraftPreferenceValue::WindowSize(size)),
+            ),
+        }
+    }
+
+    /// One size with the edge opposite `anchor` projected from the selected
+    /// ratio, or `None` when there is nothing to change.
+    ///
+    /// Pure, and the single place a ratio turns into a size. `None` covers
+    /// three cases that all mean "leave it alone": no ratio is held, the
+    /// projection already agrees with the size, and the ratio cannot express
+    /// this edge as a size this build accepts. The last one is refused rather
+    /// than clamped, since a size the user did not choose is not a repair.
+    fn projection_of(&self, size: WindowSize, anchor: WindowAxis) -> Option<WindowSize> {
+        let ratio = self.window_aspect.ratio().filter(|_| self.window_locked)?;
+        let projected = match anchor {
+            WindowAxis::Width => WindowSize {
+                width: size.width,
+                height: project_height(size.width, ratio)?,
+            },
+            WindowAxis::Height => WindowSize {
+                width: project_width(size.height, ratio)?,
+                height: size.height,
+            },
+        };
+        (projected != size).then_some(projected)
+    }
+
+    /// Projects the held ratio onto the size this row is already overriding.
+    fn apply_window_ratio(&mut self, id: &PreferenceId, anchor: WindowAxis) {
+        let Some(size) = self.active_window_size(id) else {
+            return;
+        };
+        let Some(projected) = self.projection_of(size, anchor) else {
+            return;
+        };
+        self.store_window_size(id, projected);
+    }
+
+    /// Records the size the window manager gave the sizing window.
+    ///
+    /// The window on screen is the value: whatever size it was dragged to is
+    /// the exact size stored, with no scaling in between. `anchor` is the edge
+    /// the user is driving, so a held ratio moves the other one.
+    ///
+    /// Returns the exact size now stored when it differs from `reported`, so
+    /// the caller knows the window is not yet showing what the row holds;
+    /// `None` when the two already agree, or when the size was refused. A size
+    /// under the smallest window this build accepts is refused rather than
+    /// grown: the window carries that minimum as its own limit, and a manager
+    /// that ignores it does not get to store a size Minecraft would not take.
+    pub fn fit_window(
+        &mut self,
+        id: &PreferenceId,
+        reported: WindowSize,
+        anchor: WindowAxis,
+    ) -> Option<WindowSize> {
+        if reported.width < WindowSize::MINIMUM_EDGE || reported.height < WindowSize::MINIMUM_EDGE {
+            return None;
+        }
+        let exact = self.projection_of(reported, anchor).unwrap_or(reported);
+        self.store_window_size(id, exact);
+        (exact != reported).then_some(exact)
+    }
+
+    /// Records one exact size, dropping the field text it supersedes so both
+    /// fields read back what was actually stored.
+    fn store_window_size(&mut self, id: &PreferenceId, size: WindowSize) {
+        self.pending.remove(id);
+        self.set_state(
+            id,
+            DraftState::overriding(MinecraftPreferenceValue::WindowSize(size)),
+        );
     }
 
     /// Records free text for the one presentation kind that takes it.
@@ -1792,6 +2138,40 @@ impl MinecraftDefaultsModel {
         rows
     }
 
+    /// One visible row rebuilt on its own, with the position it occupies.
+    ///
+    /// For a gesture that has to keep the element it is happening in: the row
+    /// is written back in place instead of the list being replaced.
+    #[must_use]
+    pub fn row_at(&self, id: &PreferenceId) -> Option<(usize, MinecraftPreferenceRow)> {
+        let mut heading: Option<Option<String>> = None;
+        for (index, entry) in self.visible_entries().into_iter().enumerate() {
+            let section = entry.descriptor.section.clone();
+            let repeated = heading.as_ref() == Some(&section);
+            if !repeated {
+                heading = Some(section.clone());
+            }
+            if entry.id() != id.as_str() {
+                continue;
+            }
+            let section_heading = if repeated {
+                String::new()
+            } else {
+                section_label(section.as_deref())
+            };
+            return Some((
+                index,
+                self.row_for(
+                    entry,
+                    section_heading,
+                    &self.binding_conflicts(),
+                    &self.invalid_ids(),
+                ),
+            ));
+        }
+        None
+    }
+
     #[allow(clippy::too_many_lines)]
     fn row_for(
         &self,
@@ -1951,6 +2331,8 @@ impl MinecraftDefaultsModel {
                 }
             }
             (PreferenceEditor::WindowSize, value) => {
+                row.aspect_index = i32::try_from(self.window_aspect.position()).unwrap_or(0);
+                row.aspect_locked = self.window_locked;
                 let size = match value {
                     Some(MinecraftPreferenceValue::WindowSize(size)) => Some(*size),
                     _ => None,
@@ -2905,6 +3287,599 @@ mod tests {
             model.problem_of(&window),
             Some(FieldProblem::Unreadable),
             "half a window size is not a window size"
+        );
+    }
+
+    // -------------------------------------------------- the window size picker
+
+    /// A model whose window size is a value an older Ephervex stored without
+    /// applying it, which this screen reads as no override at all.
+    fn retained_window_model(size: WindowSize) -> MinecraftDefaultsModel {
+        let mut snapshot = bundled_snapshot();
+        for entry in &mut snapshot.entries {
+            if entry.id() == "window_size" {
+                entry.managed = false;
+                entry.value = Some(MinecraftPreferenceValue::WindowSize(size));
+            }
+        }
+        let mut model = MinecraftDefaultsModel::new();
+        model.apply_snapshot(snapshot);
+        model.select_category(1);
+        model
+    }
+
+    fn window_size_of(model: &MinecraftDefaultsModel, id: &PreferenceId) -> Option<WindowSize> {
+        match model.state_of(id).value {
+            Some(MinecraftPreferenceValue::WindowSize(size)) => Some(size),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn each_offered_aspect_is_an_exact_whole_number_pair() {
+        assert_eq!(WindowAspect::Free.ratio(), None);
+        assert_eq!(WindowAspect::Ratio16x9.ratio(), Some((16, 9)));
+        assert_eq!(WindowAspect::Ratio16x10.ratio(), Some((16, 10)));
+        assert_eq!(WindowAspect::Ratio21x9.ratio(), Some((21, 9)));
+        assert_eq!(WindowAspect::Ratio4x3.ratio(), Some((4, 3)));
+
+        for (index, aspect) in WINDOW_ASPECTS.iter().enumerate() {
+            assert_eq!(WindowAspect::at(index), Some(*aspect));
+            assert_eq!(aspect.position(), index);
+        }
+        assert_eq!(WindowAspect::at(WINDOW_ASPECTS.len()), None);
+        assert_ne!(
+            WindowAspect::Ratio16x9.ratio(),
+            WindowAspect::Ratio16x10.ratio(),
+            "two ratios that round to the same decimal stay distinct"
+        );
+    }
+
+    #[test]
+    fn projection_rounds_half_up_and_refuses_what_it_cannot_express() {
+        // 1620 * 10 / 16 is exactly 1012.5, so the tie decides the value.
+        assert_eq!(project_height(1620, (16, 10)), Some(1013));
+        // 321 * 16 / 9 is 570.67, which rounds to the nearer whole number.
+        assert_eq!(project_width(321, (16, 9)), Some(571));
+        // A wide ratio can imply a height under the smallest window this
+        // build accepts. That is refused rather than moved up to the minimum.
+        assert_eq!(project_height(400, (21, 9)), None);
+        // And an edge whose projection leaves the representable range fails
+        // closed instead of wrapping.
+        assert_eq!(project_width(u32::MAX, (21, 9)), None);
+        assert_eq!(project_height(u32::MAX, (16, 9)), Some(2_415_919_103));
+    }
+
+    #[test]
+    fn a_free_size_moves_each_edge_on_its_own() {
+        let mut model = loaded_model();
+        model.select_category(1);
+        let window = id("window_size");
+
+        model.set_window_aspect(&window, WindowAspect::Free);
+        model.commit_window_size(&window, "1600", "1000", WindowAxis::Width);
+
+        assert!(!model.window_locked(), "free never holds a ratio");
+        assert_eq!(
+            window_size_of(&model, &window),
+            Some(WindowSize {
+                width: 1600,
+                height: 1000
+            }),
+            "neither edge is projected from the other"
+        );
+    }
+
+    #[test]
+    fn a_held_ratio_projects_the_edge_the_user_did_not_type() {
+        let mut model = loaded_model();
+        model.select_category(1);
+        let window = id("window_size");
+        model.set_window_size(&window, "1600", "1000");
+
+        model.set_window_aspect(&window, WindowAspect::Ratio16x9);
+        assert!(model.window_locked(), "choosing a ratio holds it");
+        assert_eq!(
+            window_size_of(&model, &window),
+            Some(WindowSize {
+                width: 1600,
+                height: 900
+            }),
+            "the width is kept and the height follows the ratio"
+        );
+
+        model.commit_window_size(&window, "1600", "1200", WindowAxis::Height);
+        assert_eq!(
+            window_size_of(&model, &window),
+            Some(WindowSize {
+                width: 2133,
+                height: 1200
+            }),
+            "typing a height keeps it and projects the width"
+        );
+
+        model.commit_window_size(&window, "1280", "1200", WindowAxis::Width);
+        assert_eq!(
+            window_size_of(&model, &window),
+            Some(WindowSize {
+                width: 1280,
+                height: 720
+            }),
+            "typing a width keeps it and projects the height"
+        );
+    }
+
+    #[test]
+    fn releasing_and_holding_a_ratio_again_only_projects_while_it_is_held() {
+        let mut model = loaded_model();
+        model.select_category(1);
+        let window = id("window_size");
+        model.set_window_size(&window, "1600", "1000");
+        model.set_window_aspect(&window, WindowAspect::Ratio16x10);
+
+        let held = WindowSize {
+            width: 1600,
+            height: 1000,
+        };
+        assert_eq!(window_size_of(&model, &window), Some(held), "already 16:10");
+
+        model.set_window_locked(&window, false);
+        model.commit_window_size(&window, "1600", "1200", WindowAxis::Height);
+        assert_eq!(
+            window_size_of(&model, &window),
+            Some(WindowSize {
+                width: 1600,
+                height: 1200
+            }),
+            "released, the ratio is only shown and each edge stands alone"
+        );
+
+        model.set_window_locked(&window, true);
+        assert_eq!(
+            window_size_of(&model, &window),
+            Some(WindowSize {
+                width: 1600,
+                height: 1000
+            }),
+            "holding it again projects the height from the width that is there"
+        );
+    }
+
+    #[test]
+    fn window_text_that_is_not_a_size_survives_a_commit_on_either_edge() {
+        let earlier = WindowSize {
+            width: 1600,
+            height: 1000,
+        };
+        for (anchor, width, height, kept_width, kept_height) in [
+            (WindowAxis::Width, "", "1000", "", "1000"),
+            (WindowAxis::Height, "1600", "12x0", "1600", "12x0"),
+        ] {
+            let mut model = loaded_model();
+            model.select_category(1);
+            let window = id("window_size");
+            model.set_window_size(&window, "1600", "1000");
+            model.set_window_aspect(&window, WindowAspect::Ratio16x9);
+            model.commit_window_size(&window, "1600", "900", WindowAxis::Width);
+            model.commit_window_size(&window, "1600", "1000", WindowAxis::Width);
+            model.set_window_locked(&window, false);
+            model.set_window_locked(&window, true);
+            // Whatever the ratio did earlier, the size on record is the one
+            // the next commit must not silently project.
+            let recorded = window_size_of(&model, &window);
+
+            model.commit_window_size(&window, width, height, anchor);
+
+            let row = model
+                .rows()
+                .into_iter()
+                .find(|row| row.id == "window_size")
+                .expect("the window size row");
+            assert_eq!(row.text_value, kept_width, "the width text stays as typed");
+            assert_eq!(
+                row.height_text, kept_height,
+                "the height text stays as typed"
+            );
+            assert!(
+                model.problem_of(&window).is_some(),
+                "the row still reports the problem"
+            );
+            assert!(
+                model.invalid_ids().contains(&window),
+                "and saving stays blocked"
+            );
+            assert_eq!(
+                window_size_of(&model, &window),
+                recorded,
+                "no earlier size is projected in place of what failed to read"
+            );
+            assert_ne!(
+                recorded,
+                Some(earlier),
+                "the earlier size is not what a ratio would have made of it"
+            );
+            assert_eq!(
+                model.window_start(&window),
+                WINDOW_START,
+                "and the sizing window will not open onto a size the fields \
+                 have already been typed past"
+            );
+        }
+    }
+
+    #[test]
+    fn the_sizing_window_opens_on_the_rows_own_size_and_stores_nothing_to_do_it() {
+        let mut model = loaded_model();
+        model.select_category(1);
+        let window = id("window_size");
+
+        assert_eq!(
+            model.window_start(&window),
+            WINDOW_START,
+            "a row with no size opens on the window Minecraft itself opens"
+        );
+        assert!(model.state_of(&window).is_absent());
+        assert!(!model.is_dirty(), "looking at a size is not choosing one");
+        assert!(model.edits().is_empty());
+
+        model.set_window_size(&window, "1600", "900");
+        assert_eq!(
+            model.window_start(&window),
+            WindowSize {
+                width: 1600,
+                height: 900
+            },
+            "and a row with one opens on exactly that"
+        );
+    }
+
+    #[test]
+    fn a_free_sizing_window_stores_exactly_the_size_it_was_given() {
+        let mut model = loaded_model();
+        model.select_category(1);
+        let window = id("window_size");
+
+        let given = WindowSize {
+            width: 1731,
+            height: 973,
+        };
+        assert_eq!(
+            model.fit_window(&window, given, WindowAxis::Width),
+            None,
+            "nothing to correct, so the window is left where the user put it"
+        );
+        assert_eq!(window_size_of(&model, &window), Some(given));
+        assert_eq!(model.origin_of(&window), ValueOrigin::Overridden);
+
+        let edits = model.edits();
+        assert_eq!(edits.len(), 1, "one preference, one edit");
+        assert_eq!(edits[0].id.as_str(), "window_size");
+        assert!(matches!(
+            edits[0].change,
+            PreferenceChange::Set {
+                value: MinecraftPreferenceValue::WindowSize(stored),
+                ..
+            } if stored == given
+        ));
+    }
+
+    #[test]
+    fn the_edge_a_window_manager_moved_is_the_edge_the_user_is_driving() {
+        let from = WindowSize {
+            width: 1600,
+            height: 900,
+        };
+        let anchor = |width, height| window_anchor(from, WindowSize { width, height });
+
+        assert_eq!(anchor(1600, 900), None, "a window that did not move");
+        assert_eq!(
+            anchor(1900, 900),
+            Some(WindowAxis::Width),
+            "the right border: the width is chosen and the height follows"
+        );
+        assert_eq!(
+            anchor(1600, 1100),
+            Some(WindowAxis::Height),
+            "the bottom border: the height is chosen and the width follows"
+        );
+        // A corner moves both, so the edge that moved further in proportion is
+        // the one being driven. Comparing raw pixels would make the long edge
+        // win every diagonal drag on a wide window.
+        assert_eq!(
+            anchor(1700, 1400),
+            Some(WindowAxis::Height),
+            "6% wider against 56% taller"
+        );
+        assert_eq!(anchor(2400, 950), Some(WindowAxis::Width));
+        assert_eq!(
+            anchor(2400, 1350),
+            Some(WindowAxis::Width),
+            "both edges by half: an exact tie keeps the width rather than \
+             flipping edge to edge"
+        );
+    }
+
+    #[test]
+    fn a_diagonal_drag_keeps_one_edge_for_the_whole_gesture() {
+        let mut model = loaded_model();
+        model.select_category(1);
+        let window = id("window_size");
+        let opened = WindowSize {
+            width: 1600,
+            height: 900,
+        };
+        model.set_window_size(&window, "1600", "900");
+        model.set_window_aspect(&window, WindowAspect::Ratio16x9);
+
+        // What the window reports as the pointer travels out and down. It
+        // starts out mostly sideways and turns downwards part way, which is
+        // where deciding the edge report by report would change its mind.
+        let dragged = [
+            WindowSize {
+                width: 1900,
+                height: 950,
+            },
+            WindowSize {
+                width: 2000,
+                height: 1400,
+            },
+            WindowSize {
+                width: 2100,
+                height: 1450,
+            },
+        ];
+        let anchor = window_anchor(opened, dragged[0]).expect("the window moved");
+        assert_eq!(anchor, WindowAxis::Width, "the drag began sideways");
+        assert_eq!(
+            window_anchor(dragged[0], dragged[1]),
+            Some(WindowAxis::Height),
+            "and turned downwards, which is the report that would flip it"
+        );
+
+        for reported in dragged {
+            model.fit_window(&window, reported, anchor);
+            let size = window_size_of(&model, &window).expect("a size");
+            assert_eq!(
+                size.width, reported.width,
+                "the edge the gesture is driving stays the user's throughout"
+            );
+            assert_eq!(
+                size.height,
+                project_height(reported.width, (16, 9)).expect("a 16:9 height"),
+                "and the other edge is the ratio's, every step of the way"
+            );
+        }
+    }
+
+    #[test]
+    fn a_held_ratio_follows_the_edge_the_window_manager_did_not_move() {
+        let mut model = loaded_model();
+        model.select_category(1);
+        let window = id("window_size");
+        model.set_window_size(&window, "1600", "900");
+        model.set_window_aspect(&window, WindowAspect::Ratio16x9);
+
+        // The right border moved: the width is what the user chose, so the
+        // height is what follows.
+        let correction = model.fit_window(
+            &window,
+            WindowSize {
+                width: 1280,
+                height: 900,
+            },
+            WindowAxis::Width,
+        );
+        assert_eq!(
+            correction,
+            Some(WindowSize {
+                width: 1280,
+                height: 720
+            })
+        );
+        assert_eq!(window_size_of(&model, &window), correction);
+
+        // The bottom border moved: the height stands and the width follows.
+        let correction = model.fit_window(
+            &window,
+            WindowSize {
+                width: 1280,
+                height: 1000,
+            },
+            WindowAxis::Height,
+        );
+        assert_eq!(
+            correction,
+            Some(WindowSize {
+                width: 1778,
+                height: 1000
+            }),
+            "1000 * 16 / 9 is 1777.8, rounded to the nearer whole number"
+        );
+        assert_eq!(window_size_of(&model, &window), correction);
+    }
+
+    #[test]
+    fn a_corrected_window_reports_its_corrected_size_and_settles() {
+        let mut model = loaded_model();
+        model.select_category(1);
+        let window = id("window_size");
+        model.set_window_size(&window, "1600", "900");
+        model.set_window_aspect(&window, WindowAspect::Ratio16x10);
+
+        let reported = WindowSize {
+            width: 1728,
+            height: 1003,
+        };
+        let corrected = model
+            .fit_window(&window, reported, WindowAxis::Width)
+            .expect("the ratio moves the height");
+        assert_eq!(
+            corrected,
+            WindowSize {
+                width: 1728,
+                height: 1080
+            }
+        );
+        assert_eq!(
+            model.fit_window(&window, corrected, WindowAxis::Width),
+            None,
+            "putting the window on the corrected size settles in one step \
+             rather than chasing itself"
+        );
+        assert_eq!(window_size_of(&model, &window), Some(corrected));
+    }
+
+    #[test]
+    fn a_window_smaller_than_this_build_accepts_stores_nothing() {
+        let mut model = loaded_model();
+        model.select_category(1);
+        let window = id("window_size");
+        model.set_window_size(&window, "1600", "900");
+        let held = window_size_of(&model, &window);
+
+        for refused in [
+            WindowSize {
+                width: WindowSize::MINIMUM_EDGE - 1,
+                height: 900,
+            },
+            WindowSize {
+                width: 1600,
+                height: WindowSize::MINIMUM_EDGE - 1,
+            },
+            WindowSize {
+                width: 1,
+                height: 1,
+            },
+        ] {
+            assert_eq!(model.fit_window(&window, refused, WindowAxis::Width), None);
+            assert_eq!(
+                window_size_of(&model, &window),
+                held,
+                "a window under the minimum is refused rather than grown into one"
+            );
+        }
+    }
+
+    #[test]
+    fn a_size_the_held_ratio_cannot_express_is_kept_rather_than_moved() {
+        let mut model = loaded_model();
+        model.select_category(1);
+        let window = id("window_size");
+        model.set_window_size(&window, "1600", "900");
+        model.set_window_aspect(&window, WindowAspect::Ratio21x9);
+
+        // 21:9 of this width is a height under the minimum, so there is no
+        // projection to apply and the exact window stands.
+        let given = WindowSize {
+            width: 400,
+            height: 400,
+        };
+        assert_eq!(model.fit_window(&window, given, WindowAxis::Width), None);
+        assert_eq!(window_size_of(&model, &window), Some(given));
+    }
+
+    #[test]
+    fn choosing_a_ratio_or_holding_it_writes_nothing_on_an_untouched_row() {
+        let mut model = loaded_model();
+        model.select_category(1);
+        let window = id("window_size");
+
+        for aspect in WINDOW_ASPECTS {
+            model.set_window_aspect(&window, aspect);
+            model.set_window_locked(&window, false);
+            model.set_window_locked(&window, true);
+        }
+
+        assert_eq!(model.origin_of(&window), ValueOrigin::NotOverridden);
+        assert!(model.state_of(&window).is_absent());
+        assert!(!model.is_dirty(), "the picker's own state is not a value");
+        assert!(model.edits().is_empty());
+        assert_eq!(
+            model.window_start(&window),
+            WINDOW_START,
+            "and there is no size of its own for a window to open onto"
+        );
+    }
+
+    #[test]
+    fn a_retained_window_size_stays_inactive_through_every_picker_interaction() {
+        let retained = WindowSize {
+            width: 1600,
+            height: 1000,
+        };
+        let window = id("window_size");
+        let unchanged = DraftState {
+            managed: false,
+            value: Some(MinecraftPreferenceValue::WindowSize(retained)),
+        };
+
+        let mut model = retained_window_model(retained);
+        assert_eq!(model.origin_of(&window), ValueOrigin::NotOverridden);
+        assert_eq!(model.state_of(&window), unchanged);
+        assert_eq!(
+            model.shown_value(&window),
+            None,
+            "a value nothing writes is not the value the row shows"
+        );
+
+        for aspect in WINDOW_ASPECTS {
+            model.set_window_aspect(&window, aspect);
+            model.set_window_locked(&window, false);
+            model.set_window_locked(&window, true);
+            assert_eq!(
+                model.window_start(&window),
+                WINDOW_START,
+                "and a sizing window never opens onto a retained value"
+            );
+        }
+
+        assert_eq!(
+            model.state_of(&window),
+            unchanged,
+            "the retained configuration is left exactly as it was found"
+        );
+        assert_eq!(model.origin_of(&window), ValueOrigin::NotOverridden);
+        assert!(!model.is_dirty());
+        assert!(
+            model.edits().is_empty(),
+            "presentation alone never reaches a save batch"
+        );
+
+        // Only an explicit size makes it an override, and it is still one row.
+        model.set_window_aspect(&window, WindowAspect::Free);
+        model.commit_window_size(&window, "1280", "720", WindowAxis::Width);
+        assert_eq!(model.origin_of(&window), ValueOrigin::Overridden);
+        let edits = model.edits();
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].id.as_str(), "window_size");
+        assert!(matches!(
+            edits[0].change,
+            PreferenceChange::Set {
+                value: MinecraftPreferenceValue::WindowSize(WindowSize {
+                    width: 1280,
+                    height: 720
+                }),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn resetting_the_window_size_leaves_no_override_behind() {
+        let mut model = loaded_model();
+        model.select_category(1);
+        let window = id("window_size");
+
+        model.commit_window_size(&window, "1280", "720", WindowAxis::Width);
+        assert_eq!(model.origin_of(&window), ValueOrigin::Overridden);
+
+        model.reset_row(&window);
+        assert_eq!(model.origin_of(&window), ValueOrigin::NotOverridden);
+        assert!(model.state_of(&window).is_absent());
+        assert_eq!(model.window_start(&window), WINDOW_START);
+        assert!(
+            model.edits().is_empty(),
+            "back to what core already holds, so there is nothing to save"
         );
     }
 

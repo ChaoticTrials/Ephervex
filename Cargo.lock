@@ -1621,12 +1621,14 @@ dependencies = [
  "ephervex-core",
  "ephervex-i18n",
  "ephervex-model",
+ "raw-window-handle",
  "rfd",
  "slint",
  "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "x11rb",
 ]
 
 [[package]]
@@ -5754,6 +5756,7 @@ dependencies = [
  "num-traits",
  "once_cell",
  "pin-weak",
+ "raw-window-handle",
  "slint-macros",
  "unicode-segmentation",
  "vtable",

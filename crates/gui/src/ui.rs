@@ -230,6 +230,9 @@ slint::slint! {
         number-step: float,
         number-readout: string,
         number-hint: string,
+        // The window size picker's own presentation. Neither is stored.
+        aspect-index: int,
+        aspect-locked: bool,
         enum-labels: [string],
         enum-index: int,
         binding-label: string,
@@ -993,6 +996,7 @@ slint::slint! {
         in property <bool> compact;
         in property <bool> capturing;
         in property <bool> languages-available;
+        in property <[string]> aspect-labels;
         callback set-boolean(string, bool);
         callback set-number(string, float);
         callback edit-number(string, string);
@@ -1000,7 +1004,11 @@ slint::slint! {
         callback set-enumeration(string, int);
         callback set-language(string, int);
         callback edit-window(string, string, string);
-        callback commit-window(string, string, string);
+        callback commit-window-width(string, string, string);
+        callback commit-window-height(string, string, string);
+        callback set-window-aspect(string, int);
+        callback set-window-lock(string, bool);
+        callback open-window-preview(string);
         callback commit-text(string, string);
         callback forget(string);
         callback begin-capture(string);
@@ -1010,7 +1018,10 @@ slint::slint! {
         callback retry-languages();
         property <length> heading-height: root.item.section-heading == "" ? 0px : 42px * Theme.text-scale;
         property <length> detail-lines: ((root.item.invalid ? 22px : 0px) + (root.item.notice == "" ? 0px : 22px) + (root.item.status-detail == "" ? 0px : 22px)) * Theme.text-scale;
-        height: root.heading-height + 104px * Theme.text-scale + root.detail-lines;
+        // The window size row spends a second line on the ratio it projects
+        // with, which is the one editor that does not fit on one.
+        property <length> editor-lines: root.item.editor == "window" ? 42px * Theme.text-scale : 0px;
+        height: root.heading-height + 104px * Theme.text-scale + root.editor-lines + root.detail-lines;
         background: transparent;
         VerticalLayout {
             spacing: 0px;
@@ -1119,29 +1130,63 @@ slint::slint! {
                         }
                         // One product preference, so both numbers are read
                         // and committed together: half a window size is not a
-                        // window size.
-                        if root.item.editor == "window" : HorizontalLayout {
+                        // window size. The ratio and the lock are the same
+                        // value's other face, not a second one.
+                        if root.item.editor == "window" : VerticalLayout {
                             spacing: 8px;
-                            alignment: center;
-                            FieldLabel { text: GuiI18n.text("gui-minecraft-width"); vertical-alignment: center; }
-                            width-field := TextField {
-                                width: 96px;
-                                accessible-name: GuiI18n.text("gui-minecraft-width");
-                                invalid: root.item.invalid;
-                                text: root.item.text-value;
-                                edited(value) => { root.edit-window(root.item.id, value, height-field.text); }
-                                accepted => { root.commit-window(root.item.id, width-field.text, height-field.text); }
-                                focus-lost => { root.commit-window(root.item.id, width-field.text, height-field.text); }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                FieldLabel { text: GuiI18n.text("gui-minecraft-width"); vertical-alignment: center; }
+                                width-field := TextField {
+                                    width: 96px;
+                                    accessible-name: GuiI18n.text("gui-minecraft-width");
+                                    invalid: root.item.invalid;
+                                    text: root.item.text-value;
+                                    edited(value) => { root.edit-window(root.item.id, value, height-field.text); }
+                                    // The edited field is the one the ratio
+                                    // holds still, so each field commits on
+                                    // its own axis.
+                                    accepted => { root.commit-window-width(root.item.id, width-field.text, height-field.text); }
+                                    focus-lost => { root.commit-window-width(root.item.id, width-field.text, height-field.text); }
+                                }
+                                FieldLabel { text: GuiI18n.text("gui-minecraft-height"); vertical-alignment: center; }
+                                height-field := TextField {
+                                    width: 96px;
+                                    accessible-name: GuiI18n.text("gui-minecraft-height");
+                                    invalid: root.item.invalid;
+                                    text: root.item.height-text;
+                                    edited(value) => { root.edit-window(root.item.id, width-field.text, value); }
+                                    accepted => { root.commit-window-height(root.item.id, width-field.text, height-field.text); }
+                                    focus-lost => { root.commit-window-height(root.item.id, width-field.text, height-field.text); }
+                                }
+                                Rectangle { horizontal-stretch: 1; min-width: 0px; }
                             }
-                            FieldLabel { text: GuiI18n.text("gui-minecraft-height"); vertical-alignment: center; }
-                            height-field := TextField {
-                                width: 96px;
-                                accessible-name: GuiI18n.text("gui-minecraft-height");
-                                invalid: root.item.invalid;
-                                text: root.item.height-text;
-                                edited(value) => { root.edit-window(root.item.id, width-field.text, value); }
-                                accepted => { root.commit-window(root.item.id, width-field.text, height-field.text); }
-                                focus-lost => { root.commit-window(root.item.id, width-field.text, height-field.text); }
+                            // The second line is the same value by eye: the
+                            // ratio it is held to, and the window that is it.
+                            // Keeping it off the first line leaves the row's
+                            // own actions their column at every width.
+                            HorizontalLayout {
+                                spacing: 8px;
+                                aspect-box := ComboBox {
+                                    width: root.compact ? 116px : 136px;
+                                    accessible-label: GuiI18n.text("gui-minecraft-aspect");
+                                    model: root.aspect-labels;
+                                    current-index: root.item.aspect-index;
+                                    selected => { root.set-window-aspect(root.item.id, aspect-box.current-index); }
+                                }
+                                FieldLabel { text: GuiI18n.text("gui-minecraft-aspect-lock"); vertical-alignment: center; }
+                                Toggle {
+                                    accessible-name: GuiI18n.text("gui-minecraft-aspect-lock");
+                                    checked: root.item.aspect-locked;
+                                    toggled(value) => { root.set-window-lock(root.item.id, value); }
+                                }
+                                // Sizing by eye means a window the size of the
+                                // window, not a drawing of one.
+                                AppButton {
+                                    text: GuiI18n.text("gui-minecraft-window-open");
+                                    clicked => { root.open-window-preview(root.item.id); }
+                                }
+                                Rectangle { horizontal-stretch: 1; min-width: 0px; }
                             }
                         }
                         if root.item.editor == "text" : text-field := TextField {
@@ -1412,6 +1457,67 @@ slint::slint! {
         }
     }
 
+    // A window the exact size of the Minecraft window being configured.
+    //
+    // This is the picker: it is sized by the window manager like any other
+    // window, and whatever size it is dragged to is the exact size stored.
+    // Nothing is scaled, so what the user sees on screen is the window they
+    // are asking Minecraft for. The size it reports is in the same screen
+    // coordinates Minecraft's own window uses.
+    export component WindowSizePreview inherits Window {
+        in property <string> readout;
+        // Whether a ratio is being held, which is the difference between a
+        // window that follows the pointer and one that settles onto a shape.
+        in property <bool> holds-ratio;
+        // The smallest window this build accepts, supplied by the code that
+        // owns that rule rather than repeated here as a number.
+        in property <length> minimum-edge;
+        callback resized(length, length);
+        callback dismissed();
+        title: GuiI18n.text("gui-minecraft-window-preview-title");
+        // Sizing a window against a settings page it would otherwise hide
+        // behind.
+        always-on-top: true;
+        background: Theme.background;
+        // Every edge and corner stays draggable. A held ratio reaches the
+        // window manager as an aspect, not as a size this window refuses to
+        // take, so the manager moves the edge the user is not holding rather
+        // than this window losing half its handles.
+        min-width: root.minimum-edge;
+        min-height: root.minimum-edge;
+        changed width => { root.resized(self.width, self.height); }
+        changed height => { root.resized(self.width, self.height); }
+        VerticalLayout {
+            padding: 16px;
+            spacing: 10px;
+            alignment: center;
+            Text {
+                text: root.readout;
+                color: Theme.text;
+                font-size: 32px;
+                horizontal-alignment: center;
+                overflow: elide;
+            }
+            Text {
+                text: root.holds-ratio
+                    ? GuiI18n.text("gui-minecraft-window-preview-hint-ratio")
+                    : GuiI18n.text("gui-minecraft-window-preview-hint");
+                color: Theme.text-secondary;
+                font-size: Theme.caption-size;
+                horizontal-alignment: center;
+                wrap: word-wrap;
+            }
+            HorizontalLayout {
+                alignment: center;
+                AppButton {
+                    text: GuiI18n.text("gui-minecraft-window-preview-close");
+                    tone: "primary";
+                    clicked => { root.dismissed(); }
+                }
+            }
+        }
+    }
+
     export component AppWindow inherits Window {
         title: "Ephervex";
         icon: root.logo;
@@ -1483,6 +1589,8 @@ slint::slint! {
         // -- Minecraft defaults for future client instances.
         in-out property <[MinecraftPreferenceRow]> minecraft-preference-rows;
         in-out property <[string]> minecraft-categories;
+        // The ratios the window size picker offers, in the order it lists them.
+        in-out property <[string]> minecraft-aspect-labels;
         in-out property <int> minecraft-category-index: 0;
         in-out property <string> minecraft-query;
         in-out property <bool> minecraft-show-advanced: false;
@@ -1817,7 +1925,11 @@ slint::slint! {
         callback minecraft-set-enumeration(string, int);
         callback minecraft-set-language(string, int);
         callback minecraft-edit-window(string, string, string);
-        callback minecraft-commit-window(string, string, string);
+        callback minecraft-commit-window-width(string, string, string);
+        callback minecraft-commit-window-height(string, string, string);
+        callback minecraft-set-window-aspect(string, int);
+        callback minecraft-set-window-lock(string, bool);
+        callback minecraft-open-window-preview(string);
         callback minecraft-commit-text(string, string);
         callback minecraft-forget-preference(string);
         callback minecraft-begin-capture(string);
@@ -2253,8 +2365,13 @@ slint::slint! {
                                 commit-number(id, value) => { root.minecraft-commit-number(id, value); }
                                 set-enumeration(id, index) => { root.minecraft-set-enumeration(id, index); }
                                 set-language(id, index) => { root.minecraft-set-language(id, index); }
+                                aspect-labels: root.minecraft-aspect-labels;
                                 edit-window(id, width, height) => { root.minecraft-edit-window(id, width, height); }
-                                commit-window(id, width, height) => { root.minecraft-commit-window(id, width, height); }
+                                commit-window-width(id, width, height) => { root.minecraft-commit-window-width(id, width, height); }
+                                commit-window-height(id, width, height) => { root.minecraft-commit-window-height(id, width, height); }
+                                set-window-aspect(id, index) => { root.minecraft-set-window-aspect(id, index); }
+                                set-window-lock(id, held) => { root.minecraft-set-window-lock(id, held); }
+                                open-window-preview(id) => { root.minecraft-open-window-preview(id); }
                                 commit-text(id, value) => { root.minecraft-commit-text(id, value); }
                                 forget(id) => { root.minecraft-forget-preference(id); }
                                 begin-capture(id) => { root.minecraft-begin-capture(id); }
