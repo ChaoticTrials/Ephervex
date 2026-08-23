@@ -428,7 +428,9 @@ impl ApiConfig {
 /// the display name, and timestamps. The refresh token that makes the account
 /// usable is in the keyring and is not represented here at all — not even as a
 /// copy, and not even as a length.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+// No `Eq`: the open `unknown` table holds `toml::Value`, which has no total
+// equality because it can carry a float.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct AccountConfig {
     /// The account's Minecraft display name, for showing in the interface
@@ -445,6 +447,15 @@ pub struct AccountConfig {
     /// RFC 3339 timestamp of the last successful chain completion, or of
     /// creation for an offline account, which never authenticates.
     pub last_authenticated_at: String,
+    /// Keys this build does not know about. See [`Config::unknown`].
+    ///
+    /// An account row is as open as any other table: a newer Ephervex may
+    /// record something here, and an older one running once must not destroy
+    /// it. That openness is also why this table is walked for credential-shaped
+    /// keys like every other one -- nothing about being nested under a profile
+    /// id makes an untrusted key safe.
+    #[serde(flatten)]
+    pub unknown: toml::Table,
 }
 
 /// Why an account reference did not resolve to exactly one account.
@@ -936,6 +947,7 @@ impl Config {
             // shows the field.
             .or_else(|| find_secret_key(&self.api.unknown, "api").map(|found| found.reported))
             .or_else(|| find_secret_key(&self.cache.unknown, "cache").map(|found| found.reported))
+            .or_else(|| find_secret_key(&self.mods.unknown, "mods").map(|found| found.reported))
             .or_else(|| {
                 self.minecraft_preferences
                     .keys()
@@ -946,6 +958,14 @@ impl Config {
                 self.accounts
                     .keys()
                     .find(|key| looks_like_secret_key(key))
+                    .map(|_| "accounts.<redacted>".to_owned())
+            })
+            .or_else(|| {
+                // The profile id a row is keyed by is not secret, but it is
+                // still user-controlled text that should not reach a report.
+                self.accounts
+                    .values()
+                    .find_map(|account| find_secret_key(&account.unknown, "accounts"))
                     .map(|_| "accounts.<redacted>".to_owned())
             })
     }
@@ -959,6 +979,7 @@ impl Config {
             (&mut self.eula.unknown, "eula"),
             (&mut self.api.unknown, "api"),
             (&mut self.cache.unknown, "cache"),
+            (&mut self.mods.unknown, "mods"),
         ] {
             while let Some(found) = find_secret_key(table, prefix) {
                 // The key can itself contain credential material, so neither
@@ -968,6 +989,16 @@ impl Config {
                      secrets belong in the system keyring"
                 );
                 remove_nested(table, &found.leaf);
+            }
+        }
+
+        for account in self.accounts.values_mut() {
+            while let Some(found) = find_secret_key(&account.unknown, "accounts") {
+                tracing::warn!(
+                    "discarding a credential-looking key from an account row; \
+                     secrets belong in the system keyring"
+                );
+                remove_nested(&mut account.unknown, &found.leaf);
             }
         }
 
@@ -1036,10 +1067,40 @@ fn find_secret_key(table: &toml::Table, prefix: &str) -> Option<SecretKeyMatch> 
                 leaf: key.clone(),
             });
         }
-        if let toml::Value::Table(nested) = value {
-            if let Some(found) = find_secret_key(nested, &path) {
-                return Some(found);
+        match value {
+            toml::Value::Table(nested) => {
+                if let Some(found) = find_secret_key(nested, &path) {
+                    return Some(found);
+                }
             }
+            // An array of tables hides a key exactly as well as a table does,
+            // and TOML's `[[section]]` syntax makes one an obvious thing to
+            // hand-edit a credential into.
+            toml::Value::Array(elements) => {
+                if let Some(found) = find_secret_in_array(elements, &path) {
+                    return Some(found);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Walks the tables inside an array, and inside any array they contain.
+///
+/// The reported path stays the array's own, without an element index: it is
+/// shown to a user to tell them which part of their configuration to edit, and
+/// an index into a list they are looking at adds nothing.
+fn find_secret_in_array(elements: &[toml::Value], prefix: &str) -> Option<SecretKeyMatch> {
+    for element in elements {
+        let found = match element {
+            toml::Value::Table(nested) => find_secret_key(nested, prefix),
+            toml::Value::Array(nested) => find_secret_in_array(nested, prefix),
+            _ => None,
+        };
+        if found.is_some() {
+            return found;
         }
     }
     None
@@ -1052,15 +1113,30 @@ fn looks_like_secret_key(key: &str) -> bool {
         .any(|marker| lowered.contains(marker))
 }
 
-/// Removes a key by leaf name at any depth, pruning tables that become empty.
+/// Removes one occurrence of a key by leaf name, at any depth.
+///
+/// Callers loop until [`find_secret_key`] reports nothing, so removing a single
+/// occurrence per call is enough to clear all of them.
 fn remove_nested(table: &mut toml::Table, leaf: &str) {
     if table.remove(leaf).is_some() {
         return;
     }
     for (_, value) in table.iter_mut() {
-        if let toml::Value::Table(nested) = value {
-            remove_nested(nested, leaf);
+        remove_nested_value(value, leaf);
+    }
+}
+
+/// The array half of [`remove_nested`], so a key found inside an array of
+/// tables can also be removed rather than only reported.
+fn remove_nested_value(value: &mut toml::Value, leaf: &str) {
+    match value {
+        toml::Value::Table(nested) => remove_nested(nested, leaf),
+        toml::Value::Array(elements) => {
+            for element in elements {
+                remove_nested_value(element, leaf);
+            }
         }
+        _ => {}
     }
 }
 
@@ -1664,6 +1740,148 @@ reference = ""
         let text =
             format!("{DEFAULT_CONFIG_EXAMPLE}\n[api]\ncurseforge_api_key = \"$2a$10$notreal\"\n");
         let config = Config::from_toml_str(&text).expect("parse");
+        assert!(config.find_secret_looking_key().is_none());
+        assert!(
+            !config
+                .to_toml_string()
+                .expect("serialize")
+                .contains("notreal")
+        );
+    }
+
+    #[test]
+    fn a_credential_inside_an_array_of_tables_is_dropped_on_load() {
+        // `[[section]]` is the natural TOML shape for "one entry per provider",
+        // so it is exactly where somebody would paste a key. An array is not a
+        // place the walk may stop.
+        let text = format!(
+            "{DEFAULT_CONFIG_EXAMPLE}\n[mods]\ndefault_catalog = \"curseforge\"\n\
+             [[mods.sources]]\nname = \"private\"\napi_key = \"$2a$10$notreal\"\n"
+        );
+        let config = Config::from_toml_str(&text).expect("parse");
+        assert!(config.find_secret_looking_key().is_none());
+        let serialized = config.to_toml_string().expect("serialize");
+        assert!(!serialized.contains("notreal"), "{serialized}");
+        // Everything beside the credential survives, including the row it was
+        // pasted into.
+        assert_eq!(config.mods.default_catalog, "curseforge");
+        assert!(serialized.contains("private"), "{serialized}");
+    }
+
+    #[test]
+    fn a_credential_shaped_key_inside_an_array_of_tables_is_refused_on_save() {
+        let mut config = Config::default();
+        let mut row = toml::Table::new();
+        row.insert("name".to_owned(), toml::Value::String("private".to_owned()));
+        row.insert(
+            "access_token".to_owned(),
+            toml::Value::String("notreal".to_owned()),
+        );
+        config.mods.unknown.insert(
+            "sources".to_owned(),
+            toml::Value::Array(vec![toml::Value::Table(row)]),
+        );
+
+        let error = config
+            .to_toml_string()
+            .expect_err("a credential is refused");
+        assert!(
+            matches!(error, ConfigError::SecretRejected { .. }),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_credential_hand_edited_into_the_mods_table_is_dropped_on_load() {
+        // `[mods]` is as open as every other table, so it is walked like every
+        // other table. Preferring a catalog is a setting; reaching one is a
+        // keyring credential (ADR 0004, ADR 0022).
+        let text = format!(
+            "{DEFAULT_CONFIG_EXAMPLE}\n[mods]\ndefault_catalog = \"curseforge\"\n\
+             curseforge_api_key = \"$2a$10$notreal\"\n"
+        );
+        let config = Config::from_toml_str(&text).expect("parse");
+        assert!(config.find_secret_looking_key().is_none());
+        assert!(!config.mods.unknown.contains_key("curseforge_api_key"));
+        // The setting beside it is untouched.
+        assert_eq!(config.mods.default_catalog, "curseforge");
+        assert!(
+            !config
+                .to_toml_string()
+                .expect("serialize")
+                .contains("notreal")
+        );
+    }
+
+    #[test]
+    fn a_credential_shaped_key_under_mods_is_refused_on_save() {
+        let mut config = Config::default();
+        config.mods.unknown.insert(
+            "access_key".to_owned(),
+            toml::Value::String("notreal".to_owned()),
+        );
+        // The key itself is redacted in the report: an untrusted key name can
+        // carry credential material of its own.
+        assert_eq!(
+            config.find_secret_looking_key().as_deref(),
+            Some("mods.<redacted>")
+        );
+        assert!(matches!(
+            config.to_toml_string(),
+            Err(ConfigError::SecretRejected { .. })
+        ));
+    }
+
+    #[test]
+    fn unknown_keys_inside_an_account_row_survive() {
+        // An account row is written by whichever build signed the account in.
+        // A newer one recording something here must survive an older one
+        // running once, exactly like every other table.
+        let text = format!(
+            "{DEFAULT_CONFIG_EXAMPLE}\n\
+             [accounts.2f8a1c40-0000-4000-8000-000000000001]\n\
+             name = \"Steve\"\nkind = \"microsoft\"\n\
+             added_at = \"2026-01-01T00:00:00Z\"\n\
+             last_authenticated_at = \"2026-01-02T00:00:00Z\"\n\
+             future_account_field = \"kept\"\n"
+        );
+        let config = Config::from_toml_str(&text).expect("parse");
+        let account = config
+            .accounts
+            .get("2f8a1c40-0000-4000-8000-000000000001")
+            .expect("account");
+        assert_eq!(account.name, "Steve");
+        assert_eq!(
+            account
+                .unknown
+                .get("future_account_field")
+                .and_then(toml::Value::as_str),
+            Some("kept")
+        );
+
+        let round_tripped =
+            Config::from_toml_str(&config.to_toml_string().expect("serialize")).expect("reparse");
+        assert_eq!(round_tripped, config);
+    }
+
+    #[test]
+    fn a_credential_hand_edited_into_an_account_row_is_dropped_on_load() {
+        let text = format!(
+            "{DEFAULT_CONFIG_EXAMPLE}\n\
+             [accounts.2f8a1c40-0000-4000-8000-000000000001]\n\
+             name = \"Steve\"\nkind = \"microsoft\"\n\
+             added_at = \"2026-01-01T00:00:00Z\"\n\
+             last_authenticated_at = \"2026-01-02T00:00:00Z\"\n\
+             refresh_token = \"notreal\"\n"
+        );
+        let config = Config::from_toml_str(&text).expect("parse");
+        let account = config
+            .accounts
+            .get("2f8a1c40-0000-4000-8000-000000000001")
+            .expect("account");
+        // The account itself is kept; only the credential is discarded.
+        assert_eq!(account.name, "Steve");
+        assert!(!account.unknown.contains_key("refresh_token"));
         assert!(config.find_secret_looking_key().is_none());
         assert!(
             !config

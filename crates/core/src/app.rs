@@ -451,7 +451,7 @@ impl App {
             self.preference_context(&request.minecraft_version),
         )
         .await?;
-        self.publish_client(request, &preferences)
+        self.materialize_client(request, &preferences)
     }
 
     /// Validates the exact game and loader selection without publishing any
@@ -493,15 +493,20 @@ impl App {
         context: &PreferenceContext,
     ) -> CoreResult<CreatedClient> {
         validation?;
-        self.publish_client(request, context)
+        self.materialize_client(request, context)
     }
 
-    fn publish_client(
+    /// Creates the instance, applies the one-time preferences, and publishes.
+    ///
+    /// Publication is the last step, so a failure before it leaves an instance
+    /// no other entry point can see (see `ephervex_storage::registry`).
+    fn materialize_client(
         &self,
         request: NewClient,
         context: &PreferenceContext,
     ) -> CoreResult<CreatedClient> {
-        let record = self.registry().create_client(request)?;
+        let registry = self.registry();
+        let record = registry.create_client(request)?;
         let preferences = match self.apply_global_preferences(&record, context) {
             Ok(applied) => Some(applied),
             Err(error) => {
@@ -513,6 +518,10 @@ impl App {
                 None
             }
         };
+        if let Err(error) = registry.publish_client(&record) {
+            discard_unpublished(registry, &record);
+            return Err(error.into());
+        }
         Ok(CreatedClient {
             record,
             preferences,
@@ -522,7 +531,7 @@ impl App {
     #[cfg(test)]
     pub(crate) fn create_client_for_test(&self, request: NewClient) -> CoreResult<ClientRecord> {
         Ok(self
-            .publish_client(request, &PreferenceContext::offline())?
+            .materialize_client(request, &PreferenceContext::offline())?
             .record)
     }
 
@@ -1179,6 +1188,23 @@ async fn after_successful_validation<T>(
 ) -> CoreResult<T> {
     validation?;
     Ok(optional_work.await)
+}
+
+/// Removes an instance that never reached publication.
+///
+/// A partial instance is not a reproduction of anything, so it is removed
+/// rather than left behind. Failing to remove it is reported and never
+/// propagated: the caller already has a real error to return, and the leftover
+/// directory carries an incomplete marker that keeps reconciliation from ever
+/// presenting it as an instance.
+pub(crate) fn discard_unpublished(registry: &Registry, record: &ClientRecord) {
+    if let Err(error) = registry.discard_unpublished_client(record) {
+        warn!(
+            instance_id = %record.id,
+            %error,
+            "could not remove the instance left behind by a failed creation"
+        );
+    }
 }
 
 fn loader_build_is_available(listing: &LoaderVersionListing, selected: &str) -> bool {

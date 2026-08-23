@@ -396,6 +396,101 @@ async fn a_size_mismatch_is_rejected_even_when_no_hash_was_supplied() {
 }
 
 #[tokio::test]
+async fn a_body_larger_than_the_requests_ceiling_is_abandoned_rather_than_written() {
+    // The shape of an untrusted document nobody published a size or a hash for:
+    // a provider metadata response. Without a ceiling it streams until the disk
+    // is full, so the request carries its own.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/manifest.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(BODY))
+        .mount(&server)
+        .await;
+
+    let dir = TempDir::new().expect("temp dir");
+    let destination = dir.path().join("manifest.json");
+    let error = manager(RetryPolicy::none())
+        .download(
+            &request(&server, "/manifest.json", &destination).bounded_by(8),
+            &OperationReporter::silent("download"),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("the body overruns the ceiling");
+
+    assert!(matches!(
+        error,
+        DownloadError::BodyTooLarge { limit: 8, .. }
+    ));
+    assert!(!destination.exists());
+    assert!(
+        no_partial_siblings(&destination),
+        "an abandoned oversize body leaves no staging file"
+    );
+}
+
+#[tokio::test]
+async fn a_request_ceiling_cannot_raise_the_managers_own_limit() {
+    // A manager sized for artifacts and a request sized for a document meet at
+    // the tighter of the two, never the looser.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/artifact.jar"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(BODY))
+        .mount(&server)
+        .await;
+
+    let manager = DownloadManager::new(DownloaderConfig {
+        concurrency: 1,
+        retry: RetryPolicy::none(),
+        http: HttpConfig::for_loopback_tests(),
+        allow_resume: true,
+        max_bytes: Some(8),
+    })
+    .expect("client builds");
+
+    let dir = TempDir::new().expect("temp dir");
+    let destination = dir.path().join("artifact.jar");
+    let error = manager
+        .download(
+            &request(&server, "/artifact.jar", &destination).bounded_by(u64::MAX),
+            &OperationReporter::silent("download"),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("the manager ceiling still applies");
+
+    assert!(matches!(
+        error,
+        DownloadError::BodyTooLarge { limit: 8, .. }
+    ));
+    assert!(!destination.exists());
+}
+
+#[tokio::test]
+async fn a_body_within_the_ceiling_is_downloaded_normally() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/manifest.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(BODY))
+        .mount(&server)
+        .await;
+
+    let dir = TempDir::new().expect("temp dir");
+    let destination = dir.path().join("manifest.json");
+    manager(RetryPolicy::none())
+        .download(
+            &request(&server, "/manifest.json", &destination).bounded_by(BODY.len() as u64),
+            &OperationReporter::silent("download"),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("a body exactly at the ceiling is not over it");
+
+    assert_eq!(std::fs::read(&destination).expect("body"), BODY);
+}
+
+#[tokio::test]
 async fn a_canceled_download_leaves_no_file_behind() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

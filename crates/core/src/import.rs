@@ -36,7 +36,7 @@ use ephervex_pack::{
     MaterializeRequest, MaterializedPack, OptionalSelection, PackAnalysis, PackArchive, PackPolicy,
     PackRecipe, PackSide, SourceStore,
 };
-use ephervex_storage::{ClientRecord, FileDisposition, ImportSource, NewClient};
+use ephervex_storage::{ClientRecord, ImportSource, NewClient};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument, warn};
 
@@ -215,17 +215,10 @@ impl App {
         {
             Ok(materialized) => materialized,
             Err(error) => {
-                // A partial import is not a reproduction of anything.
-                if let Err(cleanup) = self
-                    .registry_for_services()
-                    .delete_client(record.id, FileDisposition::Remove)
-                {
-                    warn!(
-                        instance_id = %record.id,
-                        %cleanup,
-                        "could not remove the instance left behind by a failed import"
-                    );
-                }
+                // A partial import is not a reproduction of anything. The
+                // instance was never published, so there is no row to delete
+                // and no other operation could have observed it.
+                crate::app::discard_unpublished(self.registry_for_services(), &record);
                 return Err(error);
             }
         };
@@ -245,6 +238,11 @@ impl App {
                 None
             }
         };
+
+        if let Err(error) = self.registry_for_services().publish_client(&record) {
+            crate::app::discard_unpublished(self.registry_for_services(), &record);
+            return Err(error.into());
+        }
 
         info!(
             instance_id = %record.id,

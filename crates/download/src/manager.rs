@@ -187,6 +187,14 @@ pub struct DownloadRequest {
     expected_hashes: Vec<Hash>,
     expected_size: Option<u64>,
     label: Option<String>,
+    /// A ceiling on the response body for this one request.
+    ///
+    /// Separate from [`DownloaderConfig::max_bytes`], which applies to every
+    /// transfer a manager performs and therefore has to accommodate a client
+    /// JAR or a managed runtime. Untrusted documents whose size nobody
+    /// published -- provider metadata, install profiles -- need a bound of
+    /// their own, and one manager serves both kinds of transfer.
+    max_bytes: Option<u64>,
     /// The credential this one request may carry, when its source needs one.
     ///
     /// Shared rather than copied: a pack import builds hundreds of requests
@@ -210,6 +218,7 @@ impl DownloadRequest {
             expected_hashes: Vec::new(),
             expected_size: None,
             label: None,
+            max_bytes: None,
             authenticated: None,
         }
     }
@@ -242,6 +251,18 @@ impl DownloadRequest {
     #[must_use]
     pub const fn sized(mut self, bytes: u64) -> Self {
         self.expected_size = Some(bytes);
+        self
+    }
+
+    /// Refuses a response body larger than this many bytes.
+    ///
+    /// Enforced while streaming, so an unbounded body is abandoned as soon as
+    /// it crosses the line rather than after it has filled a disk. For a
+    /// document whose exact size the provider published, prefer
+    /// [`Self::sized`]; this is the bound for the ones that publish nothing.
+    #[must_use]
+    pub const fn bounded_by(mut self, bytes: u64) -> Self {
+        self.max_bytes = Some(bytes);
         self
     }
 
@@ -864,7 +885,13 @@ impl Transfer<'_, '_> {
             })?;
 
             written = written.saturating_add(chunk.len() as u64);
-            if let Some(limit) = self.manager.config.max_bytes {
+            // The tighter of the two applies: a manager-wide ceiling sized for
+            // artifacts must not raise a request's own bound.
+            let ceiling = match (self.manager.config.max_bytes, self.request.max_bytes) {
+                (Some(config), Some(request)) => Some(config.min(request)),
+                (limit, None) | (None, limit) => limit,
+            };
+            if let Some(limit) = ceiling {
                 if written > limit {
                     return Err(DownloadError::BodyTooLarge {
                         url: self.url_label.clone(),

@@ -574,6 +574,78 @@ mod tests {
     }
 
     #[test]
+    fn one_oversize_entry_is_refused_and_leaves_no_partial_file() {
+        // The per-entry ceiling, distinct from the shared total: a single
+        // entry that inflates past it must not be written even in part.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = dir.path().join("bomb.mrpack");
+        zip_file(&archive, &[("overrides/huge.bin", &vec![b'x'; 8192])]);
+
+        let mut pack = PackArchive::open(
+            &archive,
+            ExtractionLimits {
+                max_entry_bytes: 1024,
+                ..ExtractionLimits::default()
+            },
+        )
+        .expect("open");
+
+        let destination = dir.path().join("out");
+        let error = pack
+            .extract_prefix("overrides", &destination)
+            .expect_err("an entry over its own ceiling is refused");
+        assert!(
+            matches!(
+                error,
+                PackError::LimitExceeded {
+                    limit: "entry-size",
+                    allowed: 1024,
+                    ..
+                }
+            ),
+            "unexpected error: {error:?}"
+        );
+        assert!(
+            !destination.join("huge.bin").exists(),
+            "the partially written entry is removed rather than left behind"
+        );
+    }
+
+    #[test]
+    fn a_symlink_entry_is_refused_rather_than_resolved() {
+        // A modpack override tree has no legitimate symlink, and resolving one
+        // is how an archive reaches outside the directory it was given.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = dir.path().join("linked.mrpack");
+        {
+            let file = File::create(&archive).expect("create archive");
+            let mut writer = zip::ZipWriter::new(file);
+            let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            writer
+                .add_symlink("overrides/escape.txt", "/etc/passwd", options)
+                .expect("write a symlink entry");
+            writer.finish().expect("finish");
+        }
+
+        let destination = dir.path().join("out");
+        let error = open(&archive)
+            .extract_prefix("overrides", &destination)
+            .expect_err("a symlink entry is refused");
+        assert!(
+            matches!(
+                error,
+                PackError::EntryTypeUnsupported {
+                    kind: "symlink",
+                    ..
+                }
+            ),
+            "unexpected error: {error:?}"
+        );
+        assert!(!destination.join("escape.txt").exists());
+    }
+
+    #[test]
     fn the_size_budget_is_shared_across_layers_rather_than_per_layer() {
         // A bomb split across `overrides/` and `client-overrides/` must not
         // stay under two separate ceilings.

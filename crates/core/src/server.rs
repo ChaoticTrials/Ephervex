@@ -1673,6 +1673,9 @@ mod tests {
                     )),
             )
             .expect("client");
+        app.registry_for_services()
+            .publish_client(&client)
+            .expect("publish");
         let mut server = app
             .registry_for_services()
             .prepare_server(NewServer::linked("linked", client.id))

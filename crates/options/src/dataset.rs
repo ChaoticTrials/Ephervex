@@ -179,7 +179,18 @@ impl OptionsDataset {
         reason = "the bundled dataset is build input, and a broken one must fail loudly rather than leave the launcher with no compatibility knowledge at all"
     )]
     pub fn bundled() -> Self {
-        Self::parse(BUNDLED_DATASET).expect("the bundled options compatibility dataset is valid")
+        Self::bundled_checked().expect("the bundled options compatibility dataset is valid")
+    }
+
+    /// The baseline compiled into this build, reported rather than asserted.
+    ///
+    /// [`Self::bundled`] is right for the launcher's own use: a build whose
+    /// compatibility data does not parse has nothing useful to offer and should
+    /// say so at the top of its voice. A health report is the one caller that
+    /// needs the opposite -- it exists to *describe* a broken installation, so
+    /// it must be able to name this failure instead of becoming it.
+    pub fn bundled_checked() -> Result<Self, DatasetError> {
+        Self::parse(BUNDLED_DATASET)
     }
 
     /// Reads and fully validates a document.

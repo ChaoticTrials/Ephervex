@@ -33,15 +33,19 @@ fn the_instance_registry_workflow_holds_end_to_end() {
     let paths = isolated_paths(&base);
 
     // --- create temp record -------------------------------------------------
+    // Creation and publication are two steps: an instance only becomes visible
+    // to the rest of the registry once its materialization has finished.
     let temporary = {
         let registry = Registry::open(paths.clone()).expect("open registry");
-        registry
+        let record = registry
             .create_client(NewClient::new(
                 "Temp repro",
                 "1.20.1",
                 LoaderSelection::exact(LoaderKind::NeoForge, "47.1.106"),
             ))
-            .expect("create temporary instance")
+            .expect("create temporary instance");
+        registry.publish_client(&record).expect("publish");
+        record
     };
     assert_eq!(
         temporary.storage,
@@ -53,7 +57,7 @@ fn the_instance_registry_workflow_holds_end_to_end() {
     // --- create persistent record -------------------------------------------
     let persistent = {
         let registry = Registry::open(paths.clone()).expect("open registry");
-        registry
+        let record = registry
             .create_client(
                 NewClient::new(
                     "Kept repro",
@@ -62,7 +66,9 @@ fn the_instance_registry_workflow_holds_end_to_end() {
                 )
                 .with_storage(StorageClass::Persistent),
             )
-            .expect("create persistent instance")
+            .expect("create persistent instance");
+        registry.publish_client(&record).expect("publish");
+        record
     };
     assert!(
         persistent
@@ -115,6 +121,7 @@ fn a_missing_persistent_root_is_kept_and_warned_about_rather_than_removed() {
                 .with_storage(StorageClass::Persistent),
         )
         .expect("create");
+    registry.publish_client(&persistent).expect("publish");
 
     std::fs::remove_dir_all(&persistent.root).expect("simulate an unmounted disk");
 
@@ -161,4 +168,185 @@ fn no_secret_is_stored_in_config() {
         std::fs::read_to_string(paths.config_file()).expect("read back"),
         written
     );
+}
+
+/// The hard invariant: nothing treats an instance as complete before it is
+/// published.
+///
+/// Enumerated on purpose rather than spot-checked: each entry point below is
+/// asserted separately, so a regression names which one broke instead of
+/// failing a single blanket check.
+///
+/// The list is maintained by hand and cannot notice an entry point added after
+/// it. What makes the invariant hold is structural, and it is that every one of
+/// these resolves through the index, which an unpublished instance has no row
+/// in; this test is the evidence for that, not the mechanism.
+#[test]
+fn no_entry_point_sees_an_instance_before_it_is_published() {
+    let base = tempfile::tempdir().expect("temp dir");
+    let paths = isolated_paths(&base);
+    let registry = Registry::open(paths.clone()).expect("open registry");
+
+    let unpublished = registry
+        .create_client(
+            NewClient::new("Half built", "1.20.1", LoaderSelection::vanilla())
+                .with_storage(StorageClass::Persistent),
+        )
+        .expect("create");
+
+    // The directory and its canonical metadata exist -- that is what makes the
+    // rest of this test worth writing.
+    assert!(unpublished.root.is_dir());
+    assert!(
+        ephervex_storage::metadata::is_incomplete(&unpublished.root),
+        "a created instance carries the marker until it is published"
+    );
+
+    // -- lookup ------------------------------------------------------------
+    assert!(
+        matches!(
+            registry.client(unpublished.id),
+            Err(ephervex_storage::RegistryError::InstanceUnknown { .. })
+        ),
+        "reading an unpublished instance must report it as unknown"
+    );
+    assert!(
+        registry.list_clients().expect("list").is_empty(),
+        "an unpublished instance must not be listed"
+    );
+    assert!(
+        registry
+            .linked_server_ids(unpublished.id)
+            .expect("links")
+            .is_empty()
+    );
+
+    // -- mutation ----------------------------------------------------------
+    let mut mutated = unpublished.clone();
+    assert!(
+        matches!(
+            registry.update_client(&mut mutated),
+            Err(ephervex_storage::RegistryError::InstanceUnknown { .. })
+        ),
+        "an unpublished instance must not be mutable"
+    );
+
+    // -- deletion and duplication ------------------------------------------
+    assert!(
+        matches!(
+            registry.delete_client(unpublished.id, ephervex_storage::FileDisposition::Remove),
+            Err(ephervex_storage::RegistryError::InstanceUnknown { .. })
+        ),
+        "an unpublished instance is not deletable by id; only its creator can discard it"
+    );
+    assert!(
+        matches!(
+            registry.duplicate_client(
+                unpublished.id,
+                &ephervex_storage::DuplicateClient::default()
+            ),
+            Err(ephervex_storage::RegistryError::InstanceUnknown { .. })
+        ),
+        "an unpublished instance must not be duplicable"
+    );
+    // The refused delete left the files exactly where they were.
+    assert!(unpublished.root.is_dir());
+
+    // -- reconciliation ----------------------------------------------------
+    let report = reconcile(&registry).expect("reconcile");
+    assert!(
+        registry.list_clients().expect("list").is_empty(),
+        "reconciliation must never adopt an unfinished instance"
+    );
+    assert_eq!(report.unfinished_instances.len(), 1);
+    assert_eq!(report.unfinished_instances[0].root, unpublished.root);
+    assert!(report.needs_attention());
+    assert!(
+        unpublished.root.is_dir(),
+        "reconciliation reports an unfinished instance; it never deletes one"
+    );
+
+    // -- publication makes it real ------------------------------------------
+    registry.publish_client(&unpublished).expect("publish");
+    assert!(!ephervex_storage::metadata::is_incomplete(
+        &unpublished.root
+    ));
+    assert_eq!(
+        registry.client(unpublished.id).expect("published").id,
+        unpublished.id
+    );
+    assert_eq!(registry.list_clients().expect("list").len(), 1);
+}
+
+/// The recovery path ADR 0002 exists for must not regress: a *finished*
+/// instance the database has lost is still adopted.
+#[test]
+fn a_finished_instance_missing_from_the_index_is_still_recovered() {
+    let base = tempfile::tempdir().expect("temp dir");
+    let paths = isolated_paths(&base);
+    let registry = Registry::open(paths.clone()).expect("open registry");
+
+    let record = registry
+        .create_client(
+            NewClient::new("Recoverable", "1.20.1", LoaderSelection::vanilla())
+                .with_storage(StorageClass::Persistent),
+        )
+        .expect("create");
+    registry.publish_client(&record).expect("publish");
+
+    // Lose the index row, keep the directory: a database restored from an old
+    // backup, or removed to force a rebuild.
+    std::fs::remove_file(paths.database_file()).expect("drop the index");
+    let registry = Registry::open(paths.clone()).expect("reopen registry");
+    assert!(registry.list_clients().expect("list").is_empty());
+
+    let report = reconcile(&registry).expect("reconcile");
+    assert_eq!(report.reindexed.len(), 1);
+    assert!(report.unfinished_instances.is_empty());
+    assert_eq!(registry.list_clients().expect("list").len(), 1);
+}
+
+/// An interrupted duplication is the one unfinished instance whose metadata
+/// names an id the index already knows, because the copy carries the
+/// original's `instance.json` until it finishes. Testing the index first would
+/// skip exactly the directory the marker was written for.
+#[test]
+fn an_interrupted_duplication_is_reported_even_though_its_metadata_is_already_indexed() {
+    let base = tempfile::tempdir().expect("temp dir");
+    let paths = isolated_paths(&base);
+    let registry = Registry::open(paths.clone()).expect("open registry");
+
+    let original = registry
+        .create_client(
+            NewClient::new("Original", "1.20.1", LoaderSelection::vanilla())
+                .with_storage(StorageClass::Persistent),
+        )
+        .expect("create");
+    registry.publish_client(&original).expect("publish");
+
+    // What `duplicate_client` leaves behind when it is killed mid-copy: a
+    // second root, marked incomplete, holding the original's metadata.
+    let abandoned = paths
+        .persistent_instances_dir()
+        .join("11111111-2222-4333-8444-555555555555");
+    std::fs::create_dir_all(abandoned.join(".launcher")).expect("create the abandoned root");
+    std::fs::copy(
+        original.root.join(".launcher/instance.json"),
+        abandoned.join(".launcher/instance.json"),
+    )
+    .expect("copy the metadata the way the interrupted copy would have");
+    std::fs::write(abandoned.join(".launcher/incomplete"), b"").expect("mark it incomplete");
+
+    let report = reconcile(&registry).expect("reconcile");
+
+    assert_eq!(
+        report.unfinished_instances.len(),
+        1,
+        "an interrupted duplication must be reported, not silently kept forever"
+    );
+    assert_eq!(report.unfinished_instances[0].root, abandoned);
+    assert!(report.needs_attention());
+    // The original is untouched and still the only instance.
+    assert_eq!(registry.list_clients().expect("list").len(), 1);
+    assert!(abandoned.is_dir(), "reporting never deletes");
 }

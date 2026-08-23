@@ -97,6 +97,17 @@ pub const METADATA_ENVELOPE_VERSION: u32 = 1;
 /// [`MetadataCache::refresh`].
 pub const DEFAULT_METADATA_TTL: Duration = Duration::from_secs(15 * 60);
 
+/// The largest provider document this cache will accept.
+///
+/// A metadata response is untrusted input whose size nobody publishes: there is
+/// no hash and no declared length to check it against, so without a ceiling a
+/// hostile or broken endpoint can stream until the disk is full. The number is
+/// chosen against the largest documents Ephervex actually reads -- Mojang's
+/// version manifest and the per-release language catalogs are the biggest by a
+/// wide margin, and a loader install profile is capped separately at 16 MiB --
+/// so it bounds the damage without being near anything legitimate.
+pub const MAX_METADATA_BYTES: u64 = 64 * 1024 * 1024;
+
 /// Where a document came from and how old it is.
 ///
 /// The three variants are deliberately distinguishable by a frontend: "live",
@@ -531,7 +542,9 @@ impl MetadataCache {
         // yesterday's staging file would be served as today's refresh.
         remove_if_present(&staging).await;
 
-        let request = DownloadRequest::new(url.clone(), &staging).labeled(key.to_string());
+        let request = DownloadRequest::new(url.clone(), &staging)
+            .labeled(key.to_string())
+            .bounded_by(MAX_METADATA_BYTES);
         let outcome = manager.download(&request, reporter, cancel).await;
         let read = match outcome {
             Ok(_) => fs::read(&staging)
@@ -568,7 +581,9 @@ impl MetadataCache {
         let staging = self.staging_path(key);
         remove_if_present(&staging).await;
 
-        let request = DownloadRequest::new(url.clone(), &staging).labeled(key.to_string());
+        let request = DownloadRequest::new(url.clone(), &staging)
+            .labeled(key.to_string())
+            .bounded_by(MAX_METADATA_BYTES);
         let outcome = manager.download(&request, reporter, cancel).await;
         let read = match outcome {
             Ok(_) => fs::read(&staging)

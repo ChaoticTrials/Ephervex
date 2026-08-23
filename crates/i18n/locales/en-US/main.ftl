@@ -72,10 +72,19 @@ reconcile-reindexed = { $count ->
        *[other] Recovered { $count } instances found on disk but missing from the index.
     }
 
+reconcile-unfinished-instances = { $count ->
+        [one] { $count } instance directory was left unfinished by an interrupted creation or import.
+       *[other] { $count } instance directories were left unfinished by interrupted creations or imports.
+    }
+.action = Ephervex did not add them to the instance list, because their files are incomplete. Delete the directories when you no longer need what they hold.
+
 reconcile-nothing-to-do = Everything in the index matches what is on disk.
 
 # $name is user-authored, $path is a filesystem path. Untranslated.
 reconcile-persistent-root-missing-detail = { $name } expected its files at { $path }.
+
+# $name is user-authored, $path is a filesystem path. Untranslated.
+reconcile-unfinished-instance-detail = { $name } was never finished at { $path }.
 
 ## Attention reasons 
 #

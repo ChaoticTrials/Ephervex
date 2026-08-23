@@ -79,6 +79,14 @@ pub struct ReconciliationReport {
     /// Several valid roots claimed the same server identity. No root was
     /// selected automatically.
     pub server_conflicts: Vec<ServerRootConflict>,
+    /// Instance directories whose materialization never finished.
+    ///
+    /// Left exactly where they are: they hold whatever an interrupted creation
+    /// or import managed to write, and only the user can say whether that is
+    /// worth keeping. They are never indexed, because a half-built instance
+    /// presented as a finished one is the failure this state exists to
+    /// prevent.
+    pub unfinished_instances: Vec<ReconciledRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,6 +106,7 @@ impl ReconciliationReport {
             && self.index_repaired.is_empty()
             && self.persistence_unhealthy.is_empty()
             && self.server_conflicts.is_empty()
+            && self.unfinished_instances.is_empty()
     }
 
     /// Whether anything here needs the user's attention.
@@ -108,6 +117,7 @@ impl ReconciliationReport {
         !self.missing_persistent.is_empty()
             || !self.persistence_unhealthy.is_empty()
             || !self.server_conflicts.is_empty()
+            || !self.unfinished_instances.is_empty()
     }
 }
 
@@ -317,6 +327,32 @@ fn reindex_orphaned_clients(
             }
         };
 
+        // The marker is checked before the index, not after it. An interrupted
+        // duplication carries the *original's* `instance.json` until the copy
+        // finishes, so its id is already indexed; testing the index first would
+        // skip the one directory the marker was written for.
+        //
+        // An instance whose creation, import, or duplication never finished
+        // parses perfectly and is missing whatever the materialization had not
+        // written yet. Adopting it would present a half-built instance as a
+        // complete one, which is exactly what the marker exists to prevent.
+        // Reported and left alone -- never indexed, and never deleted on the
+        // user's behalf.
+        if metadata::is_incomplete(&directory) {
+            tracing::warn!(
+                instance_id = %record.id,
+                path = %directory.display(),
+                "an instance directory was never finished; leaving it unindexed"
+            );
+            report.unfinished_instances.push(ReconciledRecord {
+                reference: RecordRef::Client(record.id),
+                name: record.name.clone(),
+                root: directory.clone(),
+                storage: StorageClass::Persistent,
+            });
+            continue;
+        }
+
         if known.contains(&record.id) {
             continue;
         }
@@ -453,10 +489,10 @@ mod tests {
         let registry = environment.registry();
 
         let temporary = registry
-            .create_client(NewClient::new("temp", "1.20.1", LoaderSelection::vanilla()))
+            .create_published_client(NewClient::new("temp", "1.20.1", LoaderSelection::vanilla()))
             .expect("create");
         let persistent = registry
-            .create_client(
+            .create_published_client(
                 NewClient::new("kept", "1.20.1", LoaderSelection::vanilla())
                     .with_storage(StorageClass::Persistent),
             )
@@ -492,7 +528,7 @@ mod tests {
         let environment = TestEnvironment::new();
         let registry = environment.registry();
         let mut client = registry
-            .create_client(NewClient::new(
+            .create_published_client(NewClient::new(
                 "legacy",
                 "1.20.1",
                 LoaderSelection::vanilla(),
@@ -525,11 +561,15 @@ mod tests {
 
         for _ in 0..3 {
             registry
-                .create_client(NewClient::new("temp", "1.20.1", LoaderSelection::vanilla()))
+                .create_published_client(NewClient::new(
+                    "temp",
+                    "1.20.1",
+                    LoaderSelection::vanilla(),
+                ))
                 .expect("create");
         }
         registry
-            .create_client(
+            .create_published_client(
                 NewClient::new("kept", "1.20.1", LoaderSelection::vanilla())
                     .with_storage(StorageClass::Persistent),
             )
@@ -549,7 +589,7 @@ mod tests {
         let environment = TestEnvironment::new();
         let registry = environment.registry();
         let temporary = registry
-            .create_client(NewClient::new("temp", "1.20.1", LoaderSelection::vanilla()))
+            .create_published_client(NewClient::new("temp", "1.20.1", LoaderSelection::vanilla()))
             .expect("create");
         std::fs::remove_dir_all(&temporary.root).expect("clear temp");
 
@@ -564,7 +604,7 @@ mod tests {
         let record = {
             let registry = environment.registry();
             registry
-                .create_client(
+                .create_published_client(
                     NewClient::new("recovered", "1.12.2", LoaderSelection::vanilla())
                         .with_storage(StorageClass::Persistent),
                 )
@@ -588,7 +628,11 @@ mod tests {
         {
             let registry = environment.registry();
             registry
-                .create_client(NewClient::new("temp", "1.20.1", LoaderSelection::vanilla()))
+                .create_published_client(NewClient::new(
+                    "temp",
+                    "1.20.1",
+                    LoaderSelection::vanilla(),
+                ))
                 .expect("create");
         }
 
@@ -637,7 +681,7 @@ mod tests {
         let environment = TestEnvironment::new();
         let registry = environment.registry();
         let record = registry
-            .create_client(
+            .create_published_client(
                 NewClient::new("remounted", "1.20.1", LoaderSelection::vanilla())
                     .with_storage(StorageClass::Persistent),
             )

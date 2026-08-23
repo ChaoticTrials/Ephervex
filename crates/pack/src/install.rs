@@ -1052,6 +1052,105 @@ mod tests {
         }
     }
 
+    /// Copies a retained override layer the way `apply_retained_overrides`
+    /// does, without needing a whole recipe to reach it.
+    fn copy_layer(source: &Path, destination: &Path) -> PackResult<ExtractionReport> {
+        let limits = ExtractionLimits::default();
+        let mut spent = ExtractionReport::default();
+        copy_retained_tree(source, destination, &limits, &mut spent)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_in_a_retained_layer_is_refused_rather_than_followed() {
+        // Retained layers come from an untrusted archive that was extracted
+        // earlier, so the same refusal has to apply on the way back out. A
+        // link planted here would otherwise write through it into the user's
+        // home directory the next time a server was reconstructed.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let outside = dir.path().join("outside");
+        std::fs::write(&outside, b"do not touch").expect("write");
+
+        let layer = dir.path().join("layer");
+        std::fs::create_dir_all(layer.join("config")).expect("create");
+        std::fs::write(layer.join("config/ok.toml"), b"a=1").expect("write");
+        std::os::unix::fs::symlink(&outside, layer.join("config/escape.toml"))
+            .expect("plant a symlink");
+
+        let destination = dir.path().join("minecraft");
+        let error = copy_layer(&layer, &destination).expect_err("a symlink is refused");
+        assert!(
+            matches!(
+                error,
+                PackError::EntryTypeUnsupported {
+                    kind: "symlink",
+                    ..
+                }
+            ),
+            "unexpected error: {error:?}"
+        );
+        assert_eq!(
+            std::fs::read(&outside).expect("read"),
+            b"do not touch",
+            "nothing was written through the link"
+        );
+        assert!(!destination.join("config/escape.toml").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_directory_in_a_retained_layer_is_refused_too() {
+        // The directory case is the one that would otherwise let a whole tree
+        // be walked from outside the layer.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).expect("create");
+        std::fs::write(elsewhere.join("secret.txt"), b"private").expect("write");
+
+        let layer = dir.path().join("layer");
+        std::fs::create_dir_all(&layer).expect("create");
+        std::os::unix::fs::symlink(&elsewhere, layer.join("config")).expect("plant a symlink");
+
+        let error = copy_layer(&layer, &dir.path().join("minecraft"))
+            .expect_err("a symlinked directory is refused");
+        assert!(
+            matches!(
+                error,
+                PackError::EntryTypeUnsupported {
+                    kind: "symlink",
+                    ..
+                }
+            ),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    #[test]
+    fn a_retained_layer_entry_over_its_ceiling_is_refused() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let layer = dir.path().join("layer");
+        std::fs::create_dir_all(&layer).expect("create");
+        std::fs::write(layer.join("huge.bin"), vec![b'x'; 4096]).expect("write");
+
+        let limits = ExtractionLimits {
+            max_entry_bytes: 1024,
+            ..ExtractionLimits::default()
+        };
+        let mut spent = ExtractionReport::default();
+        let error = copy_retained_tree(&layer, &dir.path().join("out"), &limits, &mut spent)
+            .expect_err("an oversize retained file is refused");
+        assert!(
+            matches!(
+                error,
+                PackError::LimitExceeded {
+                    limit: "entry-size",
+                    ..
+                }
+            ),
+            "unexpected error: {error:?}"
+        );
+    }
+
     /// A fetch context that never touches the network, for building requests.
     fn offline_fetch<'a>(
         manager: &'a DownloadManager,

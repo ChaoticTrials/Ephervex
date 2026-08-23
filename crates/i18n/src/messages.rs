@@ -56,6 +56,25 @@ pub fn reindexed(count: usize) -> String {
     fl!(LANGUAGE_LOADER, "reconcile-reindexed", count = count)
 }
 
+/// "N instance directories were left unfinished ..."
+///
+/// A creation or import that was interrupted before it published. The
+/// directories are never indexed and never deleted automatically.
+#[must_use]
+pub fn unfinished_instances(count: usize) -> String {
+    fl!(
+        LANGUAGE_LOADER,
+        "reconcile-unfinished-instances",
+        count = count
+    )
+}
+
+/// The next step offered alongside [`unfinished_instances`].
+#[must_use]
+pub fn unfinished_instances_action() -> String {
+    fl!(LANGUAGE_LOADER, "reconcile-unfinished-instances", "action")
+}
+
 /// Shown when the index already agreed with the filesystem.
 #[must_use]
 pub fn nothing_to_reconcile() -> String {

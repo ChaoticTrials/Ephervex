@@ -19,21 +19,23 @@ use std::process::ExitCode;
 use clap::{Args, CommandFactory as _, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use ephervex_core::{
-    AccountStatus, AccountSummary, ApiSettings, App, ArgumentForm, Artifact, AssetIndexRef,
-    AuthEvent, AuthObserver, CancellationToken, CaptureHealth, CapturedLine, ClientFolder,
-    ClientRecord, Compatibility, Config, ControlResponse, CoreError, CreatedClient,
+    AccountStatus, AccountSummary, ApiSettings, App, ArgumentForm, Artifact, ArtifactCacheHealth,
+    AssetIndexRef, AuthEvent, AuthObserver, BundledDocumentHealth, CancellationToken,
+    CaptureHealth, CapturedLine, ClientFolder, ClientRecord, Compatibility, Config,
+    ConfigurationHealth, ControlResponse, CoreError, CreatedClient, CredentialBackendHealth,
     CredentialStorage, DEFAULT_DIAGNOSTIC_BYTES, DEFAULT_SEARCH_LIMIT, DiagnosticEntry,
-    DiagnosticKind, DiagnosticRequest, DiagnosticScope, DiagnosticSearch, DuplicateClient,
-    EULA_CONFIRMATION_PHRASE, Entitlements, EulaStatus, FileDisposition, Freshness, ImportRequest,
-    ImportedPack, IncompatibilityReason, InstalledMods, JavaPathChoice, JavaPlan, JavaPlanRequest,
-    JavaRuntime, JavaTarget, LaunchAndConnectEvent, LaunchAndConnectObserver,
-    LaunchAndConnectOptions, LaunchAndConnectOutcome, LaunchEvent, LaunchFeatures, LaunchObserver,
-    LaunchOptions, LaunchOutcome, LaunchState, LoginFlow, LoginOptions, LoginRequest,
-    MAX_SEARCH_MATCHES, MINECRAFT_EULA_REFERENCE, ManagedInstallation, ManagedMod, ModInstallPlan,
-    ModInstallRequest, ModProjectDetails, ModSearchQuery, ModSearchResults, NetworkAccess,
-    NewClient, NewServer, OperationReporter, OptionalSelection, OutputLine, PackAnalysis,
-    PackRecipe, PackSide, Paths, PlanWarning, PlannedMod, PreferenceApplication, PreferenceId,
-    PreferenceKey, ReconciliationReport, ReleaseListing, RequirementBasis, RuntimeClassification,
+    DiagnosticKind, DiagnosticRequest, DiagnosticScope, DiagnosticSearch, DirectoryState,
+    DuplicateClient, EULA_CONFIRMATION_PHRASE, Entitlements, EulaStatus, FileDisposition,
+    Freshness, ImportRequest, ImportedPack, IncompatibilityReason, InstallationHealth,
+    InstalledMods, JavaHealth, JavaPathChoice, JavaPlan, JavaPlanRequest, JavaRuntime, JavaTarget,
+    LaunchAndConnectEvent, LaunchAndConnectObserver, LaunchAndConnectOptions,
+    LaunchAndConnectOutcome, LaunchEvent, LaunchFeatures, LaunchObserver, LaunchOptions,
+    LaunchOutcome, LaunchState, LoginFlow, LoginOptions, LoginRequest, MAX_SEARCH_MATCHES,
+    MINECRAFT_EULA_REFERENCE, ManagedInstallation, ManagedMod, ModInstallPlan, ModInstallRequest,
+    ModProjectDetails, ModSearchQuery, ModSearchResults, NetworkAccess, NewClient, NewServer,
+    OperationReporter, OptionalSelection, OutputLine, PackAnalysis, PackRecipe, PackSide, Paths,
+    PlanWarning, PlannedMod, PreferenceApplication, PreferenceId, PreferenceKey,
+    ReconciliationReport, ReleaseListing, RequirementBasis, RuntimeClassification,
     RuntimeInventory, SearchOptions, SecretString, ServerCommitWarning, ServerCreateOptions,
     ServerEvent, ServerFolder, ServerNetworkSettings, ServerObserver, ServerPersistenceHealth,
     ServerRecord, ServerWarning, Session, SideRequirement, SkipReason, TextAnchor, TextView,
@@ -72,6 +74,12 @@ enum Command {
     Info,
     /// Show the resolved application directories.
     Paths,
+    /// Check this installation and report what is wrong with it.
+    ///
+    /// Local only: nothing here contacts a network service. Credentials are
+    /// never printed, and whether one is stored is not reported at all -- only
+    /// whether the system has somewhere to keep them.
+    Doctor,
     /// Show or change the effective configuration.
     Config {
         /// Omit to show the configuration, as `ephervex config` always has.
@@ -987,6 +995,13 @@ fn main() -> ExitCode {
         launcher_logs.as_deref(),
     );
 
+    // Not routed through `run`, whose contract is "an error means the command
+    // did not do its job". `doctor` always does its job; what varies is what it
+    // found, and that is what its exit status reports.
+    if matches!(cli.command, Command::Doctor) {
+        return run_doctor(cli.json);
+    }
+
     match run(&cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -1004,19 +1019,14 @@ fn generate_completions(shell: Shell) {
 
 fn run(cli: &Cli) -> anyhow::Result<()> {
     match &cli.command {
-        Command::Completions { .. } => Ok(()),
         Command::Info => {
             show_info(cli.json);
             Ok(())
         }
-        Command::Paths => {
-            // Resolved without opening storage, so this still works when the
-            // database or the configuration is the thing that is broken.
-            let paths = Paths::from_environment()?;
-            let config = Config::load_or_default(&paths)?;
-            show_paths(&config.apply_to(paths), cli.json);
-            Ok(())
-        }
+        Command::Paths => run_paths(cli.json),
+        // Both are handled in `main`: completions before application logging is
+        // initialized, and `doctor` because its report decides the exit status.
+        Command::Completions { .. } | Command::Doctor => Ok(()),
         Command::Config { command } => match command {
             None | Some(ConfigCommand::Show) => {
                 let paths = Paths::from_environment()?;
@@ -2202,6 +2212,327 @@ fn show_paths(paths: &Paths, json: bool) {
                 ""
             }
         );
+    }
+}
+
+/// Renders `ephervex doctor`.
+///
+/// Field labels are plain text, matching `info` and `paths`: this is a
+/// technical report about one machine, and its rows are the same identifiers
+/// the JSON form uses. Anything that is a *failure* still carries the localized
+/// message the rest of the interface would show.
+fn show_health(health: &InstallationHealth, json: bool) {
+    if json {
+        print_json(&health_json(health));
+        return;
+    }
+
+    println!("{} {}", health.application.name, health.application.version);
+    println!("app id:     {}", health.application.app_id);
+    println!(
+        "platform:   {}-{}",
+        health.platform.os, health.platform.arch
+    );
+    println!("language:   {}", health.application.language);
+
+    show_health_directories(health);
+    show_health_configuration(health.configuration.as_ref());
+    show_health_credentials(&health.credential_storage);
+
+    println!();
+    println!("bundled data");
+    show_bundled_document(
+        "options compatibility",
+        &health.bundled_data.options_dataset,
+    );
+    show_bundled_document(
+        "preference catalog",
+        &health.bundled_data.preference_catalog,
+    );
+
+    show_health_artifact_cache(health.artifact_cache.as_ref());
+    show_health_java(health.java.as_ref());
+
+    if let Some(error) = &health.storage_error {
+        println!();
+        println!("storage");
+        println!("  could not be opened: {error}");
+    }
+}
+
+/// `ephervex paths`.
+///
+/// Resolved without opening storage, so this still works when the database or
+/// the configuration is the thing that is broken.
+fn run_paths(json: bool) -> anyhow::Result<()> {
+    let paths = Paths::from_environment()?;
+    let config = Config::load_or_default(&paths)?;
+    show_paths(&config.apply_to(paths), json);
+    Ok(())
+}
+
+/// `ephervex doctor`.
+///
+/// Deliberately not `open_app()`: a broken installation is exactly what this
+/// reports, so it must not need one that works.
+fn run_doctor(json: bool) -> ExitCode {
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            report_failure(&error.into(), json);
+            return ExitCode::FAILURE;
+        }
+    };
+    let health = runtime.block_on(ephervex_core::installation_health());
+    show_health(&health, json);
+    // The report is the output and the exit status is its verdict, so a script
+    // can gate on `ephervex doctor` without parsing anything. A fault is not an
+    // error here: the report is still printed in full, and no failure banner is
+    // added to it.
+    if health.has_fault() {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+fn show_health_directories(health: &InstallationHealth) {
+    println!();
+    println!("directories");
+    if let Some(error) = &health.paths_error {
+        println!("  could not be resolved: {error}");
+    }
+    for directory in &health.directories {
+        let state = match &directory.state {
+            DirectoryState::Absent => "missing (created on first use)".to_owned(),
+            DirectoryState::Writable => "writable".to_owned(),
+            DirectoryState::NotWritable { detail } => format!("NOT WRITABLE: {detail}"),
+            DirectoryState::Unusable { detail } => format!("UNUSABLE: {detail}"),
+        };
+        println!(
+            "  {:<21} {}  [{state}]",
+            directory.purpose,
+            directory.path.display()
+        );
+    }
+}
+
+fn show_health_configuration(configuration: Option<&ConfigurationHealth>) {
+    println!();
+    println!("configuration");
+    let Some(configuration) = configuration else {
+        println!("  could not be located: the storage directories did not resolve");
+        return;
+    };
+    match configuration {
+        ConfigurationHealth::Absent { path } => {
+            println!("  {}  [not written yet]", path.display());
+        }
+        ConfigurationHealth::Loaded {
+            path,
+            schema_version,
+        } => {
+            println!("  {}  [schema {schema_version}]", path.display());
+        }
+        ConfigurationHealth::Unusable {
+            path,
+            message_id,
+            detail,
+        } => {
+            println!("  {}  [UNUSABLE]", path.display());
+            println!("  {}", ephervex_i18n::lookup(message_id));
+            println!("  {detail}");
+        }
+    }
+}
+
+fn show_health_credentials(credentials: &CredentialBackendHealth) {
+    println!();
+    println!("credential storage");
+    if credentials.available {
+        println!("  {}  [available]", credentials.backend);
+    } else {
+        println!("  unavailable; sign-in is session-only for this run");
+        if let Some(detail) = &credentials.detail {
+            println!("  {detail}");
+        }
+    }
+}
+
+fn show_health_artifact_cache(cache: Option<&ArtifactCacheHealth>) {
+    println!();
+    println!("artifact cache");
+    match cache {
+        None => println!("  not measured; storage could not be opened"),
+        Some(ArtifactCacheHealth::Unavailable { detail }) => {
+            println!("  not measured: {detail}");
+        }
+        Some(ArtifactCacheHealth::Measured {
+            used_bytes,
+            entries,
+            complete,
+            limit,
+            over_budget,
+        }) => {
+            println!("  {entries} entries, {used_bytes} bytes, budget {limit}");
+            if !complete {
+                println!("  the cache was in use; part of it was not measured");
+            }
+            if *over_budget {
+                println!("  over budget; collection runs after the next cache operation");
+            }
+        }
+    }
+}
+
+fn show_health_java(java: Option<&JavaHealth>) {
+    println!();
+    println!("java");
+    match java {
+        None => println!("  not measured: storage could not be opened"),
+        Some(JavaHealth::Unavailable { detail }) => {
+            // Never "no runtimes found": the scan did not finish, which is a
+            // different thing to tell somebody than that they have no JDK.
+            println!("  not measured: {detail}");
+        }
+        Some(JavaHealth::Discovered {
+            discovered,
+            managed,
+            major_versions,
+        }) => {
+            println!("  {discovered} runtimes ({managed} managed)");
+            if !major_versions.is_empty() {
+                let versions: Vec<String> =
+                    major_versions.iter().map(ToString::to_string).collect();
+                println!("  major versions: {}", versions.join(", "));
+            }
+        }
+    }
+}
+
+fn show_bundled_document(label: &str, document: &BundledDocumentHealth) {
+    match document {
+        BundledDocumentHealth::Loaded { entries, revision } => match revision {
+            Some(revision) => println!("  {label:<22} {entries} entries, revision {revision}"),
+            None => println!("  {label:<22} {entries} entries"),
+        },
+        BundledDocumentHealth::Unusable { detail } => {
+            println!("  {label:<22} UNUSABLE: {detail}");
+        }
+    }
+}
+
+fn health_json(health: &InstallationHealth) -> serde_json::Value {
+    serde_json::json!({
+        "application": {
+            "name": health.application.name,
+            "version": health.application.version,
+            "app_id": health.application.app_id,
+            "user_agent": health.application.user_agent,
+            "language": health.application.language,
+        },
+        "platform": {
+            "os": health.platform.os,
+            "arch": health.platform.arch,
+            "family": health.platform.family,
+        },
+        "paths_error": health.paths_error,
+        "directories": health
+            .directories
+            .iter()
+            .map(|directory| {
+                let (state, detail) = match &directory.state {
+                    DirectoryState::Absent => ("absent", None),
+                    DirectoryState::Writable => ("writable", None),
+                    DirectoryState::NotWritable { detail } => ("not_writable", Some(detail)),
+                    DirectoryState::Unusable { detail } => ("unusable", Some(detail)),
+                };
+                serde_json::json!({
+                    "purpose": directory.purpose,
+                    "path": directory.path,
+                    "state": state,
+                    "detail": detail,
+                })
+            })
+            .collect::<Vec<_>>(),
+        "configuration": match &health.configuration {
+            None => serde_json::Value::Null,
+            Some(ConfigurationHealth::Absent { path }) => serde_json::json!({
+                "status": "absent",
+                "path": path,
+            }),
+            Some(ConfigurationHealth::Loaded { path, schema_version }) => serde_json::json!({
+                "status": "loaded",
+                "path": path,
+                "schema_version": schema_version,
+            }),
+            Some(ConfigurationHealth::Unusable { path, message_id, detail }) => serde_json::json!({
+                "status": "unusable",
+                "path": path,
+                "message_id": message_id,
+                "detail": detail,
+            }),
+        },
+        "credential_storage": {
+            "available": health.credential_storage.available,
+            "backend": health.credential_storage.backend,
+            "detail": health.credential_storage.detail,
+        },
+        "bundled_data": {
+            "options_compatibility": bundled_document_json(&health.bundled_data.options_dataset),
+            "preference_catalog": bundled_document_json(&health.bundled_data.preference_catalog),
+        },
+        "artifact_cache": match &health.artifact_cache {
+            None => serde_json::Value::Null,
+            Some(ArtifactCacheHealth::Unavailable { detail }) => serde_json::json!({
+                "status": "unavailable",
+                "detail": detail,
+            }),
+            Some(ArtifactCacheHealth::Measured {
+                used_bytes,
+                entries,
+                complete,
+                limit,
+                over_budget,
+            }) => serde_json::json!({
+                "status": "measured",
+                "used_bytes": used_bytes,
+                "entries": entries,
+                "complete": complete,
+                "limit": limit.to_string(),
+                "over_budget": over_budget,
+            }),
+        },
+        "java": match &health.java {
+            None => serde_json::Value::Null,
+            Some(JavaHealth::Unavailable { detail }) => serde_json::json!({
+                "status": "unavailable",
+                "detail": detail,
+            }),
+            Some(JavaHealth::Discovered { discovered, managed, major_versions }) => {
+                serde_json::json!({
+                    "status": "discovered",
+                    "discovered": discovered,
+                    "managed": managed,
+                    "major_versions": major_versions,
+                })
+            }
+        },
+        "storage_error": health.storage_error,
+    })
+}
+
+fn bundled_document_json(document: &BundledDocumentHealth) -> serde_json::Value {
+    match document {
+        BundledDocumentHealth::Loaded { entries, revision } => serde_json::json!({
+            "status": "loaded",
+            "entries": entries,
+            "revision": revision,
+        }),
+        BundledDocumentHealth::Unusable { detail } => serde_json::json!({
+            "status": "unusable",
+            "detail": detail,
+        }),
     }
 }
 
@@ -3725,6 +4056,7 @@ fn show_reconciliation(report: &ReconciliationReport, json: bool) {
             "missing_persistent": reconciled_json(&report.missing_persistent),
             "reindexed": reconciled_json(&report.reindexed),
             "recovered": reconciled_json(&report.recovered),
+            "unfinished_instances": reconciled_json(&report.unfinished_instances),
             "needs_attention": report.needs_attention(),
         }));
         return;
@@ -3765,6 +4097,25 @@ fn show_reconciliation(report: &ReconciliationReport, json: bool) {
             );
         }
         println!("{}", ephervex_i18n::messages::missing_persistent_action());
+    }
+    if !report.unfinished_instances.is_empty() {
+        println!(
+            "{}",
+            ephervex_i18n::messages::unfinished_instances(report.unfinished_instances.len())
+        );
+        for entry in &report.unfinished_instances {
+            println!(
+                "  {}",
+                ephervex_i18n::lookup_args(
+                    "reconcile-unfinished-instance-detail",
+                    [
+                        ("name", MessageArg::from(entry.name.as_str())),
+                        ("path", MessageArg::from(entry.root.as_path())),
+                    ]
+                )
+            );
+        }
+        println!("{}", ephervex_i18n::messages::unfinished_instances_action());
     }
 }
 

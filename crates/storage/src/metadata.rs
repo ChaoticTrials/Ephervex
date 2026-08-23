@@ -44,6 +44,16 @@ pub const CLIENT_METADATA_FILE: &str = "instance.json";
 pub const SERVER_METADATA_FILE: &str = "server.json";
 /// `.launcher/warnings.json`.
 pub const WARNINGS_FILE: &str = "warnings.json";
+/// `.launcher/incomplete`, present only while an instance is being built.
+///
+/// Materializing a client writes files for as long as the pack takes, and a
+/// power loss in the middle of that leaves a root whose `instance.json` parses
+/// perfectly and whose `mods/` is half a pack. The index cannot describe that
+/// state -- an unpublished instance simply has no row -- but reconciliation
+/// reads directories rather than the index, so it needs a signal of its own.
+/// This file is that signal: present from creation until publication, and its
+/// absence is what makes an orphan directory safe to adopt (ADR 0002).
+pub const INCOMPLETE_MARKER_FILE: &str = "incomplete";
 /// `.launcher/source/`, holding the provider-specific recipe.
 pub const SOURCE_DIR: &str = "source";
 /// `.launcher/retired/`, where a mutation holds the files it is replacing.
@@ -203,6 +213,74 @@ pub fn is_client_instance_root(root: &Path) -> bool {
 #[must_use]
 pub fn is_server_root(root: &Path) -> bool {
     server_metadata_path(root).is_file()
+}
+
+/// `<root>/.launcher/incomplete`.
+#[must_use]
+pub fn incomplete_marker_path(root: &Path) -> PathBuf {
+    metadata_dir(root).join(INCOMPLETE_MARKER_FILE)
+}
+
+/// Whether this instance root is still being built.
+///
+/// A read error counts as incomplete. Nothing is gained by treating a root the
+/// launcher cannot inspect as finished, and adopting one would be exactly the
+/// mistake this marker exists to prevent.
+#[must_use]
+pub fn is_incomplete(root: &Path) -> bool {
+    match std::fs::symlink_metadata(incomplete_marker_path(root)) {
+        Ok(_) => true,
+        Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+    }
+}
+
+/// Flags an instance root as still being built.
+///
+/// Written durably, because the whole point is to survive the loss of power
+/// that interrupted the materialization.
+pub fn mark_incomplete(root: &Path) -> Result<(), MetadataError> {
+    prepare_metadata_dir(root)?;
+    let path = incomplete_marker_path(root);
+    let file = std::fs::File::create(&path).map_err(|source| MetadataError::Unwritable {
+        path: path.clone(),
+        source,
+    })?;
+    file.sync_all()
+        .map_err(|source| MetadataError::Unwritable {
+            path: path.clone(),
+            source,
+        })?;
+    sync_parent(&path)
+}
+
+/// Clears the flag, making the instance publishable.
+///
+/// A marker that is already gone is success: republishing a complete instance
+/// must not fail because there was nothing left to clear.
+pub fn clear_incomplete(root: &Path) -> Result<(), MetadataError> {
+    let path = incomplete_marker_path(root);
+    match std::fs::remove_file(&path) {
+        Ok(()) => sync_parent(&path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(MetadataError::Unwritable { path, source }),
+    }
+}
+
+fn sync_parent(path: &Path) -> Result<(), MetadataError> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    // The rename or unlink itself is what has to reach the disk; failing to
+    // open the directory is not a reason to fail the operation.
+    if let Ok(directory) = std::fs::File::open(parent) {
+        directory
+            .sync_all()
+            .map_err(|source| MetadataError::Unwritable {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+    }
+    Ok(())
 }
 
 /// Writes `.launcher/instance.json` and `.launcher/warnings.json`.

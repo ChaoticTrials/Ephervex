@@ -6,6 +6,37 @@
 //! that [`crate::reconcile`] will pick up and re-index on the next start; the
 //! reverse order would leave an index row pointing at a directory that was
 //! never created.
+//!
+//! # An instance is not complete until it is published
+//!
+//! Creating a client instance and *finishing* one are separated, because the
+//! work in between (laying down a pack, downloading mods, applying
+//! preferences) takes as long as it takes and can be interrupted.
+//! [`Registry::create_client`] therefore writes no index row at all, and
+//! [`Registry::publish_client`] is what adds it.
+//!
+//! That separation is the enforcement, not a convention callers are asked to
+//! respect. Every read, listing, launch, and mutation path in this module
+//! resolves through the index, so an unpublished instance is *absent* from all
+//! of them; there is no state in which one of them can observe a half-built
+//! instance and mistake it for a finished one. Reconciliation is the one thing
+//! that reads directories instead of the index, so it gets a second, separate
+//! signal: [`metadata::INCOMPLETE_MARKER_FILE`], written at creation and
+//! cleared at publication.
+//!
+//! Both orderings around the marker are deliberate.
+//!
+//! The marker is written *before* the metadata it guards. `instance.json` is a
+//! durable write, so writing it first would leave a window in which a crash
+//! produces a directory that parses as an instance and carries no marker,
+//! which is precisely the state reconciliation is right to adopt. A crash in
+//! the order used here leaves a marked directory with no metadata, which is
+//! not an instance root at all and is left alone.
+//!
+//! The marker is cleared *before* the row is inserted. A crash between those
+//! two leaves a markerless directory with no row, which reconciliation adopts,
+//! correct because everything was materialized. The reverse order could index
+//! a row for a root still flagged incomplete.
 
 use std::path::{Path, PathBuf};
 
@@ -164,9 +195,14 @@ impl Registry {
         };
 
         create_dir_all(&metadata::client_game_dir(&root))?;
-        // Metadata first. See the module documentation.
+        // Marker before metadata. See the module documentation: the reverse
+        // order leaves a window in which a crash produces a directory that
+        // parses as a finished instance and carries nothing to say it is not.
+        metadata::mark_incomplete(&root)?;
         metadata::write_client_metadata(&root, &record)?;
-        self.insert_client_row(&record)?;
+        // No index row yet: the caller still has to materialize this instance,
+        // and until it does the instance must not exist as far as every other
+        // entry point is concerned.
 
         tracing::info!(
             instance_id = %record.id,
@@ -175,6 +211,58 @@ impl Registry {
             "created client instance"
         );
         Ok(record)
+    }
+
+    /// Finishes a created instance, making it visible to every other operation.
+    ///
+    /// The last step of creating, importing, or duplicating a client. Until it
+    /// succeeds the instance has no index row, so nothing can list it, read it,
+    /// launch it, or mutate it.
+    ///
+    /// Idempotent for the marker's sake, since publishing an instance whose
+    /// marker is already gone is not an error, but not for the row insert: two
+    /// publications of one id is a caller bug rather than a recoverable state.
+    pub fn publish_client(&self, record: &ClientRecord) -> Result<(), RegistryError> {
+        // Marker first. See the module documentation.
+        metadata::clear_incomplete(&record.root)?;
+        self.insert_client_row(record)?;
+        tracing::info!(
+            instance_id = %record.id,
+            root = %record.root.display(),
+            "published client instance"
+        );
+        Ok(())
+    }
+
+    /// Creates and publishes in one step.
+    ///
+    /// For tests that need an ordinary finished instance as a fixture. Tests
+    /// that are about the create/publish boundary itself call the two halves
+    /// separately, which is the only way to observe an unpublished instance.
+    #[cfg(test)]
+    pub(crate) fn create_published_client(
+        &self,
+        request: NewClient,
+    ) -> Result<ClientRecord, RegistryError> {
+        let record = self.create_client(request)?;
+        self.publish_client(&record)?;
+        Ok(record)
+    }
+
+    /// Removes an instance that was created but never published.
+    ///
+    /// The compensating action for a failed materialization. It takes the
+    /// record rather than an id precisely because there is no row to look one
+    /// up by, and it removes the directory the caller was handed and nothing
+    /// else.
+    pub fn discard_unpublished_client(&self, record: &ClientRecord) -> Result<(), RegistryError> {
+        remove_tree(&record.root)?;
+        tracing::info!(
+            instance_id = %record.id,
+            root = %record.root.display(),
+            "discarded an unpublished client instance"
+        );
+        Ok(())
     }
 
     /// Adds an already-existing instance directory to the index.
@@ -223,6 +311,11 @@ impl Registry {
         let root = self.paths.instance_root(storage, id);
         ensure_free_root(&root)?;
 
+        // Before the copy, not after it: the copy carries the original's
+        // `instance.json` for as long as it runs, so an interrupted duplication
+        // would otherwise leave a second root claiming the original's identity.
+        metadata::mark_incomplete(&root)?;
+
         let report = crate::copy::copy_tree(&original.root, &root, &[LAUNCH_LOCK_FILE]).map_err(
             |source| RegistryError::Io {
                 path: root.clone(),
@@ -255,7 +348,7 @@ impl Registry {
         // the row, in the order the module documentation requires.
         create_dir_all(&metadata::client_game_dir(&root))?;
         metadata::write_client_metadata(&root, &record)?;
-        self.insert_client_row(&record)?;
+        self.publish_client(&record)?;
 
         tracing::info!(
             instance_id = %record.id,
@@ -1005,7 +1098,7 @@ mod tests {
         let registry = environment.registry();
 
         let record = registry
-            .create_client(NewClient::new(
+            .create_published_client(NewClient::new(
                 "Crash repro",
                 "1.20.1",
                 LoaderSelection::exact(LoaderKind::NeoForge, "47.1.106"),
@@ -1024,7 +1117,7 @@ mod tests {
         let environment = TestEnvironment::new();
         let registry = environment.registry();
         let record = registry
-            .create_client(
+            .create_published_client(
                 NewClient::new(
                     "Persistent",
                     "1.12.2",
@@ -1044,10 +1137,10 @@ mod tests {
         let registry = environment.registry();
 
         let temporary = registry
-            .create_client(NewClient::new("temp", "1.20.1", LoaderSelection::vanilla()))
+            .create_published_client(NewClient::new("temp", "1.20.1", LoaderSelection::vanilla()))
             .expect("create");
         let persistent = registry
-            .create_client(
+            .create_published_client(
                 NewClient::new("kept", "1.20.1", LoaderSelection::vanilla())
                     .with_storage(StorageClass::Persistent),
             )
@@ -1071,7 +1164,7 @@ mod tests {
         let environment = TestEnvironment::new();
         let registry = environment.registry();
         let mut record = registry
-            .create_client(NewClient::new(
+            .create_published_client(NewClient::new(
                 "before",
                 "1.20.1",
                 LoaderSelection::vanilla(),
@@ -1097,7 +1190,7 @@ mod tests {
         let registry = environment.registry();
 
         let kept = registry
-            .create_client(NewClient::new("kept", "1.20.1", LoaderSelection::vanilla()))
+            .create_published_client(NewClient::new("kept", "1.20.1", LoaderSelection::vanilla()))
             .expect("create");
         registry
             .delete_client(kept.id, FileDisposition::Keep)
@@ -1109,7 +1202,7 @@ mod tests {
         ));
 
         let removed = registry
-            .create_client(NewClient::new(
+            .create_published_client(NewClient::new(
                 "removed",
                 "1.20.1",
                 LoaderSelection::vanilla(),
@@ -1125,7 +1218,7 @@ mod tests {
     /// duplication tests.
     fn client_with_files(registry: &Registry, name: &str) -> ClientRecord {
         let record = registry
-            .create_client(
+            .create_published_client(
                 NewClient::new(
                     name,
                     "1.20.1",
@@ -1289,7 +1382,7 @@ mod tests {
         let registry = environment.registry();
 
         let client = registry
-            .create_client(NewClient::new(
+            .create_published_client(NewClient::new(
                 "client",
                 "1.20.1",
                 LoaderSelection::vanilla(),
@@ -1328,7 +1421,7 @@ mod tests {
         let environment = TestEnvironment::new();
         let registry = environment.registry();
         let client = registry
-            .create_client(NewClient::new(
+            .create_published_client(NewClient::new(
                 "client",
                 "1.20.1",
                 LoaderSelection::vanilla(),
@@ -1362,7 +1455,7 @@ mod tests {
         let registry = environment.registry();
         let loader = LoaderSelection::exact(LoaderKind::NeoForge, "21.1.172");
         let client = registry
-            .create_client(NewClient::new("client", "1.21.1", loader.clone()))
+            .create_published_client(NewClient::new("client", "1.21.1", loader.clone()))
             .expect("create client");
 
         let server = registry
@@ -1422,7 +1515,7 @@ mod tests {
         let record = {
             let registry = environment.registry();
             registry
-                .create_client(
+                .create_published_client(
                     NewClient::new("kept", "1.20.1", LoaderSelection::vanilla())
                         .with_storage(StorageClass::Persistent),
                 )
@@ -1451,7 +1544,7 @@ mod tests {
         let environment = TestEnvironment::new();
         let registry = environment.registry();
         let record = registry
-            .create_client(NewClient::new("x", "1.20.1", LoaderSelection::vanilla()))
+            .create_published_client(NewClient::new("x", "1.20.1", LoaderSelection::vanilla()))
             .expect("create");
 
         registry

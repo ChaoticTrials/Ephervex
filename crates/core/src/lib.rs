@@ -31,6 +31,7 @@ pub mod curseforge;
 pub mod curseforge_pack;
 pub mod diagnostics;
 pub mod error;
+pub mod health;
 pub mod import;
 pub mod instance;
 pub mod launch;
@@ -60,6 +61,11 @@ pub use diagnostics::{
     DiagnosticSearch, DiagnosticSection,
 };
 pub use error::{CoreError, CoreResult};
+pub use health::{
+    ApplicationIdentity, ArtifactCacheHealth, BundledDataHealth, BundledDocumentHealth,
+    ConfigurationHealth, CredentialBackendHealth, DirectoryHealth, DirectoryState,
+    InstallationHealth, JavaHealth, PlatformIdentity, installation_health,
+};
 pub use import::{ImportRequest, ImportedPack};
 pub use instance::{CreatedClient, PreferenceContext, global_minecraft_preferences};
 pub use launch::{LaunchOptions, LaunchOutcome};

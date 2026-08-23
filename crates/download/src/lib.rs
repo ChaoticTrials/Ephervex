@@ -86,8 +86,8 @@ pub use manager::{
     DownloaderConfig,
 };
 pub use metadata::{
-    CachedMetadata, DEFAULT_METADATA_TTL, Freshness, METADATA_ENVELOPE_VERSION, MetadataCache,
-    MetadataCacheError, MetadataKey,
+    CachedMetadata, DEFAULT_METADATA_TTL, Freshness, MAX_METADATA_BYTES, METADATA_ENVELOPE_VERSION,
+    MetadataCache, MetadataCacheError, MetadataKey,
 };
 pub use progress::{ByteTally, ChannelSink, OperationReporter, ProgressSink};
 /// The URL type the policy functions take, re-exported.

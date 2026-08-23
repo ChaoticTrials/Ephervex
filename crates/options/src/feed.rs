@@ -435,7 +435,12 @@ impl OptionsFeed {
         // download, so a leftover staging file would be served as this refresh.
         let _ = fs::remove_file(&staging).await;
 
-        let request = DownloadRequest::new(url.clone(), &staging).labeled(OPTIONS_FEED_CACHE_KEY);
+        // Bounded like every other metadata fetch: the feed is a document with
+        // no published size and no hash, so nothing but this stops a hostile or
+        // broken host from streaming until the disk is full.
+        let request = DownloadRequest::new(url.clone(), &staging)
+            .labeled(OPTIONS_FEED_CACHE_KEY)
+            .bounded_by(ephervex_download::MAX_METADATA_BYTES);
         let outcome = self.manager.download(&request, reporter, cancel).await;
         let read = match outcome {
             Ok(_) => fs::read(&staging)
