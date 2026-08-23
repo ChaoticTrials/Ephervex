@@ -46,6 +46,12 @@ python3 tools/minecraft-options/update.py --from-analysis <dir> --offline
 python3 tools/minecraft-options/update.py --check --from-analysis <dir> --offline
 ```
 
+`update.py --check` takes the directory for one analyzed *release*
+(`.cache/analysis/mc-26.2`), not the analysis root: the root's own `normalized/`
+holds whatever the last single-release run left there, which is not the same
+thing. `preferences.py --check` is the opposite - it reads the analysis root,
+because its enrichment comes from the canonical release's output beside it.
+
 Publication is manual and deliberate. `update.py` never edits the remote feed
 and never needs GitHub credentials; it writes the file and prints its path.
 
@@ -82,6 +88,12 @@ Regenerating the catalog is a reviewed source change, not something
 
 Python 3, a JDK providing `javap`, and network access for the fetching steps.
 None of this is needed to build, test, or run Ephervex.
+
+That is also why regenerating and verifying the committed datasets is a
+maintainer step rather than part of the release gate: both checks need the
+untracked development cache, which no release build has. The datasets ship
+compiled into the binaries and are never fetched at build time. See
+[`docs/release.md`](../../docs/release.md).
 
 ## Layout
 

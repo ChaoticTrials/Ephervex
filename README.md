@@ -82,7 +82,9 @@ Current functionality includes:
   folder actions;
 * desktop management of instances, servers, accounts, Java runtimes, mods,
   Minecraft preferences, diagnostics, and application settings; and
-* shell completion generation for Bash, Zsh, Fish, Elvish, and PowerShell.
+* shell completion generation for Bash, Zsh, Fish, Elvish, and PowerShell; and
+* a local health report (`ephervex doctor`) covering storage locations,
+  writability, credential-store availability, bundled data, cache, and Java.
 
 ## Modpacks and mods
 
@@ -167,6 +169,10 @@ shell configuration files or install completion scripts automatically.
 * Complete pack and mod version-management workflows are still in development.
 * The generated Minecraft preference metadata is not yet exposed through the
   complete desktop preference interface.
+* Only `x86_64` is released, on a glibc 2.35 baseline. Distributions older than
+  Ubuntu 22.04 or Debian 12 are unsupported.
+* Running the AppImage needs FUSE. Where it is unavailable,
+  `APPIMAGE_EXTRACT_AND_RUN=1` starts it without mounting.
 * Native text selection in the virtualized live diagnostics viewer is currently
   limited to one rendered record or chunk at a time. The complete retained
   output can still be copied through the viewer.
@@ -177,6 +183,41 @@ shell configuration files or install completion scripts automatically.
   newer, and Vanilla, Forge, and NeoForge.
 * Fabric, Quilt, snapshots, pre-releases, release candidates, Windows, and
   macOS are outside the current supported scope.
+
+## Installing
+
+Ephervex is distributed as a single AppImage for Linux on `x86_64`.
+
+```bash
+chmod +x Ephervex-<version>-x86_64.AppImage
+./Ephervex-<version>-x86_64.AppImage
+```
+
+That starts the desktop application. The same artifact carries the command-line
+interface, reached by invoking it under that name:
+
+```bash
+ln -s Ephervex-<version>-x86_64.AppImage ephervex
+./ephervex --help
+./ephervex doctor
+```
+
+The supported baseline is glibc 2.35, which covers Ubuntu 22.04 LTS, Linux Mint
+21, Debian 12, and anything newer. Like every AppImage, the artifact mounts
+itself through FUSE, which needs `/dev/fuse` and a `fusermount` helper; where
+that is unavailable,
+`APPIMAGE_EXTRACT_AND_RUN=1 ./Ephervex-<version>-x86_64.AppImage` runs it
+without mounting. Nothing is installed and nothing runs as root; uninstalling is
+deleting the file, plus the XDG directories if you want your instances gone too.
+
+`ephervex doctor` reports whether this machine is set up correctly: the resolved
+directories and whether they are writable, whether the credential store can be
+reached, whether the bundled Minecraft data is intact, and what Java it found.
+It needs no network, and its exit status is the verdict, so a script can gate on
+it without parsing anything.
+
+See [`docs/release.md`](docs/release.md) for storage locations, upgrade and
+uninstall behavior, offline expectations, and how a release is built.
 
 ## Building and testing
 
@@ -205,6 +246,9 @@ cargo test --workspace
 
 * [`docs/architecture.md`](docs/architecture.md) describes crate ownership,
   dependency direction, workflows, and security boundaries.
+* [`docs/release.md`](docs/release.md) covers supported Linux scope, storage
+  locations, upgrade and uninstall behavior, offline expectations, and the
+  release build procedure.
 * [`docs/curseforge-api-key.md`](docs/curseforge-api-key.md) explains why
   CurseForge access needs an API key, how to apply for one, and where Ephervex
   keeps it.
@@ -215,7 +259,7 @@ cargo test --workspace
 Ephervex is under active development.
 
 The core launcher, desktop application, direct launching, Modrinth workflows,
-dedicated servers, linked reproduction environments, and local diagnostics are
-functional. Remaining work is focused on broader provider support, richer pack
-and mod controls, complete metadata-driven Minecraft preferences, release
-hardening, packaging, and final dogfooding.
+dedicated servers, linked reproduction environments, local diagnostics, and
+Linux packaging are functional. Remaining work is focused on broader provider
+support, richer pack and mod controls, and complete metadata-driven Minecraft
+preferences.

@@ -81,7 +81,7 @@ and brotli, and dlopens X11, xkbcommon, and EGL.
 The baseline is what makes that correct: each of those is part of the baseline
 distribution's own desktop stack, so a machine that meets the floor has them.
 Bundling the graphics and input libraries specifically would make things worse,
-not better — the GPU driver, the input method, and the font configuration all
+not better. The GPU driver, the input method, and the font configuration all
 belong to the host, and a bundled copy that disagrees with the host's driver
 fails on exactly the machines that work today.
 

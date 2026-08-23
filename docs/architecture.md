@@ -84,6 +84,19 @@ SQLite row. Reconciliation can therefore rebuild an index entry from an intact
 instance. A missing temporary root is treated as expected operating-system
 cleanup; a missing persistent root remains registered and requires attention.
 
+Creating a client instance and finishing one are separate steps, because the
+work between them -- laying down a pack, downloading mods, applying preferences
+-- takes as long as it takes and can be interrupted. Creation writes no index
+row; publication writes it. Every read, listing, launch, and mutation path
+resolves through the index, so an unpublished instance is absent from all of
+them rather than being something each caller has to remember to check for.
+Reconciliation reads directories instead of the index, so it gets a second
+signal: a marker written into `.launcher/` at creation and cleared at
+publication. A marked root is reported and left exactly where it is, never
+indexed and never deleted. The marker is cleared before the row is inserted, so
+the remaining crash window leaves a fully materialized instance that
+reconciliation is right to adopt.
+
 For servers, `.launcher/server.json` is the canonical entity and SQLite is a
 query index plus recovery copy. New servers are fully built in a hidden sibling
 root and published with one directory rename. Existing metadata wins during
@@ -583,6 +596,17 @@ binary does not destroy settings it does not understand; a newer schema version
 is refused instead of guessed at. `App::mutate_config` commits an in-memory
 change only after the atomic write succeeds.
 
+Preservation covers every open table, including the per-account rows and the
+sparse Minecraft preference map, and every one of them is walked for
+credential-shaped keys in both directions: dropped on load, refused on save. The
+walk descends through tables and through arrays of tables, so `[[section]]`, the
+natural shape for a per-provider list, is not a place to hide one.
+What preservation does not cover is formatting. A rewrite keeps values and loses
+comments, blank lines, quoting style, and key order, and re-emits unknown keys
+after the ones this build knows. Reading a configuration never rewrites it, so a
+newer build's file survives an older build starting up; the first setting change
+is what rewrites the whole file.
+
 Configuration holds settings and never cache contents: what the launcher happens
 to have downloaded is a fact about the filesystem, not a preference.
 
@@ -631,3 +655,8 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
+
+The release gate adds the maintainer tooling's own tests, a release build, and
+the packaged artifact's smoke test. Packaging, the declared Linux baseline and
+how it is enforced, and the full gate are in
+[`docs/release.md`](release.md) and [ADR 0023](adr/0023-appimage-is-the-linux-release-artifact.md).
