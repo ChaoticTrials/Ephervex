@@ -1,0 +1,26 @@
+#!/bin/sh
+# Ephervex AppImage entry point.
+#
+# The package holds the two binaries Ephervex already ships under the two names
+# it already gives them, so dispatch is on the name the artifact was invoked
+# under rather than on an argument this launcher would otherwise have to
+# invent:
+#
+#   ./Ephervex-x86_64.AppImage          the desktop application
+#   ln -s ... ephervex && ./ephervex    the command-line interface
+#
+# Anything not named `ephervex` starts the desktop application, which is what a
+# double-click and the desktop entry both do.
+set -eu
+
+HERE=$(dirname "$(readlink -f "$0")")
+export PATH="${HERE}/usr/bin:${PATH}"
+
+# `$ARGV0` is what the AppImage runtime was invoked as; `$0` is the extracted
+# AppRun, which is why the runtime provides the former at all.
+invoked=$(basename "${ARGV0:-$0}")
+
+case "${invoked}" in
+    ephervex) exec "${HERE}/usr/bin/ephervex" "$@" ;;
+    *) exec "${HERE}/usr/bin/ephervex-gui" "$@" ;;
+esac

@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <!--
+    A reverse-DNS component id, which is what AppStream requires of a desktop
+    application, derived from the project's own repository. It is deliberately
+    not `APP_ID`: that constant names the desktop entry, the XDG directories,
+    and the keyring service (ADR 0003, ADR 0004), and the `launchable` below is
+    what ties this component to it.
+  -->
+  <id>io.github.chaotictrials.ephervex</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>Apache-2.0</project_license>
+
+  <developer id="io.github.chaotictrials">
+    <name>ChaoticTrials</name>
+  </developer>
+
+  <name>Ephervex</name>
+  <summary>Disposable Minecraft environments for reproducing bugs</summary>
+
+  <description>
+    <p>
+      Ephervex is a Linux-first Minecraft launcher and developer tool for
+      disposable bug-reproduction environments. It creates temporary or
+      persistent instances, preserves exact game and loader selections, and
+      keeps downloaded artifacts in shared verified stores.
+    </p>
+    <p>
+      New and imported instances are temporary by default. Minecraft, loader,
+      mod, and pack versions are never silently upgraded, downgraded, or
+      approximated. A client instance can have a linked dedicated server with
+      matching installation data, direct connection, and retained diagnostics.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">ephervex.desktop</launchable>
+  <url type="homepage">https://github.com/ChaoticTrials/ephervex</url>
+  <url type="bugtracker">https://github.com/ChaoticTrials/ephervex/issues</url>
+
+  <categories>
+    <category>Game</category>
+  </categories>
+
+  <content_rating type="oars-1.1"/>
+
+  <provides>
+    <binary>ephervex</binary>
+    <binary>ephervex-gui</binary>
+  </provides>
+</component>

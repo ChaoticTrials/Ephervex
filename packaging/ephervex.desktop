@@ -4,11 +4,17 @@ Version=1.0
 Name=Ephervex
 GenericName=Minecraft Launcher
 Comment=Spawn. Reproduce. Despawn.
-Exec=ephervex-gui %f
-TryExec=ephervex-gui
+# No `%f` and no MimeType: the desktop application takes no arguments, so
+# advertising a file association would open an empty launcher on a
+# double-clicked pack, and claiming application/zip would make Ephervex a
+# candidate handler for every archive on the machine. Imports are started from
+# inside the application and from `ephervex import`.
+# No `TryExec` either: it names a binary to look for on PATH, an AppImage
+# installs none, and an entry whose TryExec does not resolve is one desktops are
+# told not to display.
+Exec=ephervex-gui
 Icon=ephervex
 Terminal=false
 Categories=Game;
 Keywords=minecraft;launcher;modding;forge;neoforge;
-StartupWMClass=ephervex
-MimeType=application/x-modrinth-modpack+zip;application/zip;
+StartupWMClass=ephervex-gui

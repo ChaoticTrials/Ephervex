@@ -28,3 +28,4 @@ so the reasoning trail survives.
 | [0020](0020-mod-mutation-is-one-undoable-transaction.md) | Mod mutation is one undoable transaction, and ownership decides what may be mutated | Accepted |
 | [0021](0021-linked-mod-sync-pins-the-root-and-resolves-per-target.md) | Linked mod synchronization pins the root release and resolves dependencies per target | Accepted |
 | [0022](0022-curseforge-uses-a-user-supplied-key-and-persists-nothing.md) | CurseForge uses a user-supplied API key, and its responses are never persisted | Accepted |
+| [0023](0023-appimage-is-the-linux-release-artifact.md) | AppImage is the Linux release artifact, on a declared glibc baseline | Accepted |

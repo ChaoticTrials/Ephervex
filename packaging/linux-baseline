@@ -1,0 +1,20 @@
+# The Linux baseline Ephervex releases target.
+#
+# This is a support commitment, not a description of whichever machine happened
+# to run the build. `build-appimage.sh` reads it and refuses to package binaries
+# that require anything newer, so a newer build host produces a hard failure
+# instead of quietly raising the floor for everyone.
+#
+# Changing these values changes what Ephervex claims to run on. See
+# docs/adr/0023-appimage-is-the-linux-release-artifact.md and docs/release.md.
+
+# Minimum glibc. 2.35 is Ubuntu 22.04 LTS and Linux Mint 21; Debian 12 ships
+# 2.36 and every later release is higher still.
+EPHERVEX_BASELINE_GLIBC=2.35
+
+# The distribution image whose toolchain reaches that floor. The release build
+# runs inside this; the packaging script never pulls or manages it.
+EPHERVEX_BASELINE_IMAGE=ubuntu:22.04
+
+# The only supported release architecture today.
+EPHERVEX_BASELINE_ARCH=x86_64

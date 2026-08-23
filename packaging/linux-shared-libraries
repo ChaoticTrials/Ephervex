@@ -1,0 +1,29 @@
+# The shared libraries the release binaries are allowed to need.
+#
+# The glibc floor in `linux-baseline` checks symbol versions. This checks the
+# other half of "will it start on the baseline": which libraries have to be on
+# the host at all. Nothing is bundled (ADR 0023), so every soname here is a
+# promise that the baseline distribution already ships it, and docs/release.md
+# tells users the same thing.
+#
+# `build-appimage.sh` reads the direct DT_NEEDED entries of each shipped binary
+# and refuses anything not listed, so a dependency that arrives with a crate
+# change is a build failure rather than a startup failure on somebody else's
+# machine. A soname that stops being needed is not an error; it just makes this
+# list larger than it has to be.
+#
+# Adding a line is a support decision. Change it together with the runtime
+# requirements in docs/release.md.
+
+# The C runtime, its compiler support library, and the dynamic linker, which
+# these binaries name explicitly. The linker soname is architecture-specific,
+# like the baseline architecture itself.
+libc.so.6
+libm.so.6
+libgcc_s.so.1
+ld-linux-x86-64.so.2
+
+# Font discovery for the desktop application. It pulls in freetype, libpng,
+# expat, zlib, bzip2, and brotli transitively; those are part of the same
+# desktop font stack and are not linked directly.
+libfontconfig.so.1
