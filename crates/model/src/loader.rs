@@ -105,6 +105,32 @@ impl fmt::Display for LoaderSelection {
     }
 }
 
+/// The default name suggested for a new instance of this target.
+///
+/// A distinct, dash-joined convention from [`LoaderSelection`]'s
+/// space-joined `Display`: this one names a directory-friendly default, not
+/// a sentence. Vanilla carries no loader segment. A modded loader whose
+/// version has not loaded yet omits the version segment rather than
+/// rendering a placeholder, since the caller recomputes this as soon as the
+/// version becomes known.
+#[must_use]
+pub fn default_instance_name(
+    minecraft: &str,
+    loader: LoaderKind,
+    loader_version: Option<&str>,
+) -> String {
+    if loader == LoaderKind::Vanilla {
+        return minecraft.to_owned();
+    }
+    match loader_version
+        .map(str::trim)
+        .filter(|version| !version.is_empty())
+    {
+        Some(version) => format!("{minecraft}-{loader}-{version}"),
+        None => format!("{minecraft}-{loader}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -143,6 +169,42 @@ mod tests {
         assert_eq!(
             LoaderSelection::exact(LoaderKind::Forge, "47.4.0").to_string(),
             "Forge 47.4.0"
+        );
+    }
+
+    #[test]
+    fn default_instance_name_uses_only_the_release_for_vanilla() {
+        assert_eq!(
+            default_instance_name("1.20.1", LoaderKind::Vanilla, None),
+            "1.20.1"
+        );
+        assert_eq!(
+            default_instance_name("1.20.1", LoaderKind::Vanilla, Some("47.4.0")),
+            "1.20.1"
+        );
+    }
+
+    #[test]
+    fn default_instance_name_joins_loader_and_version_with_dashes() {
+        assert_eq!(
+            default_instance_name("1.20.1", LoaderKind::Forge, Some("47.4.0")),
+            "1.20.1-Forge-47.4.0"
+        );
+        assert_eq!(
+            default_instance_name("1.21.1", LoaderKind::NeoForge, Some("21.1.100")),
+            "1.21.1-NeoForge-21.1.100"
+        );
+    }
+
+    #[test]
+    fn default_instance_name_omits_a_not_yet_loaded_loader_version() {
+        assert_eq!(
+            default_instance_name("1.20.1", LoaderKind::Forge, None),
+            "1.20.1-Forge"
+        );
+        assert_eq!(
+            default_instance_name("1.20.1", LoaderKind::Forge, Some("")),
+            "1.20.1-Forge"
         );
     }
 }

@@ -610,6 +610,18 @@ enum ImportPhase {
     Submitting,
 }
 
+/// Tracks whether the "New Instance" name field is still following the
+/// launcher's own suggestion or has been taken over by the user.
+///
+/// Unlike [`ImportFlowState`], there is no async step that could race a
+/// suggestion against itself here: the suggestion is recomputed synchronously
+/// from whatever the Minecraft version/loader/loader version fields already
+/// hold, so a single flag is enough.
+#[derive(Debug, Default)]
+struct CreateInstanceNameState {
+    name_edited: bool,
+}
+
 /// One optional component's checkbox state in the import modal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ImportOptionState {
@@ -866,6 +878,7 @@ pub fn attach(ui: &AppWindow) -> Controller {
     let live_viewer = Rc::new(RefCell::new(LiveViewerState::default()));
     let import_flow = Rc::new(RefCell::new(ImportFlowState::default()));
     let minecraft = Rc::new(RefCell::new(MinecraftDefaultsModel::new()));
+    let create_instance_name = Rc::new(RefCell::new(CreateInstanceNameState::default()));
     register_i18n(ui);
     register_toasts(ui);
     register_callbacks(
@@ -875,6 +888,7 @@ pub fn attach(ui: &AppWindow) -> Controller {
         &live_viewer,
         &import_flow,
         &minecraft,
+        &create_instance_name,
     );
 
     let weak = ui.as_weak();
@@ -884,6 +898,7 @@ pub fn attach(ui: &AppWindow) -> Controller {
     let poll_live_viewer = Rc::clone(&live_viewer);
     let poll_import_flow = Rc::clone(&import_flow);
     let poll_minecraft = Rc::clone(&minecraft);
+    let poll_create_instance_name = Rc::clone(&create_instance_name);
     let poll_commands = backend.commands.clone();
     let poll_timer = Timer::default();
     poll_timer.start(TimerMode::Repeated, Duration::from_millis(80), move || {
@@ -913,6 +928,7 @@ pub fn attach(ui: &AppWindow) -> Controller {
                     &poll_creations,
                     &poll_import_flow,
                     &poll_minecraft,
+                    &poll_create_instance_name,
                     &poll_commands,
                 ),
             }
@@ -977,6 +993,7 @@ where
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn register_callbacks(
     ui: &AppWindow,
     commands: &Sender<Command>,
@@ -984,9 +1001,11 @@ fn register_callbacks(
     live_viewer: &Rc<RefCell<LiveViewerState>>,
     import_flow: &Rc<RefCell<ImportFlowState>>,
     minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
+    create_instance_name: &Rc<RefCell<CreateInstanceNameState>>,
 ) {
     register_catalog_actions(ui, commands);
     register_client_actions(ui, commands, Rc::clone(&creations));
+    register_create_instance_naming(ui, commands, create_instance_name);
     register_import_flow(ui, commands, import_flow);
 
     let sender = commands.clone();
@@ -1120,6 +1139,47 @@ fn register_catalog_actions(ui: &AppWindow, commands: &Sender<Command>) {
                     minecraft: minecraft.into(),
                 },
             );
+        }
+    });
+}
+
+/// Wires the "New Instance" modal's own name-suggestion mechanics: opening it,
+/// recomputing the suggestion, and noticing when the user takes it over.
+fn register_create_instance_naming(
+    ui: &AppWindow,
+    commands: &Sender<Command>,
+    create_instance_name: &Rc<RefCell<CreateInstanceNameState>>,
+) {
+    let sender = commands.clone();
+    let weak = ui.as_weak();
+    let name_state = Rc::clone(create_instance_name);
+    ui.on_open_create_instance_modal(move || {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        name_state.borrow_mut().name_edited = false;
+        ui.set_modal_error(SharedString::default());
+        send(&sender, Command::LoadMinecraftReleases);
+        if !ui.get_create_minecraft().is_empty() {
+            send(
+                &sender,
+                Command::WarmLanguageCatalog(ui.get_create_minecraft().into()),
+            );
+        }
+        ui.set_modal("create-instance".into());
+        recompute_create_name(&ui, &name_state.borrow());
+    });
+
+    let name_state = Rc::clone(create_instance_name);
+    ui.on_create_name_edited(move |_text| {
+        name_state.borrow_mut().name_edited = true;
+    });
+
+    let weak = ui.as_weak();
+    let name_state = Rc::clone(create_instance_name);
+    ui.on_recompute_create_name(move || {
+        if let Some(ui) = weak.upgrade() {
+            recompute_create_name(&ui, &name_state.borrow());
         }
     });
 }
@@ -2977,7 +3037,7 @@ fn parse_java_memory(minimum: &str, maximum: &str) -> Result<(u32, u32), String>
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn apply_event(
     ui: &AppWindow,
     event: Event,
@@ -2985,6 +3045,7 @@ fn apply_event(
     creations: &Rc<RefCell<CreationTracker>>,
     import_flow: &Rc<RefCell<ImportFlowState>>,
     minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
+    create_instance_name: &Rc<RefCell<CreateInstanceNameState>>,
     commands: &Sender<Command>,
 ) {
     match event {
@@ -2999,13 +3060,22 @@ fn apply_event(
         Event::ArtifactCacheStatus(_) | Event::ArtifactCacheClearFinished => {
             apply_artifact_cache_event(ui, event);
         }
-        Event::MinecraftReleases(versions) => apply_minecraft_releases(ui, versions),
+        Event::MinecraftReleases(versions) => {
+            apply_minecraft_releases(ui, versions, create_instance_name);
+        }
         Event::LoaderVersions {
             form,
             loader,
             minecraft,
             versions,
-        } => apply_loader_versions(ui, &form, loader, &minecraft, &versions),
+        } => apply_loader_versions(
+            ui,
+            &form,
+            loader,
+            &minecraft,
+            &versions,
+            create_instance_name,
+        ),
         Event::ManagedMods(data) => {
             // A late answer for an instance the user has already navigated
             // away from is discarded rather than rendered under the wrong
@@ -3158,7 +3228,11 @@ fn import_submission_action(
     }
 }
 
-fn apply_minecraft_releases(ui: &AppWindow, versions: Vec<String>) {
+fn apply_minecraft_releases(
+    ui: &AppWindow,
+    versions: Vec<String>,
+    create_instance_name: &Rc<RefCell<CreateInstanceNameState>>,
+) {
     if !versions.is_empty() {
         let create_current = ui.get_create_minecraft();
         let server_current = ui.get_create_server_minecraft();
@@ -3178,6 +3252,28 @@ fn apply_minecraft_releases(ui: &AppWindow, versions: Vec<String>) {
     ui.set_minecraft_releases(model(
         versions.into_iter().map(SharedString::from).collect(),
     ));
+    recompute_create_name(ui, &create_instance_name.borrow());
+}
+
+/// Refreshes `create-name` with the launcher's own suggestion, unless the
+/// user has already typed one for the archive/target currently in the
+/// dialog.
+fn recompute_create_name(ui: &AppWindow, state: &CreateInstanceNameState) {
+    if state.name_edited {
+        return;
+    }
+    let loader = loader_kind_of(ui.get_create_loader().as_str())
+        .unwrap_or(ephervex_model::LoaderKind::Vanilla);
+    let loader_version = ui.get_create_loader_version();
+    let loader_version = (!loader_version.is_empty()).then(|| loader_version.as_str());
+    ui.set_create_name(
+        ephervex_model::default_instance_name(
+            ui.get_create_minecraft().as_str(),
+            loader,
+            loader_version,
+        )
+        .into(),
+    );
 }
 
 fn apply_loader_versions(
@@ -3186,6 +3282,7 @@ fn apply_loader_versions(
     loader: ephervex_model::LoaderKind,
     minecraft: &str,
     versions: &[String],
+    create_instance_name: &Rc<RefCell<CreateInstanceNameState>>,
 ) {
     let label = loader.to_string();
     // The loader-change form asks for one instance's own family and release, so
@@ -3217,6 +3314,7 @@ fn apply_loader_versions(
     } else {
         ui.set_create_loader_versions(rows);
         ui.set_create_loader_version(versions.first().cloned().unwrap_or_default().into());
+        recompute_create_name(ui, &create_instance_name.borrow());
     }
 }
 
