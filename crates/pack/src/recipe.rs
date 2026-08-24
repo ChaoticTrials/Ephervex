@@ -390,8 +390,9 @@ pub struct BlockedProviderFile {
     pub identity: ProviderFileIdentity,
     pub project_name: Option<String>,
     pub file_name: Option<String>,
-    /// A link to the project's page on the provider's own site, when enough
-    /// is known to build one.
+    /// A link to this exact file's own page on the provider's own site (the
+    /// one with a "Download" button for it), when enough is known to build
+    /// one.
     pub browser_url: Option<String>,
     /// The provider's own digest(s) for the file, so a hand-placed copy can
     /// be recognized without trusting anything about where it came from.

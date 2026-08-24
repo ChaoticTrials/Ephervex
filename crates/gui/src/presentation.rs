@@ -1028,8 +1028,8 @@ pub struct BlockedFilePresentation {
     pub project_line: String,
     /// The file's own name, falling back to its catalog id.
     pub file_line: String,
-    /// A link to the project's page on the provider's own site, when enough
-    /// was known to build one.
+    /// A link to this exact file's own page on the provider's own site,
+    /// when enough was known to build one.
     pub browser_url: String,
 }
 

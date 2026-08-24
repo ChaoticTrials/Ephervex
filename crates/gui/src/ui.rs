@@ -1742,7 +1742,7 @@ slint::slint! {
         in-out property <[string]> minecraft-releases;
         in-out property <[string]> create-loader-versions;
         in-out property <[string]> create-server-loader-versions;
-        in-out property <string> create-minecraft: "1.21.1";
+        in-out property <string> create-minecraft;
         in-out property <string> create-loader: "Vanilla";
         in-out property <string> create-loader-version;
         in-out property <bool> create-persistent: false;
