@@ -373,6 +373,33 @@ impl PendingProviderFile {
     }
 }
 
+/// A [`PendingProviderFile`] the provider answered about but declined to
+/// serve, because its author turned off third-party distribution.
+///
+/// Not an error: a pack import that meets one of these does not abort. It
+/// stays here for a caller to display, offer a manual-download link for, or
+/// let the user explicitly skip. Nothing in this type is invented — every
+/// field is either the pack's own declaration or something the provider said
+/// about the exact file it refused, which is why `project_name`, `file_name`,
+/// and `browser_url` are all optional rather than defaulted to a raw id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockedProviderFile {
+    /// The same identity a resolved [`PendingProviderFile`] carries, so a
+    /// caller's skip/found decision can be matched back to the pack's own
+    /// declaration.
+    pub identity: ProviderFileIdentity,
+    pub project_name: Option<String>,
+    pub file_name: Option<String>,
+    /// A link to the project's page on the provider's own site, when enough
+    /// is known to build one.
+    pub browser_url: Option<String>,
+    /// The provider's own digest(s) for the file, so a hand-placed copy can
+    /// be recognized without trusting anything about where it came from.
+    pub hashes: Vec<Hash>,
+    pub client: SideRequirement,
+    pub server: SideRequirement,
+}
+
 /// One file the pack declares (the project's `PackFileRecipe`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PackFileRecipe {

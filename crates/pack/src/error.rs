@@ -168,6 +168,17 @@ pub enum PackError {
     #[error("{remaining} of the pack's files have not been resolved with their provider")]
     ProviderFilesUnresolved { remaining: usize, first: String },
 
+    /// Materialization was asked for while the pack still had files a
+    /// provider refused to serve, and nothing said what to do about them.
+    ///
+    /// Distinct from [`Self::ProviderFilesUnresolved`]: those files were never
+    /// asked about at all, while these were asked about and refused. Neither
+    /// is laid down silently — a caller resolves a refusal by finding a
+    /// verified copy in the shared cache or by an explicit skip, and reaching
+    /// here means neither happened for every one of them.
+    #[error("{remaining} of the pack's files are not available for automatic download")]
+    ProviderFilesBlocked { remaining: usize, first: String },
+
     /// A pack file carries no hash, so a download could not be verified
     #[error("the pack file `{path}` has no usable hash")]
     FileHashesMissing { path: String },
@@ -336,6 +347,7 @@ impl PackError {
             Self::PackEntryInclusionConflict { .. } => "error-pack-entry-inclusion-conflict",
             Self::ProviderContentUnsupported { .. } => "error-pack-provider-content-unsupported",
             Self::ProviderFilesUnresolved { .. } => "error-pack-provider-files-unresolved",
+            Self::ProviderFilesBlocked { .. } => "error-pack-provider-files-blocked",
             Self::FileHashesMissing { .. } => "error-pack-file-hashes-missing",
             Self::FileDownloadsMissing { .. } => "error-pack-file-downloads-missing",
             Self::DownloadUrlRejected { .. } => "error-pack-download-url-rejected",
@@ -448,7 +460,8 @@ impl PackError {
                 ("reference", reference.clone()),
                 ("project_type", project_type.clone()),
             ],
-            Self::ProviderFilesUnresolved { remaining, first } => vec![
+            Self::ProviderFilesUnresolved { remaining, first }
+            | Self::ProviderFilesBlocked { remaining, first } => vec![
                 ("remaining", remaining.to_string()),
                 ("project", first.clone()),
             ],
@@ -607,6 +620,10 @@ mod tests {
             },
             PackError::ProviderFilesUnresolved {
                 remaining: 3,
+                first: "238222".to_owned(),
+            },
+            PackError::ProviderFilesBlocked {
+                remaining: 1,
                 first: "238222".to_owned(),
             },
             PackError::MinecraftDependencyMissing,

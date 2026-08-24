@@ -989,6 +989,26 @@ pub enum CurseForgeProjectClass {
     Other(String),
 }
 
+impl CurseForgeProjectClass {
+    /// The path segment CurseForge's own site uses for a project of this
+    /// class, e.g. `mc-mods` in `curseforge.com/minecraft/mc-mods/<slug>`.
+    ///
+    /// The same slugs classification itself reads a category response for,
+    /// so a browser link built from this and a project's own slug needs no
+    /// second request. `None` for [`Self::Other`]: this build never confirms
+    /// a project of an unrecognized class in the first place, so nothing
+    /// downstream ever needs a link for one.
+    #[must_use]
+    pub const fn browser_path_segment(&self) -> Option<&'static str> {
+        match self {
+            Self::Mods => Some(MODS_CLASS_SLUG),
+            Self::ResourcePacks => Some(RESOURCE_PACKS_CLASS_SLUG),
+            Self::ShaderPacks => Some(SHADER_PACKS_CLASS_SLUG),
+            Self::Other(_) => None,
+        }
+    }
+}
+
 /// One exact CurseForge file, normalized and checked against what was asked
 /// for.
 ///
@@ -1027,6 +1047,10 @@ fn normalize_file(
         });
     }
 
+    // Parsed before the distribution check so a refusal can still name the
+    // file and its digest for a caller that offers a manual-download path.
+    let hashes = supported_hashes(&document.hashes);
+
     // Null rather than absent, and it means the project's owner turned off
     // third-party distribution. There is no second address to try: assembling a
     // CDN path out of the ids would route around a decision the author made.
@@ -1038,9 +1062,10 @@ fn normalize_file(
             provider: ModProvider::CurseForge,
             project_id: project.to_string(),
             file_id: file.to_string(),
+            file_name: Some(document.file_name.clone()),
+            hashes: hashes.clone(),
         })?;
 
-    let hashes = supported_hashes(&document.hashes);
     if hashes.is_empty() {
         // Verification is mandatory. A file with no digest this build can check
         // is one it will not install, rather than one it trusts because of the

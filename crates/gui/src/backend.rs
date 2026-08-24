@@ -20,9 +20,9 @@ use ephervex_core::{
     LinkedTargetResult, LinkedTargetState, LoginOptions, ManagedModEntry, ManagedModSnapshot,
     MetadataAvailability, ModDetails, ModInstallPlan, ModMutability, ModMutation, ModMutationPlan,
     ModSearchQuery, MutationRestriction, NewClient, NewServer, OperationReporter,
-    OptionalSelection, PackAnalysis, Paths, PlannedOutcome, ProgressSink, SearchOptions,
-    ServerCreateOptions, ServerEvent, ServerFolder, ServerNetworkSettings, ServerObserver,
-    SideRequirement,
+    OptionalSelection, PackAnalysis, Paths, PlannedOutcome, ProgressSink, ProviderFileIdentity,
+    SearchOptions, ServerCreateOptions, ServerEvent, ServerFolder, ServerNetworkSettings,
+    ServerObserver, SideRequirement, WatchTarget,
 };
 use ephervex_core::{
     ConfiguredPreferences, LanguageAvailability, LanguageEntry, MinecraftPreferencePreview,
@@ -81,6 +81,10 @@ pub enum Command {
         /// analyzed and possibly resolved. Never inferred here: the modal
         /// built it from the same normalized components the core reports.
         selection: OptionalSelection,
+        /// Blocked provider files the modal's "Skip" button was used on.
+        /// Never inferred here: only the modal's own blocked-file list can
+        /// know which decisions the user actually made.
+        skip_blocked: Vec<ProviderFileIdentity>,
         /// The attempt this submission belongs to, echoed back on
         /// [`Event::ImportSubmissionFinished`] so the double-submit guard is
         /// only ever released by the completion of this exact submission.
@@ -236,6 +240,11 @@ pub enum Command {
     RemoveCurseForgeApiKey,
     OpenCurseForgeKeyHelp,
     SaveStorageRoot(String),
+    PickWatchedFolder,
+    /// Replaces the whole configured watched-folder list. Sent with the full
+    /// list after every add or remove, mirroring the settings screen's other
+    /// list-shaped settings rather than diffing one entry at a time.
+    SaveWatchedDownloadFolders(Vec<String>),
     /// Measure the reusable artifact cache.
     ///
     /// Its own command rather than part of the ordinary snapshot: measuring walks
@@ -380,6 +389,11 @@ pub struct SettingsData {
     pub persistent_root: String,
     pub default_persistent_root: String,
     pub persistent_root_origin: SettingOrigin,
+    /// Folders a download watcher checks for a manually placed copy of a
+    /// file its provider refused to serve, as absolute paths. Never empty in
+    /// practice unless the user explicitly cleared the list: an unconfigured
+    /// list already resolves to the OS Downloads folder before it gets here.
+    pub watched_download_folders: Vec<String>,
     pub microsoft_client_id: String,
     pub effective_microsoft_client_id: String,
     pub microsoft_client_id_origin: SettingOrigin,
@@ -713,7 +727,7 @@ pub struct JavaData {
 
 #[derive(Debug, Clone)]
 pub enum Event {
-    Snapshot(Snapshot),
+    Snapshot(Box<Snapshot>),
     MinecraftReleases(Vec<String>),
     /// One save of the global Minecraft defaults reached a terminal outcome.
     ///
@@ -812,6 +826,18 @@ pub enum Event {
         generation: u64,
         result: Result<ImportPresentation, ImportFailure>,
     },
+    /// A folder watcher found and verified a hand-placed copy of one blocked
+    /// file's bytes while the import modal was open on it.
+    ///
+    /// A receiver must discard this unless `generation` still names the
+    /// attempt it is tracking, exactly like [`Event::ImportResolved`]. Does
+    /// not by itself change what final import will do — that re-checks the
+    /// shared cache independently — it only clears the row from the modal's
+    /// own blocked-file list.
+    BlockedFileMatched {
+        generation: u64,
+        identity: ProviderFileIdentity,
+    },
     /// An `ImportPack` submission reached a terminal outcome (success,
     /// failure, cancellation, or a setup failure before the operation could
     /// even start). `generation` is the same identity the submission's
@@ -827,6 +853,7 @@ pub enum Event {
         succeeded: bool,
     },
     StorageRootPicked(PathBuf),
+    WatchedFolderPicked(PathBuf),
     ArtifactCacheStatus(ArtifactCacheStatusData),
     /// A manual clear has finished without a fresh usage figure to show, because
     /// the clear was refused or the store could not be measured afterwards. The
@@ -1032,6 +1059,14 @@ fn run_worker(
                     let _ = events.send(Event::StorageRootPicked(path));
                 }
             }
+            Command::PickWatchedFolder => {
+                if let Some(path) = rfd::FileDialog::new()
+                    .set_title(lookup("gui-choose-watched-folder"))
+                    .pick_folder()
+                {
+                    let _ = events.send(Event::WatchedFolderPicked(path));
+                }
+            }
             Command::CreateClient {
                 request_id,
                 name,
@@ -1072,6 +1107,7 @@ fn run_worker(
                 name,
                 persistent,
                 selection,
+                skip_blocked,
                 generation,
             } => {
                 let paths = app.paths().clone();
@@ -1085,6 +1121,7 @@ fn run_worker(
                         name,
                         persistent,
                         selection,
+                        skip_blocked,
                     },
                 );
             }
@@ -1799,6 +1836,13 @@ fn run_worker(
                     Err(error) => send_error(&events, &error),
                 }
             }
+            Command::SaveWatchedDownloadFolders(folders) => {
+                let folders: Vec<PathBuf> = folders.into_iter().map(PathBuf::from).collect();
+                match app.set_watched_download_folders(Some(&folders)) {
+                    Ok(()) => send_snapshot(&app, &events),
+                    Err(error) => send_error(&events, &error),
+                }
+            }
             Command::MeasureArtifactCache => match runtime.block_on(app.artifact_cache_status()) {
                 Ok(status) => {
                     let _ = events.send(Event::ArtifactCacheStatus(artifact_cache_status_data(
@@ -2066,7 +2110,7 @@ fn warm_language_catalog(paths: Paths, minecraft: &str) {
 fn send_snapshot(app: &App, events: &Sender<Event>) {
     match snapshot(app) {
         Ok(snapshot) => {
-            let _ = events.send(Event::Snapshot(snapshot));
+            let _ = events.send(Event::Snapshot(Box::new(snapshot)));
         }
         Err(error) => send_error(events, &error),
     }
@@ -2166,6 +2210,11 @@ fn application_settings(app: &App) -> Result<SettingsData, CoreError> {
             .map_or_else(String::new, |path| path.display().to_string()),
         default_persistent_root: storage.default_root.display().to_string(),
         persistent_root_origin: origin(storage.configured_root.is_some()),
+        watched_download_folders: app
+            .watched_download_folders()
+            .into_iter()
+            .map(|path| path.display().to_string())
+            .collect(),
         microsoft_client_id_origin: origin(api.microsoft_client_id_is_custom),
         user_agent_origin: origin(!api.user_agent.is_empty()),
         microsoft_client_id: api.microsoft_client_id,
@@ -3218,7 +3267,10 @@ fn spawn_import_resolution(
             });
         },
         move |app, events, runtime| {
-            let result = runtime.block_on(app.resolve_pack(&mut analysis, &cancel));
+            // Nothing has been decided about a blocked file yet at preview
+            // time; this call's only job is to populate `analysis.blocked`
+            // (after a cache-probe auto-resolution) for the modal to show.
+            let result = runtime.block_on(app.resolve_pack(&mut analysis, &[], &cancel));
             let outcome = match result {
                 Ok(()) => Ok(ImportPresentation::from_analysis(&analysis)),
                 Err(error) => Err(import_failure(&error)),
@@ -3227,6 +3279,31 @@ fn spawn_import_resolution(
                 generation,
                 result: outcome,
             });
+
+            // A blocked file may still turn up in a watched folder while the
+            // modal stays open on it. This keeps rescanning until every
+            // target is matched or `cancel` fires — the same cancellation a
+            // new archive pick or closing the modal already triggers, so
+            // nothing further needs to stop this loop on its own.
+            if !analysis.blocked.is_empty() {
+                let targets = analysis
+                    .blocked
+                    .iter()
+                    .map(WatchTarget::from_blocked)
+                    .collect();
+                let mut watcher = app.download_watcher(targets);
+                while !watcher.is_finished() && !cancel.is_cancelled() {
+                    match runtime.block_on(watcher.scan_once()) {
+                        Some(identity) => {
+                            let _ = events.send(Event::BlockedFileMatched {
+                                generation,
+                                identity,
+                            });
+                        }
+                        None => std::thread::sleep(ephervex_core::RESCAN_INTERVAL),
+                    }
+                }
+            }
         },
     );
 }
@@ -3242,6 +3319,7 @@ struct ImportSubmission {
     name: String,
     persistent: bool,
     selection: OptionalSelection,
+    skip_blocked: Vec<ProviderFileIdentity>,
 }
 
 /// Runs an `ImportPack` submission on a thread of its own and, on every
@@ -3263,6 +3341,7 @@ fn spawn_import_submission(
         name,
         persistent,
         selection,
+        skip_blocked,
     } = submission;
     let entity = archive.display().to_string();
     spawn_detached_with_setup_failure(
@@ -3286,7 +3365,8 @@ fn spawn_import_submission(
             register_cancellation(&cancellations, &reporter, &cancel);
             let mut request = ImportRequest::new(archive)
                 .with_storage(storage_class(persistent))
-                .selecting(selection);
+                .selecting(selection)
+                .skipping_blocked(skip_blocked);
             if !name.trim().is_empty() {
                 request = request.named(name);
             }

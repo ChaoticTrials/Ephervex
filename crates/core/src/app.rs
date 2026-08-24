@@ -1163,6 +1163,49 @@ impl App {
         Ok(())
     }
 
+    /// The folders a download watcher checks for a manually placed copy of a
+    /// file its provider refused to serve, resolved to the OS Downloads
+    /// folder when nothing is configured.
+    #[must_use]
+    pub fn watched_download_folders(&self) -> Vec<PathBuf> {
+        self.config().watched_download_folders()
+    }
+
+    /// Replaces the configured watched-folder list.
+    ///
+    /// `None` returns to the unconfigured default (the OS Downloads folder);
+    /// `Some(&[])` explicitly clears it, watching nothing. Each path is made
+    /// absolute before it is stored, on the same reasoning
+    /// [`Self::set_persistent_instance_root`] does: a relative path would
+    /// resolve against whatever directory happened to launch the process.
+    #[instrument(skip(self))]
+    pub fn set_watched_download_folders(&mut self, folders: Option<&[PathBuf]>) -> CoreResult<()> {
+        let absolute = folders
+            .map(|folders| {
+                folders
+                    .iter()
+                    .map(|path| {
+                        std::path::absolute(path).map_err(|source| {
+                            ephervex_storage::PathError::DirectoryCreation {
+                                path: path.clone(),
+                                source,
+                            }
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?;
+        let setting = absolute.map(|folders| {
+            folders
+                .into_iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        });
+        self.mutate_config(|config| {
+            config.watched_download_folders.clone_from(&setting);
+        })
+    }
+
     /// Changes a setting and writes the configuration file.
     ///
     /// The single place configuration is mutated, so no service can change a
@@ -1221,6 +1264,36 @@ mod tests {
 
     fn app_rooted_at(base: &std::path::Path) -> App {
         App::open_at(Paths::rooted_at(base)).expect("app should open against a temporary root")
+    }
+
+    #[test]
+    fn watched_download_folders_persist_across_a_reopen_and_absolutize_relative_paths() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+
+        app.set_watched_download_folders(Some(&[PathBuf::from("relative/downloads")]))
+            .expect("set a relative folder");
+        let configured = app.watched_download_folders();
+        assert_eq!(configured.len(), 1);
+        assert!(
+            configured[0].is_absolute(),
+            "a relative path must not resolve against whatever directory launched the process"
+        );
+
+        let reopened = app_rooted_at(base.path());
+        assert_eq!(
+            reopened.watched_download_folders(),
+            configured,
+            "the setting must survive a restart"
+        );
+
+        let mut app = reopened;
+        app.set_watched_download_folders(Some(&[]))
+            .expect("clear the list");
+        assert!(
+            app.watched_download_folders().is_empty(),
+            "an explicit empty list must not fall back to the OS Downloads folder"
+        );
     }
 
     #[test]

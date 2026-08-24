@@ -35,7 +35,7 @@
 use std::path::{Path, PathBuf};
 
 use ephervex_download::{CacheLayout, DownloadManager, OperationReporter};
-use ephervex_model::{ImportSourceKind, LoaderSelection};
+use ephervex_model::{AttentionReason, ImportSourceKind, LoaderSelection};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument};
 
@@ -48,8 +48,8 @@ use crate::install::{self, AppliedLayer, MaterializedFiles};
 use crate::modrinth::{self, ParsedPack};
 use crate::policy::PackPolicy;
 use crate::recipe::{
-    OptionalComponent, OptionalSelection, OverrideScope, PackRecipe, PackSide, PendingProviderFile,
-    SideRequirement,
+    BlockedProviderFile, OptionalComponent, OptionalSelection, OverrideScope, PackRecipe, PackSide,
+    PendingProviderFile, SideRequirement,
 };
 use crate::store::SourceStore;
 
@@ -68,6 +68,15 @@ pub struct PackAnalysis {
     /// Download addresses the URL policy refused, for files that had another
     /// permitted address.
     pub rejected_urls: Vec<String>,
+    /// Declared files a provider answered about but refused to serve, and
+    /// that resolving against the shared cache or an explicit skip has not
+    /// yet cleared. Import refuses to run while any remain and nothing has
+    /// said what to do about them; see [`crate::error::PackError::ProviderFilesBlocked`].
+    pub blocked: Vec<BlockedProviderFile>,
+    /// Attention reasons accumulated while resolving this pack, before it
+    /// becomes an instance — currently only a skipped provider file's
+    /// [`AttentionReason::ManualDownloadRequired`].
+    pub attention: Vec<AttentionReason>,
 }
 
 impl PackAnalysis {
@@ -227,6 +236,8 @@ pub fn parse_with(
                 recipe,
                 pending: Vec::new(),
                 rejected_urls,
+                blocked: Vec::new(),
+                attention: Vec::new(),
             })
         }
         PackFormat::CurseForgePack => {
@@ -243,6 +254,8 @@ pub fn parse_with(
                 recipe,
                 pending,
                 rejected_urls: Vec::new(),
+                blocked: Vec::new(),
+                attention: Vec::new(),
             })
         }
         PackFormat::PrismExport => Err(PackError::FormatUnsupported { format }),
@@ -340,6 +353,16 @@ pub async fn materialize(request: MaterializeRequest<'_>) -> PackResult<Material
         return Err(PackError::ProviderFilesUnresolved {
             remaining: analysis.pending.len(),
             first: unresolved.identity.project_id.clone().unwrap_or_default(),
+        });
+    }
+    if let Some(blocked) = analysis.blocked.first() {
+        // A file a provider refused is not laid down silently either: the
+        // caller resolves each one first, by finding a verified copy in the
+        // shared cache or by an explicit skip. Reaching here means at least
+        // one is still neither.
+        return Err(PackError::ProviderFilesBlocked {
+            remaining: analysis.blocked.len(),
+            first: blocked.identity.project_id.clone().unwrap_or_default(),
         });
     }
 

@@ -580,6 +580,15 @@ pub struct Config {
     /// Custom persistent instance root, or empty for the XDG default. This is
     /// the only relocatable root.
     pub persistent_instance_root: String,
+    /// Folders a download watcher checks for a manually placed copy of a
+    /// file its provider refused to serve automatically, matched by hash.
+    ///
+    /// `None` means "use the OS Downloads folder", this launcher's own
+    /// default; `Some(vec![])` means the user explicitly cleared the list
+    /// rather than never having set it. Unlike
+    /// [`Self::persistent_instance_root`]'s single relocatable root, a list
+    /// cannot use blank-vs-populated to tell those two apart.
+    pub watched_download_folders: Option<Vec<String>>,
     /// The account launches use, as a profile UUID, or empty when nobody is
     /// signed in.
     ///
@@ -624,6 +633,7 @@ impl Default for Config {
             schema_version: CONFIG_SCHEMA_VERSION,
             language: "en-US".to_owned(),
             persistent_instance_root: String::new(),
+            watched_download_folders: None,
             active_account: String::new(),
             display: ApplicationDisplayConfig::default(),
             java: JavaConfig::default(),
@@ -780,6 +790,28 @@ impl Config {
     pub fn persistent_instance_root(&self) -> Option<PathBuf> {
         let trimmed = self.persistent_instance_root.trim();
         (!trimmed.is_empty()).then(|| PathBuf::from(trimmed))
+    }
+
+    /// The folders a download watcher checks, resolving the unconfigured
+    /// default to the OS Downloads folder.
+    ///
+    /// Empty when the user explicitly cleared the list, or when this build
+    /// has no configured list and the platform reports no Downloads folder
+    /// either (there is nothing sensible to fall back to further).
+    #[must_use]
+    pub fn watched_download_folders(&self) -> Vec<PathBuf> {
+        match &self.watched_download_folders {
+            Some(folders) => folders
+                .iter()
+                .map(|folder| folder.trim())
+                .filter(|folder| !folder.is_empty())
+                .map(PathBuf::from)
+                .collect(),
+            None => directories::UserDirs::new()
+                .and_then(|dirs| dirs.download_dir().map(Path::to_path_buf))
+                .into_iter()
+                .collect(),
+        }
     }
 
     /// Applies the configured overrides to a path resolver.
@@ -1696,6 +1728,67 @@ reference = ""
         );
         // The other roots stay where XDG says.
         assert_eq!(paths.config_dir(), Path::new("/example/config"));
+    }
+
+    #[test]
+    fn an_unconfigured_watch_list_and_an_explicitly_cleared_one_round_trip_distinctly() {
+        // Unlike a single relocatable root, a list cannot tell "never set"
+        // apart from "cleared" by blank-vs-populated, so this exercises the
+        // actual TOML round trip rather than trusting that `None` and
+        // `Some(vec![])` serialize to different things.
+        let mut config = Config::default();
+        assert_eq!(config.watched_download_folders, None);
+        let unconfigured = config.to_toml_string().expect("serialize");
+        assert_eq!(
+            Config::from_toml_str(&unconfigured)
+                .expect("parse")
+                .watched_download_folders,
+            None,
+            "an unconfigured list must round-trip as unconfigured, not as an empty one"
+        );
+
+        config.watched_download_folders = Some(Vec::new());
+        let cleared = config.to_toml_string().expect("serialize");
+        assert_eq!(
+            Config::from_toml_str(&cleared)
+                .expect("parse")
+                .watched_download_folders,
+            Some(Vec::new()),
+            "an explicitly cleared list must round-trip as present and empty"
+        );
+        assert_ne!(
+            unconfigured, cleared,
+            "the two states must not serialize identically"
+        );
+    }
+
+    #[test]
+    fn a_configured_watch_list_is_trimmed_and_blanks_are_dropped() {
+        let config = Config {
+            watched_download_folders: Some(vec![
+                "  /home/user/Downloads  ".to_owned(),
+                String::new(),
+                "   ".to_owned(),
+                "/mnt/nas/mods".to_owned(),
+            ]),
+            ..Config::default()
+        };
+        assert_eq!(
+            config.watched_download_folders(),
+            vec![
+                PathBuf::from("/home/user/Downloads"),
+                PathBuf::from("/mnt/nas/mods"),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_explicitly_cleared_watch_list_resolves_to_nothing() {
+        let config = Config {
+            watched_download_folders: Some(Vec::new()),
+            ..Config::default()
+        };
+        assert!(config.watched_download_folders().is_empty());
     }
 
     #[test]

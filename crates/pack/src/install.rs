@@ -60,8 +60,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ephervex_download::{
-    AuthenticatedSource, CacheLayout, ContentStore, DownloadError, DownloadManager,
-    DownloadOutcome, DownloadRequest, FileExtension, OperationReporter, Url, UrlPolicyError,
+    ArtifactSource, ArtifactStep, AuthenticatedSource, CacheLayout, ContentStore, DownloadError,
+    DownloadManager, DownloadOutcome, DownloadRequest, FileExtension, OperationReporter, Url,
+    UrlPolicyError, file_matches_hashes,
 };
 use ephervex_model::Hash;
 use tokio_util::sync::CancellationToken;
@@ -381,6 +382,19 @@ pub(crate) async fn fetch_all(
         if fetch.cancel.is_cancelled() {
             return Err(PackError::Canceled);
         }
+        // A file with no declared address at all — a provider refused to
+        // serve it, and nothing has fetched it over the network — can still
+        // install if a verified copy is already in the shared cache (an
+        // earlier import, or a folder a watcher is minding, put it there).
+        // There is no `DownloadRequest` to build without a URL, so this asks
+        // the cache directly instead of going through `primary_request`.
+        if file.downloads.is_empty() {
+            match probe_cache_without_url(file, fetch).await? {
+                Some(outcome) => outcomes[index] = Some(outcome),
+                None => missing.push(index),
+            }
+            continue;
+        }
         // Built without a credential: the probe only reads a path this crate
         // derived from the file's own strongest digest.
         let probe = primary_request(file, fetch, None)?;
@@ -523,6 +537,57 @@ fn request_for(
         request = request.authenticated_by(Arc::clone(source));
     }
     Ok(request)
+}
+
+/// Checks the shared cache directly for a file that names no download
+/// address at all, with no network access.
+///
+/// The counterpart to [`DownloadManager::cached`] for a file
+/// [`request_for`]/[`primary_request`] cannot even build a request for: both
+/// ask the identical question ("is a verified copy of this hash already at
+/// its content-addressed path?"), but this one has no `DownloadRequest` to
+/// ask it through, since building one needs a URL this file does not have.
+/// `Ok(None)` covers both an ordinary cache miss and a file with no usable
+/// hash to check against; only a genuine filesystem fault propagates.
+async fn probe_cache_without_url(
+    file: &PackFileRecipe,
+    fetch: ArtifactFetch<'_>,
+) -> PackResult<Option<DownloadOutcome>> {
+    let Ok(hash) = strongest_hash(file) else {
+        return Ok(None);
+    };
+    let destination =
+        fetch
+            .cache
+            .content(ContentStore::Downloads, hash, extension_of(file).as_ref());
+    let io_failed = |source: std::io::Error| PackError::DownloadFailed {
+        path: file.display_name(),
+        source: Box::new(DownloadError::io(
+            ArtifactStep::ReadCached,
+            &destination,
+            source,
+        )),
+    };
+    let metadata = match std::fs::symlink_metadata(&destination) {
+        Ok(metadata) if metadata.is_file() => metadata,
+        Ok(_) => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => return Err(io_failed(source)),
+    };
+    if !file_matches_hashes(&destination, &file.hashes)
+        .await
+        .map_err(|error| PackError::DownloadFailed {
+            path: file.display_name(),
+            source: Box::new(error),
+        })?
+    {
+        return Ok(None);
+    }
+    Ok(Some(DownloadOutcome {
+        path: destination,
+        bytes: metadata.len(),
+        source: ArtifactSource::AlreadyCached,
+    }))
 }
 
 /// The hash a file's cache path is derived from.
@@ -1262,6 +1327,67 @@ mod tests {
         )
         .expect("request");
         assert!(open.authenticated_source().is_none());
+    }
+
+    /// [`file`] with no download address, as a watcher-resolved or
+    /// otherwise cache-only recipe entry has.
+    fn downloadless_file(path: &str) -> PackFileRecipe {
+        let mut entry = file(path);
+        entry.downloads = Vec::new();
+        entry
+    }
+
+    #[tokio::test]
+    async fn a_downloadless_file_already_verified_in_the_cache_installs_with_no_request() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = CacheLayout::new(dir.path());
+        let manager =
+            DownloadManager::new(ephervex_download::DownloaderConfig::default()).expect("manager");
+        let reporter = OperationReporter::silent("test");
+        let cancel = CancellationToken::new();
+        let entry = downloadless_file("mods/a.jar");
+
+        // `file()`'s hashes are the empty body's, so an empty fixture at the
+        // strongest hash's cache path is what "already verified" looks like.
+        let destination = cache.content(
+            ContentStore::Downloads,
+            &entry.hashes[0],
+            Some(&FileExtension::new("jar").expect("jar")),
+        );
+        std::fs::create_dir_all(destination.parent().expect("shard")).expect("shard");
+        std::fs::write(&destination, []).expect("write fixture");
+
+        let outcomes = fetch_all(
+            &[&entry],
+            offline_fetch(&manager, &cache, &reporter, &cancel),
+        )
+        .await
+        .expect("a verified cache entry installs with no download address");
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].source, ArtifactSource::AlreadyCached);
+        assert_eq!(outcomes[0].path, destination);
+    }
+
+    #[tokio::test]
+    async fn a_downloadless_file_the_cache_does_not_have_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = CacheLayout::new(dir.path());
+        let manager =
+            DownloadManager::new(ephervex_download::DownloaderConfig::default()).expect("manager");
+        let reporter = OperationReporter::silent("test");
+        let cancel = CancellationToken::new();
+        let entry = downloadless_file("mods/a.jar");
+
+        let error = fetch_all(
+            &[&entry],
+            offline_fetch(&manager, &cache, &reporter, &cancel),
+        )
+        .await
+        .expect_err("no address and no cache entry cannot install");
+        assert!(
+            matches!(error, PackError::FileDownloadsMissing { .. }),
+            "unexpected error: {error:?}"
+        );
     }
 
     #[test]

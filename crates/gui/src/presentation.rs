@@ -7,10 +7,10 @@
 use std::net::IpAddr;
 
 use ephervex_core::{
-    ARTIFACT_CACHE_LIMIT_PRESETS, ArtifactCacheLimit, ArtifactCacheLimitError, ByteUnit,
-    ClientRecord, DEFAULT_ARTIFACT_CACHE_LIMIT_BYTES, DiagnosticKind, DiagnosticScope,
-    LaunchAndConnectAvailability, NetworkAccess, PackAnalysis, PackSide, RuntimeClassification,
-    ServerRecord, ServerStatus, format_binary_bytes,
+    ARTIFACT_CACHE_LIMIT_PRESETS, ArtifactCacheLimit, ArtifactCacheLimitError, BlockedProviderFile,
+    ByteUnit, ClientRecord, DEFAULT_ARTIFACT_CACHE_LIMIT_BYTES, DiagnosticKind, DiagnosticScope,
+    LaunchAndConnectAvailability, NetworkAccess, PackAnalysis, PackSide, ProviderFileIdentity,
+    RuntimeClassification, ServerRecord, ServerStatus, format_binary_bytes,
 };
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use ephervex_model::{
@@ -1017,6 +1017,44 @@ pub struct ImportOptionPresentation {
     pub selected: bool,
 }
 
+/// One file a provider refused to serve, translated from
+/// [`ephervex_core::BlockedProviderFile`] for the import modal's blocked-file
+/// list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockedFilePresentation {
+    /// The identity a skip decision or a watcher match is recorded against.
+    pub identity: ProviderFileIdentity,
+    /// The project's own name, falling back to its catalog id.
+    pub project_line: String,
+    /// The file's own name, falling back to its catalog id.
+    pub file_line: String,
+    /// A link to the project's page on the provider's own site, when enough
+    /// was known to build one.
+    pub browser_url: String,
+}
+
+impl BlockedFilePresentation {
+    #[must_use]
+    fn from_blocked(blocked: &BlockedProviderFile) -> Self {
+        let project_id = blocked.identity.project_id.as_deref().unwrap_or_default();
+        let file_id = blocked.identity.file_id.as_deref().unwrap_or_default();
+        Self {
+            identity: blocked.identity.clone(),
+            project_line: blocked
+                .project_name
+                .clone()
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| project_id.to_owned()),
+            file_line: blocked
+                .file_name
+                .clone()
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| file_id.to_owned()),
+            browser_url: blocked.browser_url.clone().unwrap_or_default(),
+        }
+    }
+}
+
 /// The provider-neutral facts an import analysis has enough information to
 /// show, independent of whether provider resolution has finished.
 ///
@@ -1036,6 +1074,10 @@ pub struct ImportPresentation {
     pub optional_count: usize,
     pub optional: Vec<ImportOptionPresentation>,
     pub needs_provider_resolution: bool,
+    /// Declared files a provider refused to serve and that neither the shared
+    /// cache nor an explicit skip has cleared yet. Import stays disabled
+    /// while this is non-empty.
+    pub blocked: Vec<BlockedFilePresentation>,
 }
 
 impl ImportPresentation {
@@ -1060,6 +1102,11 @@ impl ImportPresentation {
                 })
                 .collect(),
             needs_provider_resolution: analysis.needs_provider_resolution(),
+            blocked: analysis
+                .blocked
+                .iter()
+                .map(BlockedFilePresentation::from_blocked)
+                .collect(),
         }
     }
 
@@ -1215,6 +1262,7 @@ mod import_tests {
                 },
             ],
             needs_provider_resolution: false,
+            blocked: Vec::new(),
         }
     }
 

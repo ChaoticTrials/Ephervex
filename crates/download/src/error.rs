@@ -152,11 +152,13 @@ impl DownloadError {
     }
 
     /// Builds a [`DownloadError::Io`] naming the step and the path that failed.
-    pub(crate) fn io(
-        operation: ArtifactStep,
-        path: impl Into<PathBuf>,
-        source: std::io::Error,
-    ) -> Self {
+    ///
+    /// Public because a caller outside this crate that reads a path this
+    /// crate manages — a shared cache entry it is deciding whether to reuse,
+    /// say — has the identical failure to report and should not invent a
+    /// second [`ArtifactStep`] taxonomy to do it.
+    #[must_use]
+    pub fn io(operation: ArtifactStep, path: impl Into<PathBuf>, source: std::io::Error) -> Self {
         Self::Io {
             operation,
             path: path.into(),

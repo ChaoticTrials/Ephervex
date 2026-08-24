@@ -129,6 +129,17 @@ slint::slint! {
         selected: bool,
     }
 
+    // One file a provider refused to serve, still waiting on a watcher match
+    // or a skip. `identity` is the opaque join key `skip-blocked-file`/
+    // `open-blocked-file` are called with; the two lines are the project's
+    // and the file's own names, falling back to their catalog ids.
+    export struct ImportBlockedRow {
+        identity: string,
+        project-line: string,
+        file-line: string,
+        browser-url: string,
+    }
+
     // One linked server in a mod confirmation, or one finished target in a
     // result. The same shape serves both so the two cannot describe the same
     // server differently.
@@ -1751,6 +1762,7 @@ slint::slint! {
         in-out property <string> import-required-line;
         in-out property <string> import-optional-line;
         in-out property <[ImportOptionRow]> import-optional-items;
+        in-out property <[ImportBlockedRow]> import-blocked-items;
         // Whether the current archive has a successful, fully resolved
         // analysis: the only condition the Import button's `enabled` needs.
         in-out property <bool> import-ready;
@@ -1811,6 +1823,7 @@ slint::slint! {
         in-out property <string> persistent-root;
         in-out property <string> default-persistent-root;
         in-out property <bool> persistent-root-is-custom;
+        in-out property <[string]> watched-download-folders;
         in-out property <[string]> artifact-cache-limit-labels;
         in-out property <int> artifact-cache-limit-index;
         // Which entry in the list above is Custom. Held rather than hardcoded so
@@ -1868,6 +1881,8 @@ slint::slint! {
         callback close-import-modal();
         callback choose-import-file();
         callback toggle-import-optional(string);
+        callback skip-blocked-file(string);
+        callback open-blocked-file(string);
         callback import-name-edited(string);
         // No archive path: submission always uses whichever archive the
         // current analysis actually applies to, not this text.
@@ -1910,6 +1925,8 @@ slint::slint! {
         callback save-storage-settings(string);
         callback choose-storage-root();
         callback reset-storage-root();
+        callback choose-watched-folder();
+        callback remove-watched-folder(string);
         callback measure-artifact-cache();
         callback save-artifact-cache-limit(int, string, string);
         callback clear-artifact-cache();
@@ -2450,6 +2467,19 @@ slint::slint! {
                             HorizontalLayout { if root.persistent-root-is-custom : AppButton { text: GuiI18n.text("gui-reset-default"); clicked => { root.reset-storage-root(); } } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-save-storage-root"); tone: "primary"; clicked => { root.save-storage-settings(root.persistent-root); } } }
                             BodyText { text: GuiI18n.text("gui-storage-change-future-only"); color: Theme.text-muted; wrap: word-wrap; }
                             Divider { }
+                            SectionTitle { title: GuiI18n.text("gui-watched-download-folders"); detail: GuiI18n.text("gui-watched-download-folders-detail"); }
+                            if root.watched-download-folders.length > 0 : VerticalLayout {
+                                spacing: 6px;
+                                for folder in root.watched-download-folders : HorizontalLayout {
+                                    spacing: 8px;
+                                    height: 32px;
+                                    BodyText { text: folder; overflow: elide; vertical-alignment: center; horizontal-stretch: 1; }
+                                    AppButton { text: GuiI18n.text("gui-remove"); tone: "danger"; clicked => { root.remove-watched-folder(folder); } }
+                                }
+                            }
+                            if root.watched-download-folders.length == 0 : BodyText { text: GuiI18n.text("gui-watched-download-folders-empty"); color: Theme.text-muted; wrap: word-wrap; }
+                            HorizontalLayout { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-add-watched-folder"); clicked => { root.choose-watched-folder(); } } }
+                            Divider { }
                             SectionTitle { title: GuiI18n.text("gui-artifact-cache"); detail: GuiI18n.text("gui-artifact-cache-detail"); }
                             // Height taken from the content rather than fixed:
                             // a bare Rectangle reports no preferred height of
@@ -2615,6 +2645,44 @@ slint::slint! {
                                             toggled(selected) => { root.toggle-import-optional(item.logical-path); }
                                         }
                                         BodyText { text: item.display; overflow: elide; vertical-alignment: center; }
+                                    }
+                                }
+                            }
+                            if root.import-blocked-items.length > 0 : VerticalLayout {
+                                spacing: 6px;
+                                BodyText { text: GuiI18n.text("gui-import-blocked-detail"); color: Theme.warning; wrap: word-wrap; }
+                                ScrollView {
+                                    viewport-width: self.width;
+                                    height: min(root.import-blocked-items.length * 64px, 220px);
+                                    VerticalLayout {
+                                        spacing: 6px;
+                                        for item in root.import-blocked-items : Rectangle {
+                                            height: 58px;
+                                            border-radius: 6px;
+                                            border-width: 1px;
+                                            border-color: Theme.border;
+                                            background: Theme.surface;
+                                            HorizontalLayout {
+                                                padding: 8px;
+                                                spacing: 8px;
+                                                VerticalLayout {
+                                                    alignment: center;
+                                                    BodyText { text: item.project-line; overflow: elide; }
+                                                    BodyText { text: item.file-line; color: Theme.text-muted; overflow: elide; }
+                                                }
+                                                Rectangle { horizontal-stretch: 1; }
+                                                AppButton {
+                                                    text: GuiI18n.text("gui-open-in-browser");
+                                                    enabled: item.browser-url != "";
+                                                    clicked => { root.open-blocked-file(item.browser-url); }
+                                                }
+                                                AppButton {
+                                                    text: GuiI18n.text("gui-skip");
+                                                    tone: "danger";
+                                                    clicked => { root.skip-blocked-file(item.identity); }
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }

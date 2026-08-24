@@ -34,7 +34,7 @@ use ephervex_model::{InstanceId, StorageClass};
 use ephervex_options::PreferenceApplication;
 use ephervex_pack::{
     MaterializeRequest, MaterializedPack, OptionalSelection, PackAnalysis, PackArchive, PackPolicy,
-    PackRecipe, PackSide, SourceStore,
+    PackRecipe, PackSide, ProviderFileIdentity, SourceStore,
 };
 use ephervex_storage::{ClientRecord, ImportSource, NewClient};
 use tokio_util::sync::CancellationToken;
@@ -57,6 +57,12 @@ pub struct ImportRequest {
     /// Which optional files to take. Empty means none, which is the product
     /// default.
     pub selection: OptionalSelection,
+    /// Provider-refused files the caller has explicitly decided to do without.
+    ///
+    /// Empty means none, which is the product default and the only value the
+    /// CLI ever supplies: import still refuses atomically when a pack has any
+    /// file a provider refused and nothing said what to do about it.
+    pub skip_blocked: Vec<ProviderFileIdentity>,
 }
 
 impl ImportRequest {
@@ -68,6 +74,7 @@ impl ImportRequest {
             name: None,
             storage: StorageClass::default_for_new_instance(),
             selection: OptionalSelection::none(),
+            skip_blocked: Vec::new(),
         }
     }
 
@@ -86,6 +93,12 @@ impl ImportRequest {
     #[must_use]
     pub fn selecting(mut self, selection: OptionalSelection) -> Self {
         self.selection = selection;
+        self
+    }
+
+    #[must_use]
+    pub fn skipping_blocked(mut self, skip_blocked: Vec<ProviderFileIdentity>) -> Self {
+        self.skip_blocked = skip_blocked;
         self
     }
 }
@@ -178,7 +191,9 @@ impl App {
         // Including the provider lookups: a missing API key, a file the pack
         // declares that no longer exists, and a file whose author does not
         // permit third-party downloads all fail here, with nothing created.
-        let authenticated = self.prepare_provider_files(&mut analysis, cancel).await?;
+        let authenticated = self
+            .prepare_provider_files(&mut analysis, &request.skip_blocked, cancel)
+            .await?;
         // The resolution above already read whatever secret store this pack's
         // provider needs, so the download half reuses that value rather than
         // reading it again.
@@ -198,7 +213,8 @@ impl App {
                 analysis.recipe.loader.clone(),
             )
             .with_storage(request.storage)
-            .with_source(import_source(&analysis)),
+            .with_source(import_source(&analysis))
+            .with_attention(analysis.attention.clone()),
         )?;
 
         let materialized = match self

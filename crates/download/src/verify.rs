@@ -8,9 +8,15 @@
 //! `ephervex_model::Hash` owns digest normalization and comparison, so this
 //! module only produces hex and asks that type whether it matches.
 
+use std::path::Path;
+
 use ephervex_model::{Hash, HashAlgorithm};
 use sha1::Sha1;
 use sha2::{Digest, Sha256, Sha512};
+use tokio::fs::File;
+use tokio::io::AsyncReadExt as _;
+
+use crate::error::{ArtifactStep, DownloadError};
 
 /// A verified expectation that was not met.
 ///
@@ -130,6 +136,37 @@ impl HashVerifier {
     }
 }
 
+/// Whether a file already on disk matches every expected hash.
+///
+/// Reads the whole file once, in bounded chunks, computing exactly the
+/// algorithms `expected` names — the same work [`HashVerifier`] does while a
+/// download streams past, done here for bytes that arrived some other way (a
+/// cache entry being revalidated, a file a folder watcher just found). An
+/// empty `expected` is vacuously true, the same rule [`HashVerifier`] applies
+/// everywhere else: verification is a no-op when nothing was published to
+/// check against.
+pub async fn file_matches_hashes(path: &Path, expected: &[Hash]) -> Result<bool, DownloadError> {
+    if expected.is_empty() {
+        return Ok(true);
+    }
+    let mut file = File::open(path)
+        .await
+        .map_err(|source| DownloadError::io(ArtifactStep::ReadCached, path, source))?;
+    let mut verifier = HashVerifier::new(expected);
+    let mut buffer = vec![0; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .await
+            .map_err(|source| DownloadError::io(ArtifactStep::ReadCached, path, source))?;
+        if read == 0 {
+            break;
+        }
+        verifier.update(&buffer[..read]);
+    }
+    Ok(verifier.finish().is_ok())
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -200,5 +237,46 @@ mod tests {
         verifier.update(BODY);
         let mismatch = verifier.finish().unwrap_err();
         assert_eq!(mismatch.algorithm, HashAlgorithm::Sha512);
+    }
+
+    #[tokio::test]
+    async fn a_file_on_disk_matching_every_expected_hash_passes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("artifact.jar");
+        std::fs::write(&path, BODY).expect("write fixture");
+        let expected = vec![
+            Hash::new(HashAlgorithm::Sha1, &sha1_of(BODY)).expect("valid sha1"),
+            Hash::new(HashAlgorithm::Sha512, &sha512_of(BODY)).expect("valid sha512"),
+        ];
+        assert!(
+            file_matches_hashes(&path, &expected)
+                .await
+                .expect("hashing succeeds")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_file_on_disk_not_matching_an_expected_hash_fails() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("artifact.jar");
+        std::fs::write(&path, b"not the expected content").expect("write fixture");
+        let expected = vec![Hash::new(HashAlgorithm::Sha1, BODY_SHA1).expect("valid sha1")];
+        assert!(
+            !file_matches_hashes(&path, &expected)
+                .await
+                .expect("hashing succeeds")
+        );
+    }
+
+    #[tokio::test]
+    async fn no_expected_hashes_is_vacuously_a_match() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("artifact.jar");
+        std::fs::write(&path, BODY).expect("write fixture");
+        assert!(
+            file_matches_hashes(&path, &[])
+                .await
+                .expect("hashing succeeds")
+        );
     }
 }

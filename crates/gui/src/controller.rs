@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use copypasta::{ClipboardContext, ClipboardProvider as _};
 use ephervex_core::live_diagnostics::{LogFilter, LogLevel, RetainedLog};
-use ephervex_core::{OptionalSelection, WindowSize};
+use ephervex_core::{OptionalSelection, ProviderFileIdentity, WindowSize};
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use ephervex_model::ModProvider;
 use slint::{
@@ -30,9 +30,9 @@ use crate::presentation::{
     validate_port,
 };
 use crate::ui::{
-    AccountRow, ActivityRow, AppWindow, DiagnosticRow, GuiI18n, ImportOptionRow, InstanceRow,
-    JavaRow, LinkedTargetRow, LogChunk, ModRow, ModSearchRow, ModVersionRow, PendingEntityRow,
-    ServerRow, Theme, WindowSizePreview,
+    AccountRow, ActivityRow, AppWindow, DiagnosticRow, GuiI18n, ImportBlockedRow, ImportOptionRow,
+    InstanceRow, JavaRow, LinkedTargetRow, LogChunk, ModRow, ModSearchRow, ModVersionRow,
+    PendingEntityRow, ServerRow, Theme, WindowSizePreview,
 };
 use crate::window_aspect;
 
@@ -465,6 +465,18 @@ fn render_import_flow(ui: &AppWindow, state: &ImportFlowState) {
         })
         .collect();
     ui.set_import_optional_items(model(rows));
+
+    let blocked_rows: Vec<ImportBlockedRow> = state
+        .blocked
+        .iter()
+        .map(|blocked| ImportBlockedRow {
+            identity: blocked_identity_key(&blocked.identity).into(),
+            project_line: blocked.project_line.clone().into(),
+            file_line: blocked.file_line.clone().into(),
+            browser_url: blocked.browser_url.clone().into(),
+        })
+        .collect();
+    ui.set_import_blocked_items(model(blocked_rows));
 }
 
 fn register_import_flow(
@@ -531,6 +543,8 @@ fn register_import_flow(
         edited_state.borrow_mut().mark_name_edited();
     });
 
+    register_blocked_file_actions(ui, import_flow);
+
     let sender = commands.clone();
     let weak = ui.as_weak();
     let submit_state = Rc::clone(import_flow);
@@ -558,9 +572,52 @@ fn register_import_flow(
                 name: name.into(),
                 persistent,
                 selection: submission.selection,
+                skip_blocked: submission.skip_blocked,
                 generation: submission.generation,
             },
         );
+    });
+}
+
+/// Wires the import modal's blocked-file list: skipping one, and opening its
+/// project page in the user's browser.
+fn register_blocked_file_actions(ui: &AppWindow, import_flow: &Rc<RefCell<ImportFlowState>>) {
+    let weak = ui.as_weak();
+    let skip_state = Rc::clone(import_flow);
+    ui.on_skip_blocked_file(move |key| {
+        let mut state = skip_state.borrow_mut();
+        let Some(identity) = state
+            .blocked
+            .iter()
+            .find(|blocked| blocked_identity_key(&blocked.identity) == key.as_str())
+            .map(|blocked| blocked.identity.clone())
+        else {
+            return;
+        };
+        state.skip_blocked_file(&identity);
+        drop(state);
+        if let Some(ui) = weak.upgrade() {
+            render_import_flow(&ui, &skip_state.borrow());
+        }
+    });
+
+    let weak = ui.as_weak();
+    ui.on_open_blocked_file(move |url| {
+        if url.is_empty() {
+            return;
+        }
+        let opened = ephervex_core::open_in_browser(url.as_str());
+        if let Some(ui) = weak.upgrade() {
+            ui.invoke_present_toast(
+                lookup(if opened {
+                    "gui-import-blocked-opened"
+                } else {
+                    "gui-import-blocked-open-failed"
+                })
+                .into(),
+                !opened,
+            );
+        }
     });
 }
 
@@ -630,6 +687,16 @@ struct ImportOptionState {
     selected: bool,
 }
 
+/// One still-blocked file's state in the import modal, pending a watcher
+/// match or a skip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BlockedFileState {
+    identity: ProviderFileIdentity,
+    project_line: String,
+    file_line: String,
+    browser_url: String,
+}
+
 /// Everything `Command::ImportPack` needs, built from [`ImportFlowState`]'s
 /// own authoritative fields by [`ImportFlowState::begin_submit`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -637,6 +704,7 @@ struct PreparedImportSubmission {
     generation: u64,
     archive: PathBuf,
     selection: OptionalSelection,
+    skip_blocked: Vec<ProviderFileIdentity>,
 }
 
 /// Tracks one archive at a time through analysis, optional resolution,
@@ -657,6 +725,15 @@ struct ImportFlowState {
     archive: PathBuf,
     presentation: Option<ImportPresentation>,
     options: Vec<ImportOptionState>,
+    /// Files a provider refused that neither the shared cache nor an
+    /// explicit skip has cleared yet. Import stays disabled while this is
+    /// non-empty; see [`Self::is_ready`].
+    blocked: Vec<BlockedFileState>,
+    /// Blocked files the user has explicitly chosen to do without, threaded
+    /// into `Command::ImportPack` at submit time. Also used to filter a
+    /// freshly arrived `blocked` list, so a decision already made does not
+    /// reappear if resolution runs again.
+    skipped: Vec<ProviderFileIdentity>,
     suggested_name: String,
     /// Set the moment the user types in the name field. Checked before a
     /// later analysis/resolution result would otherwise overwrite it: an
@@ -733,6 +810,7 @@ impl ImportFlowState {
             Ok(presentation) => {
                 self.suggested_name.clone_from(&presentation.name);
                 self.options = options_from(&presentation);
+                self.blocked = blocked_from(&presentation, &self.skipped);
                 self.phase = if presentation.needs_provider_resolution {
                     ImportPhase::Resolving
                 } else {
@@ -770,6 +848,7 @@ impl ImportFlowState {
                     self.suggested_name.clone_from(&presentation.name);
                 }
                 self.options = options_from(&presentation);
+                self.blocked = blocked_from(&presentation, &self.skipped);
                 self.phase = ImportPhase::Ready;
                 self.presentation = Some(presentation);
             }
@@ -797,8 +876,36 @@ impl ImportFlowState {
         }
     }
 
-    const fn is_ready(&self) -> bool {
-        matches!(self.phase, ImportPhase::Ready)
+    /// Removes a blocked file from the modal's list and records the skip, so
+    /// final import omits it and the created instance is flagged with
+    /// `AttentionReason::ManualDownloadRequired` for it instead.
+    fn skip_blocked_file(&mut self, identity: &ProviderFileIdentity) {
+        self.blocked.retain(|blocked| &blocked.identity != identity);
+        if !self.skipped.contains(identity) {
+            self.skipped.push(identity.clone());
+        }
+    }
+
+    /// A folder watcher found and verified a copy of `identity`'s file.
+    /// `false` means it was discarded: either `generation` no longer names
+    /// the attempt this flow is tracking, or the row was already gone (a
+    /// stale or duplicate event) — either way there is nothing new to
+    /// render.
+    fn blocked_file_matched(&mut self, generation: u64, identity: &ProviderFileIdentity) -> bool {
+        if self.tracked_generation != Some(generation) {
+            return false;
+        }
+        let before = self.blocked.len();
+        self.blocked.retain(|blocked| &blocked.identity != identity);
+        self.blocked.len() != before
+    }
+
+    /// Ready to submit only once analysis (and resolution, if it needed to
+    /// run) has finished *and* nothing a provider refused is still
+    /// unaccounted for: [`Self::skip_blocked_file`] or a watcher match
+    /// clears each one, or the pack simply had none.
+    fn is_ready(&self) -> bool {
+        matches!(self.phase, ImportPhase::Ready) && self.blocked.is_empty()
     }
 
     /// Tries to move into `Submitting`, returning everything `ImportPack`
@@ -821,6 +928,7 @@ impl ImportFlowState {
             generation,
             archive: self.archive.clone(),
             selection: self.selection(),
+            skip_blocked: self.skipped.clone(),
         })
     }
 
@@ -860,6 +968,38 @@ fn options_from(presentation: &ImportPresentation) -> Vec<ImportOptionState> {
             logical_path: option.logical_path.clone(),
             display: option.display.clone(),
             selected: option.selected,
+        })
+        .collect()
+}
+
+/// The opaque join key a blocked row's `identity` Slint field carries.
+/// `skip-blocked-file` calls back with exactly this string, and the handler
+/// matches it back against `ImportFlowState::blocked` rather than parsing it,
+/// so the two directions can never disagree about what it means.
+fn blocked_identity_key(identity: &ProviderFileIdentity) -> String {
+    format!(
+        "{}/{}",
+        identity.project_id.as_deref().unwrap_or_default(),
+        identity.file_id.as_deref().unwrap_or_default(),
+    )
+}
+
+/// Everything a freshly arrived analysis/resolution result reports as
+/// blocked, minus whatever the user already decided to skip: a decision
+/// already made must not reappear just because resolution answered again.
+fn blocked_from(
+    presentation: &ImportPresentation,
+    skipped: &[ProviderFileIdentity],
+) -> Vec<BlockedFileState> {
+    presentation
+        .blocked
+        .iter()
+        .filter(|blocked| !skipped.contains(&blocked.identity))
+        .map(|blocked| BlockedFileState {
+            identity: blocked.identity.clone(),
+            project_line: blocked.project_line.clone(),
+            file_line: blocked.file_line.clone(),
+            browser_url: blocked.browser_url.clone(),
         })
         .collect()
 }
@@ -1983,6 +2123,7 @@ fn register_settings(ui: &AppWindow, commands: &Sender<Command>) {
     ui.on_choose_storage_root(move || send(&sender, Command::PickStorageRoot));
     let sender = commands.clone();
     ui.on_reset_storage_root(move || send(&sender, Command::SaveStorageRoot(String::new())));
+    register_watched_folders(ui, commands);
 
     let sender = commands.clone();
     ui.on_refresh_java(move || send(&sender, Command::RefreshJava));
@@ -2012,6 +2153,29 @@ fn register_settings(ui: &AppWindow, commands: &Sender<Command>) {
             );
         },
     );
+}
+
+/// Wires the "watched download folders" list: adding one via a native
+/// folder picker, and removing one. Each change sends the whole updated
+/// list, matching how the settings screen's other list-shaped values save.
+fn register_watched_folders(ui: &AppWindow, commands: &Sender<Command>) {
+    let sender = commands.clone();
+    ui.on_choose_watched_folder(move || send(&sender, Command::PickWatchedFolder));
+
+    let sender = commands.clone();
+    let weak = ui.as_weak();
+    ui.on_remove_watched_folder(move |folder| {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        let remaining: Vec<String> = ui
+            .get_watched_download_folders()
+            .iter()
+            .filter(|existing| existing != folder.as_str())
+            .map(|existing| existing.to_string())
+            .collect();
+        send(&sender, Command::SaveWatchedDownloadFolders(remaining));
+    });
 }
 
 /// The Minecraft defaults screen: one draft, one atomic save.
@@ -3050,7 +3214,7 @@ fn apply_event(
 ) {
     match event {
         Event::Snapshot(snapshot) => {
-            apply_snapshot_event(ui, snapshot, creations, minecraft, commands);
+            apply_snapshot_event(ui, *snapshot, creations, minecraft, commands);
         }
         Event::MinecraftPreferencesSaveFinished { .. }
         | Event::MinecraftPreferencePreview { .. }
@@ -3153,12 +3317,33 @@ fn apply_event(
             let applied = import_flow.borrow_mut().resolved(generation, result);
             apply_import_result(ui, import_flow, applied);
         }
+        Event::BlockedFileMatched {
+            generation,
+            identity,
+        } => {
+            let applied = import_flow
+                .borrow_mut()
+                .blocked_file_matched(generation, &identity);
+            apply_import_result(ui, import_flow, applied);
+        }
         Event::ImportSubmissionFinished {
             generation,
             succeeded,
         } => apply_import_submission_finished(ui, import_flow, generation, succeeded),
         Event::StorageRootPicked(path) => {
             ui.set_persistent_root(path.display().to_string().into());
+        }
+        Event::WatchedFolderPicked(path) => {
+            let mut folders: Vec<String> = ui
+                .get_watched_download_folders()
+                .iter()
+                .map(|folder| folder.to_string())
+                .collect();
+            let picked = path.display().to_string();
+            if !folders.contains(&picked) {
+                folders.push(picked);
+            }
+            send(commands, Command::SaveWatchedDownloadFolders(folders));
         }
     }
 }
@@ -3610,6 +3795,13 @@ fn apply_snapshot(
     ui.set_persistent_root(settings.persistent_root.into());
     ui.set_default_persistent_root(settings.default_persistent_root.into());
     ui.set_persistent_root_is_custom(settings.persistent_root_origin.is_override());
+    ui.set_watched_download_folders(model(
+        settings
+            .watched_download_folders
+            .into_iter()
+            .map(SharedString::from)
+            .collect(),
+    ));
     ui.set_microsoft_client_id(settings.microsoft_client_id.into());
     ui.set_effective_microsoft_client_id(settings.effective_microsoft_client_id.into());
     ui.set_microsoft_client_id_is_custom(settings.microsoft_client_id_origin.is_override());
@@ -5191,7 +5383,127 @@ mod tests {
                 ]
             },
             needs_provider_resolution: needs_resolution,
+            blocked: Vec::new(),
         }
+    }
+
+    fn sample_identity() -> ProviderFileIdentity {
+        ProviderFileIdentity {
+            provider: Some(ModProvider::CurseForge),
+            project_id: Some("238222".to_owned()),
+            version_id: Some("4593548".to_owned()),
+            file_id: Some("4593548".to_owned()),
+        }
+    }
+
+    fn blocked_presentation() -> ImportPresentation {
+        let mut presentation = resolved_presentation("Example Pack", false);
+        presentation.blocked = vec![presentation::BlockedFilePresentation {
+            identity: sample_identity(),
+            project_line: "Blocked Mod".to_owned(),
+            file_line: "blocked.jar".to_owned(),
+            browser_url: "https://www.curseforge.com/minecraft/mc-mods/blocked-mod".to_owned(),
+        }];
+        presentation
+    }
+
+    #[test]
+    fn a_blocked_file_keeps_the_flow_out_of_ready_until_it_is_skipped() {
+        let mut flow = ImportFlowState::default();
+        let generation = flow.begin_attempt();
+        flow.analyzed(
+            generation,
+            PathBuf::from("pack.zip"),
+            Ok(blocked_presentation()),
+        );
+
+        assert!(
+            !flow.is_ready(),
+            "a pack with an unresolved blocked file must not be ready to import"
+        );
+        assert_eq!(flow.blocked.len(), 1);
+
+        flow.skip_blocked_file(&sample_identity());
+        assert!(flow.blocked.is_empty());
+        assert_eq!(flow.skipped, vec![sample_identity()]);
+        assert!(
+            flow.is_ready(),
+            "skipping the only blocked file clears the way to import"
+        );
+    }
+
+    #[test]
+    fn a_watcher_match_clears_the_row_without_recording_a_skip() {
+        let mut flow = ImportFlowState::default();
+        let generation = flow.begin_attempt();
+        flow.analyzed(
+            generation,
+            PathBuf::from("pack.zip"),
+            Ok(blocked_presentation()),
+        );
+
+        assert!(flow.blocked_file_matched(generation, &sample_identity()));
+        assert!(flow.blocked.is_empty());
+        assert!(
+            flow.skipped.is_empty(),
+            "a watcher match is not a skip decision"
+        );
+        assert!(flow.is_ready());
+    }
+
+    #[test]
+    fn a_stale_watcher_match_is_discarded() {
+        let mut flow = ImportFlowState::default();
+        let generation = flow.begin_attempt();
+        flow.analyzed(
+            generation,
+            PathBuf::from("pack.zip"),
+            Ok(blocked_presentation()),
+        );
+
+        assert!(
+            !flow.blocked_file_matched(generation.wrapping_add(1), &sample_identity()),
+            "a match for a superseded attempt must not touch this one"
+        );
+        assert_eq!(flow.blocked.len(), 1);
+    }
+
+    #[test]
+    fn a_skip_survives_a_fresh_resolution_result_for_the_same_archive() {
+        let mut flow = ImportFlowState::default();
+        let generation = flow.begin_attempt();
+        flow.analyzed(
+            generation,
+            PathBuf::from("pack.zip"),
+            Ok(blocked_presentation()),
+        );
+        flow.skip_blocked_file(&sample_identity());
+        assert!(flow.is_ready());
+
+        // A second resolution answer still names the same blocked file (the
+        // server has not forgotten it either); the earlier skip must keep it
+        // out of the modal rather than reintroducing it.
+        flow.resolved(generation, Ok(blocked_presentation()));
+        assert!(
+            flow.blocked.is_empty(),
+            "an already-skipped file must not reappear"
+        );
+        assert!(flow.is_ready());
+    }
+
+    #[test]
+    fn begin_submit_carries_the_skipped_identities() {
+        let mut flow = ImportFlowState::default();
+        let generation = flow.begin_attempt();
+        flow.analyzed(
+            generation,
+            PathBuf::from("pack.zip"),
+            Ok(blocked_presentation()),
+        );
+        flow.skip_blocked_file(&sample_identity());
+
+        let submission = flow.begin_submit().expect("ready once skipped");
+        assert_eq!(submission.skip_blocked, vec![sample_identity()]);
     }
 
     #[test]
@@ -5445,6 +5757,7 @@ mod tests {
             generation,
             archive: PathBuf::from("pack.zip"),
             selection: OptionalSelection::of(["mods/optional-b.jar"]),
+            skip_blocked: Vec::new(),
         };
         assert_eq!(flow.begin_submit(), Some(expected.clone()));
         assert_eq!(flow.phase, ImportPhase::Submitting);
@@ -5481,6 +5794,7 @@ mod tests {
                 generation,
                 archive: PathBuf::from("/tmp/analyzed-pack.zip"),
                 selection: OptionalSelection::of(["mods/optional-a.jar", "mods/optional-b.jar"]),
+                skip_blocked: Vec::new(),
             }),
             "the archive submitted must be exactly the one the current analysis is for; \
              `begin_submit` takes no archive argument, so nothing else could have supplied one"

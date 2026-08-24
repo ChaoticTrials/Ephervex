@@ -94,6 +94,10 @@ pub(super) fn version(
         });
     }
 
+    // Parsed before the distribution check so a refusal can still name the
+    // file and its digest for a caller that offers a manual-download path.
+    let hashes = supported_hashes(&document.hashes);
+
     // Null, absent, or blank all mean the same thing: the project's owner
     // turned off third-party distribution. Refused rather than skipped: a
     // skipped file would silently become "install the next one down", which is
@@ -107,6 +111,8 @@ pub(super) fn version(
             provider: ModProvider::CurseForge,
             project_id: project.to_string(),
             file_id: file.to_string(),
+            file_name: Some(document.file_name.clone()),
+            hashes: hashes.clone(),
         })?;
 
     // Provider data decides which machine the launcher connects to, so it is
@@ -119,7 +125,6 @@ pub(super) fn version(
             detail: source.to_string(),
         })?;
 
-    let hashes = supported_hashes(&document.hashes);
     if hashes.is_empty() {
         return Err(ModPlatformError::HashesMissing {
             version_id: file.to_string(),

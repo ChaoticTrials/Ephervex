@@ -53,15 +53,22 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
-use ephervex_download::{AuthenticatedSource, DomainAllowlist, DownloadManager, DownloaderConfig};
+use ephervex_download::{
+    ArtifactStep, AuthenticatedSource, ContentStore, DomainAllowlist, DownloadError,
+    DownloadManager, DownloaderConfig, FileExtension, file_matches_hashes,
+};
 use ephervex_mod_platform::{
     CURSEFORGE_API_KEY_HEADER, CurseForgeFileRelease, CurseForgeOperation, CurseForgeProject,
     CurseForgeProjectClass, MINECRAFT_GAME_ID, ModPlatformError,
 };
-use ephervex_model::{CurseForgeFileId, CurseForgeProjectId, ModOrigin, ModProvider, SecretString};
+use ephervex_model::{
+    AttentionReason, CurseForgeFileId, CurseForgeProjectId, Hash, ModOrigin, ModProvider,
+    SecretString,
+};
 use ephervex_pack::{
-    ArtifactCredentials, CredentialUnavailable, MODS_DIR, PackAnalysis, PackError, PackFileRecipe,
-    PackFormat, PendingProviderFile, ProviderFileIdentity, RESOURCEPACKS_DIR, SHADERPACKS_DIR,
+    ArtifactCredentials, BlockedProviderFile, CredentialUnavailable, MODS_DIR, PackAnalysis,
+    PackError, PackFileRecipe, PackFormat, PendingProviderFile, ProviderFileIdentity,
+    RESOURCEPACKS_DIR, SHADERPACKS_DIR, safe_file_name,
 };
 use futures_util::StreamExt as _;
 use reqwest::header::HeaderName;
@@ -95,9 +102,11 @@ impl App {
     pub async fn resolve_pack(
         &self,
         analysis: &mut PackAnalysis,
+        skip_blocked: &[ProviderFileIdentity],
         cancel: &CancellationToken,
     ) -> CoreResult<()> {
-        self.prepare_provider_files(analysis, cancel).await?;
+        self.prepare_provider_files(analysis, skip_blocked, cancel)
+            .await?;
         Ok(())
     }
 
@@ -109,12 +118,14 @@ impl App {
     pub(crate) async fn prepare_provider_files(
         &self,
         analysis: &mut PackAnalysis,
+        skip_blocked: &[ProviderFileIdentity],
         cancel: &CancellationToken,
     ) -> CoreResult<Option<Arc<AuthenticatedSource>>> {
         match analysis.format {
-            PackFormat::CurseForgePack => {
-                Ok(Some(self.resolve_curseforge_pack(analysis, cancel).await?))
-            }
+            PackFormat::CurseForgePack => Ok(Some(
+                self.resolve_curseforge_pack(analysis, skip_blocked, cancel)
+                    .await?,
+            )),
             // Every other format's manifest describes its own files, so there
             // is nothing to resolve and no credential to spend.
             PackFormat::ModrinthPack | PackFormat::PrismExport | _ => Ok(None),
@@ -125,6 +136,7 @@ impl App {
     async fn resolve_curseforge_pack(
         &self,
         analysis: &mut PackAnalysis,
+        skip_blocked: &[ProviderFileIdentity],
         cancel: &CancellationToken,
     ) -> CoreResult<Arc<AuthenticatedSource>> {
         let api = self.curseforge_api()?;
@@ -140,23 +152,124 @@ impl App {
         let classes = classify_projects(&operation, &analysis.pending, cancel).await?;
 
         let pending = std::mem::take(&mut analysis.pending);
-        let resolved = match resolve_files(&operation, &pending, &classes, &hosts, cancel).await {
-            Ok(resolved) => resolved,
-            Err(error) => {
-                // The analysis is left describing the pack it describes: a
-                // caller that retries after configuring a key must still see
-                // the entries that need resolving.
-                analysis.pending = pending;
-                return Err(error);
+        let (mut resolved, blocked) =
+            match resolve_files(&operation, &pending, &classes, &hosts, cancel).await {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    // The analysis is left describing the pack it describes: a
+                    // caller that retries after configuring a key must still see
+                    // the entries that need resolving.
+                    analysis.pending = pending;
+                    return Err(error);
+                }
+            };
+
+        // A file the provider refused is not necessarily still missing: an
+        // earlier import, or a folder a watcher is minding, may have already
+        // put a verified copy in the shared cache. Only a cache miss the
+        // caller explicitly chose to skip becomes an attention reason; every
+        // other one stays blocked for display.
+        let mut still_blocked = Vec::with_capacity(blocked.len());
+        for entry in blocked {
+            let content_class = entry
+                .identity
+                .project_id
+                .as_deref()
+                .and_then(CurseForgeProjectId::parse)
+                .and_then(|project| classes.get(&project))
+                .map(|classified| classified.content);
+            let cached = match content_class {
+                Some(content_class) => self.recipe_from_cache(&entry, content_class).await?,
+                None => None,
+            };
+            match cached {
+                Some(recipe) => resolved.push(recipe),
+                None if skip_blocked.contains(&entry.identity) => {
+                    analysis
+                        .attention
+                        .push(AttentionReason::ManualDownloadRequired(
+                            manual_download_detail(&entry),
+                        ));
+                }
+                None => still_blocked.push(entry),
             }
-        };
+        }
 
         info!(
             files = resolved.len(),
+            blocked = still_blocked.len(),
             "resolved a CurseForge pack's declared files"
         );
         analysis.recipe.files.extend(resolved);
+        analysis.blocked = still_blocked;
         Ok(credential)
+    }
+
+    /// A blocked file's recipe entry, if the shared cache already holds bytes
+    /// matching its digest.
+    ///
+    /// Checked with no network access: a verified hash at the content-addressed
+    /// path is exactly the proof an ordinary completed download leaves behind,
+    /// so a file a folder watcher (or an earlier import) already placed there
+    /// needs no download address at all. `None` for a file with no usable name
+    /// or no published hash, not just a genuine cache miss — either one means
+    /// there is nothing this launcher could have verified a hand-placed copy
+    /// against.
+    async fn recipe_from_cache(
+        &self,
+        blocked: &BlockedProviderFile,
+        content_class: PackContentClass,
+    ) -> CoreResult<Option<PackFileRecipe>> {
+        let Some(hash) = blocked.hashes.first() else {
+            return Ok(None);
+        };
+        let Some(name) = blocked.file_name.as_deref().and_then(safe_file_name) else {
+            return Ok(None);
+        };
+        let extension = name
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .and_then(|extension| FileExtension::new(extension).ok());
+        let path = self.artifact_cache().layout().content(
+            ContentStore::Downloads,
+            hash,
+            extension.as_ref(),
+        );
+        let download_failed = |source: DownloadError| {
+            CoreError::from(PackError::DownloadFailed {
+                path: blocked.file_name.clone().unwrap_or_default(),
+                source: Box::new(source),
+            })
+        };
+        let metadata = match tokio::fs::symlink_metadata(&path).await {
+            Ok(metadata) if metadata.is_file() => metadata,
+            Ok(_) => return Ok(None),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => {
+                return Err(download_failed(DownloadError::io(
+                    ArtifactStep::ReadCached,
+                    &path,
+                    source,
+                )));
+            }
+        };
+        if !file_matches_hashes(&path, &blocked.hashes)
+            .await
+            .map_err(download_failed)?
+        {
+            return Ok(None);
+        }
+        Ok(Some(PackFileRecipe {
+            logical_path: PathBuf::from(content_class.logical_dir()).join(&name),
+            hashes: blocked.hashes.clone(),
+            downloads: Vec::new(),
+            size: Some(metadata.len()),
+            client: blocked.client,
+            server: blocked.server,
+            selected: None,
+            origin: ModOrigin::PackDeclared,
+            identity: Some(blocked.identity.clone()),
+        }))
     }
 
     /// The hosts a CurseForge artifact may be fetched from, and the only ones
@@ -414,6 +527,23 @@ impl PackContentClass {
     }
 }
 
+/// What [`classify_projects`] learned about one declared project: enough to
+/// route its files, and enough to name and link the project if one of them
+/// turns out to be blocked.
+#[derive(Debug, Clone)]
+struct ClassifiedProject {
+    content: PackContentClass,
+    name: String,
+    slug: String,
+    /// The class-page path segment CurseForge's own site uses, from the same
+    /// classification `content` came from. Always present for a project this
+    /// function keeps (`Other` is refused before a [`ClassifiedProject`] is
+    /// built), but carried as an `Option` rather than asserted, so a future
+    /// provider change that widens the accepted classes cannot silently
+    /// produce a broken link.
+    browser_path_segment: Option<&'static str>,
+}
+
 /// Confirms every project a manifest declares against CurseForge's own
 /// category classes, before any file is fetched, and says where each one's
 /// file belongs.
@@ -439,7 +569,7 @@ async fn classify_projects(
     operation: &CurseForgeOperation<'_>,
     pending: &[PendingProviderFile],
     cancel: &CancellationToken,
-) -> CoreResult<BTreeMap<CurseForgeProjectId, PackContentClass>> {
+) -> CoreResult<BTreeMap<CurseForgeProjectId, ClassifiedProject>> {
     let mut projects: Vec<CurseForgeProjectId> = pending
         .iter()
         .map(|entry| declared_ids(entry).map(|(project, _)| project))
@@ -470,7 +600,9 @@ async fn classify_projects(
         .into_iter()
         .zip(classified)
         .map(|(id, project)| {
-            let content = match classes.classify(&project)? {
+            let classification = classes.classify(&project)?;
+            let browser_path_segment = classification.browser_path_segment();
+            let content = match classification {
                 CurseForgeProjectClass::Mods => PackContentClass::Mods,
                 CurseForgeProjectClass::ResourcePacks => PackContentClass::ResourcePacks,
                 CurseForgeProjectClass::ShaderPacks => PackContentClass::ShaderPacks,
@@ -486,22 +618,47 @@ async fn classify_projects(
                     }));
                 }
             };
-            Ok((id, content))
+            Ok((
+                id,
+                ClassifiedProject {
+                    content,
+                    name: project.name,
+                    slug: project.slug,
+                    browser_path_segment,
+                },
+            ))
         })
         .collect()
 }
 
+/// What one distribution-restricted file's response said, before it is
+/// attached to each pending entry that declared it.
+struct BlockedFileDetail {
+    project_name: Option<String>,
+    file_name: Option<String>,
+    browser_url: Option<String>,
+    hashes: Vec<Hash>,
+}
+
 /// Looks up every declared file, deduplicated and with bounded concurrency.
 ///
-/// Returns entries in the pack's own order, so the recipe reads the way the
-/// manifest does.
+/// A file whose author disabled third-party downloads does not abort the
+/// batch: [`ModPlatformError::FileDistributionRestricted`] is collected into
+/// the second return value instead, one entry per pending file it applies to,
+/// so a caller can display it, offer a manual-download link, or resolve it
+/// from the shared cache rather than losing the rest of the pack over one
+/// author's decision. Every other lookup failure still propagates
+/// immediately and aborts the batch, exactly as before.
+///
+/// Returns resolved entries in the pack's own order, so the recipe reads the
+/// way the manifest does.
 async fn resolve_files(
     operation: &CurseForgeOperation<'_>,
     pending: &[PendingProviderFile],
-    classes: &BTreeMap<CurseForgeProjectId, PackContentClass>,
+    classes: &BTreeMap<CurseForgeProjectId, ClassifiedProject>,
     hosts: &DomainAllowlist,
     cancel: &CancellationToken,
-) -> CoreResult<Vec<PackFileRecipe>> {
+) -> CoreResult<(Vec<PackFileRecipe>, Vec<BlockedProviderFile>)> {
     let wanted: Vec<(CurseForgeProjectId, CurseForgeFileId)> = pending
         .iter()
         .map(declared_ids)
@@ -519,52 +676,115 @@ async fn resolve_files(
         "resolving CurseForge pack files"
     );
 
-    let releases: Vec<CurseForgeFileRelease> = futures_util::stream::iter(
-        distinct
-            .iter()
-            .map(|(project, file)| operation.file(*project, *file, cancel)),
-    )
-    .buffered(LOOKUP_CONCURRENCY)
-    .collect::<Vec<_>>()
-    .await
-    .into_iter()
-    .collect::<Result<_, ModPlatformError>>()?;
+    let outcomes: Vec<Result<CurseForgeFileRelease, ModPlatformError>> =
+        futures_util::stream::iter(
+            distinct
+                .iter()
+                .map(|(project, file)| operation.file(*project, *file, cancel)),
+        )
+        .buffered(LOOKUP_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
 
-    let by_identity: BTreeMap<(CurseForgeProjectId, CurseForgeFileId), &CurseForgeFileRelease> =
-        releases
-            .iter()
-            .map(|release| ((release.project, release.file), release))
-            .collect();
+    let mut by_identity: BTreeMap<(CurseForgeProjectId, CurseForgeFileId), CurseForgeFileRelease> =
+        BTreeMap::new();
+    let mut blocked_reasons: BTreeMap<(CurseForgeProjectId, CurseForgeFileId), BlockedFileDetail> =
+        BTreeMap::new();
+    for ((project, file), outcome) in distinct.iter().copied().zip(outcomes) {
+        match outcome {
+            Ok(release) => {
+                by_identity.insert((project, file), release);
+            }
+            Err(ModPlatformError::FileDistributionRestricted {
+                file_name, hashes, ..
+            }) => {
+                let classified = classes.get(&project);
+                blocked_reasons.insert(
+                    (project, file),
+                    BlockedFileDetail {
+                        project_name: classified.map(|classified| classified.name.clone()),
+                        file_name,
+                        browser_url: classified.and_then(|classified| {
+                            classified.browser_path_segment.map(|segment| {
+                                format!(
+                                    "https://www.curseforge.com/minecraft/{segment}/{slug}",
+                                    slug = classified.slug
+                                )
+                            })
+                        }),
+                        hashes,
+                    },
+                );
+            }
+            Err(error) => return Err(CoreError::from(error)),
+        }
+    }
 
-    pending
-        .iter()
-        .zip(&wanted)
-        .map(|(entry, identity)| {
-            let release = by_identity
-                .get(identity)
-                .copied()
-                // Unreachable: every distinct identity was requested and every
-                // response was checked against the identity it answers for.
-                .ok_or_else(|| ModPlatformError::FileUnknown {
-                    provider: ModProvider::CurseForge,
-                    project_id: identity.0.to_string(),
-                    file_id: identity.1.to_string(),
-                })?;
+    let mut resolved = Vec::with_capacity(by_identity.len());
+    let mut blocked = Vec::with_capacity(blocked_reasons.len());
+    for (entry, identity) in pending.iter().zip(&wanted) {
+        if let Some(release) = by_identity.get(identity) {
             let content_class = classes
                 .get(&identity.0)
-                .copied()
+                .map(|classified| classified.content)
                 // Unreachable: `classes` was built from this same `pending`
                 // list's projects, so every one of them has an entry.
-                .ok_or_else(|| ModPlatformError::ResponseInvalid {
-                    provider: ModProvider::CurseForge,
-                    detail: format!(
-                        "project {} was resolved without being classified first",
-                        identity.0
-                    ),
+                .ok_or_else(|| {
+                    CoreError::from(ModPlatformError::ResponseInvalid {
+                        provider: ModProvider::CurseForge,
+                        detail: format!(
+                            "project {} was resolved without being classified first",
+                            identity.0
+                        ),
+                    })
                 })?;
-            recipe_entry(entry, release, content_class, hosts)
-        })
-        .collect()
+            resolved.push(recipe_entry(entry, release, content_class, hosts)?);
+        } else if let Some(detail) = blocked_reasons.get(identity) {
+            blocked.push(BlockedProviderFile {
+                identity: ProviderFileIdentity {
+                    provider: Some(ModProvider::CurseForge),
+                    project_id: Some(identity.0.to_string()),
+                    version_id: Some(identity.1.to_string()),
+                    file_id: Some(identity.1.to_string()),
+                },
+                project_name: detail.project_name.clone(),
+                file_name: detail.file_name.clone(),
+                browser_url: detail.browser_url.clone(),
+                hashes: detail.hashes.clone(),
+                client: entry.client,
+                server: entry.server,
+            });
+        } else {
+            // Unreachable: every distinct identity was requested and landed
+            // in exactly one of the two maps above.
+            return Err(CoreError::from(ModPlatformError::FileUnknown {
+                provider: ModProvider::CurseForge,
+                project_id: identity.0.to_string(),
+                file_id: identity.1.to_string(),
+            }));
+        }
+    }
+    Ok((resolved, blocked))
+}
+
+/// A human-readable line naming a skipped file, for
+/// [`AttentionReason::ManualDownloadRequired`].
+///
+/// Falls back to the raw ids when a name is unavailable, the same way the
+/// blocked-file listing itself does: an id is still durable and specific,
+/// just less readable than a name.
+fn manual_download_detail(blocked: &BlockedProviderFile) -> String {
+    let project = blocked
+        .project_name
+        .as_deref()
+        .or(blocked.identity.project_id.as_deref())
+        .unwrap_or("unknown project");
+    let file = blocked
+        .file_name
+        .as_deref()
+        .or(blocked.identity.file_id.as_deref())
+        .unwrap_or("unknown file");
+    format!("{project} - {file}")
 }
 
 /// The exact ids a pending entry declares.
@@ -1829,7 +2049,7 @@ mod tests {
         let app = app_against(dir.path(), &server);
 
         let error = import(&app, &archive).await.expect_err("must refuse");
-        assert_eq!(error.message_id(), "error-mod-file-distribution-restricted");
+        assert_eq!(error.message_id(), "error-pack-provider-files-blocked");
         assert!(app.list_clients().expect("list").is_empty());
         let fetches = server
             .received_requests()
@@ -2101,7 +2321,7 @@ mod tests {
         let app = app_against(dir.path(), &server);
 
         let error = import(&app, &archive).await.expect_err("must refuse");
-        assert_eq!(error.message_id(), "error-mod-file-distribution-restricted");
+        assert_eq!(error.message_id(), "error-pack-provider-files-blocked");
         assert!(app.list_clients().expect("list").is_empty());
     }
 
@@ -2282,7 +2502,7 @@ mod tests {
         let app = app_against(dir.path(), &server);
 
         let error = import(&app, &archive).await.expect_err("must refuse");
-        assert_eq!(error.message_id(), "error-mod-file-distribution-restricted");
+        assert_eq!(error.message_id(), "error-pack-provider-files-blocked");
         assert!(app.list_clients().expect("list").is_empty());
         // Nothing went looking for the file anywhere else.
         let fetches = server
@@ -2293,6 +2513,195 @@ mod tests {
             .filter(|request| request.url.path().starts_with("/files/"))
             .count();
         assert_eq!(fetches, 0);
+    }
+
+    #[tokio::test]
+    async fn a_blocked_file_does_not_abort_a_pack_whose_other_files_still_resolve() {
+        let server = MockServer::start().await;
+        serve_pack_as_mods(&server).await;
+        serve_file(
+            &server,
+            REQUIRED_PROJECT,
+            REQUIRED_FILE,
+            "required-1.0.0.jar",
+            REQUIRED_BODY,
+        )
+        .await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/v1/mods/{OPTIONAL_PROJECT}/files/{OPTIONAL_FILE}"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                format!(
+                    r#"{{"data":{{"id":{OPTIONAL_FILE},"gameId":432,"modId":{OPTIONAL_PROJECT},
+                        "isAvailable":true,"fileName":"restricted.jar","fileLength":10,
+                        "downloadUrl":null,
+                        "hashes":[{{"value":"da39a3ee5e6b4b0d3255bfef95601890afd80709","algo":1}}]}}}}"#
+                ),
+                "application/json",
+            ))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = archive_at(dir.path(), "repro.zip");
+        let app = app_against(dir.path(), &server);
+
+        let mut analysis = app.analyze_pack(&archive).expect("analyzed locally");
+        app.resolve_pack(&mut analysis, &[], &CancellationToken::new())
+            .await
+            .expect("resolving collects the blocked file rather than aborting");
+
+        assert_eq!(analysis.blocked.len(), 1);
+        let blocked = &analysis.blocked[0];
+        assert_eq!(blocked.project_name.as_deref(), Some("Optional Mod"));
+        assert_eq!(blocked.file_name.as_deref(), Some("restricted.jar"));
+        assert_eq!(
+            blocked.browser_url.as_deref(),
+            Some("https://www.curseforge.com/minecraft/mc-mods/Optional Mod")
+        );
+        assert!(
+            analysis
+                .recipe
+                .files
+                .iter()
+                .any(|file| file.logical_path.ends_with("required-1.0.0.jar")),
+            "the required file still resolved despite the other one being blocked"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_blocked_file_already_verified_in_the_shared_cache_resolves_without_being_skipped() {
+        const RESTRICTED_BODY: &[u8] = b"a copy the user placed by hand";
+
+        let server = MockServer::start().await;
+        serve_pack_as_mods(&server).await;
+        serve_file(
+            &server,
+            REQUIRED_PROJECT,
+            REQUIRED_FILE,
+            "required-1.0.0.jar",
+            REQUIRED_BODY,
+        )
+        .await;
+        let digest = sha1_of(RESTRICTED_BODY);
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/v1/mods/{OPTIONAL_PROJECT}/files/{OPTIONAL_FILE}"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                format!(
+                    r#"{{"data":{{"id":{OPTIONAL_FILE},"gameId":432,"modId":{OPTIONAL_PROJECT},
+                        "isAvailable":true,"fileName":"restricted.jar","fileLength":{length},
+                        "downloadUrl":null,
+                        "hashes":[{{"value":"{digest}","algo":1}}]}}}}"#,
+                    length = RESTRICTED_BODY.len(),
+                ),
+                "application/json",
+            ))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = archive_at(dir.path(), "repro.zip");
+        let app = app_against(dir.path(), &server);
+
+        // A verified copy already sitting in the shared cache, as if an
+        // earlier import or a folder watcher had put it there.
+        let hash = Hash::new(HashAlgorithm::Sha1, &digest).expect("valid sha1");
+        let extension = FileExtension::new("jar").expect("jar");
+        let cache_path =
+            app.artifact_cache()
+                .layout()
+                .content(ContentStore::Downloads, &hash, Some(&extension));
+        std::fs::create_dir_all(cache_path.parent().expect("shard")).expect("shard");
+        std::fs::write(&cache_path, RESTRICTED_BODY).expect("pre-populate the cache");
+
+        let mut analysis = app.analyze_pack(&archive).expect("analyzed locally");
+        app.resolve_pack(&mut analysis, &[], &CancellationToken::new())
+            .await
+            .expect("resolving succeeds");
+
+        assert!(
+            analysis.blocked.is_empty(),
+            "a cache hit resolves the file rather than leaving it blocked"
+        );
+        let recovered = analysis
+            .recipe
+            .files
+            .iter()
+            .find(|file| file.logical_path.ends_with("restricted.jar"))
+            .expect("the cache-recovered file is an ordinary recipe entry");
+        assert!(
+            recovered.downloads.is_empty(),
+            "nothing needs to be fetched for a file the cache already verified"
+        );
+    }
+
+    #[tokio::test]
+    async fn skipping_a_blocked_file_lets_the_import_proceed_with_a_manual_download_attention() {
+        let server = MockServer::start().await;
+        serve_pack_as_mods(&server).await;
+        serve_file(
+            &server,
+            REQUIRED_PROJECT,
+            REQUIRED_FILE,
+            "required-1.0.0.jar",
+            REQUIRED_BODY,
+        )
+        .await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/v1/mods/{OPTIONAL_PROJECT}/files/{OPTIONAL_FILE}"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                format!(
+                    r#"{{"data":{{"id":{OPTIONAL_FILE},"gameId":432,"modId":{OPTIONAL_PROJECT},
+                        "isAvailable":true,"fileName":"restricted.jar","fileLength":10,
+                        "downloadUrl":null,
+                        "hashes":[{{"value":"da39a3ee5e6b4b0d3255bfef95601890afd80709","algo":1}}]}}}}"#
+                ),
+                "application/json",
+            ))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = archive_at(dir.path(), "repro.zip");
+        let app = app_against(dir.path(), &server);
+
+        let skip = ProviderFileIdentity {
+            provider: Some(ModProvider::CurseForge),
+            project_id: Some(OPTIONAL_PROJECT.to_string()),
+            version_id: Some(OPTIONAL_FILE.to_string()),
+            file_id: Some(OPTIONAL_FILE.to_string()),
+        };
+        let imported = app
+            .import_pack(
+                &ImportRequest::new(&archive)
+                    .with_storage(StorageClass::Temporary)
+                    .skipping_blocked(vec![skip]),
+                &OperationReporter::silent("curseforge-import"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("an explicit skip lets the import proceed");
+
+        assert_eq!(
+            imported.record.attention,
+            vec![AttentionReason::ManualDownloadRequired(
+                "Optional Mod - restricted.jar".to_owned()
+            )]
+        );
+        assert!(
+            imported
+                .materialized
+                .files
+                .installed
+                .iter()
+                .all(|file| !file.ends_with("restricted.jar")),
+            "a skipped file is never installed"
+        );
     }
 
     #[tokio::test]

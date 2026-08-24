@@ -31,7 +31,7 @@ use reqwest::header::{
 };
 use reqwest::{Client, Response, StatusCode, Url};
 use tokio::fs::{self, File, OpenOptions};
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
@@ -42,7 +42,7 @@ use crate::client::{HttpConfig, build_allowlisted_client, build_client};
 use crate::error::{ArtifactStep, AttemptFailure, DownloadError};
 use crate::progress::{ByteTally, OperationReporter};
 use crate::retry::{RetryPolicy, retry_after};
-use crate::verify::HashVerifier;
+use crate::verify::{HashVerifier, file_matches_hashes};
 
 /// The longest filename Ephervex generates for its own scratch files.
 ///
@@ -1069,25 +1069,7 @@ async fn revalidate_cached(
     let size_matches = request
         .expected_size
         .is_none_or(|expected| expected == bytes);
-    let hashes_match = if request.expected_hashes.is_empty() {
-        true
-    } else {
-        let mut file = File::open(destination)
-            .await
-            .map_err(|source| DownloadError::io(ArtifactStep::ReadCached, destination, source))?;
-        let mut verifier = HashVerifier::new(&request.expected_hashes);
-        let mut buffer = vec![0; 64 * 1024];
-        loop {
-            let read = file.read(&mut buffer).await.map_err(|source| {
-                DownloadError::io(ArtifactStep::ReadCached, destination, source)
-            })?;
-            if read == 0 {
-                break;
-            }
-            verifier.update(&buffer[..read]);
-        }
-        verifier.finish().is_ok()
-    };
+    let hashes_match = file_matches_hashes(destination, &request.expected_hashes).await?;
 
     if !size_matches || !hashes_match {
         warn!(path = %destination.display(), "discarding a cache entry that does not match its request");

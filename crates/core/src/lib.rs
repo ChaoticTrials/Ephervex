@@ -30,6 +30,7 @@ pub mod connection;
 pub mod curseforge;
 pub mod curseforge_pack;
 pub mod diagnostics;
+pub mod download_watch;
 pub mod error;
 pub mod health;
 pub mod import;
@@ -60,6 +61,7 @@ pub use diagnostics::{
     ClientLogTail, DEFAULT_DIAGNOSTIC_BYTES, DiagnosticCatalog, DiagnosticRequest, DiagnosticScope,
     DiagnosticSearch, DiagnosticSection,
 };
+pub use download_watch::{DownloadWatcher, RESCAN_INTERVAL, WatchTarget};
 pub use error::{CoreError, CoreResult};
 pub use health::{
     ApplicationIdentity, ArtifactCacheHealth, BundledDataHealth, BundledDocumentHealth,
@@ -188,11 +190,12 @@ pub use ephervex_options::{
     ReleaseSupport, SkipReason, SkippedPreference, WindowSize,
 };
 pub use ephervex_pack::{
-    AppliedLayer, ExtractionLimits, ManagedMod, ManagedModInstallation, ManagedMutationReport,
-    MaterializedFiles, MaterializedPack, MaterializedServerRecipe, ModIdentity, ModOrigin,
-    OptionalComponent, OptionalSelection, OverrideLayer, OverrideScope, PackAnalysis, PackError,
-    PackFileRecipe, PackFormat, PackPolicy, PackRecipe, PackSide, ProviderFileIdentity,
-    ProviderRecipeMetadata, RecordedMod, ServerReconstructionPlan, SidePlan, SideRequirement,
+    AppliedLayer, BlockedProviderFile, ExtractionLimits, ManagedMod, ManagedModInstallation,
+    ManagedMutationReport, MaterializedFiles, MaterializedPack, MaterializedServerRecipe,
+    ModIdentity, ModOrigin, OptionalComponent, OptionalSelection, OverrideLayer, OverrideScope,
+    PackAnalysis, PackError, PackFileRecipe, PackFormat, PackPolicy, PackRecipe, PackSide,
+    ProviderFileIdentity, ProviderRecipeMetadata, RecordedMod, ServerReconstructionPlan, SidePlan,
+    SideRequirement,
 };
 pub use ephervex_server::{
     CaptureHealth, CaptureRetention, CapturedLine, ControlAction, ControlResponse,
