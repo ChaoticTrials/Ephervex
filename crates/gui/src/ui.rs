@@ -2651,6 +2651,13 @@ slint::slint! {
                             if root.import-blocked-items.length > 0 : VerticalLayout {
                                 spacing: 6px;
                                 BodyText { text: GuiI18n.text("gui-import-blocked-detail"); color: Theme.warning; wrap: word-wrap; }
+                                HorizontalLayout {
+                                    Rectangle { horizontal-stretch: 1; }
+                                    AppButton {
+                                        text: GuiI18n.text("gui-import-open-watched-folders");
+                                        clicked => { root.close-import-modal(); root.page = 4; root.workspace = ""; root.workspace-tab = "Storage"; }
+                                    }
+                                }
                                 ScrollView {
                                     viewport-width: self.width;
                                     height: min(root.import-blocked-items.length * 64px, 220px);

@@ -1712,6 +1712,7 @@ gui-import-resolving = Resolving files from the provider...
 gui-import-resolution-unavailable = The import worker could not start to resolve provider files.
 gui-import-open-providers = Open Providers & APIs
 gui-import-blocked-detail = These files' authors do not allow automatic downloads. Download each one manually and place it in a watched folder, then Skip or wait for it to be found.
+gui-import-open-watched-folders = Manage Watched Folders
 gui-import-blocked-opened = Opened the file's download page in your browser.
 gui-import-blocked-open-failed = Could not open a browser.
 gui-created-entity = Created "{ $value }".
