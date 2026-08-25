@@ -1775,7 +1775,7 @@ slint::slint! {
         in-out property <string> import-error-kind: "other";
         in-out property <string> create-server-client-id;
         in-out property <string> create-server-name;
-        in-out property <string> create-server-minecraft: "1.21.1";
+        in-out property <string> create-server-minecraft;
         in-out property <string> create-server-loader: "Vanilla";
         in-out property <string> create-server-loader-version;
         in-out property <bool> create-server-persistent: false;

@@ -704,14 +704,14 @@ async fn resolve_files(
                     BlockedFileDetail {
                         project_name: classified.map(|classified| classified.name.clone()),
                         file_name,
-                        // The exact file's own page, not just the project's:
-                        // it is the one with a "Download" button for this
-                        // exact declared file rather than whatever the
-                        // project's page happens to show as current.
+                        // The exact file's own download link, not just the
+                        // project's page: CurseForge starts this file's
+                        // download automatically rather than requiring
+                        // another click on the file's info page.
                         browser_url: classified.and_then(|classified| {
                             classified.browser_path_segment.map(|segment| {
                                 format!(
-                                    "https://www.curseforge.com/minecraft/{segment}/{slug}/files/{file}",
+                                    "https://www.curseforge.com/minecraft/{segment}/{slug}/download/{file}",
                                     slug = classified.slug
                                 )
                             })
@@ -2562,7 +2562,7 @@ mod tests {
         assert_eq!(blocked.file_name.as_deref(), Some("restricted.jar"));
         assert_eq!(
             blocked.browser_url.as_deref(),
-            Some("https://www.curseforge.com/minecraft/mc-mods/Optional Mod/files/4593600")
+            Some("https://www.curseforge.com/minecraft/mc-mods/Optional Mod/download/4593600")
         );
         assert!(
             analysis
