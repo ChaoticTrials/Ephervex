@@ -1375,6 +1375,13 @@ fn register_client_actions(
     });
 
     let sender = commands.clone();
+    ui.on_kill_instance(move |id| {
+        if let Some(id) = backend::parse_instance_id(&id) {
+            send(&sender, Command::KillInstance(id));
+        }
+    });
+
+    let sender = commands.clone();
     ui.on_launch_and_connect(move |client, server| {
         if let (Some(client), Some(server)) = (
             backend::parse_instance_id(&client),
@@ -3858,6 +3865,7 @@ fn apply_instance_snapshot(
             state: item.state.into(),
             state_kind: item.state_kind.into(),
             can_launch: item.can_launch,
+            can_kill: item.can_kill,
             connect_server_id: item
                 .launch_and_connect
                 .first()

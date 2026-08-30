@@ -57,6 +57,10 @@ slint::slint! {
         state: string,
         state-kind: string,
         can-launch: bool,
+        // Whether this launcher has a game running for the instance that it can
+        // stop. Not the negation of `can-launch`: an instance that needs
+        // attention cannot be launched and is not running either.
+        can-kill: bool,
         connect-server-id: string,
         connect-server-name: string,
         can-connect: bool,
@@ -1298,6 +1302,7 @@ slint::slint! {
         in property <bool> selected;
         callback choose(string);
         callback launch(string);
+        callback kill(string);
         callback open-workspace(string);
         callback open-folder(string);
         callback create-server(string, string);
@@ -1347,7 +1352,8 @@ slint::slint! {
                 }
                 HorizontalLayout { alignment: center; spacing: 7px;
                     if item.can-launch : AppButton { width: 150px; text: GuiI18n.text("gui-launch"); tone: "primary"; clicked => { root.launch(item.id); } }
-                    if !item.can-launch : Rectangle { width: 150px; }
+                    if !item.can-launch && item.can-kill : AppButton { width: 150px; text: GuiI18n.text("gui-kill-instance"); tone: "danger"; clicked => { root.kill(item.id); } }
+                    if !item.can-launch && !item.can-kill : Rectangle { width: 150px; }
                     IconButton { icon: @image-url("../../../assets/icons/open-workspace.svg"); accessible-name: GuiI18n.text("gui-open-workspace"); clicked => { root.open-workspace(item.id); } }
                 }
             }
@@ -1356,6 +1362,7 @@ slint::slint! {
             Menu {
                 MenuItem { title: GuiI18n.text("gui-open-workspace"); activated => { root.open-workspace(item.id); } }
                 MenuItem { title: GuiI18n.text("gui-launch"); enabled: item.can-launch; activated => { root.launch(item.id); } }
+                MenuItem { title: GuiI18n.text("gui-kill-instance"); enabled: item.can-kill; activated => { root.kill(item.id); } }
                 MenuItem { title: GuiI18n.text("gui-open-folder"); activated => { root.open-folder(item.id); } }
                 MenuItem { title: GuiI18n.text("gui-create-linked-server"); activated => { root.create-server(item.id, item.name); } }
                 MenuSeparator { }
@@ -1443,6 +1450,7 @@ slint::slint! {
         in property <InstanceRow> item;
         in property <bool> has-selection;
         callback launch(string);
+        callback kill(string);
         callback connect(string, string);
         callback open-folder(string);
         callback workspace(string);
@@ -1473,6 +1481,7 @@ slint::slint! {
             Divider { }
             Eyebrow { text: GuiI18n.text("gui-actions"); }
             if item.can-launch : AppButton { text: GuiI18n.text("gui-launch"); tone: "primary"; clicked => { root.launch(item.id); } }
+            if item.can-kill : AppButton { text: GuiI18n.text("gui-kill-instance"); tone: "danger"; clicked => { root.kill(item.id); } }
             if item.connect-server-id != "" : AppButton { text: GuiI18n.value("gui-launch-connect", item.connect-server-name); enabled: item.can-connect; clicked => { root.connect(item.id, item.connect-server-id); } }
             HorizontalLayout { spacing: 8px;
                 AppButton { text: GuiI18n.text("gui-open-workspace"); clicked => { root.workspace(item.id); } }
@@ -1883,6 +1892,7 @@ slint::slint! {
         callback select-instance(string);
         callback select-server(string);
         callback launch-client(string);
+        callback kill-instance(string);
         callback launch-and-connect(string, string);
         callback open-client-folder(string);
         callback open-server-folder(string);
@@ -2099,6 +2109,7 @@ slint::slint! {
                                         selected: item.id == root.selected-instance-id;
                                         choose(id) => { root.selected-instance-id = id; root.select-instance(id); }
                                         launch(id) => { root.launch-client(id); }
+                                        kill(id) => { root.kill-instance(id); }
                                         open-workspace(id) => { root.selected-instance-id = id; root.selected-instance-index = index; root.select-instance(id); root.workspace = "instance"; root.workspace-tab = "Overview"; root.load-instance-workspace(id); }
                                         open-folder(id) => { root.open-client-folder(id); }
                                         create-server(id, name) => { root.create-server-client-id = id; root.create-server-name = name + " Server"; root.modal = "create-server"; }
@@ -2114,6 +2125,7 @@ slint::slint! {
                         has-selection: root.selected-instance-index >= 0;
                         item: root.selected-instance-index >= 0 ? root.instances[root.selected-instance-index] : {};
                         launch(id) => { root.launch-client(id); }
+                        kill(id) => { root.kill-instance(id); }
                         connect(client, server) => { root.launch-and-connect(client, server); }
                         open-folder(id) => { root.open-client-folder(id); }
                         workspace(id) => { root.workspace = "instance"; root.workspace-tab = "Overview"; root.load-instance-workspace(id); }

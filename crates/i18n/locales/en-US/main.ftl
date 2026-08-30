@@ -1602,6 +1602,10 @@ gui-active-operations = { $count ->
    *[other] { $count } active operations
 }
 gui-no-active-tasks = No active tasks
+gui-activity-minecraft-running = Minecraft is running
+gui-kill-instance = Kill Instance
+gui-kill-instance-requested = Stopping Minecraft.
+gui-kill-instance-unavailable = Nothing this launcher started is running for that instance.
 gui-dismiss-notification = Dismiss notification
 gui-modal-new-instance = New Instance
 gui-modal-import = Import Modpack

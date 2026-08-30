@@ -17,25 +17,10 @@ use i_slint_backend_testing::{ElementHandle, TestingBackend, TestingBackendOptio
 use slint::platform::PointerEventButton;
 use slint::{ComponentHandle, ModelRc, PhysicalSize, SharedString, VecModel};
 
-/// One window, because the testing backend is a per-process platform and a
-/// second one would panic. Both card kinds are exercised inside it.
+/// One window per test thread. Both card kinds are exercised in the first.
 #[test]
 fn a_card_button_is_clickable_across_its_whole_face() {
-    // A software renderer, because the pointer positions a click is resolved
-    // against only exist once the window has actually been laid out and drawn.
-    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
-        renderer_name: Some("software".into()),
-        mock_time: true,
-        threading: false,
-    })))
-    .expect("testing backend");
-
-    let ui = AppWindow::new().expect("window");
-    install_i18n(&ui);
-    // Wide enough that the action column and the card body are far apart, which
-    // is the arrangement the overlap used to hide in.
-    ui.window().set_size(PhysicalSize::new(1480, 900));
-    ui.show().expect("show");
+    let ui = window();
 
     let launched: Rc<RefCell<Vec<String>>> = Rc::default();
     let chosen: Rc<RefCell<Vec<String>>> = Rc::default();
@@ -89,6 +74,60 @@ fn settle(ui: &AppWindow) {
     ui.window().take_snapshot().expect("render");
 }
 
+/// A running instance offers a stop where a ready one offers a launch, and the
+/// two are not each other's negation: an instance that needs attention offers
+/// neither.
+#[test]
+fn a_running_instance_offers_a_kill_in_place_of_a_launch() {
+    let ui = window();
+    let killed: Rc<RefCell<Vec<String>>> = Rc::default();
+    let record = Rc::clone(&killed);
+    ui.on_kill_instance(move |id| record.borrow_mut().push(id.to_string()));
+
+    let mut running = instance();
+    running.can_launch = false;
+    running.can_kill = true;
+    running.state = "Running".into();
+    running.state_kind = "running".into();
+
+    ui.set_loading(false);
+    ui.set_page(0);
+    ui.set_instances(ModelRc::new(VecModel::from(vec![running])));
+    settle(&ui);
+
+    assert!(
+        ElementHandle::find_by_accessible_label(&ui, &lookup("gui-launch"))
+            .next()
+            .is_none(),
+        "a running instance is not launchable"
+    );
+    let kill = ElementHandle::find_by_accessible_label(&ui, &lookup("gui-kill-instance"))
+        .next()
+        .expect("the card offers a stop");
+    kill.mock_single_click(PointerEventButton::Left);
+    assert_eq!(killed.borrow().as_slice(), ["repro-client"]);
+}
+
+/// A laid-out, drawn window on this thread's own testing backend.
+///
+/// Software-rendered, because the pointer positions a click is resolved against
+/// only exist once the window has been laid out and drawn. Wide enough that a
+/// card's action column and its body are far apart, which is the arrangement the
+/// touch-area overlap used to hide in.
+fn window() -> AppWindow {
+    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
+        renderer_name: Some("software".into()),
+        mock_time: true,
+        threading: false,
+    })))
+    .expect("testing backend");
+    let ui = AppWindow::new().expect("window");
+    install_i18n(&ui);
+    ui.window().set_size(PhysicalSize::new(1480, 900));
+    ui.show().expect("show");
+    ui
+}
+
 fn install_i18n(ui: &AppWindow) {
     let global = ui.global::<GuiI18n>();
     global.on_text(|id| lookup(id.as_str()).into());
@@ -128,6 +167,7 @@ fn instance() -> InstanceRow {
         state: "Ready".into(),
         state_kind: "ready".into(),
         can_launch: true,
+        can_kill: false,
         connect_server_id: SharedString::default(),
         connect_server_name: SharedString::default(),
         can_connect: false,

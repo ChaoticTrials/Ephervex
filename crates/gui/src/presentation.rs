@@ -34,6 +34,11 @@ pub struct InstancePresentation {
     pub state: String,
     pub state_kind: &'static str,
     pub can_launch: bool,
+    /// Whether a launch is under way or a game is running for this instance.
+    ///
+    /// Not `!can_launch`: an instance that needs attention cannot be launched
+    /// and is not running either, and offering to stop it would be a lie.
+    pub can_kill: bool,
     pub launch_and_connect: Vec<ConnectPresentation>,
 }
 
@@ -77,6 +82,7 @@ impl InstancePresentation {
             state,
             state_kind,
             can_launch: launch_state.is_none() && !record.needs_attention(),
+            can_kill: launch_state.is_some(),
             launch_and_connect: connections
                 .into_iter()
                 .map(|(server, availability)| match availability {
@@ -772,6 +778,9 @@ mod tests {
         let starting = InstancePresentation::from_record(&record, 0, 0, Some(&preparing), []);
         assert_eq!(starting.state_kind, "starting");
         assert!(!starting.can_launch);
+        // Stopping a launch that has not reached the game yet cancels the
+        // preparation, which is what the action means in that state.
+        assert!(starting.can_kill);
 
         let running = ephervex_core::LaunchState {
             game_pid: Some(std::process::id()),
@@ -780,6 +789,24 @@ mod tests {
         let running = InstancePresentation::from_record(&record, 0, 0, Some(&running), []);
         assert_eq!(running.state_kind, "running");
         assert!(!running.can_launch);
+        assert!(running.can_kill);
+
+        let idle = InstancePresentation::from_record(&record, 0, 0, None, []);
+        assert!(idle.can_launch);
+        assert!(!idle.can_kill);
+    }
+
+    #[test]
+    fn an_instance_needing_attention_is_neither_launchable_nor_killable() {
+        // The two are not each other's negation, and an instance that cannot be
+        // launched must not be offered a way to stop something that is not
+        // running.
+        let mut record = client(StorageClass::Temporary, LoaderSelection::vanilla());
+        record.add_attention(ephervex_model::AttentionReason::BestEffortServerConversion);
+        let item = InstancePresentation::from_record(&record, 0, 0, None, []);
+        assert!(item.needs_attention);
+        assert!(!item.can_launch);
+        assert!(!item.can_kill);
     }
 
     #[test]

@@ -52,6 +52,13 @@ pub enum Command {
         minecraft: String,
     },
     CancelOperation(String),
+    /// Stop the game this launcher started for one instance.
+    ///
+    /// Addressed by the instance rather than by an operation id, because that
+    /// is what the button on a card knows, and because a launch that is still
+    /// preparing has no operation id on screen yet. Stopping it then cancels
+    /// the preparation, which is what the button means in that state.
+    KillInstance(InstanceId),
     /// `generation` is assigned by the controller the instant the attempt
     /// begins (before the file dialog even opens), not once a result comes
     /// back: that is what lets a later result be checked against the attempt
@@ -996,6 +1003,9 @@ fn run_worker(
                 Err(error) => send_modal_error(&events, &error),
             },
             Command::CancelOperation(id) => cancel_operation(&cancellations, &events, &id),
+            Command::KillInstance(instance) => {
+                kill_instance(&cancellations, &events, instance);
+            }
             Command::PickImport { generation } => {
                 // The attempt begins here, at the controller's request, not
                 // at whichever later point this handler happens to finish:
@@ -1134,14 +1144,21 @@ fn run_worker(
                 let entity = app
                     .client(instance)
                     .map_or_else(|_| instance.to_string(), |record| record.name);
-                spawn_launch(paths, &events, instance, entity);
+                spawn_launch(paths, &events, Arc::clone(&cancellations), instance, entity);
             }
             Command::LaunchAndConnect { client, server } => {
                 let paths = app.paths().clone();
                 let entity = app
                     .client(client)
                     .map_or_else(|_| format!("{client} -> {server}"), |record| record.name);
-                spawn_connect(paths, &events, client, server, entity);
+                spawn_connect(
+                    paths,
+                    &events,
+                    Arc::clone(&cancellations),
+                    client,
+                    server,
+                    entity,
+                );
             }
             Command::OpenClientFolder(instance) => {
                 report_sync(
@@ -2553,18 +2570,31 @@ fn send_diagnostic_content(
     }
 }
 
-fn spawn_launch(paths: Paths, events: &Sender<Event>, instance: InstanceId, entity: String) {
+fn spawn_launch(
+    paths: Paths,
+    events: &Sender<Event>,
+    cancellations: CancellationRegistry,
+    instance: InstanceId,
+    entity: String,
+) {
     spawn_detached(
         paths.clone(),
         events.clone(),
         move |mut app, events, runtime| {
             let (observer, mut receiver) = LaunchObserver::channel();
             let cancel = CancellationToken::new();
+            // Canceling is what stops a game: the supervising task kills the
+            // child and then waits for its real exit, so the instance's lock is
+            // released rather than left claiming a process that is gone.
+            let killing = Arc::clone(&cancellations);
+            hold_cancellation(&killing, instance.to_string(), &cancel);
             let event_sender = events.clone();
             let entity_for_events = entity.clone();
             let paths_for_events = paths.clone();
             let observed_operation = Arc::new(Mutex::new(None::<String>));
             let forwarded_operation = Arc::clone(&observed_operation);
+            let forwarded_cancellations = Arc::clone(&cancellations);
+            let forwarded_token = cancel.clone();
             runtime.block_on(async move {
                 let forward = tokio::spawn(async move {
                     while let Some(event) = receiver.recv().await {
@@ -2572,6 +2602,8 @@ fn spawn_launch(paths: Paths, events: &Sender<Event>, instance: InstanceId, enti
                             &event_sender,
                             &entity_for_events,
                             &forwarded_operation,
+                            &forwarded_cancellations,
+                            &forwarded_token,
                             &paths_for_events,
                             event,
                         );
@@ -2610,6 +2642,7 @@ fn spawn_launch(paths: Paths, events: &Sender<Event>, instance: InstanceId, enti
                             },
                             false,
                             !outcome.is_success(),
+                            false,
                         );
                     }
                     Err(error) => {
@@ -2627,10 +2660,12 @@ fn spawn_launch(paths: Paths, events: &Sender<Event>, instance: InstanceId, enti
                             "failed",
                             false,
                             true,
+                            false,
                         );
                         send_error(&events, &error);
                     }
                 }
+                release_launch_cancellation(&killing, instance, &observed_operation);
                 if let Ok(app) = App::open_at(paths) {
                     send_snapshot(&app, &events);
                 }
@@ -2639,10 +2674,13 @@ fn spawn_launch(paths: Paths, events: &Sender<Event>, instance: InstanceId, enti
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn forward_launch_event(
     events: &Sender<Event>,
     entity: &str,
     observed_operation: &Mutex<Option<String>>,
+    cancellations: &CancellationRegistry,
+    cancel: &CancellationToken,
     paths: &Paths,
     event: LaunchEvent,
 ) {
@@ -2651,6 +2689,7 @@ fn forward_launch_event(
             if let Ok(mut observed) = observed_operation.lock() {
                 *observed = Some(operation.to_string());
             }
+            hold_cancellation(cancellations, operation.to_string(), cancel);
             send_activity_state(
                 events,
                 operation.to_string(),
@@ -2660,6 +2699,7 @@ fn forward_launch_event(
                 "running",
                 true,
                 false,
+                true,
             );
             refresh_snapshot(paths, events);
         }
@@ -2671,6 +2711,26 @@ fn forward_launch_event(
                 message: localized_value("gui-starting-minecraft", entity),
                 error: false,
             });
+            // The same row, still active, now saying what it is actually doing.
+            // Preparation is over and the game is running; without this the
+            // activity list describes a download for as long as the session
+            // lasts, and the status bar's count is the only sign anything is
+            // happening at all.
+            if let Ok(observed) = observed_operation.lock()
+                && let Some(operation) = observed.clone()
+            {
+                send_activity_state(
+                    events,
+                    operation,
+                    &lookup("gui-activity-launching-minecraft"),
+                    entity,
+                    &lookup("gui-activity-minecraft-running"),
+                    "running",
+                    true,
+                    false,
+                    true,
+                );
+            }
             refresh_snapshot(paths, events);
         }
         LaunchEvent::Failed { message_id, .. } => {
@@ -2754,6 +2814,7 @@ fn spawn_server(paths: Paths, events: &Sender<Event>, server: ServerId, entity: 
                             if failed { "failed" } else { "completed" },
                             false,
                             failed,
+                            false,
                         );
                     }
                     Err(error) => {
@@ -2771,6 +2832,7 @@ fn spawn_server(paths: Paths, events: &Sender<Event>, server: ServerId, entity: 
                             "failed",
                             false,
                             true,
+                            false,
                         );
                         send_error(&events, &error);
                     }
@@ -2805,6 +2867,7 @@ fn forward_server_event(
                 &lookup("gui-activity-validating-server"),
                 "running",
                 true,
+                false,
                 false,
             );
             refresh_snapshot(paths, events);
@@ -2841,6 +2904,7 @@ fn forward_server_event(
 fn spawn_connect(
     paths: Paths,
     events: &Sender<Event>,
+    cancellations: CancellationRegistry,
     client: InstanceId,
     server: ServerId,
     entity: String,
@@ -2854,6 +2918,10 @@ fn spawn_connect(
                 let (server_observer, mut server_events) = ServerObserver::channel();
                 let (launch_observer, mut launch_events) = LaunchObserver::channel();
                 let cancel = CancellationToken::new();
+                // A client started this way is running just as much as one
+                // started from the Launch button, so it is stoppable by the same
+                // instance id.
+                hold_cancellation(&cancellations, client.to_string(), &cancel);
                 let refresh_paths = paths.clone();
                 let refresh_events = events.clone();
                 let connect_forward = tokio::spawn(async move {
@@ -2910,12 +2978,16 @@ fn spawn_connect(
                 let launch_entity = entity.clone();
                 let launch_operation = Arc::new(Mutex::new(None::<String>));
                 let forwarded_launch_operation = Arc::clone(&launch_operation);
+                let forwarded_cancellations = Arc::clone(&cancellations);
+                let forwarded_token = cancel.clone();
                 let launch_forward = tokio::spawn(async move {
                     while let Some(event) = launch_events.recv().await {
                         forward_launch_event(
                             &launch_event_sender,
                             &launch_entity,
                             &forwarded_launch_operation,
+                            &forwarded_cancellations,
+                            &forwarded_token,
                             &launch_paths,
                             event,
                         );
@@ -2947,9 +3019,11 @@ fn spawn_connect(
                         "completed",
                         false,
                         false,
+                        false,
                     ),
                     Err(error) => send_error(&events, &error),
                 }
+                release_launch_cancellation(&cancellations, client, &launch_operation);
                 if let Ok(app) = App::open_at(paths.clone()) {
                     send_snapshot(&app, &events);
                 }
@@ -3161,8 +3235,33 @@ fn register_cancellation(
     reporter: &OperationReporter,
     token: &CancellationToken,
 ) {
+    hold_cancellation(cancellations, reporter.id().to_string(), token);
+}
+
+/// Files a cancellation token under a key a frontend can address it by.
+fn hold_cancellation(cancellations: &CancellationRegistry, key: String, token: &CancellationToken) {
     if let Ok(mut entries) = cancellations.lock() {
-        entries.insert(reporter.id().to_string(), token.clone());
+        entries.insert(key, token.clone());
+    }
+}
+
+/// Drops the token a launch was filed under, by both of its keys.
+///
+/// A launch is addressable twice: by its instance, which is what a card's Kill
+/// Instance action knows, and by the operation id it turns out to have, which is
+/// what the activity list's Cancel knows. Both go when the launch ends.
+fn release_launch_cancellation(
+    cancellations: &CancellationRegistry,
+    instance: InstanceId,
+    observed_operation: &Mutex<Option<String>>,
+) {
+    if let Ok(mut entries) = cancellations.lock() {
+        entries.remove(&instance.to_string());
+        if let Ok(observed) = observed_operation.lock()
+            && let Some(operation) = observed.as_deref()
+        {
+            entries.remove(operation);
+        }
     }
 }
 
@@ -3188,6 +3287,38 @@ fn cancel_operation(cancellations: &CancellationRegistry, events: &Sender<Event>
             message: lookup("gui-operation-not-cancellable"),
             error: true,
         });
+    }
+}
+
+/// Stops the game this launcher started for one instance.
+///
+/// Canceling the launch is what stops it: the supervising task kills the child
+/// and waits for its real exit, so the instance's own lock is released rather
+/// than left claiming a process that is gone. An instance this launcher did not
+/// start has no token here, and says so rather than pretending to have acted.
+fn kill_instance(
+    cancellations: &CancellationRegistry,
+    events: &Sender<Event>,
+    instance: InstanceId,
+) {
+    let token = cancellations
+        .lock()
+        .ok()
+        .and_then(|entries| entries.get(&instance.to_string()).cloned());
+    match token {
+        Some(token) => {
+            token.cancel();
+            let _ = events.send(Event::Toast {
+                message: lookup("gui-kill-instance-requested"),
+                error: false,
+            });
+        }
+        None => {
+            let _ = events.send(Event::Toast {
+                message: lookup("gui-kill-instance-unavailable"),
+                error: true,
+            });
+        }
     }
 }
 
@@ -3454,6 +3585,7 @@ fn send_activity_state(
     status_kind: &'static str,
     active: bool,
     failed: bool,
+    cancellable: bool,
 ) {
     let _ = events.send(Event::Activity(ActivityData {
         item: ActivityPresentation {
@@ -3470,7 +3602,7 @@ fn send_activity_state(
             detail: detail.to_owned(),
             progress: 0.0,
             indeterminate: active,
-            cancellable: false,
+            cancellable,
             failed,
         },
         entity: entity.to_owned(),
