@@ -1274,7 +1274,7 @@ fn run_worker(
                                 &reporter,
                                 &cancel,
                             ));
-                            finish_linked(&app, &events, result);
+                            finish_linked(&app, &events, instance, result);
                         }
                         Ok(plan) => {
                             let _ = events.send(Event::LinkedApply(linked_section(&plan)));
@@ -1301,7 +1301,7 @@ fn run_worker(
                         &OperationReporter::silent("changing-mod-version"),
                         &CancellationToken::new(),
                     ));
-                    finish_linked(&app, &events, result);
+                    finish_linked(&app, &events, instance, result);
                 });
             }
             Command::UpdateMod {
@@ -1318,7 +1318,7 @@ fn run_worker(
                         &OperationReporter::silent("updating-mod"),
                         &CancellationToken::new(),
                     ));
-                    finish_linked(&app, &events, result);
+                    finish_linked(&app, &events, instance, result);
                 });
             }
             Command::PlanModRemoval { instance, path } => {
@@ -1352,7 +1352,7 @@ fn run_worker(
                         &OperationReporter::silent("removing-mod"),
                         &CancellationToken::new(),
                     ));
-                    finish_linked(&app, &events, result);
+                    finish_linked(&app, &events, instance, result);
                 });
             }
             Command::LoadInstanceWorkspace(instance) => {
@@ -1370,25 +1370,7 @@ fn run_worker(
                     }
                 }
 
-                let paths = app.paths().clone();
-                spawn_detached(paths, events.clone(), move |app, events, runtime| {
-                    let enriched = runtime.block_on(app.enriched_managed_mods(
-                        instance,
-                        &OperationReporter::silent("managed-mods"),
-                        &CancellationToken::new(),
-                    ));
-                    match enriched {
-                        Ok(snapshot) => {
-                            let _ = events.send(Event::ManagedMods(managed_mods_data(&snapshot)));
-                        }
-                        // Enrichment is decoration. The list the user is
-                        // already looking at is correct without it, so this
-                        // is logged rather than shown as a failed operation.
-                        Err(error) => {
-                            tracing::warn!(%error, "managed mod metadata could not be loaded");
-                        }
-                    }
-                });
+                refresh_enriched_mods(app.paths().clone(), &events, instance);
             }
             Command::SearchMods {
                 instance,
@@ -1511,14 +1493,16 @@ fn run_worker(
                             .await?;
                         let message = client_outcome_message(&outcome);
                         // The Managed Mods panel may already be open on this
-                        // instance, and a newly installed mod must appear on
-                        // it without the workspace being reopened. Recorded
-                        // state is authoritative here; the panel picks up
-                        // provider titles and artwork the next time it is
-                        // freshly loaded, the same as any other durable read.
+                        // instance, and a newly installed mod must appear on it
+                        // without the workspace being reopened. Recorded state
+                        // is authoritative about which mods are there and is
+                        // shown at once; the provider title, version, and
+                        // artwork follow, so the new row does not sit there as a
+                        // file name until the workspace is opened again.
                         if let Ok(snapshot) = app.managed_mod_snapshot(instance) {
                             let _ = reports.send(Event::ManagedMods(managed_mods_data(&snapshot)));
                         }
+                        refresh_enriched_mods(app.paths().clone(), &reports, instance);
                         if outcome.targets.is_empty() {
                             return Ok(OperationReport::Toast(message));
                         }
@@ -3818,7 +3802,40 @@ fn target_explanation(target: &LinkedTargetPlan) -> String {
 ///
 /// A single target keeps the ordinary toast. Several get a list, because the
 /// truth about them is per target and a summary line would have to pick one.
-fn finish_linked(app: &App, events: &Sender<Event>, result: CoreResult<LinkedModOutcome>) {
+/// Replaces the Managed Mods panel with the same instance's enriched view.
+///
+/// The durable record is authoritative about *which* mods an instance has, and
+/// it is what a workspace load and every mutation return. It carries no
+/// provider title, version, or artwork, so a panel left holding it shows jar
+/// file names. Enrichment is a provider round trip, so it runs off the command
+/// thread and only replaces the list once it has an answer.
+fn refresh_enriched_mods(paths: Paths, events: &Sender<Event>, instance: InstanceId) {
+    spawn_detached(paths, events.clone(), move |app, events, runtime| {
+        let enriched = runtime.block_on(app.enriched_managed_mods(
+            instance,
+            &OperationReporter::silent("managed-mods"),
+            &CancellationToken::new(),
+        ));
+        match enriched {
+            Ok(snapshot) => {
+                let _ = events.send(Event::ManagedMods(managed_mods_data(&snapshot)));
+            }
+            // Enrichment is decoration. The list the user is already looking at
+            // is correct without it, so this is logged rather than shown as a
+            // failed operation.
+            Err(error) => {
+                tracing::warn!(%error, "managed mod metadata could not be loaded");
+            }
+        }
+    });
+}
+
+fn finish_linked(
+    app: &App,
+    events: &Sender<Event>,
+    instance: InstanceId,
+    result: CoreResult<LinkedModOutcome>,
+) {
     match result {
         Ok(outcome) => {
             let _ = events.send(Event::CloseModal);
@@ -3832,6 +3849,7 @@ fn finish_linked(app: &App, events: &Sender<Event>, result: CoreResult<LinkedMod
             }
             if let ClientModOutcome::Mutated(mutation) = &outcome.client {
                 let _ = events.send(Event::ManagedMods(managed_mods_data(&mutation.snapshot)));
+                refresh_enriched_mods(app.paths().clone(), events, instance);
             }
             send_snapshot(app, events);
         }
