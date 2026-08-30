@@ -2,6 +2,7 @@
 
 pub mod backend;
 pub mod controller;
+pub mod file_drop;
 pub mod minecraft_defaults;
 pub mod presentation;
 // Slint's generated bindings contain framework-owned unsafe blocks. Keep the

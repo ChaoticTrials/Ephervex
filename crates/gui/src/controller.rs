@@ -22,6 +22,7 @@ use crate::backend::{
     DiagnosticData, Event, JavaData, LiveLogLine, LiveLogSource, LiveLogUpdate, ManagedModData,
     ModSearchData, ServerWorkspaceData, SettingsData, Snapshot,
 };
+use crate::file_drop::{FileDrop, FileDrops};
 use crate::minecraft_defaults::{
     self, LanguageCatalogState, MinecraftDefaultsModel, WindowAspect, WindowAxis, window_anchor,
 };
@@ -38,6 +39,10 @@ use crate::window_aspect;
 
 pub struct Controller {
     _poll_timer: Timer,
+    /// Kept so a later hook, such as [`accept_file_drops`], can send the same
+    /// commands the callbacks registered here do.
+    commands: Sender<Command>,
+    import_flow: Rc<RefCell<ImportFlowState>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1010,6 +1015,48 @@ impl std::fmt::Debug for Controller {
     }
 }
 
+/// Routes archives dropped on the window into the import dialog.
+///
+/// The drop is the same act as choosing a file, so it takes the same path: the
+/// attempt begins here, synchronously, and the analysis that follows is checked
+/// against it exactly as a dialog's would be. Opening the dialog is part of
+/// accepting the drop, because a drop with nothing on screen would look like
+/// nothing happened.
+///
+/// A drop is ignored while another modal is open. A file let go over a
+/// confirmation the user is in the middle of is far more likely to be a
+/// misplaced gesture than a request to abandon it.
+pub fn accept_file_drops(ui: &AppWindow, drops: &FileDrops, controller: &Controller) {
+    let weak = ui.as_weak();
+    let sender = controller.commands.clone();
+    let flow = Rc::clone(&controller.import_flow);
+    drops.listen(move |drop| {
+        let Some(ui) = weak.upgrade() else { return };
+        let busy = !ui.get_modal().is_empty() && ui.get_modal() != "import";
+        match drop {
+            FileDrop::Hovering => ui.set_file_drop_active(!busy),
+            FileDrop::Left => ui.set_file_drop_active(false),
+            FileDrop::Dropped(archive) => {
+                ui.set_file_drop_active(false);
+                if busy {
+                    return;
+                }
+                let generation = flow.borrow_mut().begin_attempt();
+                render_import_flow(&ui, &flow.borrow());
+                ui.set_modal_error(SharedString::default());
+                ui.set_modal("import".into());
+                send(
+                    &sender,
+                    Command::AnalyzeImport {
+                        generation,
+                        archive,
+                    },
+                );
+            }
+        }
+    });
+}
+
 pub fn attach(ui: &AppWindow) -> Controller {
     let backend = backend::spawn();
     let receiver = Rc::new(RefCell::new(backend.events));
@@ -1084,6 +1131,8 @@ pub fn attach(ui: &AppWindow) -> Controller {
 
     Controller {
         _poll_timer: poll_timer,
+        commands: backend.commands,
+        import_flow,
     }
 }
 

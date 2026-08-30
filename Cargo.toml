@@ -102,7 +102,12 @@ sha1 = "0.11.0"
 sha2 = "0.11.0"
 # `raw-window-handle-06` exposes a window's native handle, which is how a
 # window can be given a size constraint the toolkit does not model itself.
-slint = { version = "1.17.1", features = ["raw-window-handle-06"] }
+# `unstable-winit-030` reaches the windowing events Slint does not model at all.
+# File drops are the one this build needs: Slint's own drag-and-drop carries
+# text and images between elements of the same application, and never a path
+# from the desktop. The feature is explicitly unstable across Slint minor
+# releases, so what is built on it is one small handler in the frontend.
+slint = { version = "1.17.1", features = ["raw-window-handle-06", "unstable-winit-030"] }
 sysinfo = "0.39.6"
 tar = "0.4.46"
 tempfile = "3.27.0"

@@ -67,6 +67,13 @@ pub enum Command {
     PickImport {
         generation: u64,
     },
+    /// The same attempt, for an archive the user has already named by dropping
+    /// it on the window. No dialog, and no cancellation to report: the choice
+    /// was made before this was sent.
+    AnalyzeImport {
+        generation: u64,
+        archive: PathBuf,
+    },
     /// Abandons whatever provider resolution is still running for the import
     /// modal: a superseding archive pick already does this on its own before
     /// starting the next one, so this is for the modal closing outright.
@@ -1021,44 +1028,22 @@ fn run_worker(
                     .add_filter(lookup("gui-modpack-archives"), &["mrpack", "zip"])
                     .pick_file()
                 {
-                    Some(path) => match app.analyze_pack(&path) {
-                        Ok(analysis) => {
-                            let presentation = ImportPresentation::from_analysis(&analysis);
-                            let needs_resolution = presentation.needs_provider_resolution;
-                            let _ = events.send(Event::ImportAnalyzed {
-                                generation,
-                                archive: path.clone(),
-                                result: Ok(presentation),
-                            });
-                            if needs_resolution {
-                                let cancel = CancellationToken::new();
-                                import_resolve_cancel = Some(cancel.clone());
-                                spawn_import_resolution(
-                                    app.paths().clone(),
-                                    events.clone(),
-                                    generation,
-                                    analysis,
-                                    cancel,
-                                );
-                            }
-                        }
-                        Err(error) => {
-                            tracing::warn!(
-                                message_id = error.message_id(),
-                                detail = %error,
-                                "pack analysis failed"
-                            );
-                            let _ = events.send(Event::ImportAnalyzed {
-                                generation,
-                                archive: path,
-                                result: Err(import_failure(&error)),
-                            });
-                        }
-                    },
+                    Some(path) => {
+                        import_resolve_cancel = analyze_import(&app, &events, generation, &path);
+                    }
                     None => {
                         let _ = events.send(Event::ImportPickCanceled { generation });
                     }
                 }
+            }
+            Command::AnalyzeImport {
+                generation,
+                archive,
+            } => {
+                if let Some(previous) = import_resolve_cancel.take() {
+                    previous.cancel();
+                }
+                import_resolve_cancel = analyze_import(&app, &events, generation, &archive);
             }
             Command::CancelImportAnalysis => {
                 if let Some(previous) = import_resolve_cancel.take() {
@@ -3268,6 +3253,53 @@ fn release_launch_cancellation(
 fn remove_cancellation(cancellations: &CancellationRegistry, reporter: &OperationReporter) {
     if let Ok(mut entries) = cancellations.lock() {
         entries.remove(&reporter.id().to_string());
+    }
+}
+
+/// Inspects an archive and reports what importing it would involve.
+///
+/// Returns the token for the provider resolution this started, where the pack
+/// needs one, so the caller can cancel it when a newer attempt replaces this.
+fn analyze_import(
+    app: &App,
+    events: &Sender<Event>,
+    generation: u64,
+    archive: &Path,
+) -> Option<CancellationToken> {
+    match app.analyze_pack(archive) {
+        Ok(analysis) => {
+            let presentation = ImportPresentation::from_analysis(&analysis);
+            let needs_resolution = presentation.needs_provider_resolution;
+            let _ = events.send(Event::ImportAnalyzed {
+                generation,
+                archive: archive.to_path_buf(),
+                result: Ok(presentation),
+            });
+            needs_resolution.then(|| {
+                let cancel = CancellationToken::new();
+                spawn_import_resolution(
+                    app.paths().clone(),
+                    events.clone(),
+                    generation,
+                    analysis,
+                    cancel.clone(),
+                );
+                cancel
+            })
+        }
+        Err(error) => {
+            tracing::warn!(
+                message_id = error.message_id(),
+                detail = %error,
+                "pack analysis failed"
+            );
+            let _ = events.send(Event::ImportAnalyzed {
+                generation,
+                archive: archive.to_path_buf(),
+                result: Err(import_failure(&error)),
+            });
+            None
+        }
     }
 }
 

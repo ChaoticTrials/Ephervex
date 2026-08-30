@@ -14,10 +14,26 @@ fn main() -> Result<(), slint::PlatformError> {
         launcher_logs.as_deref(),
     );
 
+    // Chosen before the window exists, because that is when a backend can still
+    // be given a handler. A display server that cannot deliver file drops, or a
+    // build with no windowing backend to configure, simply keeps the file
+    // dialog as the only way to name an archive.
+    let drops = ephervex_gui::file_drop::FileDrops::default();
+    if let Err(error) = slint::BackendSelector::new()
+        .backend_name("winit".to_owned())
+        .with_winit_custom_application_handler(ephervex_gui::file_drop::FileDropHandler::new(
+            drops.clone(),
+        ))
+        .select()
+    {
+        tracing::info!(%error, "dropping a modpack onto the window is unavailable here");
+    }
+
     let ui = ephervex_gui::ui::AppWindow::new()?;
     ui.set_app_version(ephervex_model::APP_VERSION.into());
     ui.set_license_text(include_str!("../../../LICENSE").into());
-    let _controller = ephervex_gui::controller::attach(&ui);
+    let controller = ephervex_gui::controller::attach(&ui);
+    ephervex_gui::controller::accept_file_drops(&ui, &drops, &controller);
 
     tracing::info!(
         "starting {} {} desktop interface",

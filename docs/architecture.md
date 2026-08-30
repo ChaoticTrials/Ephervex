@@ -343,6 +343,11 @@ matching on provider-specific error trees.
 
 ## Pack-import data flow
 
+An archive reaches this flow from the frontend's file dialog or from a drop onto
+the desktop window; both hand `ephervex-core` a path and nothing else. Detection
+reads the archive's contents rather than its name, so how the path was named
+never changes how the pack is read.
+
 ```text
 untrusted archive
    │
@@ -638,9 +643,14 @@ import and CurseForge browsing need a user-supplied API key and cannot obtain a
 file whose author has turned off third-party distribution. CurseForge browsing
 offers Minecraft's Mods class only, and its version lists are scoped to the
 instance's exact Minecraft release and loader family because the provider pages
-its file listings. Mod updates and removal are unavailable. Fabric, Quilt,
-snapshots, Windows, and macOS are outside the supported scope recorded in
-ADR 0008.
+its file listings. Mod updates and removal are unavailable. Dropping a modpack
+archive onto the desktop window works on X11 and XWayland only: the windowing
+layer implements file drops there and not on Wayland, and Slint's own
+drag-and-drop carries text and images between elements of one application rather
+than a path from the desktop. The file dialog remains available everywhere, and
+the same X11-only boundary already applies to the Minecraft window-size picker's
+aspect hint. Fabric, Quilt, snapshots, Windows, and macOS are outside the
+supported scope recorded in ADR 0008.
 
 ## Verification
 

@@ -1724,6 +1724,10 @@ slint::slint! {
         in-out property <string> selected-diagnostic-kind;
         in-out property <string> workspace: "";
         in-out property <string> workspace-tab: "Overview";
+        // Whether a file from the desktop is being held over the window. Set
+        // only while the drop would be accepted, so the highlight never
+        // promises something a release would not do.
+        in-out property <bool> file-drop-active: false;
         in-out property <string> modal: "";
         in-out property <string> modal-error;
         in-out property <string> status-message: GuiI18n.text("gui-ready");
@@ -2607,6 +2611,25 @@ slint::slint! {
                 if root.toast-one-text != "" : ToastPanel { message: root.toast-one-text; error: root.toast-one-error; dismiss => { root.toast-one-text = ""; root.toast-slot-available(); } }
                 if root.toast-two-text != "" : ToastPanel { message: root.toast-two-text; error: root.toast-two-error; dismiss => { root.toast-two-text = ""; root.toast-slot-available(); } }
                 if root.toast-three-text != "" : ToastPanel { message: root.toast-three-text; error: root.toast-three-error; dismiss => { root.toast-three-text = ""; root.toast-slot-available(); } }
+            }
+        }
+
+        // What a file held over the window looks like. Drawn under the modal
+        // overlay, and never while one is open, because a drop is refused then.
+        if root.file-drop-active : Rectangle {
+            background: Theme.background.with-alpha(0.8);
+            Rectangle {
+                width: min(520px, parent.width - 80px);
+                height: 168px;
+                border-radius: 10px;
+                border-width: 2px;
+                border-color: Theme.accent;
+                background: Theme.elevated;
+                VerticalLayout {
+                    padding: 24px; spacing: 8px; alignment: center;
+                    Heading { text: GuiI18n.text("gui-drop-to-import"); font-size: Theme.item-title-size; horizontal-alignment: center; }
+                    BodyText { text: GuiI18n.text("gui-drop-to-import-detail"); wrap: word-wrap; horizontal-alignment: center; }
+                }
             }
         }
 
