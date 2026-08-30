@@ -120,6 +120,9 @@ x11rb = "0.13.2"
 zip = "8.6.0"
 
 # --- test-only ---
+# Drives a real `AppWindow` headlessly so a layering mistake in the Slint markup
+# can be caught by a test rather than only by clicking the running application.
+i-slint-backend-testing = { version = "1.17.1", features = ["renderer-software"] }
 wiremock = "0.6.5"
 
 [profile.release]

@@ -4754,9 +4754,27 @@ mod tests {
         assert!(source.contains(
             "open-workspace(id) => { root.selected-global-server-id = id; root.selected-global-server-index = index; root.selected-server-id = id; root.server-workspace-return-client = \"\"; root.select-server(id); root.workspace = \"server\";"
         ));
-        assert!(source.contains(
-            "card-area := TouchArea { width: parent.width - 250px; clicked => { root.choose(item.id); } double-clicked => { root.open-workspace(item.id); } }"
-        ));
+        // A card's own touch area has to be declared before the layout holding
+        // its buttons, so that it sits under them. Slint resolves a pointer
+        // event front to back, so a touch area declared after the buttons takes
+        // the press first and the button never sees it. What that costs the
+        // user is proven in `tests/card_pointer_targets.rs`; this only keeps the
+        // arrangement visible where it is written.
+        for component in ["component InstanceCard", "component ServerCard"] {
+            let start = source.find(component).expect("the card component");
+            let end = source[start..]
+                .find("\n    component ")
+                .map_or(source.len(), |offset| start + offset);
+            let card = &source[start..end];
+            let area = card
+                .find("card-area := TouchArea")
+                .expect("a card touch area");
+            let layout = card.find("HorizontalLayout {").expect("the card layout");
+            assert!(
+                area < layout,
+                "{component}'s touch area is over its buttons"
+            );
+        }
     }
 
     #[test]

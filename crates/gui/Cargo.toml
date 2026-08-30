@@ -39,6 +39,9 @@ raw-window-handle.workspace = true
 x11rb.workspace = true
 
 [dev-dependencies]
+# A headless window, so what the markup actually does with a pointer event is
+# testable rather than only observable by hand.
+i-slint-backend-testing.workspace = true
 # A disposable launcher root, so the settings screen's save path can be proven
 # against a real configuration file rather than a stand-in for one.
 tempfile.workspace = true

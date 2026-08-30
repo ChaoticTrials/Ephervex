@@ -1306,6 +1306,15 @@ slint::slint! {
         accessible-role: button;
         accessible-label: item.name;
         accessible-action-default => { root.choose(item.id); }
+        // First, so it is *under* the card's own buttons rather than over
+        // them. A touch area declared after them takes the press first, and one
+        // that sets a width without an x is centered rather than left-aligned,
+        // which put it across the left of the Launch button and swallowed every
+        // click that landed on the label.
+        card-area := TouchArea {
+            clicked => { root.choose(item.id); }
+            double-clicked => { root.open-workspace(item.id); }
+        }
         Rectangle {
             x: 0px; y: 10px; width: 3px; height: parent.height - 20px;
             border-radius: 2px;
@@ -1338,7 +1347,6 @@ slint::slint! {
                 }
             }
         }
-        card-area := TouchArea { width: parent.width - 250px; clicked => { root.choose(item.id); } double-clicked => { root.open-workspace(item.id); } }
         ContextMenuArea {
             Menu {
                 MenuItem { title: GuiI18n.text("gui-open-workspace"); activated => { root.open-workspace(item.id); } }
@@ -1370,6 +1378,11 @@ slint::slint! {
         accessible-role: button;
         accessible-label: item.name;
         accessible-action-default => { root.choose(item.id); }
+        // Under the card's buttons, not over them. See `InstanceCard`.
+        card-area := TouchArea {
+            clicked => { root.choose(item.id); }
+            double-clicked => { root.open-workspace(item.id); }
+        }
         Rectangle {
             x: 0px; y: 10px; width: 3px; height: parent.height - 20px;
             border-radius: 2px;
@@ -1406,7 +1419,6 @@ slint::slint! {
                 }
             }
         }
-        card-area := TouchArea { width: parent.width - 250px; clicked => { root.choose(item.id); } double-clicked => { root.open-workspace(item.id); } }
         ContextMenuArea {
             Menu {
                 MenuItem { title: GuiI18n.text("gui-open-server-workspace"); activated => { root.open-workspace(item.id); } }

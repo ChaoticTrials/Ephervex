@@ -1621,6 +1621,7 @@ dependencies = [
  "ephervex-core",
  "ephervex-i18n",
  "ephervex-model",
+ "i-slint-backend-testing",
  "raw-window-handle",
  "rfd",
  "slint",
