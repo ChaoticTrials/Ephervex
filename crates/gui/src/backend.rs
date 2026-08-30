@@ -54,6 +54,15 @@ pub enum Command {
     /// Records the Minecraft releases to offer first, in the order given.
     SetFavoriteMinecraftVersions(Vec<String>),
     CancelOperation(String),
+    /// Replace one instance's own Java and JVM settings. `None` on a field
+    /// restores the global one.
+    SaveInstanceRuntime {
+        instance: InstanceId,
+        java: Option<PathBuf>,
+        min_memory_mib: Option<u32>,
+        max_memory_mib: Option<u32>,
+        jvm_args: Vec<String>,
+    },
     /// Clear the runtime evidence a server left behind when its supervisor died.
     RepairServer(ServerId),
     /// Stop the game this launcher started for one instance.
@@ -610,6 +619,23 @@ pub struct LinkedResultData {
 }
 
 /// The Managed Mods list plus whatever has to be said about how complete it is.
+/// One instance's own runtime settings, and what it would otherwise inherit.
+#[derive(Debug, Clone)]
+pub struct InstanceRuntimeData {
+    pub instance: String,
+    /// Empty where the instance follows the global setting.
+    pub java: String,
+    pub min_memory: String,
+    pub max_memory: String,
+    pub jvm_args: String,
+    /// Whether anything is pinned, which is what makes "follow global" an
+    /// action worth offering.
+    pub pinned: bool,
+    /// An already-localized sentence naming what the global settings are, so
+    /// an empty field reads as a choice rather than as missing information.
+    pub global: String,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ManagedModsData {
     /// Which instance this list describes.
@@ -753,6 +779,7 @@ pub struct JavaData {
 #[derive(Debug, Clone)]
 pub enum Event {
     Snapshot(Box<Snapshot>),
+    InstanceRuntime(InstanceRuntimeData),
     MinecraftReleases(Vec<String>),
     /// One save of the global Minecraft defaults reached a terminal outcome.
     ///
@@ -1029,6 +1056,37 @@ fn run_worker(
             Command::CancelOperation(id) => cancel_operation(&cancellations, &events, &id),
             Command::KillInstance(instance) => {
                 kill_instance(&cancellations, &events, instance);
+            }
+            Command::SaveInstanceRuntime {
+                instance,
+                java,
+                min_memory_mib,
+                max_memory_mib,
+                jvm_args,
+            } => {
+                let jvm = ephervex_model::JvmSettings {
+                    min_memory_mib,
+                    max_memory_mib,
+                    jvm_args,
+                };
+                let result = app.set_client_runtime_settings(
+                    instance,
+                    java.map(ephervex_model::JavaOverride::new),
+                    (!jvm.pins_nothing()).then_some(jvm),
+                );
+                match result {
+                    Ok(_) => {
+                        let _ = events.send(Event::Toast {
+                            message: lookup("gui-instance-runtime-saved"),
+                            error: false,
+                        });
+                        send_snapshot(&app, &events);
+                    }
+                    // Shown on the screen the fields are on, not as a toast the
+                    // user has to catch: a refused save leaves them looking at
+                    // values that are not what the instance has.
+                    Err(error) => send_modal_error(&events, &error),
+                }
             }
             Command::RepairServer(id) => {
                 match app.recover_server_runtime(id) {
@@ -1405,6 +1463,9 @@ fn run_worker(
                     }
                 }
 
+                if let Ok(runtime) = instance_runtime_data(&app, instance) {
+                    let _ = events.send(Event::InstanceRuntime(runtime));
+                }
                 refresh_enriched_mods(app.paths().clone(), &events, instance);
             }
             Command::SearchMods {
@@ -3331,6 +3392,33 @@ fn analyze_import(
             None
         }
     }
+}
+
+fn instance_runtime_data(app: &App, instance: InstanceId) -> CoreResult<InstanceRuntimeData> {
+    let record = app.client(instance)?;
+    let global = app.java_settings();
+    let jvm = record.jvm_override.as_ref();
+    let number = |value: Option<u32>| value.map(|mib| mib.to_string()).unwrap_or_default();
+    Ok(InstanceRuntimeData {
+        instance: instance.to_string(),
+        java: record
+            .java_override
+            .as_ref()
+            .map(|java| java.path.display().to_string())
+            .unwrap_or_default(),
+        min_memory: number(jvm.and_then(|jvm| jvm.min_memory_mib)),
+        max_memory: number(jvm.and_then(|jvm| jvm.max_memory_mib)),
+        jvm_args: jvm.map(|jvm| jvm.jvm_args.join(" ")).unwrap_or_default(),
+        pinned: record.java_override.is_some() || jvm.is_some(),
+        global: localized_values(
+            "gui-instance-runtime-global",
+            &format!("{} - {} MiB", global.min_memory_mib, global.max_memory_mib),
+            &global.preferred_path.map_or_else(
+                || lookup("gui-java-auto-selected"),
+                |path| path.display().to_string(),
+            ),
+        ),
+    })
 }
 
 fn cancel_operation(cancellations: &CancellationRegistry, events: &Sender<Event>, id: &str) {

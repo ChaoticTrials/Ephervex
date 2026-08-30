@@ -578,6 +578,37 @@ impl App {
         Ok(self.registry().delete_client(id, files)?)
     }
 
+    /// Replaces one instance's Java and JVM overrides as one metadata mutation.
+    ///
+    /// `None` on either restores the corresponding global setting, which is
+    /// what "use the global value" means and is a different state from pinning
+    /// the value the global one happens to hold today.
+    ///
+    /// Refuses while the instance is launching or running, for the same reason
+    /// the server equivalent does: what a running process was started with
+    /// cannot be changed underneath it, and a record that disagreed with the
+    /// live command would misdescribe the reproduction.
+    #[instrument(skip(self))]
+    pub fn set_client_runtime_settings(
+        &self,
+        id: InstanceId,
+        java_override: Option<ephervex_model::JavaOverride>,
+        jvm_override: Option<ephervex_model::JvmSettings>,
+    ) -> CoreResult<ClientRecord> {
+        let mut record = self.client(id)?;
+        if let Some(state) = self.launch_state(id)? {
+            return Err(ephervex_storage::LockError::AlreadyRunning {
+                pid: state.game_pid.unwrap_or(state.owner_pid),
+                since: state.since,
+            }
+            .into());
+        }
+        record.java_override = java_override;
+        record.jvm_override = jvm_override;
+        self.registry().update_client(&mut record)?;
+        Ok(record)
+    }
+
     /// The servers linked to a client.
     ///
     /// Derived from the server rows rather than stored on the client, so it
@@ -1465,6 +1496,58 @@ mod tests {
         app.delete_client(created.id, FileDisposition::Remove)
             .expect("delete");
         assert!(app.list_clients().expect("list").is_empty());
+    }
+
+    #[test]
+    fn instance_runtime_overrides_are_settable_and_clearable() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let created = app
+            .create_client_for_test(NewClient::new(
+                "Bug Repro",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create");
+        assert!(created.java_override.is_none());
+        assert!(created.jvm_override.is_none());
+
+        let pinned = app
+            .set_client_runtime_settings(
+                created.id,
+                Some(ephervex_model::JavaOverride::new("/opt/jdk/bin/java")),
+                Some(ephervex_model::JvmSettings {
+                    min_memory_mib: Some(2048),
+                    max_memory_mib: Some(8192),
+                    jvm_args: vec!["-XX:+UseZGC".to_owned()],
+                }),
+            )
+            .expect("pin");
+        assert_eq!(
+            pinned
+                .java_override
+                .as_ref()
+                .map(|java| java.path.as_path()),
+            Some(std::path::Path::new("/opt/jdk/bin/java"))
+        );
+
+        // Reopened, because the point of the setting is that it survives.
+        let reopened = app_rooted_at(base.path());
+        let stored = reopened.client(created.id).expect("client");
+        assert_eq!(
+            stored
+                .jvm_override
+                .as_ref()
+                .and_then(|jvm| jvm.max_memory_mib),
+            Some(8192)
+        );
+
+        // `None` restores the global setting rather than pinning today's value.
+        let cleared = reopened
+            .set_client_runtime_settings(created.id, None, None)
+            .expect("clear");
+        assert!(cleared.java_override.is_none());
+        assert!(cleared.jvm_override.is_none());
     }
 
     /// A linked server exists to reproduce one client. Left behind it is

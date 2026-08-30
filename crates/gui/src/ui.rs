@@ -1953,6 +1953,15 @@ slint::slint! {
         in-out property <string> java-memory-min: "512";
         in-out property <string> java-memory-max: "4096";
         in-out property <string> java-preferred-path;
+        // What one instance pins for itself. Each field is empty while the
+        // instance follows the global setting, which is a different state from
+        // pinning the value the global one currently holds.
+        in-out property <string> instance-java-path;
+        in-out property <string> instance-memory-min;
+        in-out property <string> instance-memory-max;
+        in-out property <string> instance-jvm-args;
+        in-out property <bool> instance-runtime-pinned: false;
+        in-out property <string> instance-runtime-global;
         in-out property <bool> java-auto-detect: true;
         in-out property <bool> java-auto-download: true;
         in-out property <bool> show-linked-servers: false;
@@ -1978,6 +1987,8 @@ slint::slint! {
         callback delete-client(string, bool);
         callback delete-server(string, bool);
         callback repair-server(string);
+        callback save-instance-runtime(string, string, string, string, string);
+        callback clear-instance-runtime(string);
         callback load-instance-workspace(string);
         callback search-mods(string, string, string);
         callback load-more-mods(string, string, string, int);
@@ -2239,7 +2250,7 @@ slint::slint! {
                                 spacing: 4px;
                                 WorkspaceTab { text: GuiI18n.text("gui-instance-tab-overview"); selected: root.workspace-tab == "Overview"; clicked => { root.close-live-log(); root.workspace-tab = "Overview"; } }
                                 WorkspaceTab { text: GuiI18n.text("gui-instance-tab-mods"); selected: root.workspace-tab == "Mods"; clicked => { root.close-live-log(); root.workspace-tab = "Mods"; } }
-                                WorkspaceTab { text: GuiI18n.text("gui-instance-tab-minecraft-settings"); selected: root.workspace-tab == "Minecraft Settings"; clicked => { root.close-live-log(); root.workspace-tab = "Minecraft Settings"; } }
+                                WorkspaceTab { text: GuiI18n.text("gui-instance-tab-settings"); selected: root.workspace-tab == "Settings"; clicked => { root.close-live-log(); root.workspace-tab = "Settings"; } }
                                 WorkspaceTab { text: GuiI18n.text("gui-instance-tab-logs"); selected: root.workspace-tab == "Logs"; clicked => { root.workspace-tab = "Logs"; root.selected-diagnostic-kind = "log"; root.open-live-log("client", root.selected-instance-id); } }
                                 Rectangle { horizontal-stretch: 1; }
                             }
@@ -2298,7 +2309,28 @@ slint::slint! {
                                     }
                                 }
                             }
-                            if root.workspace-tab == "Minecraft Settings" : EmptyState { title: GuiI18n.text("gui-instance-settings-unavailable"); message: GuiI18n.text("gui-instance-settings-unavailable-detail"); primary-text: GuiI18n.text("gui-open-global-defaults"); primary => { root.page = 4; root.workspace = ""; root.workspace-tab = "Minecraft"; } }
+                            if root.workspace-tab == "Settings" : ScrollView { viewport-width: self.width; VerticalLayout { alignment: start; width: min(parent.width, 720px); spacing: 12px;
+                                SectionTitle { title: GuiI18n.text("gui-instance-runtime"); detail: GuiI18n.text("gui-instance-runtime-detail"); }
+                                BodyText { text: root.instance-runtime-global; color: Theme.text-muted; wrap: word-wrap; }
+                                Text { text: GuiI18n.text("gui-java-preferred"); color: Theme.text-secondary; font-size: Theme.label-size; }
+                                TextField { text <=> root.instance-java-path; placeholder: GuiI18n.text("gui-instance-runtime-inherited"); accessible-name: GuiI18n.text("gui-java-preferred"); }
+                                HorizontalLayout { spacing: 12px;
+                                    VerticalLayout { spacing: 4px; FieldLabel { text: GuiI18n.text("gui-java-memory-min"); } TextField { text <=> root.instance-memory-min; placeholder: GuiI18n.text("gui-instance-runtime-inherited"); accessible-name: GuiI18n.text("gui-java-memory-min"); input-type: InputType.number; width: 190px; } }
+                                    VerticalLayout { spacing: 4px; FieldLabel { text: GuiI18n.text("gui-java-memory-max"); } TextField { text <=> root.instance-memory-max; placeholder: GuiI18n.text("gui-instance-runtime-inherited"); accessible-name: GuiI18n.text("gui-java-memory-max"); input-type: InputType.number; width: 190px; } }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
+                                Text { text: GuiI18n.text("gui-instance-jvm-args"); color: Theme.text-secondary; font-size: Theme.label-size; }
+                                TextField { text <=> root.instance-jvm-args; placeholder: GuiI18n.text("gui-instance-jvm-args-placeholder"); accessible-name: GuiI18n.text("gui-instance-jvm-args"); }
+                                if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; }
+                                HorizontalLayout { spacing: 8px;
+                                    if root.instance-runtime-pinned : AppButton { text: GuiI18n.text("gui-instance-runtime-clear"); clicked => { root.clear-instance-runtime(root.selected-instance-id); } }
+                                    Rectangle { horizontal-stretch: 1; }
+                                    AppButton { text: GuiI18n.text("gui-instance-runtime-save"); tone: "primary"; clicked => { root.save-instance-runtime(root.selected-instance-id, root.instance-java-path, root.instance-memory-min, root.instance-memory-max, root.instance-jvm-args); } }
+                                }
+                                Divider { }
+                                SectionTitle { title: GuiI18n.text("gui-instance-settings-unavailable"); detail: GuiI18n.text("gui-instance-settings-unavailable-detail"); }
+                                HorizontalLayout { AppButton { text: GuiI18n.text("gui-open-global-defaults"); clicked => { root.page = 4; root.workspace = ""; root.workspace-tab = "Minecraft"; } } Rectangle { horizontal-stretch: 1; } }
+                            } }
                             if root.workspace-tab == "Logs" : VerticalLayout { spacing: 9px;
                                 HorizontalLayout { spacing: 8px; FilterChip { text: GuiI18n.text("gui-live-latest-log"); accessible-name: GuiI18n.text("gui-live-latest-log"); selected: root.selected-diagnostic-kind != "crash-report"; clicked => { root.selected-diagnostic-kind = "log"; root.open-live-log("client", root.selected-instance-id); } } FilterChip { text: GuiI18n.text("gui-crash-reports"); accessible-name: GuiI18n.text("gui-crash-reports"); selected: root.selected-diagnostic-kind == "crash-report"; clicked => { root.close-live-log(); root.selected-diagnostic-kind = "crash-report"; root.load-diagnostics("client", root.selected-instance-id, "crash-report"); } } Rectangle { horizontal-stretch: 1; } }
                                 if root.selected-diagnostic-kind != "crash-report" : LiveLogViewer {

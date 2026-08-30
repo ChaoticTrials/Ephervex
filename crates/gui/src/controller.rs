@@ -1736,6 +1736,21 @@ fn register_favorite_versions(ui: &AppWindow, commands: &Sender<Command>) {
     });
 }
 
+/// A typed path, or `None` where the field was left to the global setting.
+fn optional_path(value: &str) -> Option<PathBuf> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| PathBuf::from(trimmed))
+}
+
+/// A typed number, or `None` where the field was left to the global setting.
+///
+/// Something that is not a number is also `None`: the field is numeric, and
+/// refusing to save the rest of the form over one stray character would be
+/// worse than the value it could not read staying inherited.
+fn optional_number(value: &str) -> Option<u32> {
+    value.trim().parse().ok()
+}
+
 fn favorite_versions(ui: &AppWindow) -> Vec<String> {
     ui.get_favorite_minecraft_versions()
         .iter()
@@ -2006,6 +2021,42 @@ fn register_instance_selection(
 }
 
 fn register_server_actions(ui: &AppWindow, commands: &Sender<Command>) {
+    let sender = commands.clone();
+    ui.on_save_instance_runtime(move |id, java, min, max, args| {
+        let Some(instance) = backend::parse_instance_id(&id) else {
+            return;
+        };
+        send(
+            &sender,
+            Command::SaveInstanceRuntime {
+                instance,
+                java: optional_path(&java),
+                min_memory_mib: optional_number(&min),
+                max_memory_mib: optional_number(&max),
+                // Split on whitespace: a JVM argument never contains one, and
+                // one field is easier to reason about than a list editor for
+                // something typed twice a year.
+                jvm_args: args.split_whitespace().map(ToOwned::to_owned).collect(),
+            },
+        );
+    });
+
+    let sender = commands.clone();
+    ui.on_clear_instance_runtime(move |id| {
+        if let Some(instance) = backend::parse_instance_id(&id) {
+            send(
+                &sender,
+                Command::SaveInstanceRuntime {
+                    instance,
+                    java: None,
+                    min_memory_mib: None,
+                    max_memory_mib: None,
+                    jvm_args: Vec::new(),
+                },
+            );
+        }
+    });
+
     let sender = commands.clone();
     ui.on_repair_server(move |id| {
         if let Some(id) = backend::parse_server_id(&id) {
@@ -3396,6 +3447,18 @@ fn apply_event(
         }
         Event::ArtifactCacheStatus(_) | Event::ArtifactCacheClearFinished => {
             apply_artifact_cache_event(ui, event);
+        }
+        Event::InstanceRuntime(runtime) => {
+            // A late answer for an instance the user has already left is
+            // discarded rather than typed into the fields of another one.
+            if presentation::result_is_current(&runtime.instance, &ui.get_selected_instance_id()) {
+                ui.set_instance_java_path(runtime.java.into());
+                ui.set_instance_memory_min(runtime.min_memory.into());
+                ui.set_instance_memory_max(runtime.max_memory.into());
+                ui.set_instance_jvm_args(runtime.jvm_args.into());
+                ui.set_instance_runtime_pinned(runtime.pinned);
+                ui.set_instance_runtime_global(runtime.global.into());
+            }
         }
         Event::MinecraftReleases(versions) => {
             apply_minecraft_releases(ui, versions, create_instance_name);

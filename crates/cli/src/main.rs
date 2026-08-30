@@ -43,8 +43,8 @@ use ephervex_core::{
 };
 use ephervex_i18n::Arg as MessageArg;
 use ephervex_model::{
-    DefaultModCatalog, InstanceId, LoaderKind, LoaderSelection, ModProvider, OperationId, ServerId,
-    StorageClass,
+    DefaultModCatalog, InstanceId, JavaOverride, JvmSettings, LoaderKind, LoaderSelection,
+    ModProvider, OperationId, ServerId, StorageClass,
 };
 
 #[derive(Debug, Parser)]
@@ -556,6 +556,33 @@ enum InstanceCommand {
         /// Print the path without handing it to a file manager.
         #[arg(long)]
         print: bool,
+    },
+    /// Show or change this instance's own Java and JVM settings.
+    ///
+    /// Each value falls back to the global setting until it is pinned here.
+    /// With no options, prints what is pinned.
+    Runtime {
+        id: InstanceId,
+        /// Use this Java executable instead of the selected one.
+        #[arg(long, value_name = "PATH")]
+        java: Option<PathBuf>,
+        /// Minimum heap size in MiB.
+        #[arg(long, value_name = "MIB")]
+        min_memory: Option<u32>,
+        /// Maximum heap size in MiB.
+        #[arg(long, value_name = "MIB")]
+        max_memory: Option<u32>,
+        /// One extra JVM argument. Repeatable, and replaces the pinned list.
+        ///
+        /// `allow_hyphen_values` because every JVM argument begins with one.
+        #[arg(long = "jvm-arg", value_name = "ARG", allow_hyphen_values = true)]
+        jvm_args: Vec<String>,
+        /// Remove every override and follow the global settings again.
+        #[arg(
+            long,
+            conflicts_with_all = ["java", "min_memory", "max_memory", "jvm_args"]
+        )]
+        clear: bool,
     },
     /// Remove a client instance from the index.
     Delete {
@@ -1236,6 +1263,7 @@ async fn run_instance_command(
             };
             print_folder(path.as_deref(), folder.as_str(), json)?;
         }
+        InstanceCommand::Runtime { .. } => run_instance_runtime(app, command, json)?,
         InstanceCommand::Delete { id, keep_files } => {
             let files = if *keep_files {
                 FileDisposition::Keep
@@ -4517,6 +4545,114 @@ fn preference_names(ids: &[PreferenceId]) -> Vec<&str> {
 /// An unavailable folder is a failure with an exit code, not a silent success:
 /// a script that asked for the crash reports of an instance that has never
 /// crashed should be able to tell.
+/// What one `instance runtime` invocation asked for.
+#[derive(Clone, Copy)]
+struct RuntimeArgs<'a> {
+    java: Option<&'a Path>,
+    min_memory: Option<u32>,
+    max_memory: Option<u32>,
+    jvm_args: &'a [String],
+    clear: bool,
+}
+
+fn run_instance_runtime(app: &App, command: &InstanceCommand, json: bool) -> anyhow::Result<()> {
+    let InstanceCommand::Runtime {
+        id,
+        java,
+        min_memory,
+        max_memory,
+        jvm_args,
+        clear,
+    } = command
+    else {
+        return Ok(());
+    };
+    let record = apply_instance_runtime(
+        app,
+        *id,
+        RuntimeArgs {
+            java: java.as_deref(),
+            min_memory: *min_memory,
+            max_memory: *max_memory,
+            jvm_args,
+            clear: *clear,
+        },
+    )?;
+    print_instance_runtime(&record, json);
+    Ok(())
+}
+
+/// Applies a runtime change, or reads the instance back when none was asked for.
+///
+/// Pinned values replace what was pinned before rather than merging into it, so
+/// one invocation describes one intended state.
+fn apply_instance_runtime(
+    app: &App,
+    id: InstanceId,
+    args: RuntimeArgs<'_>,
+) -> anyhow::Result<ClientRecord> {
+    if args.clear {
+        return Ok(app.set_client_runtime_settings(id, None, None)?);
+    }
+    let asked = args.java.is_some()
+        || args.min_memory.is_some()
+        || args.max_memory.is_some()
+        || !args.jvm_args.is_empty();
+    if !asked {
+        return Ok(app.client(id)?);
+    }
+    let jvm = JvmSettings {
+        min_memory_mib: args.min_memory,
+        max_memory_mib: args.max_memory,
+        jvm_args: args.jvm_args.to_vec(),
+    };
+    Ok(app.set_client_runtime_settings(
+        id,
+        args.java.map(JavaOverride::new),
+        (!jvm.pins_nothing()).then_some(jvm),
+    )?)
+}
+
+/// What one instance pins for itself, and what it leaves to the global setting.
+fn print_instance_runtime(record: &ClientRecord, json: bool) {
+    let java = record
+        .java_override
+        .as_ref()
+        .map(|java| java.path.display().to_string());
+    let jvm = record.jvm_override.as_ref();
+    if json {
+        print_json(&serde_json::json!({
+            "instance": record.id.to_string(),
+            "java": java,
+            "min_memory_mib": jvm.and_then(|jvm| jvm.min_memory_mib),
+            "max_memory_mib": jvm.and_then(|jvm| jvm.max_memory_mib),
+            "jvm_args": jvm.map(|jvm| jvm.jvm_args.clone()).unwrap_or_default(),
+        }));
+        return;
+    }
+    let global = "follows the global setting";
+    println!("java:       {}", java.as_deref().unwrap_or(global));
+    println!(
+        "min memory: {}",
+        jvm.and_then(|jvm| jvm.min_memory_mib)
+            .map_or_else(|| global.to_owned(), |mib| format!("{mib} MiB"))
+    );
+    println!(
+        "max memory: {}",
+        jvm.and_then(|jvm| jvm.max_memory_mib)
+            .map_or_else(|| global.to_owned(), |mib| format!("{mib} MiB"))
+    );
+    let args = jvm.map(|jvm| jvm.jvm_args.as_slice()).unwrap_or_default();
+    println!(
+        "jvm args:   {}",
+        if args.is_empty() {
+            global.to_owned()
+        } else {
+            args.join(" ")
+        }
+    );
+}
+
 fn print_folder(path: Option<&Path>, folder: &str, json: bool) -> anyhow::Result<()> {
     if let Some(path) = path {
         if json {
