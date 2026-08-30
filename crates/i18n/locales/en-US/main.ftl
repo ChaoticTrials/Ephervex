@@ -1163,6 +1163,11 @@ gui-delete-server = Delete Server...
 gui-delete-instance-detail = Remove "{ $value }" from Ephervex?
 gui-delete-server-detail = Remove "{ $value }" from Ephervex?
 gui-delete-choice-detail = Keeping files only removes the Ephervex record. Deleting files permanently removes the managed game or server directory.
+# $count is how many servers were created from this instance.
+gui-delete-instance-linked = { $count ->
+    [one] Its linked server is deleted with it, the same way.
+   *[other] Its { $count } linked servers are deleted with it, the same way.
+}
 gui-remove-from-ephervex = Keep Files
 gui-delete-files = Delete Files
 gui-instance-deleted = Instance removed.
@@ -1257,6 +1262,8 @@ gui-no-servers-detail = Create a standalone exact server or create one linked to
 gui-no-standalone-servers-detail = No standalone servers are shown. Linked servers remain available from their client workspaces.
 gui-linked-server = Linked Server
 gui-no-linked-server-detail = Add a linked server when this reproduction environment needs a matching dedicated server.
+gui-repair-server = Repair
+gui-server-repaired = Cleared the stale runtime state. The server can be started again.
 gui-server-needs-attention = This server needs attention before it can be started reliably.
 gui-back-instance = Back to Instance
 gui-no-server-selected = No server selected

@@ -2006,6 +2006,13 @@ fn register_instance_selection(
 }
 
 fn register_server_actions(ui: &AppWindow, commands: &Sender<Command>) {
+    let sender = commands.clone();
+    ui.on_repair_server(move |id| {
+        if let Some(id) = backend::parse_server_id(&id) {
+            send(&sender, Command::RepairServer(id));
+        }
+    });
+
     register_server_property_actions(ui, commands);
 
     let sender = commands.clone();

@@ -54,6 +54,8 @@ pub enum Command {
     /// Records the Minecraft releases to offer first, in the order given.
     SetFavoriteMinecraftVersions(Vec<String>),
     CancelOperation(String),
+    /// Clear the runtime evidence a server left behind when its supervisor died.
+    RepairServer(ServerId),
     /// Stop the game this launcher started for one instance.
     ///
     /// Addressed by the instance rather than by an operation id, because that
@@ -1027,6 +1029,18 @@ fn run_worker(
             Command::CancelOperation(id) => cancel_operation(&cancellations, &events, &id),
             Command::KillInstance(instance) => {
                 kill_instance(&cancellations, &events, instance);
+            }
+            Command::RepairServer(id) => {
+                match app.recover_server_runtime(id) {
+                    Ok(()) => {
+                        let _ = events.send(Event::Toast {
+                            message: lookup("gui-server-repaired"),
+                            error: false,
+                        });
+                    }
+                    Err(error) => send_error(&events, &error),
+                }
+                send_snapshot(&app, &events);
             }
             Command::PickImport { generation } => {
                 // The attempt begins here, at the controller's request, not

@@ -556,12 +556,25 @@ impl App {
         Ok(self.registry().list_clients()?)
     }
 
-    /// Deletes a client instance.
+    /// Deletes a client instance and every server linked to it.
     ///
     /// `files` is explicit rather than inferred: removing a user's game
-    /// directory is not something to decide on their behalf from context.
+    /// directory is not something to decide on their behalf from context. The
+    /// linked servers follow the same choice, because a server that exists to
+    /// reproduce one client has nothing left to be once that client is gone.
+    ///
+    /// The storage layer's own delete only unlinks them, which is the right
+    /// primitive: whether a linked server outlives its client is a product
+    /// decision, not a storage invariant, so it is made here.
+    ///
+    /// A running linked server refuses the whole deletion rather than being
+    /// stopped as a side effect. Nothing is removed in that case, so the user
+    /// can stop it and ask again.
     #[instrument(skip(self))]
     pub fn delete_client(&self, id: InstanceId, files: FileDisposition) -> CoreResult<()> {
+        for server in self.linked_server_ids(id)? {
+            self.delete_server(server, files)?;
+        }
         Ok(self.registry().delete_client(id, files)?)
     }
 
@@ -1452,6 +1465,46 @@ mod tests {
         app.delete_client(created.id, FileDisposition::Remove)
             .expect("delete");
         assert!(app.list_clients().expect("list").is_empty());
+    }
+
+    /// A linked server exists to reproduce one client. Left behind it is
+    /// indistinguishable from a standalone one, which is how a launcher
+    /// accumulates servers nobody can account for.
+    #[test]
+    fn deleting_a_client_takes_the_servers_linked_to_it() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let client = app
+            .create_client_for_test(NewClient::new(
+                "Bug Repro",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create");
+
+        let staging = base.path().join("staged-server");
+        std::fs::create_dir_all(&staging).expect("staging");
+        let server = app
+            .registry_for_services()
+            .prepare_server(ephervex_storage::NewServer::linked(
+                "Repro Server",
+                client.id,
+            ))
+            .expect("prepare");
+        app.registry_for_services()
+            .publish_staged_server(&server, &staging)
+            .expect("publish");
+        assert_eq!(app.linked_server_ids(client.id).expect("linked").len(), 1);
+
+        app.delete_client(client.id, FileDisposition::Remove)
+            .expect("delete");
+
+        assert!(app.list_clients().expect("clients").is_empty());
+        assert!(
+            app.list_servers().expect("servers").is_empty(),
+            "a linked server must not outlive the client it reproduces"
+        );
+        assert!(!server.root.exists(), "its files follow the same choice");
     }
 
     #[test]
