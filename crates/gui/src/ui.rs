@@ -38,6 +38,13 @@ slint::slint! {
         out property <color> vanilla: #8fb8cd;
         out property <color> forge: #d8a653;
         out property <color> neoforge: #65c58a;
+        // Every control that can share a toolbar row is this tall, so a row
+        // that mixes a button, a chip and a field lines up without each caller
+        // having to know what the others chose.
+        out property <length> control-height: 36px;
+        // The primary navigation column. Named because the page bodies beside
+        // it have to know how much of the window is left.
+        out property <length> sidebar-width: 218px;
     }
 
     export struct InstanceRow {
@@ -334,7 +341,7 @@ slint::slint! {
         in property <bool> enabled: true;
         callback clicked();
         min-width: max(88px, label.preferred-width + 28px);
-        height: 36px;
+        height: Theme.control-height;
         horizontal-stretch: 0;
         border-radius: 6px;
         border-width: 1px;
@@ -368,8 +375,8 @@ slint::slint! {
         in property <string> version;
         in property <bool> enabled: true;
         callback toggled();
-        width: 36px;
-        height: 36px;
+        width: Theme.control-height;
+        height: Theme.control-height;
         border-radius: 6px;
         border-width: 1px;
         border-color: !root.enabled ? Theme.border : root.favorite ? Theme.warning.with-alpha(0.7) : area.has-hover ? Theme.accent : Theme.border;
@@ -394,8 +401,8 @@ slint::slint! {
         in property <string> accessible-name;
         in property <bool> enabled: true;
         callback clicked();
-        width: 36px;
-        height: 36px;
+        width: Theme.control-height;
+        height: Theme.control-height;
         border-radius: 6px;
         border-width: 1px;
         border-color: area.has-hover ? Theme.accent : Theme.border;
@@ -418,7 +425,7 @@ slint::slint! {
         callback accepted();
         callback edited(string);
         callback focus-lost();
-        height: 36px;
+        height: Theme.control-height;
         min-width: 120px;
         border-radius: 6px;
         border-width: 1px;
@@ -497,8 +504,8 @@ slint::slint! {
         in property <string> accessible-name: text;
         in property <bool> selected;
         callback clicked();
-        height: 28px;
-        width: label.preferred-width + 18px;
+        height: Theme.control-height;
+        width: label.preferred-width + 24px;
         horizontal-stretch: 0;
         border-radius: 5px;
         border-width: 1px;
@@ -550,10 +557,10 @@ slint::slint! {
         VerticalLayout {
             spacing: 0px;
             Rectangle {
-                height: 42px;
+                height: Theme.control-height + 12px;
                 background: Theme.surface;
                 HorizontalLayout {
-                    padding-left: 10px; padding-right: 10px; spacing: 6px; alignment: center;
+                    padding-left: 10px; padding-right: 10px; spacing: 6px; cross-axis-alignment: center;
                     all-levels := FilterChip { text: GuiI18n.text("gui-all"); accessible-name: GuiI18n.text("gui-filter-all-levels"); selected: root.trace-enabled && root.debug-enabled && root.info-enabled && root.warn-enabled && root.error-enabled && root.fatal-enabled && root.other-enabled; clicked => { root.set-level("all", !all-levels.selected); } }
                     FilterChip { text: "INFO"; accessible-name: GuiI18n.text("gui-filter-info"); selected: root.info-enabled; clicked => { root.set-level("info", !root.info-enabled); } }
                     FilterChip { text: "WARN"; accessible-name: GuiI18n.text("gui-filter-warn"); selected: root.warn-enabled; clicked => { root.set-level("warn", !root.warn-enabled); } }
@@ -566,10 +573,10 @@ slint::slint! {
                 }
             }
             Rectangle {
-                height: 44px;
+                height: Theme.control-height + 12px;
                 background: Theme.surface;
                 HorizontalLayout {
-                    padding-left: 10px; padding-right: 10px; spacing: 8px; alignment: center;
+                    padding-left: 10px; padding-right: 10px; spacing: 8px; cross-axis-alignment: center;
                     TextField { text <=> root.query; placeholder: GuiI18n.text("gui-search-retained-logs"); input-type: InputType.search; width: 230px; accepted => { root.search(root.query); } accessible-label: GuiI18n.text("gui-search-retained-logs"); }
                     AppButton { text: GuiI18n.text("gui-find"); min-width: 62px; clicked => { root.search(root.query); } }
                     FilterChip { text: GuiI18n.text("gui-wrap-lines"); accessible-name: GuiI18n.text("gui-wrap-lines"); selected: root.wrap-lines; clicked => { root.wrap-lines = !root.wrap-lines; } }
@@ -749,7 +756,10 @@ slint::slint! {
         accessible-action-default => { root.clicked(); }
         Rectangle { x: 0px; y: 8px; width: 3px; height: 30px; background: root.selected ? Theme.accent : transparent; border-radius: 2px; }
         HorizontalLayout {
-            alignment: center;
+            // `alignment` is the main axis only. Without the cross-axis rule a
+            // fixed-size image is pinned to the top of the row while the label,
+            // which has no fixed height, stretches and centers itself inside it.
+            cross-axis-alignment: center;
             padding-left: 16px; padding-right: 12px; spacing: 13px;
             Image { source: root.icon; width: 22px; height: 22px; image-fit: contain; }
             Text { text: root.label; color: root.selected ? Theme.accent : Theme.text-secondary; font-size: Theme.row-heading-size; vertical-alignment: center; }
@@ -902,17 +912,31 @@ slint::slint! {
         }
     }
 
-    component EmptyState inherits Rectangle {
+    // A layout at the root rather than a rectangle holding one.
+    //
+    // A layout fills the cross axis of the layout it sits in; a plain rectangle
+    // takes the size of its own content. This is a tab body and a panel body,
+    // so it has to fill: as a rectangle it turned a whole tab into a narrow
+    // column of centred lines while every other tab, all of them layouts,
+    // spanned the window.
+    component EmptyState inherits VerticalLayout {
         in property <string> title;
         in property <string> message;
         callback primary();
         callback secondary();
         in property <string> primary-text;
         in property <string> secondary-text;
-        background: transparent;
-        VerticalLayout {
-            alignment: center; spacing: 10px; padding: 32px;
-            Image { source: @image-url("../../../assets/icons/environment-generic.svg"); width: 64px; height: 64px; image-fit: contain; }
+        alignment: center;
+        spacing: 10px;
+        padding: 32px;
+        // Centred as a block and kept to a readable measure, rather than one
+        // sentence stretched across a whole window.
+        HorizontalLayout {
+            alignment: center;
+            VerticalLayout {
+            max-width: 560px;
+            alignment: center; spacing: 10px;
+            HorizontalLayout { alignment: center; Image { source: @image-url("../../../assets/icons/environment-generic.svg"); width: 64px; height: 64px; image-fit: contain; } }
             Heading { text: root.title; horizontal-alignment: center; }
             BodyText { text: root.message; horizontal-alignment: center; wrap: word-wrap; }
             Rectangle { height: 5px; }
@@ -920,6 +944,7 @@ slint::slint! {
                 alignment: center; spacing: 8px;
                 if root.secondary-text != "" : AppButton { text: root.secondary-text; clicked => { root.secondary(); } }
                 if root.primary-text != "" : AppButton { text: root.primary-text; tone: "primary"; clicked => { root.primary(); } }
+            }
             }
         }
     }
@@ -1273,7 +1298,7 @@ slint::slint! {
         border-width: 1px;
         border-color: Theme.accent.with-alpha(0.7);
         background: Theme.surface;
-        HorizontalLayout { padding: 15px; spacing: 16px; alignment: center;
+        HorizontalLayout { padding: 15px; spacing: 16px; cross-axis-alignment: center;
             LoaderGlyph { kind: item.loader-kind; server: item.server; }
             VerticalLayout { horizontal-stretch: 1; spacing: 5px;
                 Heading { text: item.name; }
@@ -1299,7 +1324,7 @@ slint::slint! {
         border-color: error ? Theme.danger.with-alpha(0.75) : Theme.success.with-alpha(0.75);
         background: Theme.elevated;
         Rectangle { x: 0px; y: 0px; width: 4px; height: parent.height; background: root.error ? Theme.danger : Theme.success; border-radius: 3px; }
-        HorizontalLayout { padding-left: 16px; padding-right: 10px; padding-top: 10px; padding-bottom: 10px; spacing: 10px; alignment: center;
+        HorizontalLayout { padding-left: 16px; padding-right: 10px; padding-top: 10px; padding-bottom: 10px; spacing: 10px; cross-axis-alignment: center;
             VerticalLayout { horizontal-stretch: 1; spacing: 3px; Heading { text: root.error ? GuiI18n.text("gui-notification-error") : GuiI18n.text("gui-notification-complete"); font-size: Theme.body-size; } toast-message := BodyText { text: root.message; color: Theme.text-secondary; wrap: word-wrap; } }
             IconButton { icon: @image-url("../../../assets/icons/close.svg"); accessible-name: GuiI18n.text("gui-dismiss-notification"); width: 32px; height: 32px; clicked => { root.dismiss(); } }
         }
@@ -2086,9 +2111,13 @@ slint::slint! {
                 border-width: 1px;
                 border-color: Theme.border;
                 HorizontalLayout {
-                    alignment: center; padding-left: 20px; padding-right: 20px; spacing: 14px;
-                    Image { source: root.logo; width: 36px; height: 36px; image-fit: contain; accessible-label: GuiI18n.text("gui-logo-accessible"); }
-                    Heading { text: "Ephervex"; font-size: Theme.brand-size; width: 180px; }
+                    // No `alignment`: under anything but the default, every cell
+                    // is given its preferred size, which collapses the spacer
+                    // below to nothing and centers the whole bar as one block.
+                    cross-axis-alignment: center;
+                    padding-left: 20px; padding-right: 20px; spacing: 14px;
+                    Image { source: root.logo; width: 32px; height: 32px; image-fit: contain; accessible-label: GuiI18n.text("gui-logo-accessible"); }
+                    Heading { text: "Ephervex"; font-size: Theme.brand-size; }
                     Rectangle { horizontal-stretch: 1; }
                     if root.page == 0 && root.workspace == "" : AppButton { text: GuiI18n.text("gui-import-modpack"); clicked => { root.open-import-modal(); } }
                     if root.page == 0 && root.workspace == "" : AppButton { text: GuiI18n.text("gui-new-instance"); tone: "primary"; min-width: 148px; clicked => { root.open-create-instance-modal(); } }
@@ -2101,7 +2130,7 @@ slint::slint! {
                 spacing: 0px;
                 // Primary navigation.
                 Rectangle {
-                    width: 218px;
+                    width: Theme.sidebar-width;
                     background: #11171a;
                     border-width: 1px;
                     border-color: Theme.border;
@@ -2116,536 +2145,550 @@ slint::slint! {
                     }
                 }
 
-                // Instances list and inspector.
-                if root.page == 0 && root.workspace == "" : HorizontalLayout {
-                    spacing: 0px;
+                // One container for every page body, always present and
+                // always claiming the space beside the sidebar.
+                //
+                // A conditional child contributes no layout information of
+                // its own, so a page that asked to stretch was given only
+                // the width its content preferred. That is why an instance
+                // workspace collapsed into a column whenever the open tab
+                // happened to be a narrow one.
+                Rectangle {
                     horizontal-stretch: 1;
-                    Rectangle {
-                        horizontal-stretch: 1;
-                        background: Theme.background;
-                        VerticalLayout {
-                            padding: 24px; spacing: 18px;
-                            HorizontalLayout {
-                                PageIntro { title: GuiI18n.text("gui-instances"); subtitle: GuiI18n.text("gui-instances-detail"); }
-                                BodyText { text: GuiI18n.count("gui-client-instances-count", root.instances.length); color: Theme.text-muted; }
-                            }
-                            Rectangle {
-                                height: 58px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface;
-                                HorizontalLayout {
-                                    padding-left: 10px; padding-right: 10px; spacing: 8px;
-                                    AppButton { text: GuiI18n.text("gui-all"); tone: root.instance-filter == "all" ? "primary" : "secondary"; min-width: 70px; clicked => { root.instance-filter = "all"; root.refresh(); } }
-                                    AppButton { text: GuiI18n.text("gui-temporary"); tone: root.instance-filter == "temporary" ? "primary" : "secondary"; clicked => { root.instance-filter = "temporary"; root.refresh(); } }
-                                    AppButton { text: GuiI18n.text("gui-persistent"); tone: root.instance-filter == "persistent" ? "primary" : "secondary"; clicked => { root.instance-filter = "persistent"; root.refresh(); } }
-                                    Rectangle { horizontal-stretch: 1; }
-                                    TextField { text <=> root.instance-query; placeholder: GuiI18n.text("gui-filter-instances"); input-type: InputType.search; width: 290px; accepted => { root.refresh(); } }
-                                }
-                            }
-                            if root.loading : VerticalLayout { alignment: center; Spinner { width: 38px; height: 38px; } BodyText { text: GuiI18n.text("gui-loading-instances"); horizontal-alignment: center; } }
-                            if !root.loading && root.instances.length == 0 && root.pending-instances.length == 0 : EmptyState {
-                                title: GuiI18n.text("gui-no-client-instances");
-                                message: GuiI18n.text("gui-no-client-instances-detail");
-                                primary-text: GuiI18n.text("gui-modal-new-instance"); secondary-text: GuiI18n.text("gui-import-modpack");
-                                primary => { root.open-create-instance-modal(); }
-                                secondary => { root.open-import-modal(); }
-                            }
-                            if !root.loading && (root.instances.length > 0 || root.pending-instances.length > 0) : ScrollView {
-                                viewport-width: self.width;
-                                VerticalLayout {
-                                    spacing: 12px;
-                                    for pending in root.pending-instances : PendingCard { item: pending; }
-                                    for item[index] in root.instances : InstanceCard {
-                                        visible: root.instance-filter == "all" || item.storage-kind == root.instance-filter;
-                                        item: item;
-                                        selected: item.id == root.selected-instance-id;
-                                        choose(id) => { root.selected-instance-id = id; root.select-instance(id); }
-                                        launch(id) => { root.launch-client(id); }
-                                        kill(id) => { root.kill-instance(id); }
-                                        open-workspace(id) => { root.selected-instance-id = id; root.selected-instance-index = index; root.select-instance(id); root.workspace = "instance"; root.workspace-tab = "Overview"; root.load-instance-workspace(id); }
-                                        open-folder(id) => { root.open-client-folder(id); }
-                                        create-server(id, name) => { root.create-server-client-id = id; root.create-server-name = name + " Server"; root.modal = "create-server"; }
-                                        duplicate(id) => { root.duplicate-client(id); }
-                                        delete(id, name) => { root.pending-action-id = id; root.pending-action-name = name; root.modal = "delete-instance"; }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    if root.show-inspector && root.selected-instance-index >= 0 : InstanceInspector {
-                        width: 360px;
-                        has-selection: root.selected-instance-index >= 0;
-                        item: root.selected-instance-index >= 0 ? root.instances[root.selected-instance-index] : {};
-                        launch(id) => { root.launch-client(id); }
-                        kill(id) => { root.kill-instance(id); }
-                        connect(client, server) => { root.launch-and-connect(client, server); }
-                        open-folder(id) => { root.open-client-folder(id); }
-                        workspace(id) => { root.workspace = "instance"; root.workspace-tab = "Overview"; root.load-instance-workspace(id); }
-                        create-server(id, name) => { root.create-server-client-id = id; root.create-server-name = name + " Server"; root.modal = "create-server"; }
-                        diagnostics(id) => { root.workspace = "instance"; root.workspace-tab = "Logs"; root.selected-diagnostic-kind = "log"; root.load-instance-workspace(id); root.open-live-log("client", id); }
-                    }
-                }
+                    background: Theme.background;
 
-                if root.page == 0 && root.workspace == "instance" : Rectangle {
-                    horizontal-stretch: 1; background: Theme.background;
-                    VerticalLayout {
-                        padding: 22px; spacing: 14px;
-                        HorizontalLayout { spacing: 12px; AppButton { text: GuiI18n.text("gui-back-instances"); clicked => { root.close-live-log(); root.workspace = ""; } } Heading { text: root.selected-instance-index >= 0 ? root.instances[root.selected-instance-index].name : GuiI18n.text("gui-instance"); font-size: Theme.workspace-title-size; } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-launch"); tone: "primary"; enabled: root.selected-instance-index >= 0 && root.instances[root.selected-instance-index].can-launch; clicked => { root.launch-client(root.selected-instance-id); } } }
-                        HorizontalLayout {
-                            spacing: 4px;
-                            WorkspaceTab { text: GuiI18n.text("gui-instance-tab-overview"); selected: root.workspace-tab == "Overview"; clicked => { root.close-live-log(); root.workspace-tab = "Overview"; } }
-                            WorkspaceTab { text: GuiI18n.text("gui-instance-tab-mods"); selected: root.workspace-tab == "Mods"; clicked => { root.close-live-log(); root.workspace-tab = "Mods"; } }
-                            WorkspaceTab { text: GuiI18n.text("gui-instance-tab-minecraft-settings"); selected: root.workspace-tab == "Minecraft Settings"; clicked => { root.close-live-log(); root.workspace-tab = "Minecraft Settings"; } }
-                            WorkspaceTab { text: GuiI18n.text("gui-instance-tab-logs"); selected: root.workspace-tab == "Logs"; clicked => { root.workspace-tab = "Logs"; root.selected-diagnostic-kind = "log"; root.open-live-log("client", root.selected-instance-id); } }
-                            Rectangle { horizontal-stretch: 1; }
-                        }
-                        Divider { }
-                        if root.workspace-tab == "Overview" : ScrollView {
-                            VerticalLayout { alignment: start; width: min(parent.width, 980px); spacing: 12px;
-                                Heading { text: GuiI18n.text("gui-reproduction-environment"); }
-                                BodyText { text: GuiI18n.text("gui-reproduction-environment-detail"); }
-                                Rectangle { height: 126px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface;
-                                    HorizontalLayout { padding: 18px; spacing: 18px; LoaderGlyph { kind: root.instances[root.selected-instance-index].loader-kind; } VerticalLayout { Heading { text: root.instances[root.selected-instance-index].name; } BodyText { text: GuiI18n.values("gui-target-summary", root.instances[root.selected-instance-index].minecraft, root.instances[root.selected-instance-index].loader); } BodyText { text: root.instances[root.selected-instance-index].storage + " | " + root.instances[root.selected-instance-index].source; } BodyText { text: root.instances[root.selected-instance-index].path; color: Theme.text-muted; } } }
+                    // Instances list and inspector.
+                    if root.page == 0 && root.workspace == "" : HorizontalLayout {
+                        spacing: 0px;
+                        horizontal-stretch: 1;
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            background: Theme.background;
+                            VerticalLayout {
+                                padding: 24px; spacing: 18px;
+                                HorizontalLayout {
+                                    PageIntro { title: GuiI18n.text("gui-instances"); subtitle: GuiI18n.text("gui-instances-detail"); }
+                                    BodyText { text: GuiI18n.count("gui-client-instances-count", root.instances.length); color: Theme.text-muted; }
                                 }
-                                if root.instances[root.selected-instance-index].loader-kind != "vanilla" : HorizontalLayout { spacing: 10px; BodyText { text: GuiI18n.value("gui-loader-change-summary", root.instances[root.selected-instance-index].loader); color: Theme.text-secondary; } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-loader-change-open"); clicked => { root.open-loader-change(); } } }
-                                BodyText { text: root.instances[root.selected-instance-index].storage-kind == "temporary" ? GuiI18n.text("gui-temporary-lifecycle") : GuiI18n.text("gui-persistent-lifecycle"); color: Theme.text-muted; wrap: word-wrap; }
-                                Divider { }
-                                HorizontalLayout { Heading { text: GuiI18n.text("gui-linked-server"); font-size: Theme.section-size; } Rectangle { horizontal-stretch: 1; } if root.linked-servers.length == 0 && root.linked-pending-servers.length == 0 : AppButton { text: GuiI18n.text("gui-create-linked-server"); clicked => { root.create-server-client-id = root.selected-instance-id; root.create-server-name = root.instances[root.selected-instance-index].name + " Server"; root.modal = "create-server"; } } }
-                                if root.linked-servers.length == 0 && root.linked-pending-servers.length == 0 : BodyText { text: GuiI18n.text("gui-no-linked-server-detail"); color: Theme.text-muted; wrap: word-wrap; }
-                                for pending in root.linked-pending-servers : PendingCard { visible: pending.linked-client-id == root.selected-instance-id; item: pending; }
-                                for server in root.linked-servers : Rectangle { height: 142px; border-radius: 8px; border-width: 1px; border-color: server.needs-attention ? Theme.warning : Theme.border; background: Theme.surface; VerticalLayout { padding: 14px; spacing: 8px;
-                                    HorizontalLayout { Heading { text: server.name; font-size: Theme.row-heading-size; } Pill { text: server.state; tone-color: server.state-kind == "running" ? Theme.success : server.needs-attention ? Theme.warning : Theme.text-secondary; } Rectangle { horizontal-stretch: 1; } BodyText { text: server.address; color: Theme.text-muted; } }
-                                    BodyText { text: server.needs-attention ? GuiI18n.text("gui-server-needs-attention") : server.state-detail; color: server.needs-attention ? Theme.warning : Theme.text-secondary; }
-                                    HorizontalLayout { spacing: 8px;
-                                        AppButton { text: GuiI18n.text("gui-open-server-workspace"); clicked => { root.selected-server-id = server.id; root.server-workspace-return-client = root.selected-instance-id; root.page = 1; root.workspace = "server"; root.workspace-tab = "Overview"; root.load-server-workspace(server.id); } }
-                                        if server.can-start || server.can-stop : AppButton { text: server.can-start ? GuiI18n.text("gui-start") : GuiI18n.text("gui-stop"); tone: "primary"; clicked => { if server.can-start { root.server-start(server.id); } else { root.server-stop(server.id); } } }
-                                        AppButton { text: GuiI18n.text("gui-launch-client-connect"); enabled: server.can-connect; clicked => { root.launch-and-connect(root.selected-instance-id, server.id); } }
-                                        AppButton { text: GuiI18n.text("gui-open-folder"); clicked => { root.open-server-folder(server.id); } }
-                                    }
-                                } }
-                            }
-                        }
-                        if root.workspace-tab == "Mods" : HorizontalLayout {
-                            spacing: 16px;
-                            Rectangle { width: 46%; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface;
-                                VerticalLayout { padding: 16px; spacing: 10px; Heading { text: GuiI18n.text("gui-managed-mods"); } BodyText { text: GuiI18n.text("gui-managed-mods-detail"); wrap: word-wrap; }
-                                    if root.managed-mods-notice != "" : BodyText { text: root.managed-mods-notice; color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
-                                    if root.managed-mods.length == 0 : EmptyState { title: GuiI18n.text("gui-no-managed-mods"); message: GuiI18n.text("gui-no-managed-mods-detail"); }
-                                    ScrollView { viewport-width: self.width; VerticalLayout { spacing: 8px; for mod in root.managed-mods : ModCard { item: mod; manage(path) => { root.open-mod-manager(path); } } } }
-                                }
-                            }
-                            Rectangle { horizontal-stretch: 1; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface;
-                                VerticalLayout { padding: 16px; spacing: 10px; Heading { text: GuiI18n.text("gui-add-mods"); } BodyText { text: GuiI18n.text("gui-catalog-compatibility"); wrap: word-wrap; }
-                                    HorizontalLayout { spacing: 8px; Text { text: GuiI18n.text("gui-mod-catalog"); color: Theme.text-secondary; font-size: Theme.label-size; vertical-alignment: center; }
-                                        FilterChip { text: GuiI18n.text("gui-provider-modrinth"); accessible-name: GuiI18n.text("gui-provider-modrinth"); selected: root.mod-provider == "modrinth"; clicked => { root.switch-mod-catalog("modrinth"); } }
-                                        FilterChip { text: GuiI18n.text("gui-provider-curseforge"); accessible-name: GuiI18n.text("gui-provider-curseforge"); selected: root.mod-provider == "curseforge"; clicked => { root.switch-mod-catalog("curseforge"); } }
+                                Rectangle {
+                                    height: Theme.control-height + 20px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface;
+                                    HorizontalLayout {
+                                        cross-axis-alignment: center;
+                                        padding-left: 10px; padding-right: 10px; spacing: 8px;
+                                        AppButton { text: GuiI18n.text("gui-all"); tone: root.instance-filter == "all" ? "primary" : "secondary"; min-width: 70px; clicked => { root.instance-filter = "all"; root.refresh(); } }
+                                        AppButton { text: GuiI18n.text("gui-temporary"); tone: root.instance-filter == "temporary" ? "primary" : "secondary"; clicked => { root.instance-filter = "temporary"; root.refresh(); } }
+                                        AppButton { text: GuiI18n.text("gui-persistent"); tone: root.instance-filter == "persistent" ? "primary" : "secondary"; clicked => { root.instance-filter = "persistent"; root.refresh(); } }
                                         Rectangle { horizontal-stretch: 1; }
+                                        TextField { text <=> root.instance-query; placeholder: GuiI18n.text("gui-filter-instances"); input-type: InputType.search; width: 290px; accepted => { root.refresh(); } }
                                     }
-                                    HorizontalLayout { TextField { text <=> root.mod-query; placeholder: GuiI18n.text("gui-search-compatible-mods"); input-type: InputType.search; horizontal-stretch: 1; accepted => { root.search-mods(root.selected-instance-id, root.mod-provider, root.mod-query); } } AppButton { text: GuiI18n.text("gui-search"); tone: "primary"; enabled: !root.mod-search-loading; clicked => { root.search-mods(root.selected-instance-id, root.mod-provider, root.mod-query); } } }
-                                    if root.mod-search-notice != "" : Rectangle { border-radius: 6px; border-width: 1px; border-color: Theme.danger; background: Theme.background; VerticalLayout { padding: 10px; spacing: 6px; BodyText { text: root.mod-search-notice; color: Theme.text-secondary; wrap: word-wrap; } if root.mod-provider == "curseforge" : HorizontalLayout { AppButton { text: GuiI18n.text("gui-open-providers-settings"); clicked => { root.page = 4; root.workspace = ""; root.workspace-tab = "Providers & APIs"; } } Rectangle { horizontal-stretch: 1; } } } }
-                                    if root.mod-search-loading : BodyText { text: GuiI18n.text("gui-mod-search-running"); color: Theme.text-muted; }
-                                    if !root.mod-search-loading && root.mod-search-ran && root.mod-search-notice == "" && root.mod-results.length == 0 && root.mod-results-next-offset < 0 : EmptyState { title: GuiI18n.text("gui-no-mod-results"); message: GuiI18n.text("gui-no-mod-results-detail"); }
-                                    ScrollView { VerticalLayout { spacing: 8px; for mod in root.mod-results : Rectangle { height: 92px; clip: true; border-radius: 6px; border-width: 1px; border-color: Theme.border; background: Theme.background; HorizontalLayout { padding: 10px; spacing: 11px; VerticalLayout { alignment: center; ModArtwork { icon: mod.icon; origin-kind: "user"; } } VerticalLayout { horizontal-stretch: 1; Heading { text: mod.title; font-size: Theme.row-heading-size; overflow: elide; } BodyText { text: mod.description; wrap: word-wrap; overflow: elide; vertical-alignment: top; height: Theme.body-size * 2.7; } BodyText { text: GuiI18n.values("gui-mod-result-meta", mod.author, mod.note); color: Theme.text-muted; overflow: elide; } } VerticalLayout { alignment: center; AppButton { width: 120px; text: GuiI18n.text("gui-install"); tone: "primary"; enabled: !root.mod-action-pending; clicked => { root.install-from-browser(root.selected-instance-id, root.mod-provider, mod.project-id); } } } } }
-                                        if root.mod-results-next-offset >= 0 : HorizontalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-load-more"); enabled: !root.mod-search-loading; clicked => { root.load-more-mods(root.selected-instance-id, root.mod-search-provider, root.mod-search-submitted, root.mod-results-next-offset); } } }
+                                }
+                                if root.loading : VerticalLayout { alignment: center; Spinner { width: 38px; height: 38px; } BodyText { text: GuiI18n.text("gui-loading-instances"); horizontal-alignment: center; } }
+                                if !root.loading && root.instances.length == 0 && root.pending-instances.length == 0 : EmptyState {
+                                    title: GuiI18n.text("gui-no-client-instances");
+                                    message: GuiI18n.text("gui-no-client-instances-detail");
+                                    primary-text: GuiI18n.text("gui-modal-new-instance"); secondary-text: GuiI18n.text("gui-import-modpack");
+                                    primary => { root.open-create-instance-modal(); }
+                                    secondary => { root.open-import-modal(); }
+                                }
+                                if !root.loading && (root.instances.length > 0 || root.pending-instances.length > 0) : ScrollView {
+                                    viewport-width: self.width;
+                                    VerticalLayout {
+                                        spacing: 12px;
+                                        for pending in root.pending-instances : PendingCard { item: pending; }
+                                        for item[index] in root.instances : InstanceCard {
+                                            visible: root.instance-filter == "all" || item.storage-kind == root.instance-filter;
+                                            item: item;
+                                            selected: item.id == root.selected-instance-id;
+                                            choose(id) => { root.selected-instance-id = id; root.select-instance(id); }
+                                            launch(id) => { root.launch-client(id); }
+                                            kill(id) => { root.kill-instance(id); }
+                                            open-workspace(id) => { root.selected-instance-id = id; root.selected-instance-index = index; root.select-instance(id); root.workspace = "instance"; root.workspace-tab = "Overview"; root.load-instance-workspace(id); }
+                                            open-folder(id) => { root.open-client-folder(id); }
+                                            create-server(id, name) => { root.create-server-client-id = id; root.create-server-name = name + " Server"; root.modal = "create-server"; }
+                                            duplicate(id) => { root.duplicate-client(id); }
+                                            delete(id, name) => { root.pending-action-id = id; root.pending-action-name = name; root.modal = "delete-instance"; }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if root.show-inspector && root.selected-instance-index >= 0 : InstanceInspector {
+                            width: 360px;
+                            has-selection: root.selected-instance-index >= 0;
+                            item: root.selected-instance-index >= 0 ? root.instances[root.selected-instance-index] : {};
+                            launch(id) => { root.launch-client(id); }
+                            kill(id) => { root.kill-instance(id); }
+                            connect(client, server) => { root.launch-and-connect(client, server); }
+                            open-folder(id) => { root.open-client-folder(id); }
+                            workspace(id) => { root.workspace = "instance"; root.workspace-tab = "Overview"; root.load-instance-workspace(id); }
+                            create-server(id, name) => { root.create-server-client-id = id; root.create-server-name = name + " Server"; root.modal = "create-server"; }
+                            diagnostics(id) => { root.workspace = "instance"; root.workspace-tab = "Logs"; root.selected-diagnostic-kind = "log"; root.load-instance-workspace(id); root.open-live-log("client", id); }
+                        }
+                    }
+
+                    if root.page == 0 && root.workspace == "instance" : Rectangle {
+                        horizontal-stretch: 1; background: Theme.background;
+                        VerticalLayout {
+                            padding: 22px; spacing: 14px;
+                            HorizontalLayout { spacing: 12px; AppButton { text: GuiI18n.text("gui-back-instances"); clicked => { root.close-live-log(); root.workspace = ""; } } Heading { text: root.selected-instance-index >= 0 ? root.instances[root.selected-instance-index].name : GuiI18n.text("gui-instance"); font-size: Theme.workspace-title-size; } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-launch"); tone: "primary"; enabled: root.selected-instance-index >= 0 && root.instances[root.selected-instance-index].can-launch; clicked => { root.launch-client(root.selected-instance-id); } } }
+                            HorizontalLayout {
+                                spacing: 4px;
+                                WorkspaceTab { text: GuiI18n.text("gui-instance-tab-overview"); selected: root.workspace-tab == "Overview"; clicked => { root.close-live-log(); root.workspace-tab = "Overview"; } }
+                                WorkspaceTab { text: GuiI18n.text("gui-instance-tab-mods"); selected: root.workspace-tab == "Mods"; clicked => { root.close-live-log(); root.workspace-tab = "Mods"; } }
+                                WorkspaceTab { text: GuiI18n.text("gui-instance-tab-minecraft-settings"); selected: root.workspace-tab == "Minecraft Settings"; clicked => { root.close-live-log(); root.workspace-tab = "Minecraft Settings"; } }
+                                WorkspaceTab { text: GuiI18n.text("gui-instance-tab-logs"); selected: root.workspace-tab == "Logs"; clicked => { root.workspace-tab = "Logs"; root.selected-diagnostic-kind = "log"; root.open-live-log("client", root.selected-instance-id); } }
+                                Rectangle { horizontal-stretch: 1; }
+                            }
+                            Divider { }
+                            if root.workspace-tab == "Overview" : ScrollView {
+                                VerticalLayout { alignment: start; width: min(parent.width, 980px); spacing: 12px;
+                                    Heading { text: GuiI18n.text("gui-reproduction-environment"); }
+                                    BodyText { text: GuiI18n.text("gui-reproduction-environment-detail"); }
+                                    Rectangle { height: 126px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface;
+                                        HorizontalLayout { padding: 18px; spacing: 18px; LoaderGlyph { kind: root.instances[root.selected-instance-index].loader-kind; } VerticalLayout { Heading { text: root.instances[root.selected-instance-index].name; } BodyText { text: GuiI18n.values("gui-target-summary", root.instances[root.selected-instance-index].minecraft, root.instances[root.selected-instance-index].loader); } BodyText { text: root.instances[root.selected-instance-index].storage + " | " + root.instances[root.selected-instance-index].source; } BodyText { text: root.instances[root.selected-instance-index].path; color: Theme.text-muted; } } }
+                                    }
+                                    if root.instances[root.selected-instance-index].loader-kind != "vanilla" : HorizontalLayout { spacing: 10px; BodyText { text: GuiI18n.value("gui-loader-change-summary", root.instances[root.selected-instance-index].loader); color: Theme.text-secondary; } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-loader-change-open"); clicked => { root.open-loader-change(); } } }
+                                    BodyText { text: root.instances[root.selected-instance-index].storage-kind == "temporary" ? GuiI18n.text("gui-temporary-lifecycle") : GuiI18n.text("gui-persistent-lifecycle"); color: Theme.text-muted; wrap: word-wrap; }
+                                    Divider { }
+                                    HorizontalLayout { Heading { text: GuiI18n.text("gui-linked-server"); font-size: Theme.section-size; } Rectangle { horizontal-stretch: 1; } if root.linked-servers.length == 0 && root.linked-pending-servers.length == 0 : AppButton { text: GuiI18n.text("gui-create-linked-server"); clicked => { root.create-server-client-id = root.selected-instance-id; root.create-server-name = root.instances[root.selected-instance-index].name + " Server"; root.modal = "create-server"; } } }
+                                    if root.linked-servers.length == 0 && root.linked-pending-servers.length == 0 : BodyText { text: GuiI18n.text("gui-no-linked-server-detail"); color: Theme.text-muted; wrap: word-wrap; }
+                                    for pending in root.linked-pending-servers : PendingCard { visible: pending.linked-client-id == root.selected-instance-id; item: pending; }
+                                    for server in root.linked-servers : Rectangle { height: 142px; border-radius: 8px; border-width: 1px; border-color: server.needs-attention ? Theme.warning : Theme.border; background: Theme.surface; VerticalLayout { padding: 14px; spacing: 8px;
+                                        HorizontalLayout { Heading { text: server.name; font-size: Theme.row-heading-size; } Pill { text: server.state; tone-color: server.state-kind == "running" ? Theme.success : server.needs-attention ? Theme.warning : Theme.text-secondary; } Rectangle { horizontal-stretch: 1; } BodyText { text: server.address; color: Theme.text-muted; } }
+                                        BodyText { text: server.needs-attention ? GuiI18n.text("gui-server-needs-attention") : server.state-detail; color: server.needs-attention ? Theme.warning : Theme.text-secondary; }
+                                        HorizontalLayout { spacing: 8px;
+                                            AppButton { text: GuiI18n.text("gui-open-server-workspace"); clicked => { root.selected-server-id = server.id; root.server-workspace-return-client = root.selected-instance-id; root.page = 1; root.workspace = "server"; root.workspace-tab = "Overview"; root.load-server-workspace(server.id); } }
+                                            if server.can-start || server.can-stop : AppButton { text: server.can-start ? GuiI18n.text("gui-start") : GuiI18n.text("gui-stop"); tone: "primary"; clicked => { if server.can-start { root.server-start(server.id); } else { root.server-stop(server.id); } } }
+                                            AppButton { text: GuiI18n.text("gui-launch-client-connect"); enabled: server.can-connect; clicked => { root.launch-and-connect(root.selected-instance-id, server.id); } }
+                                            AppButton { text: GuiI18n.text("gui-open-folder"); clicked => { root.open-server-folder(server.id); } }
+                                        }
                                     } }
                                 }
                             }
-                        }
-                        if root.workspace-tab == "Minecraft Settings" : EmptyState { title: GuiI18n.text("gui-instance-settings-unavailable"); message: GuiI18n.text("gui-instance-settings-unavailable-detail"); primary-text: GuiI18n.text("gui-open-global-defaults"); primary => { root.page = 4; root.workspace = ""; root.workspace-tab = "Minecraft"; } }
-                        if root.workspace-tab == "Logs" : VerticalLayout { spacing: 9px;
-                            HorizontalLayout { spacing: 8px; FilterChip { text: GuiI18n.text("gui-live-latest-log"); accessible-name: GuiI18n.text("gui-live-latest-log"); selected: root.selected-diagnostic-kind != "crash-report"; clicked => { root.selected-diagnostic-kind = "log"; root.open-live-log("client", root.selected-instance-id); } } FilterChip { text: GuiI18n.text("gui-crash-reports"); accessible-name: GuiI18n.text("gui-crash-reports"); selected: root.selected-diagnostic-kind == "crash-report"; clicked => { root.close-live-log(); root.selected-diagnostic-kind = "crash-report"; root.load-diagnostics("client", root.selected-instance-id, "crash-report"); } } Rectangle { horizontal-stretch: 1; } }
-                            if root.selected-diagnostic-kind != "crash-report" : LiveLogViewer {
-                                chunks: root.log-chunks; has-content: root.log-has-content; status: root.log-status; history-truncated: root.log-history-truncated; pending-lines: root.log-pending-lines; content-columns: root.log-content-columns; font-size: root.technical-text-size * 1px; query <=> root.log-query; wrap-lines <=> root.log-wrap-lines; follow <=> root.log-follow; trace-enabled: root.log-trace-enabled; debug-enabled: root.log-debug-enabled; info-enabled: root.log-info-enabled; warn-enabled: root.log-warn-enabled; error-enabled: root.log-error-enabled; fatal-enabled: root.log-fatal-enabled; other-enabled: root.log-other-enabled; revision: root.log-revision;
-                                set-level(level, enabled) => { root.set-log-level(level, enabled); } search(query) => { root.search-live-log(query); } copy => { root.copy-live-log(); } follow-changed(follow) => { root.live-log-follow-changed(follow); }
-                            }
-                            if root.selected-diagnostic-kind == "crash-report" : VerticalLayout { spacing: 8px;
-                                HorizontalLayout { BodyText { text: GuiI18n.count("gui-diagnostic-files-count", root.diagnostics.length); } Rectangle { horizontal-stretch: 1; } TextField { text <=> root.diagnostic-query; placeholder: GuiI18n.text("gui-search-loaded-content"); input-type: InputType.search; width: 250px; accepted => { root.search-diagnostic("client", root.selected-instance-id, "crash-report", root.selected-diagnostic-name, root.diagnostic-query); } } AppButton { text: GuiI18n.text("gui-find"); enabled: root.selected-diagnostic-name != ""; clicked => { root.search-diagnostic("client", root.selected-instance-id, "crash-report", root.selected-diagnostic-name, root.diagnostic-query); } } AppButton { text: GuiI18n.text("gui-folder"); clicked => { root.open-diagnostic-folder("client", root.selected-instance-id, "crash-report"); } } }
-                                HorizontalLayout { spacing: 10px; Rectangle { width: 270px; background: Theme.surface; border-radius: 8px; border-width: 1px; border-color: Theme.border; ScrollView { VerticalLayout { padding: 8px; spacing: 5px; for item in root.diagnostics : Rectangle { height: 66px; background: Theme.background; border-radius: 6px; border-width: item.name == root.selected-diagnostic-name ? 2px : 1px; border-color: item.name == root.selected-diagnostic-name ? Theme.accent : Theme.border; VerticalLayout { padding: 8px; Text { text: item.name; color: Theme.warning; overflow: elide; } BodyText { text: item.summary != "" ? item.summary : item.size; overflow: elide; font-size: Theme.caption-size; } } TouchArea { clicked => { root.selected-diagnostic-name = item.name; root.open-diagnostic("client", root.selected-instance-id, "crash-report", item.name); } } } } } } Rectangle { horizontal-stretch: 1; background: rgb(11, 14, 16); border-radius: 8px; border-width: 1px; border-color: Theme.border; VerticalLayout { if root.diagnostic-content == "" : EmptyState { title: GuiI18n.text("gui-no-file-open"); message: GuiI18n.text("gui-no-file-open-detail"); } if root.diagnostic-content != "" : SelectableText { text: root.diagnostic-content; font-size: root.technical-text-size * 1px; } if root.diagnostic-content != "" : AppButton { text: GuiI18n.text("gui-copy"); clicked => { root.copy-text(root.diagnostic-content); } } } } }
-                            }
-                        }
-                    }
-                }
-
-                // Servers.
-                if root.page == 1 && root.workspace == "" : HorizontalLayout {
-                    spacing: 0px;
-                    horizontal-stretch: 1;
-                    Rectangle { horizontal-stretch: 1; background: Theme.background;
-                        VerticalLayout { padding: 24px; spacing: 18px;
-                            HorizontalLayout {
-                                PageIntro { title: GuiI18n.text("gui-servers"); subtitle: GuiI18n.text("gui-servers-detail"); }
-                                TextField { text <=> root.server-query; placeholder: GuiI18n.text("gui-filter-servers"); input-type: InputType.search; width: 290px; accepted => { root.refresh(); } }
-                            }
-                            if root.global-servers.length == 0 && root.pending-servers.length == 0 : EmptyState { title: GuiI18n.text("gui-no-servers"); message: GuiI18n.text("gui-no-standalone-servers-detail"); primary-text: GuiI18n.text("gui-modal-new-server"); primary => { root.create-server-client-id = ""; root.create-server-name = ""; root.modal-error = ""; root.request-version-catalog(); root.warm-language-catalog(root.create-server-minecraft); root.modal = "create-server"; } }
-                            if root.global-servers.length > 0 || root.pending-servers.length > 0 : ScrollView { viewport-width: self.width; VerticalLayout { spacing: 12px; for pending in root.pending-servers : PendingCard { visible: root.show-linked-servers || pending.linked-client-id == ""; item: pending; } for item[index] in root.global-servers : ServerCard { item: item; selected: item.id == root.selected-global-server-id; choose(id) => { root.selected-global-server-id = id; root.selected-global-server-index = index; root.select-server(id); } primary(id) => { if item.can-start { root.server-start(id); } else { root.server-stop(id); } } open-workspace(id) => { root.selected-global-server-id = id; root.selected-global-server-index = index; root.selected-server-id = id; root.server-workspace-return-client = ""; root.select-server(id); root.workspace = "server"; root.workspace-tab = "Overview"; root.load-server-workspace(id); } open-folder(id) => { root.open-server-folder(id); } restart(id) => { root.server-restart(id); } kill(id, name) => { root.selected-server-id = id; root.pending-action-name = name; root.modal = "kill"; } delete(id, name) => { root.pending-action-id = id; root.pending-action-name = name; root.modal = "delete-server"; } } } }
-                        }
-                    }
-                    if root.show-inspector && root.selected-global-server-index >= 0 : Rectangle { width: 360px; background: Theme.surface; border-width: 1px; border-color: Theme.border;
-                        if root.selected-global-server-index < 0 : EmptyState { title: GuiI18n.text("gui-no-server-selected"); message: GuiI18n.text("gui-select-server"); }
-                        if root.selected-global-server-index >= 0 : VerticalLayout { alignment: start; padding: 22px; spacing: 12px;
-                            HorizontalLayout {
-                                spacing: 12px;
-                                LoaderGlyph { kind: root.global-servers[root.selected-global-server-index].loader-kind; server: true; }
-                                VerticalLayout { spacing: 4px;
-                                    Heading { text: root.global-servers[root.selected-global-server-index].name; }
-                                    Pill { text: root.global-servers[root.selected-global-server-index].state; tone-color: root.global-servers[root.selected-global-server-index].state-kind == "running" ? Theme.success : Theme.text-secondary; }
-                                }
-                            }
-                            Divider { }
-                            Eyebrow { text: GuiI18n.text("gui-server-run"); }
-                            HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-target"); } BodyText { text: root.global-servers[root.selected-global-server-index].minecraft + " | " + root.global-servers[root.selected-global-server-index].loader; } }
-                            HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-relation"); } BodyText { text: root.global-servers[root.selected-global-server-index].relationship; } }
-                            HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-address"); } BodyText { text: root.global-servers[root.selected-global-server-index].address; } }
-                            Divider { }
-                            Eyebrow { text: GuiI18n.text("gui-actions"); }
-                            if root.global-servers[root.selected-global-server-index].can-start || root.global-servers[root.selected-global-server-index].can-stop : AppButton { text: root.global-servers[root.selected-global-server-index].can-start ? GuiI18n.text("gui-start") : GuiI18n.text("gui-stop"); tone: "primary"; clicked => { if root.global-servers[root.selected-global-server-index].can-start { root.server-start(root.selected-global-server-id); } else { root.server-stop(root.selected-global-server-id); } } }
-                            HorizontalLayout { spacing: 8px; AppButton { text: GuiI18n.text("gui-open-server-workspace"); clicked => { root.selected-server-id = root.selected-global-server-id; root.server-workspace-return-client = ""; root.workspace = "server"; root.workspace-tab = "Overview"; root.load-server-workspace(root.selected-server-id); } } AppButton { text: GuiI18n.text("gui-restart"); enabled: root.global-servers[root.selected-global-server-index].can-restart; clicked => { root.server-restart(root.selected-global-server-id); } } }
-                            if root.global-servers[root.selected-global-server-index].linked-client-id != "" : AppButton { text: GuiI18n.text("gui-launch-client-connect"); enabled: root.global-servers[root.selected-global-server-index].can-connect; clicked => { root.launch-and-connect(root.global-servers[root.selected-global-server-index].linked-client-id, root.selected-global-server-id); } }
-                            HorizontalLayout { spacing: 8px;
-                                AppButton { text: GuiI18n.text("gui-open-folder"); clicked => { root.open-server-folder(root.selected-global-server-id); } }
-                                AppButton { text: GuiI18n.text("gui-view-logs"); clicked => { root.selected-server-id = root.selected-global-server-id; root.server-workspace-return-client = ""; root.workspace = "server"; root.workspace-tab = "Logs"; root.selected-diagnostic-kind = "log"; root.load-server-workspace(root.selected-server-id); root.load-diagnostics("server", root.selected-server-id, "log"); } }
-                            }
-                            Divider { }
-                            AppButton { text: GuiI18n.text("gui-force-kill"); tone: "danger"; enabled: root.global-servers[root.selected-global-server-index].can-kill; clicked => { root.selected-server-id = root.selected-global-server-id; root.modal = "kill"; } }
-                        }
-                    }
-                }
-
-                if root.page == 1 && root.workspace == "server" : Rectangle { horizontal-stretch: 1; background: Theme.background;
-                    VerticalLayout { padding: 22px; spacing: 14px;
-                        HorizontalLayout { spacing: 12px; AppButton { text: root.server-workspace-return-client != "" ? GuiI18n.text("gui-back-instance") : GuiI18n.text("gui-back-servers"); clicked => { root.close-live-log(); if root.server-workspace-return-client != "" { root.page = 0; root.workspace = "instance"; root.workspace-tab = "Overview"; root.server-workspace-return-client = ""; } else { root.workspace = ""; } } } Heading { text: root.selected-server-index >= 0 ? root.servers[root.selected-server-index].name : GuiI18n.text("gui-server"); font-size: Theme.workspace-title-size; } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-restart"); enabled: root.selected-server-index >= 0 && root.servers[root.selected-server-index].can-restart; clicked => { root.server-restart(root.selected-server-id); } } AppButton { text: root.selected-server-index >= 0 && root.servers[root.selected-server-index].can-stop ? GuiI18n.text("gui-stop") : GuiI18n.text("gui-start"); tone: "primary"; enabled: root.selected-server-index >= 0 && (root.servers[root.selected-server-index].can-start || root.servers[root.selected-server-index].can-stop); clicked => { if root.servers[root.selected-server-index].can-stop { root.server-stop(root.selected-server-id); } else { root.server-start(root.selected-server-id); } } } }
-                        HorizontalLayout { spacing: 8px;
-                            WorkspaceTab { text: GuiI18n.text("gui-instance-tab-overview"); selected: root.workspace-tab == "Overview"; clicked => { root.close-live-log(); root.workspace-tab = "Overview"; } }
-                            WorkspaceTab { text: GuiI18n.text("gui-server-tab-console"); selected: root.workspace-tab == "Console"; clicked => { root.workspace-tab = "Console"; root.open-live-log("server", root.selected-server-id); } }
-                            WorkspaceTab { text: GuiI18n.text("gui-server-tab-properties"); selected: root.workspace-tab == "Properties"; clicked => { root.close-live-log(); root.workspace-tab = "Properties"; } }
-                            WorkspaceTab { text: GuiI18n.text("gui-instance-tab-logs"); selected: root.workspace-tab == "Logs"; clicked => { root.close-live-log(); root.workspace-tab = "Logs"; root.selected-diagnostic-kind = "log"; root.load-diagnostics("server", root.selected-server-id, "log"); } }
-                            Rectangle { horizontal-stretch: 1; }
-                        }
-                        Divider { }
-                        if root.workspace-tab == "Overview" : ScrollView { VerticalLayout { alignment: start; width: min(parent.width, 980px); spacing: 12px; Heading { text: GuiI18n.text("gui-dedicated-server"); } BodyText { text: root.servers[root.selected-server-index].state-detail; } Rectangle { height: 160px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface; VerticalLayout { padding: 18px; spacing: 7px;
-                            HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-exact-target"); } BodyText { text: GuiI18n.values("gui-target-summary", root.servers[root.selected-server-index].minecraft, root.servers[root.selected-server-index].loader); } }
-                            HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-runtime"); } BodyText { text: root.servers[root.selected-server-index].state + " | " + root.servers[root.selected-server-index].state-detail; } }
-                            HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-network"); } BodyText { text: root.servers[root.selected-server-index].address; } }
-                            HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-storage"); } BodyText { text: root.servers[root.selected-server-index].storage; } }
-                            HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-relationship"); } BodyText { text: root.servers[root.selected-server-index].relationship; } }
-                        } } HorizontalLayout { spacing: 8px; AppButton { text: GuiI18n.text("gui-open-folder"); clicked => { root.open-server-folder(root.selected-server-id); } } AppButton { text: GuiI18n.text("gui-view-logs"); clicked => { root.workspace-tab = "Logs"; root.selected-diagnostic-kind = "log"; root.load-diagnostics("server", root.selected-server-id, "log"); } } if root.servers[root.selected-server-index].linked-client-id != "" : AppButton { text: GuiI18n.text("gui-launch-client-connect"); tone: "primary"; enabled: root.servers[root.selected-server-index].can-connect; clicked => { root.launch-and-connect(root.servers[root.selected-server-index].linked-client-id, root.selected-server-id); } } } } }
-                        if root.workspace-tab == "Console" : VerticalLayout { spacing: 10px;
-                            HorizontalLayout { BodyText { text: GuiI18n.value("gui-bounded-output", root.servers[root.selected-server-index].state); color: root.servers[root.selected-server-index].can-send-command ? Theme.success : Theme.text-secondary; } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-restart"); enabled: root.servers[root.selected-server-index].can-restart; clicked => { root.server-restart(root.selected-server-id); } } AppButton { text: GuiI18n.text("gui-stop"); enabled: root.servers[root.selected-server-index].can-stop; clicked => { root.server-stop(root.selected-server-id); } } AppButton { text: GuiI18n.text("gui-kill"); tone: "danger"; enabled: root.servers[root.selected-server-index].can-kill; clicked => { root.modal = "kill"; } } }
-                            LiveLogViewer {
-                                chunks: root.log-chunks; has-content: root.log-has-content; status: root.log-status; history-truncated: root.log-history-truncated; pending-lines: root.log-pending-lines; content-columns: root.log-content-columns; font-size: root.technical-text-size * 1px; query <=> root.log-query; wrap-lines <=> root.log-wrap-lines; follow <=> root.log-follow; trace-enabled: root.log-trace-enabled; debug-enabled: root.log-debug-enabled; info-enabled: root.log-info-enabled; warn-enabled: root.log-warn-enabled; error-enabled: root.log-error-enabled; fatal-enabled: root.log-fatal-enabled; other-enabled: root.log-other-enabled; revision: root.log-revision;
-                                set-level(level, enabled) => { root.set-log-level(level, enabled); } search(query) => { root.search-live-log(query); } copy => { root.copy-live-log(); } follow-changed(follow) => { root.live-log-follow-changed(follow); }
-                            }
-                            HorizontalLayout { TextField { text <=> root.console-command; placeholder: root.servers[root.selected-server-index].can-send-command ? GuiI18n.text("gui-enter-server-command") : GuiI18n.text("gui-start-server-command"); enabled: root.servers[root.selected-server-index].can-send-command; horizontal-stretch: 1; accepted => { root.server-console(root.selected-server-id, root.console-command); root.console-command = ""; } } AppButton { text: GuiI18n.text("gui-send"); tone: "primary"; enabled: root.servers[root.selected-server-index].can-send-command && root.console-command != ""; clicked => { root.server-console(root.selected-server-id, root.console-command); root.console-command = ""; } } }
-                        }
-                        if root.workspace-tab == "Logs" : VerticalLayout { spacing: 8px;
-                            HorizontalLayout { spacing: 8px; FilterChip { text: GuiI18n.text("gui-log-files"); accessible-name: GuiI18n.text("gui-log-files"); selected: root.selected-diagnostic-kind != "crash-report"; clicked => { root.selected-diagnostic-kind = "log"; root.load-diagnostics("server", root.selected-server-id, "log"); } } FilterChip { text: GuiI18n.text("gui-crash-reports"); accessible-name: GuiI18n.text("gui-crash-reports"); selected: root.selected-diagnostic-kind == "crash-report"; clicked => { root.selected-diagnostic-kind = "crash-report"; root.load-diagnostics("server", root.selected-server-id, "crash-report"); } } Rectangle { horizontal-stretch: 1; } TextField { text <=> root.diagnostic-query; placeholder: GuiI18n.text("gui-search-loaded-content"); input-type: InputType.search; width: 250px; accepted => { root.search-diagnostic("server", root.selected-server-id, root.selected-diagnostic-kind, root.selected-diagnostic-name, root.diagnostic-query); } } AppButton { text: GuiI18n.text("gui-find"); enabled: root.selected-diagnostic-name != ""; clicked => { root.search-diagnostic("server", root.selected-server-id, root.selected-diagnostic-kind, root.selected-diagnostic-name, root.diagnostic-query); } } AppButton { text: GuiI18n.text("gui-folder"); clicked => { root.open-diagnostic-folder("server", root.selected-server-id, root.selected-diagnostic-kind); } } }
-                            HorizontalLayout { spacing: 10px; Rectangle { width: 280px; background: Theme.surface; border-radius: 8px; border-width: 1px; border-color: Theme.border; VerticalLayout { padding: 8px; spacing: 5px; BodyText { text: GuiI18n.count("gui-diagnostic-files-count", root.diagnostics.length); } ScrollView { VerticalLayout { spacing: 5px; for item in root.diagnostics : Rectangle { height: 66px; background: Theme.background; border-radius: 6px; border-width: item.name == root.selected-diagnostic-name ? 2px : 1px; border-color: item.name == root.selected-diagnostic-name ? Theme.accent : Theme.border; VerticalLayout { padding: 8px; Text { text: item.name; color: item.kind == "crash-report" ? Theme.warning : Theme.text; overflow: elide; } BodyText { text: item.summary != "" ? item.summary : item.size; overflow: elide; font-size: Theme.caption-size; } } TouchArea { clicked => { root.selected-diagnostic-name = item.name; root.open-diagnostic("server", root.selected-server-id, root.selected-diagnostic-kind, item.name); } } } } } } } Rectangle { horizontal-stretch: 1; background: rgb(11, 14, 16); border-radius: 8px; border-width: 1px; border-color: Theme.border; VerticalLayout { if root.diagnostic-content == "" : EmptyState { title: GuiI18n.text("gui-no-file-open"); message: GuiI18n.text("gui-no-file-open-detail"); } if root.diagnostic-content != "" : SelectableText { text: root.diagnostic-content; font-size: root.technical-text-size * 1px; } if root.diagnostic-content != "" : AppButton { text: GuiI18n.text("gui-copy"); clicked => { root.copy-text(root.diagnostic-content); } } } } }
-                        }
-                        if root.workspace-tab == "Properties" : ScrollView { VerticalLayout { alignment: start; width: min(parent.width, 1100px); spacing: 14px;
-                            Heading { text: GuiI18n.text("gui-network"); } BodyText { text: GuiI18n.text("gui-network-detail"); wrap: word-wrap; }
-                            HorizontalLayout { spacing: 12px; VerticalLayout { FieldLabel { text: GuiI18n.text("gui-access"); } ComboBox { model: [GuiI18n.text("gui-access-localhost"), GuiI18n.text("gui-access-lan"), GuiI18n.text("gui-access-custom")]; current-index: root.property-access == "LAN" ? 1 : root.property-access == "Custom" ? 2 : 0; selected(value) => { root.property-access = value == GuiI18n.text("gui-access-lan") ? "LAN" : value == GuiI18n.text("gui-access-custom") ? "Custom" : "Localhost"; root.validate-server-properties(root.property-access, root.property-address, root.property-port, root.property-max-players); } width: 190px; } Rectangle { height: 14px; } } VerticalLayout { FieldLabel { text: GuiI18n.text("gui-port"); } TextField { text <=> root.property-port; placeholder: "25565"; input-type: InputType.number; invalid: root.property-port-error != ""; width: 150px; edited => { root.validate-server-properties(root.property-access, root.property-address, root.property-port, root.property-max-players); } } Rectangle { height: 14px; Text { text: root.property-port-error; visible: root.property-port-error != ""; color: Theme.danger; font-size: 11px; } } } VerticalLayout { horizontal-stretch: 1; FieldLabel { text: GuiI18n.text("gui-custom-bind-address"); } TextField { text <=> root.property-address; placeholder: "127.0.0.1 or ::1"; enabled: root.property-access == "Custom"; invalid: root.property-address-error != ""; edited => { root.validate-server-properties(root.property-access, root.property-address, root.property-port, root.property-max-players); } } Rectangle { height: 14px; Text { text: root.property-address-error; visible: root.property-address-error != ""; color: Theme.danger; font-size: 11px; } } } }
-                            Rectangle { height: 32px; HorizontalLayout { spacing: 10px; LabeledToggle { label: GuiI18n.text("gui-online-mode"); checked <=> root.property-online-mode; } BodyText { visible: !root.property-online-mode && root.property-access != "Localhost"; text: GuiI18n.text("gui-network-warning"); color: Theme.warning; } } }
-                            Divider { } Heading { text: GuiI18n.text("gui-gameplay"); }
-                            HorizontalLayout { spacing: 12px; VerticalLayout { horizontal-stretch: 1; FieldLabel { text: GuiI18n.text("gui-message-of-the-day"); } TextField { text <=> root.property-motd; placeholder: GuiI18n.text("gui-default-motd"); } } VerticalLayout { width: 190px; FieldLabel { text: GuiI18n.text("gui-maximum-players"); } TextField { text <=> root.property-max-players; placeholder: "20"; input-type: InputType.number; invalid: root.property-max-players-error != ""; edited => { root.validate-server-properties(root.property-access, root.property-address, root.property-port, root.property-max-players); } } if root.property-max-players-error != "" : Text { text: root.property-max-players-error; color: Theme.danger; font-size: 11px; } } }
-                            HorizontalLayout { spacing: 12px; VerticalLayout { Text { text: GuiI18n.text("gui-difficulty"); color: Theme.text-secondary; font-size: 12px; } ComboBox { model: ["peaceful", "easy", "normal", "hard"]; current-index: root.property-difficulty == "peaceful" ? 0 : root.property-difficulty == "easy" ? 1 : root.property-difficulty == "hard" ? 3 : 2; selected(value) => { root.property-difficulty = value; } width: 240px; } } VerticalLayout { Text { text: GuiI18n.text("gui-game-mode"); color: Theme.text-secondary; font-size: 12px; } ComboBox { model: ["survival", "creative", "adventure", "spectator"]; current-index: root.property-gamemode == "creative" ? 1 : root.property-gamemode == "adventure" ? 2 : root.property-gamemode == "spectator" ? 3 : 0; selected(value) => { root.property-gamemode = value; } width: 270px; } } }
-                            HorizontalLayout { spacing: 14px; LabeledToggle { label: GuiI18n.text("gui-allow-flight"); checked <=> root.property-allow-flight; } LabeledToggle { label: GuiI18n.text("gui-pvp"); checked <=> root.property-pvp; } LabeledToggle { label: GuiI18n.text("gui-allowlist"); checked <=> root.property-allowlist; } Rectangle { horizontal-stretch: 1; } }
-                            Rectangle { height: 84px; border-radius: 8px; border-width: 1px; border-color: root.eula-accepted ? Theme.success : Theme.warning; background: Theme.surface; HorizontalLayout { padding: 14px; VerticalLayout { Heading { text: GuiI18n.text("gui-server-eula"); font-size: 14px; } BodyText { text: root.eula-status; wrap: word-wrap; } } AppButton { text: root.eula-accepted ? GuiI18n.text("gui-eula-review") : GuiI18n.text("gui-eula-review-accept"); clicked => { root.modal = "eula"; } } } }
-                            HorizontalLayout { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-save-changes"); tone: "primary"; enabled: root.servers[root.selected-server-index].state-kind == "stopped"; clicked => { root.save-server-properties(root.selected-server-id, root.property-motd, root.property-max-players, root.property-difficulty, root.property-gamemode, root.property-allow-flight, root.property-pvp, root.property-allowlist, root.property-online-mode, root.property-access, root.property-address, root.property-port); } } }
-                        } }
-                    }
-                }
-
-                if root.page == 3 : Rectangle { horizontal-stretch: 1; background: Theme.background;
-                    VerticalLayout { padding: 24px; spacing: 18px;
-                        PageIntro { title: GuiI18n.text("gui-activity"); subtitle: GuiI18n.text("gui-activity-detail"); }
-                        if root.activities.length == 0 : EmptyState { title: GuiI18n.text("gui-no-recent-activity"); message: GuiI18n.text("gui-no-recent-activity-detail"); }
-                        ScrollView { viewport-width: self.width; VerticalLayout { spacing: 10px; for item in root.activities : ActivityCard { item: item; cancel(id) => { root.cancel-operation(id); } } } }
-                    }
-                }
-
-                // Settings.
-                if root.page == 4 : HorizontalLayout { spacing: 0px; horizontal-stretch: 1;
-                    Rectangle { width: 208px; background: Theme.surface; border-width: 1px; border-color: Theme.border; VerticalLayout { padding: 14px; spacing: 5px; Eyebrow { text: GuiI18n.text("gui-settings-heading"); }
-                        Rectangle { height: 5px; }
-                        SettingsNavItem { label: GuiI18n.text("gui-settings-general"); selected: root.workspace-tab == "General"; clicked => { root.workspace-tab = "General"; } }
-                        SettingsNavItem { label: GuiI18n.text("gui-settings-minecraft"); selected: root.workspace-tab == "Minecraft"; clicked => { root.workspace-tab = "Minecraft"; root.request-version-catalog(); } }
-                        SettingsNavItem { label: GuiI18n.text("gui-settings-java"); selected: root.workspace-tab == "Java"; clicked => { root.workspace-tab = "Java"; } }
-                        SettingsNavItem { label: GuiI18n.text("gui-settings-accounts"); selected: root.workspace-tab == "Accounts"; clicked => { root.workspace-tab = "Accounts"; } }
-                        SettingsNavItem { label: GuiI18n.text("gui-settings-providers"); selected: root.workspace-tab == "Providers & APIs"; clicked => { root.workspace-tab = "Providers & APIs"; } }
-                        // Measuring walks the cache, so it happens when the page
-                        // that shows the figure is opened rather than on every
-                        // refresh of everything else.
-                        SettingsNavItem { label: GuiI18n.text("gui-settings-storage"); selected: root.workspace-tab == "Storage"; clicked => { root.workspace-tab = "Storage"; root.measure-artifact-cache(); } }
-                        Rectangle { vertical-stretch: 1; }
-                        Divider { }
-                        SettingsNavItem { label: GuiI18n.text("gui-settings-about"); selected: root.workspace-tab == "About & Licenses"; clicked => { root.workspace-tab = "About & Licenses"; } }
-                    } }
-                    Rectangle { horizontal-stretch: 1; background: Theme.background; ScrollView { viewport-width: self.width; VerticalLayout { x: max(0px, (parent.width - self.width) / 2); alignment: start; width: min(parent.width, 1100px); padding: 30px; spacing: 20px;
-                        PageIntro {
-                            title: root.workspace-tab == "General" ? GuiI18n.text("gui-settings-general") : root.workspace-tab == "Minecraft" ? GuiI18n.text("gui-settings-minecraft") : root.workspace-tab == "Java" ? GuiI18n.text("gui-settings-java") : root.workspace-tab == "Accounts" ? GuiI18n.text("gui-settings-accounts") : root.workspace-tab == "Providers & APIs" ? GuiI18n.text("gui-settings-providers") : root.workspace-tab == "Storage" ? GuiI18n.text("gui-settings-storage") : GuiI18n.text("gui-settings-about");
-                            subtitle: root.workspace-tab == "Minecraft" ? GuiI18n.text("gui-minecraft-defaults-detail") : root.workspace-tab == "Java" ? GuiI18n.text("gui-java-detail") : root.workspace-tab == "Accounts" ? GuiI18n.text("gui-accounts-detail") : root.workspace-tab == "Providers & APIs" ? GuiI18n.text("gui-provider-detail") : root.workspace-tab == "Storage" ? GuiI18n.text("gui-storage-detail") : root.workspace-tab == "About & Licenses" ? GuiI18n.text("gui-tagline") : GuiI18n.text("gui-settings-detail");
-                        }
-                        if root.workspace-tab == "General" : VerticalLayout { spacing: 14px;
-                            SectionTitle { title: GuiI18n.text("gui-application-display"); detail: GuiI18n.text("gui-application-display-detail"); }
-                            Rectangle { height: root.application-text-scale >= 125 ? 124px : root.application-text-scale >= 110 ? 112px : 104px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface;
-                                HorizontalLayout { padding: 16px; spacing: 20px; alignment: center;
-                                    VerticalLayout { horizontal-stretch: 1; spacing: 5px; Heading { text: GuiI18n.text("gui-application-text-size"); font-size: Theme.row-heading-size; } BodyText { text: GuiI18n.text("gui-application-text-size-detail"); wrap: word-wrap; } }
-                                    ComboBox { width: 190px; model: [GuiI18n.text("gui-text-scale-90"), GuiI18n.text("gui-text-scale-100"), GuiI18n.text("gui-text-scale-110"), GuiI18n.text("gui-text-scale-125")]; current-index: root.application-text-scale == 90 ? 0 : root.application-text-scale == 110 ? 2 : root.application-text-scale == 125 ? 3 : 1; selected(value) => { root.application-text-scale = value == GuiI18n.text("gui-text-scale-90") ? 90 : value == GuiI18n.text("gui-text-scale-110") ? 110 : value == GuiI18n.text("gui-text-scale-125") ? 125 : 100; } }
-                                }
-                            }
-                            Rectangle { height: root.application-text-scale >= 125 ? 124px : root.application-text-scale >= 110 ? 112px : 104px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface;
-                                HorizontalLayout { padding: 16px; spacing: 20px; alignment: center;
-                                    VerticalLayout { horizontal-stretch: 1; spacing: 5px; Heading { text: GuiI18n.text("gui-technical-text-size"); font-size: Theme.row-heading-size; } BodyText { text: GuiI18n.text("gui-technical-text-size-detail"); wrap: word-wrap; } }
-                                    ComboBox { width: 190px; model: [GuiI18n.text("gui-technical-size-11"), GuiI18n.text("gui-technical-size-12"), GuiI18n.text("gui-technical-size-14"), GuiI18n.text("gui-technical-size-16")]; current-index: root.technical-text-size == 11 ? 0 : root.technical-text-size == 14 ? 2 : root.technical-text-size == 16 ? 3 : 1; selected(value) => { root.technical-text-size = value == GuiI18n.text("gui-technical-size-11") ? 11 : value == GuiI18n.text("gui-technical-size-14") ? 14 : value == GuiI18n.text("gui-technical-size-16") ? 16 : 12; } }
-                                }
-                            }
-                            HorizontalLayout { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-save-display-settings"); tone: "primary"; clicked => { root.save-display-settings(root.application-text-scale, root.technical-text-size); } } }
-                            SectionTitle { title: GuiI18n.text("gui-linked-server-defaults"); detail: GuiI18n.text("gui-linked-server-defaults-detail"); }
-                            LabeledToggle { width: min(parent.width, 520px); label: GuiI18n.text("gui-show-linked-servers"); checked <=> root.show-linked-servers; }
-                            LabeledToggle { width: min(parent.width, 520px); label: GuiI18n.text("gui-default-account-operator"); checked <=> root.make-default-account-operator; }
-                            HorizontalLayout { spacing: 12px; alignment: center; VerticalLayout { FieldLabel { text: GuiI18n.text("gui-default-operator-level"); } BodyText { text: GuiI18n.text("gui-default-operator-level-detail"); color: Theme.text-muted; } } Rectangle { horizontal-stretch: 1; } ComboBox { accessible-label: GuiI18n.text("gui-default-operator-level"); width: 220px; model: [GuiI18n.text("gui-operator-level-1"), GuiI18n.text("gui-operator-level-2"), GuiI18n.text("gui-operator-level-3"), GuiI18n.text("gui-operator-level-4")]; current-index: root.operator-permission-level - 1; selected(value) => { root.operator-permission-level = value == GuiI18n.text("gui-operator-level-1") ? 1 : value == GuiI18n.text("gui-operator-level-2") ? 2 : value == GuiI18n.text("gui-operator-level-3") ? 3 : 4; } } }
-                            HorizontalLayout { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-save-server-defaults"); tone: "primary"; clicked => { root.save-linked-server-settings(root.show-linked-servers, root.make-default-account-operator, root.operator-permission-level); } } }
-                            SectionTitle { title: GuiI18n.text("gui-favorite-versions"); detail: GuiI18n.text("gui-favorite-versions-detail"); }
-                            if root.favorite-minecraft-versions.length == 0 : Rectangle { height: max(46px, no-favorites.preferred-height + 22px); border-radius: 6px; border-width: 1px; border-color: Theme.border; background: Theme.surface;
-                                no-favorites := BodyText { x: 12px; width: parent.width - 24px; text: GuiI18n.text("gui-no-favorite-versions"); color: Theme.text-muted; wrap: word-wrap; }
-                            }
-                            for version in root.favorite-minecraft-versions : Rectangle {
-                                width: min(parent.width, 520px);
-                                height: 48px;
-                                border-radius: 6px;
-                                border-width: 1px;
-                                border-color: Theme.border;
-                                background: Theme.surface;
-                                HorizontalLayout {
-                                    padding-left: 14px; padding-right: 8px; padding-top: 6px; padding-bottom: 6px; spacing: 10px;
-                                    BodyText { text: version; color: Theme.text; horizontal-stretch: 1; vertical-alignment: center; overflow: elide; }
-                                    VerticalLayout { alignment: center; FavoriteToggle { version: version; favorite: true; toggled => { root.remove-favorite-version(version); } } }
-                                }
-                            }
-                        }
-                        // The screen keeps its own height and scrolls only the
-                        // rows, so the category tabs, the filter, and Save and
-                        // Discard stay reachable however long the list is.
-                        if root.workspace-tab == "Minecraft" : VerticalLayout { spacing: 12px;
-                            height: max(360px, root.height - 258px);
-                            if root.minecraft-preserved-notice != "" : Rectangle { height: max(46px, preserved-text.preferred-height + 22px); border-radius: 6px; border-width: 1px; border-color: Theme.border; background: Theme.surface;
-                                preserved-text := BodyText { x: 12px; width: parent.width - 24px; text: root.minecraft-preserved-notice; color: Theme.text-muted; wrap: word-wrap; }
-                            }
-                            if root.minecraft-unusable-notice != "" : Rectangle { height: max(46px, unusable-text.preferred-height + 22px); border-radius: 6px; border-width: 1px; border-color: Theme.warning.with-alpha(0.55); background: Theme.surface;
-                                unusable-text := BodyText { x: 12px; width: parent.width - 24px; text: root.minecraft-unusable-notice; color: Theme.warning; wrap: word-wrap; }
-                            }
-                            // The five stable catalog categories. They wrap
-                            // rather than shrink, so a narrow window keeps
-                            // every tab readable and reachable.
-                            Rectangle { height: category-tabs.preferred-height; vertical-stretch: 0; background: transparent;
-                                category-tabs := HorizontalLayout { spacing: 4px; alignment: start;
-                                    for category[index] in root.minecraft-categories : WorkspaceTab {
-                                        text: category;
-                                        min-width: max(88px, self.preferred-width);
-                                        selected: index == root.minecraft-category-index;
-                                        clicked => { root.minecraft-select-category(index); }
+                            if root.workspace-tab == "Mods" : HorizontalLayout {
+                                spacing: 16px;
+                                Rectangle { width: 46%; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface;
+                                    VerticalLayout { padding: 16px; spacing: 10px; Heading { text: GuiI18n.text("gui-managed-mods"); } BodyText { text: GuiI18n.text("gui-managed-mods-detail"); wrap: word-wrap; }
+                                        if root.managed-mods-notice != "" : BodyText { text: root.managed-mods-notice; color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
+                                        if root.managed-mods.length == 0 : EmptyState { title: GuiI18n.text("gui-no-managed-mods"); message: GuiI18n.text("gui-no-managed-mods-detail"); }
+                                        ScrollView { viewport-width: self.width; VerticalLayout { spacing: 8px; for mod in root.managed-mods : ModCard { item: mod; manage(path) => { root.open-mod-manager(path); } } } }
                                     }
                                 }
-                            }
-                            Divider { }
-                            HorizontalLayout { spacing: 10px; alignment: center; vertical-stretch: 0;
-                                filter-field := TextField {
-                                    horizontal-stretch: 1;
-                                    max-width: 340px;
-                                    placeholder: GuiI18n.text("gui-minecraft-filter");
-                                    accessible-name: GuiI18n.text("gui-minecraft-filter");
-                                    input-type: InputType.search;
-                                    edited(value) => { root.minecraft-query = value; root.minecraft-set-query(value); }
-                                }
-                                if root.minecraft-query != "" : AppButton { text: GuiI18n.text("gui-clear"); min-width: 84px; clicked => { filter-field.text = ""; root.minecraft-query = ""; root.minecraft-set-query(""); } }
-                                Rectangle { horizontal-stretch: 1; min-width: 4px; }
-                                BodyText { text: GuiI18n.text("gui-minecraft-show-advanced"); horizontal-stretch: 0; }
-                                Toggle { accessible-name: GuiI18n.text("gui-minecraft-show-advanced"); checked: root.minecraft-show-advanced; toggled(value) => { root.minecraft-set-show-advanced(value); } }
-                            }
-                            HorizontalLayout { spacing: 10px; alignment: center; vertical-stretch: 0;
-                                VerticalLayout { horizontal-stretch: 1; spacing: 2px;
-                                    FieldLabel { text: GuiI18n.text("gui-minecraft-preview"); }
-                                    BodyText { text: GuiI18n.text("gui-minecraft-preview-detail"); color: Theme.text-muted; wrap: word-wrap; }
-                                }
-                                preview-box := ComboBox {
-                                    width: root.compact-layout ? 150px : 190px;
-                                    accessible-label: GuiI18n.text("gui-minecraft-preview");
-                                    model: root.minecraft-releases;
-                                    current-value: root.minecraft-preview-release;
-                                    selected(value) => { root.minecraft-set-preview-release(value); }
-                                }
-                            }
-                            ScrollView { vertical-stretch: 1; viewport-width: self.width; VerticalLayout { alignment: start; spacing: 12px;
-                            if root.minecraft-preference-rows.length == 0 : EmptyState { title: GuiI18n.text("gui-minecraft-no-matches"); message: GuiI18n.text("gui-minecraft-no-matches-detail"); }
-                            for row in root.minecraft-preference-rows : MinecraftPreferenceRowCard {
-                                item: row;
-                                compact: root.compact-layout;
-                                capturing: root.minecraft-capturing-id == row.id;
-                                languages-available: root.minecraft-languages-available;
-                                set-boolean(id, on) => { root.minecraft-set-boolean(id, on); }
-                                set-number(id, value) => { root.minecraft-set-number(id, value); }
-                                edit-number(id, value) => { root.minecraft-edit-number(id, value); }
-                                commit-number(id, value) => { root.minecraft-commit-number(id, value); }
-                                set-enumeration(id, index) => { root.minecraft-set-enumeration(id, index); }
-                                set-language(id, index) => { root.minecraft-set-language(id, index); }
-                                aspect-labels: root.minecraft-aspect-labels;
-                                edit-window(id, width, height) => { root.minecraft-edit-window(id, width, height); }
-                                commit-window-width(id, width, height) => { root.minecraft-commit-window-width(id, width, height); }
-                                commit-window-height(id, width, height) => { root.minecraft-commit-window-height(id, width, height); }
-                                set-window-aspect(id, index) => { root.minecraft-set-window-aspect(id, index); }
-                                set-window-lock(id, held) => { root.minecraft-set-window-lock(id, held); }
-                                open-window-preview(id) => { root.minecraft-open-window-preview(id); }
-                                commit-text(id, value) => { root.minecraft-commit-text(id, value); }
-                                forget(id) => { root.minecraft-forget-preference(id); }
-                                begin-capture(id) => { root.minecraft-begin-capture(id); }
-                                cancel-capture => { root.minecraft-cancel-capture(); }
-                                captured-key(id, reported) => { root.minecraft-captured-key(id, reported); }
-                                captured-mouse(id, reported) => { root.minecraft-captured-mouse(id, reported); }
-                                retry-languages => { root.minecraft-retry-languages(); }
-                            }
-                            } }
-                            Divider { }
-                            HorizontalLayout { spacing: 10px; alignment: center; vertical-stretch: 0;
-                                BodyText { text: root.minecraft-dirty ? GuiI18n.count("gui-minecraft-unsaved-count", root.minecraft-dirty-count) : GuiI18n.count("gui-minecraft-total-count", root.minecraft-total-count); color: root.minecraft-dirty ? Theme.accent : Theme.text-muted; horizontal-stretch: 1; wrap: word-wrap; }
-                                AppButton { text: GuiI18n.text("gui-discard-changes"); enabled: root.minecraft-dirty && !root.minecraft-saving; clicked => { root.minecraft-discard-defaults(); } }
-                                AppButton { text: GuiI18n.text("gui-save-changes"); tone: "primary"; enabled: root.minecraft-can-save && !root.minecraft-saving; clicked => { root.minecraft-save-defaults(); } }
-                            }
-                        }
-                        if root.workspace-tab == "Java" : VerticalLayout { spacing: 12px;
-                            VerticalLayout { spacing: 6px;
-                                LabeledToggle { width: min(parent.width, 440px); label: GuiI18n.text("gui-java-detect"); checked <=> root.java-auto-detect; }
-                                LabeledToggle { width: min(parent.width, 440px); label: GuiI18n.text("gui-java-download"); checked <=> root.java-auto-download; }
-                            }
-                            HorizontalLayout { spacing: 12px; VerticalLayout { FieldLabel { text: GuiI18n.text("gui-java-memory-min"); } TextField { text <=> root.java-memory-min; input-type: InputType.number; width: 190px; } } VerticalLayout { FieldLabel { text: GuiI18n.text("gui-java-memory-max"); } TextField { text <=> root.java-memory-max; input-type: InputType.number; width: 190px; } } }
-                            Text { text: GuiI18n.text("gui-java-preferred"); color: Theme.text-secondary; font-size: 12px; } TextField { text <=> root.java-preferred-path; placeholder: "/usr/bin/java"; }
-                            HorizontalLayout { AppButton { text: GuiI18n.text("gui-java-refresh"); clicked => { root.refresh-java(); } } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-java-save"); tone: "primary"; clicked => { root.save-java-settings(root.java-auto-detect, root.java-auto-download, root.java-memory-min, root.java-memory-max, root.java-preferred-path); } } }
-                            for java in root.java-runtimes : Rectangle { height: 75px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface; HorizontalLayout { padding: 12px; VerticalLayout { Heading { text: java.version + " | " + java.vendor; font-size: 14px; } BodyText { text: java.path; overflow: elide; } } Pill { text: java.origin; tone-color: Theme.accent-secondary; } } }
-                        }
-                        if root.workspace-tab == "Accounts" : VerticalLayout { spacing: 12px;
-                            TextField { text <=> root.offline-account-name; placeholder: GuiI18n.text("gui-offline-account-placeholder"); }
-                            HorizontalLayout { spacing: 8px; AppButton { text: GuiI18n.text("gui-add-offline-account"); width: 180px; clicked => { root.add-offline-account(root.offline-account-name); } } AppButton { text: GuiI18n.text("gui-microsoft-sign-in"); width: 205px; tone: "primary"; clicked => { root.begin-microsoft-login(); } } Rectangle { horizontal-stretch: 1; } }
-                            if root.accounts.length == 0 : EmptyState { title: GuiI18n.text("gui-no-accounts"); message: GuiI18n.text("gui-no-accounts-detail"); }
-                            for account in root.accounts : Rectangle { height: 78px; border-radius: 8px; border-width: account.is-default ? 2px : 1px; border-color: account.is-default ? Theme.accent : Theme.border; background: Theme.surface; HorizontalLayout { padding: 12px; spacing: 8px; VerticalLayout { Heading { text: account.name; font-size: 14px; } BodyText { text: account.kind + " | " + account.credential-state; } } if account.is-default : Pill { text: GuiI18n.text("gui-default"); tone-color: Theme.accent; } if !account.is-default : AppButton { text: GuiI18n.text("gui-make-default"); width: 130px; clicked => { root.set-default-account(account.id); } } AppButton { text: GuiI18n.text("gui-remove"); width: 110px; tone: "danger"; clicked => { root.remove-account(account.id); } } } }
-                        }
-                        if root.workspace-tab == "Providers & APIs" : VerticalLayout { spacing: 14px;
-                            SectionTitle { title: GuiI18n.text("gui-preferred-mod-catalog"); detail: GuiI18n.text("gui-preferred-mod-catalog-detail"); }
-                            Rectangle { height: 146px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface; VerticalLayout { padding: 16px; spacing: 8px;
-                                HorizontalLayout { Heading { text: GuiI18n.text("gui-preferred-mod-catalog-heading"); font-size: Theme.row-heading-size; } Rectangle { horizontal-stretch: 1; } Pill { text: root.default-mod-catalog-is-custom ? GuiI18n.text("gui-override") : GuiI18n.text("gui-default"); tone-color: root.default-mod-catalog-is-custom ? Theme.accent : Theme.text-secondary; } }
-                                // Applied the moment a chip is clicked, and the selection follows
-                                // the stored value rather than the click: a save that fails leaves
-                                // the previous catalog selected instead of the one that was asked for.
-                                HorizontalLayout { spacing: 8px; FilterChip { text: GuiI18n.text("gui-provider-modrinth"); accessible-name: GuiI18n.text("gui-provider-modrinth"); selected: root.default-mod-catalog == "modrinth"; clicked => { root.choose-default-mod-catalog("modrinth"); } } FilterChip { text: GuiI18n.text("gui-provider-curseforge"); accessible-name: GuiI18n.text("gui-provider-curseforge"); selected: root.default-mod-catalog == "curseforge"; clicked => { root.choose-default-mod-catalog("curseforge"); } } Rectangle { horizontal-stretch: 1; } if root.default-mod-catalog-is-custom : AppButton { text: GuiI18n.text("gui-reset-default"); clicked => { root.choose-default-mod-catalog(""); } } }
-                                BodyText { text: root.default-mod-catalog == "" ? GuiI18n.value("gui-preferred-mod-catalog-unrecognized", root.configured-mod-catalog) : GuiI18n.text("gui-preferred-mod-catalog-note"); color: Theme.text-muted; wrap: word-wrap; }
-                            } }
-                            SectionTitle { title: GuiI18n.text("gui-provider-identifiers"); detail: GuiI18n.text("gui-provider-identifiers-detail"); }
-                            Rectangle { height: 146px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface; VerticalLayout { padding: 16px; spacing: 8px;
-                                HorizontalLayout { Heading { text: GuiI18n.text("gui-microsoft-client-id"); font-size: Theme.row-heading-size; } Rectangle { horizontal-stretch: 1; } Pill { text: root.microsoft-client-id-is-custom ? GuiI18n.text("gui-override") : GuiI18n.text("gui-default"); tone-color: root.microsoft-client-id-is-custom ? Theme.accent : Theme.text-secondary; } }
-                                HorizontalLayout { spacing: 8px; TextField { text <=> root.microsoft-client-id; placeholder: GuiI18n.text("gui-no-override"); horizontal-stretch: 1; } if root.microsoft-client-id-is-custom : AppButton { text: GuiI18n.text("gui-reset-default"); clicked => { root.reset-microsoft-client-id(); } } }
-                                BodyText { text: GuiI18n.value(root.microsoft-client-id-is-custom ? "gui-effective-value" : "gui-effective-default", root.effective-microsoft-client-id); color: Theme.text-muted; wrap: word-wrap; }
-                            } }
-                            Rectangle { height: 146px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface; VerticalLayout { padding: 16px; spacing: 8px;
-                                HorizontalLayout { Heading { text: GuiI18n.text("gui-user-agent"); font-size: Theme.row-heading-size; } Rectangle { horizontal-stretch: 1; } Pill { text: root.user-agent-is-custom ? GuiI18n.text("gui-override") : GuiI18n.text("gui-default"); tone-color: root.user-agent-is-custom ? Theme.accent : Theme.text-secondary; } }
-                                HorizontalLayout { spacing: 8px; TextField { text <=> root.user-agent; placeholder: GuiI18n.text("gui-no-override"); horizontal-stretch: 1; } if root.user-agent-is-custom : AppButton { text: GuiI18n.text("gui-reset-default"); clicked => { root.reset-user-agent(); } } }
-                                BodyText { text: GuiI18n.value(root.user-agent-is-custom ? "gui-effective-value" : "gui-effective-default", root.effective-user-agent); color: Theme.text-muted; wrap: word-wrap; }
-                            } }
-                            HorizontalLayout { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-save-api-settings"); tone: "primary"; clicked => { root.save-api-settings(root.microsoft-client-id, root.user-agent); } } }
-                            SectionTitle { title: GuiI18n.text("gui-curseforge"); detail: GuiI18n.text("gui-curseforge-detail"); }
-                            Rectangle { height: 196px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface; VerticalLayout { padding: 16px; spacing: 8px;
-                                HorizontalLayout { Heading { text: GuiI18n.text("gui-curseforge-api-key"); font-size: Theme.row-heading-size; } Rectangle { horizontal-stretch: 1; } Pill { text: root.curseforge-key-configured ? GuiI18n.text("gui-curseforge-key-configured") : GuiI18n.text("gui-curseforge-key-not-configured"); tone-color: root.curseforge-key-configured ? Theme.accent : Theme.text-secondary; } }
-                                // Masked because it shows what the user is typing, never what is stored:
-                                // a saved key is not readable from here and the field is emptied on submit.
-                                HorizontalLayout { spacing: 8px; TextField { text <=> root.curseforge-api-key; placeholder: GuiI18n.text("gui-curseforge-key-placeholder"); accessible-name: GuiI18n.text("gui-curseforge-api-key"); input-type: InputType.password; horizontal-stretch: 1; accepted => { root.save-curseforge-api-key(root.curseforge-api-key); } } AppButton { text: root.curseforge-key-configured ? GuiI18n.text("gui-curseforge-key-replace") : GuiI18n.text("gui-curseforge-key-save"); tone: "primary"; enabled: root.curseforge-api-key != ""; clicked => { root.save-curseforge-api-key(root.curseforge-api-key); } } if root.curseforge-key-configured : AppButton { text: GuiI18n.text("gui-remove"); tone: "danger"; clicked => { root.remove-curseforge-api-key(); } } }
-                                BodyText { text: GuiI18n.text("gui-curseforge-key-storage"); color: Theme.text-muted; wrap: word-wrap; }
-                                HorizontalLayout { AppButton { text: GuiI18n.text("gui-curseforge-key-help"); clicked => { root.open-curseforge-key-help(); } } Rectangle { horizontal-stretch: 1; } }
-                            } }
-                        }
-                        if root.workspace-tab == "Storage" : VerticalLayout { spacing: 14px;
-                            SectionTitle { title: GuiI18n.text("gui-persistent-storage"); detail: GuiI18n.text("gui-persistent-storage-detail"); }
-                            Rectangle { height: 164px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface; VerticalLayout { padding: 16px; spacing: 9px;
-                                HorizontalLayout { Heading { text: GuiI18n.text("gui-storage-root"); font-size: Theme.row-heading-size; } Rectangle { horizontal-stretch: 1; } Pill { text: root.persistent-root-is-custom ? GuiI18n.text("gui-custom-location") : GuiI18n.text("gui-default-location"); tone-color: root.persistent-root-is-custom ? Theme.accent : Theme.text-secondary; } }
-                                HorizontalLayout { spacing: 8px; TextField { text <=> root.persistent-root; placeholder: GuiI18n.text("gui-no-override"); horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-choose-folder"); clicked => { root.choose-storage-root(); } } }
-                                BodyText { text: GuiI18n.value("gui-effective-location", root.storage-root); color: Theme.text-secondary; overflow: elide; }
-                                BodyText { text: GuiI18n.value("gui-default-location-path", root.default-persistent-root); color: Theme.text-muted; overflow: elide; }
-                            } }
-                            HorizontalLayout { if root.persistent-root-is-custom : AppButton { text: GuiI18n.text("gui-reset-default"); clicked => { root.reset-storage-root(); } } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-save-storage-root"); tone: "primary"; clicked => { root.save-storage-settings(root.persistent-root); } } }
-                            BodyText { text: GuiI18n.text("gui-storage-change-future-only"); color: Theme.text-muted; wrap: word-wrap; }
-                            Divider { }
-                            SectionTitle { title: GuiI18n.text("gui-watched-download-folders"); detail: GuiI18n.text("gui-watched-download-folders-detail"); }
-                            if root.watched-download-folders.length > 0 : VerticalLayout {
-                                spacing: 6px;
-                                for folder in root.watched-download-folders : HorizontalLayout {
-                                    spacing: 8px;
-                                    height: 32px;
-                                    BodyText { text: folder; overflow: elide; vertical-alignment: center; horizontal-stretch: 1; }
-                                    AppButton { text: GuiI18n.text("gui-remove"); tone: "danger"; clicked => { root.remove-watched-folder(folder); } }
-                                }
-                            }
-                            if root.watched-download-folders.length == 0 : BodyText { text: GuiI18n.text("gui-watched-download-folders-empty"); color: Theme.text-muted; wrap: word-wrap; }
-                            HorizontalLayout { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-add-watched-folder"); clicked => { root.choose-watched-folder(); } } }
-                            Divider { }
-                            SectionTitle { title: GuiI18n.text("gui-artifact-cache"); detail: GuiI18n.text("gui-artifact-cache-detail"); }
-                            // Height taken from the content rather than fixed:
-                            // a bare Rectangle reports no preferred height of
-                            // its own, and the scroll view needs a real one or
-                            // the row below this card cannot be reached.
-                            Rectangle { height: cache-card.preferred-height; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface; cache-card := VerticalLayout { padding: 16px; spacing: 12px;
-                                HorizontalLayout { spacing: 10px;
-                                    Heading { text: root.artifact-cache-usage-known ? (root.artifact-cache-usage-exact ? GuiI18n.values("gui-artifact-cache-usage", root.artifact-cache-used, root.artifact-cache-total) : GuiI18n.values("gui-artifact-cache-usage-approximate", root.artifact-cache-used, root.artifact-cache-total)) : GuiI18n.text("gui-artifact-cache-measuring"); font-size: Theme.row-heading-size; overflow: elide; horizontal-stretch: 1; }
-                                    if root.artifact-cache-over-budget : Pill { text: GuiI18n.text("gui-artifact-cache-over-budget"); tone-color: Theme.warning; }
-                                }
-                                HorizontalLayout { spacing: 10px; alignment: start;
-                                    VerticalLayout { spacing: 4px;
-                                        FieldLabel { text: GuiI18n.text("gui-artifact-cache-limit"); }
-                                        ComboBox {
-                                            width: 170px;
-                                            accessible-label: GuiI18n.text("gui-artifact-cache-limit");
-                                            model: root.artifact-cache-limit-labels;
-                                            current-index <=> root.artifact-cache-limit-index;
+                                Rectangle { horizontal-stretch: 1; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface;
+                                    VerticalLayout { padding: 16px; spacing: 10px; Heading { text: GuiI18n.text("gui-add-mods"); } BodyText { text: GuiI18n.text("gui-catalog-compatibility"); wrap: word-wrap; }
+                                        HorizontalLayout { spacing: 8px; Text { text: GuiI18n.text("gui-mod-catalog"); color: Theme.text-secondary; font-size: Theme.label-size; vertical-alignment: center; }
+                                            FilterChip { text: GuiI18n.text("gui-provider-modrinth"); accessible-name: GuiI18n.text("gui-provider-modrinth"); selected: root.mod-provider == "modrinth"; clicked => { root.switch-mod-catalog("modrinth"); } }
+                                            FilterChip { text: GuiI18n.text("gui-provider-curseforge"); accessible-name: GuiI18n.text("gui-provider-curseforge"); selected: root.mod-provider == "curseforge"; clicked => { root.switch-mod-catalog("curseforge"); } }
+                                            Rectangle { horizontal-stretch: 1; }
                                         }
-                                    }
-                                    if root.artifact-cache-limit-index == root.artifact-cache-custom-index : VerticalLayout { spacing: 4px;
-                                        FieldLabel { text: GuiI18n.text("gui-artifact-cache-custom-value"); }
-                                        // Wide enough for a value far past any
-                                        // preset: the presets stop at 100 GiB,
-                                        // the setting does not.
-                                        TextField { width: 130px; text <=> root.artifact-cache-custom-value; placeholder: "500"; input-type: InputType.number; accessible-name: GuiI18n.text("gui-artifact-cache-custom-value"); }
-                                    }
-                                    if root.artifact-cache-limit-index == root.artifact-cache-custom-index : VerticalLayout { spacing: 4px;
-                                        FieldLabel { text: " "; }
-                                        ComboBox { width: 100px; accessible-label: GuiI18n.text("gui-artifact-cache-custom-value"); model: root.artifact-cache-units; current-value <=> root.artifact-cache-custom-unit; }
-                                    }
-                                    VerticalLayout { spacing: 4px;
-                                        // An empty label so the button lines up
-                                        // with the controls it saves rather than
-                                        // with their labels.
-                                        FieldLabel { text: " "; }
-                                        AppButton { text: GuiI18n.text("gui-save-artifact-cache-limit"); tone: "primary"; clicked => { root.save-artifact-cache-limit(root.artifact-cache-limit-index, root.artifact-cache-custom-value, root.artifact-cache-custom-unit); } }
+                                        HorizontalLayout { TextField { text <=> root.mod-query; placeholder: GuiI18n.text("gui-search-compatible-mods"); input-type: InputType.search; horizontal-stretch: 1; accepted => { root.search-mods(root.selected-instance-id, root.mod-provider, root.mod-query); } } AppButton { text: GuiI18n.text("gui-search"); tone: "primary"; enabled: !root.mod-search-loading; clicked => { root.search-mods(root.selected-instance-id, root.mod-provider, root.mod-query); } } }
+                                        if root.mod-search-notice != "" : Rectangle { border-radius: 6px; border-width: 1px; border-color: Theme.danger; background: Theme.background; VerticalLayout { padding: 10px; spacing: 6px; BodyText { text: root.mod-search-notice; color: Theme.text-secondary; wrap: word-wrap; } if root.mod-provider == "curseforge" : HorizontalLayout { AppButton { text: GuiI18n.text("gui-open-providers-settings"); clicked => { root.page = 4; root.workspace = ""; root.workspace-tab = "Providers & APIs"; } } Rectangle { horizontal-stretch: 1; } } } }
+                                        if root.mod-search-loading : BodyText { text: GuiI18n.text("gui-mod-search-running"); color: Theme.text-muted; }
+                                        if !root.mod-search-loading && root.mod-search-ran && root.mod-search-notice == "" && root.mod-results.length == 0 && root.mod-results-next-offset < 0 : EmptyState { title: GuiI18n.text("gui-no-mod-results"); message: GuiI18n.text("gui-no-mod-results-detail"); }
+                                        ScrollView { VerticalLayout { spacing: 8px; for mod in root.mod-results : Rectangle { height: 92px; clip: true; border-radius: 6px; border-width: 1px; border-color: Theme.border; background: Theme.background; HorizontalLayout { padding: 10px; spacing: 11px; VerticalLayout { alignment: center; ModArtwork { icon: mod.icon; origin-kind: "user"; } } VerticalLayout { horizontal-stretch: 1; Heading { text: mod.title; font-size: Theme.row-heading-size; overflow: elide; } BodyText { text: mod.description; wrap: word-wrap; overflow: elide; vertical-alignment: top; height: Theme.body-size * 2.7; } BodyText { text: GuiI18n.values("gui-mod-result-meta", mod.author, mod.note); color: Theme.text-muted; overflow: elide; } } VerticalLayout { alignment: center; AppButton { width: 120px; text: GuiI18n.text("gui-install"); tone: "primary"; enabled: !root.mod-action-pending; clicked => { root.install-from-browser(root.selected-instance-id, root.mod-provider, mod.project-id); } } } } }
+                                            if root.mod-results-next-offset >= 0 : HorizontalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-load-more"); enabled: !root.mod-search-loading; clicked => { root.load-more-mods(root.selected-instance-id, root.mod-search-provider, root.mod-search-submitted, root.mod-results-next-offset); } } }
+                                        } }
                                     }
                                 }
-                                BodyText { text: GuiI18n.text("gui-artifact-cache-cleanup-note"); color: Theme.text-muted; wrap: word-wrap; }
-                            } }
-                            HorizontalLayout {
-                                // Named for the cache and nothing else: an
-                                // instance or a server is never what this
-                                // removes, and the button must not read as if it
-                                // might be.
-                                AppButton { text: root.artifact-cache-clearing ? GuiI18n.text("gui-clearing-artifact-cache") : GuiI18n.text("gui-clear-artifact-cache"); enabled: !root.artifact-cache-clearing; clicked => { root.artifact-cache-clearing = true; root.clear-artifact-cache(); } }
+                            }
+                            if root.workspace-tab == "Minecraft Settings" : EmptyState { title: GuiI18n.text("gui-instance-settings-unavailable"); message: GuiI18n.text("gui-instance-settings-unavailable-detail"); primary-text: GuiI18n.text("gui-open-global-defaults"); primary => { root.page = 4; root.workspace = ""; root.workspace-tab = "Minecraft"; } }
+                            if root.workspace-tab == "Logs" : VerticalLayout { spacing: 9px;
+                                HorizontalLayout { spacing: 8px; FilterChip { text: GuiI18n.text("gui-live-latest-log"); accessible-name: GuiI18n.text("gui-live-latest-log"); selected: root.selected-diagnostic-kind != "crash-report"; clicked => { root.selected-diagnostic-kind = "log"; root.open-live-log("client", root.selected-instance-id); } } FilterChip { text: GuiI18n.text("gui-crash-reports"); accessible-name: GuiI18n.text("gui-crash-reports"); selected: root.selected-diagnostic-kind == "crash-report"; clicked => { root.close-live-log(); root.selected-diagnostic-kind = "crash-report"; root.load-diagnostics("client", root.selected-instance-id, "crash-report"); } } Rectangle { horizontal-stretch: 1; } }
+                                if root.selected-diagnostic-kind != "crash-report" : LiveLogViewer {
+                                    chunks: root.log-chunks; has-content: root.log-has-content; status: root.log-status; history-truncated: root.log-history-truncated; pending-lines: root.log-pending-lines; content-columns: root.log-content-columns; font-size: root.technical-text-size * 1px; query <=> root.log-query; wrap-lines <=> root.log-wrap-lines; follow <=> root.log-follow; trace-enabled: root.log-trace-enabled; debug-enabled: root.log-debug-enabled; info-enabled: root.log-info-enabled; warn-enabled: root.log-warn-enabled; error-enabled: root.log-error-enabled; fatal-enabled: root.log-fatal-enabled; other-enabled: root.log-other-enabled; revision: root.log-revision;
+                                    set-level(level, enabled) => { root.set-log-level(level, enabled); } search(query) => { root.search-live-log(query); } copy => { root.copy-live-log(); } follow-changed(follow) => { root.live-log-follow-changed(follow); }
+                                }
+                                if root.selected-diagnostic-kind == "crash-report" : VerticalLayout { spacing: 8px;
+                                    HorizontalLayout { BodyText { text: GuiI18n.count("gui-diagnostic-files-count", root.diagnostics.length); } Rectangle { horizontal-stretch: 1; } TextField { text <=> root.diagnostic-query; placeholder: GuiI18n.text("gui-search-loaded-content"); input-type: InputType.search; width: 250px; accepted => { root.search-diagnostic("client", root.selected-instance-id, "crash-report", root.selected-diagnostic-name, root.diagnostic-query); } } AppButton { text: GuiI18n.text("gui-find"); enabled: root.selected-diagnostic-name != ""; clicked => { root.search-diagnostic("client", root.selected-instance-id, "crash-report", root.selected-diagnostic-name, root.diagnostic-query); } } AppButton { text: GuiI18n.text("gui-folder"); clicked => { root.open-diagnostic-folder("client", root.selected-instance-id, "crash-report"); } } }
+                                    HorizontalLayout { spacing: 10px; Rectangle { width: 270px; background: Theme.surface; border-radius: 8px; border-width: 1px; border-color: Theme.border; ScrollView { VerticalLayout { padding: 8px; spacing: 5px; for item in root.diagnostics : Rectangle { height: 66px; background: Theme.background; border-radius: 6px; border-width: item.name == root.selected-diagnostic-name ? 2px : 1px; border-color: item.name == root.selected-diagnostic-name ? Theme.accent : Theme.border; VerticalLayout { padding: 8px; Text { text: item.name; color: Theme.warning; overflow: elide; } BodyText { text: item.summary != "" ? item.summary : item.size; overflow: elide; font-size: Theme.caption-size; } } TouchArea { clicked => { root.selected-diagnostic-name = item.name; root.open-diagnostic("client", root.selected-instance-id, "crash-report", item.name); } } } } } } Rectangle { horizontal-stretch: 1; background: rgb(11, 14, 16); border-radius: 8px; border-width: 1px; border-color: Theme.border; VerticalLayout { if root.diagnostic-content == "" : EmptyState { title: GuiI18n.text("gui-no-file-open"); message: GuiI18n.text("gui-no-file-open-detail"); } if root.diagnostic-content != "" : SelectableText { text: root.diagnostic-content; font-size: root.technical-text-size * 1px; } if root.diagnostic-content != "" : AppButton { text: GuiI18n.text("gui-copy"); clicked => { root.copy-text(root.diagnostic-content); } } } } }
+                                }
+                            }
+                        }
+                    }
+
+                    // Servers.
+                    if root.page == 1 && root.workspace == "" : HorizontalLayout {
+                        spacing: 0px;
+                        horizontal-stretch: 1;
+                        Rectangle { horizontal-stretch: 1; background: Theme.background;
+                            VerticalLayout { padding: 24px; spacing: 18px;
+                                HorizontalLayout {
+                                    PageIntro { title: GuiI18n.text("gui-servers"); subtitle: GuiI18n.text("gui-servers-detail"); }
+                                    TextField { text <=> root.server-query; placeholder: GuiI18n.text("gui-filter-servers"); input-type: InputType.search; width: 290px; accepted => { root.refresh(); } }
+                                }
+                                if root.global-servers.length == 0 && root.pending-servers.length == 0 : EmptyState { title: GuiI18n.text("gui-no-servers"); message: GuiI18n.text("gui-no-standalone-servers-detail"); primary-text: GuiI18n.text("gui-modal-new-server"); primary => { root.create-server-client-id = ""; root.create-server-name = ""; root.modal-error = ""; root.request-version-catalog(); root.warm-language-catalog(root.create-server-minecraft); root.modal = "create-server"; } }
+                                if root.global-servers.length > 0 || root.pending-servers.length > 0 : ScrollView { viewport-width: self.width; VerticalLayout { spacing: 12px; for pending in root.pending-servers : PendingCard { visible: root.show-linked-servers || pending.linked-client-id == ""; item: pending; } for item[index] in root.global-servers : ServerCard { item: item; selected: item.id == root.selected-global-server-id; choose(id) => { root.selected-global-server-id = id; root.selected-global-server-index = index; root.select-server(id); } primary(id) => { if item.can-start { root.server-start(id); } else { root.server-stop(id); } } open-workspace(id) => { root.selected-global-server-id = id; root.selected-global-server-index = index; root.selected-server-id = id; root.server-workspace-return-client = ""; root.select-server(id); root.workspace = "server"; root.workspace-tab = "Overview"; root.load-server-workspace(id); } open-folder(id) => { root.open-server-folder(id); } restart(id) => { root.server-restart(id); } kill(id, name) => { root.selected-server-id = id; root.pending-action-name = name; root.modal = "kill"; } delete(id, name) => { root.pending-action-id = id; root.pending-action-name = name; root.modal = "delete-server"; } } } }
+                            }
+                        }
+                        if root.show-inspector && root.selected-global-server-index >= 0 : Rectangle { width: 360px; background: Theme.surface; border-width: 1px; border-color: Theme.border;
+                            if root.selected-global-server-index < 0 : EmptyState { title: GuiI18n.text("gui-no-server-selected"); message: GuiI18n.text("gui-select-server"); }
+                            if root.selected-global-server-index >= 0 : VerticalLayout { alignment: start; padding: 22px; spacing: 12px;
+                                HorizontalLayout {
+                                    spacing: 12px;
+                                    LoaderGlyph { kind: root.global-servers[root.selected-global-server-index].loader-kind; server: true; }
+                                    VerticalLayout { spacing: 4px;
+                                        Heading { text: root.global-servers[root.selected-global-server-index].name; }
+                                        Pill { text: root.global-servers[root.selected-global-server-index].state; tone-color: root.global-servers[root.selected-global-server-index].state-kind == "running" ? Theme.success : Theme.text-secondary; }
+                                    }
+                                }
+                                Divider { }
+                                Eyebrow { text: GuiI18n.text("gui-server-run"); }
+                                HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-target"); } BodyText { text: root.global-servers[root.selected-global-server-index].minecraft + " | " + root.global-servers[root.selected-global-server-index].loader; } }
+                                HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-relation"); } BodyText { text: root.global-servers[root.selected-global-server-index].relationship; } }
+                                HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-address"); } BodyText { text: root.global-servers[root.selected-global-server-index].address; } }
+                                Divider { }
+                                Eyebrow { text: GuiI18n.text("gui-actions"); }
+                                if root.global-servers[root.selected-global-server-index].can-start || root.global-servers[root.selected-global-server-index].can-stop : AppButton { text: root.global-servers[root.selected-global-server-index].can-start ? GuiI18n.text("gui-start") : GuiI18n.text("gui-stop"); tone: "primary"; clicked => { if root.global-servers[root.selected-global-server-index].can-start { root.server-start(root.selected-global-server-id); } else { root.server-stop(root.selected-global-server-id); } } }
+                                HorizontalLayout { spacing: 8px; AppButton { text: GuiI18n.text("gui-open-server-workspace"); clicked => { root.selected-server-id = root.selected-global-server-id; root.server-workspace-return-client = ""; root.workspace = "server"; root.workspace-tab = "Overview"; root.load-server-workspace(root.selected-server-id); } } AppButton { text: GuiI18n.text("gui-restart"); enabled: root.global-servers[root.selected-global-server-index].can-restart; clicked => { root.server-restart(root.selected-global-server-id); } } }
+                                if root.global-servers[root.selected-global-server-index].linked-client-id != "" : AppButton { text: GuiI18n.text("gui-launch-client-connect"); enabled: root.global-servers[root.selected-global-server-index].can-connect; clicked => { root.launch-and-connect(root.global-servers[root.selected-global-server-index].linked-client-id, root.selected-global-server-id); } }
+                                HorizontalLayout { spacing: 8px;
+                                    AppButton { text: GuiI18n.text("gui-open-folder"); clicked => { root.open-server-folder(root.selected-global-server-id); } }
+                                    AppButton { text: GuiI18n.text("gui-view-logs"); clicked => { root.selected-server-id = root.selected-global-server-id; root.server-workspace-return-client = ""; root.workspace = "server"; root.workspace-tab = "Logs"; root.selected-diagnostic-kind = "log"; root.load-server-workspace(root.selected-server-id); root.load-diagnostics("server", root.selected-server-id, "log"); } }
+                                }
+                                Divider { }
+                                AppButton { text: GuiI18n.text("gui-force-kill"); tone: "danger"; enabled: root.global-servers[root.selected-global-server-index].can-kill; clicked => { root.selected-server-id = root.selected-global-server-id; root.modal = "kill"; } }
+                            }
+                        }
+                    }
+
+                    if root.page == 1 && root.workspace == "server" : Rectangle { horizontal-stretch: 1; background: Theme.background;
+                        VerticalLayout { padding: 22px; spacing: 14px;
+                            HorizontalLayout { spacing: 12px; AppButton { text: root.server-workspace-return-client != "" ? GuiI18n.text("gui-back-instance") : GuiI18n.text("gui-back-servers"); clicked => { root.close-live-log(); if root.server-workspace-return-client != "" { root.page = 0; root.workspace = "instance"; root.workspace-tab = "Overview"; root.server-workspace-return-client = ""; } else { root.workspace = ""; } } } Heading { text: root.selected-server-index >= 0 ? root.servers[root.selected-server-index].name : GuiI18n.text("gui-server"); font-size: Theme.workspace-title-size; } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-restart"); enabled: root.selected-server-index >= 0 && root.servers[root.selected-server-index].can-restart; clicked => { root.server-restart(root.selected-server-id); } } AppButton { text: root.selected-server-index >= 0 && root.servers[root.selected-server-index].can-stop ? GuiI18n.text("gui-stop") : GuiI18n.text("gui-start"); tone: "primary"; enabled: root.selected-server-index >= 0 && (root.servers[root.selected-server-index].can-start || root.servers[root.selected-server-index].can-stop); clicked => { if root.servers[root.selected-server-index].can-stop { root.server-stop(root.selected-server-id); } else { root.server-start(root.selected-server-id); } } } }
+                            HorizontalLayout { spacing: 8px;
+                                WorkspaceTab { text: GuiI18n.text("gui-instance-tab-overview"); selected: root.workspace-tab == "Overview"; clicked => { root.close-live-log(); root.workspace-tab = "Overview"; } }
+                                WorkspaceTab { text: GuiI18n.text("gui-server-tab-console"); selected: root.workspace-tab == "Console"; clicked => { root.workspace-tab = "Console"; root.open-live-log("server", root.selected-server-id); } }
+                                WorkspaceTab { text: GuiI18n.text("gui-server-tab-properties"); selected: root.workspace-tab == "Properties"; clicked => { root.close-live-log(); root.workspace-tab = "Properties"; } }
+                                WorkspaceTab { text: GuiI18n.text("gui-instance-tab-logs"); selected: root.workspace-tab == "Logs"; clicked => { root.close-live-log(); root.workspace-tab = "Logs"; root.selected-diagnostic-kind = "log"; root.load-diagnostics("server", root.selected-server-id, "log"); } }
                                 Rectangle { horizontal-stretch: 1; }
                             }
-                        }
-                        if root.workspace-tab == "About & Licenses" : VerticalLayout { alignment: start; spacing: 14px;
-                            Image { source: root.logo; width: 92px; height: 92px; image-fit: contain; accessible-label: GuiI18n.text("gui-logo-accessible"); }
-                            Heading { text: "Ephervex"; font-size: 24px; }
-                            BodyText { text: GuiI18n.value("gui-version", root.app-version); }
-                            BodyText { text: GuiI18n.text("gui-apache-license"); color: Theme.text; }
-                            HorizontalLayout { AppButton { text: GuiI18n.text("gui-view-ephervex-license"); clicked => { root.modal = "license"; } } Rectangle { horizontal-stretch: 1; } }
                             Divider { }
-                            Heading { text: GuiI18n.text("gui-built-with-slint"); }
-                            Rectangle { width: 290px; height: 105px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface; AboutSlint { } }
-                            Divider { }
-                            Heading { text: GuiI18n.text("gui-third-party-software"); }
-                            BodyText { text: GuiI18n.text("gui-third-party-detail"); }
-                            HorizontalLayout { AppButton { text: GuiI18n.text("gui-third-party-licenses"); clicked => { root.modal = "third-party"; } } Rectangle { horizontal-stretch: 1; } }
+                            if root.workspace-tab == "Overview" : ScrollView { VerticalLayout { alignment: start; width: min(parent.width, 980px); spacing: 12px; Heading { text: GuiI18n.text("gui-dedicated-server"); } BodyText { text: root.servers[root.selected-server-index].state-detail; } Rectangle { height: 160px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface; VerticalLayout { padding: 18px; spacing: 7px;
+                                HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-exact-target"); } BodyText { text: GuiI18n.values("gui-target-summary", root.servers[root.selected-server-index].minecraft, root.servers[root.selected-server-index].loader); } }
+                                HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-runtime"); } BodyText { text: root.servers[root.selected-server-index].state + " | " + root.servers[root.selected-server-index].state-detail; } }
+                                HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-network"); } BodyText { text: root.servers[root.selected-server-index].address; } }
+                                HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-storage"); } BodyText { text: root.servers[root.selected-server-index].storage; } }
+                                HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-relationship"); } BodyText { text: root.servers[root.selected-server-index].relationship; } }
+                            } } HorizontalLayout { spacing: 8px; AppButton { text: GuiI18n.text("gui-open-folder"); clicked => { root.open-server-folder(root.selected-server-id); } } AppButton { text: GuiI18n.text("gui-view-logs"); clicked => { root.workspace-tab = "Logs"; root.selected-diagnostic-kind = "log"; root.load-diagnostics("server", root.selected-server-id, "log"); } } if root.servers[root.selected-server-index].linked-client-id != "" : AppButton { text: GuiI18n.text("gui-launch-client-connect"); tone: "primary"; enabled: root.servers[root.selected-server-index].can-connect; clicked => { root.launch-and-connect(root.servers[root.selected-server-index].linked-client-id, root.selected-server-id); } } } } }
+                            if root.workspace-tab == "Console" : VerticalLayout { spacing: 10px;
+                                HorizontalLayout { BodyText { text: GuiI18n.value("gui-bounded-output", root.servers[root.selected-server-index].state); color: root.servers[root.selected-server-index].can-send-command ? Theme.success : Theme.text-secondary; } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-restart"); enabled: root.servers[root.selected-server-index].can-restart; clicked => { root.server-restart(root.selected-server-id); } } AppButton { text: GuiI18n.text("gui-stop"); enabled: root.servers[root.selected-server-index].can-stop; clicked => { root.server-stop(root.selected-server-id); } } AppButton { text: GuiI18n.text("gui-kill"); tone: "danger"; enabled: root.servers[root.selected-server-index].can-kill; clicked => { root.modal = "kill"; } } }
+                                LiveLogViewer {
+                                    chunks: root.log-chunks; has-content: root.log-has-content; status: root.log-status; history-truncated: root.log-history-truncated; pending-lines: root.log-pending-lines; content-columns: root.log-content-columns; font-size: root.technical-text-size * 1px; query <=> root.log-query; wrap-lines <=> root.log-wrap-lines; follow <=> root.log-follow; trace-enabled: root.log-trace-enabled; debug-enabled: root.log-debug-enabled; info-enabled: root.log-info-enabled; warn-enabled: root.log-warn-enabled; error-enabled: root.log-error-enabled; fatal-enabled: root.log-fatal-enabled; other-enabled: root.log-other-enabled; revision: root.log-revision;
+                                    set-level(level, enabled) => { root.set-log-level(level, enabled); } search(query) => { root.search-live-log(query); } copy => { root.copy-live-log(); } follow-changed(follow) => { root.live-log-follow-changed(follow); }
+                                }
+                                HorizontalLayout { TextField { text <=> root.console-command; placeholder: root.servers[root.selected-server-index].can-send-command ? GuiI18n.text("gui-enter-server-command") : GuiI18n.text("gui-start-server-command"); enabled: root.servers[root.selected-server-index].can-send-command; horizontal-stretch: 1; accepted => { root.server-console(root.selected-server-id, root.console-command); root.console-command = ""; } } AppButton { text: GuiI18n.text("gui-send"); tone: "primary"; enabled: root.servers[root.selected-server-index].can-send-command && root.console-command != ""; clicked => { root.server-console(root.selected-server-id, root.console-command); root.console-command = ""; } } }
+                            }
+                            if root.workspace-tab == "Logs" : VerticalLayout { spacing: 8px;
+                                HorizontalLayout { spacing: 8px; FilterChip { text: GuiI18n.text("gui-log-files"); accessible-name: GuiI18n.text("gui-log-files"); selected: root.selected-diagnostic-kind != "crash-report"; clicked => { root.selected-diagnostic-kind = "log"; root.load-diagnostics("server", root.selected-server-id, "log"); } } FilterChip { text: GuiI18n.text("gui-crash-reports"); accessible-name: GuiI18n.text("gui-crash-reports"); selected: root.selected-diagnostic-kind == "crash-report"; clicked => { root.selected-diagnostic-kind = "crash-report"; root.load-diagnostics("server", root.selected-server-id, "crash-report"); } } Rectangle { horizontal-stretch: 1; } TextField { text <=> root.diagnostic-query; placeholder: GuiI18n.text("gui-search-loaded-content"); input-type: InputType.search; width: 250px; accepted => { root.search-diagnostic("server", root.selected-server-id, root.selected-diagnostic-kind, root.selected-diagnostic-name, root.diagnostic-query); } } AppButton { text: GuiI18n.text("gui-find"); enabled: root.selected-diagnostic-name != ""; clicked => { root.search-diagnostic("server", root.selected-server-id, root.selected-diagnostic-kind, root.selected-diagnostic-name, root.diagnostic-query); } } AppButton { text: GuiI18n.text("gui-folder"); clicked => { root.open-diagnostic-folder("server", root.selected-server-id, root.selected-diagnostic-kind); } } }
+                                HorizontalLayout { spacing: 10px; Rectangle { width: 280px; background: Theme.surface; border-radius: 8px; border-width: 1px; border-color: Theme.border; VerticalLayout { padding: 8px; spacing: 5px; BodyText { text: GuiI18n.count("gui-diagnostic-files-count", root.diagnostics.length); } ScrollView { VerticalLayout { spacing: 5px; for item in root.diagnostics : Rectangle { height: 66px; background: Theme.background; border-radius: 6px; border-width: item.name == root.selected-diagnostic-name ? 2px : 1px; border-color: item.name == root.selected-diagnostic-name ? Theme.accent : Theme.border; VerticalLayout { padding: 8px; Text { text: item.name; color: item.kind == "crash-report" ? Theme.warning : Theme.text; overflow: elide; } BodyText { text: item.summary != "" ? item.summary : item.size; overflow: elide; font-size: Theme.caption-size; } } TouchArea { clicked => { root.selected-diagnostic-name = item.name; root.open-diagnostic("server", root.selected-server-id, root.selected-diagnostic-kind, item.name); } } } } } } } Rectangle { horizontal-stretch: 1; background: rgb(11, 14, 16); border-radius: 8px; border-width: 1px; border-color: Theme.border; VerticalLayout { if root.diagnostic-content == "" : EmptyState { title: GuiI18n.text("gui-no-file-open"); message: GuiI18n.text("gui-no-file-open-detail"); } if root.diagnostic-content != "" : SelectableText { text: root.diagnostic-content; font-size: root.technical-text-size * 1px; } if root.diagnostic-content != "" : AppButton { text: GuiI18n.text("gui-copy"); clicked => { root.copy-text(root.diagnostic-content); } } } } }
+                            }
+                            if root.workspace-tab == "Properties" : ScrollView { VerticalLayout { alignment: start; width: min(parent.width, 1100px); spacing: 14px;
+                                Heading { text: GuiI18n.text("gui-network"); } BodyText { text: GuiI18n.text("gui-network-detail"); wrap: word-wrap; }
+                                HorizontalLayout { spacing: 12px; VerticalLayout { FieldLabel { text: GuiI18n.text("gui-access"); } ComboBox { model: [GuiI18n.text("gui-access-localhost"), GuiI18n.text("gui-access-lan"), GuiI18n.text("gui-access-custom")]; current-index: root.property-access == "LAN" ? 1 : root.property-access == "Custom" ? 2 : 0; selected(value) => { root.property-access = value == GuiI18n.text("gui-access-lan") ? "LAN" : value == GuiI18n.text("gui-access-custom") ? "Custom" : "Localhost"; root.validate-server-properties(root.property-access, root.property-address, root.property-port, root.property-max-players); } width: 190px; } Rectangle { height: 14px; } } VerticalLayout { FieldLabel { text: GuiI18n.text("gui-port"); } TextField { text <=> root.property-port; placeholder: "25565"; input-type: InputType.number; invalid: root.property-port-error != ""; width: 150px; edited => { root.validate-server-properties(root.property-access, root.property-address, root.property-port, root.property-max-players); } } Rectangle { height: 14px; Text { text: root.property-port-error; visible: root.property-port-error != ""; color: Theme.danger; font-size: 11px; } } } VerticalLayout { horizontal-stretch: 1; FieldLabel { text: GuiI18n.text("gui-custom-bind-address"); } TextField { text <=> root.property-address; placeholder: "127.0.0.1 or ::1"; enabled: root.property-access == "Custom"; invalid: root.property-address-error != ""; edited => { root.validate-server-properties(root.property-access, root.property-address, root.property-port, root.property-max-players); } } Rectangle { height: 14px; Text { text: root.property-address-error; visible: root.property-address-error != ""; color: Theme.danger; font-size: 11px; } } } }
+                                Rectangle { height: 32px; HorizontalLayout { spacing: 10px; LabeledToggle { label: GuiI18n.text("gui-online-mode"); checked <=> root.property-online-mode; } BodyText { visible: !root.property-online-mode && root.property-access != "Localhost"; text: GuiI18n.text("gui-network-warning"); color: Theme.warning; } } }
+                                Divider { } Heading { text: GuiI18n.text("gui-gameplay"); }
+                                HorizontalLayout { spacing: 12px; VerticalLayout { horizontal-stretch: 1; FieldLabel { text: GuiI18n.text("gui-message-of-the-day"); } TextField { text <=> root.property-motd; placeholder: GuiI18n.text("gui-default-motd"); } } VerticalLayout { width: 190px; FieldLabel { text: GuiI18n.text("gui-maximum-players"); } TextField { text <=> root.property-max-players; placeholder: "20"; input-type: InputType.number; invalid: root.property-max-players-error != ""; edited => { root.validate-server-properties(root.property-access, root.property-address, root.property-port, root.property-max-players); } } if root.property-max-players-error != "" : Text { text: root.property-max-players-error; color: Theme.danger; font-size: 11px; } } }
+                                HorizontalLayout { spacing: 12px; VerticalLayout { Text { text: GuiI18n.text("gui-difficulty"); color: Theme.text-secondary; font-size: 12px; } ComboBox { model: ["peaceful", "easy", "normal", "hard"]; current-index: root.property-difficulty == "peaceful" ? 0 : root.property-difficulty == "easy" ? 1 : root.property-difficulty == "hard" ? 3 : 2; selected(value) => { root.property-difficulty = value; } width: 240px; } } VerticalLayout { Text { text: GuiI18n.text("gui-game-mode"); color: Theme.text-secondary; font-size: 12px; } ComboBox { model: ["survival", "creative", "adventure", "spectator"]; current-index: root.property-gamemode == "creative" ? 1 : root.property-gamemode == "adventure" ? 2 : root.property-gamemode == "spectator" ? 3 : 0; selected(value) => { root.property-gamemode = value; } width: 270px; } } }
+                                HorizontalLayout { spacing: 14px; LabeledToggle { label: GuiI18n.text("gui-allow-flight"); checked <=> root.property-allow-flight; } LabeledToggle { label: GuiI18n.text("gui-pvp"); checked <=> root.property-pvp; } LabeledToggle { label: GuiI18n.text("gui-allowlist"); checked <=> root.property-allowlist; } Rectangle { horizontal-stretch: 1; } }
+                                Rectangle { height: 84px; border-radius: 8px; border-width: 1px; border-color: root.eula-accepted ? Theme.success : Theme.warning; background: Theme.surface; HorizontalLayout { padding: 14px; VerticalLayout { Heading { text: GuiI18n.text("gui-server-eula"); font-size: 14px; } BodyText { text: root.eula-status; wrap: word-wrap; } } AppButton { text: root.eula-accepted ? GuiI18n.text("gui-eula-review") : GuiI18n.text("gui-eula-review-accept"); clicked => { root.modal = "eula"; } } } }
+                                HorizontalLayout { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-save-changes"); tone: "primary"; enabled: root.servers[root.selected-server-index].state-kind == "stopped"; clicked => { root.save-server-properties(root.selected-server-id, root.property-motd, root.property-max-players, root.property-difficulty, root.property-gamemode, root.property-allow-flight, root.property-pvp, root.property-allowlist, root.property-online-mode, root.property-access, root.property-address, root.property-port); } } }
+                            } }
                         }
-                    } } }
+                    }
+
+                    if root.page == 3 : Rectangle { horizontal-stretch: 1; background: Theme.background;
+                        VerticalLayout { padding: 24px; spacing: 18px;
+                            PageIntro { title: GuiI18n.text("gui-activity"); subtitle: GuiI18n.text("gui-activity-detail"); }
+                            if root.activities.length == 0 : EmptyState { title: GuiI18n.text("gui-no-recent-activity"); message: GuiI18n.text("gui-no-recent-activity-detail"); }
+                            ScrollView { viewport-width: self.width; VerticalLayout { spacing: 10px; for item in root.activities : ActivityCard { item: item; cancel(id) => { root.cancel-operation(id); } } } }
+                        }
+                    }
+
+                    // Settings.
+                    if root.page == 4 : HorizontalLayout { spacing: 0px; horizontal-stretch: 1;
+                        Rectangle { width: 208px; background: Theme.surface; border-width: 1px; border-color: Theme.border; VerticalLayout { padding: 14px; spacing: 5px; Eyebrow { text: GuiI18n.text("gui-settings-heading"); }
+                            Rectangle { height: 5px; }
+                            SettingsNavItem { label: GuiI18n.text("gui-settings-general"); selected: root.workspace-tab == "General"; clicked => { root.workspace-tab = "General"; } }
+                            SettingsNavItem { label: GuiI18n.text("gui-settings-minecraft"); selected: root.workspace-tab == "Minecraft"; clicked => { root.workspace-tab = "Minecraft"; root.request-version-catalog(); } }
+                            SettingsNavItem { label: GuiI18n.text("gui-settings-java"); selected: root.workspace-tab == "Java"; clicked => { root.workspace-tab = "Java"; } }
+                            SettingsNavItem { label: GuiI18n.text("gui-settings-accounts"); selected: root.workspace-tab == "Accounts"; clicked => { root.workspace-tab = "Accounts"; } }
+                            SettingsNavItem { label: GuiI18n.text("gui-settings-providers"); selected: root.workspace-tab == "Providers & APIs"; clicked => { root.workspace-tab = "Providers & APIs"; } }
+                            // Measuring walks the cache, so it happens when the page
+                            // that shows the figure is opened rather than on every
+                            // refresh of everything else.
+                            SettingsNavItem { label: GuiI18n.text("gui-settings-storage"); selected: root.workspace-tab == "Storage"; clicked => { root.workspace-tab = "Storage"; root.measure-artifact-cache(); } }
+                            Rectangle { vertical-stretch: 1; }
+                            Divider { }
+                            SettingsNavItem { label: GuiI18n.text("gui-settings-about"); selected: root.workspace-tab == "About & Licenses"; clicked => { root.workspace-tab = "About & Licenses"; } }
+                        } }
+                        Rectangle { horizontal-stretch: 1; background: Theme.background; ScrollView { viewport-width: self.width; VerticalLayout { x: max(0px, (parent.width - self.width) / 2); alignment: start; width: min(parent.width, 1100px); padding: 30px; spacing: 20px;
+                            PageIntro {
+                                title: root.workspace-tab == "General" ? GuiI18n.text("gui-settings-general") : root.workspace-tab == "Minecraft" ? GuiI18n.text("gui-settings-minecraft") : root.workspace-tab == "Java" ? GuiI18n.text("gui-settings-java") : root.workspace-tab == "Accounts" ? GuiI18n.text("gui-settings-accounts") : root.workspace-tab == "Providers & APIs" ? GuiI18n.text("gui-settings-providers") : root.workspace-tab == "Storage" ? GuiI18n.text("gui-settings-storage") : GuiI18n.text("gui-settings-about");
+                                subtitle: root.workspace-tab == "Minecraft" ? GuiI18n.text("gui-minecraft-defaults-detail") : root.workspace-tab == "Java" ? GuiI18n.text("gui-java-detail") : root.workspace-tab == "Accounts" ? GuiI18n.text("gui-accounts-detail") : root.workspace-tab == "Providers & APIs" ? GuiI18n.text("gui-provider-detail") : root.workspace-tab == "Storage" ? GuiI18n.text("gui-storage-detail") : root.workspace-tab == "About & Licenses" ? GuiI18n.text("gui-tagline") : GuiI18n.text("gui-settings-detail");
+                            }
+                            if root.workspace-tab == "General" : VerticalLayout { spacing: 14px;
+                                SectionTitle { title: GuiI18n.text("gui-application-display"); detail: GuiI18n.text("gui-application-display-detail"); }
+                                Rectangle { height: root.application-text-scale >= 125 ? 124px : root.application-text-scale >= 110 ? 112px : 104px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface;
+                                    HorizontalLayout { padding: 16px; spacing: 20px; cross-axis-alignment: center;
+                                        VerticalLayout { horizontal-stretch: 1; spacing: 5px; Heading { text: GuiI18n.text("gui-application-text-size"); font-size: Theme.row-heading-size; } BodyText { text: GuiI18n.text("gui-application-text-size-detail"); wrap: word-wrap; } }
+                                        ComboBox { width: 190px; model: [GuiI18n.text("gui-text-scale-90"), GuiI18n.text("gui-text-scale-100"), GuiI18n.text("gui-text-scale-110"), GuiI18n.text("gui-text-scale-125")]; current-index: root.application-text-scale == 90 ? 0 : root.application-text-scale == 110 ? 2 : root.application-text-scale == 125 ? 3 : 1; selected(value) => { root.application-text-scale = value == GuiI18n.text("gui-text-scale-90") ? 90 : value == GuiI18n.text("gui-text-scale-110") ? 110 : value == GuiI18n.text("gui-text-scale-125") ? 125 : 100; } }
+                                    }
+                                }
+                                Rectangle { height: root.application-text-scale >= 125 ? 124px : root.application-text-scale >= 110 ? 112px : 104px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface;
+                                    HorizontalLayout { padding: 16px; spacing: 20px; cross-axis-alignment: center;
+                                        VerticalLayout { horizontal-stretch: 1; spacing: 5px; Heading { text: GuiI18n.text("gui-technical-text-size"); font-size: Theme.row-heading-size; } BodyText { text: GuiI18n.text("gui-technical-text-size-detail"); wrap: word-wrap; } }
+                                        ComboBox { width: 190px; model: [GuiI18n.text("gui-technical-size-11"), GuiI18n.text("gui-technical-size-12"), GuiI18n.text("gui-technical-size-14"), GuiI18n.text("gui-technical-size-16")]; current-index: root.technical-text-size == 11 ? 0 : root.technical-text-size == 14 ? 2 : root.technical-text-size == 16 ? 3 : 1; selected(value) => { root.technical-text-size = value == GuiI18n.text("gui-technical-size-11") ? 11 : value == GuiI18n.text("gui-technical-size-14") ? 14 : value == GuiI18n.text("gui-technical-size-16") ? 16 : 12; } }
+                                    }
+                                }
+                                HorizontalLayout { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-save-display-settings"); tone: "primary"; clicked => { root.save-display-settings(root.application-text-scale, root.technical-text-size); } } }
+                                SectionTitle { title: GuiI18n.text("gui-linked-server-defaults"); detail: GuiI18n.text("gui-linked-server-defaults-detail"); }
+                                LabeledToggle { width: min(parent.width, 520px); label: GuiI18n.text("gui-show-linked-servers"); checked <=> root.show-linked-servers; }
+                                LabeledToggle { width: min(parent.width, 520px); label: GuiI18n.text("gui-default-account-operator"); checked <=> root.make-default-account-operator; }
+                                HorizontalLayout { spacing: 12px; cross-axis-alignment: center; VerticalLayout { FieldLabel { text: GuiI18n.text("gui-default-operator-level"); } BodyText { text: GuiI18n.text("gui-default-operator-level-detail"); color: Theme.text-muted; } } Rectangle { horizontal-stretch: 1; } ComboBox { accessible-label: GuiI18n.text("gui-default-operator-level"); width: 220px; model: [GuiI18n.text("gui-operator-level-1"), GuiI18n.text("gui-operator-level-2"), GuiI18n.text("gui-operator-level-3"), GuiI18n.text("gui-operator-level-4")]; current-index: root.operator-permission-level - 1; selected(value) => { root.operator-permission-level = value == GuiI18n.text("gui-operator-level-1") ? 1 : value == GuiI18n.text("gui-operator-level-2") ? 2 : value == GuiI18n.text("gui-operator-level-3") ? 3 : 4; } } }
+                                HorizontalLayout { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-save-server-defaults"); tone: "primary"; clicked => { root.save-linked-server-settings(root.show-linked-servers, root.make-default-account-operator, root.operator-permission-level); } } }
+                                SectionTitle { title: GuiI18n.text("gui-favorite-versions"); detail: GuiI18n.text("gui-favorite-versions-detail"); }
+                                if root.favorite-minecraft-versions.length == 0 : Rectangle { height: max(46px, no-favorites.preferred-height + 22px); border-radius: 6px; border-width: 1px; border-color: Theme.border; background: Theme.surface;
+                                    no-favorites := BodyText { x: 12px; width: parent.width - 24px; text: GuiI18n.text("gui-no-favorite-versions"); color: Theme.text-muted; wrap: word-wrap; }
+                                }
+                                for version in root.favorite-minecraft-versions : Rectangle {
+                                    width: min(parent.width, 520px);
+                                    height: 48px;
+                                    border-radius: 6px;
+                                    border-width: 1px;
+                                    border-color: Theme.border;
+                                    background: Theme.surface;
+                                    HorizontalLayout {
+                                        padding-left: 14px; padding-right: 8px; padding-top: 6px; padding-bottom: 6px; spacing: 10px;
+                                        BodyText { text: version; color: Theme.text; horizontal-stretch: 1; vertical-alignment: center; overflow: elide; }
+                                        VerticalLayout { alignment: center; FavoriteToggle { version: version; favorite: true; toggled => { root.remove-favorite-version(version); } } }
+                                    }
+                                }
+                            }
+                            // The screen keeps its own height and scrolls only the
+                            // rows, so the category tabs, the filter, and Save and
+                            // Discard stay reachable however long the list is.
+                            if root.workspace-tab == "Minecraft" : VerticalLayout { spacing: 12px;
+                                height: max(360px, root.height - 258px);
+                                if root.minecraft-preserved-notice != "" : Rectangle { height: max(46px, preserved-text.preferred-height + 22px); border-radius: 6px; border-width: 1px; border-color: Theme.border; background: Theme.surface;
+                                    preserved-text := BodyText { x: 12px; width: parent.width - 24px; text: root.minecraft-preserved-notice; color: Theme.text-muted; wrap: word-wrap; }
+                                }
+                                if root.minecraft-unusable-notice != "" : Rectangle { height: max(46px, unusable-text.preferred-height + 22px); border-radius: 6px; border-width: 1px; border-color: Theme.warning.with-alpha(0.55); background: Theme.surface;
+                                    unusable-text := BodyText { x: 12px; width: parent.width - 24px; text: root.minecraft-unusable-notice; color: Theme.warning; wrap: word-wrap; }
+                                }
+                                // The five stable catalog categories. They wrap
+                                // rather than shrink, so a narrow window keeps
+                                // every tab readable and reachable.
+                                Rectangle { height: category-tabs.preferred-height; vertical-stretch: 0; background: transparent;
+                                    category-tabs := HorizontalLayout { spacing: 4px; alignment: start;
+                                        for category[index] in root.minecraft-categories : WorkspaceTab {
+                                            text: category;
+                                            min-width: max(88px, self.preferred-width);
+                                            selected: index == root.minecraft-category-index;
+                                            clicked => { root.minecraft-select-category(index); }
+                                        }
+                                    }
+                                }
+                                Divider { }
+                                HorizontalLayout { spacing: 10px; cross-axis-alignment: center; vertical-stretch: 0;
+                                    filter-field := TextField {
+                                        horizontal-stretch: 1;
+                                        max-width: 340px;
+                                        placeholder: GuiI18n.text("gui-minecraft-filter");
+                                        accessible-name: GuiI18n.text("gui-minecraft-filter");
+                                        input-type: InputType.search;
+                                        edited(value) => { root.minecraft-query = value; root.minecraft-set-query(value); }
+                                    }
+                                    if root.minecraft-query != "" : AppButton { text: GuiI18n.text("gui-clear"); min-width: 84px; clicked => { filter-field.text = ""; root.minecraft-query = ""; root.minecraft-set-query(""); } }
+                                    Rectangle { horizontal-stretch: 1; min-width: 4px; }
+                                    BodyText { text: GuiI18n.text("gui-minecraft-show-advanced"); horizontal-stretch: 0; }
+                                    Toggle { accessible-name: GuiI18n.text("gui-minecraft-show-advanced"); checked: root.minecraft-show-advanced; toggled(value) => { root.minecraft-set-show-advanced(value); } }
+                                }
+                                HorizontalLayout { spacing: 10px; cross-axis-alignment: center; vertical-stretch: 0;
+                                    VerticalLayout { horizontal-stretch: 1; spacing: 2px;
+                                        FieldLabel { text: GuiI18n.text("gui-minecraft-preview"); }
+                                        BodyText { text: GuiI18n.text("gui-minecraft-preview-detail"); color: Theme.text-muted; wrap: word-wrap; }
+                                    }
+                                    preview-box := ComboBox {
+                                        width: root.compact-layout ? 150px : 190px;
+                                        accessible-label: GuiI18n.text("gui-minecraft-preview");
+                                        model: root.minecraft-releases;
+                                        current-value: root.minecraft-preview-release;
+                                        selected(value) => { root.minecraft-set-preview-release(value); }
+                                    }
+                                }
+                                ScrollView { vertical-stretch: 1; viewport-width: self.width; VerticalLayout { alignment: start; spacing: 12px;
+                                if root.minecraft-preference-rows.length == 0 : EmptyState { title: GuiI18n.text("gui-minecraft-no-matches"); message: GuiI18n.text("gui-minecraft-no-matches-detail"); }
+                                for row in root.minecraft-preference-rows : MinecraftPreferenceRowCard {
+                                    item: row;
+                                    compact: root.compact-layout;
+                                    capturing: root.minecraft-capturing-id == row.id;
+                                    languages-available: root.minecraft-languages-available;
+                                    set-boolean(id, on) => { root.minecraft-set-boolean(id, on); }
+                                    set-number(id, value) => { root.minecraft-set-number(id, value); }
+                                    edit-number(id, value) => { root.minecraft-edit-number(id, value); }
+                                    commit-number(id, value) => { root.minecraft-commit-number(id, value); }
+                                    set-enumeration(id, index) => { root.minecraft-set-enumeration(id, index); }
+                                    set-language(id, index) => { root.minecraft-set-language(id, index); }
+                                    aspect-labels: root.minecraft-aspect-labels;
+                                    edit-window(id, width, height) => { root.minecraft-edit-window(id, width, height); }
+                                    commit-window-width(id, width, height) => { root.minecraft-commit-window-width(id, width, height); }
+                                    commit-window-height(id, width, height) => { root.minecraft-commit-window-height(id, width, height); }
+                                    set-window-aspect(id, index) => { root.minecraft-set-window-aspect(id, index); }
+                                    set-window-lock(id, held) => { root.minecraft-set-window-lock(id, held); }
+                                    open-window-preview(id) => { root.minecraft-open-window-preview(id); }
+                                    commit-text(id, value) => { root.minecraft-commit-text(id, value); }
+                                    forget(id) => { root.minecraft-forget-preference(id); }
+                                    begin-capture(id) => { root.minecraft-begin-capture(id); }
+                                    cancel-capture => { root.minecraft-cancel-capture(); }
+                                    captured-key(id, reported) => { root.minecraft-captured-key(id, reported); }
+                                    captured-mouse(id, reported) => { root.minecraft-captured-mouse(id, reported); }
+                                    retry-languages => { root.minecraft-retry-languages(); }
+                                }
+                                } }
+                                Divider { }
+                                HorizontalLayout { spacing: 10px; cross-axis-alignment: center; vertical-stretch: 0;
+                                    BodyText { text: root.minecraft-dirty ? GuiI18n.count("gui-minecraft-unsaved-count", root.minecraft-dirty-count) : GuiI18n.count("gui-minecraft-total-count", root.minecraft-total-count); color: root.minecraft-dirty ? Theme.accent : Theme.text-muted; horizontal-stretch: 1; wrap: word-wrap; }
+                                    AppButton { text: GuiI18n.text("gui-discard-changes"); enabled: root.minecraft-dirty && !root.minecraft-saving; clicked => { root.minecraft-discard-defaults(); } }
+                                    AppButton { text: GuiI18n.text("gui-save-changes"); tone: "primary"; enabled: root.minecraft-can-save && !root.minecraft-saving; clicked => { root.minecraft-save-defaults(); } }
+                                }
+                            }
+                            if root.workspace-tab == "Java" : VerticalLayout { spacing: 12px;
+                                VerticalLayout { spacing: 6px;
+                                    LabeledToggle { width: min(parent.width, 440px); label: GuiI18n.text("gui-java-detect"); checked <=> root.java-auto-detect; }
+                                    LabeledToggle { width: min(parent.width, 440px); label: GuiI18n.text("gui-java-download"); checked <=> root.java-auto-download; }
+                                }
+                                HorizontalLayout { spacing: 12px; VerticalLayout { FieldLabel { text: GuiI18n.text("gui-java-memory-min"); } TextField { text <=> root.java-memory-min; input-type: InputType.number; width: 190px; } } VerticalLayout { FieldLabel { text: GuiI18n.text("gui-java-memory-max"); } TextField { text <=> root.java-memory-max; input-type: InputType.number; width: 190px; } } }
+                                Text { text: GuiI18n.text("gui-java-preferred"); color: Theme.text-secondary; font-size: 12px; } TextField { text <=> root.java-preferred-path; placeholder: "/usr/bin/java"; }
+                                HorizontalLayout { AppButton { text: GuiI18n.text("gui-java-refresh"); clicked => { root.refresh-java(); } } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-java-save"); tone: "primary"; clicked => { root.save-java-settings(root.java-auto-detect, root.java-auto-download, root.java-memory-min, root.java-memory-max, root.java-preferred-path); } } }
+                                for java in root.java-runtimes : Rectangle { height: 75px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface; HorizontalLayout { padding: 12px; VerticalLayout { Heading { text: java.version + " | " + java.vendor; font-size: 14px; } BodyText { text: java.path; overflow: elide; } } Pill { text: java.origin; tone-color: Theme.accent-secondary; } } }
+                            }
+                            if root.workspace-tab == "Accounts" : VerticalLayout { spacing: 12px;
+                                TextField { text <=> root.offline-account-name; placeholder: GuiI18n.text("gui-offline-account-placeholder"); }
+                                HorizontalLayout { spacing: 8px; AppButton { text: GuiI18n.text("gui-add-offline-account"); width: 180px; clicked => { root.add-offline-account(root.offline-account-name); } } AppButton { text: GuiI18n.text("gui-microsoft-sign-in"); width: 205px; tone: "primary"; clicked => { root.begin-microsoft-login(); } } Rectangle { horizontal-stretch: 1; } }
+                                if root.accounts.length == 0 : EmptyState { title: GuiI18n.text("gui-no-accounts"); message: GuiI18n.text("gui-no-accounts-detail"); }
+                                for account in root.accounts : Rectangle { height: 78px; border-radius: 8px; border-width: account.is-default ? 2px : 1px; border-color: account.is-default ? Theme.accent : Theme.border; background: Theme.surface; HorizontalLayout { padding: 12px; spacing: 8px; VerticalLayout { Heading { text: account.name; font-size: 14px; } BodyText { text: account.kind + " | " + account.credential-state; } } if account.is-default : Pill { text: GuiI18n.text("gui-default"); tone-color: Theme.accent; } if !account.is-default : AppButton { text: GuiI18n.text("gui-make-default"); width: 130px; clicked => { root.set-default-account(account.id); } } AppButton { text: GuiI18n.text("gui-remove"); width: 110px; tone: "danger"; clicked => { root.remove-account(account.id); } } } }
+                            }
+                            if root.workspace-tab == "Providers & APIs" : VerticalLayout { spacing: 14px;
+                                SectionTitle { title: GuiI18n.text("gui-preferred-mod-catalog"); detail: GuiI18n.text("gui-preferred-mod-catalog-detail"); }
+                                Rectangle { height: 146px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface; VerticalLayout { padding: 16px; spacing: 8px;
+                                    HorizontalLayout { Heading { text: GuiI18n.text("gui-preferred-mod-catalog-heading"); font-size: Theme.row-heading-size; } Rectangle { horizontal-stretch: 1; } Pill { text: root.default-mod-catalog-is-custom ? GuiI18n.text("gui-override") : GuiI18n.text("gui-default"); tone-color: root.default-mod-catalog-is-custom ? Theme.accent : Theme.text-secondary; } }
+                                    // Applied the moment a chip is clicked, and the selection follows
+                                    // the stored value rather than the click: a save that fails leaves
+                                    // the previous catalog selected instead of the one that was asked for.
+                                    HorizontalLayout { spacing: 8px; FilterChip { text: GuiI18n.text("gui-provider-modrinth"); accessible-name: GuiI18n.text("gui-provider-modrinth"); selected: root.default-mod-catalog == "modrinth"; clicked => { root.choose-default-mod-catalog("modrinth"); } } FilterChip { text: GuiI18n.text("gui-provider-curseforge"); accessible-name: GuiI18n.text("gui-provider-curseforge"); selected: root.default-mod-catalog == "curseforge"; clicked => { root.choose-default-mod-catalog("curseforge"); } } Rectangle { horizontal-stretch: 1; } if root.default-mod-catalog-is-custom : AppButton { text: GuiI18n.text("gui-reset-default"); clicked => { root.choose-default-mod-catalog(""); } } }
+                                    BodyText { text: root.default-mod-catalog == "" ? GuiI18n.value("gui-preferred-mod-catalog-unrecognized", root.configured-mod-catalog) : GuiI18n.text("gui-preferred-mod-catalog-note"); color: Theme.text-muted; wrap: word-wrap; }
+                                } }
+                                SectionTitle { title: GuiI18n.text("gui-provider-identifiers"); detail: GuiI18n.text("gui-provider-identifiers-detail"); }
+                                Rectangle { height: 146px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface; VerticalLayout { padding: 16px; spacing: 8px;
+                                    HorizontalLayout { Heading { text: GuiI18n.text("gui-microsoft-client-id"); font-size: Theme.row-heading-size; } Rectangle { horizontal-stretch: 1; } Pill { text: root.microsoft-client-id-is-custom ? GuiI18n.text("gui-override") : GuiI18n.text("gui-default"); tone-color: root.microsoft-client-id-is-custom ? Theme.accent : Theme.text-secondary; } }
+                                    HorizontalLayout { spacing: 8px; TextField { text <=> root.microsoft-client-id; placeholder: GuiI18n.text("gui-no-override"); horizontal-stretch: 1; } if root.microsoft-client-id-is-custom : AppButton { text: GuiI18n.text("gui-reset-default"); clicked => { root.reset-microsoft-client-id(); } } }
+                                    BodyText { text: GuiI18n.value(root.microsoft-client-id-is-custom ? "gui-effective-value" : "gui-effective-default", root.effective-microsoft-client-id); color: Theme.text-muted; wrap: word-wrap; }
+                                } }
+                                Rectangle { height: 146px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface; VerticalLayout { padding: 16px; spacing: 8px;
+                                    HorizontalLayout { Heading { text: GuiI18n.text("gui-user-agent"); font-size: Theme.row-heading-size; } Rectangle { horizontal-stretch: 1; } Pill { text: root.user-agent-is-custom ? GuiI18n.text("gui-override") : GuiI18n.text("gui-default"); tone-color: root.user-agent-is-custom ? Theme.accent : Theme.text-secondary; } }
+                                    HorizontalLayout { spacing: 8px; TextField { text <=> root.user-agent; placeholder: GuiI18n.text("gui-no-override"); horizontal-stretch: 1; } if root.user-agent-is-custom : AppButton { text: GuiI18n.text("gui-reset-default"); clicked => { root.reset-user-agent(); } } }
+                                    BodyText { text: GuiI18n.value(root.user-agent-is-custom ? "gui-effective-value" : "gui-effective-default", root.effective-user-agent); color: Theme.text-muted; wrap: word-wrap; }
+                                } }
+                                HorizontalLayout { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-save-api-settings"); tone: "primary"; clicked => { root.save-api-settings(root.microsoft-client-id, root.user-agent); } } }
+                                SectionTitle { title: GuiI18n.text("gui-curseforge"); detail: GuiI18n.text("gui-curseforge-detail"); }
+                                Rectangle { height: 196px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface; VerticalLayout { padding: 16px; spacing: 8px;
+                                    HorizontalLayout { Heading { text: GuiI18n.text("gui-curseforge-api-key"); font-size: Theme.row-heading-size; } Rectangle { horizontal-stretch: 1; } Pill { text: root.curseforge-key-configured ? GuiI18n.text("gui-curseforge-key-configured") : GuiI18n.text("gui-curseforge-key-not-configured"); tone-color: root.curseforge-key-configured ? Theme.accent : Theme.text-secondary; } }
+                                    // Masked because it shows what the user is typing, never what is stored:
+                                    // a saved key is not readable from here and the field is emptied on submit.
+                                    HorizontalLayout { spacing: 8px; TextField { text <=> root.curseforge-api-key; placeholder: GuiI18n.text("gui-curseforge-key-placeholder"); accessible-name: GuiI18n.text("gui-curseforge-api-key"); input-type: InputType.password; horizontal-stretch: 1; accepted => { root.save-curseforge-api-key(root.curseforge-api-key); } } AppButton { text: root.curseforge-key-configured ? GuiI18n.text("gui-curseforge-key-replace") : GuiI18n.text("gui-curseforge-key-save"); tone: "primary"; enabled: root.curseforge-api-key != ""; clicked => { root.save-curseforge-api-key(root.curseforge-api-key); } } if root.curseforge-key-configured : AppButton { text: GuiI18n.text("gui-remove"); tone: "danger"; clicked => { root.remove-curseforge-api-key(); } } }
+                                    BodyText { text: GuiI18n.text("gui-curseforge-key-storage"); color: Theme.text-muted; wrap: word-wrap; }
+                                    HorizontalLayout { AppButton { text: GuiI18n.text("gui-curseforge-key-help"); clicked => { root.open-curseforge-key-help(); } } Rectangle { horizontal-stretch: 1; } }
+                                } }
+                            }
+                            if root.workspace-tab == "Storage" : VerticalLayout { spacing: 14px;
+                                SectionTitle { title: GuiI18n.text("gui-persistent-storage"); detail: GuiI18n.text("gui-persistent-storage-detail"); }
+                                Rectangle { height: 164px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface; VerticalLayout { padding: 16px; spacing: 9px;
+                                    HorizontalLayout { Heading { text: GuiI18n.text("gui-storage-root"); font-size: Theme.row-heading-size; } Rectangle { horizontal-stretch: 1; } Pill { text: root.persistent-root-is-custom ? GuiI18n.text("gui-custom-location") : GuiI18n.text("gui-default-location"); tone-color: root.persistent-root-is-custom ? Theme.accent : Theme.text-secondary; } }
+                                    HorizontalLayout { spacing: 8px; TextField { text <=> root.persistent-root; placeholder: GuiI18n.text("gui-no-override"); horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-choose-folder"); clicked => { root.choose-storage-root(); } } }
+                                    BodyText { text: GuiI18n.value("gui-effective-location", root.storage-root); color: Theme.text-secondary; overflow: elide; }
+                                    BodyText { text: GuiI18n.value("gui-default-location-path", root.default-persistent-root); color: Theme.text-muted; overflow: elide; }
+                                } }
+                                HorizontalLayout { if root.persistent-root-is-custom : AppButton { text: GuiI18n.text("gui-reset-default"); clicked => { root.reset-storage-root(); } } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-save-storage-root"); tone: "primary"; clicked => { root.save-storage-settings(root.persistent-root); } } }
+                                BodyText { text: GuiI18n.text("gui-storage-change-future-only"); color: Theme.text-muted; wrap: word-wrap; }
+                                Divider { }
+                                SectionTitle { title: GuiI18n.text("gui-watched-download-folders"); detail: GuiI18n.text("gui-watched-download-folders-detail"); }
+                                if root.watched-download-folders.length > 0 : VerticalLayout {
+                                    spacing: 6px;
+                                    for folder in root.watched-download-folders : HorizontalLayout {
+                                        spacing: 8px;
+                                        height: 32px;
+                                        BodyText { text: folder; overflow: elide; vertical-alignment: center; horizontal-stretch: 1; }
+                                        AppButton { text: GuiI18n.text("gui-remove"); tone: "danger"; clicked => { root.remove-watched-folder(folder); } }
+                                    }
+                                }
+                                if root.watched-download-folders.length == 0 : BodyText { text: GuiI18n.text("gui-watched-download-folders-empty"); color: Theme.text-muted; wrap: word-wrap; }
+                                HorizontalLayout { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-add-watched-folder"); clicked => { root.choose-watched-folder(); } } }
+                                Divider { }
+                                SectionTitle { title: GuiI18n.text("gui-artifact-cache"); detail: GuiI18n.text("gui-artifact-cache-detail"); }
+                                // Height taken from the content rather than fixed:
+                                // a bare Rectangle reports no preferred height of
+                                // its own, and the scroll view needs a real one or
+                                // the row below this card cannot be reached.
+                                Rectangle { height: cache-card.preferred-height; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface; cache-card := VerticalLayout { padding: 16px; spacing: 12px;
+                                    HorizontalLayout { spacing: 10px;
+                                        Heading { text: root.artifact-cache-usage-known ? (root.artifact-cache-usage-exact ? GuiI18n.values("gui-artifact-cache-usage", root.artifact-cache-used, root.artifact-cache-total) : GuiI18n.values("gui-artifact-cache-usage-approximate", root.artifact-cache-used, root.artifact-cache-total)) : GuiI18n.text("gui-artifact-cache-measuring"); font-size: Theme.row-heading-size; overflow: elide; horizontal-stretch: 1; }
+                                        if root.artifact-cache-over-budget : Pill { text: GuiI18n.text("gui-artifact-cache-over-budget"); tone-color: Theme.warning; }
+                                    }
+                                    HorizontalLayout { spacing: 10px; alignment: start;
+                                        VerticalLayout { spacing: 4px;
+                                            FieldLabel { text: GuiI18n.text("gui-artifact-cache-limit"); }
+                                            ComboBox {
+                                                width: 170px;
+                                                accessible-label: GuiI18n.text("gui-artifact-cache-limit");
+                                                model: root.artifact-cache-limit-labels;
+                                                current-index <=> root.artifact-cache-limit-index;
+                                            }
+                                        }
+                                        if root.artifact-cache-limit-index == root.artifact-cache-custom-index : VerticalLayout { spacing: 4px;
+                                            FieldLabel { text: GuiI18n.text("gui-artifact-cache-custom-value"); }
+                                            // Wide enough for a value far past any
+                                            // preset: the presets stop at 100 GiB,
+                                            // the setting does not.
+                                            TextField { width: 130px; text <=> root.artifact-cache-custom-value; placeholder: "500"; input-type: InputType.number; accessible-name: GuiI18n.text("gui-artifact-cache-custom-value"); }
+                                        }
+                                        if root.artifact-cache-limit-index == root.artifact-cache-custom-index : VerticalLayout { spacing: 4px;
+                                            FieldLabel { text: " "; }
+                                            ComboBox { width: 100px; accessible-label: GuiI18n.text("gui-artifact-cache-custom-value"); model: root.artifact-cache-units; current-value <=> root.artifact-cache-custom-unit; }
+                                        }
+                                        VerticalLayout { spacing: 4px;
+                                            // An empty label so the button lines up
+                                            // with the controls it saves rather than
+                                            // with their labels.
+                                            FieldLabel { text: " "; }
+                                            AppButton { text: GuiI18n.text("gui-save-artifact-cache-limit"); tone: "primary"; clicked => { root.save-artifact-cache-limit(root.artifact-cache-limit-index, root.artifact-cache-custom-value, root.artifact-cache-custom-unit); } }
+                                        }
+                                    }
+                                    BodyText { text: GuiI18n.text("gui-artifact-cache-cleanup-note"); color: Theme.text-muted; wrap: word-wrap; }
+                                } }
+                                HorizontalLayout {
+                                    // Named for the cache and nothing else: an
+                                    // instance or a server is never what this
+                                    // removes, and the button must not read as if it
+                                    // might be.
+                                    AppButton { text: root.artifact-cache-clearing ? GuiI18n.text("gui-clearing-artifact-cache") : GuiI18n.text("gui-clear-artifact-cache"); enabled: !root.artifact-cache-clearing; clicked => { root.artifact-cache-clearing = true; root.clear-artifact-cache(); } }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
+                            }
+                            if root.workspace-tab == "About & Licenses" : VerticalLayout { alignment: start; spacing: 14px;
+                                Image { source: root.logo; width: 92px; height: 92px; image-fit: contain; accessible-label: GuiI18n.text("gui-logo-accessible"); }
+                                Heading { text: "Ephervex"; font-size: 24px; }
+                                BodyText { text: GuiI18n.value("gui-version", root.app-version); }
+                                BodyText { text: GuiI18n.text("gui-apache-license"); color: Theme.text; }
+                                HorizontalLayout { AppButton { text: GuiI18n.text("gui-view-ephervex-license"); clicked => { root.modal = "license"; } } Rectangle { horizontal-stretch: 1; } }
+                                Divider { }
+                                Heading { text: GuiI18n.text("gui-built-with-slint"); }
+                                Rectangle { width: 290px; height: 105px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface; AboutSlint { } }
+                                Divider { }
+                                Heading { text: GuiI18n.text("gui-third-party-software"); }
+                                BodyText { text: GuiI18n.text("gui-third-party-detail"); }
+                                HorizontalLayout { AppButton { text: GuiI18n.text("gui-third-party-licenses"); clicked => { root.modal = "third-party"; } } Rectangle { horizontal-stretch: 1; } }
+                            }
+                        } } }
+                    }
                 }
             }
 
@@ -2704,7 +2747,7 @@ slint::slint! {
                 border-color: Theme.border;
                 background: Theme.elevated;
                 VerticalLayout { padding: 22px; spacing: 13px;
-                    HorizontalLayout { alignment: center; Heading { text: root.modal == "create-instance" ? GuiI18n.text("gui-modal-new-instance") : root.modal == "import" ? GuiI18n.text("gui-modal-import") : root.modal == "create-server" ? GuiI18n.text("gui-modal-new-server") : root.modal == "mod-plan" ? GuiI18n.text("gui-modal-install-mod") : root.modal == "mod-manage" ? GuiI18n.text("gui-modal-manage-mod") : root.modal == "loader-change" ? GuiI18n.text("gui-modal-change-loader") : root.modal == "mod-remove" ? GuiI18n.text("gui-modal-remove-mod") : root.modal == "mod-apply" ? GuiI18n.text("gui-modal-apply-mod") : root.modal == "mod-result" ? GuiI18n.text("gui-modal-mod-result") : root.modal == "eula" ? GuiI18n.text("gui-server-eula") : root.modal == "kill" ? GuiI18n.text("gui-modal-force-kill") : root.modal == "delete-instance" ? GuiI18n.text("gui-delete-instance") : root.modal == "delete-server" ? GuiI18n.text("gui-delete-server") : root.modal == "license" ? GuiI18n.text("gui-modal-apache-license") : GuiI18n.text("gui-third-party-licenses"); font-size: 20px; } Rectangle { horizontal-stretch: 1; } IconButton { icon: @image-url("../../../assets/icons/close.svg"); accessible-name: GuiI18n.text("gui-close"); clicked => { if root.modal == "import" { root.close-import-modal(); } else { root.modal = ""; root.modal-error = ""; } } } }
+                    HorizontalLayout { cross-axis-alignment: center; Heading { text: root.modal == "create-instance" ? GuiI18n.text("gui-modal-new-instance") : root.modal == "import" ? GuiI18n.text("gui-modal-import") : root.modal == "create-server" ? GuiI18n.text("gui-modal-new-server") : root.modal == "mod-plan" ? GuiI18n.text("gui-modal-install-mod") : root.modal == "mod-manage" ? GuiI18n.text("gui-modal-manage-mod") : root.modal == "loader-change" ? GuiI18n.text("gui-modal-change-loader") : root.modal == "mod-remove" ? GuiI18n.text("gui-modal-remove-mod") : root.modal == "mod-apply" ? GuiI18n.text("gui-modal-apply-mod") : root.modal == "mod-result" ? GuiI18n.text("gui-modal-mod-result") : root.modal == "eula" ? GuiI18n.text("gui-server-eula") : root.modal == "kill" ? GuiI18n.text("gui-modal-force-kill") : root.modal == "delete-instance" ? GuiI18n.text("gui-delete-instance") : root.modal == "delete-server" ? GuiI18n.text("gui-delete-server") : root.modal == "license" ? GuiI18n.text("gui-modal-apache-license") : GuiI18n.text("gui-third-party-licenses"); font-size: 20px; } Rectangle { horizontal-stretch: 1; } IconButton { icon: @image-url("../../../assets/icons/close.svg"); accessible-name: GuiI18n.text("gui-close"); clicked => { if root.modal == "import" { root.close-import-modal(); } else { root.modal = ""; root.modal-error = ""; } } } }
                     Divider { }
                     if root.modal == "create-instance" : VerticalLayout { spacing: 11px; BodyText { text: GuiI18n.text("gui-create-instance-detail"); wrap: word-wrap; } Text { text: GuiI18n.text("gui-name"); color: Theme.text-secondary; font-size: 12px; } TextField { text <=> root.create-name; placeholder: GuiI18n.text("gui-instance-name-placeholder"); edited(text) => { root.create-name-edited(text); } } Text { text: GuiI18n.text("gui-minecraft-release"); color: Theme.text-secondary; font-size: 12px; } HorizontalLayout { spacing: 8px; ComboBox { horizontal-stretch: 1; model: root.minecraft-releases; current-value <=> root.create-minecraft; selected(value) => { root.create-minecraft = value; root.create-loader-version = ""; root.create-loader-versions = []; root.minecraft-selection-changed("client", value); if root.create-loader != "Vanilla" { root.request-loader-catalog("client", root.create-loader, value); } root.recompute-create-name(); } } FavoriteToggle { version: root.create-minecraft; favorite: root.create-minecraft-favorite; enabled: root.create-minecraft != ""; toggled => { root.toggle-favorite-version(root.create-minecraft); } } } Text { text: GuiI18n.text("gui-loader"); color: Theme.text-secondary; font-size: 12px; } ComboBox { model: root.create-loaders; current-value <=> root.create-loader; selected(value) => { root.create-loader = value; root.create-loader-version = ""; root.create-loader-versions = []; if value != "Vanilla" { root.request-loader-catalog("client", value, root.create-minecraft); } root.recompute-create-name(); } } if root.create-loader != "Vanilla" : ComboBox { model: root.create-loader-versions; current-value <=> root.create-loader-version; changed current-value => { root.recompute-create-name(); } } HorizontalLayout { BodyText { text: GuiI18n.text("gui-store-persistently"); } Toggle { checked <=> root.create-persistent; } BodyText { text: root.create-persistent ? GuiI18n.text("gui-persistent-root") : GuiI18n.text("gui-temporary-root"); color: Theme.text-muted; } } if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; } HorizontalLayout { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; } } AppButton { text: GuiI18n.text("gui-create-instance"); tone: "primary"; enabled: root.minecraft-releases.length > 0 && root.create-name != "" && root.create-minecraft != "" && (root.create-loader == "Vanilla" || root.create-loader-version != ""); clicked => { root.submit-create-instance(root.create-name, root.create-minecraft, root.create-loader, root.create-loader-version, root.create-persistent); } } } }
                     if root.modal == "import" : ScrollView {
