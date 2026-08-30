@@ -520,6 +520,29 @@ impl App {
             .await?)
     }
 
+    /// Fetches the artwork for one page of search results.
+    ///
+    /// Separate from [`Self::search_mods`] so a caller that only needs names
+    /// does not pay for the images, and so a page of results is on screen
+    /// before any of them are fetched. Returns only what succeeded, keyed by
+    /// project id: an icon is decoration, and a project whose image will not
+    /// download keeps its place in the results with nothing drawn.
+    #[instrument(skip(self, results), fields(provider = %catalog))]
+    pub async fn cache_result_artwork(
+        &self,
+        catalog: ModProvider,
+        results: &ModSearchResults,
+        cancel: &CancellationToken,
+    ) -> BTreeMap<String, PathBuf> {
+        self.cache_artwork(
+            catalog,
+            results.hits.iter().map(|hit| &hit.project),
+            &OperationReporter::silent("browsing-mods"),
+            cancel,
+        )
+        .await
+    }
+
     /// One project and its versions, annotated against the instance.
     ///
     /// `include_incompatible` decides what the version list contains, not
@@ -807,15 +830,15 @@ impl App {
     /// Returns only what succeeded. An icon is decoration: a project whose
     /// image will not download keeps its entry, its identity, and its place in
     /// the list, and the frontend draws its fallback.
-    async fn cache_artwork(
+    async fn cache_artwork<'a>(
         &self,
         catalog: ModProvider,
-        projects: &[ModProject],
+        projects: impl IntoIterator<Item = &'a ModProject>,
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> BTreeMap<String, PathBuf> {
         let wanted: Vec<(&ModProject, &str)> = projects
-            .iter()
+            .into_iter()
             .filter_map(|project| Some((project, project.icon_url.as_deref()?)))
             .collect();
         if wanted.is_empty() {

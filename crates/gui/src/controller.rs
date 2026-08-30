@@ -1438,7 +1438,7 @@ fn register_client_actions(
 fn register_mod_actions(ui: &AppWindow, commands: &Sender<Command>) {
     register_mod_mutations(ui, commands);
     register_mod_browser(ui, commands);
-    register_mod_review(ui, commands);
+    register_browser_install(ui, commands);
 
     let sender = commands.clone();
     let handle = ui.as_weak();
@@ -1615,15 +1615,22 @@ fn show_mod_catalog(ui: &AppWindow, provider: &str) {
     ui.set_mod_results_next_offset(-1);
 }
 
-/// Finding a mod in the catalog and asking what installing it would involve.
+/// Installing a mod straight from the browser.
 ///
-/// Kept apart from `register_mod_browser`: a review is not a search, carries
-/// no request id or offset of its own, and does not touch any of the search
+/// Installing is planning first: core resolves the newest release that fits the
+/// instance and everything it requires, and only then is anything written. What
+/// this adds is that a plan with nothing left to decide is applied without a
+/// confirmation, because the button already said what it does. A plan that does
+/// carry a decision, which today means linked servers to choose between, still
+/// opens the confirmation; see `apply_mod_install_plan`.
+///
+/// Kept apart from `register_mod_browser`: this is not a search, carries no
+/// request id or offset of its own, and does not touch any of the search
 /// staleness bookkeeping.
-fn register_mod_review(ui: &AppWindow, commands: &Sender<Command>) {
+fn register_browser_install(ui: &AppWindow, commands: &Sender<Command>) {
     let sender = commands.clone();
     let handle = ui.as_weak();
-    ui.on_review_mod(move |instance, provider, project| {
+    ui.on_install_from_browser(move |instance, provider, project| {
         let Some(ui) = handle.upgrade() else { return };
         let Some(instance) = backend::parse_instance_id(&instance) else {
             return;
@@ -1633,9 +1640,7 @@ fn register_mod_review(ui: &AppWindow, commands: &Sender<Command>) {
         };
         ui.set_mod_plan_requested(project.clone());
         ui.set_mod_plan_requested_provider(provider);
-        // Reviewing is planning: the confirmation it opens is the same one the
-        // linked-server section lives in, so a review already answers "and what
-        // would this do to my servers".
+        ui.set_mod_plan_direct(true);
         send(
             &sender,
             Command::PlanMod {
@@ -4141,6 +4146,37 @@ fn apply_mod_results(ui: &AppWindow, results: backend::ModResultsData) {
 }
 
 /// Shows what installing a mod would involve, here and on each linked server.
+/// What a finished plan should do next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlanDisposition {
+    /// Apply it now, without asking.
+    Install,
+    /// Everything it would install is already there.
+    NothingToDo,
+    /// Show the confirmation, because something is left for the user to decide.
+    Confirm,
+}
+
+/// Whether a plan can be applied without a confirmation.
+///
+/// A plan the browser's Install button asked for already has its answer: the
+/// button said what it does, core resolved the release and everything it
+/// requires, and repeating that back adds nothing. A plan the user reached any
+/// other way is always confirmed.
+///
+/// Linked servers are the one thing a button press cannot answer. Which of them
+/// should also receive the mod is a choice, and a choice needs the panel that
+/// offers it.
+fn plan_disposition(direct: bool, plan: &backend::ModPlanData) -> PlanDisposition {
+    if !direct || !plan.linked.targets.is_empty() {
+        return PlanDisposition::Confirm;
+    }
+    if plan.install_count == 0 {
+        return PlanDisposition::NothingToDo;
+    }
+    PlanDisposition::Install
+}
+
 fn apply_mod_install_plan(ui: &AppWindow, plan: backend::ModPlanData) {
     if !presentation::result_is_current(&plan.instance, &ui.get_selected_instance_id()) {
         return;
@@ -4171,6 +4207,25 @@ fn apply_mod_install_plan(ui: &AppWindow, plan: backend::ModPlanData) {
         },
     ) {
         return;
+    }
+    let direct = ui.get_mod_plan_direct();
+    ui.set_mod_plan_direct(false);
+    match plan_disposition(direct, &plan) {
+        PlanDisposition::Install => {
+            ui.set_mod_action_pending(true);
+            ui.invoke_install_mod(
+                plan.instance.into(),
+                plan.provider.into(),
+                plan.project.into(),
+                plan.version_id.into(),
+            );
+            return;
+        }
+        PlanDisposition::NothingToDo => {
+            ui.invoke_present_toast(lookup("gui-mod-already-present").into(), false);
+            return;
+        }
+        PlanDisposition::Confirm => {}
     }
     ui.set_mod_plan_instance(plan.instance.into());
     ui.set_mod_plan_provider(plan.provider.into());
@@ -4347,6 +4402,7 @@ fn mod_search_rows(rows: Vec<ModSearchData>) -> Vec<ModSearchRow> {
             description: row.description.into(),
             author: row.author.into(),
             note: row.note.into(),
+            icon: cached_image(&row.icon),
         })
         .collect()
 }
@@ -4743,6 +4799,69 @@ mod tests {
             assert!(source.contains(label), "missing context action {label}");
         }
         assert!(source.matches("ContextMenuArea {").count() >= 3);
+    }
+
+    fn plan(install_count: usize, targets: usize) -> backend::ModPlanData {
+        backend::ModPlanData {
+            instance: "instance".to_owned(),
+            provider: "modrinth".to_owned(),
+            requested: "utilitix".to_owned(),
+            project: "utilitix".to_owned(),
+            title: "UtilitiX".to_owned(),
+            version: "21.1.6".to_owned(),
+            version_id: "abcd1234".to_owned(),
+            install_count,
+            dependency_count: 1,
+            optional_count: 0,
+            already_installed_count: 0,
+            warning_count: 0,
+            linked: backend::LinkedSectionData {
+                instance: "instance".to_owned(),
+                kind: "install".to_owned(),
+                path: String::new(),
+                version: "abcd1234".to_owned(),
+                name: "UtilitiX".to_owned(),
+                version_number: "21.1.6".to_owned(),
+                support: String::new(),
+                targets: (0..targets)
+                    .map(|index| backend::LinkedTargetData {
+                        id: format!("server-{index}"),
+                        name: format!("Server {index}"),
+                        detail: String::new(),
+                        state: String::new(),
+                        explanation: String::new(),
+                        tone: String::new(),
+                        actionable: true,
+                        selected: true,
+                    })
+                    .collect(),
+            },
+        }
+    }
+
+    #[test]
+    fn the_browser_installs_without_a_confirmation_when_nothing_is_left_to_decide() {
+        assert_eq!(
+            plan_disposition(true, &plan(2, 0)),
+            PlanDisposition::Install
+        );
+        // Everything the plan would install is already there, so applying it
+        // would say nothing and change nothing.
+        assert_eq!(
+            plan_disposition(true, &plan(0, 0)),
+            PlanDisposition::NothingToDo
+        );
+        // A linked server is a choice about where the mod goes, and a button
+        // press did not answer it.
+        assert_eq!(
+            plan_disposition(true, &plan(2, 1)),
+            PlanDisposition::Confirm
+        );
+        // A plan reached any other way is always confirmed.
+        assert_eq!(
+            plan_disposition(false, &plan(2, 0)),
+            PlanDisposition::Confirm
+        );
     }
 
     #[test]

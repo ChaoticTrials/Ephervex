@@ -610,6 +610,10 @@ pub struct ModSearchData {
     pub title: String,
     pub description: String,
     pub author: String,
+    /// A local PNG for the project, or empty when there is none to draw. The
+    /// same cached artwork the Managed Mods list uses, so a mod looks the same
+    /// on both sides of the panel.
+    pub icon: String,
     /// A short localized note about the result, such as whether it fits this
     /// instance. The catalogs do not publish one comparable statistic between
     /// them, and inventing a number here would only look like one.
@@ -1387,10 +1391,19 @@ fn run_worker(
                         Ok(results) => {
                             let total = results.total_hits;
                             let next_offset = results.next_offset;
+                            let icons = runtime.block_on(app.cache_result_artwork(
+                                provider,
+                                &results,
+                                &CancellationToken::new(),
+                            ));
                             let rows = results
                                 .hits
                                 .into_iter()
                                 .map(|hit| ModSearchData {
+                                    icon: icons
+                                        .get(&hit.project.id)
+                                        .map(|path| path.display().to_string())
+                                        .unwrap_or_default(),
                                     project_id: hit.project.id,
                                     title: hit.project.title,
                                     description: hit.project.description,

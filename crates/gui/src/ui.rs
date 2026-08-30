@@ -159,6 +159,8 @@ slint::slint! {
         title: string,
         description: string,
         author: string,
+        // The project's cached artwork, or an empty image when there is none.
+        icon: image,
         // A short, already-localized note about the result, such as whether it
         // fits this instance. Not a number and not a catalog statistic.
         note: string,
@@ -797,15 +799,18 @@ slint::slint! {
     component ModArtwork inherits Rectangle {
         in property <image> icon;
         in property <string> origin-kind;
+        // The tile's edge length. Everything inside is derived from it so a
+        // caller changes one number rather than three.
+        in property <length> size: 56px;
         property <color> tone: root.origin-kind == "pack" ? Theme.accent-secondary : root.origin-kind == "dependency" ? Theme.text-muted : Theme.accent;
-        width: 44px; height: 44px;
-        border-radius: 7px;
+        width: root.size; height: root.size;
+        border-radius: root.size / 7;
         border-width: 1px;
         border-color: root.tone.with-alpha(0.45);
         background: root.tone.with-alpha(0.1);
         clip: true;
-        if root.icon.width > 0 : Image { x: 3px; y: 3px; width: 38px; height: 38px; source: root.icon; image-fit: contain; }
-        if root.icon.width == 0 : Image { x: 10px; y: 10px; width: 24px; height: 24px; source: @image-url("../../../assets/icons/environment-generic.svg"); image-fit: contain; colorize: root.tone; }
+        if root.icon.width > 0 : Image { x: 3px; y: 3px; width: root.size - 6px; height: root.size - 6px; source: root.icon; image-fit: contain; }
+        if root.icon.width == 0 : Image { x: root.size / 4; y: root.size / 4; width: root.size / 2; height: root.size / 2; source: @image-url("../../../assets/icons/environment-generic.svg"); image-fit: contain; colorize: root.tone; }
     }
 
     // One row of the Managed Mods list.
@@ -817,7 +822,7 @@ slint::slint! {
     component ModCard inherits Rectangle {
         in property <ModRow> item;
         callback manage(string);
-        height: 78px;
+        height: 86px;
         border-radius: 6px;
         border-width: 1px;
         border-color: root.item.missing ? Theme.warning.with-alpha(0.6) : touch.has-hover && root.item.can-manage ? Theme.accent.with-alpha(0.7) : Theme.border;
@@ -1735,6 +1740,11 @@ slint::slint! {
         // The catalog the open review asked. Part of the identity an answer is
         // matched against, and what an install is sent with.
         in-out property <string> mod-plan-requested-provider;
+        // Whether the plan being awaited was asked for by the browser's Install
+        // button. Such a plan installs itself the moment it comes back with
+        // nothing left for the user to decide; the confirmation opens only when
+        // there is a choice, which today means linked servers to target.
+        in-out property <bool> mod-plan-direct: false;
         in-out property <string> mod-plan-provider;
         in-out property <string> mod-plan-project;
         // The exact release the confirmation showed, which is the release
@@ -1883,7 +1893,7 @@ slint::slint! {
         callback search-mods(string, string, string);
         callback load-more-mods(string, string, string, int);
         callback switch-mod-catalog(string);
-        callback review-mod(string, string, string);
+        callback install-from-browser(string, string, string);
         callback install-mod(string, string, string, string);
         callback submit-create-instance(string, string, string, string, bool);
         callback open-create-instance-modal();
@@ -2171,7 +2181,7 @@ slint::slint! {
                                     if root.mod-search-notice != "" : Rectangle { border-radius: 6px; border-width: 1px; border-color: Theme.danger; background: Theme.background; VerticalLayout { padding: 10px; spacing: 6px; BodyText { text: root.mod-search-notice; color: Theme.text-secondary; wrap: word-wrap; } if root.mod-provider == "curseforge" : HorizontalLayout { AppButton { text: GuiI18n.text("gui-open-providers-settings"); clicked => { root.page = 4; root.workspace = ""; root.workspace-tab = "Providers & APIs"; } } Rectangle { horizontal-stretch: 1; } } } }
                                     if root.mod-search-loading : BodyText { text: GuiI18n.text("gui-mod-search-running"); color: Theme.text-muted; }
                                     if !root.mod-search-loading && root.mod-search-ran && root.mod-search-notice == "" && root.mod-results.length == 0 && root.mod-results-next-offset < 0 : EmptyState { title: GuiI18n.text("gui-no-mod-results"); message: GuiI18n.text("gui-no-mod-results-detail"); }
-                                    ScrollView { VerticalLayout { spacing: 8px; for mod in root.mod-results : Rectangle { height: 92px; clip: true; border-radius: 6px; border-width: 1px; border-color: Theme.border; background: Theme.background; HorizontalLayout { padding: 10px; VerticalLayout { Heading { text: mod.title; font-size: Theme.row-heading-size; overflow: elide; } BodyText { text: mod.description; wrap: word-wrap; overflow: elide; vertical-alignment: top; height: Theme.body-size * 2.7; } BodyText { text: GuiI18n.values("gui-mod-result-meta", mod.author, mod.note); color: Theme.text-muted; overflow: elide; } } AppButton { text: GuiI18n.text("gui-review"); clicked => { root.review-mod(root.selected-instance-id, root.mod-provider, mod.project-id); } } } }
+                                    ScrollView { VerticalLayout { spacing: 8px; for mod in root.mod-results : Rectangle { height: 92px; clip: true; border-radius: 6px; border-width: 1px; border-color: Theme.border; background: Theme.background; HorizontalLayout { padding: 10px; spacing: 11px; VerticalLayout { alignment: center; ModArtwork { icon: mod.icon; origin-kind: "user"; } } VerticalLayout { horizontal-stretch: 1; Heading { text: mod.title; font-size: Theme.row-heading-size; overflow: elide; } BodyText { text: mod.description; wrap: word-wrap; overflow: elide; vertical-alignment: top; height: Theme.body-size * 2.7; } BodyText { text: GuiI18n.values("gui-mod-result-meta", mod.author, mod.note); color: Theme.text-muted; overflow: elide; } } VerticalLayout { alignment: center; AppButton { width: 120px; text: GuiI18n.text("gui-install"); tone: "primary"; enabled: !root.mod-action-pending; clicked => { root.install-from-browser(root.selected-instance-id, root.mod-provider, mod.project-id); } } } } }
                                         if root.mod-results-next-offset >= 0 : HorizontalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-load-more"); enabled: !root.mod-search-loading; clicked => { root.load-more-mods(root.selected-instance-id, root.mod-search-provider, root.mod-search-submitted, root.mod-results-next-offset); } } }
                                     } }
                                 }

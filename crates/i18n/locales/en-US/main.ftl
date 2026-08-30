@@ -1245,7 +1245,6 @@ gui-load-more = Load More
 gui-open-providers-settings = Open Providers & APIs
 gui-search = Search
 gui-mod-result-meta = by { $first } | { $second }
-gui-review = Review
 gui-instance-settings-unavailable = Instance-owned Minecraft settings
 gui-instance-settings-unavailable-detail = The current core safely applies known Vanilla defaults when an instance is created, but does not expose a typed editor for an existing instance. Unknown and mod-added options remain untouched.
 gui-open-global-defaults = Open Global Defaults
@@ -1651,6 +1650,8 @@ gui-mod-plan-warnings = { $count ->
     [one] Warning: the plan has 1 compatibility note.
    *[other] Warning: the plan has { $count } compatibility notes.
 }
+gui-install = Install
+gui-mod-already-present = That mod and everything it requires are already installed.
 gui-install-required = Install Required Set
 gui-eula-detail = Minecraft's server EULA is a legal agreement. Ephervex records global consent only after this explicit action; starting a server never accepts it for you.
 gui-open-minecraft-eula = Open Minecraft EULA
