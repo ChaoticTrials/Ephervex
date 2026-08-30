@@ -3587,18 +3587,19 @@ fn import_submission_action(
 /// The list itself is not refetched: reordering is the whole effect, and a
 /// favorite added while the New Instance dialog is open should move a row, not
 /// blank the dialog while a catalog is asked again.
+/// Records the saved favorites and lights the star for the release on screen.
+///
+/// Deliberately does not reorder the release list. A `ComboBox` rebuilds its
+/// selection whenever its model changes: it clamps the index it was holding and
+/// takes whatever now sits there, and Slint documents that writing the value
+/// back cannot move it. Reordering under an open dialog therefore silently
+/// changed which release the user had chosen. The new order is applied when the
+/// list is next loaded, which is what opening the dialog does.
 fn apply_favorite_versions(ui: &AppWindow, favorites: Vec<String>) {
-    let releases: Vec<String> = ui
-        .get_minecraft_releases()
-        .iter()
-        .map(|release| release.to_string())
-        .collect();
-    let ordered = presentation::releases_with_favorites_first(releases, &favorites);
     ui.set_create_minecraft_favorite(favorites.contains(&ui.get_create_minecraft().to_string()));
     ui.set_favorite_minecraft_versions(model(
         favorites.into_iter().map(SharedString::from).collect(),
     ));
-    ui.set_minecraft_releases(model(ordered.into_iter().map(SharedString::from).collect()));
 }
 
 fn apply_minecraft_releases(
@@ -5059,6 +5060,39 @@ mod tests {
                     .collect(),
             },
         }
+    }
+
+    /// Recording a favorite must not rewrite the release list.
+    ///
+    /// A `ComboBox` rebuilds its selection whenever its model changes, so a
+    /// reorder under an open dialog moves the user's choice to whatever lands
+    /// at the index it was holding. Slint documents that writing the value back
+    /// cannot undo it, which is why the list is left alone until it is loaded.
+    #[test]
+    fn recording_a_favorite_does_not_reorder_the_release_list() {
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = AppWindow::new().expect("window");
+        let releases = ["1.21.4", "1.21.1", "1.20.1", "1.16.3"];
+        ui.set_minecraft_releases(model(releases.map(SharedString::from).to_vec()));
+        ui.set_create_minecraft("1.16.3".into());
+
+        apply_favorite_versions(&ui, vec!["1.16.3".to_owned()]);
+
+        assert_eq!(ui.get_create_minecraft(), "1.16.3");
+        assert_eq!(
+            ui.get_minecraft_releases()
+                .iter()
+                .collect::<Vec<SharedString>>(),
+            releases.map(SharedString::from).to_vec()
+        );
+        // The star still lights, and the list of favorites is what was saved.
+        assert!(ui.get_create_minecraft_favorite());
+        assert_eq!(
+            ui.get_favorite_minecraft_versions()
+                .iter()
+                .collect::<Vec<SharedString>>(),
+            vec![SharedString::from("1.16.3")]
+        );
     }
 
     #[test]
