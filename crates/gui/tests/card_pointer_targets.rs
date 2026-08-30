@@ -10,12 +10,13 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::time::Duration;
 
 use ephervex_gui::ui::{AppWindow, GuiI18n, InstanceRow, ServerRow};
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use i_slint_backend_testing::{ElementHandle, TestingBackend, TestingBackendOptions};
-use slint::platform::PointerEventButton;
-use slint::{ComponentHandle, ModelRc, PhysicalSize, SharedString, VecModel};
+use slint::platform::{PointerEventButton, WindowEvent};
+use slint::{ComponentHandle, LogicalPosition, ModelRc, PhysicalSize, SharedString, VecModel};
 
 /// One window per test thread. Both card kinds are exercised in the first.
 #[test]
@@ -126,6 +127,55 @@ fn window() -> AppWindow {
     ui.window().set_size(PhysicalSize::new(1480, 900));
     ui.show().expect("show");
     ui
+}
+
+/// A card opens its workspace on a double click.
+///
+/// The two presses have to reach the same touch area: a list model replaced
+/// between them rebuilds every card, and the second press then lands on an
+/// element that never saw the first, which reads as two ordinary clicks.
+#[test]
+fn double_clicking_a_card_opens_its_workspace() {
+    let ui = window();
+    let opened: Rc<RefCell<Vec<String>>> = Rc::default();
+    let record = Rc::clone(&opened);
+    ui.on_load_instance_workspace(move |id| record.borrow_mut().push(id.to_string()));
+
+    ui.set_loading(false);
+    ui.set_page(0);
+    ui.set_instances(ModelRc::new(VecModel::from(vec![instance()])));
+    settle(&ui);
+
+    let card = ElementHandle::find_by_accessible_label(&ui, "Repro Client")
+        .next()
+        .expect("the list holds the card");
+    double_click(&ui, &card);
+
+    assert_eq!(opened.borrow().as_slice(), ["repro-client"]);
+    assert_eq!(ui.get_workspace(), "instance");
+}
+
+/// Two presses inside the platform's double-click interval, at the element's
+/// own center. The testing backend has no event loop, so the wait between them
+/// is mocked rather than real.
+fn double_click(ui: &AppWindow, element: &ElementHandle) {
+    let position = LogicalPosition::new(
+        element.absolute_position().x + element.size().width / 2.0,
+        element.absolute_position().y + element.size().height / 2.0,
+    );
+    for _ in 0..2 {
+        ui.window()
+            .dispatch_event(WindowEvent::PointerMoved { position });
+        ui.window().dispatch_event(WindowEvent::PointerPressed {
+            position,
+            button: PointerEventButton::Left,
+        });
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(20));
+        ui.window().dispatch_event(WindowEvent::PointerReleased {
+            position,
+            button: PointerEventButton::Left,
+        });
+    }
 }
 
 fn install_i18n(ui: &AppWindow) {

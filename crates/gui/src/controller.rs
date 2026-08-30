@@ -1978,17 +1978,30 @@ fn register_instance_selection(
 ) {
     let sender = commands.clone();
     let weak = ui.as_weak();
+    // What this handler last acted on. The markup assigns `selected-instance-id`
+    // before calling in, so the property cannot tell a new selection from a
+    // repeat of the current one.
+    let selected = Rc::new(RefCell::new(String::new()));
     ui.on_select_instance(move |id| {
+        let repeat = *selected.borrow() == id.as_str();
+        if !repeat {
+            id.as_str().clone_into(&mut selected.borrow_mut());
+        }
         if let Some(ui) = weak.upgrade() {
             let linked = ui
                 .get_servers()
                 .iter()
                 .filter(|row| row.linked_client_id == id)
                 .collect::<Vec<_>>();
-            ui.set_linked_servers(model(linked));
+            ui.set_linked_servers(reconciled(&ui.get_linked_servers(), linked));
             apply_pending_creations(&ui, &creations.borrow());
         }
-        send(&sender, Command::Refresh);
+        // Clicking the already-selected card changes nothing that a snapshot
+        // would answer, and asking for one anyway is what used to rebuild the
+        // list between the two halves of a double click.
+        if !repeat {
+            send(&sender, Command::Refresh);
+        }
     });
 }
 
@@ -3399,7 +3412,10 @@ fn apply_event(
             // name. The workspace it belongs to already showed its durable
             // state, and reopening it asks again.
             if presentation::result_is_current(&data.instance, &ui.get_selected_instance_id()) {
-                ui.set_managed_mods(model(managed_mod_rows(data.mods)));
+                ui.set_managed_mods(reconciled(
+                    &ui.get_managed_mods(),
+                    managed_mod_rows(data.mods),
+                ));
                 ui.set_managed_mods_notice(data.notice.into());
             }
         }
@@ -4069,7 +4085,7 @@ fn apply_instance_snapshot(
         ui.set_selected_instance_id(SharedString::default());
         ui.set_selected_instance_index(-1);
     }
-    ui.set_instances(model(instance_rows));
+    ui.set_instances(reconciled(&ui.get_instances(), instance_rows));
 }
 
 fn apply_server_snapshot(ui: &AppWindow, servers: Vec<crate::presentation::ServerPresentation>) {
@@ -4112,9 +4128,9 @@ fn apply_server_snapshot(ui: &AppWindow, servers: Vec<crate::presentation::Serve
         .iter()
         .position(|row| row.id == workspace_server);
     ui.set_selected_server_index(workspace_index.map_or(-1, to_i32));
-    ui.set_servers(model(server_rows));
-    ui.set_global_servers(model(global_rows));
-    ui.set_linked_servers(model(linked_rows));
+    ui.set_servers(reconciled(&ui.get_servers(), server_rows));
+    ui.set_global_servers(reconciled(&ui.get_global_servers(), global_rows));
+    ui.set_linked_servers(reconciled(&ui.get_linked_servers(), linked_rows));
 }
 
 fn server_is_globally_visible(row: &ServerRow, show_linked_servers: bool) -> bool {
@@ -4636,6 +4652,36 @@ fn model<T: Clone + 'static>(rows: Vec<T>) -> ModelRc<T> {
     ModelRc::new(VecModel::from(rows))
 }
 
+/// The model to store for a list, reusing the one already there when it can.
+///
+/// Handing a repeater a different `ModelRc` makes it tear down and rebuild every
+/// row component, and with them whatever those components were in the middle of.
+/// A half-finished double click is exactly that: the second press lands on a
+/// freshly built touch area that never saw the first, so it reads as two single
+/// clicks. Snapshots arrive for reasons that have nothing to do with the list
+/// changing, so the rows have to survive one.
+///
+/// Rows are therefore written into the existing model, and only where they
+/// actually differ. An unchanged list produces no notifications at all.
+fn reconciled<T: Clone + PartialEq + 'static>(list: &ModelRc<T>, rows: Vec<T>) -> ModelRc<T> {
+    let Some(existing) = list.as_any().downcast_ref::<VecModel<T>>() else {
+        return model(rows);
+    };
+    while existing.row_count() > rows.len() {
+        existing.remove(existing.row_count() - 1);
+    }
+    for (index, row) in rows.into_iter().enumerate() {
+        if index < existing.row_count() {
+            if existing.row_data(index).as_ref() != Some(&row) {
+                existing.set_row_data(index, row);
+            }
+        } else {
+            existing.push(row);
+        }
+    }
+    list.clone()
+}
+
 fn send(sender: &Sender<Command>, command: Command) {
     if sender.send(command).is_err() {
         tracing::error!("the GUI core worker stopped unexpectedly");
@@ -5013,6 +5059,42 @@ mod tests {
                     .collect(),
             },
         }
+    }
+
+    #[test]
+    fn a_snapshot_that_changes_nothing_leaves_the_list_model_alone() {
+        let rows = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| SharedString::from(*name))
+                .collect::<Vec<_>>()
+        };
+        let list = model(rows(&["a", "b", "c"]));
+
+        // `ModelRc`'s equality is identity, which is the question here: did the
+        // repeater keep the model it was already showing?
+        let kept = |updated: &ModelRc<SharedString>| updated == &list;
+
+        // The same rows again. Replacing the model here is what used to rebuild
+        // every card between the two halves of a double click.
+        assert!(
+            kept(&reconciled(&list, rows(&["a", "b", "c"]))),
+            "an unchanged list must keep the model it already had"
+        );
+
+        // A real change is still applied, in place.
+        let changed = reconciled(&list, rows(&["a", "z", "c"]));
+        assert!(kept(&changed));
+        assert_eq!(changed.row_data(1), Some(SharedString::from("z")));
+
+        // Shrinking and growing both stay in the same model.
+        let shorter = reconciled(&list, rows(&["a"]));
+        assert!(kept(&shorter));
+        assert_eq!(shorter.row_count(), 1);
+        let longer = reconciled(&list, rows(&["a", "b", "c", "d"]));
+        assert!(kept(&longer));
+        assert_eq!(longer.row_count(), 4);
+        assert_eq!(longer.row_data(3), Some(SharedString::from("d")));
     }
 
     #[test]
