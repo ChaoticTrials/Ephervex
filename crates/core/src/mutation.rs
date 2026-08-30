@@ -1097,6 +1097,7 @@ mod tests {
             server: SideRequirement::Unknown,
             presence: ModPresence::Installed,
             details: None,
+            cached: None,
             icon: None,
         }
     }

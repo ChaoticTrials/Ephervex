@@ -36,6 +36,10 @@ tracing-subscriber.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 chrono.workspace = true
+# One `.launcher` document of this crate's own: the mods panel's display cache.
+# Everything else core persists belongs to a lower crate and is serialized
+# there.
+serde.workspace = true
 serde_json.workspace = true
 open.workspace = true
 # The CurseForge credential header is named once, in `ephervex-mod-platform`,

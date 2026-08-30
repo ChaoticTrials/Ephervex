@@ -18,7 +18,7 @@ use ephervex_core::{
     ImportRequest, LaunchAndConnectObserver, LaunchAndConnectOptions, LaunchEvent, LaunchObserver,
     LaunchOptions, LinkedModOutcome, LinkedModPlan, LinkedModRequest, LinkedTargetPlan,
     LinkedTargetResult, LinkedTargetState, LoginOptions, ManagedModEntry, ManagedModSnapshot,
-    MetadataAvailability, ModDetails, ModInstallPlan, ModMutability, ModMutation, ModMutationPlan,
+    MetadataAvailability, ModInstallPlan, ModMutability, ModMutation, ModMutationPlan,
     ModSearchQuery, MutationRestriction, NewClient, NewServer, OperationReporter,
     OptionalSelection, PackAnalysis, Paths, PlannedOutcome, ProgressSink, ProviderFileIdentity,
     SearchOptions, ServerCreateOptions, ServerEvent, ServerFolder, ServerNetworkSettings,
@@ -4160,7 +4160,6 @@ fn managed_mods_data(snapshot: &ManagedModSnapshot) -> ManagedModsData {
 }
 
 fn managed_mod_data(entry: &ManagedModEntry) -> ManagedModData {
-    let details = entry.details.as_ref();
     let title = entry.display_name().to_owned();
     let mutability = ModMutability::of(entry);
     ManagedModData {
@@ -4190,10 +4189,8 @@ fn managed_mod_data(entry: &ManagedModEntry) -> ManagedModData {
             .map_or_else(|| lookup("gui-mod-provider-unknown"), |it| it.to_string()),
         origin: lookup(entry.origin.message_id()),
         origin_kind: origin_kind(entry.origin).to_owned(),
-        compatibility: details.map(compatibility_summary).unwrap_or_default(),
-        author: details
-            .and_then(|details| details.author.clone())
-            .unwrap_or_default(),
+        compatibility: compatibility_summary(entry.game_versions(), entry.loaders()),
+        author: entry.author().unwrap_or_default().to_owned(),
         icon: entry
             .icon
             .as_ref()
@@ -4220,9 +4217,9 @@ fn origin_kind(origin: ModOrigin) -> &'static str {
 ///
 /// Empty when the provider reported neither, which is what an entry whose exact
 /// version could not be resolved looks like.
-fn compatibility_summary(details: &ModDetails) -> String {
-    let versions = details.game_versions.join(", ");
-    let loaders = details.loaders.join(", ");
+fn compatibility_summary(game_versions: &[String], loaders: &[String]) -> String {
+    let versions = game_versions.join(", ");
+    let loaders = loaders.join(", ");
     match (versions.is_empty(), loaders.is_empty()) {
         (true, true) => String::new(),
         (false, true) => versions,

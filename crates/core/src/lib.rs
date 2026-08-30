@@ -41,6 +41,7 @@ pub mod live_diagnostics;
 pub mod loader;
 pub mod logging;
 pub mod minecraft_preferences;
+mod mod_display_cache;
 pub mod mods;
 pub mod mutation;
 pub mod server;

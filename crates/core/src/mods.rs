@@ -55,6 +55,7 @@ use tracing::{info, instrument, warn};
 
 use crate::app::App;
 use crate::error::{CoreError, CoreResult};
+use crate::mod_display_cache::{self, ModDisplay};
 
 /// What a caller wants installed.
 #[derive(Debug, Clone)]
@@ -231,6 +232,11 @@ pub struct ManagedModEntry {
     pub presence: ModPresence,
     /// Provider metadata, when it was available. `None` is an ordinary state.
     pub details: Option<ModDetails>,
+    /// What a provider last said about this mod, read from the instance's own
+    /// cache. Kept apart from `details` so that "what the catalog says now" and
+    /// "what it said last time" are never confused for one another; it is only
+    /// ever a fallback for what a row draws.
+    pub cached: Option<ModDisplay>,
     /// A cached project icon on disk, when one was fetched.
     pub icon: Option<PathBuf>,
 }
@@ -254,17 +260,21 @@ impl ManagedModEntry {
             server: recorded.server,
             presence,
             details: None,
+            cached: None,
             icon: None,
         }
     }
 
-    /// The best label available, which is the project's title if one was
-    /// fetched and the file's own name otherwise.
+    /// The best label available: the title this session fetched, the one last
+    /// seen, or the file's own name.
     #[must_use]
     pub fn display_name(&self) -> &str {
-        self.details
+        if let Some(details) = self.details.as_ref() {
+            return details.title.as_str();
+        }
+        self.cached
             .as_ref()
-            .map_or(self.file_name.as_str(), |details| details.title.as_str())
+            .map_or(self.file_name.as_str(), |cached| cached.title.as_str())
     }
 
     /// The installed version as something to show, or `None` when the launcher
@@ -274,11 +284,61 @@ impl ManagedModEntry {
     /// that version 1.2.3 is installed.
     #[must_use]
     pub fn installed_version(&self) -> Option<&str> {
+        if let Some(details) = self.details.as_ref() {
+            return details
+                .version_number
+                .as_deref()
+                .or(details.version_name.as_deref());
+        }
+        self.cached.as_ref()?.version.as_deref()
+    }
+
+    /// The Minecraft versions the installed release declares.
+    #[must_use]
+    pub fn game_versions(&self) -> &[String] {
+        self.details.as_ref().map_or_else(
+            || {
+                self.cached
+                    .as_ref()
+                    .map_or(&[][..], |cached| cached.game_versions.as_slice())
+            },
+            |details| details.game_versions.as_slice(),
+        )
+    }
+
+    /// The loaders the installed release declares.
+    #[must_use]
+    pub fn loaders(&self) -> &[String] {
+        self.details.as_ref().map_or_else(
+            || {
+                self.cached
+                    .as_ref()
+                    .map_or(&[][..], |cached| cached.loaders.as_slice())
+            },
+            |details| details.loaders.as_slice(),
+        )
+    }
+
+    /// Attribution as the provider reports it, where it reports any.
+    #[must_use]
+    pub fn author(&self) -> Option<&str> {
+        if let Some(details) = self.details.as_ref() {
+            return details.author.as_deref();
+        }
+        self.cached.as_ref()?.author.as_deref()
+    }
+
+    /// This row as it should be remembered for the next time the panel opens.
+    fn to_display(&self) -> Option<ModDisplay> {
         let details = self.details.as_ref()?;
-        details
-            .version_number
-            .as_deref()
-            .or(details.version_name.as_deref())
+        Some(ModDisplay {
+            title: details.title.clone(),
+            version: self.installed_version().map(ToOwned::to_owned),
+            author: details.author.clone(),
+            game_versions: details.game_versions.clone(),
+            loaders: details.loaders.clone(),
+            icon: self.icon.clone(),
+        })
     }
 
     /// Whether the instance's pack owns this mod, rather than a later decision
@@ -326,8 +386,9 @@ pub struct ManagedModSnapshot {
     pub instance: InstanceId,
     /// The import this instance came from, when it came from one.
     pub source: Option<InstancePackSource>,
-    /// In recipe order, which is the order the pack declared and then the order
-    /// mods were installed.
+    /// Alphabetical by the name each mod is shown under. Recipe order is the
+    /// order a pack happened to declare its files in, which is not an order a
+    /// reader can use to find one of two hundred of them.
     pub mods: Vec<ManagedModEntry>,
     pub metadata: MetadataAvailability,
 }
@@ -415,6 +476,35 @@ impl ManagedModSnapshot {
             });
         }
     }
+}
+
+/// Orders a mod list the way a reader looks through one.
+///
+/// By the name on screen, case-insensitively, with the logical path breaking a
+/// tie so the order is stable between two opens.
+fn sort_for_display(mods: &mut [ManagedModEntry]) {
+    mods.sort_by(|left, right| {
+        left.display_name()
+            .to_lowercase()
+            .cmp(&right.display_name().to_lowercase())
+            .then_with(|| left.logical_path.cmp(&right.logical_path))
+    });
+}
+
+/// The rows worth remembering, keyed by logical path.
+///
+/// Only entries a provider actually answered for. A mod whose catalog was
+/// unreachable keeps whatever was cached before rather than being replaced with
+/// what the launcher could not confirm.
+fn remembered_display(snapshot: &ManagedModSnapshot) -> BTreeMap<String, ModDisplay> {
+    snapshot
+        .mods
+        .iter()
+        .filter_map(|entry| {
+            let display = entry.to_display().or_else(|| entry.cached.clone())?;
+            Some((entry.logical_path.display().to_string(), display))
+        })
+        .collect()
 }
 
 /// What one enrichment pass fetched, keyed for assembly.
@@ -720,13 +810,25 @@ impl App {
         let recipe = self.pack_recipe(instance)?;
         let game_dir = ephervex_storage::metadata::client_game_dir(&record.root);
 
-        let mods = recipe
+        // What a provider last said, so the first paint reads as mods rather
+        // than as jar file names. Never authoritative: an entry with nothing
+        // cached falls back exactly as it did before.
+        let remembered = mod_display_cache::read(&record.root);
+        let mut mods: Vec<ManagedModEntry> = recipe
             .as_ref()
             .map(PackRecipe::recorded_mods)
             .unwrap_or_default()
             .into_iter()
-            .map(|recorded| ManagedModEntry::from_recorded(recorded, &game_dir))
+            .map(|recorded| {
+                let mut entry = ManagedModEntry::from_recorded(recorded, &game_dir);
+                if let Some(cached) = remembered.get(&entry.logical_path.display().to_string()) {
+                    entry.icon.clone_from(&cached.icon);
+                    entry.cached = Some(cached.clone());
+                }
+                entry
+            })
             .collect();
+        sort_for_display(&mut mods);
 
         Ok(ManagedModSnapshot {
             instance,
@@ -764,6 +866,10 @@ impl App {
             Ok(details) => {
                 snapshot.apply(&details);
                 snapshot.metadata = MetadataAvailability::Provider;
+                // Names have just changed, and so has the order they sort in.
+                sort_for_display(&mut snapshot.mods);
+                let record = self.client(instance)?;
+                mod_display_cache::write(&record.root, remembered_display(&snapshot));
             }
             Err(error) => {
                 // Deliberately not propagated. The mods are installed whether
@@ -1503,8 +1609,24 @@ mod tests {
             snapshot.mods.iter().all(ManagedModEntry::is_pack_owned),
             "and they are visibly the pack's"
         );
+        // Looked up by name rather than by position: the list is ordered for a
+        // reader, not in the order the pack happened to declare its files.
         assert_eq!(
-            snapshot.mods[0].identity,
+            snapshot
+                .mods
+                .iter()
+                .map(ManagedModEntry::display_name)
+                .collect::<Vec<_>>(),
+            ["architectury.jar", "journeymap.jar"],
+            "the list reads alphabetically"
+        );
+        let journeymap = snapshot
+            .mods
+            .iter()
+            .find(|entry| entry.file_name == "journeymap.jar")
+            .expect("the pack's mod");
+        assert_eq!(
+            journeymap.identity,
             version_identity("lfHFW1mp", "GKQEbfSt"),
             "identity is reconstructed from the pack's own addresses on the way in"
         );
@@ -1517,6 +1639,120 @@ mod tests {
         assert_eq!(source.kind, ImportSourceKind::ModrinthPack);
         assert_eq!(source.name, "Reproduction Pack");
         assert_eq!(source.version.as_deref(), Some("3.2.1"));
+    }
+
+    /// A catalog that could not be reached must not erase what it said before.
+    #[test]
+    fn remembering_keeps_an_unconfirmed_row_and_records_a_confirmed_one() {
+        let base = |path: &str, file: &str| ManagedModEntry {
+            logical_path: PathBuf::from(path),
+            file_name: file.to_owned(),
+            origin: ModOrigin::PackDeclared,
+            identity: ModIdentity::Unresolved,
+            hashes: Vec::new(),
+            size: None,
+            client: SideRequirement::Required,
+            server: SideRequirement::Unknown,
+            presence: ModPresence::Installed,
+            details: None,
+            cached: None,
+            icon: None,
+        };
+
+        let mut answered = base("mods/a.jar", "a.jar");
+        answered.details = Some(ModDetails {
+            title: "Answered".to_owned(),
+            slug: None,
+            author: Some("MelanX".to_owned()),
+            description: String::new(),
+            version_name: None,
+            version_number: Some("2.0".to_owned()),
+            game_versions: vec!["1.21.1".to_owned()],
+            loaders: vec!["neoforge".to_owned()],
+            client_side: SideSupport::Required,
+            server_side: SideSupport::Required,
+        });
+
+        let mut unanswered = base("mods/b.jar", "b.jar");
+        unanswered.cached = Some(ModDisplay {
+            title: "Remembered".to_owned(),
+            version: Some("1.0".to_owned()),
+            ..ModDisplay::default()
+        });
+
+        let snapshot = ManagedModSnapshot {
+            instance: InstanceId::new(),
+            source: None,
+            mods: vec![answered, unanswered],
+            metadata: MetadataAvailability::Provider,
+        };
+        let remembered = remembered_display(&snapshot);
+
+        assert_eq!(remembered["mods/a.jar"].title, "Answered");
+        assert_eq!(remembered["mods/a.jar"].version.as_deref(), Some("2.0"));
+        assert_eq!(remembered["mods/a.jar"].loaders, ["neoforge"]);
+        assert_eq!(
+            remembered["mods/b.jar"].title, "Remembered",
+            "a row this pass could not confirm keeps what was known"
+        );
+    }
+
+    /// The panel's first paint is a repaint of the last answer, so a large pack
+    /// opens as mods rather than as jar file names.
+    #[tokio::test]
+    async fn the_last_provider_answer_is_shown_before_anything_is_asked_again() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, instance) =
+            imported_instance(base.path(), &["journeymap.jar", "architectury.jar"]).await;
+        let root = app.client(instance).expect("client").root;
+
+        // Nothing cached yet: the durable read can only offer file names.
+        let first = app.managed_mod_snapshot(instance).expect("snapshot");
+        assert_eq!(first.mods[0].display_name(), "architectury.jar");
+        assert!(first.mods[0].installed_version().is_none());
+
+        // What an enrichment would have left behind.
+        let mut remembered = BTreeMap::new();
+        remembered.insert(
+            "mods/journeymap.jar".to_owned(),
+            ModDisplay {
+                title: "JourneyMap".to_owned(),
+                version: Some("5.10.3".to_owned()),
+                author: Some("techbrew".to_owned()),
+                game_versions: vec!["1.21.1".to_owned()],
+                loaders: vec!["neoforge".to_owned()],
+                icon: None,
+            },
+        );
+        crate::mod_display_cache::write(&root, remembered);
+
+        let second = app.managed_mod_snapshot(instance).expect("snapshot");
+        assert_eq!(
+            second
+                .mods
+                .iter()
+                .map(ManagedModEntry::display_name)
+                .collect::<Vec<_>>(),
+            ["architectury.jar", "JourneyMap"],
+            "a remembered title is shown, and sorts under it"
+        );
+        let journeymap = second
+            .mods
+            .iter()
+            .find(|entry| entry.file_name == "journeymap.jar")
+            .expect("the mod");
+        assert_eq!(journeymap.installed_version(), Some("5.10.3"));
+        assert_eq!(journeymap.game_versions(), ["1.21.1"]);
+        assert_eq!(journeymap.author(), Some("techbrew"));
+        // Still a local read: nothing was asked of a provider.
+        assert_eq!(second.metadata, MetadataAvailability::Local);
+        // And a mod the cache says nothing about is untouched.
+        let architectury = second
+            .mods
+            .iter()
+            .find(|entry| entry.file_name == "architectury.jar")
+            .expect("the mod");
+        assert!(architectury.installed_version().is_none());
     }
 
     #[tokio::test]
