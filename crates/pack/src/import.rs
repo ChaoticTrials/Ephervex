@@ -372,6 +372,7 @@ pub async fn materialize(request: MaterializeRequest<'_>) -> PackResult<Material
     recipe.record_selection(side, selection);
 
     // 1. Pack files.
+    reporter.set_stage(Some("operation-stage-downloading-files".to_owned()));
     let files = install::install_files(install::FileInstall {
         recipe: &recipe,
         side,
@@ -382,6 +383,10 @@ pub async fn materialize(request: MaterializeRequest<'_>) -> PackResult<Material
     .await?;
 
     // 2. Overrides, then side-overrides. Later layer wins.
+    //
+    // Silent until now, and on a large pack that is several seconds of a
+    // progress bar that has stopped moving for no visible reason.
+    reporter.set_stage(Some("operation-stage-extracting-overrides".to_owned()));
     let layers = install::apply_overrides(archive, &recipe, side, game_dir)?;
     for applied in &layers {
         if let Some(layer) = recipe
@@ -395,6 +400,7 @@ pub async fn materialize(request: MaterializeRequest<'_>) -> PackResult<Material
 
     // 3. Retain the source recipe, which is mandatory even for a client-only
     //    import.
+    reporter.set_stage(Some("operation-stage-retaining-source".to_owned()));
     let store = SourceStore::new(source_dir);
     retain_source(archive, &mut recipe, side, &store)?;
     let recipe_path = store.write_recipe(&recipe)?;

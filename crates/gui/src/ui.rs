@@ -278,6 +278,11 @@ slint::slint! {
         state: string,
         server: bool,
         linked-client-id: string,
+        // What the work is doing right now, and how far through it is. Empty
+        // and indeterminate for a creation with nothing to report.
+        detail: string,
+        progress: float,
+        indeterminate: bool,
     }
 
     component BodyText inherits Text {
@@ -1303,7 +1308,11 @@ slint::slint! {
             VerticalLayout { horizontal-stretch: 1; spacing: 5px;
                 Heading { text: item.name; }
                 BodyText { text: item.target; wrap: word-wrap; }
-                BodyText { text: GuiI18n.text("gui-creation-pending-detail"); color: Theme.text-muted; wrap: word-wrap; }
+                BodyText { text: item.detail != "" ? item.detail : GuiI18n.text("gui-creation-pending-detail"); color: Theme.text-muted; wrap: word-wrap; overflow: elide; }
+                // Only where the work knows how far along it is. An
+                // indeterminate stage keeps the spinner and says nothing it
+                // cannot back up.
+                if !item.indeterminate : Rectangle { height: 4px; border-radius: 2px; background: Theme.border; Rectangle { x: 0px; width: parent.width * item.progress; height: parent.height; border-radius: 2px; background: Theme.accent; } }
             }
             VerticalLayout { width: 140px; alignment: center; spacing: 7px;
                 Pill { text: item.storage; tone-color: item.storage-kind == "temporary" ? Theme.warning : Theme.success; }
@@ -1344,7 +1353,7 @@ slint::slint! {
                 BodyText { text: item.entity; color: Theme.text; wrap: word-wrap; }
                 detail-text := BodyText { text: item.detail; visible: item.detail != ""; wrap: word-wrap; }
                 BodyText { text: item.id + " | " + item.time; color: Theme.text-muted; font-family: "monospace"; font-size: Theme.caption-size; }
-                if item.active && !item.indeterminate : Rectangle { height: 4px; border-radius: 2px; background: Theme.border; Rectangle { width: parent.width * item.progress; height: parent.height; border-radius: 2px; background: Theme.accent; } }
+                if item.active && !item.indeterminate : Rectangle { height: 4px; border-radius: 2px; background: Theme.border; Rectangle { x: 0px; width: parent.width * item.progress; height: parent.height; border-radius: 2px; background: Theme.accent; } }
             }
             VerticalLayout { width: 112px; alignment: start; spacing: 8px;
                 Pill { text: item.status; tone-color: item.failed ? Theme.danger : item.active ? Theme.accent : Theme.success; }
@@ -1853,6 +1862,9 @@ slint::slint! {
         in-out property <bool> create-persistent: false;
         in-out property <string> import-path;
         in-out property <string> import-name;
+        // Whether the import should also leave a server behind. Off by
+        // default: most imports are opened to reproduce a client.
+        in-out property <bool> import-create-server: false;
         // "idle" | "analyzing" | "resolving" | "ready" | "failed" | "submitting".
         // Drives which part of the import modal is visible and whether the
         // archive picker and the Import button are enabled.
@@ -2008,7 +2020,7 @@ slint::slint! {
         callback import-name-edited(string);
         // No archive path: submission always uses whichever archive the
         // current analysis actually applies to, not this text.
-        callback submit-import(string, bool);
+        callback submit-import(string, bool, bool);
         callback submit-create-server(string, string, string, string, string, bool, bool, string);
         callback server-start(string);
         callback server-stop(string);
@@ -2903,6 +2915,7 @@ slint::slint! {
                                 edited(text) => { root.import-name-edited(text); }
                             }
                             HorizontalLayout { BodyText { text: GuiI18n.text("gui-store-persistently"); } Toggle { checked <=> root.create-persistent; } }
+                            HorizontalLayout { spacing: 10px; cross-axis-alignment: center; VerticalLayout { horizontal-stretch: 1; spacing: 2px; BodyText { text: GuiI18n.text("gui-import-create-server"); } BodyText { text: GuiI18n.text("gui-import-create-server-detail"); color: Theme.text-muted; wrap: word-wrap; } } Toggle { checked <=> root.import-create-server; accessible-name: GuiI18n.text("gui-import-create-server"); } }
                             if root.modal-error != "" : VerticalLayout {
                                 spacing: 6px;
                                 BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; }
@@ -2918,7 +2931,7 @@ slint::slint! {
                                     text: GuiI18n.text("gui-import-modpack");
                                     tone: "primary";
                                     enabled: root.import-ready;
-                                    clicked => { root.submit-import(root.import-name, root.create-persistent); }
+                                    clicked => { root.submit-import(root.import-name, root.create-persistent, root.import-create-server); }
                                 }
                             }
                             // Absorbs whatever space the content above did not

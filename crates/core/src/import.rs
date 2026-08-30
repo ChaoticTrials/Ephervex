@@ -187,10 +187,12 @@ impl App {
         cancel: &CancellationToken,
     ) -> CoreResult<ImportedPack> {
         // Everything that can refuse the pack runs before the instance exists.
+        reporter.set_stage(Some("operation-stage-reading-archive".to_owned()));
         let (mut archive, mut analysis) = Self::open_pack(&request.archive)?;
         // Including the provider lookups: a missing API key, a file the pack
         // declares that no longer exists, and a file whose author does not
         // permit third-party downloads all fail here, with nothing created.
+        reporter.set_stage(Some("operation-stage-resolving-files".to_owned()));
         let authenticated = self
             .prepare_provider_files(&mut analysis, &request.skip_blocked, cancel)
             .await?;
@@ -242,6 +244,7 @@ impl App {
         // the managed global keys are applied *after* the pack's own
         // overrides, so a pack's `options.txt` survives except where the user
         // has explicitly asked the launcher to manage a key.
+        reporter.set_stage(Some("operation-stage-applying-settings".to_owned()));
         let context = self.preference_context(&record.minecraft_version).await;
         let preferences = match self.apply_global_preferences(&record, &context) {
             Ok(applied) => Some(applied),
@@ -255,6 +258,7 @@ impl App {
             }
         };
 
+        reporter.set_stage(Some("operation-stage-publishing".to_owned()));
         if let Err(error) = self.registry_for_services().publish_client(&record) {
             crate::app::discard_unpublished(self.registry_for_services(), &record);
             return Err(error.into());

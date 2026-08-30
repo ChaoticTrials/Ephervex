@@ -541,6 +541,28 @@ impl DownloadManager {
         cancel: &CancellationToken,
     ) -> Result<Vec<DownloadOutcome>, DownloadError> {
         reporter.begin(None);
+        let outcomes = self.download_all_within(requests, reporter, cancel).await;
+        match &outcomes {
+            Ok(_) => reporter.finish(OperationStatus::Completed),
+            Err(error) if error.is_cancellation() => reporter.finish(OperationStatus::Canceled),
+            Err(error) => reporter.finish(OperationStatus::Failed(error.to_string())),
+        }
+        outcomes
+    }
+
+    /// The same batch as one stage of a longer operation.
+    ///
+    /// Reports progress, the file in flight, and how many are done, but does
+    /// not begin or finish the operation: an import has work to do after its
+    /// downloads, and a batch that marked the whole thing complete left the
+    /// activity reading 100% with a cancel button gone while overrides were
+    /// still being extracted.
+    pub async fn download_all_within(
+        &self,
+        requests: &[DownloadRequest],
+        reporter: &OperationReporter,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<DownloadOutcome>, DownloadError> {
         let sizes: Vec<Option<u64>> = requests
             .iter()
             .map(DownloadRequest::expected_size)
@@ -573,6 +595,9 @@ impl DownloadManager {
         let mut outcomes: Vec<Option<DownloadOutcome>> =
             (0..requests.len()).map(|_| None).collect();
         let mut failure: Option<DownloadError> = None;
+        let total = requests.len() as u64;
+        let mut done = 0;
+        reporter.set_items(Progress::new(0, total));
         while let Some((index, result)) = pending.next().await {
             match result {
                 Ok(outcome) => outcomes[index] = Some(outcome),
@@ -583,18 +608,13 @@ impl DownloadManager {
                     }
                 }
             }
+            // Counted as they land rather than as they start: with several in
+            // flight, "started" is not a number anyone can read.
+            done += 1;
+            reporter.set_items(Progress::new(done, total));
         }
 
-        if let Some(error) = failure {
-            reporter.finish(if error.is_cancellation() {
-                OperationStatus::Canceled
-            } else {
-                OperationStatus::Failed(error.to_string())
-            });
-            return Err(error);
-        }
-        reporter.finish(OperationStatus::Completed);
-        Ok(outcomes.into_iter().flatten().collect())
+        failure.map_or_else(|| Ok(outcomes.into_iter().flatten().collect()), Err)
     }
 
     /// The retry loop around a single artifact.

@@ -144,6 +144,24 @@ impl OperationReporter {
         self.update(false, |state| state.operation.progress = progress);
     }
 
+    /// Names the phase now running, as a message id the frontend resolves.
+    ///
+    /// Emitted immediately: a stage change is the thing a waiting user is
+    /// watching for, and throttling it would be throttling the answer.
+    pub fn set_stage(&self, stage: Option<String>) {
+        self.update(true, |state| {
+            state.operation.stage = stage;
+            // The counts belonged to the phase that just ended.
+            state.operation.items = Progress::indeterminate();
+            state.operation.current_step = None;
+        });
+    }
+
+    /// Publishes how many of the current stage's units are done. Throttled.
+    pub fn set_items(&self, items: Progress) {
+        self.update(false, |state| state.operation.items = items);
+    }
+
     /// Moves the operation to a terminal state and emits immediately.
     pub fn finish(&self, status: OperationStatus) {
         self.update(true, |state| {

@@ -1314,6 +1314,7 @@ async fn run_server_command(
                             &args.include_unknown,
                             args.skip_unknown,
                         ),
+                        reporter: None,
                     },
                     &CancellationToken::new(),
                 )
@@ -1328,6 +1329,7 @@ async fn run_server_command(
                         java_path: java.clone(),
                         install_java_if_missing: true,
                         unknown_server_files: UnknownServerFiles::default(),
+                        reporter: None,
                     },
                     &CancellationToken::new(),
                 )

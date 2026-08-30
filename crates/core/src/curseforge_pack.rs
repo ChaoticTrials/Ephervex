@@ -3109,6 +3109,7 @@ mod tests {
             java_path: None,
             install_java_if_missing: false,
             unknown_server_files,
+            reporter: None,
         };
         app.materialize_linked_server_recipe(
             &recipe,

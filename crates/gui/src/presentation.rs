@@ -333,13 +333,22 @@ impl From<&Operation> for ActivityPresentation {
                 ("failed", "gui-state-failed", true, message.clone())
             }
         };
-        let fraction = operation.progress.fraction();
+        // Bytes when the stage moves bytes, and the item count otherwise, so a
+        // stage that copies files still has a bar that moves.
+        let fraction = operation
+            .progress
+            .fraction()
+            .or_else(|| operation.items.fraction());
         Self {
             id: operation.id.to_string(),
             title: operation.title.clone(),
             status: lookup(status_id),
             status_kind,
-            detail: operation.current_step.clone().unwrap_or(failure),
+            detail: if failure.is_empty() {
+                operation_detail(operation)
+            } else {
+                failure
+            },
             #[allow(clippy::cast_possible_truncation)]
             progress: fraction.unwrap_or_default() as f32,
             indeterminate: fraction.is_none(),
@@ -347,6 +356,38 @@ impl From<&Operation> for ActivityPresentation {
             failed,
         }
     }
+}
+
+/// A count as the message layer takes one. Saturating rather than wrapping: a
+/// number this large is a bug elsewhere, and showing it as a huge one is more
+/// honest than showing it as negative.
+fn clamped(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+/// The one line under an operation's title.
+///
+/// The phase it is in, how far through that phase it is, and what it is working
+/// on, in that order, with whatever is unknown left out. An operation that
+/// names none of them says nothing rather than something empty.
+fn operation_detail(operation: &Operation) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(stage) = operation.stage.as_deref() {
+        parts.push(lookup(stage));
+    }
+    if let Some(total) = operation.items.total {
+        parts.push(lookup_args(
+            "gui-operation-item-count",
+            [
+                ("current", Arg::Count(clamped(operation.items.current))),
+                ("total", Arg::Count(clamped(total))),
+            ],
+        ));
+    }
+    if let Some(step) = operation.current_step.as_deref() {
+        parts.push(step.to_owned());
+    }
+    parts.join(" | ")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

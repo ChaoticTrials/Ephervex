@@ -636,6 +636,16 @@ launch-connect-ready = The server is ready at { $target }.
 
 operation-launching-minecraft = Launching Minecraft
 operation-starting-server = Starting the server
+# The phases a long operation moves through, named so a waiting user can see
+# which one is running.
+operation-stage-reading-archive = Reading the archive
+operation-stage-resolving-files = Resolving files with the provider
+operation-stage-downloading-files = Downloading files
+operation-stage-extracting-overrides = Extracting the pack's own files
+operation-stage-retaining-source = Keeping the pack's source
+operation-stage-applying-settings = Applying settings
+operation-stage-publishing = Finishing up
+operation-stage-installing-server = Installing the linked server
 operation-importing-pack = Importing modpack
 operation-installing-mods = Installing mods
 operation-creating-server = Creating server
@@ -1624,6 +1634,8 @@ gui-built-with-slint = Built with Slint
 gui-third-party-software = Third-Party Software
 gui-third-party-detail = Ephervex depends on open-source software with its own license terms.
 gui-third-party-licenses = Third-Party Licenses
+# How far through a stage that counts in whole things rather than bytes.
+gui-operation-item-count = { $current } of { $total }
 gui-active-operations = { $count ->
     [one] 1 active operation
    *[other] { $count } active operations
@@ -1656,6 +1668,8 @@ gui-drop-to-import = Drop to import
 gui-drop-to-import-detail = The archive is inspected by its contents, not by its name.
 gui-browse = Browse...
 gui-instance-name-optional = Instance name (optional)
+gui-import-create-server = Also create a linked server
+gui-import-create-server-detail = Built from the same pack once the instance is in place. It is not started.
 gui-detected-pack-name = Use the detected pack name
 gui-create-linked-server-detail = Create and materialize a server linked to the selected client's retained recipe.
 gui-create-standalone-server-detail = Create and install a standalone exact server.

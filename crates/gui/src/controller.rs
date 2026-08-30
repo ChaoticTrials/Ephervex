@@ -63,6 +63,9 @@ enum CreationKey {
         persistent: bool,
         port: Option<u16>,
     },
+    /// One import attempt, identified by the archive it is reading. A second
+    /// click on the same archive is the same attempt, not a second one.
+    Import { archive: String },
 }
 
 #[derive(Debug, Clone)]
@@ -76,6 +79,11 @@ struct PendingCreation {
     storage_kind: String,
     server: bool,
     linked_client_id: String,
+    /// What the work is doing right now, for a creation that has stages worth
+    /// watching. Empty for one that finishes before anyone could read it.
+    detail: String,
+    progress: f32,
+    indeterminate: bool,
 }
 
 #[derive(Debug, Default)]
@@ -488,7 +496,9 @@ fn register_import_flow(
     ui: &AppWindow,
     commands: &Sender<Command>,
     import_flow: &Rc<RefCell<ImportFlowState>>,
+    creations: &Rc<RefCell<CreationTracker>>,
 ) {
+    let submit_creations = Rc::clone(creations);
     let sender = commands.clone();
     let weak = ui.as_weak();
     let pick_state = Rc::clone(import_flow);
@@ -553,7 +563,7 @@ fn register_import_flow(
     let sender = commands.clone();
     let weak = ui.as_weak();
     let submit_state = Rc::clone(import_flow);
-    ui.on_submit_import(move |name, persistent| {
+    ui.on_submit_import(move |name, persistent, create_server| {
         // The archive comes from the flow's own state, never from a UI
         // field: `import-path` only ever displays what the last successful
         // analysis found, and is not itself a source of a new one.
@@ -567,7 +577,21 @@ fn register_import_flow(
             };
             submission
         };
+        // The dialog has nothing left to ask, and the work that follows can
+        // take minutes. It closes now, and the instances list carries the
+        // import from here as a card that says what it is doing.
+        let key = CreationKey::Import {
+            archive: submission.archive.display().to_string(),
+        };
+        let request_id = submit_creations
+            .borrow_mut()
+            .accept(key.clone(), pending_creation(&key, persistent));
         if let Some(ui) = weak.upgrade() {
+            if request_id.is_some() {
+                ui.set_modal(SharedString::default());
+                ui.set_modal_error(SharedString::default());
+            }
+            apply_pending_creations(&ui, &submit_creations.borrow());
             render_import_flow(&ui, &submit_state.borrow());
         }
         send(
@@ -579,6 +603,8 @@ fn register_import_flow(
                 selection: submission.selection,
                 skip_blocked: submission.skip_blocked,
                 generation: submission.generation,
+                request_id,
+                create_linked_server: create_server,
             },
         );
     });
@@ -637,6 +663,19 @@ impl CreationTracker {
         pending.key = key;
         self.pending.push(pending);
         Some(request_id)
+    }
+
+    /// Records what a running creation is doing, for the card that shows it.
+    fn progressed(&mut self, request_id: &str, detail: String, progress: f32, indeterminate: bool) {
+        if let Some(pending) = self
+            .pending
+            .iter_mut()
+            .find(|pending| pending.request_id == request_id)
+        {
+            pending.detail = detail;
+            pending.progress = progress;
+            pending.indeterminate = indeterminate;
+        }
     }
 
     fn finish(&mut self, request_id: &str) {
@@ -1195,7 +1234,7 @@ fn register_callbacks(
     register_catalog_actions(ui, commands);
     register_client_actions(ui, commands, Rc::clone(&creations));
     register_create_instance_naming(ui, commands, create_instance_name);
-    register_import_flow(ui, commands, import_flow);
+    register_import_flow(ui, commands, import_flow, &creations);
 
     let sender = commands.clone();
     let weak = ui.as_weak();
@@ -1235,7 +1274,7 @@ fn register_callbacks(
                 persistent,
                 port,
             };
-            let pending = pending_creation(&key);
+            let pending = pending_creation(&key, false);
             let Some(request_id) = creations.borrow_mut().accept(key, pending) else {
                 if let Some(ui) = weak.upgrade() {
                     ui.invoke_present_toast(lookup("gui-creation-already-running").into(), true);
@@ -1389,7 +1428,7 @@ fn register_client_actions(
             loader_version: loader_version.as_str().to_owned(),
             persistent,
         };
-        let pending = pending_creation(&key);
+        let pending = pending_creation(&key, false);
         let Some(request_id) = submit_creations.borrow_mut().accept(key, pending) else {
             if let Some(ui) = weak.upgrade() {
                 ui.invoke_present_toast(lookup("gui-creation-already-running").into(), true);
@@ -3460,6 +3499,17 @@ fn apply_event(
                 ui.set_instance_runtime_global(runtime.global.into());
             }
         }
+        Event::CreationProgress {
+            request_id,
+            detail,
+            progress,
+            indeterminate,
+        } => {
+            creations
+                .borrow_mut()
+                .progressed(&request_id, detail, progress, indeterminate);
+            apply_pending_creations(ui, &creations.borrow());
+        }
         Event::MinecraftReleases(versions) => {
             apply_minecraft_releases(ui, versions, create_instance_name);
         }
@@ -3568,7 +3618,14 @@ fn apply_event(
         Event::ImportSubmissionFinished {
             generation,
             succeeded,
-        } => apply_import_submission_finished(ui, import_flow, generation, succeeded),
+            request_id,
+        } => {
+            if let Some(request_id) = request_id {
+                creations.borrow_mut().finish(&request_id);
+                apply_pending_creations(ui, &creations.borrow());
+            }
+            apply_import_submission_finished(ui, import_flow, generation, succeeded);
+        }
         Event::StorageRootPicked(path) => {
             ui.set_persistent_root(path.display().to_string().into());
         }
@@ -3769,7 +3826,7 @@ fn apply_loader_versions(
     }
 }
 
-fn pending_creation(key: &CreationKey) -> PendingCreation {
+fn pending_creation(key: &CreationKey, persistent_import: bool) -> PendingCreation {
     let (name, target, loader_kind, persistent, server) = match key {
         CreationKey::Client {
             name,
@@ -3783,6 +3840,18 @@ fn pending_creation(key: &CreationKey) -> PendingCreation {
             creation_target(minecraft, loader, loader_version),
             loader.to_ascii_lowercase(),
             *persistent,
+            false,
+        ),
+        CreationKey::Import { archive } => (
+            // The name is not known until the archive has been read, so the
+            // card is titled by what the user chose.
+            std::path::Path::new(archive).file_name().map_or_else(
+                || archive.clone(),
+                |name| name.to_string_lossy().into_owned(),
+            ),
+            lookup("gui-import-modpack"),
+            "vanilla".to_owned(),
+            persistent_import,
             false,
         ),
         CreationKey::Server {
@@ -3827,9 +3896,12 @@ fn pending_creation(key: &CreationKey) -> PendingCreation {
         }
         .to_owned(),
         server,
+        detail: String::new(),
+        progress: 0.0,
+        indeterminate: true,
         linked_client_id: match key {
             CreationKey::Server { client, .. } => client.clone(),
-            CreationKey::Client { .. } => String::new(),
+            CreationKey::Client { .. } | CreationKey::Import { .. } => String::new(),
         },
     }
 }
@@ -3870,6 +3942,9 @@ fn apply_pending_creations(ui: &AppWindow, tracker: &CreationTracker) {
                 state: lookup("gui-state-creating").into(),
                 server,
                 linked_client_id: pending.linked_client_id.clone().into(),
+                detail: pending.detail.clone().into(),
+                progress: pending.progress,
+                indeterminate: pending.detail.is_empty() || pending.indeterminate,
             })
             .collect::<Vec<_>>()
     };
@@ -4838,13 +4913,13 @@ mod tests {
             persistent: false,
         };
         let mut tracker = CreationTracker::default();
-        let request = tracker.accept(key.clone(), pending_creation(&key));
+        let request = tracker.accept(key.clone(), pending_creation(&key, false));
         assert!(request.is_some());
         let request = request.unwrap_or_default();
 
         assert!(
             tracker
-                .accept(key.clone(), pending_creation(&key))
+                .accept(key.clone(), pending_creation(&key, false))
                 .is_none()
         );
         assert_eq!(tracker.pending.len(), 1);
@@ -4852,7 +4927,7 @@ mod tests {
         tracker.finish(&request);
         assert!(
             tracker
-                .accept(key.clone(), pending_creation(&key))
+                .accept(key.clone(), pending_creation(&key, false))
                 .is_some()
         );
     }
@@ -4876,12 +4951,12 @@ mod tests {
 
         assert!(
             tracker
-                .accept(first.clone(), pending_creation(&first))
+                .accept(first.clone(), pending_creation(&first, false))
                 .is_some()
         );
         assert!(
             tracker
-                .accept(second.clone(), pending_creation(&second))
+                .accept(second.clone(), pending_creation(&second, false))
                 .is_some()
         );
         assert_eq!(tracker.pending.len(), 2);
@@ -4920,12 +4995,12 @@ mod tests {
 
         assert!(
             tracker
-                .accept(first.clone(), pending_creation(&first))
+                .accept(first.clone(), pending_creation(&first, false))
                 .is_some()
         );
         assert!(
             tracker
-                .accept(same_request.clone(), pending_creation(&same_request))
+                .accept(same_request.clone(), pending_creation(&same_request, false))
                 .is_none()
         );
     }

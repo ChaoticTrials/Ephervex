@@ -45,6 +45,14 @@ pub struct ServerCreateOptions {
     /// never declared. Reconstructing them is the default; see
     /// [`UnknownServerFiles`].
     pub unknown_server_files: UnknownServerFiles,
+    /// Where to report the loader install and the content reconstruction, for
+    /// a caller that is showing this work to someone.
+    ///
+    /// An option rather than a parameter because most callers do not watch:
+    /// creating a server from a command line, or from a test, has nobody to
+    /// tell. Without one, both stages report into a silent reporter as they
+    /// always have.
+    pub reporter: Option<OperationReporter>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -210,12 +218,16 @@ impl App {
                 },
             )
             .await?;
+        if let Some(reporter) = options.reporter.as_ref() {
+            reporter.set_stage(Some("operation-stage-installing-server".to_owned()));
+        }
         let installed = self
-            .install_server_version(
+            .install_server_version_reporting(
                 &record.minecraft_version,
                 &record.loader,
                 &java.runtime.executable,
                 &target,
+                options.reporter.as_ref(),
                 cancel,
             )
             .await?;
@@ -407,7 +419,10 @@ impl App {
                 // is available here and is asked for per file, only when a fetch
                 // is unavoidable.
                 credentials: &self.provider_credentials(),
-                reporter: &OperationReporter::silent("server-content"),
+                reporter: options
+                    .reporter
+                    .as_ref()
+                    .unwrap_or(&OperationReporter::silent("server-content")),
                 cancel,
             },
         })

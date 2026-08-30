@@ -442,9 +442,11 @@ async fn fetch_missing(
         })
         .collect::<PackResult<_>>()?;
 
+    // Within, not as the whole operation: an import still has overrides to
+    // extract, a source to retain, and a record to publish afterwards.
     match fetch
         .manager
-        .download_all(&requests, fetch.reporter, fetch.cancel)
+        .download_all_within(&requests, fetch.reporter, fetch.cancel)
         .await
     {
         // The batch answers positionally, and the caller places each outcome

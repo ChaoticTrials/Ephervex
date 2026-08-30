@@ -116,6 +116,13 @@ pub enum Command {
         /// [`Event::ImportSubmissionFinished`] so the double-submit guard is
         /// only ever released by the completion of this exact submission.
         generation: u64,
+        /// The pending card standing in for this import in the instances list,
+        /// so its progress can be reported onto that card. `None` when the
+        /// list already had a card for this archive.
+        request_id: Option<String>,
+        /// Whether to build a server from the same pack once the instance is
+        /// published. Part of the same operation, so one card reports both.
+        create_linked_server: bool,
     },
     LaunchClient(InstanceId),
     LaunchAndConnect {
@@ -780,6 +787,13 @@ pub struct JavaData {
 pub enum Event {
     Snapshot(Box<Snapshot>),
     InstanceRuntime(InstanceRuntimeData),
+    /// How a creation shown as a pending card is getting on.
+    CreationProgress {
+        request_id: String,
+        detail: String,
+        progress: f32,
+        indeterminate: bool,
+    },
     MinecraftReleases(Vec<String>),
     /// One save of the global Minecraft defaults reached a terminal outcome.
     ///
@@ -903,6 +917,9 @@ pub enum Event {
     ImportSubmissionFinished {
         generation: u64,
         succeeded: bool,
+        /// The pending card this attempt was showing on, so it stops standing
+        /// in for an instance that now exists, or for one that never will.
+        request_id: Option<String>,
     },
     StorageRootPicked(PathBuf),
     WatchedFolderPicked(PathBuf),
@@ -1195,6 +1212,8 @@ fn run_worker(
                 selection,
                 skip_blocked,
                 generation,
+                request_id,
+                create_linked_server,
             } => {
                 let paths = app.paths().clone();
                 spawn_import_submission(
@@ -1208,6 +1227,8 @@ fn run_worker(
                         persistent,
                         selection,
                         skip_blocked,
+                        request_id,
+                        create_linked_server,
                     },
                 );
             }
@@ -3210,6 +3231,7 @@ fn spawn_async_operation<F, Fut>(
                 events: events.clone(),
                 entity,
                 allow_cancel: true,
+                pending: None,
             });
             let reporter = OperationReporter::new(title, true, sink);
             reporter.begin(None);
@@ -3278,6 +3300,7 @@ fn spawn_creation_operation<F, Fut>(
                 events: events.clone(),
                 entity,
                 allow_cancel: false,
+                pending: None,
             });
             let reporter = OperationReporter::new(title, false, sink);
             reporter.begin(Some(lookup("gui-activity-preparing-environment")));
@@ -3598,6 +3621,8 @@ struct ImportSubmission {
     persistent: bool,
     selection: OptionalSelection,
     skip_blocked: Vec<ProviderFileIdentity>,
+    request_id: Option<String>,
+    create_linked_server: bool,
 }
 
 /// Runs an `ImportPack` submission on a thread of its own and, on every
@@ -3620,7 +3645,12 @@ fn spawn_import_submission(
         persistent,
         selection,
         skip_blocked,
+        request_id,
+        create_linked_server,
     } = submission;
+    // Cloned for the setup-failure path, which runs instead of the body rather
+    // than after it.
+    let setup_request_id = request_id.clone();
     let entity = archive.display().to_string();
     spawn_detached_with_setup_failure(
         paths.clone(),
@@ -3629,6 +3659,7 @@ fn spawn_import_submission(
             let _ = events.send(Event::ImportSubmissionFinished {
                 generation,
                 succeeded: false,
+                request_id: setup_request_id,
             });
         },
         move |app, events, runtime| {
@@ -3636,6 +3667,7 @@ fn spawn_import_submission(
                 events: events.clone(),
                 entity,
                 allow_cancel: true,
+                pending: request_id.clone(),
             });
             let reporter = OperationReporter::new("operation-importing-pack", true, sink);
             reporter.begin(None);
@@ -3656,6 +3688,27 @@ fn spawn_import_submission(
             // receiver can decide on its own state.
             let succeeded = match result {
                 Ok(pack) => {
+                    // Part of the same operation, so the card the user is
+                    // already watching reports it too. A server that fails
+                    // leaves the imported instance alone and says so on its
+                    // own: the import the user asked for did happen.
+                    if create_linked_server {
+                        let request = NewServer::linked(
+                            format!("{} Server", pack.record.name),
+                            pack.record.id,
+                        )
+                        .with_storage(pack.record.storage);
+                        let options = ServerCreateOptions {
+                            install_java_if_missing: true,
+                            reporter: Some(reporter.clone()),
+                            ..ServerCreateOptions::default()
+                        };
+                        if let Err(error) =
+                            runtime.block_on(app.create_server(request, &options, &cancel))
+                        {
+                            send_error(&events, &error);
+                        }
+                    }
                     reporter.finish(OperationStatus::Completed);
                     let _ = events.send(Event::Toast {
                         message: localized_value("gui-imported-pack", &pack.record.name),
@@ -3680,6 +3733,7 @@ fn spawn_import_submission(
             let _ = events.send(Event::ImportSubmissionFinished {
                 generation,
                 succeeded,
+                request_id,
             });
             if let Ok(app) = App::open_at(paths) {
                 send_snapshot(&app, &events);
@@ -3693,6 +3747,10 @@ struct UiProgressSink {
     events: Sender<Event>,
     entity: String,
     allow_cancel: bool,
+    /// A pending card standing in for this work in a list, which is shown
+    /// where the user is looking rather than on the activity page they would
+    /// have to go and find.
+    pending: Option<String>,
 }
 
 impl ProgressSink for UiProgressSink {
@@ -3703,6 +3761,15 @@ impl ProgressSink for UiProgressSink {
             self.entity.clone(),
             self.allow_cancel,
         );
+        if let Some(request_id) = self.pending.clone() {
+            let item = ActivityPresentation::from(operation);
+            let _ = self.events.send(Event::CreationProgress {
+                request_id,
+                detail: item.detail,
+                progress: item.progress,
+                indeterminate: item.indeterminate,
+            });
+        }
     }
 }
 

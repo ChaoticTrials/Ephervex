@@ -85,6 +85,21 @@ pub struct Operation {
     pub title: String,
     pub status: OperationStatus,
     pub progress: Progress,
+    /// Which phase of a multi-stage operation is running, as a message id the
+    /// frontend resolves. `None` for an operation that is one phase.
+    ///
+    /// Separate from [`Self::title`] because the title names the whole job and
+    /// does not change, while this changes as the job moves through its work.
+    /// Separate from [`Self::current_step`] because that is a value, usually a
+    /// file name, and never something to translate.
+    pub stage: Option<String>,
+    /// How many of the current stage's units are done, where it counts in
+    /// units at all.
+    ///
+    /// Beside [`Self::progress`] rather than instead of it: a download knows
+    /// both how many files it has finished and how many bytes it has moved,
+    /// and "34 of 210 files" answers a different question than a percentage.
+    pub items: Progress,
     /// Human-readable current stage, e.g. a filename being downloaded.
     pub current_step: Option<String>,
     pub cancellable: bool,
@@ -98,6 +113,8 @@ impl Operation {
             title: title.into(),
             status: OperationStatus::Pending,
             progress: Progress::indeterminate(),
+            stage: None,
+            items: Progress::indeterminate(),
             current_step: None,
             cancellable,
         }

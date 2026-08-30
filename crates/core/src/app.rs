@@ -775,8 +775,22 @@ impl App {
         target: &Path,
         cancel: &CancellationToken,
     ) -> CoreResult<InstalledServer> {
+        self.install_server_version_reporting(minecraft, loader, java, target, None, cancel)
+            .await
+    }
+
+    /// The same install, reporting into a caller's operation where it has one.
+    pub(crate) async fn install_server_version_reporting(
+        &self,
+        minecraft: &str,
+        loader: &ephervex_model::LoaderSelection,
+        java: &Path,
+        target: &Path,
+        reporter: Option<&OperationReporter>,
+        cancel: &CancellationToken,
+    ) -> CoreResult<InstalledServer> {
         self.with_artifact_cache(Box::pin(self.install_server_version_holding_the_cache(
-            minecraft, loader, java, target, cancel,
+            minecraft, loader, java, target, reporter, cancel,
         )))
         .await
     }
@@ -787,11 +801,13 @@ impl App {
         loader: &ephervex_model::LoaderSelection,
         java: &Path,
         target: &Path,
+        caller: Option<&OperationReporter>,
         cancel: &CancellationToken,
     ) -> CoreResult<InstalledServer> {
         Self::require_published_loader(loader.kind, minecraft)?;
         let parent = self.minecraft_version(minecraft).await?;
-        let reporter = OperationReporter::silent("installing-loader-server");
+        let silent = OperationReporter::silent("installing-loader-server");
+        let reporter = caller.unwrap_or(&silent);
         Ok(self
             .loaders()?
             .provider(loader.kind)
@@ -801,7 +817,7 @@ impl App {
                 parent: &parent,
                 java,
                 target,
-                reporter: &reporter,
+                reporter,
                 cancel,
             })
             .await?)
