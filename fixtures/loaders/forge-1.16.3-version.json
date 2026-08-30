@@ -1,0 +1,41 @@
+{
+  "id": "1.16.3-forge-34.1.42",
+  "time": "2021-10-24T21:00:00+00:00",
+  "releaseTime": "2021-10-24T21:00:00+00:00",
+  "type": "release",
+  "mainClass": "cpw.mods.modlauncher.Launcher",
+  "inheritsFrom": "1.16.3",
+  "arguments": {
+    "game": [
+      "--launchTarget", "fmlclient",
+      "--fml.forgeVersion", "34.1.42",
+      "--fml.mcVersion", "1.16.3",
+      "--fml.forgeGroup", "net.minecraftforge",
+      "--fml.mcpVersion", "20201025.185957"
+    ]
+  },
+  "libraries": [
+    {
+      "name": "net.minecraftforge:forge:1.16.3-34.1.42",
+      "downloads": {
+        "artifact": {
+          "path": "net/minecraftforge/forge/1.16.3-34.1.42/forge-1.16.3-34.1.42.jar",
+          "url": "",
+          "sha1": "289a994a836574cc8664d8cc2af173120e543e4a",
+          "size": 206253
+        }
+      }
+    },
+    {
+      "name": "cpw.mods:modlauncher:8.0.6",
+      "downloads": {
+        "artifact": {
+          "path": "cpw/mods/modlauncher/8.0.6/modlauncher-8.0.6.jar",
+          "url": "https://maven.minecraftforge.net/cpw/mods/modlauncher/8.0.6/modlauncher-8.0.6.jar",
+          "sha1": "70155a85837ebb17d36815ab4d12a3b464963df8",
+          "size": 126111
+        }
+      }
+    }
+  ]
+}

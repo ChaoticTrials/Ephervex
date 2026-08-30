@@ -142,8 +142,9 @@ impl InstallerEngine {
             .await?;
         self.install_profile_libraries(&bundle, reporter, cancel)
             .await?;
+        self.install_installer_declared_libraries(&bundle).await?;
 
-        if bundle.profile.spec == 1 {
+        if bundle.profile.is_processor_driven() {
             let workspace = self.workspace("client");
             self.prepare_workspace(&workspace, &bundle.profile).await?;
             self.prepare_mojang_mappings(
@@ -205,6 +206,7 @@ impl InstallerEngine {
         Self::validate_bundle(kind, minecraft, exact, &bundle)?;
         self.install_profile_libraries(&bundle, reporter, cancel)
             .await?;
+        self.install_installer_declared_libraries(&bundle).await?;
 
         let staging = server_staging(target);
         remove_tree(&staging).await;
@@ -226,27 +228,7 @@ impl InstallerEngine {
                 source: Box::new(source),
             })?;
 
-        let launch = if bundle.profile.spec == 0 {
-            let coordinate = bundle.profile.path.as_deref().ok_or_else(|| {
-                invalid_installer(&bundle.installer, "legacy profile has no path")
-            })?;
-            let coordinate = MavenCoordinate::parse(coordinate)?;
-            let library = bundle
-                .profile
-                .libraries
-                .iter()
-                .find(|library| library.coordinate == coordinate)
-                .ok_or_else(|| {
-                    invalid_installer(&bundle.installer, "legacy universal is absent")
-                })?;
-            let cached = self.layout.library(&library.coordinate);
-            let jar = staging.join(format!("forge-{minecraft}-{exact}.jar"));
-            copy_file(&cached, &jar).await?;
-            link_shared_libraries(&self.layout, &staging).await?;
-            ServerLaunch::Jar {
-                jar: target.join(jar.file_name().unwrap_or_default()),
-            }
-        } else {
+        let launch = if bundle.profile.is_processor_driven() {
             self.prepare_workspace_in(&staging, &bundle.profile).await?;
             self.prepare_mojang_mappings(
                 &bundle.profile,
@@ -272,15 +254,37 @@ impl InstallerEngine {
                 return Err(error);
             }
             self.publish_libraries(&staging.join("libraries")).await?;
+            // Which of the two processor-driven eras this is shows in what the
+            // processors produced. The argument-file era (Forge 1.17 onward and
+            // every NeoForge build) writes `unix_args.txt`; the ModLauncher era
+            // before it patches the game under `libraries` and still starts
+            // from the launcher jar the installer ships.
             let relative = modern_server_argfile(kind, minecraft, exact);
-            let generated = staging.join(&relative);
-            if !fs::try_exists(&generated).await.unwrap_or(false) {
-                remove_tree(&staging).await;
-                return Err(LoaderError::ProcessorOutputMissing { path: generated });
-            }
+            let launch = if fs::try_exists(&staging.join(&relative))
+                .await
+                .unwrap_or(false)
+            {
+                ServerLaunch::ArgFile {
+                    file: target.join(relative),
+                }
+            } else {
+                match self.stage_profile_jar(&bundle, &staging).await {
+                    Ok(jar) => ServerLaunch::Jar {
+                        jar: target.join(jar),
+                    },
+                    Err(error) => {
+                        remove_tree(&staging).await;
+                        return Err(error);
+                    }
+                }
+            };
             replace_with_shared_libraries(&self.layout, &staging).await?;
-            ServerLaunch::ArgFile {
-                file: target.join(relative),
+            launch
+        } else {
+            let jar = self.stage_profile_jar(&bundle, &staging).await?;
+            link_shared_libraries(&self.layout, &staging).await?;
+            ServerLaunch::Jar {
+                jar: target.join(jar),
             }
         };
 
@@ -442,6 +446,82 @@ impl InstallerEngine {
             }
         }
         Ok(())
+    }
+
+    /// Installs every library the loader's own version metadata declares with
+    /// no download address, where the installer archive carries the file.
+    ///
+    /// The ModLauncher era (Forge 1.13 through 1.16.5) declares its launcher
+    /// jar exactly this way: `version.json` names
+    /// `net.minecraftforge:forge:<minecraft>-<exact>` with an empty URL and a
+    /// real digest, the file ships at `maven/...` inside the installer, and no
+    /// processor ever writes it. The install profile's own library list names
+    /// the `universal` classifier instead, so nothing else would install it and
+    /// the launch would fail on a library that was never missing.
+    ///
+    /// An entry the installer does not carry is left alone. Later eras declare
+    /// processor outputs the same way, and those arrive when the processors
+    /// run.
+    async fn install_installer_declared_libraries(
+        &self,
+        bundle: &InstallerBundle,
+    ) -> LoaderResult<()> {
+        for library in &bundle.child.libraries {
+            let Some(artifact) = library.downloads.artifact.as_ref() else {
+                continue;
+            };
+            if !artifact.url.is_empty() {
+                continue;
+            }
+            let destination = self.layout.library(&library.coordinate);
+            if fs::try_exists(&destination).await.unwrap_or(false) {
+                continue;
+            }
+            let installer = bundle.installer.clone();
+            let entry = format!("maven/{}", library.coordinate.relative_path().display());
+            let expected = artifact.sha1.clone();
+            let size = artifact.size;
+            let destination_copy = destination.clone();
+            tokio::task::spawn_blocking(move || {
+                extract_declared_entry(&installer, &entry, &destination_copy, &expected, size)
+            })
+            .await
+            .map_err(|error| invalid_installer(&bundle.installer, &error.to_string()))??;
+        }
+        Ok(())
+    }
+
+    /// Stages the launcher jar a profile names as its own `path`.
+    ///
+    /// Every Forge era before the argument-file one starts a server from a jar
+    /// the installer ships rather than from anything a processor produces. It
+    /// is resolved out of the shared library store, which is where both the
+    /// profile's libraries and the metadata-declared ones have already been
+    /// published, and named after its own coordinate so the file on disk is
+    /// the one the coordinate says it is.
+    async fn stage_profile_jar(
+        &self,
+        bundle: &InstallerBundle,
+        staging: &Path,
+    ) -> LoaderResult<PathBuf> {
+        let coordinate =
+            bundle.profile.path.as_deref().ok_or_else(|| {
+                invalid_installer(&bundle.installer, "profile names no launcher jar")
+            })?;
+        let coordinate = MavenCoordinate::parse(coordinate)?;
+        let relative = coordinate.relative_path();
+        let name = PathBuf::from(relative.file_name().ok_or_else(|| {
+            invalid_installer(
+                &bundle.installer,
+                "launcher jar coordinate has no file name",
+            )
+        })?);
+        let cached = self.layout.library(&coordinate);
+        if !fs::try_exists(&cached).await.unwrap_or(false) {
+            return Err(LoaderError::ProcessorOutputMissing { path: cached });
+        }
+        copy_file(&cached, &staging.join(&name)).await?;
+        Ok(name)
     }
 
     fn workspace(&self, side: &str) -> PathBuf {
@@ -794,6 +874,33 @@ fn extract_verified_entry(
 fn extract_entry(installer: &Path, entry: &str, destination: &Path) -> LoaderResult<()> {
     let bytes = read_zip_bytes(installer, entry, 128 * 1024 * 1024)?;
     write_atomic(destination, &bytes)
+}
+
+/// Extracts a library the version metadata declares but the installer may not
+/// carry. A file that is not in the archive is not an error; see
+/// [`InstallerEngine::install_installer_declared_libraries`].
+fn extract_declared_entry(
+    installer: &Path,
+    entry: &str,
+    destination: &Path,
+    expected: &Hash,
+    size: u64,
+) -> LoaderResult<()> {
+    if !zip_entry_exists(installer, entry)? {
+        return Ok(());
+    }
+    extract_verified_entry(installer, entry, destination, expected, size)
+}
+
+fn zip_entry_exists(installer: &Path, entry: &str) -> LoaderResult<bool> {
+    let file = std::fs::File::open(installer).map_err(|source| io_error(installer, source))?;
+    let mut archive =
+        ZipArchive::new(file).map_err(|error| invalid_installer(installer, &error.to_string()))?;
+    match archive.by_name(entry) {
+        Ok(entry) => Ok(!entry.is_dir()),
+        Err(zip::result::ZipError::FileNotFound) => Ok(false),
+        Err(error) => Err(invalid_installer(installer, &error.to_string())),
+    }
 }
 
 fn read_zip_bytes(installer: &Path, entry: &str, limit: u64) -> LoaderResult<Vec<u8>> {

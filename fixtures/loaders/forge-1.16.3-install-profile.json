@@ -1,0 +1,168 @@
+{
+  "spec": 0,
+  "profile": "forge",
+  "version": "1.16.3-forge-34.1.42",
+  "minecraft": "1.16.3",
+  "json": "/version.json",
+  "path": "net.minecraftforge:forge:1.16.3-34.1.42",
+  "data": {
+    "MAPPINGS": {
+      "client": "[de.oceanlabs.mcp:mcp_config:1.16.3-20201025.185957:mappings@txt]",
+      "server": "[de.oceanlabs.mcp:mcp_config:1.16.3-20201025.185957:mappings@txt]"
+    },
+    "BINPATCH": {
+      "client": "/data/client.lzma",
+      "server": "/data/server.lzma"
+    },
+    "MC_SLIM": {
+      "client": "[net.minecraft:client:1.16.3-20201025.185957:slim]",
+      "server": "[net.minecraft:server:1.16.3-20201025.185957:slim]"
+    },
+    "MC_SLIM_SHA": {
+      "client": "'925521a630c9f48db932462b2612f39eee744f38'",
+      "server": "'c0fccd351c5b3259afd565848d754959635a3e28'"
+    },
+    "MC_EXTRA": {
+      "client": "[net.minecraft:client:1.16.3-20201025.185957:extra]",
+      "server": "[net.minecraft:server:1.16.3-20201025.185957:extra]"
+    },
+    "MC_EXTRA_SHA": {
+      "client": "'78ea966a7126730ed3fd2259bc3e7d9901e80392'",
+      "server": "'d9813758a8dfad49ce829bf697860ab43891faab'"
+    },
+    "MC_SRG": {
+      "client": "[net.minecraft:client:1.16.3-20201025.185957:srg]",
+      "server": "[net.minecraft:server:1.16.3-20201025.185957:srg]"
+    },
+    "PATCHED": {
+      "client": "[net.minecraftforge:forge:1.16.3-34.1.42:client]",
+      "server": "[net.minecraftforge:forge:1.16.3-34.1.42:server]"
+    },
+    "PATCHED_SHA": {
+      "client": "'df0a4d2091de117d2e6d35500d321c19437d21fc'",
+      "server": "'2291213c79bc4302a65736208fabd715d5847e0a'"
+    },
+    "MCP_VERSION": {
+      "client": "'20201025.185957'",
+      "server": "'20201025.185957'"
+    }
+  },
+  "processors": [
+    {
+      "jar": "net.minecraftforge:installertools:1.1.11",
+      "classpath": [
+        "net.md-5:SpecialSource:1.8.5",
+        "net.sf.jopt-simple:jopt-simple:5.0.4",
+        "com.google.code.gson:gson:2.8.0",
+        "de.siegmar:fastcsv:1.0.2",
+        "org.ow2.asm:asm-commons:6.1.1",
+        "com.google.guava:guava:20.0",
+        "net.sf.opencsv:opencsv:2.3",
+        "org.ow2.asm:asm-analysis:6.1.1",
+        "org.ow2.asm:asm-tree:6.1.1",
+        "org.ow2.asm:asm:6.1.1"
+      ],
+      "args": [
+        "--task",
+        "MCP_DATA",
+        "--input",
+        "[de.oceanlabs.mcp:mcp_config:1.16.3-20201025.185957@zip]",
+        "--output",
+        "{MAPPINGS}",
+        "--key",
+        "mappings"
+      ]
+    },
+    {
+      "jar": "net.minecraftforge:jarsplitter:1.1.2",
+      "classpath": [
+        "net.sf.jopt-simple:jopt-simple:5.0.4"
+      ],
+      "args": [
+        "--input",
+        "{MINECRAFT_JAR}",
+        "--slim",
+        "{MC_SLIM}",
+        "--extra",
+        "{MC_EXTRA}",
+        "--srg",
+        "{MAPPINGS}"
+      ],
+      "outputs": {
+        "{MC_SLIM}": "{MC_SLIM_SHA}",
+        "{MC_EXTRA}": "{MC_EXTRA_SHA}"
+      }
+    },
+    {
+      "jar": "net.md-5:SpecialSource:1.8.5",
+      "classpath": [
+        "org.ow2.asm:asm-commons:6.1.1",
+        "net.sf.jopt-simple:jopt-simple:4.9",
+        "com.google.guava:guava:20.0",
+        "net.sf.opencsv:opencsv:2.3",
+        "org.ow2.asm:asm-analysis:6.1.1",
+        "org.ow2.asm:asm-tree:6.1.1",
+        "org.ow2.asm:asm:6.1.1"
+      ],
+      "args": [
+        "--in-jar",
+        "{MC_SLIM}",
+        "--out-jar",
+        "{MC_SRG}",
+        "--srg-in",
+        "{MAPPINGS}"
+      ]
+    },
+    {
+      "jar": "net.minecraftforge:binarypatcher:1.0.12",
+      "classpath": [
+        "commons-io:commons-io:2.4",
+        "com.google.guava:guava:25.1-jre",
+        "net.sf.jopt-simple:jopt-simple:5.0.4",
+        "com.github.jponge:lzma-java:1.3",
+        "com.nothome:javaxdelta:2.0.1",
+        "com.google.code.findbugs:jsr305:3.0.2",
+        "org.checkerframework:checker-qual:2.0.0",
+        "com.google.errorprone:error_prone_annotations:2.1.3",
+        "com.google.j2objc:j2objc-annotations:1.1",
+        "org.codehaus.mojo:animal-sniffer-annotations:1.14",
+        "trove:trove:1.0.2"
+      ],
+      "args": [
+        "--clean",
+        "{MC_SRG}",
+        "--output",
+        "{PATCHED}",
+        "--apply",
+        "{BINPATCH}"
+      ],
+      "outputs": {
+        "{PATCHED}": "{PATCHED_SHA}"
+      }
+    }
+  ],
+  "libraries": [
+    {
+      "name": "de.oceanlabs.mcp:mcp_config:1.16.3-20201025.185957@zip",
+      "downloads": {
+        "artifact": {
+          "path": "de/oceanlabs/mcp/mcp_config/1.16.3-20201025.185957/mcp_config-1.16.3-20201025.185957.zip",
+          "url": "https://maven.minecraftforge.net/de/oceanlabs/mcp/mcp_config/1.16.3-20201025.185957/mcp_config-1.16.3-20201025.185957.zip",
+          "sha1": "b8e9b6c9c285ffcfbf63ccfe1d5a082427d2f066",
+          "size": 769976
+        }
+      }
+    },
+    {
+      "name": "net.minecraftforge:forge:1.16.3-34.1.42:universal",
+      "downloads": {
+        "artifact": {
+          "path": "net/minecraftforge/forge/1.16.3-34.1.42/forge-1.16.3-34.1.42-universal.jar",
+          "url": "",
+          "sha1": "0be0991c870cde2b746239f46707808b9b206ab0",
+          "size": 2285730
+        }
+      }
+    }
+  ]
+}

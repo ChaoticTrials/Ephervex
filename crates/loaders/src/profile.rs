@@ -116,6 +116,19 @@ impl InstallProfile {
         })
     }
 
+    /// Whether this profile's install is driven by the processor pipeline.
+    ///
+    /// `spec` does not answer this and never has. Forge 1.12.2 is `spec` 0 with
+    /// no processors, Forge 1.13 through 1.16.5 is `spec` 0 *with* a full
+    /// processor chain, and Forge 1.17 onward and every NeoForge build are
+    /// `spec` 1. What separates an install that has to patch and remap the game
+    /// from one that only unpacks a jar is whether the profile declares
+    /// processors, so that is what is asked.
+    #[must_use]
+    pub fn is_processor_driven(&self) -> bool {
+        !self.processors.is_empty()
+    }
+
     pub fn data_value(&self, name: &str, side: InstallSide) -> Option<&str> {
         let value = self.data.get(name)?;
         Some(match side {
@@ -167,7 +180,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn spec_zero_is_the_legacy_no_processor_shape() {
+    fn the_launchwrapper_era_declares_no_processors() {
         let profile = InstallProfile::parse(include_str!(
             "../../../fixtures/loaders/forge-1.12.2-install-profile.json"
         ))
@@ -179,6 +192,72 @@ mod tests {
             "1.12.2-14.23.5.2859"
         );
         assert!(profile.libraries[1].artifact.url.is_empty());
+    }
+
+    #[test]
+    fn the_modlauncher_era_is_processor_driven_despite_declaring_spec_zero() {
+        let legacy = InstallProfile::parse(include_str!(
+            "../../../fixtures/loaders/forge-1.12.2-install-profile.json"
+        ))
+        .expect("profile");
+        let modlauncher = InstallProfile::parse(include_str!(
+            "../../../fixtures/loaders/forge-1.16.3-install-profile.json"
+        ))
+        .expect("profile");
+        let argfile = InstallProfile::parse(include_str!(
+            "../../../fixtures/loaders/forge-1.20.1-install-profile.json"
+        ))
+        .expect("profile");
+
+        // Both of the first two declare the same `spec`, and only one of them
+        // has a game to patch. Reading the era off `spec` skipped every
+        // processor for Forge 1.13 through 1.16.5 and produced an install whose
+        // launcher jar and remapped game were simply absent.
+        assert_eq!(legacy.spec, 0);
+        assert_eq!(modlauncher.spec, 0);
+        assert_eq!(argfile.spec, 1);
+        assert!(!legacy.is_processor_driven());
+        assert!(modlauncher.is_processor_driven());
+        assert!(argfile.is_processor_driven());
+    }
+
+    #[test]
+    fn the_modlauncher_era_names_a_launcher_jar_no_processor_produces() {
+        let profile = InstallProfile::parse(include_str!(
+            "../../../fixtures/loaders/forge-1.16.3-install-profile.json"
+        ))
+        .expect("profile");
+        assert_eq!(
+            profile.path.as_deref(),
+            Some("net.minecraftforge:forge:1.16.3-34.1.42")
+        );
+        // The profile's own library list names the `universal` classifier, so
+        // the coordinate `path` points at is installed by nothing the profile
+        // describes.
+        assert!(
+            !profile
+                .libraries
+                .iter()
+                .any(|library| library.name == "net.minecraftforge:forge:1.16.3-34.1.42")
+        );
+        assert!(
+            profile
+                .libraries
+                .iter()
+                .any(|library| library.name == "net.minecraftforge:forge:1.16.3-34.1.42:universal")
+        );
+    }
+
+    #[test]
+    fn a_profile_without_sides_applies_to_both() {
+        let profile = InstallProfile::parse(include_str!(
+            "../../../fixtures/loaders/forge-1.16.3-install-profile.json"
+        ))
+        .expect("profile");
+        for processor in &profile.processors {
+            assert!(processor.applies_to(InstallSide::Client));
+            assert!(processor.applies_to(InstallSide::Server));
+        }
     }
 
     #[test]

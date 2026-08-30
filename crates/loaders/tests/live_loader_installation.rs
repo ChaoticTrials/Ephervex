@@ -49,6 +49,15 @@ async fn production_client_and_server_installers_accept_the_supported_matrix() {
             loader: "14.23.5.2859",
             java_env: "EPHERVEX_LIVE_LOADER_JAVA_8",
         },
+        // The ModLauncher era. It declares `spec` 0 like 1.12.2 and runs a full
+        // processor chain like 1.20.1, so it is the one case neither of the
+        // others stands in for.
+        WorkflowCase {
+            kind: LoaderKind::Forge,
+            minecraft: "1.16.3",
+            loader: "34.1.42",
+            java_env: "EPHERVEX_LIVE_LOADER_JAVA_8",
+        },
         WorkflowCase {
             kind: LoaderKind::Forge,
             minecraft: "1.20.1",
