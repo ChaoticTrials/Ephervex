@@ -17,6 +17,43 @@ use ephervex_model::{
     DefaultModCatalog, LoaderKind, ModProvider, Operation, OperationStatus, StorageClass,
 };
 
+/// The loader choice one Minecraft release offers, and what a selection made
+/// against a different release becomes under it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoaderChoices {
+    /// The loaders to offer, as their own untranslated product names.
+    pub options: Vec<String>,
+    /// The selection to keep. The one that was made, when the release still
+    /// has it; Vanilla otherwise, because every release has that.
+    pub selected: String,
+    /// Whether the selection had to change, which is also what invalidates the
+    /// build list that belonged to it.
+    pub reset: bool,
+}
+
+/// Narrows the loader choice to the loaders a Minecraft release ever had.
+///
+/// NeoForge's first build is for Minecraft 1.20.2, so offering it for anything
+/// older leads to a build list that never fills in and a Create button that
+/// never enables, with nothing on screen saying why.
+#[must_use]
+pub fn loader_choices(minecraft: &str, current: &str) -> LoaderChoices {
+    let options: Vec<String> = ephervex_core::App::available_loaders(minecraft)
+        .into_iter()
+        .map(|kind| kind.to_string())
+        .collect();
+    let kept = options.iter().any(|option| option == current);
+    LoaderChoices {
+        selected: if kept {
+            current.to_owned()
+        } else {
+            LoaderKind::Vanilla.to_string()
+        },
+        reset: !kept,
+        options,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstancePresentation {
     pub id: String,
@@ -764,6 +801,26 @@ mod tests {
             [LoaderKind::Vanilla, LoaderKind::Forge, LoaderKind::NeoForge].map(loader_kind_name),
             ["vanilla", "forge", "neoforge"]
         );
+    }
+
+    #[test]
+    fn the_loader_choice_follows_the_release_it_is_made_against() {
+        let modern = loader_choices("1.21.1", "NeoForge");
+        assert_eq!(modern.options, ["Vanilla", "Forge", "NeoForge"]);
+        assert_eq!(modern.selected, "NeoForge");
+        assert!(!modern.reset);
+
+        // 1.20.1 is the last release before NeoForge's first build, so it is
+        // the edge the rule has to get right.
+        let legacy = loader_choices("1.20.1", "NeoForge");
+        assert_eq!(legacy.options, ["Vanilla", "Forge"]);
+        assert_eq!(legacy.selected, "Vanilla");
+        assert!(legacy.reset);
+
+        // Forge exists on both sides of that edge and is left alone.
+        let forge = loader_choices("1.12.2", "Forge");
+        assert_eq!(forge.selected, "Forge");
+        assert!(!forge.reset);
     }
 
     #[test]

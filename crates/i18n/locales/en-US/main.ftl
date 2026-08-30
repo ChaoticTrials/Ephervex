@@ -669,6 +669,9 @@ error-loader-metadata-invalid = Loader version information could not be understo
 .action = The provider may have changed its format. Ephervex refused to guess.
 error-loader-version-unavailable = The requested loader version is unavailable.
 .action = Choose an available exact build. Stable is not replaced with Latest automatically.
+# $since is the oldest Minecraft release the loader was ever published for.
+error-loader-never-published = { $loader } has no builds for Minecraft { $minecraft }.
+.action = { $loader } was first published for Minecraft { $since }. Choose that release or a newer one, or choose a different loader.
 error-loader-identity-mismatch = The downloaded loader installer does not match the requested Minecraft or loader version.
 .action = Ephervex refused the installer instead of installing different software.
 error-loader-installer-invalid = The loader installer uses an unsupported or unsafe format.

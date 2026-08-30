@@ -1446,6 +1446,7 @@ fn register_mod_actions(ui: &AppWindow, commands: &Sender<Command>) {
     register_mod_mutations(ui, commands);
     register_mod_browser(ui, commands);
     register_browser_install(ui, commands);
+    register_loader_options(ui);
 
     let sender = commands.clone();
     let handle = ui.as_weak();
@@ -1620,6 +1621,52 @@ fn show_mod_catalog(ui: &AppWindow, provider: &str) {
     ui.set_mod_search_notice(SharedString::default());
     ui.set_mod_results_total(0);
     ui.set_mod_results_next_offset(-1);
+}
+
+/// Narrows the loader choice to the ones a Minecraft release ever had.
+///
+/// `form` is `"client"` or `"server"`, matching the dialog the choice belongs
+/// to. A loader that drops out of the list cannot stay selected, so the choice
+/// falls back to Vanilla along with the build list that belonged to it.
+fn apply_loader_options(ui: &AppWindow, form: &str, minecraft: &str) {
+    let server = form == "server";
+    let current = if server {
+        ui.get_create_server_loader()
+    } else {
+        ui.get_create_loader()
+    };
+    let choices = presentation::loader_choices(minecraft, &current);
+    let options = model(
+        choices
+            .options
+            .into_iter()
+            .map(SharedString::from)
+            .collect::<Vec<_>>(),
+    );
+    if server {
+        ui.set_create_server_loaders(options);
+        if choices.reset {
+            ui.set_create_server_loader(choices.selected.into());
+            ui.set_create_server_loader_version(SharedString::default());
+            ui.set_create_server_loader_versions(model(Vec::new()));
+        }
+    } else {
+        ui.set_create_loaders(options);
+        if choices.reset {
+            ui.set_create_loader(choices.selected.into());
+            ui.set_create_loader_version(SharedString::default());
+            ui.set_create_loader_versions(model(Vec::new()));
+        }
+    }
+}
+
+fn register_loader_options(ui: &AppWindow) {
+    let weak = ui.as_weak();
+    ui.on_refresh_loader_options(move |form, minecraft| {
+        if let Some(ui) = weak.upgrade() {
+            apply_loader_options(&ui, &form, &minecraft);
+        }
+    });
 }
 
 /// Installing a mod straight from the browser.
@@ -3449,6 +3496,10 @@ fn apply_minecraft_releases(
     ui.set_minecraft_releases(model(
         versions.into_iter().map(SharedString::from).collect(),
     ));
+    // The selection above may have moved, and which loaders exist depends on
+    // it, so the choices are narrowed before the dialog can be looked at.
+    apply_loader_options(ui, "client", &ui.get_create_minecraft());
+    apply_loader_options(ui, "server", &ui.get_create_server_minecraft());
     recompute_create_name(ui, &create_instance_name.borrow());
 }
 

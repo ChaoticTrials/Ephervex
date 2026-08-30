@@ -21,6 +21,13 @@ pub enum LoaderError {
         minecraft: String,
         mode: &'static str,
     },
+    #[error("{loader} has never had a build for minecraft `{minecraft}`")]
+    LoaderNeverPublished {
+        loader: ephervex_model::LoaderKind,
+        minecraft: String,
+        /// The oldest Minecraft release the loader was published for.
+        since: &'static str,
+    },
     #[error("{loader} requires an exact loader version")]
     ExactVersionRequired { loader: ephervex_model::LoaderKind },
     #[error("loader installer identity does not match the requested version: {detail}")]
@@ -78,6 +85,7 @@ impl LoaderError {
             Self::VersionUnavailable { .. } | Self::ExactVersionRequired { .. } => {
                 "error-loader-version-unavailable"
             }
+            Self::LoaderNeverPublished { .. } => "error-loader-never-published",
             Self::IdentityMismatch { .. } => "error-loader-identity-mismatch",
             Self::UnsupportedProfile { .. } | Self::InstallerInvalid { .. } => {
                 "error-loader-installer-invalid"
@@ -91,6 +99,23 @@ impl LoaderError {
             | Self::ProcessorOutputMissing { .. } => "error-loader-processor-failed",
             Self::ServerTargetOccupied { .. } => "error-loader-server-target-occupied",
             Self::Canceled => "error-launch-canceled",
+        }
+    }
+
+    /// The values this error's localized message needs.
+    #[must_use]
+    pub fn message_args(&self) -> Vec<(&'static str, String)> {
+        match self {
+            Self::LoaderNeverPublished {
+                loader,
+                minecraft,
+                since,
+            } => vec![
+                ("loader", loader.to_string()),
+                ("minecraft", minecraft.clone()),
+                ("since", (*since).to_owned()),
+            ],
+            _ => Vec::new(),
         }
     }
 

@@ -278,6 +278,7 @@ impl CoreError {
     #[must_use]
     pub fn message_args(&self) -> Vec<(&'static str, String)> {
         match self {
+            Self::Loader(error) => error.message_args(),
             Self::Pack(error) => error.message_args(),
             Self::ModPlatform(error) => error.message_args(),
             Self::Server(error) => error.message_args(),

@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use ephervex_download::{
     CacheLayout, DownloadManager, Freshness, MetadataCache, MetadataKey, OperationReporter,
 };
+use ephervex_minecraft::MinecraftVersionId;
 use ephervex_model::{LoaderKind, LoaderVersionMode};
 use quick_xml::de::from_str;
 use reqwest::Url;
@@ -18,6 +19,43 @@ pub const FORGE_MAVEN_METADATA_URL: &str =
     "https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml";
 pub const NEOFORGE_MAVEN_METADATA_URL: &str =
     "https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml";
+
+/// The oldest Minecraft release `net.neoforged:neoforge` was ever published for.
+///
+/// NeoForge's first line is `20.2.x`, which [`neoforge_minecraft`] reads as
+/// Minecraft 1.20.2. Anything older has no build in that artifact at all, so
+/// asking its catalog can only ever return an empty list. Answering from the
+/// version rather than from an empty answer is what lets a frontend decline to
+/// offer the loader in the first place, instead of offering it and then leaving
+/// the user in front of a build list that will never fill in.
+pub const NEOFORGE_MINIMUM_MINECRAFT: &str = "1.20.2";
+
+/// The oldest Minecraft release a loader was ever published for, where it has
+/// one. `None` means the loader has always been available.
+#[must_use]
+pub const fn minimum_minecraft(loader: LoaderKind) -> Option<&'static str> {
+    match loader {
+        LoaderKind::Vanilla | LoaderKind::Forge => None,
+        LoaderKind::NeoForge => Some(NEOFORGE_MINIMUM_MINECRAFT),
+    }
+}
+
+/// Whether a loader has any build at all for a Minecraft release.
+///
+/// This is about the loader's own history, not about what a catalog happens to
+/// serve today: it is answerable offline and never changes for a release that
+/// has already shipped. A version in a scheme this build cannot parse is not
+/// refused, because refusing it would hide a loader on the strength of a guess
+/// about an unknown version scheme.
+#[must_use]
+pub fn supports_minecraft(loader: LoaderKind, minecraft: &str) -> bool {
+    let Some(floor) = minimum_minecraft(loader) else {
+        return true;
+    };
+    MinecraftVersionId::parse(minecraft)
+        .at_least(&MinecraftVersionId::parse(floor))
+        .unwrap_or(true)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoaderBuild {
@@ -334,6 +372,34 @@ mod tests {
 
     fn official_versions(path: &str) -> Vec<String> {
         parse_maven_versions(path, "fixture").expect("official Maven metadata fixture")
+    }
+
+    #[test]
+    fn neoforge_is_offered_only_where_it_was_ever_published() {
+        for version in ["1.20.2", "1.20.4", "1.21.1", "26.1.2", "26.2"] {
+            assert!(
+                supports_minecraft(LoaderKind::NeoForge, version),
+                "{version} has NeoForge builds"
+            );
+        }
+        for version in ["1.12.2", "1.16.3", "1.18.2", "1.20.1"] {
+            assert!(
+                !supports_minecraft(LoaderKind::NeoForge, version),
+                "{version} predates net.neoforged:neoforge"
+            );
+            assert!(supports_minecraft(LoaderKind::Forge, version));
+            assert!(supports_minecraft(LoaderKind::Vanilla, version));
+        }
+    }
+
+    #[test]
+    fn a_version_scheme_this_build_cannot_parse_hides_nothing() {
+        // Hiding a loader on the strength of a guess about an unknown scheme
+        // would be worse than offering one whose build list turns out empty.
+        assert!(supports_minecraft(
+            LoaderKind::NeoForge,
+            "some-future-scheme"
+        ));
     }
 
     #[test]

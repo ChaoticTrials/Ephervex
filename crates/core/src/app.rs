@@ -470,6 +470,12 @@ impl App {
             .into());
         }
 
+        // Refused before a catalog is asked, because the answer is a fact about
+        // the loader rather than about today's metadata: the request would
+        // otherwise fail as "no such build", which reads as a typo instead of a
+        // loader that never existed for this release.
+        Self::require_published_loader(request.loader.kind, &request.minecraft_version)?;
+
         let selected = request.loader.version.as_deref().unwrap_or_default();
         let listing = self
             .loader_versions(request.loader.kind, &request.minecraft_version)
@@ -597,6 +603,36 @@ impl App {
         Ok(listing)
     }
 
+    /// Refuses a loader that never had a build for a Minecraft release.
+    pub(crate) fn require_published_loader(loader: LoaderKind, minecraft: &str) -> CoreResult<()> {
+        if ephervex_loaders::supports_minecraft(loader, minecraft) {
+            return Ok(());
+        }
+        Err(LoaderError::LoaderNeverPublished {
+            loader,
+            minecraft: minecraft.to_owned(),
+            // Present whenever the check above refused, because a loader with no
+            // floor is never refused.
+            since: ephervex_loaders::minimum_minecraft(loader).unwrap_or_default(),
+        }
+        .into())
+    }
+
+    /// The loaders that have ever had a build for one Minecraft release, in the
+    /// order a frontend should offer them.
+    ///
+    /// A fact about each loader's own history rather than about what a catalog
+    /// serves today, so it is answerable offline and instantly. NeoForge did not
+    /// exist before Minecraft 1.20.2, and offering it for an older release only
+    /// leads to a build list that never fills in.
+    #[must_use]
+    pub fn available_loaders(minecraft: &str) -> Vec<LoaderKind> {
+        [LoaderKind::Vanilla, LoaderKind::Forge, LoaderKind::NeoForge]
+            .into_iter()
+            .filter(|kind| ephervex_loaders::supports_minecraft(*kind, minecraft))
+            .collect()
+    }
+
     /// One supported release's complete metadata.
     ///
     /// Refuses a snapshot, a pre-release, or anything below the floor rather
@@ -616,6 +652,9 @@ impl App {
         kind: LoaderKind,
         minecraft: &str,
     ) -> CoreResult<LoaderVersionListing> {
+        // A loader that never existed for this release has no catalog to ask,
+        // and an empty build list is a far less useful answer than saying so.
+        Self::require_published_loader(kind, minecraft)?;
         Ok(self
             .loaders()?
             .provider(kind)
@@ -674,6 +713,7 @@ impl App {
         target: &Path,
         cancel: &CancellationToken,
     ) -> CoreResult<InstalledServer> {
+        Self::require_published_loader(loader.kind, minecraft)?;
         let parent = self.minecraft_version(minecraft).await?;
         let reporter = OperationReporter::silent("installing-loader-server");
         Ok(self
