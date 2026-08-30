@@ -39,7 +39,7 @@ use ephervex_core::{
     RuntimeInventory, SearchOptions, SecretString, ServerCommitWarning, ServerCreateOptions,
     ServerEvent, ServerFolder, ServerNetworkSettings, ServerObserver, ServerPersistenceHealth,
     ServerRecord, ServerWarning, Session, SideRequirement, SkipReason, TextAnchor, TextView,
-    VersionMetadata, VersionRecord,
+    UnknownServerFiles, VersionMetadata, VersionRecord,
 };
 use ephervex_i18n::Arg as MessageArg;
 use ephervex_model::{
@@ -795,11 +795,23 @@ struct CreateServerArgs {
     /// Use this Java executable for installation.
     #[arg(long)]
     java: Option<PathBuf>,
-    /// Include a managed file whose server applicability is undeclared.
+    /// Reconstruct only these files whose server applicability is undeclared.
     ///
-    /// Repeatable and matched against the retained recipe's logical paths.
-    #[arg(long = "include-unknown", value_name = "PATH", requires = "client")]
+    /// A linked server reconstructs every such file by default, because a pack
+    /// format that declares no server side (CurseForge does not) would
+    /// otherwise leave the server holding none of its pack. Naming paths here
+    /// narrows that to the ones given. Repeatable, and matched against the
+    /// retained recipe's logical paths.
+    #[arg(
+        long = "include-unknown",
+        value_name = "PATH",
+        requires = "client",
+        conflicts_with = "skip_unknown"
+    )]
     include_unknown: Vec<PathBuf>,
+    /// Reconstruct none of the files whose server applicability is undeclared.
+    #[arg(long = "skip-unknown", requires = "client")]
+    skip_unknown: bool,
     #[command(flatten)]
     storage: StorageArgs,
 }
@@ -1270,7 +1282,10 @@ async fn run_server_command(
                     &ServerCreateOptions {
                         java_path: args.java.clone(),
                         install_java_if_missing: true,
-                        confirmed_unknown: OptionalSelection::of(args.include_unknown.clone()),
+                        unknown_server_files: unknown_server_files(
+                            &args.include_unknown,
+                            args.skip_unknown,
+                        ),
                     },
                     &CancellationToken::new(),
                 )
@@ -1284,7 +1299,7 @@ async fn run_server_command(
                     &ServerCreateOptions {
                         java_path: java.clone(),
                         install_java_if_missing: true,
-                        confirmed_unknown: OptionalSelection::none(),
+                        unknown_server_files: UnknownServerFiles::default(),
                     },
                     &CancellationToken::new(),
                 )
@@ -2139,6 +2154,18 @@ fn parse_resolution(value: &str) -> anyhow::Result<(u32, u32)> {
 ///
 /// A modded loader without a version cannot be reproduced faithfully, and
 /// guessing one would be exactly the silent substitution Ephervex does not allow.
+/// How a `server create` invocation spells its policy for files whose server
+/// applicability the pack never declared.
+fn unknown_server_files(include: &[PathBuf], skip: bool) -> UnknownServerFiles {
+    if skip {
+        UnknownServerFiles::only(OptionalSelection::none())
+    } else if include.is_empty() {
+        UnknownServerFiles::IncludeAll
+    } else {
+        UnknownServerFiles::only(OptionalSelection::of(include.to_vec()))
+    }
+}
+
 fn build_loader(loader: LoaderArg, version: Option<&str>) -> anyhow::Result<LoaderSelection> {
     let kind = LoaderKind::from(loader);
     let selection = LoaderSelection {

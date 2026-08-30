@@ -11,7 +11,7 @@ use ephervex_model::{
     ServerId, ServerInstallation, ServerLaunch, ServerRelativePath,
 };
 use ephervex_pack::{
-    ArtifactFetch, OptionalSelection, PackError, PackRecipe, ServerMaterializeRequest, SourceStore,
+    ArtifactFetch, PackError, PackRecipe, ServerMaterializeRequest, SourceStore, UnknownServerFiles,
 };
 use ephervex_server::{
     CaptureHealth, CaptureRetention, CapturedLine, ControlAction, ControlResponse,
@@ -41,9 +41,10 @@ const AUTOMATIC_PORT_CANDIDATES: usize = 100;
 pub struct ServerCreateOptions {
     pub java_path: Option<PathBuf>,
     pub install_java_if_missing: bool,
-    /// Recipe entries whose server applicability is undeclared but which the
-    /// caller explicitly confirms for this creation.
-    pub confirmed_unknown: OptionalSelection,
+    /// What to do with recipe entries whose server applicability the pack
+    /// never declared. Reconstructing them is the default; see
+    /// [`UnknownServerFiles`].
+    pub unknown_server_files: UnknownServerFiles,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -182,7 +183,8 @@ impl App {
         self.resolve_creation_network(&mut request)?;
         let mut record = self.registry_for_services().prepare_server(request)?;
         record.operator_setup = self.default_operator_setup(&record.network);
-        let linked_recipe = self.linked_server_recipe(&mut record, &options.confirmed_unknown)?;
+        let linked_recipe =
+            self.linked_server_recipe(&mut record, &options.unknown_server_files)?;
         let staging = staging_root(&record.root);
         if staging.exists() {
             return Err(storage_io(
@@ -243,7 +245,7 @@ impl App {
         Ok(committed)
     }
 
-    /// Installs a previously scaffolded record. Unknown files are never merged.
+    /// Installs a previously scaffolded record.
     pub async fn install_server(
         &self,
         id: ServerId,
@@ -269,7 +271,8 @@ impl App {
         }
         let target = ephervex_storage::metadata::server_game_dir(&record.root);
         ensure_empty_directory(&target)?;
-        let linked_recipe = self.linked_server_recipe(&mut record, &options.confirmed_unknown)?;
+        let linked_recipe =
+            self.linked_server_recipe(&mut record, &options.unknown_server_files)?;
         let server_source = ephervex_storage::metadata::source_dir(&record.root);
         if linked_recipe.is_some() {
             ensure_empty_directory(&server_source)?;
@@ -324,7 +327,7 @@ impl App {
     fn linked_server_recipe(
         &self,
         record: &mut ServerRecord,
-        confirmed_unknown: &OptionalSelection,
+        unknown_server_files: &UnknownServerFiles,
     ) -> CoreResult<Option<(PathBuf, PackRecipe)>> {
         let Some(client_id) = record.linked_client_id else {
             return Ok(None);
@@ -359,7 +362,7 @@ impl App {
 
         // Validate confirmations and retention before Java probing or loader
         // installation can do expensive work.
-        let plan = recipe.server_reconstruction_plan(confirmed_unknown)?;
+        let plan = recipe.server_reconstruction_plan(unknown_server_files)?;
         if let Some(layer) = plan.layers.iter().find(|layer| !layer.is_retained()) {
             return Err(PackError::RetainedLayerUnavailable {
                 scope: layer.scope.as_str(),
@@ -387,7 +390,7 @@ impl App {
         let manager = self.artifact_manager()?;
         let materialized = ephervex_pack::materialize_server_recipe(ServerMaterializeRequest {
             recipe,
-            confirmed_unknown: &options.confirmed_unknown,
+            unknown_server_files: &options.unknown_server_files,
             game_dir: target,
             client_source_dir: client_source,
             server_source_dir: server_source,
@@ -1682,7 +1685,7 @@ mod tests {
             .expect("prepare");
 
         let error = app
-            .linked_server_recipe(&mut server, &OptionalSelection::none())
+            .linked_server_recipe(&mut server, &UnknownServerFiles::default())
             .expect_err("missing desired state is not an empty pack");
         assert!(matches!(
             error,

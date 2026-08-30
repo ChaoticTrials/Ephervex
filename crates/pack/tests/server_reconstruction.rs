@@ -11,7 +11,8 @@ use ephervex_model::{
 use ephervex_pack::{
     ArtifactFetch, OpenArtifacts, OptionalSelection, OverrideLayer, OverrideScope, PackError,
     PackFileRecipe, PackRecipe, ProviderFileIdentity, ProviderRecipeMetadata, RECIPE_VERSION,
-    ServerMaterializeRequest, SideRequirement, SourceStore, materialize_server_recipe,
+    ServerMaterializeRequest, SideRequirement, SourceStore, UnknownServerFiles,
+    materialize_server_recipe,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -167,7 +168,7 @@ fn recipe() -> (PackRecipe, Vec<Vec<u8>>) {
 
 async fn reconstruct(
     recipe: &PackRecipe,
-    confirmed_unknown: &OptionalSelection,
+    unknown_server_files: &UnknownServerFiles,
     game: &Path,
     client_source: &Path,
     server_source: &Path,
@@ -176,7 +177,7 @@ async fn reconstruct(
     let manager = DownloadManager::new(DownloaderConfig::default()).expect("manager");
     materialize_server_recipe(ServerMaterializeRequest {
         recipe,
-        confirmed_unknown,
+        unknown_server_files,
         game_dir: game,
         client_source_dir: client_source,
         server_source_dir: server_source,
@@ -233,7 +234,7 @@ async fn retained_desired_state_reconstructs_a_server_without_the_source_archive
         let server_source = temp.path().join(server_name).join(".launcher/source");
         let materialized = reconstruct(
             &recipe,
-            &OptionalSelection::none(),
+            &UnknownServerFiles::only(OptionalSelection::none()),
             &game,
             &client_source,
             &server_source,
@@ -286,8 +287,62 @@ async fn retained_desired_state_reconstructs_a_server_without_the_source_archive
     );
 }
 
+/// A pack format that declares no server side leaves every one of its files
+/// undeclared. Skipping those handed back a linked server holding none of the
+/// pack it was created from, so reconstructing them is the default.
 #[tokio::test]
-async fn unknown_server_content_requires_an_explicit_creation_confirmation() {
+async fn undeclared_server_content_is_reconstructed_by_default() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (recipe, bodies) = recipe();
+    let client_source = temp.path().join("client-source");
+    let cache = CacheLayout::new(temp.path().join("cache"));
+    write(
+        &client_source.join("modrinth/modrinth.index.json"),
+        b"manifest",
+    );
+    write(&client_source.join("modrinth/overrides/empty"), b"");
+    write(&client_source.join("modrinth/server-overrides/empty"), b"");
+    for (entry, body) in recipe.files.iter().zip(&bodies) {
+        cache_file(&cache, entry, body);
+    }
+
+    let game = temp.path().join("server");
+    let server_source = temp.path().join("server-source");
+    let materialized = reconstruct(
+        &recipe,
+        &UnknownServerFiles::default(),
+        &game,
+        &client_source,
+        &server_source,
+        &cache,
+    )
+    .await
+    .expect("reconstruct with the default policy");
+
+    assert!(game.join("mods/unknown.jar").is_file());
+    assert!(materialized.unconfirmed_unknown.is_empty());
+    // A declared client-only file stays excluded. Only the undeclared side
+    // changed meaning; a provider that answered the question is still obeyed.
+    assert!(!game.join("mods/client-only.jar").exists());
+    // An optional the client declined is still declined: an undeclared side and
+    // an unselected optional are different facts.
+    assert!(!game.join("mods/unselected-optional.jar").exists());
+
+    // The server's own recipe records the file as one it has, so a later mod
+    // operation does not treat it as pack content the server never received.
+    let stored = SourceStore::new(&server_source)
+        .read_recipe()
+        .expect("server recipe");
+    let unknown = stored
+        .files
+        .iter()
+        .find(|file| file.logical_path == Path::new("mods/unknown.jar"))
+        .expect("undeclared entry");
+    assert_eq!(unknown.selected, Some(true));
+}
+
+#[tokio::test]
+async fn a_narrowed_policy_reconstructs_only_the_undeclared_files_it_names() {
     let temp = tempfile::tempdir().expect("tempdir");
     let (recipe, bodies) = recipe();
     let client_source = temp.path().join("client-source");
@@ -304,7 +359,7 @@ async fn unknown_server_content_requires_an_explicit_creation_confirmation() {
 
     let materialized = reconstruct(
         &recipe,
-        &OptionalSelection::of(["mods/unknown.jar"]),
+        &UnknownServerFiles::only(OptionalSelection::of(["mods/unknown.jar"])),
         &temp.path().join("server"),
         &client_source,
         &temp.path().join("server-source"),
@@ -316,7 +371,9 @@ async fn unknown_server_content_requires_an_explicit_creation_confirmation() {
     assert!(materialized.unconfirmed_unknown.is_empty());
 
     let error = recipe
-        .server_reconstruction_plan(&OptionalSelection::of(["mods/not-unknown.jar"]))
+        .server_reconstruction_plan(&UnknownServerFiles::only(OptionalSelection::of([
+            "mods/not-unknown.jar",
+        ])))
         .expect_err("typos are not silently ignored");
     assert!(matches!(error, PackError::UnknownServerSelection { .. }));
 }
@@ -329,7 +386,7 @@ async fn missing_layers_and_path_collisions_fail_before_overwriting_server_conte
     missing.provider_metadata.manifest_file = None;
     let error = reconstruct(
         &missing,
-        &OptionalSelection::none(),
+        &UnknownServerFiles::default(),
         &temp.path().join("missing-game"),
         &temp.path().join("missing-source"),
         &temp.path().join("missing-server-source"),
@@ -360,7 +417,7 @@ async fn missing_layers_and_path_collisions_fail_before_overwriting_server_conte
     ];
     let error = reconstruct(
         &collision,
-        &OptionalSelection::none(),
+        &UnknownServerFiles::default(),
         &temp.path().join("collision-game"),
         &temp.path().join("manual-source"),
         &temp.path().join("collision-server-source"),
@@ -378,7 +435,7 @@ async fn missing_layers_and_path_collisions_fail_before_overwriting_server_conte
     write(&occupied_game.join("mods/same.jar"), b"base server file");
     let error = reconstruct(
         &collision,
-        &OptionalSelection::none(),
+        &UnknownServerFiles::default(),
         &occupied_game,
         &temp.path().join("manual-source"),
         &temp.path().join("occupied-server-source"),

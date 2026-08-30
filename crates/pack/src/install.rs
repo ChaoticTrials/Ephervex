@@ -74,7 +74,7 @@ use crate::error::{PackError, PackResult};
 use crate::path::{contained_join, is_reserved, safe_relative_path};
 use crate::recipe::{
     OptionalSelection, OverrideLayer, PackFileRecipe, PackRecipe, PackSide,
-    ServerReconstructionPlan,
+    ServerReconstructionPlan, UnknownServerFiles,
 };
 use crate::store::SourceStore;
 
@@ -138,8 +138,8 @@ pub struct FileInstall<'a> {
 #[derive(Debug, Clone, Copy)]
 pub struct ServerMaterializeRequest<'a> {
     pub recipe: &'a PackRecipe,
-    /// Unknown-server entries explicitly confirmed for this creation only.
-    pub confirmed_unknown: &'a OptionalSelection,
+    /// What to do with entries whose server side the pack never declared.
+    pub unknown_server_files: &'a UnknownServerFiles,
     pub game_dir: &'a Path,
     pub client_source_dir: &'a Path,
     pub server_source_dir: &'a Path,
@@ -185,13 +185,13 @@ pub async fn materialize_server_recipe(
 ) -> PackResult<MaterializedServerRecipe> {
     let ServerMaterializeRequest {
         recipe,
-        confirmed_unknown,
+        unknown_server_files,
         game_dir,
         client_source_dir,
         server_source_dir,
         fetch,
     } = request;
-    let plan = recipe.server_reconstruction_plan(confirmed_unknown)?;
+    let plan = recipe.server_reconstruction_plan(unknown_server_files)?;
     for layer in &plan.layers {
         let Some(relative) = &layer.retained_at else {
             return Err(PackError::RetainedLayerUnavailable {

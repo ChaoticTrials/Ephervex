@@ -95,6 +95,6 @@ pub use recipe::{
     BlockedProviderFile, ManagedMod, ModIdentity, OptionalComponent, OptionalSelection,
     OverrideLayer, OverrideScope, PackFileRecipe, PackRecipe, PackSide, PendingProviderFile,
     ProviderFileIdentity, ProviderRecipeMetadata, RECIPE_VERSION, RecordedMod,
-    ServerReconstructionPlan, SidePlan, SideRequirement,
+    ServerReconstructionPlan, SidePlan, SideRequirement, UnknownServerFiles,
 };
 pub use store::{RECIPE_FILE, SourceStore, provider_directory};

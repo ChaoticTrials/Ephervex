@@ -29,7 +29,7 @@ use ephervex_pack::{
     ArtifactFetch, MaterializeRequest, OpenArtifacts, OptionalSelection, OverrideScope, PackError,
     PackFileRecipe, PackFormat, PackPolicy, PackRecipe, PackSide, ProviderFileIdentity,
     ProviderRecipeMetadata, RECIPE_VERSION, ServerMaterializeRequest, SideRequirement, SourceStore,
-    analyze, materialize, materialize_server_recipe,
+    UnknownServerFiles, analyze, materialize, materialize_server_recipe,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -348,7 +348,7 @@ async fn a_normalized_curseforge_recipe_reconstructs_a_server_through_the_generi
     // reconstruction leaves it out and says so.
     let unconfirmed = materialize_server_recipe(ServerMaterializeRequest {
         recipe: &recipe,
-        confirmed_unknown: &OptionalSelection::none(),
+        unknown_server_files: &UnknownServerFiles::only(OptionalSelection::none()),
         game_dir: &server_game,
         client_source_dir: &client_source,
         server_source_dir: &server_source,
@@ -378,7 +378,9 @@ async fn a_normalized_curseforge_recipe_reconstructs_a_server_through_the_generi
     let server_source = workspace.path().join("server-2/.launcher/source");
     let confirmed = materialize_server_recipe(ServerMaterializeRequest {
         recipe: &recipe,
-        confirmed_unknown: &OptionalSelection::of(["mods/required-1.0.0.jar"]),
+        unknown_server_files: &UnknownServerFiles::only(OptionalSelection::of([
+            "mods/required-1.0.0.jar",
+        ])),
         game_dir: &server_game,
         client_source_dir: &client_source,
         server_source_dir: &server_source,

@@ -195,7 +195,7 @@ pub use ephervex_pack::{
     ModIdentity, ModOrigin, OptionalComponent, OptionalSelection, OverrideLayer, OverrideScope,
     PackAnalysis, PackError, PackFileRecipe, PackFormat, PackPolicy, PackRecipe, PackSide,
     ProviderFileIdentity, ProviderRecipeMetadata, RecordedMod, ServerReconstructionPlan, SidePlan,
-    SideRequirement,
+    SideRequirement, UnknownServerFiles,
 };
 pub use ephervex_server::{
     CaptureHealth, CaptureRetention, CapturedLine, ControlAction, ControlResponse,

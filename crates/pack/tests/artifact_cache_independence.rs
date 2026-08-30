@@ -24,8 +24,8 @@ use ephervex_model::{
 };
 use ephervex_pack::{
     ArtifactFetch, FileInstall, OpenArtifacts, OptionalSelection, PackFileRecipe, PackRecipe,
-    PackSide, ServerMaterializeRequest, SideRequirement, SourceStore, install_files,
-    materialize_server_recipe,
+    PackSide, ServerMaterializeRequest, SideRequirement, SourceStore, UnknownServerFiles,
+    install_files, materialize_server_recipe,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -150,7 +150,7 @@ async fn a_reconstructed_server_survives_a_full_clear_of_the_reusable_cache() {
 
     let materialized = materialize_server_recipe(ServerMaterializeRequest {
         recipe: &recipe,
-        confirmed_unknown: &OptionalSelection::default(),
+        unknown_server_files: &UnknownServerFiles::default(),
         game_dir: &server_game,
         client_source_dir: &client_source,
         server_source_dir: &server_source,

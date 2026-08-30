@@ -96,7 +96,7 @@ attention-unsupported-launch-customization = The source used launch settings Eph
 attention-ignored-unsafe-customization = An imported command or hook was found and deliberately not run: { $detail }
 attention-best-effort-server-conversion = This server was generated from a client instance and may still contain client-only mods.
 attention-manual-download-required = Some files must be downloaded manually: { $detail }
-attention-unknown-server-applicability = Server applicability is undeclared for { $path }; the file was omitted until explicitly confirmed.
+attention-unknown-server-applicability = Server applicability is undeclared for { $path }, and this server was created without it.
 
 error-pack-recipe-missing = The client no longer has the retained recipe needed to create its server.
 .action = Restore the client's launcher metadata. The original pack archive is not used as a fallback.

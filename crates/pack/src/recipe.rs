@@ -805,25 +805,26 @@ impl PackRecipe {
     ///
     /// Required files are automatic, unsupported files are excluded, and an
     /// optional file is included only when the recipe records an affirmative
-    /// choice. `Unknown` is deliberately stricter: a choice made for the
-    /// client is not proof that an undeclared server side is safe, so it is
-    /// included only when this server-creation request explicitly confirms the
-    /// path. Unconfirmed entries are returned for actionable diagnostics.
+    /// choice. What happens to a file whose server side nothing declared is the
+    /// caller's policy; see [`UnknownServerFiles`]. Entries left out are
+    /// returned for actionable diagnostics.
     pub fn server_reconstruction_plan(
         &self,
-        confirmed_unknown: &OptionalSelection,
+        unknown: &UnknownServerFiles,
     ) -> PackResult<ServerReconstructionPlan<'_>> {
-        let unknown_paths: BTreeSet<&Path> = self
-            .files
-            .iter()
-            .filter(|file| file.server == SideRequirement::Unknown)
-            .map(|file| file.logical_path.as_path())
-            .collect();
-        for path in confirmed_unknown.paths() {
-            if !unknown_paths.contains(path) {
-                return Err(PackError::UnknownServerSelection {
-                    path: path.to_path_buf(),
-                });
+        if let UnknownServerFiles::OnlyConfirmed(confirmed) = unknown {
+            let unknown_paths: BTreeSet<&Path> = self
+                .files
+                .iter()
+                .filter(|file| file.server == SideRequirement::Unknown)
+                .map(|file| file.logical_path.as_path())
+                .collect();
+            for path in confirmed.paths() {
+                if !unknown_paths.contains(path) {
+                    return Err(PackError::UnknownServerSelection {
+                        path: path.to_path_buf(),
+                    });
+                }
             }
         }
 
@@ -838,9 +839,7 @@ impl PackRecipe {
                     }
                 }
                 SideRequirement::Unsupported => {}
-                SideRequirement::Unknown
-                    if confirmed_unknown.includes(&file.logical_path, None) =>
-                {
+                SideRequirement::Unknown if unknown.includes(&file.logical_path) => {
                     files.push(file);
                 }
                 SideRequirement::Unknown => unconfirmed_unknown.push(file),
@@ -1051,6 +1050,54 @@ impl OptionalComponent {
     }
 }
 
+/// What to do with a pack file whose server applicability nothing declared.
+///
+/// # Why the default reconstructs them
+///
+/// A CurseForge `manifest.json` says only that a file belongs to the pack, and
+/// the CurseForge API has no client/server field either, so every file of a
+/// CurseForge pack reaches a recipe as [`SideRequirement::Unknown`]. Skipping
+/// those produced a linked server holding none of the pack it was created from,
+/// with the omission reported only as a general warning on the record.
+///
+/// A linked server exists to mirror its client. Reconstructing an undeclared
+/// file is recoverable, because a mod that does not belong on a server is one
+/// the user can delete; omitting it is not, because nothing on the server says
+/// what is missing. So the default is to reconstruct, and a caller that wants
+/// the stricter behavior asks for it.
+///
+/// This concerns `Unknown` alone. A file whose provider declared
+/// [`SideRequirement::Unsupported`] is still excluded, and a declared optional
+/// still needs its recorded choice.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum UnknownServerFiles {
+    /// Reconstruct every file with no declared server side.
+    #[default]
+    IncludeAll,
+    /// Reconstruct only the named paths, reporting the rest as unconfirmed.
+    OnlyConfirmed(OptionalSelection),
+}
+
+impl UnknownServerFiles {
+    /// Only the named paths, which is also how "none of them" is spelled.
+    #[must_use]
+    pub fn only(selection: OptionalSelection) -> Self {
+        Self::OnlyConfirmed(selection)
+    }
+
+    /// Whether a file with no declared server side is reconstructed.
+    #[must_use]
+    pub fn includes(&self, path: &Path) -> bool {
+        match self {
+            Self::IncludeAll => true,
+            // `None` rather than the file's recorded choice: what a client
+            // import decided about an optional file says nothing about a side
+            // the pack never declared.
+            Self::OnlyConfirmed(confirmed) => confirmed.includes(path, None),
+        }
+    }
+}
+
 /// Which optional files a caller wants.
 ///
 /// Deliberately not a `Vec<bool>` parallel to the file list: selections are
@@ -1143,7 +1190,7 @@ pub struct ServerReconstructionPlan<'a> {
     pub minecraft_version: &'a str,
     pub loader: &'a LoaderSelection,
     /// Files omitted because their provider declared no server applicability
-    /// and this creation request did not explicitly confirm them.
+    /// and this creation request asked for only a narrower set of them.
     pub unconfirmed_unknown: Vec<&'a PackFileRecipe>,
 }
 

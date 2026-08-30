@@ -889,7 +889,9 @@ mod tests {
         ArtifactCacheLimit, Hash, HashAlgorithm, ImportSourceKind, LoaderKind, SecretString,
         StorageClass,
     };
-    use ephervex_pack::{OptionalSelection, PackSide, SideRequirement, SourceStore};
+    use ephervex_pack::{
+        OptionalSelection, PackSide, SideRequirement, SourceStore, UnknownServerFiles,
+    };
     use ephervex_storage::Paths;
     use sha1::{Digest as _, Sha1};
     use wiremock::matchers::{header, method, path};
@@ -1917,10 +1919,10 @@ mod tests {
             &app,
             &imported,
             &dir.path().join("server"),
-            OptionalSelection::of([
+            UnknownServerFiles::only(OptionalSelection::of([
                 "mods/required-1.0.0.jar".to_owned(),
                 format!("resourcepacks/{RESOURCE_PACK_FILE_NAME}"),
-            ]),
+            ])),
         )
         .await
         .expect("reconstruction");
@@ -2232,10 +2234,10 @@ mod tests {
             &app,
             &imported,
             &dir.path().join("server"),
-            OptionalSelection::of([
+            UnknownServerFiles::only(OptionalSelection::of([
                 "mods/required-1.0.0.jar".to_owned(),
                 format!("shaderpacks/{SHADER_PACK_FILE_NAME}"),
-            ]),
+            ])),
         )
         .await
         .expect("reconstruction");
@@ -2943,29 +2945,31 @@ mod tests {
             .expect("a recipe");
 
         // The generic planner, unchanged and knowing nothing about CurseForge.
+        // A CurseForge manifest declares no server side for anything, so under
+        // the default policy the whole pack is what a linked server reproduces.
         let plan = recipe
-            .server_reconstruction_plan(&OptionalSelection::none())
+            .server_reconstruction_plan(&UnknownServerFiles::default())
             .expect("a plan");
-        assert!(
-            plan.files.is_empty(),
-            "an undeclared server side is a question, not a yes"
-        );
-        assert_eq!(
-            plan.unconfirmed_unknown.len(),
-            2,
-            "both declared files are offered for confirmation rather than assumed"
-        );
+        assert_eq!(plan.files.len(), 2);
+        assert!(plan.unconfirmed_unknown.is_empty());
         assert_eq!(plan.minecraft_version, "1.20.1");
         assert_eq!(plan.loader.version.as_deref(), Some("47.4.10"));
         assert!(
             plan.layers_are_retained(),
             "the pack's overrides were kept for a server built later"
         );
+        assert!(
+            plan.files
+                .iter()
+                .all(|file| file.origin == ModOrigin::PackDeclared)
+        );
 
-        // Confirming it explicitly is what puts it in, and the exact identity
-        // and ownership survive that too.
+        // Naming paths narrows it, and the exact identity and ownership survive
+        // that too.
         let confirmed = recipe
-            .server_reconstruction_plan(&OptionalSelection::of(["mods/required-1.0.0.jar"]))
+            .server_reconstruction_plan(&UnknownServerFiles::only(OptionalSelection::of([
+                "mods/required-1.0.0.jar",
+            ])))
             .expect("a plan");
         assert_eq!(confirmed.files.len(), 1);
         assert_eq!(confirmed.files[0].origin, ModOrigin::PackDeclared);
@@ -2976,6 +2980,7 @@ mod tests {
                 .and_then(|identity| identity.file_id.as_deref()),
             Some("4593548")
         );
+        assert_eq!(confirmed.unconfirmed_unknown.len(), 1);
     }
 
     // -- retained artifacts fetched again ----------------------------------
@@ -3073,24 +3078,26 @@ mod tests {
         staging: &Path,
     ) -> CoreResult<PathBuf> {
         // The pack declares nothing about servers, so the file this suite's
-        // fixture cares about is confirmed explicitly rather than assumed.
+        // fixture cares about is named explicitly rather than left to the
+        // default policy. These tests are about what reconstruction does with
+        // one known file, not about which files it picks.
         reconstruct_server_confirming(
             app,
             imported,
             staging,
-            OptionalSelection::of(["mods/required-1.0.0.jar"]),
+            UnknownServerFiles::only(OptionalSelection::of(["mods/required-1.0.0.jar"])),
         )
         .await
     }
 
-    /// The same reconstruction, confirming whichever undeclared-server files
-    /// the caller names instead of always [`reconstruct_server`]'s one
-    /// required mod.
+    /// The same reconstruction under whichever undeclared-server policy the
+    /// caller wants, instead of always [`reconstruct_server`]'s one required
+    /// mod.
     async fn reconstruct_server_confirming(
         app: &App,
         imported: &crate::import::ImportedPack,
         staging: &Path,
-        confirmed_unknown: OptionalSelection,
+        unknown_server_files: UnknownServerFiles,
     ) -> CoreResult<PathBuf> {
         let recipe = app
             .pack_recipe(imported.record.id)
@@ -3101,7 +3108,7 @@ mod tests {
         let options = ServerCreateOptions {
             java_path: None,
             install_java_if_missing: false,
-            confirmed_unknown,
+            unknown_server_files,
         };
         app.materialize_linked_server_recipe(
             &recipe,
