@@ -1496,6 +1496,7 @@ fn register_mod_actions(ui: &AppWindow, commands: &Sender<Command>) {
     register_mod_browser(ui, commands);
     register_browser_install(ui, commands);
     register_loader_options(ui);
+    register_favorite_versions(ui, commands);
 
     let sender = commands.clone();
     let handle = ui.as_weak();
@@ -1709,13 +1710,57 @@ fn apply_loader_options(ui: &AppWindow, form: &str, minecraft: &str) {
     }
 }
 
+/// Pinning and unpinning a Minecraft release.
+///
+/// Both callbacks send the whole list rather than one change, because the order
+/// is the setting: a favorite added is appended, and one removed leaves the
+/// order of the rest alone. The list on screen is not touched here; the saved
+/// value comes back in the next snapshot, so what is shown is always what is
+/// stored.
+fn register_favorite_versions(ui: &AppWindow, commands: &Sender<Command>) {
+    let sender = commands.clone();
+    let weak = ui.as_weak();
+    ui.on_toggle_favorite_version(move |version| {
+        let Some(ui) = weak.upgrade() else { return };
+        let favorites = presentation::toggled_favorite(&favorite_versions(&ui), &version);
+        send(&sender, Command::SetFavoriteMinecraftVersions(favorites));
+    });
+
+    let sender = commands.clone();
+    let weak = ui.as_weak();
+    ui.on_remove_favorite_version(move |version| {
+        let Some(ui) = weak.upgrade() else { return };
+        let mut favorites = favorite_versions(&ui);
+        favorites.retain(|kept| kept.as_str() != version.as_str());
+        send(&sender, Command::SetFavoriteMinecraftVersions(favorites));
+    });
+}
+
+fn favorite_versions(ui: &AppWindow) -> Vec<String> {
+    ui.get_favorite_minecraft_versions()
+        .iter()
+        .map(|version| version.to_string())
+        .collect()
+}
+
 fn register_loader_options(ui: &AppWindow) {
     let weak = ui.as_weak();
-    ui.on_refresh_loader_options(move |form, minecraft| {
+    ui.on_minecraft_selection_changed(move |form, minecraft| {
         if let Some(ui) = weak.upgrade() {
-            apply_loader_options(&ui, &form, &minecraft);
+            apply_minecraft_selection(&ui, &form, &minecraft);
         }
     });
+}
+
+/// What follows from choosing a Minecraft release in a creation dialog: which
+/// loaders it can have, and whether its star is on.
+fn apply_minecraft_selection(ui: &AppWindow, form: &str, minecraft: &str) {
+    apply_loader_options(ui, form, minecraft);
+    if form != "server" {
+        ui.set_create_minecraft_favorite(
+            favorite_versions(ui).iter().any(|kept| kept == minecraft),
+        );
+    }
 }
 
 /// Installing a mod straight from the browser.
@@ -3521,11 +3566,33 @@ fn import_submission_action(
     }
 }
 
+/// Records the saved favorites and reorders whatever release list is on screen.
+///
+/// The list itself is not refetched: reordering is the whole effect, and a
+/// favorite added while the New Instance dialog is open should move a row, not
+/// blank the dialog while a catalog is asked again.
+fn apply_favorite_versions(ui: &AppWindow, favorites: Vec<String>) {
+    let releases: Vec<String> = ui
+        .get_minecraft_releases()
+        .iter()
+        .map(|release| release.to_string())
+        .collect();
+    let ordered = presentation::releases_with_favorites_first(releases, &favorites);
+    ui.set_create_minecraft_favorite(favorites.contains(&ui.get_create_minecraft().to_string()));
+    ui.set_favorite_minecraft_versions(model(
+        favorites.into_iter().map(SharedString::from).collect(),
+    ));
+    ui.set_minecraft_releases(model(ordered.into_iter().map(SharedString::from).collect()));
+}
+
 fn apply_minecraft_releases(
     ui: &AppWindow,
     versions: Vec<String>,
     create_instance_name: &Rc<RefCell<CreateInstanceNameState>>,
 ) {
+    // Favorites first, so the default selection below lands on one of them
+    // rather than on whatever Mojang published most recently.
+    let versions = presentation::releases_with_favorites_first(versions, &favorite_versions(ui));
     if !versions.is_empty() {
         let create_current = ui.get_create_minecraft();
         let server_current = ui.get_create_server_minecraft();
@@ -3545,10 +3612,10 @@ fn apply_minecraft_releases(
     ui.set_minecraft_releases(model(
         versions.into_iter().map(SharedString::from).collect(),
     ));
-    // The selection above may have moved, and which loaders exist depends on
-    // it, so the choices are narrowed before the dialog can be looked at.
-    apply_loader_options(ui, "client", &ui.get_create_minecraft());
-    apply_loader_options(ui, "server", &ui.get_create_server_minecraft());
+    // The selection above may have moved, and both which loaders exist and
+    // whether the release is starred depend on it.
+    apply_minecraft_selection(ui, "client", ui.get_create_minecraft().as_ref());
+    apply_minecraft_selection(ui, "server", ui.get_create_server_minecraft().as_ref());
     recompute_create_name(ui, &create_instance_name.borrow());
 }
 
@@ -3893,6 +3960,7 @@ fn apply_snapshot(
         eula,
     } = snapshot;
     ui.set_show_linked_servers(settings.show_linked_servers);
+    apply_favorite_versions(ui, settings.favorite_minecraft_versions.clone());
     ui.set_make_default_account_operator(settings.make_default_account_operator);
     ui.set_operator_permission_level(i32::from(settings.operator_permission_level));
     apply_instance_snapshot(ui, instances);

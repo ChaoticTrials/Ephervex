@@ -17,6 +17,46 @@ use ephervex_model::{
     DefaultModCatalog, LoaderKind, ModProvider, Operation, OperationStatus, StorageClass,
 };
 
+/// Orders the release list so favorites come first.
+///
+/// Favorites keep the order the user recorded, and everything else keeps
+/// Mojang's own newest-first manifest order. A favorite the current catalog has
+/// no release for is not invented: this only reorders what was already offered.
+#[must_use]
+pub fn releases_with_favorites_first(releases: Vec<String>, favorites: &[String]) -> Vec<String> {
+    let leading: Vec<String> = favorites
+        .iter()
+        .filter(|favorite| releases.contains(favorite))
+        .cloned()
+        .collect();
+    let rest = releases
+        .into_iter()
+        .filter(|release| !leading.contains(release));
+    leading.iter().cloned().chain(rest).collect()
+}
+
+/// The favorites list after starring or unstarring one release.
+///
+/// A new favorite goes on the end, because the order is the user's own and a
+/// new entry has no claim on a position they chose for something else. Removing
+/// one leaves the rest exactly where they were.
+#[must_use]
+pub fn toggled_favorite(favorites: &[String], version: &str) -> Vec<String> {
+    if version.is_empty() {
+        return favorites.to_vec();
+    }
+    if favorites.iter().any(|kept| kept == version) {
+        return favorites
+            .iter()
+            .filter(|kept| kept.as_str() != version)
+            .cloned()
+            .collect();
+    }
+    let mut toggled = favorites.to_vec();
+    toggled.push(version.to_owned());
+    toggled
+}
+
 /// The loader choice one Minecraft release offers, and what a selection made
 /// against a different release becomes under it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -801,6 +841,45 @@ mod tests {
             [LoaderKind::Vanilla, LoaderKind::Forge, LoaderKind::NeoForge].map(loader_kind_name),
             ["vanilla", "forge", "neoforge"]
         );
+    }
+
+    #[test]
+    fn favorites_lead_the_release_list_without_reordering_the_rest() {
+        let releases = || {
+            ["1.21.4", "1.21.1", "1.20.1", "1.16.3", "1.12.2"]
+                .map(str::to_owned)
+                .to_vec()
+        };
+
+        // The user's own order, then Mojang's for everything else.
+        let ordered =
+            releases_with_favorites_first(releases(), &["1.16.3".to_owned(), "1.21.1".to_owned()]);
+        assert_eq!(ordered, ["1.16.3", "1.21.1", "1.21.4", "1.20.1", "1.12.2"]);
+
+        // A favorite the catalog has no release for is not invented into the
+        // list, and does not disturb the ones that are there.
+        let missing =
+            releases_with_favorites_first(releases(), &["1.99.9".to_owned(), "1.12.2".to_owned()]);
+        assert_eq!(missing, ["1.12.2", "1.21.4", "1.21.1", "1.20.1", "1.16.3"]);
+
+        // No favorites is the manifest's own order, unchanged.
+        assert_eq!(releases_with_favorites_first(releases(), &[]), releases());
+    }
+
+    #[test]
+    fn starring_appends_and_unstarring_leaves_the_rest_in_place() {
+        let favorites = ["1.21.1".to_owned(), "1.16.3".to_owned()];
+
+        let added = toggled_favorite(&favorites, "1.12.2");
+        assert_eq!(added, ["1.21.1", "1.16.3", "1.12.2"]);
+
+        // Removing the first must not disturb the order the user chose for the
+        // ones that stay.
+        let removed = toggled_favorite(&added, "1.21.1");
+        assert_eq!(removed, ["1.16.3", "1.12.2"]);
+
+        // Nothing is named, so nothing changes.
+        assert_eq!(toggled_favorite(&favorites, ""), favorites);
     }
 
     #[test]

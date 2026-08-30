@@ -51,6 +51,8 @@ pub enum Command {
         loader: LoaderKind,
         minecraft: String,
     },
+    /// Records the Minecraft releases to offer first, in the order given.
+    SetFavoriteMinecraftVersions(Vec<String>),
     CancelOperation(String),
     /// Stop the game this launcher started for one instance.
     ///
@@ -437,6 +439,9 @@ pub struct SettingsData {
     pub text_scale_percent: u16,
     pub technical_text_size_pixels: u16,
     pub show_linked_servers: bool,
+    /// Minecraft releases the user pinned, in the order they should be offered.
+    /// Kept exactly as recorded, including an entry no current release matches.
+    pub favorite_minecraft_versions: Vec<String>,
     pub make_default_account_operator: bool,
     pub operator_permission_level: u8,
     pub java_auto_detect: bool,
@@ -1009,6 +1014,16 @@ fn run_worker(
                 }
                 Err(error) => send_modal_error(&events, &error),
             },
+            Command::SetFavoriteMinecraftVersions(versions) => {
+                // No toast. A star is toggled while looking straight at the
+                // list it reorders, so the list itself is the confirmation, and
+                // a message per click would be noise. A refused write is still
+                // reported, because then nothing on screen would have changed.
+                match app.set_favorite_minecraft_versions(versions) {
+                    Ok(()) => send_snapshot(&app, &events),
+                    Err(error) => send_error(&events, &error),
+                }
+            }
             Command::CancelOperation(id) => cancel_operation(&cancellations, &events, &id),
             Command::KillInstance(instance) => {
                 kill_instance(&cancellations, &events, instance);
@@ -2227,6 +2242,7 @@ fn application_settings(app: &App) -> Result<SettingsData, CoreError> {
         text_scale_percent: display.text_scale.percent(),
         technical_text_size_pixels: display.technical_text_size.pixels(),
         show_linked_servers: display.show_linked_servers,
+        favorite_minecraft_versions: app.favorite_minecraft_versions().to_vec(),
         make_default_account_operator: server.make_default_account_operator,
         operator_permission_level: server.operator_permission_level.value(),
         java_auto_detect: java.auto_detect,

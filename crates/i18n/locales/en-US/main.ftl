@@ -1399,6 +1399,12 @@ gui-technical-size-14 = Comfortable (14 px)
 gui-technical-size-16 = Large (16 px)
 gui-save-display-settings = Save Display Settings
 gui-display-settings-saved = Saved Ephervex display settings.
+# $value is a Minecraft release id and is never translated.
+gui-favorite-version = Offer Minecraft { $value } first
+gui-unfavorite-version = Stop offering Minecraft { $value } first
+gui-favorite-versions = Favorite Minecraft versions
+gui-favorite-versions-detail = Releases you reproduce against often. They are offered first everywhere a Minecraft version is chosen.
+gui-no-favorite-versions = No favorites yet. Star a release in the New Instance dialog to pin it here.
 gui-linked-server-defaults = Linked server defaults
 gui-linked-server-defaults-detail = Control where linked servers appear and how new development servers configure the selected account.
 gui-show-linked-servers = Show linked servers in Servers

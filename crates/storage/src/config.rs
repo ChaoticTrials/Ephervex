@@ -598,6 +598,17 @@ pub struct Config {
     pub active_account: String,
     pub display: ApplicationDisplayConfig,
     pub java: JavaConfig,
+    /// Minecraft releases the user works with often, in the order they should
+    /// be offered.
+    ///
+    /// Stored verbatim and never validated against a catalog: a favorite is a
+    /// statement about the user's own work, and a release that is momentarily
+    /// unreachable is not one they have stopped caring about. An entry the
+    /// current catalog has no version for is simply not shown.
+    ///
+    /// A plain list rather than a set, because the order is the setting: it is
+    /// what decides which release the New Instance dialog offers first.
+    pub favorite_minecraft_versions: Vec<String>,
     /// Managed Minecraft preferences, keyed by preference name. An open map
     /// rather than a fixed struct because the set of managed keys grows with
     /// the version-aware options adapters.
@@ -637,6 +648,7 @@ impl Default for Config {
             active_account: String::new(),
             display: ApplicationDisplayConfig::default(),
             java: JavaConfig::default(),
+            favorite_minecraft_versions: Vec::new(),
             minecraft_preferences: BTreeMap::new(),
             mods: ModsConfig::default(),
             server_defaults: ServerDefaults::default(),
@@ -2069,6 +2081,51 @@ reference = ""
         for marker in SECRET_KEY_MARKERS {
             assert!(!lowered.contains(marker), "`{marker}`:\n{text}");
         }
+    }
+
+    #[test]
+    fn favorite_minecraft_versions_round_trip_in_the_order_they_were_given() {
+        let mut config = Config::default();
+        assert!(config.favorite_minecraft_versions.is_empty());
+        // The order is the setting, so it has to survive the file rather than
+        // being normalized into a set.
+        config.favorite_minecraft_versions = vec![
+            "1.21.1".to_owned(),
+            "1.12.2".to_owned(),
+            "1.20.1".to_owned(),
+        ];
+
+        let text = config.to_toml_string().expect("serialize");
+        let parsed = Config::from_toml_str(&text).expect("re-parse");
+        assert_eq!(
+            parsed.favorite_minecraft_versions,
+            ["1.21.1", "1.12.2", "1.20.1"]
+        );
+    }
+
+    #[test]
+    fn a_config_written_before_favorites_existed_reads_as_having_none() {
+        let config = Config::from_toml_str(DEFAULT_CONFIG_EXAMPLE).expect("parse");
+        assert!(config.favorite_minecraft_versions.is_empty());
+    }
+
+    #[test]
+    fn favorites_do_not_displace_keys_this_build_does_not_know() {
+        // Prepended, because the example ends inside a table and a key written
+        // after it would belong to that table rather than to the document.
+        let text = format!("from_a_newer_build = \"kept\"{DEFAULT_CONFIG_EXAMPLE}");
+        let mut config = Config::from_toml_str(&text).expect("parse");
+        config.favorite_minecraft_versions = vec!["1.21.1".to_owned()];
+        let written = config.to_toml_string().expect("serialize");
+        let parsed = Config::from_toml_str(&written).expect("re-parse");
+        assert_eq!(parsed.favorite_minecraft_versions, ["1.21.1"]);
+        assert_eq!(
+            parsed
+                .unknown
+                .get("from_a_newer_build")
+                .and_then(toml::Value::as_str),
+            Some("kept")
+        );
     }
 
     #[test]

@@ -618,6 +618,38 @@ impl App {
         .into())
     }
 
+    /// The Minecraft releases the user has marked as favorites, in the order
+    /// they should be offered.
+    #[must_use]
+    pub fn favorite_minecraft_versions(&self) -> &[String] {
+        &self.config().favorite_minecraft_versions
+    }
+
+    /// Records which Minecraft releases are favorites, in the order given.
+    ///
+    /// The order is the setting, so it is stored as given rather than sorted:
+    /// what the user put first is what the New Instance dialog offers first.
+    /// Duplicates collapse to their first appearance, and a blank entry is
+    /// dropped, because neither can name a release.
+    ///
+    /// The list is never checked against a catalog. A favorite is a statement
+    /// about the user's own work, and a release Mojang's manifest is
+    /// momentarily unreachable for is not one they have stopped caring about.
+    /// An entry no current release matches is simply not shown.
+    pub fn set_favorite_minecraft_versions(
+        &mut self,
+        versions: impl IntoIterator<Item = String>,
+    ) -> CoreResult<()> {
+        let mut kept: Vec<String> = Vec::new();
+        for version in versions {
+            let version = version.trim().to_owned();
+            if !version.is_empty() && !kept.contains(&version) {
+                kept.push(version);
+            }
+        }
+        self.mutate_config(|config| config.favorite_minecraft_versions = kept)
+    }
+
     /// The loaders that have ever had a build for one Minecraft release, in the
     /// order a frontend should offer them.
     ///
@@ -1489,6 +1521,38 @@ mod tests {
         let mut app = reopened;
         app.set_persistent_instance_root(None).expect("clear");
         assert!(!app.paths().persistent_instance_root_is_overridden());
+    }
+
+    #[test]
+    fn favorite_minecraft_versions_persist_in_the_order_they_were_given() {
+        let base = tempfile::tempdir().expect("temp dir");
+        {
+            let mut app = app_rooted_at(base.path());
+            assert!(app.favorite_minecraft_versions().is_empty());
+            app.set_favorite_minecraft_versions([
+                "1.21.1".to_owned(),
+                "1.12.2".to_owned(),
+                // A blank entry names no release, and a repeat is already
+                // expressed by its first appearance.
+                "  ".to_owned(),
+                "1.21.1".to_owned(),
+            ])
+            .expect("record");
+            assert_eq!(app.favorite_minecraft_versions(), ["1.21.1", "1.12.2"]);
+        }
+        let reopened = app_rooted_at(base.path());
+        assert_eq!(reopened.favorite_minecraft_versions(), ["1.21.1", "1.12.2"]);
+    }
+
+    #[test]
+    fn a_favorite_is_kept_verbatim_and_never_checked_against_a_catalog() {
+        // Offline, and against a release id nothing would resolve. A favorite
+        // records what the user works with, not what a manifest currently says.
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        app.set_favorite_minecraft_versions(["1.99.9".to_owned()])
+            .expect("record");
+        assert_eq!(app.favorite_minecraft_versions(), ["1.99.9"]);
     }
 
     #[test]
