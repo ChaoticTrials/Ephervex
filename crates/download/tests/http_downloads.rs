@@ -885,6 +885,87 @@ async fn a_batch_downloads_every_file_and_reports_one_operation() {
     );
 }
 
+/// The name beside a batch's count has to be a name that changes.
+///
+/// It was announced from inside each download's own future, and
+/// `FuturesUnordered` polls every future it holds before any of them finishes,
+/// so all of the names were published in one burst before the first byte
+/// arrived. The count then climbed for the length of the batch beside a file
+/// name that had been chosen at the start and never moved.
+#[tokio::test]
+async fn the_file_named_beside_a_batch_count_advances_with_it() {
+    let server = MockServer::start().await;
+    // Staggered so the batch spans several of the reporter's publish windows.
+    // Landing eight files inside one window would prove nothing: the throttle
+    // would collapse them to a single snapshot whether or not the name moved.
+    for index in 0..8 {
+        Mock::given(method("GET"))
+            .and(path(format!("/file-{index}.jar")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_bytes(BODY)
+                    .set_delay(Duration::from_millis(120 * (index + 1))),
+            )
+            .mount(&server)
+            .await;
+    }
+
+    let dir = TempDir::new().expect("temp dir");
+    let requests: Vec<DownloadRequest> = (0..8)
+        .map(|index| {
+            request(
+                &server,
+                &format!("/file-{index}.jar"),
+                &dir.path().join(format!("file-{index}.jar")),
+            )
+            .verifying(sha1_of(BODY))
+            .sized(BODY.len() as u64)
+            .labeled(format!("file-{index}.jar"))
+        })
+        .collect();
+
+    let (sink, mut events) = ChannelSink::new();
+    let sink: Arc<dyn ProgressSink> = sink;
+    let reporter = OperationReporter::new("download-batch", true, sink);
+    // Every request in flight at once, so the only thing separating the
+    // completions is the delay each one was given.
+    manager_with(RetryPolicy::none(), 8)
+        .download_all(&requests, &reporter, &CancellationToken::new())
+        .await
+        .expect("the batch succeeds");
+
+    let mut snapshots = Vec::new();
+    while let Ok(operation) = events.try_recv() {
+        snapshots.push(operation);
+    }
+
+    // The staggered delays make the completion order the request order, so the
+    // file a count of `n` refers to is exactly `file-{n - 1}`. Every snapshot
+    // that names a file has to name that one: a name is published with its own
+    // count or not at all, so the two can never describe different moments.
+    let mut named_snapshots = 0;
+    for snapshot in &snapshots {
+        let Some(named) = snapshot.current_step.as_deref() else {
+            continue;
+        };
+        named_snapshots += 1;
+        let landed = snapshot.items.current;
+        assert!(
+            landed > 0,
+            "`{named}` was named before anything had finished downloading"
+        );
+        assert_eq!(
+            named,
+            format!("file-{}.jar", landed - 1),
+            "the name beside `{landed} of 8` is not the file that count refers to"
+        );
+    }
+    assert!(
+        named_snapshots > 1,
+        "the batch never named a file it was downloading"
+    );
+}
+
 #[tokio::test]
 async fn a_failure_in_a_batch_cancels_the_rest() {
     let server = MockServer::start().await;

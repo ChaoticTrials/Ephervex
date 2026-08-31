@@ -584,9 +584,6 @@ impl DownloadManager {
                         tally: Some(tally),
                         contributed: 0,
                     };
-                    if let Some(label) = request.label.clone() {
-                        reporter.set_step(Some(label));
-                    }
                     (index, self.fetch(request, &mut cursor, batch).await)
                 }
             })
@@ -610,8 +607,16 @@ impl DownloadManager {
             }
             // Counted as they land rather than as they start: with several in
             // flight, "started" is not a number anyone can read.
+            //
+            // The name is published from here too, for the same reason and one
+            // more. `FuturesUnordered` polls every future it holds before any
+            // of them completes, so a label announced from inside a future's
+            // body announces all of them at once, in a burst, before a single
+            // byte has arrived — leaving whichever was polled last on screen
+            // for the whole batch. Published on completion, the name and the
+            // count are the same fact stated twice and always agree.
             done += 1;
-            reporter.set_items(Progress::new(done, total));
+            reporter.set_items_at(Progress::new(done, total), requests[index].label.clone());
         }
 
         failure.map_or_else(|| Ok(outcomes.into_iter().flatten().collect()), Err)

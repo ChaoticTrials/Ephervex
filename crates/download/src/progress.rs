@@ -162,6 +162,21 @@ impl OperationReporter {
         self.update(false, |state| state.operation.items = items);
     }
 
+    /// Publishes a completed unit and what it was, as one throttled update.
+    ///
+    /// One call rather than [`Self::set_items`] followed by [`Self::set_step`]
+    /// because the two describe the same event: a batch that published them
+    /// separately would emit the unthrottled step for every file it finished,
+    /// which for a batch of already-cached artifacts is thousands of
+    /// notifications in a tight loop. Stated together, the count and the name
+    /// can never disagree either.
+    pub fn set_items_at(&self, items: Progress, step: Option<String>) {
+        self.update(false, |state| {
+            state.operation.items = items;
+            state.operation.current_step = step;
+        });
+    }
+
     /// Moves the operation to a terminal state and emits immediately.
     pub fn finish(&self, status: OperationStatus) {
         self.update(true, |state| {
