@@ -42,7 +42,7 @@ use ephervex_mod_platform::{
     annotate, newest_compatible,
 };
 use ephervex_model::{
-    DefaultModCatalog, Hash, ImportSourceKind, InstanceId, ModOrigin, ModProvider,
+    DefaultModCatalog, Hash, ImportSourceKind, InstanceId, ModOrigin, ModProvider, ServerId,
 };
 use ephervex_pack::{
     ArtifactFetch, ManagedMod, ManagedModInstall, ManagedModInstallation, ModIdentity, PackError,
@@ -132,7 +132,16 @@ impl InstalledMods {
 /// something unexpected cannot fill a cache directory.
 const MAX_ARTWORK_BYTES: u64 = 2 * 1024 * 1024;
 
-/// Whether the jar an entry describes is actually in the game directory.
+/// The suffix a mod carries while it is installed but not loaded.
+///
+/// Both FML and Fabric discover mods by scanning for `.jar`, so a file with any
+/// other extension is present on disk and invisible to the loader. `.disabled`
+/// is the spelling every other launcher uses, which is what makes a directory
+/// disabled by Ephervex readable by one of them and the other way round.
+pub const DISABLED_SUFFIX: &str = ".disabled";
+
+/// Whether the jar an entry describes is actually in the game directory, and
+/// whether the loader will look at it.
 ///
 /// A recorded mod whose file has gone missing is not forgotten and not
 /// silently removed from the instance's desired state: the record is what
@@ -141,6 +150,14 @@ const MAX_ARTWORK_BYTES: u64 = 2 * 1024 * 1024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModPresence {
     Installed,
+    /// Present as `<name>.jar.disabled`, so the loader never sees it.
+    ///
+    /// Deliberately not "removed": the mod stays in the recipe, keeps its
+    /// provider identity, and is one rename away from loading again. A client
+    /// pack reconstructed onto a server is the case this exists for, where the
+    /// only way to find out that a mod is client-only is to watch the server
+    /// refuse to start.
+    Disabled,
     /// Recorded as belonging to the instance, absent from `mods/`.
     Missing,
 }
@@ -151,6 +168,7 @@ impl ModPresence {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Installed => "installed",
+            Self::Disabled => "disabled",
             Self::Missing => "missing",
         }
     }
@@ -160,6 +178,24 @@ impl ModPresence {
     pub const fn needs_attention(self) -> bool {
         matches!(self, Self::Missing)
     }
+
+    /// Whether the loader will load this mod.
+    #[must_use]
+    pub const fn is_enabled(self) -> bool {
+        matches!(self, Self::Installed)
+    }
+}
+
+/// Where a jar sits when it is disabled.
+///
+/// Appended to the whole file name rather than replacing the extension, so the
+/// original name is recovered by removing the suffix and nothing has to guess
+/// what it used to be.
+#[must_use]
+pub fn disabled_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(DISABLED_SUFFIX);
+    PathBuf::from(name)
 }
 
 /// How much provider metadata a snapshot carries.
@@ -243,9 +279,18 @@ pub struct ManagedModEntry {
 
 impl ManagedModEntry {
     /// Builds an entry from durable state and the game directory.
+    ///
+    /// The three states are read from the filesystem rather than recorded
+    /// anywhere: a jar that is there loads, a jar that is there under the
+    /// disabled suffix does not, and neither means the record is wrong. Keeping
+    /// it that way means a user who renames a jar by hand, or by way of another
+    /// launcher, is describing the same thing Ephervex would.
     fn from_recorded(recorded: RecordedMod, game_dir: &Path) -> Self {
-        let presence = if game_dir.join(&recorded.logical_path).is_file() {
+        let installed = game_dir.join(&recorded.logical_path);
+        let presence = if installed.is_file() {
             ModPresence::Installed
+        } else if disabled_path(&installed).is_file() {
+            ModPresence::Disabled
         } else {
             ModPresence::Missing
         };
@@ -381,9 +426,66 @@ impl InstancePackSource {
 /// The type both frontends render. It is assembled here rather than in a
 /// frontend so that nothing above this layer has to read a retained recipe,
 /// inspect a provider manifest, or decide what a file name implies.
+/// Which installed thing a mod list belongs to.
+///
+/// A client instance and a dedicated server hold the same shape of state: a
+/// retained pack recipe that says which mods belong to them, and a game
+/// directory that says which of those jars are actually there. Everything that
+/// reads a mod list is therefore written once against this rather than twice
+/// against two ids, which is what keeps the server's Mods panel from being a
+/// second implementation that drifts from the client's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModHost {
+    Instance(InstanceId),
+    Server(ServerId),
+}
+
+impl ModHost {
+    /// The host's own id, as a frontend addresses it.
+    #[must_use]
+    pub fn id(self) -> String {
+        match self {
+            Self::Instance(id) => id.to_string(),
+            Self::Server(id) => id.to_string(),
+        }
+    }
+
+    /// A stable identifier for `--json` output and frontend state.
+    #[must_use]
+    pub const fn kind(self) -> &'static str {
+        match self {
+            Self::Instance(_) => "client",
+            Self::Server(_) => "server",
+        }
+    }
+}
+
+impl From<InstanceId> for ModHost {
+    fn from(id: InstanceId) -> Self {
+        Self::Instance(id)
+    }
+}
+
+impl From<ServerId> for ModHost {
+    fn from(id: ServerId) -> Self {
+        Self::Server(id)
+    }
+}
+
+/// Where one mod host keeps the two things a mod list is read from.
+#[derive(Debug)]
+pub(crate) struct ModHostLayout {
+    /// The host's own root, which is what the display cache is keyed by.
+    pub(crate) root: PathBuf,
+    /// The directory the loader scans, which is what proves a jar is there.
+    pub(crate) game_dir: PathBuf,
+    /// The retained recipe, or `None` for a host created by hand.
+    pub(crate) recipe: Option<PackRecipe>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagedModSnapshot {
-    pub instance: InstanceId,
+    pub host: ModHost,
     /// The import this instance came from, when it came from one.
     pub source: Option<InstancePackSource>,
     /// Alphabetical by the name each mod is shown under. Recipe order is the
@@ -796,6 +898,120 @@ impl App {
             .unwrap_or_default())
     }
 
+    /// Where one mod host keeps its state.
+    ///
+    /// The one place that knows a client instance and a dedicated server are
+    /// laid out differently. Everything above it is written against
+    /// [`ModHost`].
+    pub(crate) fn mod_host_layout(&self, host: ModHost) -> CoreResult<ModHostLayout> {
+        let root = match host {
+            ModHost::Instance(id) => self.client(id)?.root,
+            ModHost::Server(id) => self.server(id)?.root,
+        };
+        let game_dir = match host {
+            ModHost::Instance(_) => ephervex_storage::metadata::client_game_dir(&root),
+            ModHost::Server(_) => ephervex_storage::metadata::server_game_dir(&root),
+        };
+        let store = SourceStore::new(ephervex_storage::metadata::source_dir(&root));
+        // Not an error: a host created by hand has no pack to record.
+        let recipe = if store.has_recipe() {
+            Some(store.read_recipe()?)
+        } else {
+            None
+        };
+        Ok(ModHostLayout {
+            root,
+            game_dir,
+            recipe,
+        })
+    }
+
+    /// Refuses to touch a host that is running.
+    ///
+    /// Renaming a jar underneath a running JVM does not unload it and does not
+    /// reliably do nothing either: the loader has the file open, and what the
+    /// next tick sees is up to the platform. So the rule is the same one every
+    /// other mutation follows.
+    fn refuse_running_mod_host(&self, host: ModHost) -> CoreResult<()> {
+        match host {
+            ModHost::Instance(id) => {
+                if let Some(state) = self.launch_state(id)? {
+                    return Err(ephervex_storage::LockError::AlreadyRunning {
+                        pid: state.game_pid.unwrap_or(state.owner_pid),
+                        since: state.since,
+                    }
+                    .into());
+                }
+            }
+            ModHost::Server(id) => {
+                let record = self.server(id)?;
+                if ephervex_server::classify_runtime(&record.root)?.may_be_running() {
+                    return Err(ephervex_server::ServerError::AlreadyRunning.into());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Turns one recorded mod on or off without removing it.
+    ///
+    /// The jar moves between `<name>.jar` and `<name>.jar.disabled`, which is
+    /// the whole mechanism: the loader scans for `.jar`, the recipe is not
+    /// touched, and the mod's provider identity, version and origin survive
+    /// untouched so re-enabling it needs nothing from a catalog.
+    ///
+    /// Asking for the state a mod is already in succeeds and does nothing, so a
+    /// frontend that toggles the same row twice, or a retried command, cannot
+    /// produce a half-renamed pair. A mod whose file is missing altogether is a
+    /// typed refusal rather than a silent success, because enabling something
+    /// that is not there would report a lie.
+    #[instrument(skip(self), fields(host = %host.id()))]
+    pub fn set_mod_enabled(
+        &self,
+        host: ModHost,
+        logical_path: &Path,
+        enabled: bool,
+    ) -> CoreResult<ModPresence> {
+        self.refuse_running_mod_host(host)?;
+        let layout = self.mod_host_layout(host)?;
+        let installed = layout.game_dir.join(logical_path);
+        let disabled = disabled_path(&installed);
+
+        let (from, to) = if enabled {
+            (&disabled, &installed)
+        } else {
+            (&installed, &disabled)
+        };
+        if to.is_file() && !from.is_file() {
+            // Already where it was asked to be.
+            return Ok(if enabled {
+                ModPresence::Installed
+            } else {
+                ModPresence::Disabled
+            });
+        }
+        if !from.is_file() {
+            return Err(CoreError::ModFileMissing {
+                path: logical_path.to_path_buf(),
+            });
+        }
+        std::fs::rename(from, to).map_err(|source| CoreError::ModFileNotToggled {
+            path: logical_path.to_path_buf(),
+            source,
+        })?;
+        info!(
+            host = %host.id(),
+            path = %logical_path.display(),
+            enabled,
+            "changed whether a mod loads"
+        );
+        Ok(if enabled {
+            ModPresence::Installed
+        } else {
+            ModPresence::Disabled
+        })
+    }
+
     /// Every mod this client instance has, from durable state alone.
     ///
     /// Reaches no network and needs none: the recipe says which mods belong to
@@ -806,21 +1022,36 @@ impl App {
     /// proof that a mod exists.
     #[instrument(skip(self), fields(instance = %instance))]
     pub fn managed_mod_snapshot(&self, instance: InstanceId) -> CoreResult<ManagedModSnapshot> {
-        let record = self.client(instance)?;
-        let recipe = self.pack_recipe(instance)?;
-        let game_dir = ephervex_storage::metadata::client_game_dir(&record.root);
+        self.host_mod_snapshot(ModHost::Instance(instance))
+    }
+
+    /// The same view for a dedicated server.
+    ///
+    /// A server reconstructed from a pack keeps its own recipe, so this is the
+    /// same read against a different root rather than a second idea of what a
+    /// mod list is. It is what makes a client-only mod on a server something
+    /// the user can see and act on.
+    #[instrument(skip(self), fields(server = %server))]
+    pub fn server_mod_snapshot(&self, server: ServerId) -> CoreResult<ManagedModSnapshot> {
+        self.host_mod_snapshot(ModHost::Server(server))
+    }
+
+    /// Every mod one host has, from durable state alone.
+    pub fn host_mod_snapshot(&self, host: ModHost) -> CoreResult<ManagedModSnapshot> {
+        let layout = self.mod_host_layout(host)?;
 
         // What a provider last said, so the first paint reads as mods rather
         // than as jar file names. Never authoritative: an entry with nothing
         // cached falls back exactly as it did before.
-        let remembered = mod_display_cache::read(&record.root);
-        let mut mods: Vec<ManagedModEntry> = recipe
+        let remembered = mod_display_cache::read(&layout.root);
+        let mut mods: Vec<ManagedModEntry> = layout
+            .recipe
             .as_ref()
             .map(PackRecipe::recorded_mods)
             .unwrap_or_default()
             .into_iter()
             .map(|recorded| {
-                let mut entry = ManagedModEntry::from_recorded(recorded, &game_dir);
+                let mut entry = ManagedModEntry::from_recorded(recorded, &layout.game_dir);
                 if let Some(cached) = remembered.get(&entry.logical_path.display().to_string()) {
                     entry.icon.clone_from(&cached.icon);
                     entry.cached = Some(cached.clone());
@@ -831,8 +1062,8 @@ impl App {
         sort_for_display(&mut mods);
 
         Ok(ManagedModSnapshot {
-            instance,
-            source: recipe.as_ref().map(InstancePackSource::from_recipe),
+            host,
+            source: layout.recipe.as_ref().map(InstancePackSource::from_recipe),
             mods,
             metadata: MetadataAvailability::Local,
         })
@@ -857,7 +1088,29 @@ impl App {
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<ManagedModSnapshot> {
-        let mut snapshot = self.managed_mod_snapshot(instance)?;
+        self.enriched_host_mods(ModHost::Instance(instance), reporter, cancel)
+            .await
+    }
+
+    /// The same enrichment for a dedicated server.
+    pub async fn enriched_server_mods(
+        &self,
+        server: ServerId,
+        reporter: &OperationReporter,
+        cancel: &CancellationToken,
+    ) -> CoreResult<ManagedModSnapshot> {
+        self.enriched_host_mods(ModHost::Server(server), reporter, cancel)
+            .await
+    }
+
+    /// One host's mods with provider metadata and artwork applied.
+    pub async fn enriched_host_mods(
+        &self,
+        host: ModHost,
+        reporter: &OperationReporter,
+        cancel: &CancellationToken,
+    ) -> CoreResult<ManagedModSnapshot> {
+        let mut snapshot = self.host_mod_snapshot(host)?;
         if snapshot.mods.is_empty() {
             return Ok(snapshot);
         }
@@ -868,8 +1121,8 @@ impl App {
                 snapshot.metadata = MetadataAvailability::Provider;
                 // Names have just changed, and so has the order they sort in.
                 sort_for_display(&mut snapshot.mods);
-                let record = self.client(instance)?;
-                mod_display_cache::write(&record.root, remembered_display(&snapshot));
+                let layout = self.mod_host_layout(host)?;
+                mod_display_cache::write(&layout.root, remembered_display(&snapshot));
             }
             Err(error) => {
                 // Deliberately not propagated. The mods are installed whether
@@ -1453,7 +1706,7 @@ mod tests {
 
     fn snapshot_of(entries: Vec<ManagedModEntry>) -> ManagedModSnapshot {
         ManagedModSnapshot {
-            instance: InstanceId::new(),
+            host: ModHost::Instance(InstanceId::new()),
             source: None,
             mods: entries,
             metadata: MetadataAvailability::Local,
@@ -1641,6 +1894,94 @@ mod tests {
         assert_eq!(source.version.as_deref(), Some("3.2.1"));
     }
 
+    #[tokio::test]
+    async fn a_disabled_mod_stays_recorded_and_comes_back_under_its_own_name() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, instance) =
+            imported_instance(base.path(), &["journeymap.jar", "architectury.jar"]).await;
+        let host = ModHost::Instance(instance);
+        let path = PathBuf::from("mods/journeymap.jar");
+        let mods_dir =
+            ephervex_storage::metadata::client_game_dir(&app.client(instance).unwrap().root)
+                .join("mods");
+
+        assert_eq!(
+            app.set_mod_enabled(host, &path, false)
+                .expect("the mod is disabled"),
+            ModPresence::Disabled
+        );
+        assert!(
+            !mods_dir.join("journeymap.jar").exists(),
+            "the loader must not find the jar under a name it scans for"
+        );
+        assert!(mods_dir.join("journeymap.jar.disabled").is_file());
+
+        // The record is untouched: a disabled mod is still one of the
+        // instance's mods, with its provider identity intact, which is what
+        // makes re-enabling it need nothing from a catalog.
+        let snapshot = app.host_mod_snapshot(host).expect("snapshot");
+        let entry = snapshot
+            .mods
+            .iter()
+            .find(|entry| entry.file_name == "journeymap.jar")
+            .expect("the mod is still recorded");
+        assert_eq!(entry.presence, ModPresence::Disabled);
+        assert!(!entry.presence.is_enabled());
+        assert!(
+            !entry.presence.needs_attention(),
+            "a mod the user turned off is not a problem to report"
+        );
+        assert_eq!(entry.identity, version_identity("lfHFW1mp", "GKQEbfSt"));
+        assert_eq!(snapshot.missing().count(), 0);
+
+        assert_eq!(
+            app.set_mod_enabled(host, &path, true)
+                .expect("the mod is enabled"),
+            ModPresence::Installed
+        );
+        assert!(mods_dir.join("journeymap.jar").is_file());
+        assert!(!mods_dir.join("journeymap.jar.disabled").exists());
+    }
+
+    /// A frontend toggling the same row twice, or a retried command, must not
+    /// be able to produce a half-renamed pair.
+    #[tokio::test]
+    async fn asking_for_the_state_a_mod_is_already_in_changes_nothing() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, instance) = imported_instance(base.path(), &["journeymap.jar"]).await;
+        let host = ModHost::Instance(instance);
+        let path = PathBuf::from("mods/journeymap.jar");
+
+        assert_eq!(
+            app.set_mod_enabled(host, &path, true).expect("already on"),
+            ModPresence::Installed
+        );
+        app.set_mod_enabled(host, &path, false).expect("off");
+        assert_eq!(
+            app.set_mod_enabled(host, &path, false).expect("still off"),
+            ModPresence::Disabled
+        );
+    }
+
+    /// Enabling something that is not on disk would report a lie.
+    #[tokio::test]
+    async fn a_mod_with_no_file_at_all_refuses_rather_than_reporting_success() {
+        let base = tempfile::tempdir().expect("temp dir");
+        // Recorded by the recipe, never written into `mods/`.
+        let (app, instance) = imported_instance(base.path(), &[]).await;
+        let host = ModHost::Instance(instance);
+        let path = PathBuf::from("mods/journeymap.jar");
+
+        let snapshot = app.host_mod_snapshot(host).expect("snapshot");
+        assert_eq!(snapshot.missing().count(), 2);
+
+        let error = app
+            .set_mod_enabled(host, &path, true)
+            .expect_err("nothing to enable");
+        assert!(matches!(error, CoreError::ModFileMissing { .. }));
+        assert_eq!(error.failing_path().as_deref(), Some(path.as_path()));
+    }
+
     /// A catalog that could not be reached must not erase what it said before.
     #[test]
     fn remembering_keeps_an_unconfirmed_row_and_records_a_confirmed_one() {
@@ -1681,7 +2022,7 @@ mod tests {
         });
 
         let snapshot = ManagedModSnapshot {
-            instance: InstanceId::new(),
+            host: ModHost::Instance(InstanceId::new()),
             source: None,
             mods: vec![answered, unanswered],
             metadata: MetadataAvailability::Provider,

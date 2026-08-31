@@ -31,15 +31,15 @@ use ephervex_core::{
     LaunchAndConnectEvent, LaunchAndConnectObserver, LaunchAndConnectOptions,
     LaunchAndConnectOutcome, LaunchEvent, LaunchFeatures, LaunchObserver, LaunchOptions,
     LaunchOutcome, LaunchState, LoginFlow, LoginOptions, LoginRequest, MAX_SEARCH_MATCHES,
-    MINECRAFT_EULA_REFERENCE, ManagedInstallation, ManagedMod, ModInstallPlan, ModInstallRequest,
-    ModProjectDetails, ModSearchQuery, ModSearchResults, NetworkAccess, NewClient, NewServer,
-    OperationReporter, OptionalSelection, OutputLine, PackAnalysis, PackRecipe, PackSide, Paths,
-    PlanWarning, PlannedMod, PreferenceApplication, PreferenceId, PreferenceKey,
-    ReconciliationReport, ReleaseListing, RequirementBasis, RuntimeClassification,
-    RuntimeInventory, SearchOptions, SecretString, ServerCommitWarning, ServerCreateOptions,
-    ServerEvent, ServerFolder, ServerNetworkSettings, ServerObserver, ServerPersistenceHealth,
-    ServerRecord, ServerWarning, Session, SideRequirement, SkipReason, TextAnchor, TextView,
-    UnknownServerFiles, VersionMetadata, VersionRecord,
+    MINECRAFT_EULA_REFERENCE, ManagedInstallation, ManagedMod, ManagedModSnapshot, ModHost,
+    ModInstallPlan, ModInstallRequest, ModPresence, ModProjectDetails, ModSearchQuery,
+    ModSearchResults, NetworkAccess, NewClient, NewServer, OperationReporter, OptionalSelection,
+    OutputLine, PackAnalysis, PackRecipe, PackSide, Paths, PlanWarning, PlannedMod,
+    PreferenceApplication, PreferenceId, PreferenceKey, ReconciliationReport, ReleaseListing,
+    RequirementBasis, RuntimeClassification, RuntimeInventory, SearchOptions, SecretString,
+    ServerCommitWarning, ServerCreateOptions, ServerEvent, ServerFolder, ServerNetworkSettings,
+    ServerObserver, ServerPersistenceHealth, ServerRecord, ServerWarning, Session, SideRequirement,
+    SkipReason, TextAnchor, TextView, UnknownServerFiles, VersionMetadata, VersionRecord,
 };
 use ephervex_i18n::Arg as MessageArg;
 use ephervex_model::{
@@ -324,6 +324,57 @@ enum ModCommand {
         /// The client instance to list.
         instance: InstanceId,
     },
+    /// Let a mod load again after it was disabled.
+    Enable {
+        #[command(flatten)]
+        host: ModHostArgs,
+        /// The mod's path inside the game directory, such as `mods/foo.jar`.
+        path: PathBuf,
+    },
+    /// Keep a mod installed but stop the loader from loading it.
+    ///
+    /// The jar is renamed to `<name>.jar.disabled`, which every loader ignores.
+    /// Nothing is deleted and nothing is forgotten: the mod keeps its recorded
+    /// version and provider, and enabling it again needs no download.
+    Disable {
+        #[command(flatten)]
+        host: ModHostArgs,
+        /// The mod's path inside the game directory, such as `mods/foo.jar`.
+        path: PathBuf,
+    },
+}
+
+/// Which instance or server a mod belongs to.
+#[derive(Debug, Args)]
+struct ModHostArgs {
+    /// The client instance whose mods these are.
+    #[arg(
+        long,
+        value_name = "INSTANCE",
+        conflicts_with = "server",
+        required_unless_present = "server"
+    )]
+    instance: Option<InstanceId>,
+    /// The dedicated server whose mods these are.
+    #[arg(long, value_name = "SERVER")]
+    server: Option<ServerId>,
+}
+
+impl ModHostArgs {
+    /// The named host.
+    ///
+    /// `clap` has already refused both and neither, so the remaining
+    /// combination cannot occur. It is reported rather than asserted, so that
+    /// a change to the argument definitions above cannot turn into a panic.
+    fn host(&self) -> anyhow::Result<ModHost> {
+        match (self.instance, self.server) {
+            (Some(instance), None) => Ok(ModHost::Instance(instance)),
+            (None, Some(server)) => Ok(ModHost::Server(server)),
+            _ => Err(anyhow::anyhow!(
+                "name exactly one of --instance or --server"
+            )),
+        }
+    }
 }
 
 /// Which version, and which optional extras, an install should take.
@@ -725,6 +776,12 @@ enum ServerCommand {
     },
     /// Show canonical server metadata.
     Show { id: ServerId },
+    /// List the mods a server has, and whether the loader will load each one.
+    ///
+    /// A server reconstructed from a client pack carries whatever the pack
+    /// declared, including mods that only ever run on a client. Use
+    /// `ephervex mod disable --server` to leave one out without removing it.
+    Mods { id: ServerId },
     /// Show persistence, installation, runtime, and capture status.
     Status { id: ServerId },
     /// Read or change `server.properties` through managed services.
@@ -1342,6 +1399,9 @@ async fn run_server_command(
             } else {
                 print_server(&app.server(*id)?, false);
             }
+        }
+        ServerCommand::Mods { id } => {
+            print_host_mods(&app.server_mod_snapshot(*id)?, json);
         }
         ServerCommand::Status { id } => print_server_status(app, *id, json)?,
         ServerCommand::Properties { command } => match command {
@@ -2765,8 +2825,27 @@ async fn run_mod_command(app: &mut App, command: &ModCommand, json: bool) -> any
             let mods = app.managed_mods(*instance)?;
             print_managed_mods(&mods, json);
         }
+        ModCommand::Enable { host, path } => {
+            print_mod_state(app.set_mod_enabled(host.host()?, path, true)?, path, json);
+        }
+        ModCommand::Disable { host, path } => {
+            print_mod_state(app.set_mod_enabled(host.host()?, path, false)?, path, json);
+        }
     }
     Ok(())
+}
+
+/// Reports what a mod's file is now, after being enabled or disabled.
+fn print_mod_state(presence: ModPresence, path: &Path, json: bool) {
+    if json {
+        print_json(&serde_json::json!({
+            "path": path,
+            "presence": presence.as_str(),
+            "enabled": presence.is_enabled(),
+        }));
+        return;
+    }
+    println!("{}  {}", presence.as_str(), path.display());
 }
 
 /// Shows or records which catalog mod commands use when none is named.
@@ -3086,6 +3165,51 @@ fn print_installed_mods(installed: &InstalledMods, json: bool) {
     for warning in &installed.plan.warnings {
         eprintln!("{}", warning_text(warning));
     }
+}
+
+/// Lists one host's recorded mods and whether each one loads.
+///
+/// Wider than [`print_managed_mods`], which lists only what a resolver can
+/// re-address. A server's list has to include mods with no provider identity,
+/// because a jar the pack shipped and the loader chokes on is exactly the one
+/// the reader is looking for.
+fn print_host_mods(snapshot: &ManagedModSnapshot, json: bool) {
+    if json {
+        print_json(&serde_json::json!({
+            "host": snapshot.host.id(),
+            "host_kind": snapshot.host.kind(),
+            "mods": snapshot.mods.iter().map(|entry| serde_json::json!({
+                "path": entry.logical_path,
+                "file_name": entry.file_name,
+                "name": entry.display_name(),
+                "version": entry.installed_version(),
+                "origin": entry.origin.as_str(),
+                "presence": entry.presence.as_str(),
+                "enabled": entry.presence.is_enabled(),
+            })).collect::<Vec<_>>(),
+        }));
+        return;
+    }
+
+    if snapshot.is_empty() {
+        println!("{}", ephervex_i18n::lookup("mod-list-empty"));
+        return;
+    }
+    for entry in &snapshot.mods {
+        println!(
+            "{}  {}  ({})",
+            entry.presence.as_str(),
+            entry.display_name(),
+            entry.logical_path.display()
+        );
+    }
+    println!(
+        "{}",
+        ephervex_i18n::lookup_args(
+            "mod-installed-count",
+            [("count", MessageArg::from(snapshot.len()))]
+        )
+    );
 }
 
 fn print_managed_mods(mods: &[ManagedMod], json: bool) {

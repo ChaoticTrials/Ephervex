@@ -18,7 +18,7 @@ use ephervex_core::{
     ImportRequest, LaunchAndConnectObserver, LaunchAndConnectOptions, LaunchEvent, LaunchObserver,
     LaunchOptions, LinkedModOutcome, LinkedModPlan, LinkedModRequest, LinkedTargetPlan,
     LinkedTargetResult, LinkedTargetState, LoginOptions, ManagedModEntry, ManagedModSnapshot,
-    MetadataAvailability, ModInstallPlan, ModMutability, ModMutation, ModMutationPlan,
+    MetadataAvailability, ModHost, ModInstallPlan, ModMutability, ModMutation, ModMutationPlan,
     ModSearchQuery, MutationRestriction, NewClient, NewServer, OperationReporter,
     OptionalSelection, PackAnalysis, Paths, PlannedOutcome, ProgressSink, ProviderFileIdentity,
     SearchOptions, ServerCreateOptions, ServerEvent, ServerFolder, ServerNetworkSettings,
@@ -226,6 +226,13 @@ pub enum Command {
         command: String,
     },
     LoadServerWorkspace(ServerId),
+    LoadServerMods(ServerId),
+    /// Turn one mod on or off in place, on either kind of host.
+    SetModEnabled {
+        host: ModHost,
+        path: PathBuf,
+        enabled: bool,
+    },
     OpenLiveLog(LiveLogSource),
     CloseLiveLog,
     SaveServerProperties {
@@ -518,6 +525,9 @@ pub struct ManagedModData {
     pub icon: String,
     /// The jar the instance is recorded as having is not in `mods/`.
     pub missing: bool,
+    /// Whether the loader will load this mod, as opposed to it sitting in
+    /// `mods/` under the suffix that hides it.
+    pub enabled: bool,
     pub pack_owned: bool,
     /// Whether the row opens anything at all. False for an entry with no
     /// project, which has neither versions to show nor anything to change.
@@ -645,13 +655,16 @@ pub struct InstanceRuntimeData {
 
 #[derive(Debug, Clone, Default)]
 pub struct ManagedModsData {
-    /// Which instance this list describes.
+    /// Which instance or server this list describes.
     ///
     /// Carried because the enriched list arrives after the durable one, and by
-    /// then the user may be looking at a different instance. Without it the
-    /// frontend cannot tell a late answer from the current one, and would show
-    /// one instance's mods under another instance's name.
-    pub instance: String,
+    /// then the user may be looking at a different one. Without it the frontend
+    /// cannot tell a late answer from the current one, and would show one
+    /// host's mods under another host's name.
+    pub host: String,
+    /// `"client"` or `"server"`, so a late answer for a server cannot be
+    /// mistaken for one about the instance it is linked to.
+    pub host_kind: String,
     pub mods: Vec<ManagedModData>,
     /// A localized note when provider metadata could not be fetched, empty
     /// otherwise. Never a reason to withhold the list.
@@ -1739,6 +1752,19 @@ fn run_worker(
                 send_server_workspace(&app, server, &events);
             }
             Command::LoadServerWorkspace(server) => send_server_workspace(&app, server, &events),
+            Command::LoadServerMods(server) => {
+                send_host_mods(&app, ModHost::Server(server), &events);
+            }
+            Command::SetModEnabled {
+                host,
+                path,
+                enabled,
+            } => match app.set_mod_enabled(host, &path, enabled) {
+                // Re-read rather than patched in place: the durable state is
+                // what the panel shows, and it has just changed.
+                Ok(_) => send_host_mods(&app, host, &events),
+                Err(error) => send_error(&events, &error),
+            },
             Command::OpenLiveLog(source) => {
                 open_live_log(&app, source, &events, &live_log_generation);
             }
@@ -2444,6 +2470,20 @@ const fn origin(is_override: bool) -> SettingOrigin {
         SettingOrigin::Override
     } else {
         SettingOrigin::Default
+    }
+}
+
+/// Sends one host's durable mod list, then asks a provider to decorate it.
+///
+/// Durable first and always: the list is correct without a catalog, and a
+/// server that will not start is the moment a user least wants to wait for one.
+fn send_host_mods(app: &App, host: ModHost, events: &Sender<Event>) {
+    match app.host_mod_snapshot(host) {
+        Ok(snapshot) => {
+            let _ = events.send(Event::ManagedMods(managed_mods_data(&snapshot)));
+            refresh_enriched_host_mods(app.paths().clone(), events, host);
+        }
+        Err(error) => send_error(events, &error),
     }
 }
 
@@ -4172,9 +4212,13 @@ fn target_explanation(target: &LinkedTargetPlan) -> String {
 /// file names. Enrichment is a provider round trip, so it runs off the command
 /// thread and only replaces the list once it has an answer.
 fn refresh_enriched_mods(paths: Paths, events: &Sender<Event>, instance: InstanceId) {
+    refresh_enriched_host_mods(paths, events, ModHost::Instance(instance));
+}
+
+fn refresh_enriched_host_mods(paths: Paths, events: &Sender<Event>, host: ModHost) {
     spawn_detached(paths, events.clone(), move |app, events, runtime| {
-        let enriched = runtime.block_on(app.enriched_managed_mods(
-            instance,
+        let enriched = runtime.block_on(app.enriched_host_mods(
+            host,
             &OperationReporter::silent("managed-mods"),
             &CancellationToken::new(),
         ));
@@ -4305,7 +4349,8 @@ fn restriction_text(restriction: Option<MutationRestriction>) -> String {
 /// file name, or decides what a mod is.
 fn managed_mods_data(snapshot: &ManagedModSnapshot) -> ManagedModsData {
     ManagedModsData {
-        instance: snapshot.instance.to_string(),
+        host: snapshot.host.id(),
+        host_kind: snapshot.host.kind().to_owned(),
         mods: snapshot.mods.iter().map(managed_mod_data).collect(),
         notice: match snapshot.metadata {
             MetadataAvailability::Unavailable => lookup("gui-mod-metadata-offline"),
@@ -4352,6 +4397,7 @@ fn managed_mod_data(entry: &ManagedModEntry) -> ManagedModData {
             .map(|path| path.to_string_lossy().into_owned())
             .unwrap_or_default(),
         missing: entry.presence.needs_attention(),
+        enabled: entry.presence.is_enabled(),
         pack_owned: entry.is_pack_owned(),
     }
 }
@@ -4530,6 +4576,15 @@ pub fn parse_instance_id(value: &str) -> Option<InstanceId> {
 
 pub fn parse_server_id(value: &str) -> Option<ServerId> {
     ServerId::from_str(value).ok()
+}
+
+/// The instance or server a mod action names, from what the markup carries.
+pub fn parse_mod_host(kind: &str, id: &str) -> Option<ModHost> {
+    match kind {
+        "client" => parse_instance_id(id).map(ModHost::Instance),
+        "server" => parse_server_id(id).map(ModHost::Server),
+        _ => None,
+    }
 }
 
 pub fn parse_scope(kind: &str, id: &str) -> Option<DiagnosticScope> {

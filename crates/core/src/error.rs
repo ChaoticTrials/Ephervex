@@ -190,6 +190,23 @@ pub enum CoreError {
     #[error("`{configured}` is not a mod catalog this version of Ephervex knows")]
     ModCatalogPreferenceUnrecognized { configured: String },
 
+    /// Asked to enable or disable a mod whose jar is in neither state.
+    ///
+    /// Reported rather than treated as a success: enabling a mod that is not
+    /// on disk would leave the caller believing the loader will pick something
+    /// up that is not there. The recipe still records it, so the answer is a
+    /// repair install, not a rename.
+    #[error("no file for `{}` is installed", path.display())]
+    ModFileMissing { path: PathBuf },
+
+    /// The rename between `<name>.jar` and `<name>.jar.disabled` failed.
+    #[error("`{}` could not be enabled or disabled", path.display())]
+    ModFileNotToggled {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
     /// Working out which dependencies are still needed requires every root's
     /// project, and one of them has none.
     ///
@@ -266,6 +283,8 @@ impl CoreError {
             Self::ModCatalogPreferenceUnrecognized { .. } => {
                 "error-mod-catalog-preference-unrecognized"
             }
+            Self::ModFileMissing { .. } => "error-mod-file-missing",
+            Self::ModFileNotToggled { .. } => "error-mod-file-not-toggled",
         }
     }
 
@@ -436,6 +455,8 @@ impl CoreError {
             | Self::ModNotManaged { .. }
             | Self::ModMutationRestricted { .. }
             | Self::ModIdentityIncomplete { .. }
+            | Self::ModFileMissing { .. }
+            | Self::ModFileNotToggled { .. }
             | Self::LoaderFamilyFixed { .. }
             | Self::LoaderChangeBlockedByMods { .. }
             | Self::ModCatalogPreferenceUnrecognized { .. }
@@ -475,6 +496,8 @@ impl CoreError {
             // project rather than anything on disk.
             Self::ModNotManaged { path }
             | Self::ModMutationRestricted { path, .. }
+            | Self::ModFileMissing { path }
+            | Self::ModFileNotToggled { path, .. }
             | Self::ModIdentityIncomplete { path } => Some(path.clone()),
             Self::ArtifactCache(error) => error.failing_path(),
             Self::Auth(_)

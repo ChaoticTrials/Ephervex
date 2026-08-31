@@ -84,8 +84,8 @@ pub use minecraft_preferences::{
     PreferenceChange, PreferenceEdit, configured_minecraft_preferences,
 };
 pub use mods::{
-    InstalledMods, InstancePackSource, ManagedModEntry, ManagedModSnapshot, MetadataAvailability,
-    ModDetails, ModInstallRequest, ModPresence,
+    DISABLED_SUFFIX, InstalledMods, InstancePackSource, ManagedModEntry, ManagedModSnapshot,
+    MetadataAvailability, ModDetails, ModHost, ModInstallRequest, ModPresence, disabled_path,
 };
 pub use mutation::{
     ModMutability, ModMutation, ModMutationPlan, ModVersionChoice, ModVersionChoices,

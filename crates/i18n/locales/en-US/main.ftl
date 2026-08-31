@@ -808,6 +808,8 @@ error-loader-change-blocked-by-mods = { $count ->
 error-mod-not-managed = That mod is no longer part of this instance.
 .action = Reopen the instance to see its current mods.
 error-mod-identity-incomplete = One of this instance's mods has no provider identity, so its dependencies cannot be worked out.
+error-mod-file-missing = That mod's file is not installed, so it cannot be enabled or disabled. Repair the instance to fetch it again.
+error-mod-file-not-toggled = That mod's file could not be renamed. Check that the mods folder is writable.
 .action = Mods with no identity have to be managed by hand.
 
 error-mod-catalog-preference-unrecognized = "{ $catalog }" is not a mod catalog this version of Ephervex knows.
@@ -1205,6 +1207,11 @@ gui-managed-mods = Managed Mods
 gui-managed-mods-detail = Every mod this instance is recorded as having, including the ones its pack brought.
 gui-no-managed-mods = No managed mods
 gui-no-managed-mods-detail = Manual JARs are not adopted or modified.
+gui-mod-disabled = Disabled, so the loader skips it
+gui-mod-loads = Load { $value }
+gui-server-mods = Server mods
+gui-server-mods-detail = Everything this server was built with. Turn off a mod to keep it installed while the loader skips it, which is how a client-only mod stops crashing a server.
+gui-no-server-mods-detail = This server was not built from a pack, so nothing here is recorded as belonging to it.
 # Shown when the mod's exact release cannot be proven from what Ephervex
 # recorded. The file is installed; only its version is unknown.
 gui-mod-version-unknown = Version not recorded

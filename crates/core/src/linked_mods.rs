@@ -2532,6 +2532,75 @@ mod tests {
         );
     }
 
+    /// A server crashing on a client-only mod is the reason the panel exists,
+    /// and it can only offer that mod if it reads the server's own list.
+    #[tokio::test]
+    async fn a_servers_mods_are_read_from_its_own_recipe_and_can_be_turned_off() {
+        let world = world().await;
+        let server = world.link_server("Reproduction Server", MINECRAFT);
+        apply(&world, &install("ROOTPROJ"), &[server]).await;
+        let host = crate::ModHost::Server(server);
+
+        let snapshot = world.app.server_mod_snapshot(server).expect("server mods");
+        let entry = snapshot
+            .mods
+            .iter()
+            .find(|entry| entry.identity.project_id() == Some("ROOTPROJ"))
+            .expect("the server has the mod that was synced to it");
+        assert_eq!(entry.presence, crate::ModPresence::Installed);
+        let path = entry.logical_path.clone();
+
+        world
+            .app
+            .set_mod_enabled(host, &path, false)
+            .expect("the mod is disabled");
+
+        // `server_jars` lists the directory as it is, so this states both
+        // halves: the name the loader scans for is gone, and the file is still
+        // there under the suffix that hides it.
+        let file_name = path
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .expect("the mod has a file name")
+            .to_owned();
+        let jars = world.server_jars(server);
+        assert!(
+            !jars.contains(&file_name),
+            "a disabled mod must not be a jar the loader scans: {jars:?}"
+        );
+        assert!(
+            jars.contains(&format!("{file_name}{}", crate::DISABLED_SUFFIX)),
+            "the jar is kept, not deleted: {jars:?}"
+        );
+        assert_eq!(
+            world
+                .app
+                .server_mod_snapshot(server)
+                .expect("server mods")
+                .mods
+                .iter()
+                .find(|entry| entry.identity.project_id() == Some("ROOTPROJ"))
+                .expect("still recorded")
+                .presence,
+            crate::ModPresence::Disabled,
+        );
+
+        // The client it is linked to is a separate host and is untouched: the
+        // whole point is to remove a mod from the server without changing the
+        // reproduction the client represents.
+        assert!(
+            world
+                .app
+                .managed_mod_snapshot(world.client)
+                .expect("client mods")
+                .mods
+                .iter()
+                .any(|entry| entry.identity.project_id() == Some("ROOTPROJ")
+                    && entry.presence == crate::ModPresence::Installed),
+            "disabling a mod on a server must not disable it on the client"
+        );
+    }
+
     #[tokio::test]
     async fn a_dependency_another_synced_root_still_needs_is_kept() {
         let world = world().await;

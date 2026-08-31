@@ -113,6 +113,9 @@ slint::slint! {
         author: string,
         icon: image,
         missing: bool,
+        // Whether the loader will load this mod. A disabled mod is installed
+        // and recorded; it is simply renamed out of the loader's way.
+        enabled: bool,
         pack-owned: bool,
         can-manage: bool,
         can-change-version: bool,
@@ -871,7 +874,10 @@ slint::slint! {
     // added as another chip.
     component ModCard inherits Rectangle {
         in property <ModRow> item;
+        // Whether this list lets a mod be turned off in place.
+        in property <bool> togglable;
         callback manage(string);
+        callback toggle(string, bool);
         height: 86px;
         border-radius: 6px;
         border-width: 1px;
@@ -891,7 +897,7 @@ slint::slint! {
                     spacing: 8px;
                     Text {
                         text: root.item.title;
-                        color: Theme.text;
+                        color: root.item.enabled ? Theme.text : Theme.text-muted;
                         font-size: Theme.row-heading-size;
                         font-weight: 600;
                         overflow: elide;
@@ -899,6 +905,9 @@ slint::slint! {
                         vertical-alignment: center;
                     }
                     VerticalLayout { alignment: center; Pill { text: root.item.origin; tone-color: root.item.origin-kind == "pack" ? Theme.accent-secondary : root.item.origin-kind == "dependency" ? Theme.text-muted : Theme.accent; } }
+                    // Declared after the card's own touch area, so it takes its
+                    // own clicks rather than opening the mod manager.
+                    if root.togglable : VerticalLayout { alignment: center; Toggle { checked: root.item.enabled; enabled: !root.item.missing; accessible-name: GuiI18n.value("gui-mod-loads", root.item.title); toggled(on) => { root.toggle(root.item.logical-path, on); } } }
                     VerticalLayout { alignment: center; Text { text: root.item.can-manage ? "›" : ""; color: touch.has-hover ? Theme.accent : Theme.text-muted; font-size: Theme.section-size; width: 10px; } }
                 }
                 Text {
@@ -908,7 +917,7 @@ slint::slint! {
                     overflow: elide;
                 }
                 Text {
-                    text: root.item.missing ? GuiI18n.text("gui-mod-file-missing") : root.item.compatibility != "" ? root.item.compatibility : root.item.file-name;
+                    text: root.item.missing ? GuiI18n.text("gui-mod-file-missing") : !root.item.enabled ? GuiI18n.text("gui-mod-disabled") : root.item.compatibility != "" ? root.item.compatibility : root.item.file-name;
                     color: root.item.missing ? Theme.warning : Theme.text-muted;
                     font-size: Theme.caption-size;
                     overflow: elide;
@@ -1639,6 +1648,11 @@ slint::slint! {
         in-out property <[ModRow]> managed-mods;
         // Empty unless something has to be said about how complete the list is.
         in-out property <string> managed-mods-notice;
+        // A server's own list, kept apart from its linked client's. The two are
+        // separate installations that happen to share a pack, and a server that
+        // had a client-only mod turned off must not look like the client did.
+        in-out property <[ModRow]> server-mods;
+        in-out property <string> server-mods-notice;
         // -- managing one mod, which is what the mod modals act on.
         in-out property <string> mod-action-path;
         in-out property <string> mod-action-name;
@@ -1676,6 +1690,8 @@ slint::slint! {
         callback open-loader-change();
         callback change-loader-version(string, string);
         callback open-mod-manager(string);
+        // (host kind, host id, the mod's path, whether the loader loads it)
+        callback set-mod-enabled(string, string, string, bool);
         callback change-mod-version(string, string, string);
         callback plan-mod-removal(string, string);
         // Works out what a change or an update would do here and on every
@@ -2034,6 +2050,7 @@ slint::slint! {
         callback search-live-log(string);
         callback live-log-follow-changed(bool);
         callback load-server-workspace(string);
+        callback load-server-mods(string);
         callback save-server-properties(string, string, string, string, string, bool, bool, bool, bool, string, string, string);
         callback validate-server-properties(string, string, string, string);
         callback accept-eula();
@@ -2408,6 +2425,7 @@ slint::slint! {
                             HorizontalLayout { spacing: 8px;
                                 WorkspaceTab { text: GuiI18n.text("gui-instance-tab-overview"); selected: root.workspace-tab == "Overview"; clicked => { root.close-live-log(); root.workspace-tab = "Overview"; } }
                                 WorkspaceTab { text: GuiI18n.text("gui-server-tab-console"); selected: root.workspace-tab == "Console"; clicked => { root.workspace-tab = "Console"; root.open-live-log("server", root.selected-server-id); } }
+                                WorkspaceTab { text: GuiI18n.text("gui-instance-tab-mods"); selected: root.workspace-tab == "Mods"; clicked => { root.close-live-log(); root.workspace-tab = "Mods"; root.load-server-mods(root.selected-server-id); } }
                                 WorkspaceTab { text: GuiI18n.text("gui-server-tab-properties"); selected: root.workspace-tab == "Properties"; clicked => { root.close-live-log(); root.workspace-tab = "Properties"; } }
                                 WorkspaceTab { text: GuiI18n.text("gui-instance-tab-logs"); selected: root.workspace-tab == "Logs"; clicked => { root.close-live-log(); root.workspace-tab = "Logs"; root.selected-diagnostic-kind = "log"; root.load-diagnostics("server", root.selected-server-id, "log"); } }
                                 Rectangle { horizontal-stretch: 1; }
@@ -2431,6 +2449,12 @@ slint::slint! {
                             if root.workspace-tab == "Logs" : VerticalLayout { spacing: 8px;
                                 HorizontalLayout { spacing: 8px; FilterChip { text: GuiI18n.text("gui-log-files"); accessible-name: GuiI18n.text("gui-log-files"); selected: root.selected-diagnostic-kind != "crash-report"; clicked => { root.selected-diagnostic-kind = "log"; root.load-diagnostics("server", root.selected-server-id, "log"); } } FilterChip { text: GuiI18n.text("gui-crash-reports"); accessible-name: GuiI18n.text("gui-crash-reports"); selected: root.selected-diagnostic-kind == "crash-report"; clicked => { root.selected-diagnostic-kind = "crash-report"; root.load-diagnostics("server", root.selected-server-id, "crash-report"); } } Rectangle { horizontal-stretch: 1; } TextField { text <=> root.diagnostic-query; placeholder: GuiI18n.text("gui-search-loaded-content"); input-type: InputType.search; width: 250px; accepted => { root.search-diagnostic("server", root.selected-server-id, root.selected-diagnostic-kind, root.selected-diagnostic-name, root.diagnostic-query); } } AppButton { text: GuiI18n.text("gui-find"); enabled: root.selected-diagnostic-name != ""; clicked => { root.search-diagnostic("server", root.selected-server-id, root.selected-diagnostic-kind, root.selected-diagnostic-name, root.diagnostic-query); } } AppButton { text: GuiI18n.text("gui-folder"); clicked => { root.open-diagnostic-folder("server", root.selected-server-id, root.selected-diagnostic-kind); } } }
                                 HorizontalLayout { spacing: 10px; Rectangle { width: 280px; background: Theme.surface; border-radius: 8px; border-width: 1px; border-color: Theme.border; VerticalLayout { padding: 8px; spacing: 5px; BodyText { text: GuiI18n.count("gui-diagnostic-files-count", root.diagnostics.length); } ScrollView { VerticalLayout { spacing: 5px; for item in root.diagnostics : Rectangle { height: 66px; background: Theme.background; border-radius: 6px; border-width: item.name == root.selected-diagnostic-name ? 2px : 1px; border-color: item.name == root.selected-diagnostic-name ? Theme.accent : Theme.border; VerticalLayout { padding: 8px; Text { text: item.name; color: item.kind == "crash-report" ? Theme.warning : Theme.text; overflow: elide; } BodyText { text: item.summary != "" ? item.summary : item.size; overflow: elide; font-size: Theme.caption-size; } } TouchArea { clicked => { root.selected-diagnostic-name = item.name; root.open-diagnostic("server", root.selected-server-id, root.selected-diagnostic-kind, item.name); } } } } } } } Rectangle { horizontal-stretch: 1; background: rgb(11, 14, 16); border-radius: 8px; border-width: 1px; border-color: Theme.border; VerticalLayout { if root.diagnostic-content == "" : EmptyState { title: GuiI18n.text("gui-no-file-open"); message: GuiI18n.text("gui-no-file-open-detail"); } if root.diagnostic-content != "" : SelectableText { text: root.diagnostic-content; font-size: root.technical-text-size * 1px; } if root.diagnostic-content != "" : AppButton { text: GuiI18n.text("gui-copy"); clicked => { root.copy-text(root.diagnostic-content); } } } } }
+                            }
+                            if root.workspace-tab == "Mods" : VerticalLayout { spacing: 10px;
+                                SectionTitle { title: GuiI18n.text("gui-server-mods"); detail: GuiI18n.text("gui-server-mods-detail"); }
+                                if root.server-mods-notice != "" : BodyText { text: root.server-mods-notice; color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
+                                if root.server-mods.length == 0 : EmptyState { title: GuiI18n.text("gui-no-managed-mods"); message: GuiI18n.text("gui-no-server-mods-detail"); }
+                                if root.server-mods.length > 0 : ScrollView { viewport-width: self.width; VerticalLayout { spacing: 8px; for mod in root.server-mods : ModCard { item: mod; togglable: true; toggle(path, on) => { root.set-mod-enabled("server", root.selected-server-id, path, on); } } } }
                             }
                             if root.workspace-tab == "Properties" : ScrollView { VerticalLayout { alignment: start; width: min(parent.width, 1100px); spacing: 14px;
                                 Heading { text: GuiI18n.text("gui-network"); } BodyText { text: GuiI18n.text("gui-network-detail"); wrap: word-wrap; }

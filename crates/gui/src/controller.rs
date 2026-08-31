@@ -1311,6 +1311,7 @@ fn register_callbacks(
     ui.on_select_server(move |_| send(&sender, Command::Refresh));
 
     register_server_actions(ui, commands);
+    register_mod_state_actions(ui, commands);
     register_diagnostics(ui, commands);
     register_live_viewer(ui, commands, live_viewer);
     register_settings(ui, commands);
@@ -2056,6 +2057,35 @@ fn register_instance_selection(
         if !repeat {
             send(&sender, Command::Refresh);
         }
+    });
+}
+
+/// Which mods a host has, and whether each one loads.
+///
+/// Its own registration rather than part of the server actions: the same two
+/// callbacks serve a client instance's panel and a server's, and neither
+/// belongs to one screen.
+fn register_mod_state_actions(ui: &AppWindow, commands: &Sender<Command>) {
+    let sender = commands.clone();
+    ui.on_load_server_mods(move |id| {
+        if let Some(id) = backend::parse_server_id(&id) {
+            send(&sender, Command::LoadServerMods(id));
+        }
+    });
+
+    let sender = commands.clone();
+    ui.on_set_mod_enabled(move |kind, host, path, enabled| {
+        let Some(host) = backend::parse_mod_host(&kind, &host) else {
+            return;
+        };
+        send(
+            &sender,
+            Command::SetModEnabled {
+                host,
+                path: PathBuf::from(path.as_str()),
+                enabled,
+            },
+        );
     });
 }
 
@@ -3527,11 +3557,21 @@ fn apply_event(
             create_instance_name,
         ),
         Event::ManagedMods(data) => {
-            // A late answer for an instance the user has already navigated
+            // A late answer for a workspace the user has already navigated
             // away from is discarded rather than rendered under the wrong
             // name. The workspace it belongs to already showed its durable
-            // state, and reopening it asks again.
-            if presentation::result_is_current(&data.instance, &ui.get_selected_instance_id()) {
+            // state, and reopening it asks again. The kind is checked as well
+            // as the id, so a server's list can never land in the panel of the
+            // instance it is linked to.
+            if data.host_kind == "server" {
+                if presentation::result_is_current(&data.host, &ui.get_selected_server_id()) {
+                    ui.set_server_mods(reconciled(
+                        &ui.get_server_mods(),
+                        managed_mod_rows(data.mods),
+                    ));
+                    ui.set_server_mods_notice(data.notice.into());
+                }
+            } else if presentation::result_is_current(&data.host, &ui.get_selected_instance_id()) {
                 ui.set_managed_mods(reconciled(
                     &ui.get_managed_mods(),
                     managed_mod_rows(data.mods),
@@ -4711,6 +4751,7 @@ fn managed_mod_rows(rows: Vec<ManagedModData>) -> Vec<ModRow> {
             author: row.author.into(),
             icon: cached_image(&row.icon),
             missing: row.missing,
+            enabled: row.enabled,
             pack_owned: row.pack_owned,
         })
         .collect()
