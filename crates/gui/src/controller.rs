@@ -93,6 +93,44 @@ struct CreationTracker {
     pending: Vec<PendingCreation>,
 }
 
+/// One end of a selection: a row, and a byte offset into that row's text.
+///
+/// Byte offsets rather than columns, because that is what the text item takes
+/// and because a column is only a byte offset while a line stays ASCII. The
+/// conversion happens once, here, where the row's text is available.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SelectionPoint {
+    row: usize,
+    offset: usize,
+}
+
+/// What is currently selected across the log's rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LogSelection {
+    /// Where the drag began. Stays put while the other end moves.
+    anchor: SelectionPoint,
+    /// Where the pointer is now.
+    focus: SelectionPoint,
+}
+
+impl LogSelection {
+    /// The two ends in reading order, which is not the order they were made in:
+    /// a drag upwards puts the anchor last.
+    const fn ordered(&self) -> (SelectionPoint, SelectionPoint) {
+        let backwards = self.focus.row < self.anchor.row
+            || (self.focus.row == self.anchor.row && self.focus.offset < self.anchor.offset);
+        if backwards {
+            (self.focus, self.anchor)
+        } else {
+            (self.anchor, self.focus)
+        }
+    }
+
+    const fn is_empty(&self) -> bool {
+        self.anchor.row == self.focus.row && self.anchor.offset == self.focus.offset
+    }
+}
+
 struct LiveViewerState {
     active: Option<LiveLogSource>,
     history: RetainedLog,
@@ -101,6 +139,8 @@ struct LiveViewerState {
     source_truncated: bool,
     pending_lines: usize,
     search_query: String,
+    /// What the pointer has selected across rows, if anything.
+    selection: Option<LogSelection>,
 }
 
 impl Default for LiveViewerState {
@@ -113,6 +153,7 @@ impl Default for LiveViewerState {
             source_truncated: false,
             pending_lines: 0,
             search_query: String::new(),
+            selection: None,
         }
     }
 }
@@ -125,7 +166,84 @@ impl LiveViewerState {
             self.source_truncated = false;
             self.pending_lines = 0;
             self.search_query.clear();
+            self.selection = None;
         }
+    }
+
+    /// Moves one end of the selection to a character column on a row.
+    ///
+    /// `extend` keeps the anchor where it is, which is what a shift-click and
+    /// the whole of a drag both do; without it the selection starts over at
+    /// this point.
+    fn select_at(&mut self, row: usize, column: usize, extend: bool) {
+        let Some(text) = self.row_text(row) else {
+            return;
+        };
+        // A column past the end of a short line is the end of that line, which
+        // is what dragging across a ragged block of text does constantly.
+        let offset = text
+            .char_indices()
+            .nth(column)
+            .map_or_else(|| text.len(), |(offset, _)| offset);
+        let focus = SelectionPoint { row, offset };
+        self.selection = Some(match self.selection {
+            Some(existing) if extend => LogSelection {
+                anchor: existing.anchor,
+                focus,
+            },
+            _ => LogSelection {
+                anchor: focus,
+                focus,
+            },
+        });
+    }
+
+    /// Selects every row currently shown.
+    fn select_all(&mut self) {
+        let rows = self.chunks.row_count();
+        let Some(last) = rows.checked_sub(1) else {
+            self.selection = None;
+            return;
+        };
+        self.selection = Some(LogSelection {
+            anchor: SelectionPoint { row: 0, offset: 0 },
+            focus: SelectionPoint {
+                row: last,
+                offset: self.row_text(last).map_or(0, |text| text.len()),
+            },
+        });
+    }
+
+    /// The selected text, joined by newlines, with both ends trimmed to their
+    /// own offsets.
+    fn selected_text(&self) -> Option<String> {
+        let selection = self.selection.filter(|selection| !selection.is_empty())?;
+        let (start, end) = selection.ordered();
+        let mut lines = Vec::with_capacity(end.row - start.row + 1);
+        for row in start.row..=end.row {
+            let text = self.row_text(row)?;
+            // Clamped rather than sliced blind: the model can be replaced by an
+            // arriving line between the drag and the copy, and a stale offset
+            // must not be able to panic.
+            let from = if row == start.row {
+                start.offset.min(text.len())
+            } else {
+                0
+            };
+            let to = if row == end.row {
+                end.offset.min(text.len())
+            } else {
+                text.len()
+            };
+            lines.push(text.get(from..to.max(from)).unwrap_or_default().to_owned());
+        }
+        Some(lines.join("\n"))
+    }
+
+    fn row_text(&self, row: usize) -> Option<String> {
+        self.chunks
+            .row_data(row)
+            .map(|chunk| chunk.text.to_string())
     }
 
     fn deactivate(&mut self) {
@@ -205,6 +323,8 @@ fn register_live_viewer(
         }
         send(&sender, Command::OpenLiveLog(source));
     });
+
+    register_log_selection(ui, live_viewer);
 
     let sender = commands.clone();
     let close_state = Rc::clone(live_viewer);
@@ -313,7 +433,7 @@ fn build_log_presentation(state: &LiveViewerState) -> LogPresentation {
                 .max()
                 .unwrap_or(0),
         );
-        push_record_chunks(&mut chunks, text, record.level, CHUNK_BYTES);
+        push_record_chunks(&mut chunks, &text, record.level, CHUNK_BYTES);
     }
     LogPresentation {
         chunks,
@@ -322,40 +442,43 @@ fn build_log_presentation(state: &LiveViewerState) -> LogPresentation {
     }
 }
 
-fn push_record_chunks(
-    chunks: &mut Vec<LogChunk>,
-    mut text: String,
-    level: LogLevel,
-    max_bytes: usize,
-) {
-    while text.len() > max_bytes {
-        let mut split = max_bytes;
-        while !text.is_char_boundary(split) {
-            split -= 1;
-        }
-        if let Some(newline) = text[..split].rfind('\n') {
-            split = newline;
-        }
-        if split == 0 {
-            split = max_bytes.min(text.len());
-            while !text.is_char_boundary(split) {
+/// One row per physical line.
+///
+/// A record can be a whole stack trace, and a selection that spans rows can
+/// only be reasoned about if every row is one line of the same height: the row
+/// under the pointer is then the pressed row plus a count of line heights, with
+/// no geometry to query. It also keeps the list virtualized over lines rather
+/// than over records, so one enormous record does not become one enormous item.
+///
+/// `max_bytes` still applies, to the single line that exceeds it. A log can
+/// contain a line with no newline in it at all, and that is the case the cap
+/// exists for.
+fn push_record_chunks(chunks: &mut Vec<LogChunk>, text: &str, level: LogLevel, max_bytes: usize) {
+    for line in text.split('\n') {
+        let mut rest = line;
+        while rest.len() > max_bytes {
+            let mut split = max_bytes;
+            while !rest.is_char_boundary(split) {
                 split -= 1;
             }
+            // A `max_bytes` shorter than one character cannot happen with the
+            // cap this is called with, but a zero-length split would loop
+            // forever, so it is taken whole instead.
+            if split == 0 {
+                break;
+            }
+            let (head, tail) = rest.split_at(split);
+            chunks.push(LogChunk {
+                text: head.into(),
+                level: level.as_str().into(),
+            });
+            rest = tail;
         }
-        let mut remainder = text.split_off(split);
         chunks.push(LogChunk {
-            text: text.into(),
+            text: rest.into(),
             level: level.as_str().into(),
         });
-        if remainder.starts_with('\n') {
-            remainder.remove(0);
-        }
-        text = remainder;
     }
-    chunks.push(LogChunk {
-        text: text.into(),
-        level: level.as_str().into(),
-    });
 }
 
 fn same_chunk(left: &LogChunk, right: &LogChunk) -> bool {
@@ -412,6 +535,66 @@ fn sync_log_chunks(model: &VecModel<LogChunk>, chunks: Vec<LogChunk>) -> bool {
     true
 }
 
+/// Selecting across the console's rows, and copying what was selected.
+fn register_log_selection(ui: &AppWindow, live_viewer: &Rc<RefCell<LiveViewerState>>) {
+    let weak = ui.as_weak();
+    let select_state = Rc::clone(live_viewer);
+    ui.on_select_log_at(move |row, column, extend| {
+        let (Ok(row), Ok(column)) = (usize::try_from(row), usize::try_from(column)) else {
+            return;
+        };
+        let mut state = select_state.borrow_mut();
+        state.select_at(row, column, extend);
+        if let Some(ui) = weak.upgrade() {
+            publish_log_selection(&ui, &state);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let all_state = Rc::clone(live_viewer);
+    ui.on_select_all_log(move || {
+        let mut state = all_state.borrow_mut();
+        state.select_all();
+        if let Some(ui) = weak.upgrade() {
+            publish_log_selection(&ui, &state);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let copy_state = Rc::clone(live_viewer);
+    ui.on_copy_log_selection(move || {
+        let Some(text) = copy_state.borrow().selected_text() else {
+            return;
+        };
+        if let Some(ui) = weak.upgrade() {
+            ui.invoke_copy_text(text.into());
+        }
+    });
+}
+
+/// Puts the selection on screen, in the reading order the rows expect.
+///
+/// The revision is what makes rows apply it: a selection is a call on a text
+/// item rather than a binding, so there has to be something for a row to react
+/// to.
+fn publish_log_selection(ui: &AppWindow, state: &LiveViewerState) {
+    if let Some(selection) = state.selection.filter(|selection| !selection.is_empty()) {
+        let (start, end) = selection.ordered();
+        ui.set_log_selection_start_row(to_i32(start.row));
+        ui.set_log_selection_start_offset(to_i32(start.offset));
+        ui.set_log_selection_end_row(to_i32(end.row));
+        ui.set_log_selection_end_offset(to_i32(end.offset));
+        ui.set_log_has_selection(true);
+    } else {
+        // A press with no drag is not a selection, and must clear the one it
+        // replaced rather than leave it highlighted.
+        ui.set_log_selection_start_row(-1);
+        ui.set_log_selection_end_row(-1);
+        ui.set_log_has_selection(false);
+    }
+    ui.set_log_selection_revision(ui.get_log_selection_revision().saturating_add(1));
+}
+
 fn render_live_viewer(ui: &AppWindow, state: &mut LiveViewerState) {
     let presentation = build_log_presentation(state);
 
@@ -441,6 +624,10 @@ fn render_live_viewer(ui: &AppWindow, state: &mut LiveViewerState) {
     ui.set_log_other_enabled(state.filter.is_enabled(LogLevel::Other));
     if chunks_changed {
         ui.set_log_revision(ui.get_log_revision().saturating_add(1));
+        // Rows are addressed by index, and the indices just moved. Keeping the
+        // highlight would mean highlighting different text than was selected.
+        state.selection = None;
+        publish_log_selection(ui, state);
     }
     state.pending_lines = 0;
 }
@@ -5735,20 +5922,178 @@ mod tests {
         assert!(production.contains("ui.window().on_close_requested(move || {"));
     }
 
+    /// The selection is addressed in rows and character columns and stored in
+    /// byte offsets, and the two only agree while a line stays ASCII.
     #[test]
-    fn console_and_diagnostic_text_use_native_read_only_selection() {
+    fn a_selection_across_rows_copies_exactly_what_it_covers() {
+        let mut state = LiveViewerState::default();
+        state.chunks.set_vec(vec![
+            chunk("first line"),
+            chunk("second line"),
+            chunk("third line"),
+        ]);
+
+        // Drag from the middle of the first row into the middle of the third.
+        state.select_at(0, 6, false);
+        state.select_at(2, 5, true);
+
+        assert_eq!(
+            state.selected_text().as_deref(),
+            Some("line\nsecond line\nthird"),
+            "both ends are trimmed to their own column, everything between is whole"
+        );
+    }
+
+    /// A drag upwards makes the anchor the later of the two ends.
+    #[test]
+    fn a_selection_made_backwards_reads_the_same_as_one_made_forwards() {
+        let mut state = LiveViewerState::default();
+        state
+            .chunks
+            .set_vec(vec![chunk("alpha"), chunk("beta"), chunk("gamma")]);
+
+        state.select_at(2, 3, false);
+        state.select_at(0, 2, true);
+
+        assert_eq!(state.selected_text().as_deref(), Some("pha\nbeta\ngam"));
+        let (start, end) = state.selection.expect("a selection").ordered();
+        assert_eq!((start.row, end.row), (0, 2));
+    }
+
+    /// A column is a count of characters; an offset is a count of bytes.
+    #[test]
+    fn a_column_past_a_multibyte_character_becomes_the_right_byte_offset() {
+        let mut state = LiveViewerState::default();
+        state.chunks.set_vec(vec![chunk("héllo wörld")]);
+
+        state.select_at(0, 0, false);
+        state.select_at(0, 5, true);
+
+        assert_eq!(
+            state.selected_text().as_deref(),
+            Some("héllo"),
+            "five characters, six bytes"
+        );
+    }
+
+    /// Dragging past the end of a short line selects to its end rather than
+    /// nothing, which is what a ragged block of text does constantly.
+    #[test]
+    fn a_column_past_the_end_of_a_line_is_the_end_of_that_line() {
+        let mut state = LiveViewerState::default();
+        state
+            .chunks
+            .set_vec(vec![chunk("short"), chunk("a much longer line")]);
+
+        state.select_at(0, 900, false);
+        assert_eq!(
+            state.selection.expect("a selection").anchor.offset,
+            "short".len()
+        );
+
+        state.select_at(1, 6, true);
+        assert_eq!(state.selected_text().as_deref(), Some("\na much"));
+    }
+
+    #[test]
+    fn selecting_everything_covers_every_row_shown() {
+        let mut state = LiveViewerState::default();
+        state
+            .chunks
+            .set_vec(vec![chunk("one"), chunk("two"), chunk("three")]);
+
+        state.select_all();
+
+        assert_eq!(state.selected_text().as_deref(), Some("one\ntwo\nthree"));
+    }
+
+    #[test]
+    fn a_press_with_no_drag_selects_nothing_to_copy() {
+        let mut state = LiveViewerState::default();
+        state.chunks.set_vec(vec![chunk("one")]);
+
+        state.select_at(0, 2, false);
+
+        assert!(state.selection.expect("a point").is_empty());
+        assert_eq!(state.selected_text(), None);
+    }
+
+    /// A record can be a whole stack trace, and the row arithmetic a drag uses
+    /// is only true if every row is one line.
+    #[test]
+    fn a_multiline_record_becomes_one_row_for_each_of_its_lines() {
+        let mut chunks = Vec::new();
+        push_record_chunks(
+            &mut chunks,
+            "java.lang.Exception: boom\n\tat Foo.bar(Foo.java:1)\n\tat Foo.baz(Foo.java:2)",
+            LogLevel::Error,
+            32 * 1024,
+        );
+
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[1].text, "\tat Foo.bar(Foo.java:1)");
+        assert!(
+            chunks.iter().all(|chunk| !chunk.text.contains('\n')),
+            "a row holding two lines would be two rows tall and break the arithmetic"
+        );
+    }
+
+    /// A log can hold a line with no newline in it at all, which is what the
+    /// byte cap exists for.
+    #[test]
+    fn one_enormous_line_is_still_split_into_bounded_rows() {
+        let mut chunks = Vec::new();
+        push_record_chunks(&mut chunks, &"x".repeat(2_500), LogLevel::Info, 1_000);
+
+        assert_eq!(chunks.len(), 3);
+        assert!(chunks.iter().all(|chunk| chunk.text.len() <= 1_000));
+        assert_eq!(
+            chunks.iter().map(|chunk| chunk.text.len()).sum::<usize>(),
+            2_500,
+            "splitting a line must not lose any of it"
+        );
+    }
+
+    fn chunk(text: &str) -> LogChunk {
+        LogChunk {
+            text: text.into(),
+            level: "info".into(),
+        }
+    }
+
+    /// A plain document keeps the native selection; the console cannot.
+    ///
+    /// A text item's selection is confined to the element it belongs to, so on
+    /// a console built from one element per line it can never cross a line.
+    /// The console therefore drives the selection itself, which is what the
+    /// per-row pointer area and the offsets applied to each row are for. A
+    /// crash report is one element and keeps the native behavior.
+    #[test]
+    fn a_document_selects_natively_and_the_console_selects_across_rows() {
         let source = include_str!("ui.rs");
         assert!(source.contains("accessible-read-only: true"));
         assert!(source.contains("read-only: true"));
         assert!(source.contains("selectable-input.copy()"));
         assert!(source.contains("selectable-input.select-all()"));
-        assert!(source.contains("component LiveLogViewer inherits Rectangle"));
-        assert!(source.contains("chunk-input.copy()"));
-        assert!(source.contains("chunk-input.select-all()"));
-        assert!(source.contains("root.copy-live-log()"));
         assert!(source.contains(
             "SelectableText { text: root.diagnostic-content; font-size: root.technical-text-size * 1px; }"
         ));
+
+        assert!(source.contains("component LiveLogViewer inherits Rectangle"));
+        assert!(source.contains("root.copy-live-log()"));
+        // The row's own pointer area, declared after the text item so it takes
+        // the press before a single-element selection can begin.
+        assert!(source.contains("select := TouchArea"));
+        assert!(
+            !source.contains("chunk-input.copy()") && !source.contains("chunk-input.select-all()"),
+            "a per-row copy would silently copy one line of a selection that spans many"
+        );
+        // The selection is applied to every row, including one built later by
+        // the virtualized list.
+        assert!(source.contains("chunk-input.set-selection-offsets("));
+        assert!(source.contains("init => { self.apply-selection(); }"));
+        // Colors are per level and untouched by any of it.
+        assert!(source.contains(r#"chunk.level == "error" || chunk.level == "fatal""#));
     }
 
     #[test]

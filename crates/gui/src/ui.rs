@@ -564,14 +564,40 @@ slint::slint! {
         in property <bool> fatal-enabled;
         in property <bool> other-enabled;
         in property <int> revision;
+        // The selection, in reading order, as byte offsets into each end's own
+        // row. -1 means nothing is selected. Offsets rather than columns
+        // because that is what a text item takes, and a column is only a byte
+        // offset while the line stays ASCII.
+        in property <int> selection-start-row: -1;
+        in property <int> selection-start-offset;
+        in property <int> selection-end-row: -1;
+        in property <int> selection-end-offset;
+        in property <bool> has-selection;
+        in property <int> selection-revision;
         callback set-level(string, bool);
         callback search(string);
         callback copy();
+        callback copy-selection();
+        callback select-at(int, int, bool);
+        callback select-all();
         callback follow-changed(bool);
+        // Ten characters wide divided by ten. Exact in a fixed-width family,
+        // and the reason the monospace family has to resolve before a column
+        // can be worked out from a pointer position.
+        private property <length> advance: probe.preferred-width / 10;
+        // Every row is one physical line, so they are all this tall, which is
+        // what lets the row under the pointer be counted rather than searched
+        // for.
+        private property <length> row-height: probe.preferred-height + 8px;
         border-radius: 8px;
         border-width: 1px;
         border-color: Theme.border;
         background: rgb(11, 14, 16);
+
+        // Measured, never drawn. A hidden text still reports the size it would
+        // take, which is the only way to learn a font's advance, and a
+        // fixed-width family makes that one number true of every character.
+        probe := Text { visible: false; width: 0px; height: 0px; text: "0000000000"; font-family: Theme.mono-family; font-size: root.font-size; }
 
         VerticalLayout {
             spacing: 0px;
@@ -600,6 +626,7 @@ slint::slint! {
                     AppButton { text: GuiI18n.text("gui-find"); min-width: 62px; clicked => { root.search(root.query); } }
                     FilterChip { text: GuiI18n.text("gui-wrap-lines"); accessible-name: GuiI18n.text("gui-wrap-lines"); selected: root.wrap-lines; clicked => { root.wrap-lines = !root.wrap-lines; } }
                     FilterChip { text: root.follow ? GuiI18n.text("gui-following") : GuiI18n.text("gui-jump-latest"); accessible-name: root.follow ? GuiI18n.text("gui-pause-following") : GuiI18n.text("gui-jump-latest"); selected: root.follow; clicked => { root.follow = !root.follow; root.follow-changed(root.follow); } }
+                    AppButton { text: GuiI18n.text("gui-copy-selection"); min-width: 104px; enabled: root.has-selection; clicked => { root.copy-selection(); } }
                     AppButton { text: GuiI18n.text("gui-copy-retained"); min-width: 104px; enabled: root.has-content; clicked => { root.copy(); } }
                     Rectangle { horizontal-stretch: 1; }
                     if root.pending-lines > 0 : BodyText { text: GuiI18n.count("gui-new-log-lines", root.pending-lines); color: Theme.accent; font-size: Theme.caption-size; }
@@ -617,6 +644,19 @@ slint::slint! {
             }
             if root.chunks.length == 0 : Rectangle { background: rgb(11, 14, 16); VerticalLayout { alignment: center; spacing: 6px; Text { text: GuiI18n.text("gui-no-log-output"); color: Theme.text; font-size: Theme.heading-size; horizontal-alignment: center; } BodyText { text: GuiI18n.text("gui-no-log-output-detail"); horizontal-alignment: center; } } }
             if root.chunks.length > 0 : Rectangle {
+              keys := FocusScope {
+                key-pressed(event) => {
+                    if event.modifiers.control && event.text == "c" {
+                        root.copy-selection();
+                        return accept;
+                    }
+                    if event.modifiers.control && event.text == "a" {
+                        root.select-all();
+                        return accept;
+                    }
+                    return reject;
+                }
+              }
               output := ListView {
                 viewport-width: root.wrap-lines ? self.visible-width : max(self.visible-width, root.content-columns * root.font-size * 0.62 + 24px);
                 private property <int> observed-revision: root.revision;
@@ -625,18 +665,40 @@ slint::slint! {
                         self.viewport-y = min(0px, self.visible-height - self.viewport-height);
                     }
                 }
-                for chunk in root.chunks : Rectangle {
+                for chunk[row] in root.chunks : Rectangle {
                     width: output.viewport-width;
-                    height: chunk-input.preferred-height + 8px;
+                    height: root.row-height;
                     background: transparent;
-                    forward-focus: chunk-input;
                     accessible-role: text-input;
                     accessible-read-only: true;
                     accessible-value: chunk.text;
+                    // The whole line when this row is inside the selection,
+                    // and the part on the right side of the boundary when it
+                    // is the first of it. An offset past the end of the text
+                    // is clamped by the text item, so one very large number
+                    // stands for "to the end of this line".
+                    private property <int> selection-from: row == root.selection-start-row ? root.selection-start-offset : 0;
+                    private property <int> selection-to: row == root.selection-end-row ? root.selection-end-offset : 2147483647;
+                    private property <bool> selected: root.selection-start-row >= 0 && row >= root.selection-start-row && row <= root.selection-end-row;
+                    // A selection is applied rather than bound, because a text
+                    // item takes it as a call. Applied on init as well as on
+                    // change, because the list is virtualized: a row scrolled
+                    // into view is built after the selection was made and would
+                    // otherwise come back empty-handed.
+                    function apply-selection() {
+                        if self.selected {
+                            chunk-input.set-selection-offsets(self.selection-from, self.selection-to);
+                        } else {
+                            chunk-input.set-selection-offsets(0, 0);
+                        }
+                    }
+                    private property <int> observed-selection: root.selection-revision;
+                    changed observed-selection => { self.apply-selection(); }
+                    init => { self.apply-selection(); }
                     ContextMenuArea {
                         Menu {
-                            MenuItem { title: GuiI18n.text("gui-copy"); enabled: chunk.text != ""; activated => { chunk-input.copy(); } }
-                            MenuItem { title: GuiI18n.text("gui-select-all"); enabled: chunk.text != ""; activated => { chunk-input.select-all(); } }
+                            MenuItem { title: GuiI18n.text("gui-copy-selection"); enabled: root.has-selection; activated => { root.copy-selection(); } }
+                            MenuItem { title: GuiI18n.text("gui-select-all"); enabled: root.chunks.length > 0; activated => { root.select-all(); } }
                         }
                         chunk-input := TextInput {
                             x: 10px; y: 4px;
@@ -652,6 +714,54 @@ slint::slint! {
                             font-family: Theme.mono-family;
                             font-size: root.font-size;
                             accessible-label: GuiI18n.text("gui-log-output-block");
+                        }
+                    }
+                    // Declared last, so it takes the pointer before the text
+                    // item can start a selection of its own. A text item's
+                    // selection cannot leave the element it belongs to, which
+                    // is the whole reason a drag never used to reach the next
+                    // line.
+                    //
+                    // With every row one line of the same height, the row under
+                    // the pointer is this row plus a count of row heights. No
+                    // geometry is queried and no absolute position is needed,
+                    // which is what keeps this correct inside a virtualized
+                    // list.
+                    //
+                    // Wrapped lines are the documented exception: they are not
+                    // uniform in height, so a drag then selects within its own
+                    // row. Shift-clicking still reaches across rows, because
+                    // that lands on a real row's own area and needs no
+                    // arithmetic.
+                    select := TouchArea {
+                        mouse-cursor: text;
+                        pointer-event(event) => {
+                            if event.kind == PointerEventKind.down {
+                                keys.focus();
+                                root.select-at(row, self.column-at(self.mouse-x), event.modifiers.shift);
+                            }
+                        }
+                        moved => {
+                            if self.pressed {
+                                root.select-at(self.row-at(self.mouse-y), self.column-at(self.mouse-x), true);
+                                // Dragging past an edge keeps going. Stepped by
+                                // one row per movement rather than animated, so
+                                // the selection and the view stay in step.
+                                if self.absolute-position.y + self.mouse-y < output.absolute-position.y {
+                                    output.viewport-y = min(0px, output.viewport-y + root.row-height);
+                                } else if self.absolute-position.y + self.mouse-y > output.absolute-position.y + output.visible-height {
+                                    output.viewport-y = max(min(0px, output.visible-height - output.viewport-height), output.viewport-y - root.row-height);
+                                }
+                            }
+                        }
+                        function column-at(x: length) -> int {
+                            return Math.max(0, Math.floor((x - 10px) / root.advance));
+                        }
+                        function row-at(y: length) -> int {
+                            if root.wrap-lines {
+                                return row;
+                            }
+                            return Math.clamp(row + Math.floor(y / root.row-height), 0, root.chunks.length - 1);
                         }
                     }
                 }
@@ -1894,6 +2004,14 @@ slint::slint! {
         in-out property <int> log-pending-lines: 0;
         in-out property <int> log-content-columns: 80;
         in-out property <int> log-revision: 0;
+        // What the pointer has selected across the console's rows, in reading
+        // order, as byte offsets into each end's own row. -1 is no selection.
+        in-out property <int> log-selection-start-row: -1;
+        in-out property <int> log-selection-start-offset;
+        in-out property <int> log-selection-end-row: -1;
+        in-out property <int> log-selection-end-offset;
+        in-out property <bool> log-has-selection;
+        in-out property <int> log-selection-revision: 0;
         in-out property <bool> log-trace-enabled: true;
         in-out property <bool> log-debug-enabled: true;
         in-out property <bool> log-info-enabled: true;
@@ -2204,6 +2322,11 @@ slint::slint! {
         callback close-live-log();
         callback copy-live-log();
         callback set-log-level(string, bool);
+        // Moves one end of the console's selection to a character column on a
+        // row, extending from the existing anchor when asked.
+        callback select-log-at(int, int, bool);
+        callback copy-log-selection();
+        callback select-all-log();
         callback search-live-log(string);
         callback live-log-follow-changed(bool);
         callback load-server-workspace(string);
@@ -2528,8 +2651,8 @@ slint::slint! {
                                 }
                                 // The log being written to, followed as it grows.
                                 if root.selected-diagnostic-kind != "crash-report" && !root.log-shows-files : LiveLogViewer {
-                                    chunks: root.log-chunks; has-content: root.log-has-content; status: root.log-status; history-truncated: root.log-history-truncated; pending-lines: root.log-pending-lines; content-columns: root.log-content-columns; font-size: root.technical-text-size * 1px; query <=> root.log-query; wrap-lines <=> root.log-wrap-lines; follow <=> root.log-follow; trace-enabled: root.log-trace-enabled; debug-enabled: root.log-debug-enabled; info-enabled: root.log-info-enabled; warn-enabled: root.log-warn-enabled; error-enabled: root.log-error-enabled; fatal-enabled: root.log-fatal-enabled; other-enabled: root.log-other-enabled; revision: root.log-revision;
-                                    set-level(level, enabled) => { root.set-log-level(level, enabled); } search(query) => { root.search-live-log(query); } copy => { root.copy-live-log(); } follow-changed(follow) => { root.live-log-follow-changed(follow); }
+                                    chunks: root.log-chunks; has-content: root.log-has-content; status: root.log-status; history-truncated: root.log-history-truncated; pending-lines: root.log-pending-lines; content-columns: root.log-content-columns; font-size: root.technical-text-size * 1px; query <=> root.log-query; wrap-lines <=> root.log-wrap-lines; follow <=> root.log-follow; trace-enabled: root.log-trace-enabled; debug-enabled: root.log-debug-enabled; info-enabled: root.log-info-enabled; warn-enabled: root.log-warn-enabled; error-enabled: root.log-error-enabled; fatal-enabled: root.log-fatal-enabled; other-enabled: root.log-other-enabled; revision: root.log-revision; selection-start-row: root.log-selection-start-row; selection-start-offset: root.log-selection-start-offset; selection-end-row: root.log-selection-end-row; selection-end-offset: root.log-selection-end-offset; has-selection: root.log-has-selection; selection-revision: root.log-selection-revision;
+                                    set-level(level, enabled) => { root.set-log-level(level, enabled); } search(query) => { root.search-live-log(query); } copy => { root.copy-live-log(); } copy-selection => { root.copy-log-selection(); } select-at(row, column, extend) => { root.select-log-at(row, column, extend); } select-all => { root.select-all-log(); } follow-changed(follow) => { root.live-log-follow-changed(follow); }
                                 }
                                 // A saved log, read through the same view: a
                                 // finished log has the same levels as a live
@@ -2538,8 +2661,8 @@ slint::slint! {
                                     DiagnosticFileList { items: root.diagnostics; selected: root.selected-diagnostic-name; opened(name) => { root.selected-diagnostic-name = name; root.open-log-file("client", root.selected-instance-id, name); } }
                                     if root.selected-diagnostic-name == "" : Rectangle { horizontal-stretch: 1; background: rgb(11, 14, 16); border-radius: 8px; border-width: 1px; border-color: Theme.border; EmptyState { title: GuiI18n.text("gui-no-file-open"); message: GuiI18n.text("gui-no-file-open-detail"); } }
                                     if root.selected-diagnostic-name != "" : LiveLogViewer {
-                                    chunks: root.log-chunks; has-content: root.log-has-content; status: root.log-status; history-truncated: root.log-history-truncated; pending-lines: root.log-pending-lines; content-columns: root.log-content-columns; font-size: root.technical-text-size * 1px; query <=> root.log-query; wrap-lines <=> root.log-wrap-lines; follow <=> root.log-follow; trace-enabled: root.log-trace-enabled; debug-enabled: root.log-debug-enabled; info-enabled: root.log-info-enabled; warn-enabled: root.log-warn-enabled; error-enabled: root.log-error-enabled; fatal-enabled: root.log-fatal-enabled; other-enabled: root.log-other-enabled; revision: root.log-revision;
-                                    set-level(level, enabled) => { root.set-log-level(level, enabled); } search(query) => { root.search-live-log(query); } copy => { root.copy-live-log(); } follow-changed(follow) => { root.live-log-follow-changed(follow); }
+                                    chunks: root.log-chunks; has-content: root.log-has-content; status: root.log-status; history-truncated: root.log-history-truncated; pending-lines: root.log-pending-lines; content-columns: root.log-content-columns; font-size: root.technical-text-size * 1px; query <=> root.log-query; wrap-lines <=> root.log-wrap-lines; follow <=> root.log-follow; trace-enabled: root.log-trace-enabled; debug-enabled: root.log-debug-enabled; info-enabled: root.log-info-enabled; warn-enabled: root.log-warn-enabled; error-enabled: root.log-error-enabled; fatal-enabled: root.log-fatal-enabled; other-enabled: root.log-other-enabled; revision: root.log-revision; selection-start-row: root.log-selection-start-row; selection-start-offset: root.log-selection-start-offset; selection-end-row: root.log-selection-end-row; selection-end-offset: root.log-selection-end-offset; has-selection: root.log-has-selection; selection-revision: root.log-selection-revision;
+                                    set-level(level, enabled) => { root.set-log-level(level, enabled); } search(query) => { root.search-live-log(query); } copy => { root.copy-live-log(); } copy-selection => { root.copy-log-selection(); } select-at(row, column, extend) => { root.select-log-at(row, column, extend); } select-all => { root.select-all-log(); } follow-changed(follow) => { root.live-log-follow-changed(follow); }
                                 }
                                 }
                                 // A crash report stays a plain document. It is
@@ -2624,8 +2747,8 @@ slint::slint! {
                             if root.workspace-tab == "Console" : VerticalLayout { spacing: 10px;
                                 HorizontalLayout { BodyText { text: GuiI18n.value("gui-bounded-output", root.servers[root.selected-server-index].state); color: root.servers[root.selected-server-index].can-send-command ? Theme.success : Theme.text-secondary; } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-restart"); enabled: root.servers[root.selected-server-index].can-restart; clicked => { root.server-restart(root.selected-server-id); } } AppButton { text: GuiI18n.text("gui-stop"); enabled: root.servers[root.selected-server-index].can-stop; clicked => { root.server-stop(root.selected-server-id); } } AppButton { text: GuiI18n.text("gui-kill"); tone: "danger"; enabled: root.servers[root.selected-server-index].can-kill; clicked => { root.modal = "kill"; } } }
                                 LiveLogViewer {
-                                    chunks: root.log-chunks; has-content: root.log-has-content; status: root.log-status; history-truncated: root.log-history-truncated; pending-lines: root.log-pending-lines; content-columns: root.log-content-columns; font-size: root.technical-text-size * 1px; query <=> root.log-query; wrap-lines <=> root.log-wrap-lines; follow <=> root.log-follow; trace-enabled: root.log-trace-enabled; debug-enabled: root.log-debug-enabled; info-enabled: root.log-info-enabled; warn-enabled: root.log-warn-enabled; error-enabled: root.log-error-enabled; fatal-enabled: root.log-fatal-enabled; other-enabled: root.log-other-enabled; revision: root.log-revision;
-                                    set-level(level, enabled) => { root.set-log-level(level, enabled); } search(query) => { root.search-live-log(query); } copy => { root.copy-live-log(); } follow-changed(follow) => { root.live-log-follow-changed(follow); }
+                                    chunks: root.log-chunks; has-content: root.log-has-content; status: root.log-status; history-truncated: root.log-history-truncated; pending-lines: root.log-pending-lines; content-columns: root.log-content-columns; font-size: root.technical-text-size * 1px; query <=> root.log-query; wrap-lines <=> root.log-wrap-lines; follow <=> root.log-follow; trace-enabled: root.log-trace-enabled; debug-enabled: root.log-debug-enabled; info-enabled: root.log-info-enabled; warn-enabled: root.log-warn-enabled; error-enabled: root.log-error-enabled; fatal-enabled: root.log-fatal-enabled; other-enabled: root.log-other-enabled; revision: root.log-revision; selection-start-row: root.log-selection-start-row; selection-start-offset: root.log-selection-start-offset; selection-end-row: root.log-selection-end-row; selection-end-offset: root.log-selection-end-offset; has-selection: root.log-has-selection; selection-revision: root.log-selection-revision;
+                                    set-level(level, enabled) => { root.set-log-level(level, enabled); } search(query) => { root.search-live-log(query); } copy => { root.copy-live-log(); } copy-selection => { root.copy-log-selection(); } select-at(row, column, extend) => { root.select-log-at(row, column, extend); } select-all => { root.select-all-log(); } follow-changed(follow) => { root.live-log-follow-changed(follow); }
                                 }
                                 HorizontalLayout { TextField { text <=> root.console-command; placeholder: root.servers[root.selected-server-index].can-send-command ? GuiI18n.text("gui-enter-server-command") : GuiI18n.text("gui-start-server-command"); enabled: root.servers[root.selected-server-index].can-send-command; horizontal-stretch: 1; accepted => { root.server-console(root.selected-server-id, root.console-command); root.console-command = ""; } } AppButton { text: GuiI18n.text("gui-send"); tone: "primary"; enabled: root.servers[root.selected-server-index].can-send-command && root.console-command != ""; clicked => { root.server-console(root.selected-server-id, root.console-command); root.console-command = ""; } } }
                             }
@@ -2639,8 +2762,8 @@ slint::slint! {
                                 }
                                 // The log being written to, followed as it grows.
                                 if root.selected-diagnostic-kind != "crash-report" && !root.log-shows-files : LiveLogViewer {
-                                    chunks: root.log-chunks; has-content: root.log-has-content; status: root.log-status; history-truncated: root.log-history-truncated; pending-lines: root.log-pending-lines; content-columns: root.log-content-columns; font-size: root.technical-text-size * 1px; query <=> root.log-query; wrap-lines <=> root.log-wrap-lines; follow <=> root.log-follow; trace-enabled: root.log-trace-enabled; debug-enabled: root.log-debug-enabled; info-enabled: root.log-info-enabled; warn-enabled: root.log-warn-enabled; error-enabled: root.log-error-enabled; fatal-enabled: root.log-fatal-enabled; other-enabled: root.log-other-enabled; revision: root.log-revision;
-                                    set-level(level, enabled) => { root.set-log-level(level, enabled); } search(query) => { root.search-live-log(query); } copy => { root.copy-live-log(); } follow-changed(follow) => { root.live-log-follow-changed(follow); }
+                                    chunks: root.log-chunks; has-content: root.log-has-content; status: root.log-status; history-truncated: root.log-history-truncated; pending-lines: root.log-pending-lines; content-columns: root.log-content-columns; font-size: root.technical-text-size * 1px; query <=> root.log-query; wrap-lines <=> root.log-wrap-lines; follow <=> root.log-follow; trace-enabled: root.log-trace-enabled; debug-enabled: root.log-debug-enabled; info-enabled: root.log-info-enabled; warn-enabled: root.log-warn-enabled; error-enabled: root.log-error-enabled; fatal-enabled: root.log-fatal-enabled; other-enabled: root.log-other-enabled; revision: root.log-revision; selection-start-row: root.log-selection-start-row; selection-start-offset: root.log-selection-start-offset; selection-end-row: root.log-selection-end-row; selection-end-offset: root.log-selection-end-offset; has-selection: root.log-has-selection; selection-revision: root.log-selection-revision;
+                                    set-level(level, enabled) => { root.set-log-level(level, enabled); } search(query) => { root.search-live-log(query); } copy => { root.copy-live-log(); } copy-selection => { root.copy-log-selection(); } select-at(row, column, extend) => { root.select-log-at(row, column, extend); } select-all => { root.select-all-log(); } follow-changed(follow) => { root.live-log-follow-changed(follow); }
                                 }
                                 // A saved log, read through the same view: a
                                 // finished log has the same levels as a live
@@ -2649,8 +2772,8 @@ slint::slint! {
                                     DiagnosticFileList { items: root.diagnostics; selected: root.selected-diagnostic-name; opened(name) => { root.selected-diagnostic-name = name; root.open-log-file("server", root.selected-server-id, name); } }
                                     if root.selected-diagnostic-name == "" : Rectangle { horizontal-stretch: 1; background: rgb(11, 14, 16); border-radius: 8px; border-width: 1px; border-color: Theme.border; EmptyState { title: GuiI18n.text("gui-no-file-open"); message: GuiI18n.text("gui-no-file-open-detail"); } }
                                     if root.selected-diagnostic-name != "" : LiveLogViewer {
-                                    chunks: root.log-chunks; has-content: root.log-has-content; status: root.log-status; history-truncated: root.log-history-truncated; pending-lines: root.log-pending-lines; content-columns: root.log-content-columns; font-size: root.technical-text-size * 1px; query <=> root.log-query; wrap-lines <=> root.log-wrap-lines; follow <=> root.log-follow; trace-enabled: root.log-trace-enabled; debug-enabled: root.log-debug-enabled; info-enabled: root.log-info-enabled; warn-enabled: root.log-warn-enabled; error-enabled: root.log-error-enabled; fatal-enabled: root.log-fatal-enabled; other-enabled: root.log-other-enabled; revision: root.log-revision;
-                                    set-level(level, enabled) => { root.set-log-level(level, enabled); } search(query) => { root.search-live-log(query); } copy => { root.copy-live-log(); } follow-changed(follow) => { root.live-log-follow-changed(follow); }
+                                    chunks: root.log-chunks; has-content: root.log-has-content; status: root.log-status; history-truncated: root.log-history-truncated; pending-lines: root.log-pending-lines; content-columns: root.log-content-columns; font-size: root.technical-text-size * 1px; query <=> root.log-query; wrap-lines <=> root.log-wrap-lines; follow <=> root.log-follow; trace-enabled: root.log-trace-enabled; debug-enabled: root.log-debug-enabled; info-enabled: root.log-info-enabled; warn-enabled: root.log-warn-enabled; error-enabled: root.log-error-enabled; fatal-enabled: root.log-fatal-enabled; other-enabled: root.log-other-enabled; revision: root.log-revision; selection-start-row: root.log-selection-start-row; selection-start-offset: root.log-selection-start-offset; selection-end-row: root.log-selection-end-row; selection-end-offset: root.log-selection-end-offset; has-selection: root.log-has-selection; selection-revision: root.log-selection-revision;
+                                    set-level(level, enabled) => { root.set-log-level(level, enabled); } search(query) => { root.search-live-log(query); } copy => { root.copy-live-log(); } copy-selection => { root.copy-log-selection(); } select-at(row, column, extend) => { root.select-log-at(row, column, extend); } select-all => { root.select-all-log(); } follow-changed(follow) => { root.live-log-follow-changed(follow); }
                                 }
                                 }
                                 // A crash report stays a plain document. It is

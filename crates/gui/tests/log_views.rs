@@ -14,8 +14,8 @@ use std::rc::Rc;
 use ephervex_gui::ui::{AppWindow, DiagnosticRow, GuiI18n, LogChunk, ServerRow};
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use i_slint_backend_testing::{ElementHandle, TestingBackend, TestingBackendOptions};
-use slint::platform::PointerEventButton;
-use slint::{ComponentHandle, ModelRc, PhysicalSize, SharedString, VecModel};
+use slint::platform::{PointerEventButton, WindowEvent};
+use slint::{ComponentHandle, LogicalPosition, ModelRc, PhysicalSize, SharedString, VecModel};
 
 #[test]
 fn a_log_scrolled_up_offers_a_way_back_to_the_bottom() {
@@ -127,6 +127,125 @@ fn a_saved_log_is_filterable_like_the_live_one() {
         .mock_single_click(PointerEventButton::Left);
 
     assert_eq!(levels.borrow().as_slice(), ["error"]);
+}
+
+/// A drag that leaves the row it began on has to reach the rows below it.
+///
+/// This is the arithmetic that replaces a text item's own selection, which can
+/// never cross the element it belongs to: with every row one line of the same
+/// height, the row under the pointer is the pressed row plus a count of row
+/// heights. Only a rendered window can say whether that holds.
+#[test]
+fn a_drag_from_one_console_line_reaches_the_lines_below_it() {
+    let ui = window();
+    let points: Rc<RefCell<Vec<(i32, i32, bool)>>> = Rc::default();
+    let record = Rc::clone(&points);
+    ui.on_select_log_at(move |row, column, extend| {
+        record.borrow_mut().push((row, column, extend));
+    });
+
+    server_console(&ui);
+    settle(&ui);
+
+    let rows = console_rows(&ui);
+    assert!(
+        rows.len() > 4,
+        "the console has to have rows to drag across"
+    );
+    drag(&ui, &rows[1], &rows[4]);
+
+    let points = points.borrow();
+    let (first_row, _, extend) = *points.first().expect("the press selects a point");
+    assert_eq!(first_row, 1, "the press lands on the row it was made on");
+    assert!(!extend, "a press without shift starts a new selection");
+
+    let (last_row, _, extend) = *points.last().expect("the drag moves the other end");
+    assert_eq!(
+        last_row, 4,
+        "a drag three rows down must reach three rows down"
+    );
+    assert!(extend, "a drag moves one end and leaves the anchor alone");
+}
+
+/// The press has to reach the row's own area rather than the text item, which
+/// would otherwise begin a selection that can never leave one line.
+#[test]
+fn pressing_a_console_line_selects_at_the_column_under_the_pointer() {
+    let ui = window();
+    let points: Rc<RefCell<Vec<(i32, i32, bool)>>> = Rc::default();
+    let record = Rc::clone(&points);
+    ui.on_select_log_at(move |row, column, extend| {
+        record.borrow_mut().push((row, column, extend));
+    });
+
+    server_console(&ui);
+    settle(&ui);
+
+    let rows = console_rows(&ui);
+    let row = &rows[2];
+    // Well inside the line, so the column is a real one rather than clamped.
+    let position = LogicalPosition::new(
+        row.absolute_position().x + 120.0,
+        row.absolute_position().y + row.size().height / 2.0,
+    );
+    press(&ui, position);
+    release(&ui, position);
+
+    let (index, column, _) = *points.borrow().first().expect("the press is reported");
+    assert_eq!(index, 2);
+    assert!(
+        column > 0,
+        "a press inside a line must name a column, not the start of it"
+    );
+}
+
+/// The console's rows, in order.
+fn console_rows(ui: &AppWindow) -> Vec<ElementHandle> {
+    ElementHandle::find_by_accessible_label(ui, &lookup("gui-log-output-block")).collect()
+}
+
+fn drag(ui: &AppWindow, from: &ElementHandle, to: &ElementHandle) {
+    press(ui, center(from));
+    ui.window().dispatch_event(WindowEvent::PointerMoved {
+        position: center(to),
+    });
+    release(ui, center(to));
+}
+
+fn center(element: &ElementHandle) -> LogicalPosition {
+    LogicalPosition::new(
+        element.absolute_position().x + element.size().width / 2.0,
+        element.absolute_position().y + element.size().height / 2.0,
+    )
+}
+
+fn press(ui: &AppWindow, position: LogicalPosition) {
+    ui.window()
+        .dispatch_event(WindowEvent::PointerMoved { position });
+    ui.window().dispatch_event(WindowEvent::PointerPressed {
+        position,
+        button: PointerEventButton::Left,
+    });
+}
+
+fn release(ui: &AppWindow, position: LogicalPosition) {
+    ui.window().dispatch_event(WindowEvent::PointerReleased {
+        position,
+        button: PointerEventButton::Left,
+    });
+}
+
+/// The server workspace, on its Console tab, with output to select.
+fn server_console(ui: &AppWindow) {
+    ui.set_loading(false);
+    ui.set_page(1);
+    ui.set_workspace("server".into());
+    ui.set_workspace_tab("Console".into());
+    ui.set_servers(ModelRc::new(VecModel::from(vec![server()])));
+    ui.set_selected_server_index(0);
+    ui.set_selected_server_id("repro-server".into());
+    ui.set_log_chunks(chunks(40));
+    ui.set_log_has_content(true);
 }
 
 /// The server workspace, on its Logs tab.

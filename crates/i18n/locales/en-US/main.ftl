@@ -1405,6 +1405,7 @@ gui-following = Following
 gui-pause-following = Pause following new output
 gui-jump-latest = Jump to Latest
 gui-copy-retained = Copy Retained
+gui-copy-selection = Copy Selection
 gui-search-retained-logs = Search all retained logs...
 gui-new-log-lines = { $count ->
     [one] 1 new line
