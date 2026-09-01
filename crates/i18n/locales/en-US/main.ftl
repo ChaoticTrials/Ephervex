@@ -959,6 +959,29 @@ mod-installed-count = { $count ->
        *[other] { $count } installed mods
     }
 mod-install-completed = Installed { $name }.
+
+# What a crash report says about which mods to try without. "Confidence" is the
+# report's own directness: a mod it named outranks one it merely showed frames
+# from, which outranks one that was only inferred to be involved.
+crash-none = This server has no crash reports.
+crash-no-suspects = The crash report does not point at any mod.
+crash-client-code-on-server = A missing class means client-only code ran on a server.
+crash-reason-named = named as the mod that failed
+crash-reason-in-failing-frames = appears in the failing stack
+crash-reason-compat-trigger = { $mod } ran its compatibility code for this mod
+crash-not-in-mod-list = Not in this server's mods list, so it cannot be switched off here.
+gui-crash-title = This server failed to start.
+gui-crash-review-mods = Review mods
+gui-crash-disable-suggested = { $count ->
+        [one] Disable { $count } mod
+       *[other] Disable { $count } mods
+    }
+gui-crash-nothing-to-disable = The mods this crash points at are already switched off.
+gui-crash-disabled-count = { $count ->
+        [one] Disabled { $count } mod. Start the server again to see whether it gets further.
+       *[other] Disabled { $count } mods. Start the server again to see whether it gets further.
+    }
+
 mod-install-nothing-to-do = Everything requested is already installed at the requested version.
 
 # Shown next to an incompatible result rather than hiding it, so a user can see

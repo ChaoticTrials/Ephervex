@@ -122,6 +122,12 @@ slint::slint! {
         can-update: bool,
         can-remove: bool,
         restriction: string,
+        // Why the newest crash report points at this mod, already localized.
+        // Empty for a mod no crash implicates.
+        suspect-reason: string,
+        // "high", "medium", or "low". Stated evidence outranks inferred, and
+        // the row is weighted accordingly.
+        suspect-confidence: string,
     }
 
     export struct ModVersionRow {
@@ -881,7 +887,7 @@ slint::slint! {
         height: 86px;
         border-radius: 6px;
         border-width: 1px;
-        border-color: root.item.missing ? Theme.warning.with-alpha(0.6) : touch.has-hover && root.item.can-manage ? Theme.accent.with-alpha(0.7) : Theme.border;
+        border-color: root.item.missing ? Theme.warning.with-alpha(0.6) : root.item.suspect-confidence == "high" ? Theme.danger.with-alpha(0.7) : root.item.suspect-confidence != "" ? Theme.warning.with-alpha(0.6) : touch.has-hover && root.item.can-manage ? Theme.accent.with-alpha(0.7) : Theme.border;
         background: Theme.background;
         touch := TouchArea {
             enabled: root.item.can-manage;
@@ -917,8 +923,10 @@ slint::slint! {
                     overflow: elide;
                 }
                 Text {
-                    text: root.item.missing ? GuiI18n.text("gui-mod-file-missing") : !root.item.enabled ? GuiI18n.text("gui-mod-disabled") : root.item.compatibility != "" ? root.item.compatibility : root.item.file-name;
-                    color: root.item.missing ? Theme.warning : Theme.text-muted;
+                    // What the crash says outranks the descriptive line: a
+                    // reader looking at a crashed server is looking for this.
+                    text: root.item.suspect-reason != "" ? root.item.suspect-reason : root.item.missing ? GuiI18n.text("gui-mod-file-missing") : !root.item.enabled ? GuiI18n.text("gui-mod-disabled") : root.item.compatibility != "" ? root.item.compatibility : root.item.file-name;
+                    color: root.item.suspect-confidence == "high" ? Theme.danger : root.item.suspect-confidence != "" ? Theme.warning : root.item.missing ? Theme.warning : Theme.text-muted;
                     font-size: Theme.caption-size;
                     overflow: elide;
                 }
@@ -968,6 +976,72 @@ slint::slint! {
     // The badge says it in words rather than in color alone, and carries the
     // full sentence as its accessible label so a screen reader gets the
     // reason, not just the verdict.
+    // What the newest crash report says, above the list it points into.
+    //
+    // Two placements, one component: on a tab that is not the mods list it
+    // offers to open that list, and on the mods list itself it offers to act on
+    // it. The suggestion count is what decides whether acting is even possible;
+    // a report naming only mods that are already disabled offers nothing.
+    component CrashNotice inherits Rectangle {
+        in property <string> report;
+        in property <string> failure;
+        in property <bool> client-code-on-server;
+        in property <int> suggested;
+        // Whether this sits on the panel whose rows carry the suspect marks.
+        in property <bool> beside-the-mods;
+        callback review();
+        callback disable-suggested();
+        height: content.preferred-height;
+        border-radius: 6px;
+        border-width: 1px;
+        border-color: Theme.danger.with-alpha(0.6);
+        background: Theme.danger.with-alpha(0.08);
+        content := HorizontalLayout {
+            padding: 10px;
+            spacing: 10px;
+            VerticalLayout {
+                alignment: center;
+                spacing: 3px;
+                horizontal-stretch: 1;
+                Text {
+                    text: GuiI18n.text("gui-crash-title");
+                    color: Theme.danger;
+                    font-size: Theme.row-heading-size;
+                    font-weight: 600;
+                    overflow: elide;
+                }
+                // Exact, because the thrown type and its message are what a bug
+                // report has to quote.
+                BodyText {
+                    text: root.failure != "" ? root.failure : root.report;
+                    color: Theme.text-secondary;
+                    font-size: Theme.caption-size;
+                    wrap: word-wrap;
+                }
+                if root.client-code-on-server : BodyText {
+                    text: GuiI18n.text("crash-client-code-on-server");
+                    color: Theme.text-secondary;
+                    font-size: Theme.caption-size;
+                    wrap: word-wrap;
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                if !root.beside-the-mods : AppButton {
+                    text: GuiI18n.text("gui-crash-review-mods");
+                    tone: "primary";
+                    clicked => { root.review(); }
+                }
+                if root.beside-the-mods : AppButton {
+                    text: GuiI18n.count("gui-crash-disable-suggested", root.suggested);
+                    tone: "primary";
+                    enabled: root.suggested > 0;
+                    clicked => { root.disable-suggested(); }
+                }
+            }
+        }
+    }
+
     component CompatibilityBadge inherits Rectangle {
         in property <string> text;
         in property <string> kind;
@@ -1653,6 +1727,13 @@ slint::slint! {
         // had a client-only mod turned off must not look like the client did.
         in-out property <[ModRow]> server-mods;
         in-out property <string> server-mods-notice;
+        // -- what the selected host's newest crash report says. Empty report
+        // means it has never crashed, which is what clears a notice left by a
+        // previous selection.
+        in-out property <string> crash-report;
+        in-out property <string> crash-failure;
+        in-out property <bool> crash-client-code-on-server;
+        in-out property <int> crash-suggested;
         // -- managing one mod, which is what the mod modals act on.
         in-out property <string> mod-action-path;
         in-out property <string> mod-action-name;
@@ -2051,6 +2132,7 @@ slint::slint! {
         callback live-log-follow-changed(bool);
         callback load-server-workspace(string);
         callback load-server-mods(string);
+        callback disable-suggested-mods(string);
         callback save-server-properties(string, string, string, string, string, bool, bool, bool, bool, string, string, string);
         callback validate-server-properties(string, string, string, string);
         callback accept-eula();
@@ -2431,7 +2513,8 @@ slint::slint! {
                                 Rectangle { horizontal-stretch: 1; }
                             }
                             Divider { }
-                            if root.workspace-tab == "Overview" : ScrollView { VerticalLayout { alignment: start; width: min(parent.width, 980px); spacing: 12px; Heading { text: GuiI18n.text("gui-dedicated-server"); } BodyText { text: root.servers[root.selected-server-index].state-detail; } Rectangle { height: 160px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface; VerticalLayout { padding: 18px; spacing: 7px;
+                            if root.workspace-tab == "Overview" : ScrollView { VerticalLayout { alignment: start; width: min(parent.width, 980px); spacing: 12px; Heading { text: GuiI18n.text("gui-dedicated-server"); } BodyText { text: root.servers[root.selected-server-index].state-detail; }
+                                if root.crash-report != "" : CrashNotice { report: root.crash-report; failure: root.crash-failure; client-code-on-server: root.crash-client-code-on-server; suggested: root.crash-suggested; review => { root.close-live-log(); root.workspace-tab = "Mods"; root.load-server-mods(root.selected-server-id); } } Rectangle { height: 160px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface; VerticalLayout { padding: 18px; spacing: 7px;
                                 HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-exact-target"); } BodyText { text: GuiI18n.values("gui-target-summary", root.servers[root.selected-server-index].minecraft, root.servers[root.selected-server-index].loader); } }
                                 HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-runtime"); } BodyText { text: root.servers[root.selected-server-index].state + " | " + root.servers[root.selected-server-index].state-detail; } }
                                 HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-network"); } BodyText { text: root.servers[root.selected-server-index].address; } }
@@ -2452,6 +2535,7 @@ slint::slint! {
                             }
                             if root.workspace-tab == "Mods" : VerticalLayout { spacing: 10px;
                                 SectionTitle { title: GuiI18n.text("gui-server-mods"); detail: GuiI18n.text("gui-server-mods-detail"); }
+                                if root.crash-report != "" : CrashNotice { report: root.crash-report; failure: root.crash-failure; client-code-on-server: root.crash-client-code-on-server; suggested: root.crash-suggested; beside-the-mods: true; disable-suggested => { root.disable-suggested-mods(root.selected-server-id); } }
                                 if root.server-mods-notice != "" : BodyText { text: root.server-mods-notice; color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
                                 if root.server-mods.length == 0 : EmptyState { title: GuiI18n.text("gui-no-managed-mods"); message: GuiI18n.text("gui-no-server-mods-detail"); }
                                 if root.server-mods.length > 0 : ScrollView { viewport-width: self.width; VerticalLayout { spacing: 8px; for mod in root.server-mods : ModCard { item: mod; togglable: true; toggle(path, on) => { root.set-mod-enabled("server", root.selected-server-id, path, on); } } } }

@@ -22,24 +22,25 @@ use ephervex_core::{
     AccountStatus, AccountSummary, ApiSettings, App, ArgumentForm, Artifact, ArtifactCacheHealth,
     AssetIndexRef, AuthEvent, AuthObserver, BundledDocumentHealth, CancellationToken,
     CaptureHealth, CapturedLine, ClientFolder, ClientRecord, Compatibility, Config,
-    ConfigurationHealth, ControlResponse, CoreError, CreatedClient, CredentialBackendHealth,
-    CredentialStorage, DEFAULT_DIAGNOSTIC_BYTES, DEFAULT_SEARCH_LIMIT, DiagnosticEntry,
-    DiagnosticKind, DiagnosticRequest, DiagnosticScope, DiagnosticSearch, DirectoryState,
-    DuplicateClient, EULA_CONFIRMATION_PHRASE, Entitlements, EulaStatus, FileDisposition,
-    Freshness, ImportRequest, ImportedPack, IncompatibilityReason, InstallationHealth,
-    InstalledMods, JavaHealth, JavaPathChoice, JavaPlan, JavaPlanRequest, JavaRuntime, JavaTarget,
-    LaunchAndConnectEvent, LaunchAndConnectObserver, LaunchAndConnectOptions,
-    LaunchAndConnectOutcome, LaunchEvent, LaunchFeatures, LaunchObserver, LaunchOptions,
-    LaunchOutcome, LaunchState, LoginFlow, LoginOptions, LoginRequest, MAX_SEARCH_MATCHES,
-    MINECRAFT_EULA_REFERENCE, ManagedInstallation, ManagedMod, ManagedModSnapshot, ModHost,
-    ModInstallPlan, ModInstallRequest, ModPresence, ModProjectDetails, ModSearchQuery,
-    ModSearchResults, NetworkAccess, NewClient, NewServer, OperationReporter, OptionalSelection,
-    OutputLine, PackAnalysis, PackRecipe, PackSide, Paths, PlanWarning, PlannedMod,
-    PreferenceApplication, PreferenceId, PreferenceKey, ReconciliationReport, ReleaseListing,
-    RequirementBasis, RuntimeClassification, RuntimeInventory, SearchOptions, SecretString,
-    ServerCommitWarning, ServerCreateOptions, ServerEvent, ServerFolder, ServerNetworkSettings,
-    ServerObserver, ServerPersistenceHealth, ServerRecord, ServerWarning, Session, SideRequirement,
-    SkipReason, TextAnchor, TextView, UnknownServerFiles, VersionMetadata, VersionRecord,
+    ConfigurationHealth, ControlResponse, CoreError, CrashReview, CreatedClient,
+    CredentialBackendHealth, CredentialStorage, DEFAULT_DIAGNOSTIC_BYTES, DEFAULT_SEARCH_LIMIT,
+    DiagnosticEntry, DiagnosticKind, DiagnosticRequest, DiagnosticScope, DiagnosticSearch,
+    DirectoryState, DuplicateClient, EULA_CONFIRMATION_PHRASE, Entitlements, EulaStatus,
+    FileDisposition, Freshness, ImportRequest, ImportedPack, IncompatibilityReason,
+    InstallationHealth, InstalledMods, JavaHealth, JavaPathChoice, JavaPlan, JavaPlanRequest,
+    JavaRuntime, JavaTarget, LaunchAndConnectEvent, LaunchAndConnectObserver,
+    LaunchAndConnectOptions, LaunchAndConnectOutcome, LaunchEvent, LaunchFeatures, LaunchObserver,
+    LaunchOptions, LaunchOutcome, LaunchState, LoginFlow, LoginOptions, LoginRequest,
+    MAX_SEARCH_MATCHES, MINECRAFT_EULA_REFERENCE, ManagedInstallation, ManagedMod,
+    ManagedModSnapshot, ModHost, ModInstallPlan, ModInstallRequest, ModPresence, ModProjectDetails,
+    ModSearchQuery, ModSearchResults, NetworkAccess, NewClient, NewServer, OperationReporter,
+    OptionalSelection, OutputLine, PackAnalysis, PackRecipe, PackSide, Paths, PlanWarning,
+    PlannedMod, PreferenceApplication, PreferenceId, PreferenceKey, ReconciliationReport,
+    ReleaseListing, RequirementBasis, RuntimeClassification, RuntimeInventory, SearchOptions,
+    SecretString, ServerCommitWarning, ServerCreateOptions, ServerEvent, ServerFolder,
+    ServerNetworkSettings, ServerObserver, ServerPersistenceHealth, ServerRecord, ServerWarning,
+    Session, SideRequirement, SkipReason, SuspectConfidence, SuspectReason, TextAnchor, TextView,
+    UnknownServerFiles, VersionMetadata, VersionRecord,
 };
 use ephervex_i18n::Arg as MessageArg;
 use ephervex_model::{
@@ -782,6 +783,12 @@ enum ServerCommand {
     /// declared, including mods that only ever run on a client. Use
     /// `ephervex mod disable --server` to leave one out without removing it.
     Mods { id: ServerId },
+    /// Explain the newest crash and name the mods it points at.
+    ///
+    /// Reads the server's most recent crash report, and the tail of its log,
+    /// and lists the mods they attribute the failure to, most confident first.
+    /// Nothing is changed: use `ephervex mod disable --server` to act on it.
+    Crash { id: ServerId },
     /// Show persistence, installation, runtime, and capture status.
     Status { id: ServerId },
     /// Read or change `server.properties` through managed services.
@@ -1402,6 +1409,9 @@ async fn run_server_command(
         }
         ServerCommand::Mods { id } => {
             print_host_mods(&app.server_mod_snapshot(*id)?, json);
+        }
+        ServerCommand::Crash { id } => {
+            print_crash_review(app.crash_review(ModHost::Server(*id))?.as_ref(), json);
         }
         ServerCommand::Status { id } => print_server_status(app, *id, json)?,
         ServerCommand::Properties { command } => match command {
@@ -3210,6 +3220,81 @@ fn print_host_mods(snapshot: &ManagedModSnapshot, json: bool) {
             [("count", MessageArg::from(snapshot.len()))]
         )
     );
+}
+
+/// What a crash report says about which mods to try without.
+///
+/// Suspects are printed even when the host has no row for them, because a jar
+/// dropped into `mods/` by hand is still worth naming; the missing path is what
+/// says the mods list cannot switch it off.
+fn print_crash_review(review: Option<&CrashReview>, json: bool) {
+    let Some(review) = review else {
+        if json {
+            print_json(&serde_json::json!({ "crash": serde_json::Value::Null }));
+        } else {
+            println!("{}", ephervex_i18n::lookup("crash-none"));
+        }
+        return;
+    };
+
+    if json {
+        print_json(&serde_json::json!({
+            "report": review.report_name,
+            "reported_at": review.reported_at,
+            "failure": review.analysis.failure,
+            "missing_class": review.analysis.missing_class,
+            "client_code_on_server": review.analysis.client_code_on_server,
+            "suspects": review.mods.iter().map(|entry| serde_json::json!({
+                "mod_id": entry.suspect.mod_id,
+                "name": entry.suspect.label(),
+                "jar": entry.suspect.jar,
+                "path": entry.logical_path,
+                "presence": entry.presence.map(ModPresence::as_str),
+                "reason": entry.suspect.reason.as_str(),
+                "triggered_by": match &entry.suspect.reason {
+                    SuspectReason::CompatTrigger { triggered_by } => Some(triggered_by),
+                    _ => None,
+                },
+                "confidence": entry.suspect.confidence().as_str(),
+                "suggested": entry.is_actionable()
+                    && entry.suspect.confidence() > SuspectConfidence::Low,
+            })).collect::<Vec<_>>(),
+        }));
+        return;
+    }
+
+    println!("{}", review.report_name);
+    if let Some(failure) = &review.analysis.failure {
+        println!("  {failure}");
+    }
+    if review.analysis.client_code_on_server {
+        println!("  {}", ephervex_i18n::lookup("crash-client-code-on-server"));
+    }
+    if review.mods.is_empty() {
+        println!("{}", ephervex_i18n::lookup("crash-no-suspects"));
+        return;
+    }
+    for entry in &review.mods {
+        let reason = match &entry.suspect.reason {
+            SuspectReason::Named => ephervex_i18n::lookup("crash-reason-named"),
+            SuspectReason::InFailingFrames => {
+                ephervex_i18n::lookup("crash-reason-in-failing-frames")
+            }
+            SuspectReason::CompatTrigger { triggered_by } => ephervex_i18n::lookup_args(
+                "crash-reason-compat-trigger",
+                [("mod", MessageArg::from(triggered_by.as_str()))],
+            ),
+        };
+        println!(
+            "{}  {}  {reason}",
+            entry.suspect.confidence().as_str(),
+            entry.suspect.label()
+        );
+        match &entry.logical_path {
+            Some(path) => println!("    {}", path.display()),
+            None => println!("    {}", ephervex_i18n::lookup("crash-not-in-mod-list")),
+        }
+    }
 }
 
 fn print_managed_mods(mods: &[ManagedMod], json: bool) {

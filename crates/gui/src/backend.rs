@@ -14,15 +14,15 @@ use ephervex_core::ManagedMutationReport;
 use ephervex_core::live_diagnostics::TailedLine;
 use ephervex_core::{
     App, AuthEvent, AuthObserver, CancellationToken, ClientFolder, ClientModOutcome, ClientModPlan,
-    CoreError, CoreResult, DiagnosticKind, DiagnosticRequest, DiagnosticScope, EulaStatus,
-    ImportRequest, LaunchAndConnectObserver, LaunchAndConnectOptions, LaunchEvent, LaunchObserver,
-    LaunchOptions, LinkedModOutcome, LinkedModPlan, LinkedModRequest, LinkedTargetPlan,
-    LinkedTargetResult, LinkedTargetState, LoginOptions, ManagedModEntry, ManagedModSnapshot,
-    MetadataAvailability, ModHost, ModInstallPlan, ModMutability, ModMutation, ModMutationPlan,
-    ModSearchQuery, MutationRestriction, NewClient, NewServer, OperationReporter,
+    CoreError, CoreResult, CrashReview, DiagnosticKind, DiagnosticRequest, DiagnosticScope,
+    EulaStatus, ImportRequest, LaunchAndConnectObserver, LaunchAndConnectOptions, LaunchEvent,
+    LaunchObserver, LaunchOptions, LinkedModOutcome, LinkedModPlan, LinkedModRequest,
+    LinkedTargetPlan, LinkedTargetResult, LinkedTargetState, LoginOptions, ManagedModEntry,
+    ManagedModSnapshot, MetadataAvailability, ModHost, ModInstallPlan, ModMutability, ModMutation,
+    ModMutationPlan, ModSearchQuery, MutationRestriction, NewClient, NewServer, OperationReporter,
     OptionalSelection, PackAnalysis, Paths, PlannedOutcome, ProgressSink, ProviderFileIdentity,
     SearchOptions, ServerCreateOptions, ServerEvent, ServerFolder, ServerNetworkSettings,
-    ServerObserver, SideRequirement, WatchTarget,
+    ServerObserver, SideRequirement, SuspectReason, WatchTarget,
 };
 use ephervex_core::{
     ConfiguredPreferences, LanguageAvailability, LanguageEntry, MinecraftPreferencePreview,
@@ -227,6 +227,8 @@ pub enum Command {
     },
     LoadServerWorkspace(ServerId),
     LoadServerMods(ServerId),
+    /// Turn off every mod the newest crash report stated, in one step.
+    DisableSuggestedMods(ServerId),
     /// Turn one mod on or off in place, on either kind of host.
     SetModEnabled {
         host: ModHost,
@@ -538,6 +540,35 @@ pub struct ManagedModData {
     /// Why the mutating actions are unavailable, already localized. Empty when
     /// they are available.
     pub restriction: String,
+    /// Why the newest crash report points at this mod, already localized.
+    /// Empty when it does not.
+    pub suspect_reason: String,
+    /// `high`, `medium`, or `low`, so the row can weight what it says. Empty
+    /// when this mod is not a suspect.
+    pub suspect_confidence: String,
+}
+
+/// What a host's newest crash report says.
+///
+/// Sent on its own rather than with the mods, because the workspace banner has
+/// to be readable before anyone opens the Mods tab, and opening that tab is
+/// what asks for the list. Addressed by host for the same reason the mods list
+/// is: a late answer must not be drawn under another host's name.
+#[derive(Debug, Clone)]
+pub struct CrashNoticeData {
+    pub host: String,
+    /// `"client"` or `"server"`.
+    pub host_kind: String,
+    /// The crash report this was read from. Empty when the host has never
+    /// crashed, which is what clears a banner left by a previous selection.
+    pub report: String,
+    /// The failure the report stated, exact.
+    pub failure: String,
+    /// Whether a missing class proved that client-only code ran on a server.
+    pub client_code_on_server: bool,
+    /// How many mods a bulk "disable the suggested mods" would act on. Zero
+    /// when the report named nothing that is still enabled.
+    pub suggested: usize,
 }
 
 /// One release of a managed mod's project, as the version picker shows it.
@@ -848,6 +879,7 @@ pub enum Event {
         versions: Vec<String>,
     },
     ManagedMods(ManagedModsData),
+    CrashNotice(CrashNoticeData),
     ModVersions(ModVersionsData),
     ModRemovalPlan(ModRemovalPlanData),
     ModResults(ModResultsData),
@@ -1489,7 +1521,14 @@ fn run_worker(
                 // there leaves what is already shown standing.
                 match app.managed_mod_snapshot(instance) {
                     Ok(snapshot) => {
-                        let _ = events.send(Event::ManagedMods(managed_mods_data(&snapshot)));
+                        let host = ModHost::Instance(instance);
+                        let review = app.crash_review(host).ok().flatten();
+                        let _ = events
+                            .send(Event::CrashNotice(crash_notice_data(host, review.as_ref())));
+                        let _ = events.send(Event::ManagedMods(managed_mods_data(
+                            &snapshot,
+                            review.as_ref(),
+                        )));
                     }
                     Err(error) => {
                         send_error(&events, &error);
@@ -1639,7 +1678,12 @@ fn run_worker(
                         // artwork follow, so the new row does not sit there as a
                         // file name until the workspace is opened again.
                         if let Ok(snapshot) = app.managed_mod_snapshot(instance) {
-                            let _ = reports.send(Event::ManagedMods(managed_mods_data(&snapshot)));
+                            let review =
+                                app.crash_review(ModHost::Instance(instance)).ok().flatten();
+                            let _ = reports.send(Event::ManagedMods(managed_mods_data(
+                                &snapshot,
+                                review.as_ref(),
+                            )));
                         }
                         refresh_enriched_mods(app.paths().clone(), &reports, instance);
                         if outcome.targets.is_empty() {
@@ -1751,9 +1795,20 @@ fn run_worker(
                 );
                 send_server_workspace(&app, server, &events);
             }
-            Command::LoadServerWorkspace(server) => send_server_workspace(&app, server, &events),
+            Command::LoadServerWorkspace(server) => {
+                // The crash notice comes with the workspace rather than with
+                // the mods, so a server that failed to start says so on the tab
+                // the user lands on instead of only on the one they might open.
+                let host = ModHost::Server(server);
+                let review = app.crash_review(host).ok().flatten();
+                let _ = events.send(Event::CrashNotice(crash_notice_data(host, review.as_ref())));
+                send_server_workspace(&app, server, &events);
+            }
             Command::LoadServerMods(server) => {
                 send_host_mods(&app, ModHost::Server(server), &events);
+            }
+            Command::DisableSuggestedMods(server) => {
+                disable_suggested_mods(&app, server, &events);
             }
             Command::SetModEnabled {
                 host,
@@ -2480,11 +2535,64 @@ const fn origin(is_override: bool) -> SettingOrigin {
 fn send_host_mods(app: &App, host: ModHost, events: &Sender<Event>) {
     match app.host_mod_snapshot(host) {
         Ok(snapshot) => {
-            let _ = events.send(Event::ManagedMods(managed_mods_data(&snapshot)));
+            let review = app.crash_review(host).ok().flatten();
+            let _ = events.send(Event::CrashNotice(crash_notice_data(host, review.as_ref())));
+            let _ = events.send(Event::ManagedMods(managed_mods_data(
+                &snapshot,
+                review.as_ref(),
+            )));
             refresh_enriched_host_mods(app.paths().clone(), events, host);
         }
         Err(error) => send_error(events, &error),
     }
+}
+
+/// Turns off the mods the newest crash report stated, and says how many.
+///
+/// Only what the report stated: a compat trigger is an inference and stays a
+/// choice the user makes one row at a time. Only mods that are still enabled,
+/// so pressing this twice does nothing the second time.
+fn disable_suggested_mods(app: &App, server: ServerId, events: &Sender<Event>) {
+    let host = ModHost::Server(server);
+    let review = match app.crash_review(host) {
+        Ok(Some(review)) => review,
+        Ok(None) => return,
+        Err(error) => {
+            send_error(events, &error);
+            return;
+        }
+    };
+
+    let paths: Vec<PathBuf> = review
+        .suggested()
+        .filter_map(|entry| entry.logical_path.clone())
+        .collect();
+    if paths.is_empty() {
+        let _ = events.send(Event::Toast {
+            message: lookup("gui-crash-nothing-to-disable"),
+            error: false,
+        });
+        return;
+    }
+
+    let mut disabled = 0usize;
+    for path in &paths {
+        match app.set_mod_enabled(host, path, false) {
+            Ok(_) => disabled += 1,
+            // One refusal must not leave the rest untried: the server being
+            // busy is reported once, and whatever did get switched off is
+            // still reported honestly below.
+            Err(error) => send_error(events, &error),
+        }
+    }
+
+    if disabled > 0 {
+        let _ = events.send(Event::Toast {
+            message: localized_count("gui-crash-disabled-count", disabled),
+            error: false,
+        });
+    }
+    send_host_mods(app, host, events);
 }
 
 fn send_server_workspace(app: &App, server: ServerId, events: &Sender<Event>) {
@@ -4224,7 +4332,11 @@ fn refresh_enriched_host_mods(paths: Paths, events: &Sender<Event>, host: ModHos
         ));
         match enriched {
             Ok(snapshot) => {
-                let _ = events.send(Event::ManagedMods(managed_mods_data(&snapshot)));
+                let review = app.crash_review(host).ok().flatten();
+                let _ = events.send(Event::ManagedMods(managed_mods_data(
+                    &snapshot,
+                    review.as_ref(),
+                )));
             }
             // Enrichment is decoration. The list the user is already looking at
             // is correct without it, so this is logged rather than shown as a
@@ -4254,7 +4366,11 @@ fn finish_linked(
                 let _ = events.send(Event::LinkedResult(linked_result_data(&outcome)));
             }
             if let ClientModOutcome::Mutated(mutation) = &outcome.client {
-                let _ = events.send(Event::ManagedMods(managed_mods_data(&mutation.snapshot)));
+                let review = app.crash_review(ModHost::Instance(instance)).ok().flatten();
+                let _ = events.send(Event::ManagedMods(managed_mods_data(
+                    &mutation.snapshot,
+                    review.as_ref(),
+                )));
                 refresh_enriched_mods(app.paths().clone(), events, instance);
             }
             send_snapshot(app, events);
@@ -4347,11 +4463,18 @@ fn restriction_text(restriction: Option<MutationRestriction>) -> String {
 /// The one place a managed mod becomes display text. Everything it reads is
 /// already decided by `ephervex-core`; nothing here inspects a recipe, parses a
 /// file name, or decides what a mod is.
-fn managed_mods_data(snapshot: &ManagedModSnapshot) -> ManagedModsData {
+fn managed_mods_data(
+    snapshot: &ManagedModSnapshot,
+    review: Option<&CrashReview>,
+) -> ManagedModsData {
     ManagedModsData {
         host: snapshot.host.id(),
         host_kind: snapshot.host.kind().to_owned(),
-        mods: snapshot.mods.iter().map(managed_mod_data).collect(),
+        mods: snapshot
+            .mods
+            .iter()
+            .map(|entry| managed_mod_data(entry, review))
+            .collect(),
         notice: match snapshot.metadata {
             MetadataAvailability::Unavailable => lookup("gui-mod-metadata-offline"),
             MetadataAvailability::Local | MetadataAvailability::Provider => String::new(),
@@ -4359,9 +4482,40 @@ fn managed_mods_data(snapshot: &ManagedModSnapshot) -> ManagedModsData {
     }
 }
 
-fn managed_mod_data(entry: &ManagedModEntry) -> ManagedModData {
+fn crash_notice_data(host: ModHost, review: Option<&CrashReview>) -> CrashNoticeData {
+    CrashNoticeData {
+        host: host.id(),
+        host_kind: host.kind().to_owned(),
+        report: review.map(|it| it.report_name.clone()).unwrap_or_default(),
+        failure: review
+            .and_then(|it| it.analysis.failure.clone())
+            .unwrap_or_default(),
+        client_code_on_server: review.is_some_and(|it| it.analysis.client_code_on_server),
+        suggested: review.map_or(0, |it| it.suggested().count()),
+    }
+}
+
+/// Why a crash report points at one mod, in the words a row shows.
+fn suspect_reason_text(reason: &SuspectReason) -> String {
+    match reason {
+        SuspectReason::Named => lookup("crash-reason-named"),
+        SuspectReason::InFailingFrames => lookup("crash-reason-in-failing-frames"),
+        SuspectReason::CompatTrigger { triggered_by } => lookup_args(
+            "crash-reason-compat-trigger",
+            [("mod", Arg::from(triggered_by.as_str()))],
+        ),
+    }
+}
+
+fn managed_mod_data(entry: &ManagedModEntry, review: Option<&CrashReview>) -> ManagedModData {
     let title = entry.display_name().to_owned();
     let mutability = ModMutability::of(entry);
+    let suspect = review.and_then(|review| {
+        review
+            .mods
+            .iter()
+            .find(|found| found.logical_path.as_ref() == Some(&entry.logical_path))
+    });
     ManagedModData {
         project_id: entry.identity.project_id().unwrap_or_default().to_owned(),
         logical_path: entry.logical_path.display().to_string(),
@@ -4370,6 +4524,12 @@ fn managed_mod_data(entry: &ManagedModEntry) -> ManagedModData {
         can_update: mutability.can_update,
         can_remove: mutability.can_remove,
         restriction: restriction_text(mutability.restriction),
+        suspect_reason: suspect
+            .map(|found| suspect_reason_text(&found.suspect.reason))
+            .unwrap_or_default(),
+        suspect_confidence: suspect
+            .map(|found| found.suspect.confidence().as_str().to_owned())
+            .unwrap_or_default(),
         // The file name is the secondary line only when it adds something. For
         // an unidentified mod the title already is the file name, and printing
         // it twice would read as a bug.

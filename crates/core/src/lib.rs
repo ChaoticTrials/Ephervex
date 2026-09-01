@@ -27,6 +27,7 @@ pub mod app;
 pub mod artifact_cache;
 mod artwork;
 pub mod connection;
+pub mod crash_analysis;
 pub mod curseforge;
 pub mod curseforge_pack;
 pub mod diagnostics;
@@ -56,6 +57,10 @@ pub use connection::{
     ConnectError, DEFAULT_SERVER_READINESS_TIMEOUT, LaunchAndConnectAvailability,
     LaunchAndConnectEvent, LaunchAndConnectObserver, LaunchAndConnectOptions,
     LaunchAndConnectOutcome, ServerPreparation,
+};
+pub use crash_analysis::{
+    CrashAnalysis, CrashReview, CrashSuspect, SuspectConfidence, SuspectReason, SuspectedMod,
+    analyze_crash_report,
 };
 pub use curseforge::StoredApiKey;
 pub use diagnostics::{

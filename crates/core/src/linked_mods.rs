@@ -2601,6 +2601,87 @@ mod tests {
         );
     }
 
+    /// The whole point of reading a crash report: turning "startup failed"
+    /// into a row in this server's own mods list that can be switched off.
+    #[tokio::test]
+    async fn a_crash_report_names_which_of_a_servers_mods_to_try_without() {
+        let world = world().await;
+        let server = world.link_server("Reproduction Server", MINECRAFT);
+        apply(&world, &install("ROOTPROJ"), &[server]).await;
+        let host = crate::ModHost::Server(server);
+
+        let installed = world
+            .app
+            .server_mod_snapshot(server)
+            .expect("server mods")
+            .mods
+            .iter()
+            .find(|entry| entry.identity.project_id() == Some("ROOTPROJ"))
+            .cloned()
+            .expect("the mod was synced to the server");
+
+        let game_dir = ephervex_storage::metadata::server_game_dir(&world.server_root(server));
+        let reports = game_dir.join("crash-reports");
+        std::fs::create_dir_all(&reports).expect("crash reports directory");
+        std::fs::write(
+            reports.join("crash-2026-08-30_18.09.07-server.txt"),
+            format!(
+                "---- Minecraft Crash Report ----\n\n\
+Description: Mod loading error has occurred\n\n\
+-- Mod loading issue for: rootmod --\n\
+Details:\n\
+\tException message: java.lang.NoClassDefFoundError: net/minecraft/client/multiplayer/ClientLevel\n\
+Stacktrace:\n\
+\tat TRANSFORMER/rootmod@1.0/com.example.rootmod.RootMod.setup(RootMod.java:12) ~[{jar}:1.0]\n\n\
+-- System Details --\n\
+Details:\n\
+\tMod List: \n\
+\t\t{jar} |Root Mod |rootmod |1.0 |ERROR |Manifest: NOSIGNATURE\n",
+                jar = installed.file_name
+            ),
+        )
+        .expect("write crash report");
+
+        let review = world
+            .app
+            .crash_review(host)
+            .expect("the review is read")
+            .expect("the server has a crash report");
+
+        assert!(review.analysis.client_code_on_server);
+        let suspect = review.mods.first().expect("a suspect was found");
+        assert_eq!(suspect.suspect.mod_id, "rootmod");
+        assert_eq!(
+            suspect.logical_path.as_ref(),
+            Some(&installed.logical_path),
+            "the report's jar name resolves to a row the mods list can toggle"
+        );
+        assert_eq!(suspect.presence, Some(crate::ModPresence::Installed));
+        assert_eq!(
+            review.suggested().count(),
+            1,
+            "an installed mod the report named is worth suggesting"
+        );
+
+        // Once it is off, the same report must stop suggesting it: a
+        // suggestion the user has already acted on is noise.
+        world
+            .app
+            .set_mod_enabled(host, &installed.logical_path, false)
+            .expect("the mod is disabled");
+        let review = world
+            .app
+            .crash_review(host)
+            .expect("the review is read")
+            .expect("the crash report is still there");
+        assert_eq!(
+            review.mods.first().map(|entry| entry.presence),
+            Some(Some(crate::ModPresence::Disabled)),
+            "the suspect is still named, so the user can see what was done"
+        );
+        assert_eq!(review.suggested().count(), 0);
+    }
+
     #[tokio::test]
     async fn a_dependency_another_synced_root_still_needs_is_kept() {
         let world = world().await;

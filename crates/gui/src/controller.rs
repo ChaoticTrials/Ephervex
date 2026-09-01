@@ -2074,6 +2074,13 @@ fn register_mod_state_actions(ui: &AppWindow, commands: &Sender<Command>) {
     });
 
     let sender = commands.clone();
+    ui.on_disable_suggested_mods(move |id| {
+        if let Some(id) = backend::parse_server_id(&id) {
+            send(&sender, Command::DisableSuggestedMods(id));
+        }
+    });
+
+    let sender = commands.clone();
     ui.on_set_mod_enabled(move |kind, host, path, enabled| {
         let Some(host) = backend::parse_mod_host(&kind, &host) else {
             return;
@@ -3579,6 +3586,19 @@ fn apply_event(
                 ui.set_managed_mods_notice(data.notice.into());
             }
         }
+        Event::CrashNotice(notice) => {
+            let current = if notice.host_kind == "server" {
+                ui.get_selected_server_id()
+            } else {
+                ui.get_selected_instance_id()
+            };
+            if presentation::result_is_current(&notice.host, &current) {
+                ui.set_crash_report(notice.report.into());
+                ui.set_crash_failure(notice.failure.into());
+                ui.set_crash_client_code_on_server(notice.client_code_on_server);
+                ui.set_crash_suggested(i32::try_from(notice.suggested).unwrap_or(i32::MAX));
+            }
+        }
         Event::ModVersions(data) => apply_mod_versions(ui, data),
         Event::ModRemovalPlan(data) => apply_mod_removal_plan(ui, data),
         Event::ModResults(results) => apply_mod_results(ui, results),
@@ -4753,6 +4773,8 @@ fn managed_mod_rows(rows: Vec<ManagedModData>) -> Vec<ModRow> {
             missing: row.missing,
             enabled: row.enabled,
             pack_owned: row.pack_owned,
+            suspect_reason: row.suspect_reason.into(),
+            suspect_confidence: row.suspect_confidence.into(),
         })
         .collect()
 }
