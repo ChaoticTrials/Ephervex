@@ -1175,19 +1175,51 @@ mod tests {
         assert!(!huge.exists());
     }
 
+    /// Whether making a directory read-only actually stops this process removing
+    /// what is inside it.
+    ///
+    /// The condition under test is "the launcher tried to remove a file and was
+    /// refused". A privileged process is not subject to the mode bits at all, and
+    /// neither is a process on a filesystem that does not enforce them, so on those
+    /// the barrier this test builds is not a barrier and there is nothing to
+    /// observe. Probed rather than inferred from the user id, because privilege is
+    /// not the only way it fails to hold.
+    #[cfg(unix)]
+    fn a_read_only_directory_refuses_this_process() -> bool {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let probe = tempfile::tempdir().expect("tempdir");
+        let file = probe.path().join("entry");
+        std::fs::write(&file, b"probe").expect("probe file");
+        std::fs::set_permissions(probe.path(), std::fs::Permissions::from_mode(0o500))
+            .expect("read-only probe directory");
+        let refused = std::fs::remove_file(&file).is_err();
+        // Restored so the temporary directory can still clean itself up.
+        std::fs::set_permissions(probe.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("restore the probe directory");
+        refused
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn collection_stops_when_nothing_removable_is_left() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        if !a_read_only_directory_refuses_this_process() {
+            eprintln!(
+                "skipped: this process can remove files from a read-only directory, \
+                 so a refusal cannot be staged for it to report"
+            );
+            return;
+        }
+
         let fixture = Fixture::new();
         let kept = fixture.publish(ContentStore::Downloads, 0x10, 100, hour(1));
         // A shard directory with no write permission cannot have entries
         // unlinked from it, which stands in for anything that refuses removal.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            let shard = kept.parent().expect("shard");
-            std::fs::set_permissions(shard, std::fs::Permissions::from_mode(0o500))
-                .expect("read-only shard");
-        }
+        let shard = kept.parent().expect("shard").to_path_buf();
+        std::fs::set_permissions(&shard, std::fs::Permissions::from_mode(0o500))
+            .expect("read-only shard");
 
         let report = fixture
             .cache
@@ -1195,26 +1227,20 @@ mod tests {
             .await
             .expect("collection reports trouble rather than failing");
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(
-                kept.parent().expect("shard"),
-                std::fs::Permissions::from_mode(0o700),
-            )
-            .expect("restore");
-            assert_eq!(report.removed_entries, 0);
-            assert_eq!(
-                report.usage_after, 100,
-                "an over-budget cache stays over budget"
-            );
-            assert_eq!(report.troubled_entries, 1);
-            assert_eq!(report.troubles[0].stage, MaintenanceStage::Removing);
-            assert!(!report.is_clean());
-            assert!(kept.is_file());
-        }
-        #[cfg(not(unix))]
-        let _ = report;
+        // Restored before the assertions, so a failing one still leaves a
+        // directory the temporary root can remove.
+        std::fs::set_permissions(&shard, std::fs::Permissions::from_mode(0o700))
+            .expect("restore the shard");
+
+        assert_eq!(report.removed_entries, 0);
+        assert_eq!(
+            report.usage_after, 100,
+            "an over-budget cache stays over budget"
+        );
+        assert_eq!(report.troubled_entries, 1);
+        assert_eq!(report.troubles[0].stage, MaintenanceStage::Removing);
+        assert!(!report.is_clean());
+        assert!(kept.is_file());
     }
 
     #[tokio::test]

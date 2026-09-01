@@ -319,7 +319,14 @@ async fn a_recipe_that_cannot_be_written_fails_the_installation_and_removes_the_
     let bystander = instance.jar("someone-elses.jar");
     std::fs::write(&bystander, b"not ours").expect("write");
 
-    read_only(instance.store.dir());
+    if !read_only(instance.store.dir()) {
+        writable(instance.store.dir());
+        eprintln!(
+            "skipped: this process can write into a read-only directory, \
+             so the failed recipe write this test rolls back cannot be staged"
+        );
+        return;
+    }
     let additions = vec![addition(
         &server,
         "/root.jar",
@@ -515,11 +522,27 @@ async fn an_installed_mod_reaches_the_server_plan_without_the_original_archive()
 
 /// Makes a directory refuse new files, so a write into it fails the way a full
 /// disk or a permission change would.
-fn read_only(dir: &Path) {
+///
+/// Reports whether the refusal actually holds for this process. A privileged
+/// process is not subject to the mode bits, and neither is one on a filesystem
+/// that does not enforce them, so on those the barrier is not a barrier. Probed
+/// on the directory itself rather than inferred from the user id, because
+/// privilege is not the only way it fails to hold.
+#[must_use]
+fn read_only(dir: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt as _;
     let mut permissions = std::fs::metadata(dir).expect("metadata").permissions();
     permissions.set_mode(0o555);
     std::fs::set_permissions(dir, permissions).expect("set permissions");
+
+    let probe = dir.join("write-probe");
+    match std::fs::write(&probe, b"probe") {
+        Ok(()) => {
+            std::fs::remove_file(&probe).expect("remove the probe");
+            false
+        }
+        Err(_) => true,
+    }
 }
 
 fn writable(dir: &Path) {

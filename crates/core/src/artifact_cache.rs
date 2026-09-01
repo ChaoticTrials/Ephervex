@@ -483,8 +483,44 @@ mod tests {
         assert_eq!(status.used_bytes, 0);
     }
 
+    /// Whether making a directory read-only actually stops this process removing
+    /// what is inside it.
+    ///
+    /// The condition under test is "the launcher tried to remove a file and was
+    /// refused". A privileged process is not subject to the mode bits at all, and
+    /// neither is a process on a filesystem that does not enforce them, so on those
+    /// the barrier this test builds is not a barrier and there is nothing to
+    /// observe. Probed rather than inferred from the user id, because privilege is
+    /// not the only way it fails to hold.
+    #[cfg(unix)]
+    fn a_read_only_directory_refuses_this_process() -> bool {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let probe = tempfile::tempdir().expect("tempdir");
+        let file = probe.path().join("entry");
+        std::fs::write(&file, b"probe").expect("probe file");
+        std::fs::set_permissions(probe.path(), std::fs::Permissions::from_mode(0o500))
+            .expect("read-only probe directory");
+        let refused = std::fs::remove_file(&file).is_err();
+        // Restored so the temporary directory can still clean itself up.
+        std::fs::set_permissions(probe.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("restore the probe directory");
+        refused
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn maintenance_that_cannot_remove_an_entry_is_reported_and_not_fatal() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        if !a_read_only_directory_refuses_this_process() {
+            eprintln!(
+                "skipped: this process can remove files from a read-only directory, \
+                 so a refusal cannot be staged for it to report"
+            );
+            return;
+        }
+
         let base = tempfile::tempdir().expect("tempdir");
         let mut app = app_rooted_at(base.path());
         let stuck = publish(&app, 0x27, 4 * 1024 * 1024);
@@ -492,29 +528,28 @@ mod tests {
             .await
             .expect("unlimited while the shard is made read-only");
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            let shard = stuck.parent().expect("shard");
-            std::fs::set_permissions(shard, std::fs::Permissions::from_mode(0o500))
-                .expect("read-only shard");
+        let shard = stuck.parent().expect("shard").to_path_buf();
+        std::fs::set_permissions(&shard, std::fs::Permissions::from_mode(0o500))
+            .expect("read-only shard");
 
-            let report = app
-                .clear_artifact_cache()
-                .await
-                .expect("a clear that cannot remove everything is not an error");
-            std::fs::set_permissions(shard, std::fs::Permissions::from_mode(0o700))
-                .expect("restore");
+        let report = app
+            .clear_artifact_cache()
+            .await
+            .expect("a clear that cannot remove everything is not an error");
 
-            assert_eq!(report.removed_entries, 0);
-            assert_eq!(
-                report.usage_after,
-                4 * MIB,
-                "the report must not claim the cache is empty"
-            );
-            assert!(!report.is_clean());
-            assert_eq!(report.troubles[0].stage, MaintenanceStage::Removing);
-            assert!(stuck.is_file());
-        }
+        // Restored before the assertions, so a failing one still leaves a
+        // directory the temporary root can remove.
+        std::fs::set_permissions(&shard, std::fs::Permissions::from_mode(0o700))
+            .expect("restore the shard");
+
+        assert_eq!(report.removed_entries, 0);
+        assert_eq!(
+            report.usage_after,
+            4 * MIB,
+            "the report must not claim the cache is empty"
+        );
+        assert!(!report.is_clean());
+        assert_eq!(report.troubles[0].stage, MaintenanceStage::Removing);
+        assert!(stuck.is_file());
     }
 }
