@@ -18,6 +18,8 @@ use std::process::{Command, Output};
 
 use tempfile::TempDir;
 
+mod support;
+
 struct Sandbox {
     directory: TempDir,
 }
@@ -28,6 +30,7 @@ impl Sandbox {
         for child in ["config", "data", "cache", "state", "tmp"] {
             std::fs::create_dir_all(directory.path().join(child)).expect("create root");
         }
+        support::seed_provider_metadata(directory.path());
         Self { directory }
     }
 

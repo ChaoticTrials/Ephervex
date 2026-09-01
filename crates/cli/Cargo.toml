@@ -34,3 +34,13 @@ serde_json.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 zip.workspace = true
+# Test-only, and deliberately not in `[dependencies]` above: the rule there is
+# about what the shipped binary reaches through, and nothing here is compiled
+# into it. These let the test harness seed a sandbox's cache using the same
+# layout and envelope the launcher writes, rather than restating that layout in
+# a test where it could drift. See `tests/support`.
+ephervex-download.workspace = true
+ephervex-loaders.workspace = true
+ephervex-minecraft.workspace = true
+serde_json.workspace = true
+tokio.workspace = true

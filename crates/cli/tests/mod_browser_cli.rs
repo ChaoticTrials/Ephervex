@@ -13,6 +13,8 @@ use std::process::{Command, Output};
 
 use tempfile::TempDir;
 
+mod support;
+
 struct Sandbox {
     directory: TempDir,
 }
@@ -23,6 +25,7 @@ impl Sandbox {
         for child in ["config", "data", "cache", "state", "tmp"] {
             std::fs::create_dir_all(directory.path().join(child)).expect("create root");
         }
+        support::seed_provider_metadata(directory.path());
         Self { directory }
     }
 
@@ -74,7 +77,7 @@ impl Sandbox {
             "--loader",
             "forge",
             "--loader-version",
-            "47.3.0",
+            "47.4.10",
         ]);
         let id = created["id"].as_str().expect("an id").to_owned();
         let root = PathBuf::from(created["root"].as_str().expect("a root"));
@@ -94,7 +97,7 @@ fn seed_recipe(root: &Path) {
           "source_kind": "manual",
           "original_name": "Mod browser check",
           "minecraft_version": "1.20.1",
-          "loader": {"kind": "forge", "version": "47.3.0"},
+          "loader": {"kind": "forge", "version": "47.4.10"},
           "files": [
             {
               "logical_path": "mods/library-1.0.0.jar",
@@ -212,7 +215,7 @@ fn a_pack_declared_file_is_not_listed_as_a_provider_installed_mod() {
           "source_kind": "modrinth_pack",
           "original_name": "Imported Pack",
           "minecraft_version": "1.20.1",
-          "loader": {"kind": "forge", "version": "47.3.0"},
+          "loader": {"kind": "forge", "version": "47.4.10"},
           "files": [
             {
               "logical_path": "mods/from-the-pack.jar",

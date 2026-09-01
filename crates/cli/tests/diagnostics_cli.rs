@@ -15,6 +15,8 @@ use std::process::{Command, Output};
 
 use tempfile::TempDir;
 
+mod support;
+
 /// A credential-shaped string, spelled so a substring search cannot miss it and
 /// cannot match anything innocent.
 const FIXTURE_SECRET: &str = "FAKE-MICROSOFT-ACCESS-TOKEN-INSIDE-A-GAME-LOG";
@@ -38,6 +40,7 @@ impl Sandbox {
         for child in ["config", "data", "cache", "state", "tmp"] {
             std::fs::create_dir_all(directory.path().join(child)).expect("create root");
         }
+        support::seed_provider_metadata(directory.path());
         Self { directory }
     }
 

@@ -35,6 +35,12 @@ id (`neoforge-26.2.0.59`) is not a Minecraft version and whose `inheritsFrom`
 (`26.2`) is. Its 25 further libraries are omitted; the one retained carries the
 remote-artifact shape the others repeat.
 
+The command-line tests seed a sandbox's cache with `forge-promotions.json`,
+`forge-maven-metadata.xml`, and `neoforge-maven-metadata.xml` so that resolving
+a loader selection needs no network. Those tests therefore have to name a build
+these reduced files actually list; adding a build to a test means adding it
+here too.
+
 Installer profile observations are independently implemented from the
 published data and the LGPL Forge installer sources. Synthetic ZIPs are used
 for executable processor tests.
