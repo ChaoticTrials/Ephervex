@@ -1,0 +1,235 @@
+//! What the log views offer, and where each control leads.
+//!
+//! All three findings here are markup: a control that only exists while there
+//! is somewhere to scroll to, chips that decide which of three readings of a
+//! log is shown, and a Start that has to leave the user looking at the output.
+//! None of it is visible from the callbacks alone, so the window is built and
+//! clicked for real.
+
+#![allow(clippy::expect_used)]
+
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use ephervex_gui::ui::{AppWindow, DiagnosticRow, GuiI18n, LogChunk, ServerRow};
+use ephervex_i18n::{Arg, lookup, lookup_args};
+use i_slint_backend_testing::{ElementHandle, TestingBackend, TestingBackendOptions};
+use slint::platform::PointerEventButton;
+use slint::{ComponentHandle, ModelRc, PhysicalSize, SharedString, VecModel};
+
+#[test]
+fn a_log_scrolled_up_offers_a_way_back_to_the_bottom() {
+    let ui = window();
+    let followed: Rc<RefCell<Vec<bool>>> = Rc::default();
+    let record = Rc::clone(&followed);
+    ui.on_live_log_follow_changed(move |follow| record.borrow_mut().push(follow));
+
+    server_logs(&ui);
+    // Far more lines than fit, so the view has somewhere to go, and following
+    // off, which is the state someone who scrolled up is in.
+    ui.set_log_chunks(chunks(400));
+    ui.set_log_has_content(true);
+    ui.set_log_follow(false);
+    settle(&ui);
+
+    let jump = ElementHandle::find_by_accessible_label(&ui, &lookup("gui-jump-latest"))
+        .find(|element| element.size().width > 0.0)
+        .expect("a log with more lines than fit offers a way to its end");
+    jump.mock_single_click(PointerEventButton::Left);
+    settle(&ui);
+
+    assert!(
+        ui.get_log_follow(),
+        "arriving at the end must resume following, or the next line scrolls away again"
+    );
+    assert_eq!(followed.borrow().as_slice(), [true]);
+}
+
+#[test]
+fn a_log_that_fits_offers_nothing_to_scroll_to() {
+    let ui = window();
+    server_logs(&ui);
+    ui.set_log_chunks(chunks(2));
+    ui.set_log_has_content(true);
+    settle(&ui);
+
+    assert!(
+        ElementHandle::find_by_accessible_label(&ui, &lookup("gui-jump-latest"))
+            .all(|element| element.size().width == 0.0),
+        "a view already showing everything must not offer a button that does nothing"
+    );
+}
+
+/// The three ways one entity's logs are read, on one tab.
+#[test]
+fn a_servers_logs_offer_the_live_log_saved_files_and_crash_reports() {
+    let ui = window();
+    let opened: Rc<RefCell<Vec<String>>> = Rc::default();
+    let record = Rc::clone(&opened);
+    ui.on_open_log_file(move |_, _, name| record.borrow_mut().push(name.to_string()));
+    let listed: Rc<RefCell<Vec<String>>> = Rc::default();
+    let record = Rc::clone(&listed);
+    ui.on_load_diagnostics(move |_, _, kind| record.borrow_mut().push(kind.to_string()));
+
+    server_logs(&ui);
+    settle(&ui);
+
+    for chip in ["gui-live-latest-log", "gui-log-files", "gui-crash-reports"] {
+        assert!(
+            ElementHandle::find_by_accessible_label(&ui, &lookup(chip))
+                .next()
+                .is_some(),
+            "{chip} is not offered on a server's Logs tab"
+        );
+    }
+
+    ElementHandle::find_by_accessible_label(&ui, &lookup("gui-log-files"))
+        .next()
+        .expect("the saved logs chip")
+        .mock_single_click(PointerEventButton::Left);
+    assert!(ui.get_log_shows_files());
+    assert_eq!(listed.borrow().as_slice(), ["log"]);
+
+    ui.set_diagnostics(ModelRc::new(VecModel::from(vec![log_file()])));
+    settle(&ui);
+    ElementHandle::find_by_accessible_label(&ui, "2026-08-30-1.log.gz")
+        .next()
+        .expect("the list holds the file")
+        .mock_single_click(PointerEventButton::Left);
+
+    assert_eq!(
+        opened.borrow().as_slice(),
+        ["2026-08-30-1.log.gz"],
+        "a saved log has to go through the filterable view, not a plain document"
+    );
+    assert_eq!(ui.get_selected_diagnostic_name(), "2026-08-30-1.log.gz");
+}
+
+/// A saved log is read through the same viewer, so it has the same filters.
+#[test]
+fn a_saved_log_is_filterable_like_the_live_one() {
+    let ui = window();
+    let levels: Rc<RefCell<Vec<String>>> = Rc::default();
+    let record = Rc::clone(&levels);
+    ui.on_set_log_level(move |level, _| record.borrow_mut().push(level.to_string()));
+
+    server_logs(&ui);
+    ui.set_log_shows_files(true);
+    ui.set_selected_diagnostic_name("2026-08-30-1.log.gz".into());
+    ui.set_diagnostics(ModelRc::new(VecModel::from(vec![log_file()])));
+    ui.set_log_chunks(chunks(6));
+    ui.set_log_has_content(true);
+    settle(&ui);
+
+    ElementHandle::find_by_accessible_label(&ui, &lookup("gui-filter-error"))
+        .next()
+        .expect("a saved log has the level filters the live one has")
+        .mock_single_click(PointerEventButton::Left);
+
+    assert_eq!(levels.borrow().as_slice(), ["error"]);
+}
+
+/// The server workspace, on its Logs tab.
+fn server_logs(ui: &AppWindow) {
+    ui.set_loading(false);
+    ui.set_page(1);
+    ui.set_workspace("server".into());
+    ui.set_workspace_tab("Logs".into());
+    ui.set_selected_diagnostic_kind("log".into());
+    ui.set_servers(ModelRc::new(VecModel::from(vec![server()])));
+    ui.set_selected_server_index(0);
+    ui.set_selected_server_id("repro-server".into());
+}
+
+fn chunks(count: usize) -> ModelRc<LogChunk> {
+    ModelRc::new(VecModel::from(
+        (0..count)
+            .map(|index| LogChunk {
+                text: format!("[12:00:{index:02}] [Server thread/INFO]: line {index}").into(),
+                level: "info".into(),
+            })
+            .collect::<Vec<_>>(),
+    ))
+}
+
+fn log_file() -> DiagnosticRow {
+    DiagnosticRow {
+        scope_kind: "server".into(),
+        scope_id: "repro-server".into(),
+        entity: "Repro Server".into(),
+        kind: "log".into(),
+        name: "2026-08-30-1.log.gz".into(),
+        path: "/tmp/ephervex/servers/repro-server/server/logs/2026-08-30-1.log.gz".into(),
+        modified: "Yesterday".into(),
+        size: "18 KiB".into(),
+        summary: SharedString::default(),
+    }
+}
+
+fn settle(ui: &AppWindow) {
+    slint::platform::update_timers_and_animations();
+    ui.window().take_snapshot().expect("render");
+}
+
+fn window() -> AppWindow {
+    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
+        renderer_name: Some("software".into()),
+        mock_time: true,
+        threading: false,
+    })))
+    .expect("testing backend");
+    let ui = AppWindow::new().expect("window");
+    install_i18n(&ui);
+    ui.window().set_size(PhysicalSize::new(1480, 900));
+    ui.show().expect("show");
+    ui
+}
+
+fn install_i18n(ui: &AppWindow) {
+    let global = ui.global::<GuiI18n>();
+    global.on_text(|id| lookup(id.as_str()).into());
+    global.on_count(|id, count| {
+        lookup_args(id.as_str(), [("count", Arg::Count(i64::from(count)))]).into()
+    });
+    global.on_value(|id, value| {
+        lookup_args(id.as_str(), [("value", Arg::from(value.to_string()))]).into()
+    });
+    global.on_values(|id, first, second| {
+        lookup_args(
+            id.as_str(),
+            [
+                ("first", Arg::from(first.to_string())),
+                ("second", Arg::from(second.to_string())),
+            ],
+        )
+        .into()
+    });
+}
+
+fn server() -> ServerRow {
+    ServerRow {
+        id: "repro-server".into(),
+        name: "Repro Server".into(),
+        minecraft: "1.21.1".into(),
+        loader: "NeoForge 21.1.249".into(),
+        loader_kind: "neoforge".into(),
+        storage: "Temporary".into(),
+        storage_kind: "temporary".into(),
+        relationship: "Standalone".into(),
+        linked_client_id: SharedString::default(),
+        state: "Stopped".into(),
+        state_kind: "stopped".into(),
+        state_detail: "Not running".into(),
+        address: "127.0.0.1:25565".into(),
+        path: "/tmp/ephervex/servers/repro-server".into(),
+        installed: true,
+        can_start: true,
+        can_stop: false,
+        can_restart: false,
+        can_kill: false,
+        can_send_command: false,
+        can_connect: false,
+        connect_reason: SharedString::default(),
+        needs_attention: false,
+    }
+}

@@ -352,26 +352,44 @@ pub enum Command {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// What a log view is currently showing.
+///
+/// Not `Copy`, because a file is named rather than numbered. The variants are
+/// compared whole, which is what keeps a late update for one source out of a
+/// view that has since been pointed at another.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum LiveLogSource {
     Client(InstanceId),
     Server(ServerId),
+    /// One log file, opened from a diagnostics list.
+    ///
+    /// A file that has finished being written has no live half, but it is the
+    /// same text carrying the same levels, and it is read for the same reasons.
+    /// Routing it through the retained log is what gives a saved log the level
+    /// filters, the search, and the copy that the live view has.
+    File {
+        scope: DiagnosticScope,
+        /// The entry name a listing gave out. Never a path.
+        name: String,
+    },
 }
 
 impl LiveLogSource {
     #[must_use]
-    pub const fn kind(self) -> &'static str {
+    pub const fn kind(&self) -> &'static str {
         match self {
             Self::Client(_) => "client",
             Self::Server(_) => "server",
+            Self::File { .. } => "file",
         }
     }
 
     #[must_use]
-    pub fn id(self) -> String {
+    pub fn id(&self) -> String {
         match self {
             Self::Client(id) => id.to_string(),
             Self::Server(id) => id.to_string(),
+            Self::File { name, .. } => name.clone(),
         }
     }
 }
@@ -380,6 +398,8 @@ impl LiveLogSource {
 pub enum LiveLogLine {
     Client(TailedLine),
     Server(ephervex_core::CapturedLine),
+    /// One line of an opened file, whose level is read from the text itself.
+    File(String),
 }
 
 #[derive(Debug, Clone)]
@@ -2637,7 +2657,29 @@ fn open_live_log(
     generation: &Arc<AtomicU64>,
 ) {
     let current_generation = generation.fetch_add(1, Ordering::Relaxed).saturating_add(1);
-    match source {
+    match source.clone() {
+        // A file is read once. There is no tail to follow: a rotated log is
+        // finished, and the one being written to is reachable as the live view.
+        LiveLogSource::File { scope, ref name } => {
+            match app.read_diagnostic(&DiagnosticRequest::new(scope, DiagnosticKind::Log, name)) {
+                Ok(view) => {
+                    let _ = events.send(Event::LiveLog(LiveLogUpdate {
+                        source,
+                        reset: true,
+                        missing: false,
+                        // A window rather than the whole file, exactly as the
+                        // plain reader took it, and said so for the same reason.
+                        source_truncated: view.truncated,
+                        lines: view
+                            .text
+                            .lines()
+                            .map(|line| LiveLogLine::File(line.to_owned()))
+                            .collect(),
+                    }));
+                }
+                Err(error) => send_error(events, &error),
+            }
+        }
         LiveLogSource::Server(server) => match app.server_output(server, 2_001) {
             Ok(mut capture) => {
                 let bounded = capture.lines.len() > 2_000;
@@ -2693,7 +2735,7 @@ fn open_live_log(
                                     || update.skipped_bytes > 0;
                                 if has_update {
                                     let _ = events.send(Event::LiveLog(LiveLogUpdate {
-                                        source,
+                                        source: LiveLogSource::Client(instance),
                                         reset: first || update.reset,
                                         missing: update.missing,
                                         source_truncated: update.skipped_bytes > 0,

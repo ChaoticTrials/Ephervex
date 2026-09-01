@@ -119,7 +119,7 @@ impl Default for LiveViewerState {
 
 impl LiveViewerState {
     fn activate(&mut self, source: LiveLogSource) {
-        if self.active != Some(source) {
+        if self.active.as_ref() != Some(&source) {
             self.active = Some(source);
             self.history.clear();
             self.source_truncated = false;
@@ -134,7 +134,7 @@ impl LiveViewerState {
     }
 
     fn apply(&mut self, update: LiveLogUpdate) -> bool {
-        if self.active != Some(update.source) {
+        if self.active.as_ref() != Some(&update.source) {
             return false;
         }
         if update.reset {
@@ -148,6 +148,7 @@ impl LiveViewerState {
             match line {
                 LiveLogLine::Client(line) => self.history.append_tailed_line(line),
                 LiveLogLine::Server(line) => self.history.append_captured(line),
+                LiveLogLine::File(line) => self.history.append_line(line),
             }
         }
         self.pending_lines = self.pending_lines.saturating_add(added);
@@ -174,11 +175,33 @@ fn register_live_viewer(
         let Some(source) = source else {
             return;
         };
-        open_state.borrow_mut().activate(source);
+        open_state.borrow_mut().activate(source.clone());
         if let Some(ui) = weak.upgrade() {
             ui.set_log_query(SharedString::default());
             ui.set_log_follow(true);
             render_live_viewer(&ui, &mut open_state.borrow_mut());
+        }
+        send(&sender, Command::OpenLiveLog(source));
+    });
+
+    let sender = commands.clone();
+    let weak = ui.as_weak();
+    let file_state = Rc::clone(live_viewer);
+    ui.on_open_log_file(move |kind, id, name| {
+        let Some(scope) = backend::parse_scope(&kind, &id) else {
+            return;
+        };
+        let source = LiveLogSource::File {
+            scope,
+            name: name.to_string(),
+        };
+        file_state.borrow_mut().activate(source.clone());
+        if let Some(ui) = weak.upgrade() {
+            ui.set_log_query(SharedString::default());
+            // A saved log does not grow, so there is nothing to follow. The
+            // view still opens at the end, which is where a log is read from.
+            ui.set_log_follow(false);
+            render_live_viewer(&ui, &mut file_state.borrow_mut());
         }
         send(&sender, Command::OpenLiveLog(source));
     });
@@ -1310,7 +1333,7 @@ fn register_callbacks(
     let sender = commands.clone();
     ui.on_select_server(move |_| send(&sender, Command::Refresh));
 
-    register_server_actions(ui, commands);
+    register_server_actions(ui, commands, live_viewer);
     register_mod_state_actions(ui, commands);
     register_diagnostics(ui, commands);
     register_live_viewer(ui, commands, live_viewer);
@@ -2096,7 +2119,54 @@ fn register_mod_state_actions(ui: &AppWindow, commands: &Sender<Command>) {
     });
 }
 
-fn register_server_actions(ui: &AppWindow, commands: &Sender<Command>) {
+/// Selects one server and puts its console on screen, following its output.
+///
+/// The console is a tab of the server workspace, so reaching it means selecting
+/// the server and choosing both the workspace and the tab. Following is turned
+/// on because the output being waited for has not been written yet.
+fn show_server_console(ui: &AppWindow, server: SharedString) {
+    ui.set_selected_server_id(server);
+    ui.set_workspace("server".into());
+    ui.set_workspace_tab("Console".into());
+    ui.set_log_query(SharedString::default());
+    ui.set_log_follow(true);
+}
+
+/// Starting a server, which also puts its console on screen.
+///
+/// Start is offered from the server card, the workspace header, and the
+/// overview, and every one of them would otherwise have to navigate for itself.
+/// Done once here, so all of them land on the output the run is about to
+/// produce.
+fn register_server_start(
+    ui: &AppWindow,
+    commands: &Sender<Command>,
+    live_viewer: &Rc<RefCell<LiveViewerState>>,
+) {
+    let sender = commands.clone();
+    let weak = ui.as_weak();
+    let start_state = Rc::clone(live_viewer);
+    ui.on_server_start(move |id| {
+        let Some(server) = backend::parse_server_id(&id) else {
+            return;
+        };
+        send(&sender, Command::StartServer(server));
+
+        let source = LiveLogSource::Server(server);
+        start_state.borrow_mut().activate(source.clone());
+        if let Some(ui) = weak.upgrade() {
+            show_server_console(&ui, id);
+            render_live_viewer(&ui, &mut start_state.borrow_mut());
+        }
+        send(&sender, Command::OpenLiveLog(source));
+    });
+}
+
+fn register_server_actions(
+    ui: &AppWindow,
+    commands: &Sender<Command>,
+    live_viewer: &Rc<RefCell<LiveViewerState>>,
+) {
     let sender = commands.clone();
     ui.on_save_instance_runtime(move |id, java, min, max, args| {
         let Some(instance) = backend::parse_instance_id(&id) else {
@@ -2162,12 +2232,7 @@ fn register_server_actions(ui: &AppWindow, commands: &Sender<Command>) {
         }
     });
 
-    let sender = commands.clone();
-    ui.on_server_start(move |id| {
-        if let Some(id) = backend::parse_server_id(&id) {
-            send(&sender, Command::StartServer(id));
-        }
-    });
+    register_server_start(ui, commands, live_viewer);
 
     let sender = commands.clone();
     ui.on_server_stop(move |id| {
@@ -4910,6 +4975,41 @@ mod tests {
 
     use super::*;
 
+    /// Start is offered from four places. Every one of them has to leave the
+    /// user watching the output the run is about to produce, which means
+    /// selecting the server and choosing both the workspace and the tab.
+    #[test]
+    fn showing_a_servers_console_selects_it_and_opens_the_console_tab() {
+        slint::platform::set_platform(Box::new(i_slint_backend_testing::TestingBackend::new(
+            i_slint_backend_testing::TestingBackendOptions {
+                threading: false,
+                ..Default::default()
+            },
+        )))
+        .expect("testing backend");
+        let ui = AppWindow::new().expect("window");
+
+        ui.set_workspace("instance".into());
+        ui.set_workspace_tab("Overview".into());
+        ui.set_log_query("stale search".into());
+        ui.set_log_follow(false);
+
+        show_server_console(&ui, "repro-server".into());
+
+        assert_eq!(ui.get_selected_server_id(), "repro-server");
+        assert_eq!(ui.get_workspace(), "server");
+        assert_eq!(ui.get_workspace_tab(), "Console");
+        assert!(
+            ui.get_log_follow(),
+            "the output being waited for has not been written yet"
+        );
+        assert_eq!(
+            ui.get_log_query(),
+            "",
+            "a search left over from another log would hide the run being started"
+        );
+    }
+
     fn activity(id: &str, status_kind: &'static str) -> ActivityData {
         ActivityData {
             item: ActivityPresentation {
@@ -5655,7 +5755,7 @@ mod tests {
     fn large_live_history_uses_bounded_production_filter_and_chunk_updates() {
         let source = LiveLogSource::Client(ephervex_model::InstanceId::new());
         let mut state = LiveViewerState::default();
-        state.activate(source);
+        state.activate(source.clone());
 
         for batch in 0..100 {
             let lines = (0..100)
@@ -5673,7 +5773,7 @@ mod tests {
                 })
                 .collect();
             assert!(state.apply(LiveLogUpdate {
-                source,
+                source: source.clone(),
                 reset: batch == 0,
                 missing: false,
                 source_truncated: false,

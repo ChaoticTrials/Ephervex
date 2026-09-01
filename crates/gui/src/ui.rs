@@ -10,6 +10,11 @@ slint::slint! {
 
     export global Theme {
         in-out property <float> text-scale: 1;
+        // The fixed-width family this machine actually has, resolved once at
+        // startup. `font-family` is matched as a literal family name, so the
+        // generic "monospace" written here matches nothing and only stands
+        // until the real name is set. See the `monospace` module.
+        in-out property <string> mono-family: "monospace";
         out property <length> caption-size: 11px * text-scale;
         out property <length> label-size: 12px * text-scale;
         out property <length> body-size: 13px * text-scale;
@@ -479,7 +484,7 @@ slint::slint! {
     component SelectableText inherits Rectangle {
         in property <string> text;
         in property <TextWrap> wrap: no-wrap;
-        in property <string> font-family: "monospace";
+        in property <string> font-family: Theme.mono-family;
         in property <length> font-size: 12px;
         background: rgb(11, 14, 16);
         forward-focus: selectable-input;
@@ -611,7 +616,8 @@ slint::slint! {
                 }
             }
             if root.chunks.length == 0 : Rectangle { background: rgb(11, 14, 16); VerticalLayout { alignment: center; spacing: 6px; Text { text: GuiI18n.text("gui-no-log-output"); color: Theme.text; font-size: Theme.heading-size; horizontal-alignment: center; } BodyText { text: GuiI18n.text("gui-no-log-output-detail"); horizontal-alignment: center; } } }
-            if root.chunks.length > 0 : output := ListView {
+            if root.chunks.length > 0 : Rectangle {
+              output := ListView {
                 viewport-width: root.wrap-lines ? self.visible-width : max(self.visible-width, root.content-columns * root.font-size * 0.62 + 24px);
                 private property <int> observed-revision: root.revision;
                 changed observed-revision => {
@@ -643,10 +649,73 @@ slint::slint! {
                             read-only: true;
                             single-line: false;
                             wrap: root.wrap-lines ? word-wrap : no-wrap;
-                            font-family: "monospace";
+                            font-family: Theme.mono-family;
                             font-size: root.font-size;
                             accessible-label: GuiI18n.text("gui-log-output-block");
                         }
+                    }
+                }
+              }
+              // The bottom is where a log is read from, and scrolling up is how
+              // it is left. Following only moves the view when the next line
+              // arrives, which is no help at all on a log that has stopped, so
+              // this moves it now and resumes following in one press.
+              //
+              // Shown only when there is somewhere to go: a view already at the
+              // end would offer a button that does nothing.
+              if output.viewport-y > output.visible-height - output.viewport-height + 2px : IconButton {
+                  x: parent.width - self.width - 18px;
+                  y: parent.height - self.height - 14px;
+                  icon: @image-url("../../../assets/icons/jump-to-end.svg");
+                  accessible-name: GuiI18n.text("gui-jump-latest");
+                  background: Theme.elevated;
+                  clicked => {
+                      output.viewport-y = min(0px, output.visible-height - output.viewport-height);
+                      if !root.follow {
+                          root.follow = true;
+                          root.follow-changed(true);
+                      }
+                  }
+              }
+            }
+        }
+    }
+
+    // The list of files one diagnostics section holds.
+    //
+    // One component because logs and crash reports are listed the same way on
+    // both workspaces, and four copies of a list drift.
+    component DiagnosticFileList inherits Rectangle {
+        in property <[DiagnosticRow]> items;
+        in property <string> selected;
+        // Crash reports are named in the warning color wherever they appear,
+        // because a crash report existing is itself the finding.
+        in property <bool> crash;
+        callback opened(string);
+        width: 270px;
+        background: Theme.surface;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: Theme.border;
+        VerticalLayout {
+            padding: 8px;
+            spacing: 5px;
+            BodyText { text: GuiI18n.count("gui-diagnostic-files-count", root.items.length); }
+            ScrollView {
+                VerticalLayout {
+                    spacing: 5px;
+                    for item in root.items : Rectangle {
+                        height: 66px;
+                        background: Theme.background;
+                        border-radius: 6px;
+                        border-width: item.name == root.selected ? 2px : 1px;
+                        border-color: item.name == root.selected ? Theme.accent : Theme.border;
+                        VerticalLayout {
+                            padding: 8px;
+                            Text { text: item.name; color: root.crash ? Theme.warning : Theme.text; overflow: elide; }
+                            BodyText { text: item.summary != "" ? item.summary : item.size; overflow: elide; font-size: Theme.caption-size; }
+                        }
+                        TouchArea { mouse-cursor: pointer; clicked => { root.opened(item.name); } }
                     }
                 }
             }
@@ -1222,7 +1291,7 @@ slint::slint! {
                                 if root.item.overridden : Pill { text: GuiI18n.text("gui-minecraft-state-overridden"); tone-color: Theme.success; }
                                 if root.item.dirty : Pill { text: GuiI18n.text("gui-minecraft-unsaved"); tone-color: Theme.accent; }
                             }
-                            Text { text: root.item.technical-id; color: Theme.text-muted; font-size: Theme.caption-size; font-family: "monospace"; overflow: elide; }
+                            Text { text: root.item.technical-id; color: Theme.text-muted; font-size: Theme.caption-size; font-family: Theme.mono-family; overflow: elide; }
                         }
                         VerticalLayout { alignment: center; horizontal-stretch: 0;
                             CompatibilityBadge { text: root.item.status; kind: root.item.status-kind; detail: root.item.status-detail; }
@@ -1435,7 +1504,7 @@ slint::slint! {
                 Heading { text: item.title; font-size: Theme.row-heading-size; }
                 BodyText { text: item.entity; color: Theme.text; wrap: word-wrap; }
                 detail-text := BodyText { text: item.detail; visible: item.detail != ""; wrap: word-wrap; }
-                BodyText { text: item.id + " | " + item.time; color: Theme.text-muted; font-family: "monospace"; font-size: Theme.caption-size; }
+                BodyText { text: item.id + " | " + item.time; color: Theme.text-muted; font-family: Theme.mono-family; font-size: Theme.caption-size; }
                 if item.active && !item.indeterminate : Rectangle { height: 4px; border-radius: 2px; background: Theme.border; Rectangle { x: 0px; width: parent.width * item.progress; height: parent.height; border-radius: 2px; background: Theme.accent; } }
             }
             VerticalLayout { width: 112px; alignment: start; spacing: 8px;
@@ -1782,6 +1851,11 @@ slint::slint! {
         callback remove-mod(string, string);
         in-out property <[ModSearchRow]> mod-results;
         in-out property <[DiagnosticRow]> diagnostics;
+        // Whether the Logs tab is showing saved log files rather than the one
+        // being written. Beside `selected-diagnostic-kind` rather than folded
+        // into it, because that value names a kind of file for the services
+        // that read one and must stay exactly "log" or "crash-report".
+        in-out property <bool> log-shows-files;
         in-out property <[ActivityRow]> activities;
         in-out property <[AccountRow]> accounts;
         in-out property <[JavaRow]> java-runtimes;
@@ -2125,6 +2199,8 @@ slint::slint! {
         callback server-kill(string);
         callback server-console(string, string);
         callback open-live-log(string, string);
+        // Reads one saved log file into the same filterable view the live log uses.
+        callback open-log-file(string, string, string);
         callback close-live-log();
         callback copy-live-log();
         callback set-log-level(string, bool);
@@ -2348,7 +2424,7 @@ slint::slint! {
                             open-folder(id) => { root.open-client-folder(id); }
                             workspace(id) => { root.workspace = "instance"; root.workspace-tab = "Overview"; root.load-instance-workspace(id); }
                             create-server(id, name) => { root.create-server-client-id = id; root.create-server-name = name + " Server"; root.modal = "create-server"; }
-                            diagnostics(id) => { root.workspace = "instance"; root.workspace-tab = "Logs"; root.selected-diagnostic-kind = "log"; root.load-instance-workspace(id); root.open-live-log("client", id); }
+                            diagnostics(id) => { root.workspace = "instance"; root.workspace-tab = "Logs"; root.selected-diagnostic-kind = "log"; root.log-shows-files = false; root.selected-diagnostic-name = ""; root.load-instance-workspace(id); root.open-live-log("client", id); }
                         }
                     }
 
@@ -2362,7 +2438,7 @@ slint::slint! {
                                 WorkspaceTab { text: GuiI18n.text("gui-instance-tab-overview"); selected: root.workspace-tab == "Overview"; clicked => { root.close-live-log(); root.workspace-tab = "Overview"; } }
                                 WorkspaceTab { text: GuiI18n.text("gui-instance-tab-mods"); selected: root.workspace-tab == "Mods"; clicked => { root.close-live-log(); root.workspace-tab = "Mods"; } }
                                 WorkspaceTab { text: GuiI18n.text("gui-instance-tab-settings"); selected: root.workspace-tab == "Settings"; clicked => { root.close-live-log(); root.workspace-tab = "Settings"; } }
-                                WorkspaceTab { text: GuiI18n.text("gui-instance-tab-logs"); selected: root.workspace-tab == "Logs"; clicked => { root.workspace-tab = "Logs"; root.selected-diagnostic-kind = "log"; root.open-live-log("client", root.selected-instance-id); } }
+                                WorkspaceTab { text: GuiI18n.text("gui-instance-tab-logs"); selected: root.workspace-tab == "Logs"; clicked => { root.workspace-tab = "Logs"; root.selected-diagnostic-kind = "log"; root.log-shows-files = false; root.selected-diagnostic-name = ""; root.open-live-log("client", root.selected-instance-id); } }
                                 Rectangle { horizontal-stretch: 1; }
                             }
                             Divider { }
@@ -2443,14 +2519,38 @@ slint::slint! {
                                 HorizontalLayout { AppButton { text: GuiI18n.text("gui-open-global-defaults"); clicked => { root.page = 4; root.workspace = ""; root.workspace-tab = "Minecraft"; } } Rectangle { horizontal-stretch: 1; } }
                             } }
                             if root.workspace-tab == "Logs" : VerticalLayout { spacing: 9px;
-                                HorizontalLayout { spacing: 8px; FilterChip { text: GuiI18n.text("gui-live-latest-log"); accessible-name: GuiI18n.text("gui-live-latest-log"); selected: root.selected-diagnostic-kind != "crash-report"; clicked => { root.selected-diagnostic-kind = "log"; root.open-live-log("client", root.selected-instance-id); } } FilterChip { text: GuiI18n.text("gui-crash-reports"); accessible-name: GuiI18n.text("gui-crash-reports"); selected: root.selected-diagnostic-kind == "crash-report"; clicked => { root.close-live-log(); root.selected-diagnostic-kind = "crash-report"; root.load-diagnostics("client", root.selected-instance-id, "crash-report"); } } Rectangle { horizontal-stretch: 1; } }
-                                if root.selected-diagnostic-kind != "crash-report" : LiveLogViewer {
+                                HorizontalLayout { spacing: 8px;
+                                    FilterChip { text: GuiI18n.text("gui-live-latest-log"); accessible-name: GuiI18n.text("gui-live-latest-log"); selected: root.selected-diagnostic-kind != "crash-report" && !root.log-shows-files; clicked => { root.selected-diagnostic-kind = "log"; root.log-shows-files = false; root.selected-diagnostic-name = ""; root.open-live-log("client", root.selected-instance-id); } }
+                                    FilterChip { text: GuiI18n.text("gui-log-files"); accessible-name: GuiI18n.text("gui-log-files"); selected: root.selected-diagnostic-kind != "crash-report" && root.log-shows-files; clicked => { root.close-live-log(); root.selected-diagnostic-kind = "log"; root.log-shows-files = true; root.selected-diagnostic-name = ""; root.load-diagnostics("client", root.selected-instance-id, "log"); } }
+                                    FilterChip { text: GuiI18n.text("gui-crash-reports"); accessible-name: GuiI18n.text("gui-crash-reports"); selected: root.selected-diagnostic-kind == "crash-report"; clicked => { root.close-live-log(); root.selected-diagnostic-kind = "crash-report"; root.log-shows-files = false; root.selected-diagnostic-name = ""; root.load-diagnostics("client", root.selected-instance-id, "crash-report"); } }
+                                    Rectangle { horizontal-stretch: 1; }
+                                    AppButton { text: GuiI18n.text("gui-folder"); clicked => { root.open-diagnostic-folder("client", root.selected-instance-id, root.selected-diagnostic-kind); } }
+                                }
+                                // The log being written to, followed as it grows.
+                                if root.selected-diagnostic-kind != "crash-report" && !root.log-shows-files : LiveLogViewer {
                                     chunks: root.log-chunks; has-content: root.log-has-content; status: root.log-status; history-truncated: root.log-history-truncated; pending-lines: root.log-pending-lines; content-columns: root.log-content-columns; font-size: root.technical-text-size * 1px; query <=> root.log-query; wrap-lines <=> root.log-wrap-lines; follow <=> root.log-follow; trace-enabled: root.log-trace-enabled; debug-enabled: root.log-debug-enabled; info-enabled: root.log-info-enabled; warn-enabled: root.log-warn-enabled; error-enabled: root.log-error-enabled; fatal-enabled: root.log-fatal-enabled; other-enabled: root.log-other-enabled; revision: root.log-revision;
                                     set-level(level, enabled) => { root.set-log-level(level, enabled); } search(query) => { root.search-live-log(query); } copy => { root.copy-live-log(); } follow-changed(follow) => { root.live-log-follow-changed(follow); }
                                 }
+                                // A saved log, read through the same view: a
+                                // finished log has the same levels as a live
+                                // one and is read for the same reasons.
+                                if root.selected-diagnostic-kind != "crash-report" && root.log-shows-files : HorizontalLayout { spacing: 10px;
+                                    DiagnosticFileList { items: root.diagnostics; selected: root.selected-diagnostic-name; opened(name) => { root.selected-diagnostic-name = name; root.open-log-file("client", root.selected-instance-id, name); } }
+                                    if root.selected-diagnostic-name == "" : Rectangle { horizontal-stretch: 1; background: rgb(11, 14, 16); border-radius: 8px; border-width: 1px; border-color: Theme.border; EmptyState { title: GuiI18n.text("gui-no-file-open"); message: GuiI18n.text("gui-no-file-open-detail"); } }
+                                    if root.selected-diagnostic-name != "" : LiveLogViewer {
+                                    chunks: root.log-chunks; has-content: root.log-has-content; status: root.log-status; history-truncated: root.log-history-truncated; pending-lines: root.log-pending-lines; content-columns: root.log-content-columns; font-size: root.technical-text-size * 1px; query <=> root.log-query; wrap-lines <=> root.log-wrap-lines; follow <=> root.log-follow; trace-enabled: root.log-trace-enabled; debug-enabled: root.log-debug-enabled; info-enabled: root.log-info-enabled; warn-enabled: root.log-warn-enabled; error-enabled: root.log-error-enabled; fatal-enabled: root.log-fatal-enabled; other-enabled: root.log-other-enabled; revision: root.log-revision;
+                                    set-level(level, enabled) => { root.set-log-level(level, enabled); } search(query) => { root.search-live-log(query); } copy => { root.copy-live-log(); } follow-changed(follow) => { root.live-log-follow-changed(follow); }
+                                }
+                                }
+                                // A crash report stays a plain document. It is
+                                // one stack dump, and a level filter over it
+                                // would hide the report rather than narrow it.
                                 if root.selected-diagnostic-kind == "crash-report" : VerticalLayout { spacing: 8px;
-                                    HorizontalLayout { BodyText { text: GuiI18n.count("gui-diagnostic-files-count", root.diagnostics.length); } Rectangle { horizontal-stretch: 1; } TextField { text <=> root.diagnostic-query; placeholder: GuiI18n.text("gui-search-loaded-content"); input-type: InputType.search; width: 250px; accepted => { root.search-diagnostic("client", root.selected-instance-id, "crash-report", root.selected-diagnostic-name, root.diagnostic-query); } } AppButton { text: GuiI18n.text("gui-find"); enabled: root.selected-diagnostic-name != ""; clicked => { root.search-diagnostic("client", root.selected-instance-id, "crash-report", root.selected-diagnostic-name, root.diagnostic-query); } } AppButton { text: GuiI18n.text("gui-folder"); clicked => { root.open-diagnostic-folder("client", root.selected-instance-id, "crash-report"); } } }
-                                    HorizontalLayout { spacing: 10px; Rectangle { width: 270px; background: Theme.surface; border-radius: 8px; border-width: 1px; border-color: Theme.border; ScrollView { VerticalLayout { padding: 8px; spacing: 5px; for item in root.diagnostics : Rectangle { height: 66px; background: Theme.background; border-radius: 6px; border-width: item.name == root.selected-diagnostic-name ? 2px : 1px; border-color: item.name == root.selected-diagnostic-name ? Theme.accent : Theme.border; VerticalLayout { padding: 8px; Text { text: item.name; color: Theme.warning; overflow: elide; } BodyText { text: item.summary != "" ? item.summary : item.size; overflow: elide; font-size: Theme.caption-size; } } TouchArea { clicked => { root.selected-diagnostic-name = item.name; root.open-diagnostic("client", root.selected-instance-id, "crash-report", item.name); } } } } } } Rectangle { horizontal-stretch: 1; background: rgb(11, 14, 16); border-radius: 8px; border-width: 1px; border-color: Theme.border; VerticalLayout { if root.diagnostic-content == "" : EmptyState { title: GuiI18n.text("gui-no-file-open"); message: GuiI18n.text("gui-no-file-open-detail"); } if root.diagnostic-content != "" : SelectableText { text: root.diagnostic-content; font-size: root.technical-text-size * 1px; } if root.diagnostic-content != "" : AppButton { text: GuiI18n.text("gui-copy"); clicked => { root.copy-text(root.diagnostic-content); } } } } }
+                                    HorizontalLayout { spacing: 8px; Rectangle { horizontal-stretch: 1; } TextField { text <=> root.diagnostic-query; placeholder: GuiI18n.text("gui-search-loaded-content"); input-type: InputType.search; width: 250px; accepted => { root.search-diagnostic("client", root.selected-instance-id, "crash-report", root.selected-diagnostic-name, root.diagnostic-query); } } AppButton { text: GuiI18n.text("gui-find"); enabled: root.selected-diagnostic-name != ""; clicked => { root.search-diagnostic("client", root.selected-instance-id, "crash-report", root.selected-diagnostic-name, root.diagnostic-query); } } }
+                                    HorizontalLayout { spacing: 10px;
+                                        DiagnosticFileList { items: root.diagnostics; selected: root.selected-diagnostic-name; crash: true; opened(name) => { root.selected-diagnostic-name = name; root.open-diagnostic("client", root.selected-instance-id, "crash-report", name); } }
+                                        Rectangle { horizontal-stretch: 1; background: rgb(11, 14, 16); border-radius: 8px; border-width: 1px; border-color: Theme.border; VerticalLayout { if root.diagnostic-content == "" : EmptyState { title: GuiI18n.text("gui-no-file-open"); message: GuiI18n.text("gui-no-file-open-detail"); } if root.diagnostic-content != "" : SelectableText { text: root.diagnostic-content; font-size: root.technical-text-size * 1px; } if root.diagnostic-content != "" : AppButton { text: GuiI18n.text("gui-copy"); clicked => { root.copy-text(root.diagnostic-content); } } } }
+                                    }
                                 }
                             }
                         }
@@ -2509,7 +2609,7 @@ slint::slint! {
                                 WorkspaceTab { text: GuiI18n.text("gui-server-tab-console"); selected: root.workspace-tab == "Console"; clicked => { root.workspace-tab = "Console"; root.open-live-log("server", root.selected-server-id); } }
                                 WorkspaceTab { text: GuiI18n.text("gui-instance-tab-mods"); selected: root.workspace-tab == "Mods"; clicked => { root.close-live-log(); root.workspace-tab = "Mods"; root.load-server-mods(root.selected-server-id); } }
                                 WorkspaceTab { text: GuiI18n.text("gui-server-tab-properties"); selected: root.workspace-tab == "Properties"; clicked => { root.close-live-log(); root.workspace-tab = "Properties"; } }
-                                WorkspaceTab { text: GuiI18n.text("gui-instance-tab-logs"); selected: root.workspace-tab == "Logs"; clicked => { root.close-live-log(); root.workspace-tab = "Logs"; root.selected-diagnostic-kind = "log"; root.load-diagnostics("server", root.selected-server-id, "log"); } }
+                                WorkspaceTab { text: GuiI18n.text("gui-instance-tab-logs"); selected: root.workspace-tab == "Logs"; clicked => { root.workspace-tab = "Logs"; root.selected-diagnostic-kind = "log"; root.log-shows-files = false; root.selected-diagnostic-name = ""; root.open-live-log("server", root.selected-server-id); } }
                                 Rectangle { horizontal-stretch: 1; }
                             }
                             Divider { }
@@ -2529,9 +2629,40 @@ slint::slint! {
                                 }
                                 HorizontalLayout { TextField { text <=> root.console-command; placeholder: root.servers[root.selected-server-index].can-send-command ? GuiI18n.text("gui-enter-server-command") : GuiI18n.text("gui-start-server-command"); enabled: root.servers[root.selected-server-index].can-send-command; horizontal-stretch: 1; accepted => { root.server-console(root.selected-server-id, root.console-command); root.console-command = ""; } } AppButton { text: GuiI18n.text("gui-send"); tone: "primary"; enabled: root.servers[root.selected-server-index].can-send-command && root.console-command != ""; clicked => { root.server-console(root.selected-server-id, root.console-command); root.console-command = ""; } } }
                             }
-                            if root.workspace-tab == "Logs" : VerticalLayout { spacing: 8px;
-                                HorizontalLayout { spacing: 8px; FilterChip { text: GuiI18n.text("gui-log-files"); accessible-name: GuiI18n.text("gui-log-files"); selected: root.selected-diagnostic-kind != "crash-report"; clicked => { root.selected-diagnostic-kind = "log"; root.load-diagnostics("server", root.selected-server-id, "log"); } } FilterChip { text: GuiI18n.text("gui-crash-reports"); accessible-name: GuiI18n.text("gui-crash-reports"); selected: root.selected-diagnostic-kind == "crash-report"; clicked => { root.selected-diagnostic-kind = "crash-report"; root.load-diagnostics("server", root.selected-server-id, "crash-report"); } } Rectangle { horizontal-stretch: 1; } TextField { text <=> root.diagnostic-query; placeholder: GuiI18n.text("gui-search-loaded-content"); input-type: InputType.search; width: 250px; accepted => { root.search-diagnostic("server", root.selected-server-id, root.selected-diagnostic-kind, root.selected-diagnostic-name, root.diagnostic-query); } } AppButton { text: GuiI18n.text("gui-find"); enabled: root.selected-diagnostic-name != ""; clicked => { root.search-diagnostic("server", root.selected-server-id, root.selected-diagnostic-kind, root.selected-diagnostic-name, root.diagnostic-query); } } AppButton { text: GuiI18n.text("gui-folder"); clicked => { root.open-diagnostic-folder("server", root.selected-server-id, root.selected-diagnostic-kind); } } }
-                                HorizontalLayout { spacing: 10px; Rectangle { width: 280px; background: Theme.surface; border-radius: 8px; border-width: 1px; border-color: Theme.border; VerticalLayout { padding: 8px; spacing: 5px; BodyText { text: GuiI18n.count("gui-diagnostic-files-count", root.diagnostics.length); } ScrollView { VerticalLayout { spacing: 5px; for item in root.diagnostics : Rectangle { height: 66px; background: Theme.background; border-radius: 6px; border-width: item.name == root.selected-diagnostic-name ? 2px : 1px; border-color: item.name == root.selected-diagnostic-name ? Theme.accent : Theme.border; VerticalLayout { padding: 8px; Text { text: item.name; color: item.kind == "crash-report" ? Theme.warning : Theme.text; overflow: elide; } BodyText { text: item.summary != "" ? item.summary : item.size; overflow: elide; font-size: Theme.caption-size; } } TouchArea { clicked => { root.selected-diagnostic-name = item.name; root.open-diagnostic("server", root.selected-server-id, root.selected-diagnostic-kind, item.name); } } } } } } } Rectangle { horizontal-stretch: 1; background: rgb(11, 14, 16); border-radius: 8px; border-width: 1px; border-color: Theme.border; VerticalLayout { if root.diagnostic-content == "" : EmptyState { title: GuiI18n.text("gui-no-file-open"); message: GuiI18n.text("gui-no-file-open-detail"); } if root.diagnostic-content != "" : SelectableText { text: root.diagnostic-content; font-size: root.technical-text-size * 1px; } if root.diagnostic-content != "" : AppButton { text: GuiI18n.text("gui-copy"); clicked => { root.copy-text(root.diagnostic-content); } } } } }
+                            if root.workspace-tab == "Logs" : VerticalLayout { spacing: 9px;
+                                HorizontalLayout { spacing: 8px;
+                                    FilterChip { text: GuiI18n.text("gui-live-latest-log"); accessible-name: GuiI18n.text("gui-live-latest-log"); selected: root.selected-diagnostic-kind != "crash-report" && !root.log-shows-files; clicked => { root.selected-diagnostic-kind = "log"; root.log-shows-files = false; root.selected-diagnostic-name = ""; root.open-live-log("server", root.selected-server-id); } }
+                                    FilterChip { text: GuiI18n.text("gui-log-files"); accessible-name: GuiI18n.text("gui-log-files"); selected: root.selected-diagnostic-kind != "crash-report" && root.log-shows-files; clicked => { root.close-live-log(); root.selected-diagnostic-kind = "log"; root.log-shows-files = true; root.selected-diagnostic-name = ""; root.load-diagnostics("server", root.selected-server-id, "log"); } }
+                                    FilterChip { text: GuiI18n.text("gui-crash-reports"); accessible-name: GuiI18n.text("gui-crash-reports"); selected: root.selected-diagnostic-kind == "crash-report"; clicked => { root.close-live-log(); root.selected-diagnostic-kind = "crash-report"; root.log-shows-files = false; root.selected-diagnostic-name = ""; root.load-diagnostics("server", root.selected-server-id, "crash-report"); } }
+                                    Rectangle { horizontal-stretch: 1; }
+                                    AppButton { text: GuiI18n.text("gui-folder"); clicked => { root.open-diagnostic-folder("server", root.selected-server-id, root.selected-diagnostic-kind); } }
+                                }
+                                // The log being written to, followed as it grows.
+                                if root.selected-diagnostic-kind != "crash-report" && !root.log-shows-files : LiveLogViewer {
+                                    chunks: root.log-chunks; has-content: root.log-has-content; status: root.log-status; history-truncated: root.log-history-truncated; pending-lines: root.log-pending-lines; content-columns: root.log-content-columns; font-size: root.technical-text-size * 1px; query <=> root.log-query; wrap-lines <=> root.log-wrap-lines; follow <=> root.log-follow; trace-enabled: root.log-trace-enabled; debug-enabled: root.log-debug-enabled; info-enabled: root.log-info-enabled; warn-enabled: root.log-warn-enabled; error-enabled: root.log-error-enabled; fatal-enabled: root.log-fatal-enabled; other-enabled: root.log-other-enabled; revision: root.log-revision;
+                                    set-level(level, enabled) => { root.set-log-level(level, enabled); } search(query) => { root.search-live-log(query); } copy => { root.copy-live-log(); } follow-changed(follow) => { root.live-log-follow-changed(follow); }
+                                }
+                                // A saved log, read through the same view: a
+                                // finished log has the same levels as a live
+                                // one and is read for the same reasons.
+                                if root.selected-diagnostic-kind != "crash-report" && root.log-shows-files : HorizontalLayout { spacing: 10px;
+                                    DiagnosticFileList { items: root.diagnostics; selected: root.selected-diagnostic-name; opened(name) => { root.selected-diagnostic-name = name; root.open-log-file("server", root.selected-server-id, name); } }
+                                    if root.selected-diagnostic-name == "" : Rectangle { horizontal-stretch: 1; background: rgb(11, 14, 16); border-radius: 8px; border-width: 1px; border-color: Theme.border; EmptyState { title: GuiI18n.text("gui-no-file-open"); message: GuiI18n.text("gui-no-file-open-detail"); } }
+                                    if root.selected-diagnostic-name != "" : LiveLogViewer {
+                                    chunks: root.log-chunks; has-content: root.log-has-content; status: root.log-status; history-truncated: root.log-history-truncated; pending-lines: root.log-pending-lines; content-columns: root.log-content-columns; font-size: root.technical-text-size * 1px; query <=> root.log-query; wrap-lines <=> root.log-wrap-lines; follow <=> root.log-follow; trace-enabled: root.log-trace-enabled; debug-enabled: root.log-debug-enabled; info-enabled: root.log-info-enabled; warn-enabled: root.log-warn-enabled; error-enabled: root.log-error-enabled; fatal-enabled: root.log-fatal-enabled; other-enabled: root.log-other-enabled; revision: root.log-revision;
+                                    set-level(level, enabled) => { root.set-log-level(level, enabled); } search(query) => { root.search-live-log(query); } copy => { root.copy-live-log(); } follow-changed(follow) => { root.live-log-follow-changed(follow); }
+                                }
+                                }
+                                // A crash report stays a plain document. It is
+                                // one stack dump, and a level filter over it
+                                // would hide the report rather than narrow it.
+                                if root.selected-diagnostic-kind == "crash-report" : VerticalLayout { spacing: 8px;
+                                    HorizontalLayout { spacing: 8px; Rectangle { horizontal-stretch: 1; } TextField { text <=> root.diagnostic-query; placeholder: GuiI18n.text("gui-search-loaded-content"); input-type: InputType.search; width: 250px; accepted => { root.search-diagnostic("server", root.selected-server-id, "crash-report", root.selected-diagnostic-name, root.diagnostic-query); } } AppButton { text: GuiI18n.text("gui-find"); enabled: root.selected-diagnostic-name != ""; clicked => { root.search-diagnostic("server", root.selected-server-id, "crash-report", root.selected-diagnostic-name, root.diagnostic-query); } } }
+                                    HorizontalLayout { spacing: 10px;
+                                        DiagnosticFileList { items: root.diagnostics; selected: root.selected-diagnostic-name; crash: true; opened(name) => { root.selected-diagnostic-name = name; root.open-diagnostic("server", root.selected-server-id, "crash-report", name); } }
+                                        Rectangle { horizontal-stretch: 1; background: rgb(11, 14, 16); border-radius: 8px; border-width: 1px; border-color: Theme.border; VerticalLayout { if root.diagnostic-content == "" : EmptyState { title: GuiI18n.text("gui-no-file-open"); message: GuiI18n.text("gui-no-file-open-detail"); } if root.diagnostic-content != "" : SelectableText { text: root.diagnostic-content; font-size: root.technical-text-size * 1px; } if root.diagnostic-content != "" : AppButton { text: GuiI18n.text("gui-copy"); clicked => { root.copy-text(root.diagnostic-content); } } } }
+                                    }
+                                }
                             }
                             if root.workspace-tab == "Mods" : VerticalLayout { spacing: 10px;
                                 SectionTitle { title: GuiI18n.text("gui-server-mods"); detail: GuiI18n.text("gui-server-mods-detail"); }
@@ -3145,7 +3276,7 @@ slint::slint! {
                     if root.modal == "eula" : VerticalLayout { spacing: 12px; BodyText { text: GuiI18n.text("gui-eula-detail"); wrap: word-wrap; } AppButton { text: GuiI18n.text("gui-open-minecraft-eula"); clicked => { root.open-eula-reference(); } } Rectangle { height: 70px; border-radius: 6px; border-width: 1px; border-color: root.eula-accepted ? Theme.success : Theme.warning; background: Theme.surface; BodyText { x: 12px; width: parent.width - 24px; text: root.eula-status; wrap: word-wrap; } } if !root.eula-accepted : BodyText { text: GuiI18n.text("gui-eula-confirm"); color: Theme.text; wrap: word-wrap; } HorizontalLayout { Rectangle { horizontal-stretch: 1; } if root.eula-accepted : AppButton { text: GuiI18n.text("gui-revoke-consent"); tone: "danger"; clicked => { root.revoke-eula(); } } if !root.eula-accepted : AppButton { text: GuiI18n.text("gui-accept-eula"); tone: "primary"; clicked => { root.accept-eula(); } } } }
                     if root.modal == "kill" : VerticalLayout { spacing: 14px; BodyText { text: GuiI18n.value("gui-force-kill-detail", root.pending-action-name != "" ? root.pending-action-name : root.selected-server-index >= 0 ? root.servers[root.selected-server-index].name : GuiI18n.text("gui-this-server")); color: Theme.warning; wrap: word-wrap; } HorizontalLayout { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; } } AppButton { text: GuiI18n.text("gui-force-kill-action"); tone: "danger"; clicked => { root.server-kill(root.selected-server-id); root.modal = ""; } } } }
                     if root.modal == "delete-instance" || root.modal == "delete-server" : VerticalLayout { spacing: 14px; BodyText { text: GuiI18n.value(root.modal == "delete-instance" ? "gui-delete-instance-detail" : "gui-delete-server-detail", root.pending-action-name); color: Theme.warning; wrap: word-wrap; } BodyText { text: GuiI18n.text("gui-delete-choice-detail"); wrap: word-wrap; } if root.modal == "delete-instance" && root.pending-action-linked-servers > 0 : BodyText { text: GuiI18n.count("gui-delete-instance-linked", root.pending-action-linked-servers); color: Theme.warning; wrap: word-wrap; } if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; } HorizontalLayout { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; } } AppButton { text: GuiI18n.text("gui-remove-from-ephervex"); clicked => { if root.modal == "delete-instance" { root.delete-client(root.pending-action-id, false); } else { root.delete-server(root.pending-action-id, false); } } } AppButton { text: GuiI18n.text("gui-delete-files"); tone: "danger"; clicked => { if root.modal == "delete-instance" { root.delete-client(root.pending-action-id, true); } else { root.delete-server(root.pending-action-id, true); } } } } }
-                    if root.modal == "license" : ScrollView { Text { text: root.license-text; color: Theme.text-secondary; font-family: "monospace"; font-size: 12px; wrap: word-wrap; } }
+                    if root.modal == "license" : ScrollView { Text { text: root.license-text; color: Theme.text-secondary; font-family: Theme.mono-family; font-size: 12px; wrap: word-wrap; } }
                     if root.modal == "third-party" : VerticalLayout { spacing: 12px; BodyText { text: GuiI18n.text("gui-third-party-unavailable"); wrap: word-wrap; } BodyText { text: GuiI18n.text("gui-slint-attribution"); color: Theme.text-muted; wrap: word-wrap; } HorizontalLayout { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-close"); tone: "primary"; clicked => { root.modal = ""; } } } }
                 }
             }

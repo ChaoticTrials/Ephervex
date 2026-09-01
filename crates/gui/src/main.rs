@@ -30,6 +30,17 @@ fn main() -> Result<(), slint::PlatformError> {
     }
 
     let ui = ephervex_gui::ui::AppWindow::new()?;
+    // Before anything is drawn, because the console and every other technical
+    // view asks for this family on its first frame.
+    if let Some(family) = ephervex_gui::monospace::resolve_monospace_family() {
+        tracing::debug!(%family, "fixed-width family");
+        ui.global::<ephervex_gui::ui::Theme>()
+            .set_mono_family(family.into());
+    } else {
+        // The declared default stands. It resolves to nothing, so technical
+        // text renders in the fallback face rather than not at all.
+        tracing::info!("no fixed-width font family was found on this system");
+    }
     ui.set_app_version(ephervex_model::APP_VERSION.into());
     ui.set_license_text(include_str!("../../../LICENSE").into());
     let controller = ephervex_gui::controller::attach(&ui);

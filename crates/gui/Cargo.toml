@@ -21,6 +21,10 @@ workspace = true
 # this list. If a screen needs something core does not expose, the fix is to
 # add a service to core, not a dependency here.
 slint.workspace = true
+# Slint resolves `font-family` as a literal family name and never as a CSS
+# generic, so the concrete family behind the `monospace` alias has to be looked
+# up before the markup can ask for it. See `monospace`.
+fontdb.workspace = true
 ephervex-core.workspace = true
 ephervex-model.workspace = true
 ephervex-i18n.workspace = true
