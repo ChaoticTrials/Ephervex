@@ -163,6 +163,13 @@ struct LaunchArgs {
     /// Download a managed runtime if nothing installed is compatible.
     #[arg(long)]
     install_java: bool,
+    /// Play as this account instead of the default one.
+    ///
+    /// Takes an account id or name, as `ephervex account list` shows them.
+    /// This applies to one launch and does not change which account is the
+    /// default.
+    #[arg(long, value_name = "ACCOUNT")]
+    account: Option<String>,
     /// Start Minecraft in demo mode.
     #[arg(long)]
     demo: bool,
@@ -1955,6 +1962,7 @@ async fn run_launch(app: &mut App, args: &LaunchArgs, json: bool) -> anyhow::Res
         features,
         java_path: args.java_path.clone(),
         install_java_if_missing: args.install_java,
+        account: args.account.clone(),
         dry_run: args.dry_run,
     };
 

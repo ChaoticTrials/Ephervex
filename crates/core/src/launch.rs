@@ -60,6 +60,13 @@ pub struct LaunchOptions {
     pub java_path: Option<PathBuf>,
     /// Whether to download a managed runtime when nothing installed qualifies.
     pub install_java_if_missing: bool,
+    /// Launch as this account rather than the default one.
+    ///
+    /// An account reference of the kind [`App::resolve_account`] accepts: an
+    /// id, or a name. `None` uses the default, which is what every launch did
+    /// before there was a way to say otherwise. Choosing one here does not
+    /// change the default.
+    pub account: Option<String>,
     /// Prepare everything and return the command without starting the game.
     ///
     /// Everything means everything: the version is installed, the runtime is
@@ -216,7 +223,9 @@ impl App {
 
         // Establish identity before metadata or artifacts are fetched. A
         // missing account is locally knowable and should fail without network.
-        let identity = self.launch_identity(cancel).await?;
+        let identity = self
+            .launch_identity(options.account.as_deref(), cancel)
+            .await?;
 
         let metadata = self.minecraft_version(&record.minecraft_version).await?;
         let java = self
@@ -338,13 +347,25 @@ impl App {
     /// present, because "no token" would otherwise mean both *offline* and
     /// *expired* — and those want opposite things (`ephervex-auth`'s
     /// `Credentials` exists to force this distinction).
-    async fn launch_identity(&mut self, cancel: &CancellationToken) -> CoreResult<PlayerIdentity> {
+    async fn launch_identity(
+        &mut self,
+        account: Option<&str>,
+        cancel: &CancellationToken,
+    ) -> CoreResult<PlayerIdentity> {
         // refresh an expired Microsoft token before the launch rather than
         // failing on it. `authenticated_session` is that operation, and it is
-        // the same one "app restart preserves login" uses.
-        let session = self
-            .authenticated_session(&AuthObserver::silent(), cancel)
-            .await?;
+        // the same one "app restart preserves login" uses. A chosen account
+        // takes the same path with the account named instead of looked up.
+        let session = match account {
+            Some(reference) => {
+                self.session_for_account(reference, &AuthObserver::silent(), cancel)
+                    .await?
+            }
+            None => {
+                self.authenticated_session(&AuthObserver::silent(), cancel)
+                    .await?
+            }
+        };
         Ok(identity_of(session))
     }
 

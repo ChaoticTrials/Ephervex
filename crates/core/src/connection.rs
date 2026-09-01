@@ -795,10 +795,15 @@ mod tests {
             features: LaunchFeatures::none().demo().custom_resolution(1280, 720),
             java_path: Some(PathBuf::from("/exact/client-java")),
             install_java_if_missing: true,
+            account: Some("Alice".to_owned()),
             dry_run: true,
         };
         let connected = connected_launch_options(&options, target);
         assert_eq!(connected.java_path, options.java_path);
+        assert_eq!(
+            connected.account, options.account,
+            "connecting to a server must not silently change who is playing"
+        );
         assert_eq!(
             connected.install_java_if_missing,
             options.install_java_if_missing

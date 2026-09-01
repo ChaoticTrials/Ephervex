@@ -1623,6 +1623,34 @@ fn register_create_instance_naming(
     });
 }
 
+/// Launching an instance, as the default account or as a chosen one.
+fn register_launch_actions(ui: &AppWindow, commands: &Sender<Command>) {
+    let sender = commands.clone();
+    ui.on_launch_client(move |id| {
+        if let Some(instance) = backend::parse_instance_id(&id) {
+            send(
+                &sender,
+                Command::LaunchClient {
+                    instance,
+                    account: None,
+                },
+            );
+        }
+    });
+
+    let sender = commands.clone();
+    ui.on_launch_client_as(move |id, account| {
+        let Some(instance) = backend::parse_instance_id(&id) else {
+            return;
+        };
+        // An empty choice is the default account, which is what plain Launch
+        // does. Passing it through as a reference would ask the services to
+        // resolve the empty string.
+        let account = (!account.is_empty()).then(|| account.to_string());
+        send(&sender, Command::LaunchClient { instance, account });
+    });
+}
+
 fn register_client_actions(
     ui: &AppWindow,
     commands: &Sender<Command>,
@@ -1666,12 +1694,7 @@ fn register_client_actions(
 
     register_instance_selection(ui, commands, creations);
 
-    let sender = commands.clone();
-    ui.on_launch_client(move |id| {
-        if let Some(id) = backend::parse_instance_id(&id) {
-            send(&sender, Command::LaunchClient(id));
-        }
-    });
+    register_launch_actions(ui, commands);
 
     let sender = commands.clone();
     ui.on_kill_instance(move |id| {

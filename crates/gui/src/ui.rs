@@ -878,12 +878,83 @@ slint::slint! {
         }
     }
 
+    // Launching as somebody other than the default account.
+    //
+    // Beside Launch rather than replacing it: the common case is one account,
+    // and a launcher that made everyone choose every time would be worse for
+    // it. Choosing here applies to one launch and never changes the default,
+    // which is what makes it safe to use for a quick second client.
+    component LaunchAsButton inherits Rectangle {
+        in property <[AccountRow]> accounts;
+        in property <bool> enabled: true;
+        callback launch-as(string);
+        callback add-account();
+        width: 118px;
+        height: Theme.control-height;
+        horizontal-stretch: 0;
+        border-radius: 6px;
+        border-width: 1px;
+        border-color: area.has-hover && root.enabled ? Theme.accent : Theme.border;
+        background: area.has-hover && root.enabled ? Theme.elevated : transparent;
+        accessible-role: button;
+        accessible-label: GuiI18n.text("gui-launch-as");
+        accessible-enabled: enabled;
+        accessible-action-default => { if root.enabled { menu.show({ x: 0, y: root.height }); } }
+        menu := ContextMenuArea {
+            Menu {
+                for account in root.accounts : MenuItem {
+                    // The default is named like the rest. It is still the one
+                    // plain Launch uses, and saying so twice would read as two
+                    // different accounts.
+                    title: account.is-default ? account.name + " (" + GuiI18n.text("gui-default") + ")" : account.name;
+                    activated => { root.launch-as(account.id); }
+                }
+                MenuSeparator {}
+                MenuItem {
+                    title: GuiI18n.text("gui-add-account");
+                    activated => { root.add-account(); }
+                }
+            }
+        }
+        HorizontalLayout {
+            padding-left: 10px; padding-right: 10px; spacing: 5px; alignment: center;
+            Text {
+                text: GuiI18n.text("gui-launch-as");
+                color: root.enabled ? Theme.text : Theme.text-muted;
+                font-size: Theme.label-size;
+                vertical-alignment: center;
+            }
+            Text {
+                text: "\u{25be}";
+                color: root.enabled ? Theme.text-secondary : Theme.text-muted;
+                font-size: Theme.label-size;
+                vertical-alignment: center;
+            }
+        }
+        // Declared after the menu area, so a press opens the menu rather than
+        // being swallowed by the area that hosts it.
+        area := TouchArea {
+            enabled: root.enabled;
+            mouse-cursor: pointer;
+            clicked => { menu.show({ x: 0, y: root.height }); }
+        }
+    }
+
     component Pill inherits Rectangle {
         in property <string> text;
         in property <color> tone-color: Theme.text-secondary;
-        height: 24px;
-        width: label.preferred-width + 18px;
+        // A pill normally hugs its label. Where one stands in for a control it
+        // takes that control's size instead, so a column of rows does not jump
+        // between the two. An explicit width on the instance cannot do this:
+        // the width here is a binding on the same element and a laid-out child
+        // with a bound width is fixed at it.
+        in property <length> min-content-width: 0px;
+        in property <length> content-height: 24px;
+        height: root.content-height;
+        width: max(root.min-content-width, label.preferred-width + 18px);
         horizontal-stretch: 0;
+        accessible-role: AccessibleRole.text;
+        accessible-label: root.text;
         border-radius: 5px;
         border-width: 1px;
         border-color: root.tone-color.with-alpha(0.55);
@@ -2280,6 +2351,8 @@ slint::slint! {
         callback toggle-favorite-version(string);
         callback remove-favorite-version(string);
         callback launch-client(string);
+        // Launches one instance as a named account, for this launch only.
+        callback launch-client-as(string, string);
         callback kill-instance(string);
         callback launch-and-connect(string, string);
         callback open-client-folder(string);
@@ -2555,7 +2628,7 @@ slint::slint! {
                         horizontal-stretch: 1; background: Theme.background;
                         VerticalLayout {
                             padding: 22px; spacing: 14px;
-                            HorizontalLayout { spacing: 12px; AppButton { text: GuiI18n.text("gui-back-instances"); clicked => { root.close-live-log(); root.workspace = ""; } } Heading { text: root.selected-instance-index >= 0 ? root.instances[root.selected-instance-index].name : GuiI18n.text("gui-instance"); font-size: Theme.workspace-title-size; } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-launch"); tone: "primary"; enabled: root.selected-instance-index >= 0 && root.instances[root.selected-instance-index].can-launch; clicked => { root.launch-client(root.selected-instance-id); } } }
+                            HorizontalLayout { spacing: 12px; AppButton { text: GuiI18n.text("gui-back-instances"); clicked => { root.close-live-log(); root.workspace = ""; } } Heading { text: root.selected-instance-index >= 0 ? root.instances[root.selected-instance-index].name : GuiI18n.text("gui-instance"); font-size: Theme.workspace-title-size; } Rectangle { horizontal-stretch: 1; } LaunchAsButton { accounts: root.accounts; enabled: root.selected-instance-index >= 0 && root.instances[root.selected-instance-index].can-launch; launch-as(account) => { root.launch-client-as(root.selected-instance-id, account); } add-account => { root.page = 4; root.workspace = ""; root.workspace-tab = "Accounts"; } } AppButton { text: GuiI18n.text("gui-launch"); tone: "primary"; enabled: root.selected-instance-index >= 0 && root.instances[root.selected-instance-index].can-launch; clicked => { root.launch-client(root.selected-instance-id); } } }
                             HorizontalLayout {
                                 spacing: 4px;
                                 WorkspaceTab { text: GuiI18n.text("gui-instance-tab-overview"); selected: root.workspace-tab == "Overview"; clicked => { root.close-live-log(); root.workspace-tab = "Overview"; } }
@@ -2978,7 +3051,13 @@ slint::slint! {
                                 TextField { text <=> root.offline-account-name; placeholder: GuiI18n.text("gui-offline-account-placeholder"); }
                                 HorizontalLayout { spacing: 8px; AppButton { text: GuiI18n.text("gui-add-offline-account"); width: 180px; clicked => { root.add-offline-account(root.offline-account-name); } } AppButton { text: GuiI18n.text("gui-microsoft-sign-in"); width: 205px; tone: "primary"; clicked => { root.begin-microsoft-login(); } } Rectangle { horizontal-stretch: 1; } }
                                 if root.accounts.length == 0 : EmptyState { title: GuiI18n.text("gui-no-accounts"); message: GuiI18n.text("gui-no-accounts-detail"); }
-                                for account in root.accounts : Rectangle { height: 78px; border-radius: 8px; border-width: account.is-default ? 2px : 1px; border-color: account.is-default ? Theme.accent : Theme.border; background: Theme.surface; HorizontalLayout { padding: 12px; spacing: 8px; VerticalLayout { Heading { text: account.name; font-size: 14px; } BodyText { text: account.kind + " | " + account.credential-state; } } if account.is-default : Pill { text: GuiI18n.text("gui-default"); tone-color: Theme.accent; } if !account.is-default : AppButton { text: GuiI18n.text("gui-make-default"); width: 130px; clicked => { root.set-default-account(account.id); } } AppButton { text: GuiI18n.text("gui-remove"); width: 110px; tone: "danger"; clicked => { root.remove-account(account.id); } } } }
+                                for account in root.accounts : Rectangle { height: 78px; border-radius: 8px; border-width: account.is-default ? 2px : 1px; border-color: account.is-default ? Theme.accent : Theme.border; background: Theme.surface; accessible-role: list-item; accessible-label: account.name; HorizontalLayout { padding: 12px; spacing: 8px; cross-axis-alignment: center; VerticalLayout { alignment: center; horizontal-stretch: 1; Heading { text: account.name; font-size: 14px; } BodyText { text: account.kind + " | " + account.credential-state; } }
+                                    // The marker stands where the button it replaces would be, at
+                                    // that button's size, so the column does not jump between one
+                                    // row and the next.
+                                    if account.is-default : Pill { text: GuiI18n.text("gui-default"); tone-color: Theme.accent; min-content-width: 130px; content-height: Theme.control-height; }
+                                    if !account.is-default : AppButton { text: GuiI18n.text("gui-make-default"); width: 130px; clicked => { root.set-default-account(account.id); } }
+                                    AppButton { text: GuiI18n.text("gui-remove"); width: 110px; tone: "danger"; clicked => { root.remove-account(account.id); } } } }
                             }
                             if root.workspace-tab == "Providers & APIs" : VerticalLayout { spacing: 14px;
                                 SectionTitle { title: GuiI18n.text("gui-preferred-mod-catalog"); detail: GuiI18n.text("gui-preferred-mod-catalog-detail"); }

@@ -416,21 +416,76 @@ impl App {
         self.resume_account(observer, cancel).await
     }
 
+    /// A session ready to launch with, as one named account.
+    ///
+    /// The same operation as [`Self::authenticated_session`], with the account
+    /// chosen rather than read from configuration. It deliberately does not
+    /// change which account is the default: launching as somebody else is one
+    /// launch, not a new preference, and a launcher that changed the default as
+    /// a side effect would send the *next* launch somewhere unexpected.
+    pub async fn session_for_account(
+        &mut self,
+        reference: &str,
+        observer: &AuthObserver,
+        cancel: &CancellationToken,
+    ) -> CoreResult<&Session> {
+        let id = self.resolve_account(reference)?;
+        // A cached session belongs to whichever account established it, so it
+        // is only reusable when that is this one.
+        if self
+            .session()
+            .is_some_and(|session| session.account.id == id)
+        {
+            return self
+                .session()
+                .ok_or(CoreError::Auth(AuthError::NotSignedIn));
+        }
+
+        if self.account_kind(id)? == AccountKind::Offline {
+            return self.establish_offline_session_for(id);
+        }
+        let provider = self.build_account_provider(true)?;
+        let session = provider.resume(id, observer, cancel).await?;
+        self.adopt(session)
+    }
+
+    /// The recorded kind of one account.
+    fn account_kind(&self, id: Uuid) -> CoreResult<AccountKind> {
+        self.config()
+            .accounts
+            .get(&id.to_string())
+            .map(|account| account.kind)
+            .ok_or_else(|| {
+                CoreError::Auth(AuthError::AccountUnknown {
+                    reference: id.to_string(),
+                })
+            })
+    }
+
     /// Builds the session for the default offline account.
     ///
     /// Cheap and infallible in practice: an offline identity is its name and
     /// its derived UUID, both of which are already in `config.toml`.
     fn establish_offline_session(&mut self) -> CoreResult<&Session> {
-        let (id, name) = {
-            let (id, account) = self
+        let id = {
+            let (id, _) = self
                 .config()
                 .active_account_config()
                 .ok_or(CoreError::Auth(AuthError::NotSignedIn))?;
-            (
-                Uuid::parse_str(id).map_err(|_| CoreError::Auth(AuthError::NotSignedIn))?,
-                account.name.clone(),
-            )
+            Uuid::parse_str(id).map_err(|_| CoreError::Auth(AuthError::NotSignedIn))?
         };
+        self.establish_offline_session_for(id)
+    }
+
+    /// Builds the session for one offline account, whether or not it is the
+    /// default.
+    fn establish_offline_session_for(&mut self, id: Uuid) -> CoreResult<&Session> {
+        let name = self
+            .config()
+            .accounts
+            .get(&id.to_string())
+            .map(|account| account.name.clone())
+            .ok_or(CoreError::Auth(AuthError::NotSignedIn))?;
 
         self.session = Some(Session::offline(ephervex_auth::Account::offline(id, name)));
         self.session
@@ -993,6 +1048,80 @@ mod tests {
         assert!(!session.is_authenticated());
         assert!(session.access_token().is_none());
         assert!(session.expires_at().is_none());
+    }
+
+    /// The point of launching as somebody else: it is one launch, not a new
+    /// preference. A launcher that changed the default as a side effect would
+    /// send the next launch somewhere the user never asked for.
+    #[tokio::test]
+    async fn a_session_for_a_chosen_account_leaves_the_default_alone() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        let first = app.add_offline_account("Alice").expect("added");
+        let second = app.add_offline_account("Bob").expect("added");
+        assert!(
+            app.account_summary(first.id).expect("summary").is_default,
+            "the first account added is the default"
+        );
+
+        let session = app
+            .session_for_account("Bob", &AuthObserver::silent(), &CancellationToken::new())
+            .await
+            .expect("a chosen offline account is always ready to launch");
+
+        assert_eq!(session.account.id, second.id);
+        assert_eq!(session.account.name, "Bob");
+        assert!(!session.is_authenticated());
+        assert!(
+            app.account_summary(first.id).expect("summary").is_default,
+            "choosing an account for one launch must not change the default"
+        );
+    }
+
+    /// A cached session belongs to whichever account established it.
+    #[tokio::test]
+    async fn asking_for_another_account_does_not_return_the_cached_one() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        app.add_offline_account("Alice").expect("added");
+        let second = app.add_offline_account("Bob").expect("added");
+
+        // Establishes and caches the default's session.
+        let default = app
+            .authenticated_session(&AuthObserver::silent(), &CancellationToken::new())
+            .await
+            .expect("session")
+            .account
+            .id;
+
+        let chosen = app
+            .session_for_account("Bob", &AuthObserver::silent(), &CancellationToken::new())
+            .await
+            .expect("session")
+            .account
+            .id;
+
+        assert_ne!(default, chosen);
+        assert_eq!(chosen, second.id);
+    }
+
+    #[tokio::test]
+    async fn launching_as_an_account_that_does_not_exist_says_so() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        app.add_offline_account("Alice").expect("added");
+
+        let error = app
+            .session_for_account("Nobody", &AuthObserver::silent(), &CancellationToken::new())
+            .await
+            .expect_err("an unknown account cannot be launched as");
+        assert!(
+            matches!(
+                error,
+                CoreError::Auth(AuthError::AccountUnknown { ref reference }) if reference == "Nobody"
+            ),
+            "{error:?}"
+        );
     }
 
     #[test]

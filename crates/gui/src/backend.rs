@@ -124,7 +124,12 @@ pub enum Command {
         /// published. Part of the same operation, so one card reports both.
         create_linked_server: bool,
     },
-    LaunchClient(InstanceId),
+    LaunchClient {
+        instance: InstanceId,
+        /// Play as this account rather than the default. An account reference,
+        /// or `None` for the default.
+        account: Option<String>,
+    },
     LaunchAndConnect {
         client: InstanceId,
         server: ServerId,
@@ -1297,12 +1302,19 @@ fn run_worker(
                     },
                 );
             }
-            Command::LaunchClient(instance) => {
+            Command::LaunchClient { instance, account } => {
                 let paths = app.paths().clone();
                 let entity = app
                     .client(instance)
                     .map_or_else(|_| instance.to_string(), |record| record.name);
-                spawn_launch(paths, &events, Arc::clone(&cancellations), instance, entity);
+                spawn_launch(
+                    paths,
+                    &events,
+                    Arc::clone(&cancellations),
+                    instance,
+                    entity,
+                    account,
+                );
             }
             Command::LaunchAndConnect { client, server } => {
                 let paths = app.paths().clone();
@@ -2863,6 +2875,7 @@ fn spawn_launch(
     cancellations: CancellationRegistry,
     instance: InstanceId,
     entity: String,
+    account: Option<String>,
 ) {
     spawn_detached(
         paths.clone(),
@@ -2901,6 +2914,7 @@ fn spawn_launch(
                         instance,
                         &LaunchOptions {
                             install_java_if_missing: true,
+                            account,
                             ..LaunchOptions::default()
                         },
                         &observer,

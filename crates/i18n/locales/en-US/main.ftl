@@ -1168,6 +1168,8 @@ gui-linked-servers-count = { $count ->
 }
 gui-source-instance = { $value } instance
 gui-launch = Launch
+gui-launch-as = Launch as
+gui-add-account = Add account...
 gui-launch-unavailable = Launch unavailable
 gui-start = Start
 gui-stop = Stop
