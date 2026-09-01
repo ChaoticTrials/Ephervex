@@ -1230,6 +1230,7 @@ gui-temporary-lifecycle = Temporary instances remain until the operating system 
 gui-persistent-lifecycle = This instance is stored under the persistent instance root.
 gui-managed-mods = Managed Mods
 gui-managed-mods-detail = Every mod this instance is recorded as having, including the ones its pack brought.
+gui-refresh-mod-details = Refresh mod names and artwork
 gui-no-managed-mods = No managed mods
 gui-no-managed-mods-detail = Manual JARs are not adopted or modified.
 gui-mod-disabled = Disabled, so the loader skips it

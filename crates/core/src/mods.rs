@@ -55,7 +55,9 @@ use tracing::{info, instrument, warn};
 
 use crate::app::App;
 use crate::error::{CoreError, CoreResult};
-use crate::mod_display_cache::{self, ModDisplay};
+use crate::mod_display_cache::{
+    self, ModDisplay, ProjectDisplay, RememberedDisplay, VersionDisplay,
+};
 
 /// What a caller wants installed.
 #[derive(Debug, Clone)]
@@ -268,11 +270,12 @@ pub struct ManagedModEntry {
     pub presence: ModPresence,
     /// Provider metadata, when it was available. `None` is an ordinary state.
     pub details: Option<ModDetails>,
-    /// What a provider last said about this mod, read from the instance's own
-    /// cache. Kept apart from `details` so that "what the catalog says now" and
-    /// "what it said last time" are never confused for one another; it is only
-    /// ever a fallback for what a row draws.
-    pub cached: Option<ModDisplay>,
+    /// What a provider last said about this mod, read from the shared cache.
+    /// Kept apart from `details` so that "what the catalog says now" and "what
+    /// it said last time" are never confused for one another; it is only ever a
+    /// fallback for what a row draws, which is why it is not part of this
+    /// crate's public surface.
+    pub(crate) cached: Option<ModDisplay>,
     /// A cached project icon on disk, when one was fetched.
     pub icon: Option<PathBuf>,
 }
@@ -371,19 +374,6 @@ impl ManagedModEntry {
             return details.author.as_deref();
         }
         self.cached.as_ref()?.author.as_deref()
-    }
-
-    /// This row as it should be remembered for the next time the panel opens.
-    fn to_display(&self) -> Option<ModDisplay> {
-        let details = self.details.as_ref()?;
-        Some(ModDisplay {
-            title: details.title.clone(),
-            version: self.installed_version().map(ToOwned::to_owned),
-            author: details.author.clone(),
-            game_versions: details.game_versions.clone(),
-            loaders: details.loaders.clone(),
-            icon: self.icon.clone(),
-        })
     }
 
     /// Whether the instance's pack owns this mod, rather than a later decision
@@ -593,20 +583,51 @@ fn sort_for_display(mods: &mut [ManagedModEntry]) {
     });
 }
 
-/// The rows worth remembering, keyed by logical path.
+/// What is worth remembering from one enrichment, per provider.
 ///
 /// Only entries a provider actually answered for. A mod whose catalog was
-/// unreachable keeps whatever was cached before rather than being replaced with
-/// what the launcher could not confirm.
-fn remembered_display(snapshot: &ManagedModSnapshot) -> BTreeMap<String, ModDisplay> {
-    snapshot
-        .mods
-        .iter()
-        .filter_map(|entry| {
-            let display = entry.to_display().or_else(|| entry.cached.clone())?;
-            Some((entry.logical_path.display().to_string(), display))
-        })
-        .collect()
+/// unreachable keeps whatever was remembered before rather than being replaced
+/// with what the launcher could not confirm; the store is merged into on write,
+/// so leaving an entry out preserves it.
+///
+/// Split by what each field is a fact about: the title, the author and the
+/// artwork belong to the project, and the release string, its Minecraft
+/// versions and its loaders belong to the exact release.
+fn remembered_display(snapshot: &ManagedModSnapshot) -> BTreeMap<ModProvider, RememberedDisplay> {
+    let mut per_provider: BTreeMap<ModProvider, RememberedDisplay> = BTreeMap::new();
+    for entry in &snapshot.mods {
+        let (Some(provider), Some(project_id)) =
+            (entry.identity.provider(), entry.identity.project_id())
+        else {
+            continue;
+        };
+        let Some(details) = entry.details.as_ref() else {
+            continue;
+        };
+        let answers = per_provider.entry(provider).or_default();
+        answers.remember_project(
+            project_id.to_owned(),
+            ProjectDisplay {
+                title: details.title.clone(),
+                author: details.author.clone(),
+                icon: entry.icon.clone(),
+            },
+        );
+        // A release is only remembered when the exact one is known. Recording
+        // what a project's newest release declares under a version id the
+        // instance does not have would describe the wrong file.
+        if let Some(version_id) = entry.identity.version_id() {
+            answers.remember_version(
+                version_id.to_owned(),
+                VersionDisplay {
+                    version: entry.installed_version().map(ToOwned::to_owned),
+                    game_versions: details.game_versions.clone(),
+                    loaders: details.loaders.clone(),
+                },
+            );
+        }
+    }
+    per_provider
 }
 
 /// What one enrichment pass fetched, keyed for assembly.
@@ -1040,25 +1061,35 @@ impl App {
     pub fn host_mod_snapshot(&self, host: ModHost) -> CoreResult<ManagedModSnapshot> {
         let layout = self.mod_host_layout(host)?;
 
-        // What a provider last said, so the first paint reads as mods rather
-        // than as jar file names. Never authoritative: an entry with nothing
-        // cached falls back exactly as it did before.
-        let remembered = mod_display_cache::read(&layout.root);
         let mut mods: Vec<ManagedModEntry> = layout
             .recipe
             .as_ref()
             .map(PackRecipe::recorded_mods)
             .unwrap_or_default()
             .into_iter()
-            .map(|recorded| {
-                let mut entry = ManagedModEntry::from_recorded(recorded, &layout.game_dir);
-                if let Some(cached) = remembered.get(&entry.logical_path.display().to_string()) {
-                    entry.icon.clone_from(&cached.icon);
-                    entry.cached = Some(cached.clone());
-                }
-                entry
-            })
+            .map(|recorded| ManagedModEntry::from_recorded(recorded, &layout.game_dir))
             .collect();
+
+        // What a provider last said, so the first paint reads as mods rather
+        // than as jar file names. Never authoritative: an entry with nothing
+        // remembered falls back exactly as it did before. Read once per
+        // provider, because that is what the store is keyed by.
+        let cache = CacheLayout::new(self.paths().cache_dir());
+        let mut remembered: BTreeMap<ModProvider, RememberedDisplay> = BTreeMap::new();
+        for entry in &mut mods {
+            let (Some(provider), Some(project)) =
+                (entry.identity.provider(), entry.identity.project_id())
+            else {
+                continue;
+            };
+            let answers = remembered
+                .entry(provider)
+                .or_insert_with(|| mod_display_cache::read(&cache, provider.as_str()));
+            if let Some(cached) = answers.compose(project, entry.identity.version_id()) {
+                entry.icon.clone_from(&cached.icon);
+                entry.cached = Some(cached);
+            }
+        }
         sort_for_display(&mut mods);
 
         Ok(ManagedModSnapshot {
@@ -1121,8 +1152,13 @@ impl App {
                 snapshot.metadata = MetadataAvailability::Provider;
                 // Names have just changed, and so has the order they sort in.
                 sort_for_display(&mut snapshot.mods);
-                let layout = self.mod_host_layout(host)?;
-                mod_display_cache::write(&layout.root, remembered_display(&snapshot));
+                let cache = CacheLayout::new(self.paths().cache_dir());
+                for (provider, answers) in remembered_display(&snapshot) {
+                    mod_display_cache::write(&cache, provider.as_str(), &answers);
+                }
+                // An earlier build kept this beside each instance. The same
+                // metadata is now shared, so the copy is dead weight.
+                mod_display_cache::forget_instance_local(&self.mod_host_layout(host)?.root);
             }
             Err(error) => {
                 // Deliberately not propagated. The mods are installed whether
@@ -1982,14 +2018,15 @@ mod tests {
         assert_eq!(error.failing_path().as_deref(), Some(path.as_path()));
     }
 
-    /// A catalog that could not be reached must not erase what it said before.
+    /// What is remembered is split by what each field is a fact about, because
+    /// that is what makes one answer serve every host holding the same mod.
     #[test]
-    fn remembering_keeps_an_unconfirmed_row_and_records_a_confirmed_one() {
-        let base = |path: &str, file: &str| ManagedModEntry {
+    fn a_confirmed_row_is_remembered_as_a_project_and_a_release() {
+        let base = |path: &str, file: &str, identity: ModIdentity| ManagedModEntry {
             logical_path: PathBuf::from(path),
             file_name: file.to_owned(),
             origin: ModOrigin::PackDeclared,
-            identity: ModIdentity::Unresolved,
+            identity,
             hashes: Vec::new(),
             size: None,
             client: SideRequirement::Required,
@@ -1999,10 +2036,8 @@ mod tests {
             cached: None,
             icon: None,
         };
-
-        let mut answered = base("mods/a.jar", "a.jar");
-        answered.details = Some(ModDetails {
-            title: "Answered".to_owned(),
+        let details = |title: &str| ModDetails {
+            title: title.to_owned(),
             slug: None,
             author: Some("MelanX".to_owned()),
             description: String::new(),
@@ -2012,29 +2047,57 @@ mod tests {
             loaders: vec!["neoforge".to_owned()],
             client_side: SideSupport::Required,
             server_side: SideSupport::Required,
-        });
+        };
 
-        let mut unanswered = base("mods/b.jar", "b.jar");
-        unanswered.cached = Some(ModDisplay {
-            title: "Remembered".to_owned(),
-            version: Some("1.0".to_owned()),
-            ..ModDisplay::default()
-        });
+        let mut answered = base("mods/a.jar", "a.jar", version_identity("PROJA", "VERA"));
+        answered.details = Some(details("Answered"));
+
+        // Answered for, but the exact release is not known.
+        let mut project_only = base(
+            "mods/b.jar",
+            "b.jar",
+            ModIdentity::Project {
+                provider: ModProvider::Modrinth,
+                project_id: "PROJB".to_owned(),
+            },
+        );
+        project_only.details = Some(details("Project Only"));
+
+        // A catalog that could not be reached this pass. Leaving it out is what
+        // preserves it: the store is merged into rather than replaced.
+        let unanswered = base("mods/c.jar", "c.jar", version_identity("PROJC", "VERC"));
+        // Nothing to key on at all.
+        let unresolved = base("mods/d.jar", "d.jar", ModIdentity::Unresolved);
 
         let snapshot = ManagedModSnapshot {
             host: ModHost::Instance(InstanceId::new()),
             source: None,
-            mods: vec![answered, unanswered],
+            mods: vec![answered, project_only, unanswered, unresolved],
             metadata: MetadataAvailability::Provider,
         };
         let remembered = remembered_display(&snapshot);
+        let modrinth = &remembered[&ModProvider::Modrinth];
 
-        assert_eq!(remembered["mods/a.jar"].title, "Answered");
-        assert_eq!(remembered["mods/a.jar"].version.as_deref(), Some("2.0"));
-        assert_eq!(remembered["mods/a.jar"].loaders, ["neoforge"]);
-        assert_eq!(
-            remembered["mods/b.jar"].title, "Remembered",
-            "a row this pass could not confirm keeps what was known"
+        let row = modrinth
+            .compose("PROJA", Some("VERA"))
+            .expect("a confirmed row is remembered");
+        assert_eq!(row.title, "Answered");
+        assert_eq!(row.version.as_deref(), Some("2.0"));
+        assert_eq!(row.loaders, ["neoforge"]);
+
+        let row = modrinth
+            .compose("PROJB", None)
+            .expect("a project without a known release is still a name");
+        assert_eq!(row.title, "Project Only");
+        assert!(
+            row.version.is_none(),
+            "recording a release under a version id the host does not have would \
+             describe the wrong file"
+        );
+
+        assert!(
+            modrinth.compose("PROJC", Some("VERC")).is_none(),
+            "a row this pass could not confirm records nothing, so the merge keeps what was known"
         );
     }
 
@@ -2045,27 +2108,36 @@ mod tests {
         let base = tempfile::tempdir().expect("temp dir");
         let (app, instance) =
             imported_instance(base.path(), &["journeymap.jar", "architectury.jar"]).await;
-        let root = app.client(instance).expect("client").root;
 
-        // Nothing cached yet: the durable read can only offer file names.
+        // Nothing remembered yet: the durable read can only offer file names.
         let first = app.managed_mod_snapshot(instance).expect("snapshot");
         assert_eq!(first.mods[0].display_name(), "architectury.jar");
         assert!(first.mods[0].installed_version().is_none());
 
-        // What an enrichment would have left behind.
-        let mut remembered = BTreeMap::new();
-        remembered.insert(
-            "mods/journeymap.jar".to_owned(),
-            ModDisplay {
+        // What an enrichment would have left behind, keyed by the ids the
+        // recipe records for this mod.
+        let mut remembered = RememberedDisplay::default();
+        remembered.remember_project(
+            "lfHFW1mp".to_owned(),
+            ProjectDisplay {
                 title: "JourneyMap".to_owned(),
-                version: Some("5.10.3".to_owned()),
                 author: Some("techbrew".to_owned()),
-                game_versions: vec!["1.21.1".to_owned()],
-                loaders: vec!["neoforge".to_owned()],
                 icon: None,
             },
         );
-        crate::mod_display_cache::write(&root, remembered);
+        remembered.remember_version(
+            "GKQEbfSt".to_owned(),
+            VersionDisplay {
+                version: Some("5.10.3".to_owned()),
+                game_versions: vec!["1.21.1".to_owned()],
+                loaders: vec!["neoforge".to_owned()],
+            },
+        );
+        crate::mod_display_cache::write(
+            &CacheLayout::new(app.paths().cache_dir()),
+            ModProvider::Modrinth.as_str(),
+            &remembered,
+        );
 
         let second = app.managed_mod_snapshot(instance).expect("snapshot");
         assert_eq!(
@@ -2094,6 +2166,69 @@ mod tests {
             .find(|entry| entry.file_name == "architectury.jar")
             .expect("the mod");
         assert!(architectury.installed_version().is_none());
+    }
+
+    /// The reason the store is shared: a mod's name belongs to the mod, not to
+    /// the instance that happens to hold it.
+    #[tokio::test]
+    async fn one_remembered_answer_names_the_mod_in_every_instance_that_has_it() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, first) = imported_instance(base.path(), &["journeymap.jar"]).await;
+        // A second instance of the same pack, in the same launcher root, so it
+        // reads the same shared cache.
+        let (_, second) = imported_instance(base.path(), &["journeymap.jar"]).await;
+        assert_ne!(first, second);
+
+        let mut remembered = RememberedDisplay::default();
+        remembered.remember_project(
+            "lfHFW1mp".to_owned(),
+            ProjectDisplay {
+                title: "JourneyMap".to_owned(),
+                author: Some("techbrew".to_owned()),
+                icon: None,
+            },
+        );
+        crate::mod_display_cache::write(
+            &CacheLayout::new(app.paths().cache_dir()),
+            ModProvider::Modrinth.as_str(),
+            &remembered,
+        );
+
+        for instance in [first, second] {
+            let snapshot = app.managed_mod_snapshot(instance).expect("snapshot");
+            let journeymap = snapshot
+                .mods
+                .iter()
+                .find(|entry| entry.file_name == "journeymap.jar")
+                .expect("the mod");
+            assert_eq!(
+                journeymap.display_name(),
+                "JourneyMap",
+                "an answer fetched for one instance names the mod in the other too"
+            );
+        }
+    }
+
+    /// A per-instance file from an earlier build is dead weight once the same
+    /// metadata is shared.
+    #[tokio::test]
+    async fn an_earlier_builds_per_instance_cache_is_cleaned_up() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, instance) = imported_instance(base.path(), &["journeymap.jar"]).await;
+        let root = app.client(instance).expect("client").root;
+        let stale = ephervex_storage::metadata::metadata_dir(&root).join("mod-display.json");
+        std::fs::create_dir_all(stale.parent().expect("parent")).expect("dir");
+        std::fs::write(&stale, br#"{"version":1,"entries":{}}"#).expect("write");
+
+        // The durable read must not be disturbed by it either way.
+        assert!(
+            !app.managed_mod_snapshot(instance)
+                .expect("snapshot")
+                .is_empty()
+        );
+
+        crate::mod_display_cache::forget_instance_local(&root);
+        assert!(!stale.exists());
     }
 
     #[tokio::test]

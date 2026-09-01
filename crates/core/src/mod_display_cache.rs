@@ -2,28 +2,30 @@
 //!
 //! # The problem
 //!
-//! An instance's durable record says which mods it has: a logical path, a jar
-//! name, hashes, and a provider project id. It does not say what any of them is
+//! A host's durable record says which mods it has: a logical path, a jar name,
+//! hashes, and a provider project id. It does not say what any of them is
 //! called. So the panel paints jar file names and "Version not recorded" and
 //! then, once two catalogs have answered, replaces the lot. For a two hundred
 //! mod pack that is several seconds of a list that is correct but unreadable,
 //! every single time the workspace is opened.
 //!
 //! Nothing about a mod's name changes often enough to justify asking again
-//! before showing anything. So the last answer is kept beside the instance it
-//! describes, and the panel opens with it.
+//! before showing anything. So the last answer is kept and the panel opens with
+//! it.
 //!
-//! # What is kept, and what is not
+//! # What it is keyed by
 //!
-//! Only what one row draws: the title, the installed version as a string, the
-//! Minecraft versions and loaders the row summarizes, the author line, and the
-//! path of the artwork that was already cached. No description, no identifiers
-//! beyond the logical path the entry is keyed by, and nothing a provider
-//! response carries that the list does not use.
+//! Everything kept here belongs to a project or to a release, never to an
+//! installation: a title, an author and an icon are facts about a project id; a
+//! release's own version string, its Minecraft versions and its loaders are
+//! facts about a version id. Two instances holding the same mod therefore
+//! describe it identically, and this is a shared store keyed by those ids
+//! rather than a copy beside every instance that happens to have the file.
 //!
-//! This is a per-instance file rather than a shared store because it is a view
-//! of one instance's list, keyed by that instance's own logical paths. The
-//! artwork it points at is the shared cache and is not duplicated here.
+//! Only what one row draws is kept. No description, no identifiers beyond the
+//! keys, and nothing a provider response carries that the list does not use.
+//! The artwork the icon path points at is the shared artwork cache and is not
+//! duplicated here.
 //!
 //! # On CurseForge
 //!
@@ -40,92 +42,178 @@
 //!
 //! A cache miss, an unreadable file, a version this build does not know: all of
 //! them mean the panel opens the way it used to, with file names. Nothing here
-//! can change which mods an instance has, and nothing reads it to decide
-//! anything but what to draw.
+//! can change which mods a host has, and nothing reads it to decide anything
+//! but what to draw.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
+use ephervex_download::CacheLayout;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
-/// `.launcher/mod-display.json`.
-const CACHE_FILE: &str = "mod-display.json";
-
 /// Bumped when an entry's shape changes. A file written by a different version
 /// is discarded rather than guessed at.
-const CACHE_VERSION: u32 = 1;
+const CACHE_VERSION: u32 = 2;
 
-/// One row's worth of provider metadata, as last seen.
+/// What a provider last said about one project.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ModDisplay {
-    pub title: String,
-    /// The installed release as a person reads it, when the exact release was
-    /// known. Never derived from the file name.
+pub(crate) struct ProjectDisplay {
+    pub(crate) title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub version: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub author: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub game_versions: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub loaders: Vec<String>,
+    pub(crate) author: Option<String>,
     /// The artwork already in the shared cache, when there is any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub icon: Option<PathBuf>,
+    pub(crate) icon: Option<PathBuf>,
 }
 
+/// What a provider last said about one release.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct VersionDisplay {
+    /// The release as a person reads it. Never derived from the file name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) version: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) game_versions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) loaders: Vec<String>,
+}
+
+/// One row's worth of provider metadata, assembled from what is remembered.
+///
+/// The shape the panel draws, which is not the shape it is stored in: a row is
+/// a project and a release seen together.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ModDisplay {
+    pub(crate) title: String,
+    pub(crate) version: Option<String>,
+    pub(crate) author: Option<String>,
+    pub(crate) game_versions: Vec<String>,
+    pub(crate) loaders: Vec<String>,
+    pub(crate) icon: Option<PathBuf>,
+}
+
+/// One provider's remembered answers.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct RememberedDisplay {
+    #[serde(default)]
+    projects: BTreeMap<String, ProjectDisplay>,
+    #[serde(default)]
+    versions: BTreeMap<String, VersionDisplay>,
+}
+
+impl RememberedDisplay {
+    /// The row for one mod, when the project behind it was ever answered for.
+    ///
+    /// A release that is not remembered is not a miss: the project still names
+    /// the mod, and a row with a title and no version reads far better than a
+    /// jar file name.
+    #[must_use]
+    pub(crate) fn compose(&self, project_id: &str, version_id: Option<&str>) -> Option<ModDisplay> {
+        let project = self.projects.get(project_id)?;
+        let version = version_id.and_then(|id| self.versions.get(id));
+        Some(ModDisplay {
+            title: project.title.clone(),
+            author: project.author.clone(),
+            icon: project.icon.clone(),
+            version: version.and_then(|version| version.version.clone()),
+            game_versions: version
+                .map(|it| it.game_versions.clone())
+                .unwrap_or_default(),
+            loaders: version.map(|it| it.loaders.clone()).unwrap_or_default(),
+        })
+    }
+
+    /// Records what a provider answered for one project.
+    pub(crate) fn remember_project(&mut self, project_id: String, project: ProjectDisplay) {
+        self.projects.insert(project_id, project);
+    }
+
+    /// Records what a provider answered for one release.
+    pub(crate) fn remember_version(&mut self, version_id: String, version: VersionDisplay) {
+        self.versions.insert(version_id, version);
+    }
+
+    #[must_use]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.projects.is_empty() && self.versions.is_empty()
+    }
+}
+
+/// A document as it is written, so a file from another build is recognized as
+/// one rather than parsed as this build's shape.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct CacheFile {
     version: u32,
-    /// Keyed by the entry's logical path, which is what identifies a row within
-    /// one instance and survives a mod being renamed on its provider.
-    entries: BTreeMap<String, ModDisplay>,
+    #[serde(flatten)]
+    remembered: RememberedDisplay,
 }
 
-/// Reads what was last seen for one instance, by logical path.
+/// Reads what was last seen for one provider.
 ///
-/// Any failure is an empty map: this is a repaint, and a launcher that refused
-/// to list an instance's mods because a cache file was corrupt would be worse
-/// than one that lists them under their file names.
+/// Any failure is an empty answer: this is a repaint, and a launcher that
+/// refused to list a host's mods because a cache file was corrupt would be
+/// worse than one that lists them under their file names.
 #[must_use]
-pub(crate) fn read(instance_root: &Path) -> BTreeMap<String, ModDisplay> {
-    let path = cache_path(instance_root);
+pub(crate) fn read(cache: &CacheLayout, provider: &str) -> RememberedDisplay {
+    let Ok(path) = cache.mod_display(provider) else {
+        return RememberedDisplay::default();
+    };
     let Ok(body) = std::fs::read(&path) else {
-        return BTreeMap::new();
+        return RememberedDisplay::default();
     };
     match serde_json::from_slice::<CacheFile>(&body) {
-        Ok(cache) if cache.version == CACHE_VERSION => cache.entries,
-        Ok(cache) => {
+        Ok(file) if file.version == CACHE_VERSION => file.remembered,
+        Ok(file) => {
             debug!(
                 path = %path.display(),
-                found = cache.version,
+                found = file.version,
                 expected = CACHE_VERSION,
                 "ignoring a mod display cache from another version"
             );
-            BTreeMap::new()
+            RememberedDisplay::default()
         }
         Err(error) => {
             debug!(path = %path.display(), %error, "ignoring an unreadable mod display cache");
-            BTreeMap::new()
+            RememberedDisplay::default()
         }
     }
 }
 
-/// Records what a provider answered, replacing whatever was there.
+/// Records what a provider answered.
 ///
-/// Written whole rather than merged: the list it describes is the whole list,
-/// and an entry that is no longer in it belongs to a mod the instance no longer
-/// has. Failure is logged and otherwise ignored; the enrichment the user asked
-/// for succeeded either way.
-pub(crate) fn write(instance_root: &Path, entries: BTreeMap<String, ModDisplay>) {
-    let path = cache_path(instance_root);
-    let cache = CacheFile {
-        version: CACHE_VERSION,
-        entries,
+/// Merged into what is already there rather than replacing it: this describes
+/// projects and releases, not one host's list, and a second instance holding
+/// different mods from the same provider must not erase the first's. Failure is
+/// logged and otherwise ignored; the enrichment the user asked for succeeded
+/// either way.
+pub(crate) fn write(cache: &CacheLayout, provider: &str, remembered: &RememberedDisplay) {
+    if remembered.is_empty() {
+        return;
+    }
+    let Ok(path) = cache.mod_display(provider) else {
+        return;
     };
-    // Compact, like every other launcher-owned document under `.launcher`.
-    let Ok(body) = serde_json::to_vec(&cache) else {
+    let mut merged = read(cache, provider);
+    merged.projects.extend(
+        remembered
+            .projects
+            .iter()
+            .map(|(id, project)| (id.clone(), project.clone())),
+    );
+    merged.versions.extend(
+        remembered
+            .versions
+            .iter()
+            .map(|(id, version)| (id.clone(), version.clone())),
+    );
+
+    let file = CacheFile {
+        version: CACHE_VERSION,
+        remembered: merged,
+    };
+    // Compact, like every other launcher-owned document.
+    let Ok(body) = serde_json::to_vec(&file) else {
         return;
     };
     let Some(directory) = path.parent() else {
@@ -148,8 +236,18 @@ pub(crate) fn write(instance_root: &Path, entries: BTreeMap<String, ModDisplay>)
     }
 }
 
-fn cache_path(instance_root: &Path) -> PathBuf {
-    ephervex_storage::metadata::metadata_dir(instance_root).join(CACHE_FILE)
+/// Removes the per-instance file an earlier build wrote.
+///
+/// The same metadata is now shared, so this one is dead weight inside every
+/// instance that has it. Best-effort and silent: a file that cannot be removed
+/// is not read by anything either.
+pub(crate) fn forget_instance_local(host_root: &std::path::Path) {
+    let path = ephervex_storage::metadata::metadata_dir(host_root).join("mod-display.json");
+    if let Err(error) = std::fs::remove_file(&path)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        debug!(path = %path.display(), %error, "could not remove a superseded mod display cache");
+    }
 }
 
 #[cfg(test)]
@@ -158,66 +256,152 @@ mod tests {
 
     use super::*;
 
-    fn entry(title: &str) -> ModDisplay {
-        ModDisplay {
+    fn layout(dir: &tempfile::TempDir) -> CacheLayout {
+        CacheLayout::new(dir.path())
+    }
+
+    fn project(title: &str) -> ProjectDisplay {
+        ProjectDisplay {
             title: title.to_owned(),
-            version: Some("1.2.3".to_owned()),
             author: Some("MelanX".to_owned()),
-            game_versions: vec!["1.21.1".to_owned()],
-            loaders: vec!["neoforge".to_owned()],
             icon: Some(PathBuf::from("/cache/artwork/modrinth/abc.png")),
         }
     }
 
+    fn version() -> VersionDisplay {
+        VersionDisplay {
+            version: Some("1.2.3".to_owned()),
+            game_versions: vec!["1.21.1".to_owned()],
+            loaders: vec!["neoforge".to_owned()],
+        }
+    }
+
+    fn remembered() -> RememberedDisplay {
+        let mut remembered = RememberedDisplay::default();
+        remembered.remember_project("utilitix".to_owned(), project("UtilitiX"));
+        remembered.remember_version("v1".to_owned(), version());
+        remembered
+    }
+
     #[test]
     fn what_was_written_is_what_comes_back() {
-        let root = tempfile::tempdir().expect("temp");
-        assert!(read(root.path()).is_empty(), "a first open has no cache");
+        let dir = tempfile::tempdir().expect("temp");
+        let cache = layout(&dir);
+        assert!(
+            read(&cache, "modrinth").is_empty(),
+            "a first open has no cache"
+        );
 
-        let mut entries = BTreeMap::new();
-        entries.insert("mods/utilitix.jar".to_owned(), entry("UtilitiX"));
-        write(root.path(), entries.clone());
+        write(&cache, "modrinth", &remembered());
+        assert_eq!(read(&cache, "modrinth"), remembered());
+    }
 
-        assert_eq!(read(root.path()), entries);
+    /// The whole point of the shared store: one answer serves every host that
+    /// has the mod.
+    #[test]
+    fn one_answer_describes_the_mod_wherever_it_is_installed() {
+        let dir = tempfile::tempdir().expect("temp");
+        let cache = layout(&dir);
+        write(&cache, "modrinth", &remembered());
+
+        let row = read(&cache, "modrinth")
+            .compose("utilitix", Some("v1"))
+            .expect("the project was answered for");
+        assert_eq!(row.title, "UtilitiX");
+        assert_eq!(row.version.as_deref(), Some("1.2.3"));
+        assert_eq!(row.loaders, ["neoforge"]);
+    }
+
+    /// A release nobody remembers still leaves a mod with a name.
+    #[test]
+    fn a_remembered_project_names_a_mod_whose_release_is_unknown() {
+        let dir = tempfile::tempdir().expect("temp");
+        let cache = layout(&dir);
+        write(&cache, "modrinth", &remembered());
+
+        let row = read(&cache, "modrinth")
+            .compose("utilitix", None)
+            .expect("the project is enough");
+        assert_eq!(row.title, "UtilitiX");
+        assert_eq!(row.version, None);
+        assert!(row.game_versions.is_empty());
+
+        assert!(
+            read(&cache, "modrinth")
+                .compose("never-seen", None)
+                .is_none(),
+            "a project nobody answered for has nothing to draw"
+        );
+    }
+
+    /// Two hosts with different mods from one provider share the file, and the
+    /// second must not erase the first.
+    #[test]
+    fn a_later_answer_is_merged_rather_than_replacing_the_file() {
+        let dir = tempfile::tempdir().expect("temp");
+        let cache = layout(&dir);
+        write(&cache, "modrinth", &remembered());
+
+        let mut second = RememberedDisplay::default();
+        second.remember_project("jei".to_owned(), project("Just Enough Items"));
+        write(&cache, "modrinth", &second);
+
+        let stored = read(&cache, "modrinth");
+        assert!(stored.compose("utilitix", None).is_some(), "still there");
+        assert!(
+            stored.compose("jei", None).is_some(),
+            "and so is the new one"
+        );
+    }
+
+    #[test]
+    fn each_provider_keeps_its_own_answers() {
+        let dir = tempfile::tempdir().expect("temp");
+        let cache = layout(&dir);
+        write(&cache, "modrinth", &remembered());
+
+        assert!(
+            read(&cache, "curseforge").is_empty(),
+            "one provider's ids mean nothing to another"
+        );
     }
 
     #[test]
     fn the_document_is_compact_like_every_other_launcher_owned_file() {
-        let root = tempfile::tempdir().expect("temp");
-        let mut entries = BTreeMap::new();
-        entries.insert("mods/utilitix.jar".to_owned(), entry("UtilitiX"));
-        write(root.path(), entries);
+        let dir = tempfile::tempdir().expect("temp");
+        let cache = layout(&dir);
+        write(&cache, "modrinth", &remembered());
 
-        let body = std::fs::read_to_string(cache_path(root.path())).expect("the cache was written");
+        let body = std::fs::read_to_string(cache.mod_display("modrinth").expect("path"))
+            .expect("the cache was written");
         assert!(!body.contains('\n'), "{body}");
     }
 
     #[test]
     fn a_cache_that_cannot_be_understood_is_a_miss_rather_than_a_failure() {
-        let root = tempfile::tempdir().expect("temp");
-        let path = cache_path(root.path());
+        let dir = tempfile::tempdir().expect("temp");
+        let cache = layout(&dir);
+        let path = cache.mod_display("modrinth").expect("path");
         std::fs::create_dir_all(path.parent().expect("parent")).expect("dir");
 
         std::fs::write(&path, b"not json at all").expect("write");
-        assert!(read(root.path()).is_empty());
+        assert!(read(&cache, "modrinth").is_empty());
 
         // A file from a build that shaped its entries differently.
-        std::fs::write(&path, br#"{"version":99,"entries":{"a":{"title":"x"}}}"#).expect("write");
-        assert!(read(root.path()).is_empty());
+        std::fs::write(&path, br#"{"version":99,"projects":{"a":{"title":"x"}}}"#).expect("write");
+        assert!(read(&cache, "modrinth").is_empty());
     }
 
     #[test]
-    fn a_later_answer_replaces_the_earlier_one_whole() {
-        let root = tempfile::tempdir().expect("temp");
-        let mut first = BTreeMap::new();
-        first.insert("mods/a.jar".to_owned(), entry("A"));
-        first.insert("mods/gone.jar".to_owned(), entry("Removed"));
-        write(root.path(), first);
+    fn a_superseded_per_instance_cache_is_removed() {
+        let dir = tempfile::tempdir().expect("temp");
+        let stale = ephervex_storage::metadata::metadata_dir(dir.path()).join("mod-display.json");
+        std::fs::create_dir_all(stale.parent().expect("parent")).expect("dir");
+        std::fs::write(&stale, b"{}").expect("write");
 
-        let mut second = BTreeMap::new();
-        second.insert("mods/a.jar".to_owned(), entry("A"));
-        write(root.path(), second.clone());
-
-        assert_eq!(read(root.path()), second, "a removed mod leaves no entry");
+        forget_instance_local(dir.path());
+        assert!(!stale.exists());
+        // Removing one that is not there is not a failure.
+        forget_instance_local(dir.path());
     }
 }

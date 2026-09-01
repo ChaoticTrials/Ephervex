@@ -1,6 +1,6 @@
 //! Non-blocking bridge from Slint callbacks to `ephervex-core` services.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::str::FromStr as _;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -234,6 +234,9 @@ pub enum Command {
     LoadServerMods(ServerId),
     /// Turn off every mod the newest crash report stated, in one step.
     DisableSuggestedMods(ServerId),
+    /// Ask a provider about this host's mods again, even though this run
+    /// already has.
+    RefreshMods(ModHost),
     /// Turn one mod on or off in place, on either kind of host.
     SetModEnabled {
         host: ModHost,
@@ -1033,6 +1036,17 @@ impl std::fmt::Debug for BackendHandle {
     }
 }
 
+/// Which hosts have had their mods enriched from a provider during this run.
+///
+/// A mod's title, artwork and release notes do not change while the launcher is
+/// open, so asking again on every workspace open spends a round trip to redraw
+/// what is already on screen. The shared cache makes the first paint correct;
+/// this keeps the second open from paying for it at all.
+///
+/// Session state rather than something durable: a restart is exactly when
+/// asking again is worth it, and a user who wants it sooner has Refresh.
+type RefreshedHosts = Arc<Mutex<HashSet<String>>>;
+
 pub fn spawn() -> BackendHandle {
     let (command_tx, command_rx) = mpsc::channel();
     let (event_tx, event_rx) = mpsc::channel();
@@ -1086,6 +1100,7 @@ fn run_worker(
     }
     send_snapshot(&app, &events);
     let live_log_generation = Arc::new(AtomicU64::new(0));
+    let refreshed_mods: RefreshedHosts = Arc::new(Mutex::new(HashSet::new()));
     // The still-running resolution's own cancellation, so a superseding pick
     // or a closed modal can stop wasting a network request on an answer
     // nothing will read. The attempt identity itself belongs to the
@@ -1837,10 +1852,19 @@ fn run_worker(
                 send_server_workspace(&app, server, &events);
             }
             Command::LoadServerMods(server) => {
-                send_host_mods(&app, ModHost::Server(server), &events);
+                send_host_mods(
+                    &app,
+                    ModHost::Server(server),
+                    &events,
+                    &refreshed_mods,
+                    false,
+                );
+            }
+            Command::RefreshMods(host) => {
+                send_host_mods(&app, host, &events, &refreshed_mods, true);
             }
             Command::DisableSuggestedMods(server) => {
-                disable_suggested_mods(&app, server, &events);
+                disable_suggested_mods(&app, server, &events, &refreshed_mods);
             }
             Command::SetModEnabled {
                 host,
@@ -1849,7 +1873,7 @@ fn run_worker(
             } => match app.set_mod_enabled(host, &path, enabled) {
                 // Re-read rather than patched in place: the durable state is
                 // what the panel shows, and it has just changed.
-                Ok(_) => send_host_mods(&app, host, &events),
+                Ok(_) => send_host_mods(&app, host, &events, &refreshed_mods, false),
                 Err(error) => send_error(&events, &error),
             },
             Command::OpenLiveLog(source) => {
@@ -2564,7 +2588,13 @@ const fn origin(is_override: bool) -> SettingOrigin {
 ///
 /// Durable first and always: the list is correct without a catalog, and a
 /// server that will not start is the moment a user least wants to wait for one.
-fn send_host_mods(app: &App, host: ModHost, events: &Sender<Event>) {
+fn send_host_mods(
+    app: &App,
+    host: ModHost,
+    events: &Sender<Event>,
+    refreshed: &RefreshedHosts,
+    force: bool,
+) {
     match app.host_mod_snapshot(host) {
         Ok(snapshot) => {
             let review = app.crash_review(host).ok().flatten();
@@ -2573,7 +2603,9 @@ fn send_host_mods(app: &App, host: ModHost, events: &Sender<Event>) {
                 &snapshot,
                 review.as_ref(),
             )));
-            refresh_enriched_host_mods(app.paths().clone(), events, host);
+            if claim_refresh(refreshed, host, force) {
+                refresh_enriched_host_mods(app.paths().clone(), events, host);
+            }
         }
         Err(error) => send_error(events, &error),
     }
@@ -2584,7 +2616,12 @@ fn send_host_mods(app: &App, host: ModHost, events: &Sender<Event>) {
 /// Only what the report stated: a compat trigger is an inference and stays a
 /// choice the user makes one row at a time. Only mods that are still enabled,
 /// so pressing this twice does nothing the second time.
-fn disable_suggested_mods(app: &App, server: ServerId, events: &Sender<Event>) {
+fn disable_suggested_mods(
+    app: &App,
+    server: ServerId,
+    events: &Sender<Event>,
+    refreshed: &RefreshedHosts,
+) {
     let host = ModHost::Server(server);
     let review = match app.crash_review(host) {
         Ok(Some(review)) => review,
@@ -2624,7 +2661,8 @@ fn disable_suggested_mods(app: &App, server: ServerId, events: &Sender<Event>) {
             error: false,
         });
     }
-    send_host_mods(app, host, events);
+    // The mods just changed, so the remembered list is stale by definition.
+    send_host_mods(app, host, events, refreshed, true);
 }
 
 fn send_server_workspace(app: &App, server: ServerId, events: &Sender<Event>) {
@@ -4375,6 +4413,23 @@ fn target_explanation(target: &LinkedTargetPlan) -> String {
 /// provider title, version, or artwork, so a panel left holding it shows jar
 /// file names. Enrichment is a provider round trip, so it runs off the command
 /// thread and only replaces the list once it has an answer.
+/// Whether this host's mods should be asked of a provider now.
+///
+/// `force` is an explicit Refresh, which also clears the mark so the answer it
+/// fetches is the one the rest of the run reuses.
+fn claim_refresh(refreshed: &RefreshedHosts, host: ModHost, force: bool) -> bool {
+    let Ok(mut refreshed) = refreshed.lock() else {
+        // A poisoned lock is not a reason to stop showing mod names.
+        return true;
+    };
+    let key = format!("{}:{}", host.kind(), host.id());
+    if force {
+        refreshed.insert(key);
+        return true;
+    }
+    refreshed.insert(key)
+}
+
 fn refresh_enriched_mods(paths: Paths, events: &Sender<Event>, instance: InstanceId) {
     refresh_enriched_host_mods(paths, events, ModHost::Instance(instance));
 }
@@ -4821,6 +4876,50 @@ mod tests {
     #![allow(clippy::expect_used)]
 
     use super::*;
+
+    /// A mod's title does not change while the launcher is open, so the second
+    /// time a workspace is opened it repaints rather than asking again.
+    #[test]
+    fn a_hosts_mods_are_fetched_once_per_run_unless_refresh_is_asked_for() {
+        let refreshed: RefreshedHosts = Arc::new(Mutex::new(HashSet::new()));
+        let instance = ModHost::Instance(ephervex_model::InstanceId::new());
+        let other = ModHost::Instance(ephervex_model::InstanceId::new());
+
+        assert!(claim_refresh(&refreshed, instance, false), "the first open");
+        assert!(
+            !claim_refresh(&refreshed, instance, false),
+            "the second open repaints what is already known"
+        );
+        assert!(
+            claim_refresh(&refreshed, other, false),
+            "a different instance has not been asked about yet"
+        );
+        assert!(
+            claim_refresh(&refreshed, instance, true),
+            "Refresh is how a re-fetch stays reachable within one run"
+        );
+        assert!(
+            !claim_refresh(&refreshed, instance, false),
+            "and the answer it fetched is what the rest of the run reuses"
+        );
+    }
+
+    /// A server and an instance are different hosts even where their ids would
+    /// not tell them apart.
+    #[test]
+    fn a_server_and_an_instance_are_tracked_separately() {
+        let refreshed: RefreshedHosts = Arc::new(Mutex::new(HashSet::new()));
+        assert!(claim_refresh(
+            &refreshed,
+            ModHost::Instance(ephervex_model::InstanceId::new()),
+            false
+        ));
+        assert!(claim_refresh(
+            &refreshed,
+            ModHost::Server(ephervex_model::ServerId::new()),
+            false
+        ));
+    }
 
     fn busy_cache() -> CoreError {
         CoreError::from(ephervex_core::ArtifactCacheError::Busy {

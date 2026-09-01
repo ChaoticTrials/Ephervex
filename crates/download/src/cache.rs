@@ -483,6 +483,24 @@ impl CacheLayout {
             .join(format!("{project}.{ARTWORK_FORMAT}")))
     }
 
+    /// Where one provider's remembered mod display metadata is kept.
+    ///
+    /// Shared rather than per instance because every field in it belongs to a
+    /// project or to a release, not to an installation: two instances holding
+    /// the same mod describe it identically, and caching it twice would mean
+    /// fetching it twice.
+    ///
+    /// Under the metadata store, beside the provider responses it is derived
+    /// from. It is not one of them: it never expires and is never consulted to
+    /// decide anything, so it carries no freshness of its own.
+    pub fn mod_display(&self, provider: &str) -> Result<PathBuf, CacheKeyError> {
+        let provider = safe_segment(provider.trim())?;
+        Ok(self
+            .store_root(ContentStore::Metadata)
+            .join("mod-display")
+            .join(format!("{provider}.json")))
+    }
+
     /// Sharding on the first two hex characters keeps directory sizes
     /// reasonable; a flat directory with tens of thousands of entries is slow
     /// to list on some filesystems and unpleasant to inspect by hand.
@@ -790,6 +808,18 @@ mod tests {
         assert_eq!(ContentStore::Downloads.directory(), "downloads");
         assert_eq!(ContentStore::Metadata.directory(), "metadata");
         assert_eq!(ContentStore::Natives.directory(), "natives");
+    }
+
+    #[test]
+    fn remembered_mod_display_is_one_file_per_provider_under_metadata() {
+        assert_eq!(
+            layout().mod_display("modrinth").expect("safe"),
+            PathBuf::from("/cache/ephervex/metadata/mod-display/modrinth.json")
+        );
+        // A provider name is a segment like any other, and one that arrived
+        // from configuration must not be able to climb out of the store.
+        assert!(layout().mod_display("../../etc").is_err());
+        assert!(layout().mod_display("").is_err());
     }
 
     #[test]

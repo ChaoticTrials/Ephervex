@@ -2307,6 +2307,13 @@ fn register_mod_state_actions(ui: &AppWindow, commands: &Sender<Command>) {
     });
 
     let sender = commands.clone();
+    ui.on_refresh_mods(move |kind, id| {
+        if let Some(host) = backend::parse_mod_host(&kind, &id) {
+            send(&sender, Command::RefreshMods(host));
+        }
+    });
+
+    let sender = commands.clone();
     ui.on_disable_suggested_mods(move |id| {
         if let Some(id) = backend::parse_server_id(&id) {
             send(&sender, Command::DisableSuggestedMods(id));
