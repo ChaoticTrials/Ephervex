@@ -35,12 +35,12 @@ use ephervex_core::{
     ManagedModSnapshot, ModHost, ModInstallPlan, ModInstallRequest, ModPresence, ModProjectDetails,
     ModSearchQuery, ModSearchResults, NetworkAccess, NewClient, NewServer, OperationReporter,
     OptionalSelection, OutputLine, PackAnalysis, PackRecipe, PackSide, Paths, PlanWarning,
-    PlannedMod, PreferenceApplication, PreferenceId, PreferenceKey, ReconciliationReport,
-    ReleaseListing, RequirementBasis, RuntimeClassification, RuntimeInventory, SearchOptions,
-    SecretString, ServerCommitWarning, ServerCreateOptions, ServerEvent, ServerFolder,
-    ServerNetworkSettings, ServerObserver, ServerPersistenceHealth, ServerRecord, ServerWarning,
-    Session, SideRequirement, SkipReason, SuspectConfidence, SuspectReason, TextAnchor, TextView,
-    UnknownServerFiles, VersionMetadata, VersionRecord,
+    PlannedMod, PreferenceApplication, PreferenceId, PreferenceKey, ProcessMonitor,
+    ReconciliationReport, ReleaseListing, RequirementBasis, RuntimeClassification,
+    RuntimeInventory, SearchOptions, SecretString, ServerCommitWarning, ServerCreateOptions,
+    ServerEvent, ServerFolder, ServerNetworkSettings, ServerObserver, ServerPersistenceHealth,
+    ServerRecord, ServerWarning, Session, SideRequirement, SkipReason, SuspectConfidence,
+    SuspectReason, TextAnchor, TextView, UnknownServerFiles, VersionMetadata, VersionRecord,
 };
 use ephervex_i18n::Arg as MessageArg;
 use ephervex_model::{
@@ -146,6 +146,12 @@ enum Command {
     Import(ImportArgs),
     /// Install and launch a client instance, streaming its log to the terminal.
     Launch(LaunchArgs),
+    /// List everything Ephervex is currently running.
+    ///
+    /// Client instances with a live launch, and servers this launcher is still
+    /// supervising. A server whose supervisor is gone is a recovery case: see
+    /// `ephervex server recover`.
+    Running,
     /// Reconcile the index against what is actually on disk.
     Reconcile,
 }
@@ -1234,6 +1240,7 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(run_launch(&mut app, args, cli.json))
         }
+        Command::Running => print_running(&open_app()?, cli.json),
         Command::Reconcile => {
             let app = open_app()?;
             let report = app.reconcile()?;
@@ -5314,6 +5321,66 @@ fn server_json(record: &ServerRecord) -> serde_json::Value {
         "updated_at": record.updated_at,
         "last_started_at": record.last_started_at,
     })
+}
+
+/// What this launcher is running, most recently started first.
+fn print_running(app: &App, json: bool) -> anyhow::Result<()> {
+    let mut running = app.running_processes()?;
+    // Two samples are needed before CPU is a rate rather than a guess, and a
+    // one-shot command has only one. Memory and the rest are true immediately,
+    // so the numbers that are meaningful are still shown.
+    ProcessMonitor::new().observe(&mut running);
+
+    if json {
+        print_json(&serde_json::json!({
+            "running": running.iter().map(|process| serde_json::json!({
+                "kind": process.host.kind(),
+                "id": process.host.id(),
+                "name": process.name,
+                "pid": process.pid,
+                "owner_pid": process.owner_pid,
+                "since": process.since,
+                "controllable": process.controllable,
+                "memory_bytes": process.usage.map(|usage| usage.memory_bytes),
+                "last_line": process.last_line,
+            })).collect::<Vec<_>>(),
+        }));
+        return Ok(());
+    }
+
+    if running.is_empty() {
+        println!("{}", ephervex_i18n::lookup("running-nothing"));
+        return Ok(());
+    }
+    for process in &running {
+        let pid = process
+            .pid
+            .map_or_else(|| "-".to_owned(), |pid| pid.to_string());
+        println!(
+            "{}  {}  pid {pid}  {}",
+            process.host.kind(),
+            process.name,
+            format_uptime(process.uptime_seconds())
+        );
+        if let Some(line) = &process.last_line {
+            println!("    {line}");
+        }
+    }
+    Ok(())
+}
+
+/// How long something has been running, in the largest unit that says it.
+fn format_uptime(seconds: Option<i64>) -> String {
+    let Some(seconds) = seconds else {
+        return "-".to_owned();
+    };
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 3_600 {
+        format!("{}m", seconds / 60)
+    } else {
+        format!("{}h{}m", seconds / 3_600, (seconds % 3_600) / 60)
+    }
 }
 
 fn reconciled_json(records: &[ephervex_core::ReconciledRecord]) -> serde_json::Value {

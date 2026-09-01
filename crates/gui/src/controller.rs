@@ -33,12 +33,15 @@ use crate::presentation::{
 use crate::ui::{
     AccountRow, ActivityRow, AppWindow, DiagnosticRow, GuiI18n, ImportBlockedRow, ImportOptionRow,
     InstanceRow, JavaRow, LinkedTargetRow, LogChunk, ModRow, ModSearchRow, ModVersionRow,
-    PendingEntityRow, ServerRow, Theme, WindowSizePreview,
+    PendingEntityRow, RunningRow, ServerRow, Theme, WindowSizePreview,
 };
 use crate::window_aspect;
 
 pub struct Controller {
     _poll_timer: Timer,
+    /// A slower poll of its own, so watching what is running does not add work
+    /// to every other screen. Runs only while that page is open.
+    _running_timer: Timer,
     /// Kept so a later hook, such as [`accept_file_drops`], can send the same
     /// commands the callbacks registered here do.
     commands: Sender<Command>,
@@ -1378,12 +1381,33 @@ pub fn attach(ui: &AppWindow) -> Controller {
         }
     });
 
+    // A second is enough for uptime and for CPU to read smoothly, and it costs
+    // nothing while the page is closed, which is nearly always.
+    let running_weak = ui.as_weak();
+    let running_commands = backend.commands.clone();
+    let running_timer = Timer::default();
+    running_timer.start(TimerMode::Repeated, Duration::from_secs(1), move || {
+        let Some(ui) = running_weak.upgrade() else {
+            return;
+        };
+        if ui.get_page() == RUNNING_PAGE && ui.get_workspace().is_empty() {
+            send(&running_commands, Command::LoadRunning);
+        }
+    });
+
     Controller {
         _poll_timer: poll_timer,
+        _running_timer: running_timer,
         commands: backend.commands,
         import_flow,
     }
 }
+
+/// The navigation entry that lists what is running.
+///
+/// Named because the poll that feeds it has to know when it is on screen, and a
+/// bare number in that check would say nothing about which screen it is.
+const RUNNING_PAGE: i32 = 2;
 
 fn register_toasts(ui: &AppWindow) {
     const MAX_QUEUED_TOASTS: usize = 12;
@@ -2303,6 +2327,16 @@ fn register_mod_state_actions(ui: &AppWindow, commands: &Sender<Command>) {
     ui.on_load_server_mods(move |id| {
         if let Some(id) = backend::parse_server_id(&id) {
             send(&sender, Command::LoadServerMods(id));
+        }
+    });
+
+    let sender = commands.clone();
+    ui.on_load_running(move || send(&sender, Command::LoadRunning));
+
+    let sender = commands.clone();
+    ui.on_force_stop_launch(move |id| {
+        if let Some(instance) = backend::parse_instance_id(&id) {
+            send(&sender, Command::ForceStopLaunch(instance));
         }
     });
 
@@ -3880,6 +3914,24 @@ fn apply_event(
                 ui.set_crash_client_code_on_server(notice.client_code_on_server);
                 ui.set_crash_suggested(i32::try_from(notice.suggested).unwrap_or(i32::MAX));
             }
+        }
+        Event::Running(running) => {
+            ui.set_running(ModelRc::new(VecModel::from(
+                running
+                    .into_iter()
+                    .map(|process| RunningRow {
+                        kind: process.kind.into(),
+                        id: process.id.into(),
+                        name: process.name.into(),
+                        pid: process.pid.into(),
+                        uptime: process.uptime.into(),
+                        usage: process.usage.into(),
+                        last_line: process.last_line.into(),
+                        controllable: process.controllable,
+                        can_stop: process.can_stop,
+                    })
+                    .collect::<Vec<_>>(),
+            )));
         }
         Event::ModVersions(data) => apply_mod_versions(ui, data),
         Event::ModRemovalPlan(data) => apply_mod_removal_plan(ui, data),

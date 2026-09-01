@@ -45,6 +45,7 @@ pub mod minecraft_preferences;
 mod mod_display_cache;
 pub mod mods;
 pub mod mutation;
+pub mod running;
 pub mod server;
 
 pub use account::{AccountStatus, AccountSummary, ApiSettings, LoginOptions, TOKEN_REFRESH_MARGIN};
@@ -96,6 +97,7 @@ pub use mutation::{
     ModMutability, ModMutation, ModMutationPlan, ModVersionChoice, ModVersionChoices,
     MutationRestriction, PlannedFile, PlannedOutcome,
 };
+pub use running::{ProcessMonitor, ProcessUsage, RunningProcess};
 pub use server::{CaptureSnapshot, ServerCreateOptions, ServerPersistenceHealth, ServerStatus};
 
 /// Cancellation, re-exported because the services take one.

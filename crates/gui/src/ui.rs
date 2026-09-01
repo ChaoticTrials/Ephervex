@@ -203,6 +203,21 @@ slint::slint! {
         summary: string,
     }
 
+    export struct RunningRow {
+        // "client" or "server", which decides where every action goes.
+        kind: string,
+        id: string,
+        name: string,
+        pid: string,
+        uptime: string,
+        // Live CPU and memory. Empty on the first poll, because CPU is a rate
+        // and there is nothing yet to compare against.
+        usage: string,
+        last-line: string,
+        controllable: bool,
+        can-stop: bool,
+    }
+
     export struct LogChunk {
         text: string,
         level: string,
@@ -1672,6 +1687,84 @@ slint::slint! {
         }
     }
 
+    // One thing the launcher is running.
+    //
+    // Not an activity card: that one describes an operation with a progress
+    // fraction and a Cancel. A running game has neither, and the two answer
+    // different questions.
+    component RunningCard inherits Rectangle {
+        in property <RunningRow> item;
+        callback open-log(string, string);
+        callback open-console(string);
+        callback open-workspace(string, string);
+        callback stop(string, string);
+        callback force-stop(string);
+        height: 92px;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: Theme.border;
+        background: Theme.surface;
+        // Declared before the buttons, so a click on one of them reaches the
+        // button rather than the card behind it.
+        //
+        // Opening on a double click, like every other card in the application,
+        // and for a reason this page makes sharper: a disabled control does not
+        // consume its click, so a single-click card would navigate away from a
+        // press on a Stop that is greyed out.
+        TouchArea {
+            mouse-cursor: pointer;
+            double-clicked => { root.open-workspace(root.item.kind, root.item.id); }
+        }
+        HorizontalLayout {
+            padding: 12px;
+            spacing: 12px;
+            cross-axis-alignment: center;
+            VerticalLayout {
+                alignment: center;
+                LoaderGlyph { server: root.item.kind == "server"; kind: "vanilla"; }
+            }
+            VerticalLayout {
+                alignment: center;
+                spacing: 3px;
+                horizontal-stretch: 1;
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text { text: root.item.name; color: Theme.text; font-size: Theme.row-heading-size; font-weight: 600; overflow: elide; horizontal-stretch: 1; vertical-alignment: center; }
+                    VerticalLayout { alignment: center; Pill { text: root.item.kind == "server" ? GuiI18n.text("gui-server") : GuiI18n.text("gui-instance"); tone-color: root.item.kind == "server" ? Theme.server : Theme.accent; } }
+                }
+                // Exact, because a pid is what a developer chases outside the
+                // launcher and a rounded one would be useless.
+                BodyText {
+                    text: (root.item.pid != "" ? "pid " + root.item.pid + "  |  " : "") + root.item.uptime + (root.item.usage != "" ? "  |  " + root.item.usage : "");
+                    color: Theme.text-secondary;
+                    font-size: Theme.caption-size;
+                    overflow: elide;
+                }
+                Text {
+                    text: root.item.last-line;
+                    color: Theme.text-muted;
+                    font-size: Theme.caption-size;
+                    font-family: Theme.mono-family;
+                    overflow: elide;
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                HorizontalLayout {
+                    spacing: 8px;
+                    AppButton { text: GuiI18n.text("gui-open-log"); clicked => { root.open-log(root.item.kind, root.item.id); } }
+                    if root.item.kind == "server" : AppButton { text: GuiI18n.text("gui-open-console"); clicked => { root.open-console(root.item.id); } }
+                    AppButton { text: root.item.kind == "server" ? GuiI18n.text("gui-stop") : GuiI18n.text("gui-stop-game"); tone: "danger"; enabled: root.item.can-stop; clicked => { root.stop(root.item.kind, root.item.id); } }
+                    // The bigger hammer, and only for a client: a launch left
+                    // by another run of the launcher has nobody supervising it,
+                    // so cancelling is not available and the instance would
+                    // otherwise stay stuck claiming to be busy.
+                    if root.item.kind == "client" : AppButton { text: GuiI18n.text("gui-force-stop"); tone: "danger"; clicked => { root.force-stop(root.item.id); } }
+                }
+            }
+        }
+    }
+
     component ActivityCard inherits Rectangle {
         in property <ActivityRow> item;
         callback cancel(string);
@@ -1968,6 +2061,9 @@ slint::slint! {
         in-out property <[InstanceRow]> instances;
         in-out property <[ServerRow]> servers;
         in-out property <[ServerRow]> global-servers;
+        // What the launcher is running right now. Polled only while the page
+        // showing it is open.
+        in-out property <[RunningRow]> running;
         in-out property <[ServerRow]> linked-servers;
         in-out property <[ModRow]> managed-mods;
         // Empty unless something has to be said about how complete the list is.
@@ -2404,6 +2500,8 @@ slint::slint! {
         callback live-log-follow-changed(bool);
         callback load-server-workspace(string);
         callback load-server-mods(string);
+        callback load-running();
+        callback force-stop-launch(string);
         // Asks a provider about a host's mods again. Names and artwork are
         // otherwise fetched once per host per run and repainted from the
         // shared cache after that.
@@ -2540,6 +2638,7 @@ slint::slint! {
                         padding: 14px; spacing: 8px;
                         NavItem { icon: @image-url("../../../assets/icons/nav-instances.svg"); label: GuiI18n.text("gui-instances"); selected: root.page == 0; clicked => { root.close-live-log(); root.page = 0; root.workspace = ""; } }
                         NavItem { icon: @image-url("../../../assets/icons/nav-servers.svg"); label: GuiI18n.text("gui-servers"); selected: root.page == 1; clicked => { root.close-live-log(); root.page = 1; root.workspace = ""; } }
+                        NavItem { icon: @image-url("../../../assets/icons/nav-logs.svg"); label: GuiI18n.text("gui-running"); selected: root.page == 2; clicked => { root.close-live-log(); root.page = 2; root.workspace = ""; root.load-running(); } }
                         NavItem { icon: @image-url("../../../assets/icons/nav-activity.svg"); label: GuiI18n.text("gui-activity"); selected: root.page == 3; clicked => { root.close-live-log(); root.page = 3; root.workspace = ""; } }
                         NavItem { icon: @image-url("../../../assets/icons/nav-settings.svg"); label: GuiI18n.text("gui-settings"); selected: root.page == 4; clicked => { root.close-live-log(); root.page = 4; root.workspace = ""; root.workspace-tab = "General"; } }
                         Rectangle { vertical-stretch: 1; }
@@ -2882,6 +2981,24 @@ slint::slint! {
                                 Rectangle { height: 84px; border-radius: 8px; border-width: 1px; border-color: root.eula-accepted ? Theme.success : Theme.warning; background: Theme.surface; HorizontalLayout { padding: 14px; VerticalLayout { Heading { text: GuiI18n.text("gui-server-eula"); font-size: 14px; } BodyText { text: root.eula-status; wrap: word-wrap; } } AppButton { text: root.eula-accepted ? GuiI18n.text("gui-eula-review") : GuiI18n.text("gui-eula-review-accept"); clicked => { root.modal = "eula"; } } } }
                                 HorizontalLayout { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-save-changes"); tone: "primary"; enabled: root.servers[root.selected-server-index].state-kind == "stopped"; clicked => { root.save-server-properties(root.selected-server-id, root.property-motd, root.property-max-players, root.property-difficulty, root.property-gamemode, root.property-allow-flight, root.property-pvp, root.property-allowlist, root.property-online-mode, root.property-access, root.property-address, root.property-port); } } }
                             } }
+                        }
+                    }
+
+                    // What is running, which is a different question from what
+                    // the launcher is doing: an operation has a progress
+                    // fraction and a Cancel, and a running game has neither.
+                    if root.page == 2 : Rectangle { horizontal-stretch: 1; background: Theme.background;
+                        VerticalLayout { padding: 24px; spacing: 18px;
+                            PageIntro { title: GuiI18n.text("gui-running"); subtitle: GuiI18n.text("gui-running-detail"); }
+                            if root.running.length == 0 : EmptyState { title: GuiI18n.text("gui-nothing-running"); message: GuiI18n.text("gui-nothing-running-detail"); }
+                            ScrollView { viewport-width: self.width; VerticalLayout { spacing: 10px; for item in root.running : RunningCard {
+                                item: item;
+                                open-log(kind, id) => { if kind == "server" { root.selected-server-id = id; root.page = 1; root.workspace = "server"; root.workspace-tab = "Logs"; root.load-server-workspace(id); } else { root.selected-instance-id = id; root.page = 0; root.workspace = "instance"; root.workspace-tab = "Logs"; root.load-instance-workspace(id); } root.selected-diagnostic-kind = "log"; root.log-shows-files = false; root.selected-diagnostic-name = ""; root.open-live-log(kind, id); }
+                                open-console(id) => { root.selected-server-id = id; root.page = 1; root.workspace = "server"; root.workspace-tab = "Console"; root.load-server-workspace(id); root.open-live-log("server", id); }
+                                open-workspace(kind, id) => { if kind == "server" { root.selected-server-id = id; root.page = 1; root.workspace = "server"; root.workspace-tab = "Overview"; root.load-server-workspace(id); } else { root.selected-instance-id = id; root.page = 0; root.workspace = "instance"; root.workspace-tab = "Overview"; root.load-instance-workspace(id); } }
+                                stop(kind, id) => { if kind == "server" { root.server-stop(id); } else { root.kill-instance(id); } }
+                                force-stop(id) => { root.force-stop-launch(id); }
+                            } } }
                         }
                     }
 

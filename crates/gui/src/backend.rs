@@ -20,9 +20,9 @@ use ephervex_core::{
     LinkedTargetPlan, LinkedTargetResult, LinkedTargetState, LoginOptions, ManagedModEntry,
     ManagedModSnapshot, MetadataAvailability, ModHost, ModInstallPlan, ModMutability, ModMutation,
     ModMutationPlan, ModSearchQuery, MutationRestriction, NewClient, NewServer, OperationReporter,
-    OptionalSelection, PackAnalysis, Paths, PlannedOutcome, ProgressSink, ProviderFileIdentity,
-    SearchOptions, ServerCreateOptions, ServerEvent, ServerFolder, ServerNetworkSettings,
-    ServerObserver, SideRequirement, SuspectReason, WatchTarget,
+    OptionalSelection, PackAnalysis, Paths, PlannedOutcome, ProcessMonitor, ProgressSink,
+    ProviderFileIdentity, SearchOptions, ServerCreateOptions, ServerEvent, ServerFolder,
+    ServerNetworkSettings, ServerObserver, SideRequirement, SuspectReason, WatchTarget,
 };
 use ephervex_core::{
     ConfiguredPreferences, LanguageAvailability, LanguageEntry, MinecraftPreferencePreview,
@@ -237,6 +237,10 @@ pub enum Command {
     /// Ask a provider about this host's mods again, even though this run
     /// already has.
     RefreshMods(ModHost),
+    /// What this launcher is running, with live resource use.
+    LoadRunning,
+    /// End a launch this process is not supervising, and release its lock.
+    ForceStopLaunch(InstanceId),
     /// Turn one mod on or off in place, on either kind of host.
     SetModEnabled {
         host: ModHost,
@@ -576,6 +580,29 @@ pub struct ManagedModData {
     pub suspect_confidence: String,
 }
 
+/// One thing this launcher is running, as the Running page shows it.
+#[derive(Debug, Clone)]
+pub struct RunningData {
+    /// `"client"` or `"server"`, which decides where every action goes.
+    pub kind: String,
+    pub id: String,
+    pub name: String,
+    /// The process id, or empty where there is not one yet.
+    pub pid: String,
+    /// How long it has been running, already localized.
+    pub uptime: String,
+    /// Live CPU and memory, already localized. Empty until the second sample,
+    /// because CPU is a rate and the first poll has nothing to compare against.
+    pub usage: String,
+    /// The most recent line of its output.
+    pub last_line: String,
+    /// Whether commands can be sent to it. Servers only.
+    pub controllable: bool,
+    /// Whether this run can be stopped the ordinary way: the run that owns it
+    /// is this one, so cancelling it kills the game and waits for its exit.
+    pub can_stop: bool,
+}
+
 /// What a host's newest crash report says.
 ///
 /// Sent on its own rather than with the mods, because the workspace banner has
@@ -908,6 +935,7 @@ pub enum Event {
     },
     ManagedMods(ManagedModsData),
     CrashNotice(CrashNoticeData),
+    Running(Vec<RunningData>),
     ModVersions(ModVersionsData),
     ModRemovalPlan(ModRemovalPlanData),
     ModResults(ModResultsData),
@@ -1101,6 +1129,8 @@ fn run_worker(
     send_snapshot(&app, &events);
     let live_log_generation = Arc::new(AtomicU64::new(0));
     let refreshed_mods: RefreshedHosts = Arc::new(Mutex::new(HashSet::new()));
+    // Kept between polls, because CPU is a rate rather than a reading.
+    let mut process_monitor = ProcessMonitor::new();
     // The still-running resolution's own cancellation, so a superseding pick
     // or a closed modal can stop wasting a network request on an answer
     // nothing will read. The attempt identity itself belongs to the
@@ -1860,6 +1890,27 @@ fn run_worker(
                     false,
                 );
             }
+            Command::LoadRunning => {
+                let _ = events.send(Event::Running(running_data(
+                    &app,
+                    &mut process_monitor,
+                    &cancellations,
+                )));
+            }
+            Command::ForceStopLaunch(instance) => match app.force_stop_launch(instance) {
+                Ok(outcome) => {
+                    let _ = events.send(Event::Toast {
+                        message: lookup(if outcome.signaled_game || outcome.signaled_owner {
+                            "gui-force-stop-signaled"
+                        } else {
+                            "gui-force-stop-released"
+                        }),
+                        error: false,
+                    });
+                    send_snapshot(&app, &events);
+                }
+                Err(error) => send_error(&events, &error),
+            },
             Command::RefreshMods(host) => {
                 send_host_mods(&app, host, &events, &refreshed_mods, true);
             }
@@ -2663,6 +2714,88 @@ fn disable_suggested_mods(
     }
     // The mods just changed, so the remembered list is stale by definition.
     send_host_mods(app, host, events, refreshed, true);
+}
+
+/// What this launcher is running, with live resource use.
+fn running_data(
+    app: &App,
+    monitor: &mut ProcessMonitor,
+    cancellations: &CancellationRegistry,
+) -> Vec<RunningData> {
+    let Ok(mut running) = app.running_processes() else {
+        return Vec::new();
+    };
+    monitor.observe(&mut running);
+
+    // A launch can only be stopped the ordinary way by the run supervising it,
+    // which is this one exactly when it still holds the cancellation.
+    let supervised: HashSet<String> = cancellations
+        .lock()
+        .map(|entries| entries.keys().cloned().collect())
+        .unwrap_or_default();
+
+    running
+        .into_iter()
+        .map(|process| {
+            let id = process.host.id();
+            let can_stop = match process.host {
+                ModHost::Instance(_) => supervised.contains(&id),
+                ModHost::Server(_) => process.controllable,
+            };
+            let uptime = format_uptime(process.uptime_seconds());
+            RunningData {
+                kind: process.host.kind().to_owned(),
+                name: process.name,
+                pid: process.pid.map_or_else(String::new, |pid| pid.to_string()),
+                uptime,
+                usage: format_usage(process.usage),
+                last_line: process.last_line.unwrap_or_default(),
+                controllable: process.controllable,
+                can_stop,
+                id,
+            }
+        })
+        .collect()
+}
+
+/// How long a run has been going, in the largest unit that says it.
+fn format_uptime(seconds: Option<i64>) -> String {
+    let Some(seconds) = seconds else {
+        return String::new();
+    };
+    if seconds < 60 {
+        localized_count("gui-uptime-seconds", usize::try_from(seconds).unwrap_or(0))
+    } else if seconds < 3_600 {
+        localized_count(
+            "gui-uptime-minutes",
+            usize::try_from(seconds / 60).unwrap_or(0),
+        )
+    } else {
+        lookup_args(
+            "gui-uptime-hours",
+            [
+                ("hours", Arg::from(seconds / 3_600)),
+                ("minutes", Arg::from((seconds % 3_600) / 60)),
+            ],
+        )
+    }
+}
+
+/// Live CPU and memory, or nothing on the first sample of a process.
+fn format_usage(usage: Option<ephervex_core::ProcessUsage>) -> String {
+    let Some(usage) = usage else {
+        return String::new();
+    };
+    lookup_args(
+        "gui-process-usage",
+        [
+            // Formatted rather than cast: a percentage of one core has no
+            // useful fractional part, and rounding it into an integer type is
+            // a truncation this does not need to perform.
+            ("cpu", Arg::from(format!("{:.0}", usage.cpu_percent))),
+            ("memory", Arg::from(format_bytes(usage.memory_bytes))),
+        ],
+    )
 }
 
 fn send_server_workspace(app: &App, server: ServerId, events: &Sender<Event>) {

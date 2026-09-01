@@ -950,6 +950,7 @@ mod tests {
             owner_pid: std::process::id(),
             owner_start_ticks: None,
             game_pid: None,
+            game_start_ticks: None,
             since: Utc::now(),
         };
         let starting = InstancePresentation::from_record(&record, 0, 0, Some(&preparing), []);

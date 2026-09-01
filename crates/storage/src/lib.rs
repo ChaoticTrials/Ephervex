@@ -55,7 +55,9 @@ pub use diagnostics::{
 };
 pub use folders::{ClientFolder, MissingFolder, ServerFolder};
 pub use index::{Index, IndexError, MIGRATIONS, Migration, MigrationOutcome, apply_migrations};
-pub use lock::{LAUNCH_LOCK_FILE, LaunchLock, LaunchState, LockError, running_state};
+pub use lock::{
+    ForcedStop, LAUNCH_LOCK_FILE, LaunchLock, LaunchState, LockError, force_release, running_state,
+};
 pub use metadata::{METADATA_VERSION, MetadataError};
 pub use paths::{PathError, Paths};
 pub use reconcile::{

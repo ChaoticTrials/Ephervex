@@ -964,6 +964,27 @@ mod-install-completed = Installed { $name }.
 # report's own directness: a mod it named outranks one it merely showed frames
 # from, which outranks one that was only inferred to be involved.
 crash-none = This server has no crash reports.
+running-nothing = Nothing is running.
+gui-running = Running
+gui-running-detail = Everything Ephervex is running right now. Client instances with a live launch, and servers this launcher is supervising.
+gui-nothing-running = Nothing is running.
+gui-nothing-running-detail = Launch an instance or start a server and it will appear here.
+gui-uptime-seconds = { $count ->
+        [one] { $count }s
+       *[other] { $count }s
+    }
+gui-uptime-minutes = { $count ->
+        [one] { $count }m
+       *[other] { $count }m
+    }
+gui-uptime-hours = { $hours }h { $minutes }m
+gui-process-usage = { $cpu }% CPU | { $memory }
+gui-stop-game = Stop Game
+gui-force-stop = Force Stop
+gui-force-stop-signaled = Asked the launch to stop, and released the instance.
+gui-force-stop-released = The launch was already gone. The instance is released.
+gui-open-log = Open Log
+gui-open-console = Console
 crash-no-suspects = The crash report does not point at any mod.
 crash-client-code-on-server = A missing class means client-only code ran on a server.
 crash-reason-named = named as the mod that failed

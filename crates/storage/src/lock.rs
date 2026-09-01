@@ -116,10 +116,40 @@ pub struct LaunchState {
     /// The Minecraft process, once it has been spawned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub game_pid: Option<u32>,
+    /// `/proc/<pid>/stat` field 22 for `game_pid`, which distinguishes the game
+    /// from a later process that happened to be given the same number.
+    ///
+    /// Recorded for the same reason as `owner_start_ticks`, and needed for a
+    /// stronger one: a pid alone is not safe to signal, so anything that ends a
+    /// launch it is not itself supervising has to prove first that the pid is
+    /// still the process the lock is describing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game_start_ticks: Option<u64>,
     pub since: DateTime<Utc>,
 }
 
 impl LaunchState {
+    /// Whether the game this lock describes is still the process it names.
+    ///
+    /// `false` when there is no game recorded yet, when it has exited, or when
+    /// the pid now belongs to something else. Never a guess: a caller that is
+    /// about to signal a pid needs proof, not an assumption.
+    #[must_use]
+    pub fn game_is_alive(&self) -> bool {
+        let Some(pid) = self.game_pid else {
+            return false;
+        };
+        if !proc_filesystem_available() {
+            return false;
+        }
+        match process_start_ticks(pid) {
+            Some(ticks) => self
+                .game_start_ticks
+                .is_none_or(|recorded| recorded == ticks),
+            None => false,
+        }
+    }
+
     /// Whether the process that took this lock is still running.
     #[must_use]
     pub fn owner_is_alive(&self) -> bool {
@@ -135,6 +165,70 @@ impl LaunchState {
             None => false,
         }
     }
+}
+
+/// What ending a launch from outside it actually did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ForcedStop {
+    /// Whether the game process was signaled.
+    pub signaled_game: bool,
+    /// Whether the launcher run that owns the lock was signaled.
+    pub signaled_owner: bool,
+    /// Whether a lock file was removed.
+    pub released: bool,
+}
+
+/// Ends a launch this process is not supervising, and releases its lock.
+///
+/// The ordinary way a launch stops is the run that owns it canceling and
+/// waiting for the child, which releases the lock on the way out. This is for
+/// when that is not available: the launch belongs to a run that has since gone,
+/// or to one that is wedged, and the instance is left claiming to be busy.
+///
+/// # Why a pid alone is not enough
+///
+/// Process ids are reused. Signaling a number read out of a file could reach
+/// something else entirely, so nothing here is signaled without first proving
+/// the pid is still the process the lock describes, by the start time recorded
+/// beside it. A pid that cannot be proven is skipped rather than signaled.
+///
+/// `SIGTERM` rather than `SIGKILL`: Minecraft saves on it, and a launch that
+/// ignores it still ends up launchable because the lock is released either way.
+pub fn force_release(instance_root: &Path) -> Result<ForcedStop, LockError> {
+    let path = metadata_dir(instance_root).join(LAUNCH_LOCK_FILE);
+    let Some(state) = read_state(&path)? else {
+        return Ok(ForcedStop::default());
+    };
+
+    let mut outcome = ForcedStop::default();
+    // The game first, so it is not reparented and left running by the death of
+    // the run that was supervising it.
+    if state.game_is_alive()
+        && let Some(pid) = state.game_pid
+    {
+        outcome.signaled_game = terminate(pid);
+    }
+    if state.owner_is_alive() && state.owner_pid != std::process::id() {
+        outcome.signaled_owner = terminate(state.owner_pid);
+    }
+
+    match std::fs::remove_file(&path) {
+        Ok(()) => outcome.released = true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(LockError::unusable(&path, error)),
+    }
+    debug!(path = %path.display(), ?outcome, "ended a launch from outside it");
+    Ok(outcome)
+}
+
+/// Asks one process to stop. `false` when it was already gone.
+fn terminate(pid: u32) -> bool {
+    let Ok(raw) = i32::try_from(pid) else {
+        return false;
+    };
+    rustix::process::Pid::from_raw(raw).is_some_and(|pid| {
+        rustix::process::kill_process(pid, rustix::process::Signal::TERM).is_ok()
+    })
 }
 
 /// A held launch lock. Released on drop.
@@ -162,6 +256,7 @@ impl LaunchLock {
             owner_pid: std::process::id(),
             owner_start_ticks: process_start_ticks(std::process::id()),
             game_pid: None,
+            game_start_ticks: None,
             since: Utc::now(),
         };
 
@@ -218,6 +313,7 @@ impl LaunchLock {
     /// instance can be diagnosed without guessing.
     pub fn record_game_pid(&mut self, pid: u32) -> Result<(), LockError> {
         self.state.game_pid = Some(pid);
+        self.state.game_start_ticks = process_start_ticks(pid);
         let body = serde_json::to_vec(&self.state)
             .map_err(|error| LockError::unusable(&self.path, error.into()))?;
         let mut temporary_name = self.path.as_os_str().to_os_string();
@@ -414,6 +510,7 @@ mod tests {
             owner_pid: std::process::id(),
             owner_start_ticks: process_start_ticks(std::process::id()),
             game_pid: Some(99),
+            game_start_ticks: None,
             since: Utc::now(),
         };
         std::fs::write(
@@ -442,6 +539,7 @@ mod tests {
             owner_pid: 0,
             owner_start_ticks: Some(1),
             game_pid: None,
+            game_start_ticks: None,
             since: Utc::now(),
         };
         let path = metadata_dir(root.path()).join(LAUNCH_LOCK_FILE);
@@ -464,6 +562,7 @@ mod tests {
             owner_pid: std::process::id(),
             owner_start_ticks: Some(0),
             game_pid: None,
+            game_start_ticks: None,
             since: Utc::now(),
         };
         let path = metadata_dir(root.path()).join(LAUNCH_LOCK_FILE);
