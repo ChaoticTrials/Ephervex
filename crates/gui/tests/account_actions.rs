@@ -100,6 +100,60 @@ fn launch_as_offers_every_account_and_a_way_to_add_one() {
     );
 }
 
+/// Launch as has to be reachable from the list, not only from a workspace
+/// somebody has already opened. The inspector is where an instance's other
+/// actions live, and it sits beside the Launch that the card offers.
+#[test]
+fn launch_as_is_offered_beside_launch_on_the_instances_page() {
+    let ui = window();
+
+    ui.set_loading(false);
+    ui.set_page(0);
+    ui.set_workspace(SharedString::default());
+    ui.set_show_inspector(true);
+    ui.set_instances(ModelRc::new(VecModel::from(vec![instance()])));
+    ui.set_selected_instance_index(0);
+    ui.set_selected_instance_id("repro-client".into());
+    ui.set_accounts(ModelRc::new(VecModel::from(vec![
+        account("alice-id", "Alice", true),
+        account("bob-id", "Bob", false),
+    ])));
+    settle(&ui);
+
+    assert!(
+        widest(&ui, &lookup("gui-launch-as")).is_some(),
+        "the instances page offers a way to launch as somebody else"
+    );
+    assert!(
+        widest(&ui, &lookup("gui-launch")).is_some(),
+        "and plain Launch is still the one beside it"
+    );
+}
+
+/// A running instance cannot be launched at all, so neither control belongs
+/// there.
+#[test]
+fn a_running_instance_offers_neither_launch() {
+    let ui = window();
+    let mut running = instance();
+    running.can_launch = false;
+    running.can_kill = true;
+
+    ui.set_loading(false);
+    ui.set_page(0);
+    ui.set_workspace(SharedString::default());
+    ui.set_show_inspector(true);
+    ui.set_instances(ModelRc::new(VecModel::from(vec![running])));
+    ui.set_selected_instance_index(0);
+    ui.set_accounts(ModelRc::new(VecModel::from(vec![account(
+        "alice-id", "Alice", true,
+    )])));
+    settle(&ui);
+
+    assert!(widest(&ui, &lookup("gui-launch-as")).is_none());
+    assert!(widest(&ui, &lookup("gui-kill-instance")).is_some());
+}
+
 /// Launching as a chosen account reports that account, and never the default.
 #[test]
 fn launching_as_an_account_names_the_account_it_was_given() {

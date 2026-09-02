@@ -1952,7 +1952,11 @@ slint::slint! {
     component InstanceInspector inherits Rectangle {
         in property <InstanceRow> item;
         in property <bool> has-selection;
+        // The accounts a launch can be made as, for the control beside Launch.
+        in property <[AccountRow]> accounts;
         callback launch(string);
+        callback launch-as(string, string);
+        callback add-account();
         callback kill(string);
         callback connect(string, string);
         callback open-folder(string);
@@ -1983,7 +1987,10 @@ slint::slint! {
             BodyText { text: item.path; color: Theme.text-muted; overflow: elide; }
             Divider { }
             Eyebrow { text: GuiI18n.text("gui-actions"); }
-            if item.can-launch : AppButton { text: GuiI18n.text("gui-launch"); tone: "primary"; clicked => { root.launch(item.id); } }
+            if item.can-launch : HorizontalLayout { spacing: 8px;
+                AppButton { text: GuiI18n.text("gui-launch"); tone: "primary"; clicked => { root.launch(item.id); } }
+                LaunchAsButton { accounts: root.accounts; launch-as(account) => { root.launch-as(item.id, account); } add-account => { root.add-account(); } }
+            }
             if item.can-kill : AppButton { text: GuiI18n.text("gui-kill-instance"); tone: "danger"; clicked => { root.kill(item.id); } }
             if item.connect-server-id != "" : AppButton { text: GuiI18n.value("gui-launch-connect", item.connect-server-name); enabled: item.can-connect; clicked => { root.connect(item.id, item.connect-server-id); } }
             HorizontalLayout { spacing: 8px;
@@ -2731,7 +2738,10 @@ slint::slint! {
                             width: 360px;
                             has-selection: root.selected-instance-index >= 0;
                             item: root.selected-instance-index >= 0 ? root.instances[root.selected-instance-index] : {};
+                            accounts: root.accounts;
                             launch(id) => { root.launch-client(id); }
+                            launch-as(id, account) => { root.launch-client-as(id, account); }
+                            add-account => { root.page = 4; root.workspace = ""; root.workspace-tab = "Accounts"; }
                             kill(id) => { root.kill-instance(id); }
                             connect(client, server) => { root.launch-and-connect(client, server); }
                             open-folder(id) => { root.open-client-folder(id); }
