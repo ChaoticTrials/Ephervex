@@ -1783,6 +1783,21 @@ fn register_create_instance_naming(
     });
 }
 
+/// A handle for one additional launch, unique for the life of this process.
+///
+/// It reaches a lock file name and a cancellation key, so it stays to
+/// characters both can hold. The process id keeps two launchers from colliding
+/// on one instance; the counter keeps this one from colliding with itself.
+fn next_launch_handle() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    format!(
+        "{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
 /// Launching an instance, as the default account or as a chosen one.
 fn register_launch_actions(ui: &AppWindow, commands: &Sender<Command>) {
     let sender = commands.clone();
@@ -1793,13 +1808,14 @@ fn register_launch_actions(ui: &AppWindow, commands: &Sender<Command>) {
                 Command::LaunchClient {
                     instance,
                     account: None,
+                    additional: None,
                 },
             );
         }
     });
 
     let sender = commands.clone();
-    ui.on_launch_client_as(move |id, account| {
+    ui.on_launch_client_as(move |id, account, alongside| {
         let Some(instance) = backend::parse_instance_id(&id) else {
             return;
         };
@@ -1807,7 +1823,17 @@ fn register_launch_actions(ui: &AppWindow, commands: &Sender<Command>) {
         // does. Passing it through as a reference would ask the services to
         // resolve the empty string.
         let account = (!account.is_empty()).then(|| account.to_string());
-        send(&sender, Command::LaunchClient { instance, account });
+        // A second client needs a handle of its own, so it can be listed and
+        // stopped without touching the launch it is running beside.
+        let additional = alongside.then(next_launch_handle);
+        send(
+            &sender,
+            Command::LaunchClient {
+                instance,
+                account,
+                additional,
+            },
+        );
     });
 }
 
@@ -1857,9 +1883,15 @@ fn register_client_actions(
     register_launch_actions(ui, commands);
 
     let sender = commands.clone();
-    ui.on_kill_instance(move |id| {
-        if let Some(id) = backend::parse_instance_id(&id) {
-            send(&sender, Command::KillInstance(id));
+    ui.on_kill_instance(move |id, launch| {
+        if let Some(instance) = backend::parse_instance_id(&id) {
+            send(
+                &sender,
+                Command::KillInstance {
+                    instance,
+                    launch: (!launch.is_empty()).then(|| launch.to_string()),
+                },
+            );
         }
     });
 
@@ -2470,9 +2502,15 @@ fn register_mod_state_actions(ui: &AppWindow, commands: &Sender<Command>) {
     ui.on_load_running(move || send(&sender, Command::LoadRunning));
 
     let sender = commands.clone();
-    ui.on_force_stop_launch(move |id| {
+    ui.on_force_stop_launch(move |id, launch| {
         if let Some(instance) = backend::parse_instance_id(&id) {
-            send(&sender, Command::ForceStopLaunch(instance));
+            send(
+                &sender,
+                Command::ForceStopLaunch {
+                    instance,
+                    launch: (!launch.is_empty()).then(|| launch.to_string()),
+                },
+            );
         }
     });
 
@@ -4058,6 +4096,7 @@ fn apply_event(
                     .map(|process| RunningRow {
                         kind: process.kind.into(),
                         id: process.id.into(),
+                        launch: process.launch.into(),
                         name: process.name.into(),
                         pid: process.pid.into(),
                         uptime: process.uptime.into(),

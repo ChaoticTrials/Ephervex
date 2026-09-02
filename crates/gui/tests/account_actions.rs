@@ -71,7 +71,7 @@ fn launch_as_offers_every_account_and_a_way_to_add_one() {
     let ui = window();
     let launched: Rc<RefCell<Vec<(String, String)>>> = Rc::default();
     let record = Rc::clone(&launched);
-    ui.on_launch_client_as(move |id, account| {
+    ui.on_launch_client_as(move |id, account, _alongside| {
         record
             .borrow_mut()
             .push((id.to_string(), account.to_string()));
@@ -143,10 +143,11 @@ fn launch_as_is_offered_beside_launch_on_the_instances_page() {
     }
 }
 
-/// A running instance cannot be launched at all, so neither control belongs
-/// there.
+/// A running instance can still be launched as somebody else -- that is a
+/// second client beside the first, which is the whole point of the control.
+/// What it cannot do is start again as the same account.
 #[test]
-fn a_running_instance_offers_neither_launch() {
+fn a_running_instance_can_still_be_launched_as_someone_else() {
     let ui = window();
     let mut running = instance();
     running.can_launch = false;
@@ -163,8 +164,40 @@ fn a_running_instance_offers_neither_launch() {
     )])));
     settle(&ui);
 
-    assert!(widest(&ui, &lookup("gui-launch-as")).is_none());
-    assert!(widest(&ui, &lookup("gui-kill-instance")).is_some());
+    let launch_as =
+        widest(&ui, &lookup("gui-launch-as")).expect("a second account is still launchable");
+    let kill = widest(&ui, &lookup("gui-kill-instance")).expect("and the running client stoppable");
+    assert!(
+        widest(&ui, &lookup("gui-launch")).is_none(),
+        "plain Launch would be a second client as the same account"
+    );
+    assert!(
+        (launch_as.size().width - kill.size().width).abs() < 1.0,
+        "the pair still splits its row evenly"
+    );
+}
+
+/// Launching as somebody while the instance runs asks for a second client;
+/// launching as somebody while it is idle does not.
+#[test]
+fn launching_as_someone_says_whether_it_is_a_second_client() {
+    let ui = window();
+    let launched: Rc<RefCell<Vec<bool>>> = Rc::default();
+    let record = Rc::clone(&launched);
+    ui.on_launch_client_as(move |_, _, alongside| record.borrow_mut().push(alongside));
+
+    instance_workspace(&ui);
+    settle(&ui);
+    ui.invoke_launch_client_as("repro-client".into(), "bob-id".into(), false);
+
+    let mut running = instance();
+    running.can_launch = false;
+    running.can_kill = true;
+    ui.set_instances(ModelRc::new(VecModel::from(vec![running])));
+    settle(&ui);
+    ui.invoke_launch_client_as("repro-client".into(), "bob-id".into(), true);
+
+    assert_eq!(launched.borrow().as_slice(), [false, true]);
 }
 
 /// Launching as a chosen account reports that account, and never the default.
@@ -173,14 +206,14 @@ fn launching_as_an_account_names_the_account_it_was_given() {
     let ui = window();
     let launched: Rc<RefCell<Vec<(String, String)>>> = Rc::default();
     let record = Rc::clone(&launched);
-    ui.on_launch_client_as(move |id, account| {
+    ui.on_launch_client_as(move |id, account, _alongside| {
         record
             .borrow_mut()
             .push((id.to_string(), account.to_string()));
     });
 
     instance_workspace(&ui);
-    ui.invoke_launch_client_as("repro-client".into(), "bob-id".into());
+    ui.invoke_launch_client_as("repro-client".into(), "bob-id".into(), false);
 
     assert_eq!(
         launched.borrow().as_slice(),

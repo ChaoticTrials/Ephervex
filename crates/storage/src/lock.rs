@@ -37,7 +37,37 @@ use crate::metadata::metadata_dir;
 use crate::paths::{PathError, create_dir_all};
 
 /// The lock file's name inside an instance's `.launcher/` directory.
+///
+/// One instance can hold more than one launch at a time -- launching as a
+/// second account is exactly that -- so this is the name of the *first* one.
+/// A launch that is content to run alongside another names its own file
+/// [`additional_lock_file`] instead, so the two cannot clear each other's.
 pub const LAUNCH_LOCK_FILE: &str = "launch.lock";
+
+/// The prefix every launch lock file's name starts with.
+const LAUNCH_LOCK_PREFIX: &str = "launch.";
+
+/// The lock file one additional launch holds.
+///
+/// `id` identifies the launch to whoever started it: it is the same handle a
+/// frontend uses to find the launch again in a list and to stop it. Validated
+/// as a single safe path segment, because it reaches a file name.
+fn additional_lock_file(id: &str) -> Option<String> {
+    let safe = !id.is_empty()
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'));
+    safe.then(|| format!("{LAUNCH_LOCK_PREFIX}{id}.lock"))
+}
+
+/// One launch an instance currently holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunningLaunch {
+    /// The launch's own handle: the id its starter gave it, or `None` for the
+    /// first launch, which holds the unnamed lock.
+    pub id: Option<String>,
+    pub state: LaunchState,
+}
 
 /// How many times acquisition retries after clearing a lock whose owner is
 /// gone.
@@ -194,8 +224,17 @@ pub struct ForcedStop {
 ///
 /// `SIGTERM` rather than `SIGKILL`: Minecraft saves on it, and a launch that
 /// ignores it still ends up launchable because the lock is released either way.
-pub fn force_release(instance_root: &Path) -> Result<ForcedStop, LockError> {
-    let path = metadata_dir(instance_root).join(LAUNCH_LOCK_FILE);
+pub fn force_release(instance_root: &Path, launch: Option<&str>) -> Result<ForcedStop, LockError> {
+    let name = match launch {
+        Some(id) => additional_lock_file(id).ok_or_else(|| {
+            LockError::unusable(
+                &metadata_dir(instance_root),
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "unusable launch id"),
+            )
+        })?,
+        None => LAUNCH_LOCK_FILE.to_owned(),
+    };
+    let path = metadata_dir(instance_root).join(name);
     let Some(state) = read_state(&path)? else {
         return Ok(ForcedStop::default());
     };
@@ -247,6 +286,54 @@ impl LaunchLock {
     /// Creation is `O_EXCL`, so two launchers that arrive at the same instant
     /// cannot both believe they succeeded. A lock whose owner is gone is
     /// cleared and the creation retried.
+    /// Takes a lock that does not exclude the launch already running.
+    ///
+    /// For a launch the user asked for knowing one is already in progress:
+    /// a second client, under a second account, sharing the instance's game
+    /// directory. Nothing here makes that safe -- two clients opening one
+    /// world still fight over it, and Minecraft's own world lock is what
+    /// decides that -- it only stops the launcher from refusing on its own.
+    ///
+    /// The file is named after `id`, so it can never collide with another
+    /// launch's and neither can clear the other's on the way out.
+    pub fn acquire_additional(instance_root: &Path, id: &str) -> Result<Self, LockError> {
+        let directory = metadata_dir(instance_root);
+        create_dir_all(&directory)?;
+        let name = additional_lock_file(id).ok_or_else(|| {
+            LockError::unusable(
+                &directory.join(id),
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "unusable launch id"),
+            )
+        })?;
+        let path = directory.join(name);
+        let state = Self::current_state();
+
+        // A stale file under this name means a previous launch with the same
+        // id died without releasing it. It is replaced rather than refused:
+        // the id is the caller's, and it has already said it does not mind
+        // running alongside anything.
+        if read_state(&path)?.is_some_and(|held| held.owner_is_alive()) {
+            return Err(LockError::AlreadyRunning {
+                pid: state.owner_pid,
+                since: state.since,
+            });
+        }
+        let _ = std::fs::remove_file(&path);
+        write_new(&path, &state).map_err(|error| LockError::unusable(&path, error))?;
+        debug!(path = %path.display(), pid = state.owner_pid, "took an additional launch lock");
+        Ok(Self { path, state })
+    }
+
+    fn current_state() -> LaunchState {
+        LaunchState {
+            owner_pid: std::process::id(),
+            owner_start_ticks: process_start_ticks(std::process::id()),
+            game_pid: None,
+            game_start_ticks: None,
+            since: Utc::now(),
+        }
+    }
+
     pub fn acquire(instance_root: &Path) -> Result<Self, LockError> {
         let directory = metadata_dir(instance_root);
         create_dir_all(&directory)?;
@@ -374,11 +461,72 @@ impl Drop for LaunchLock {
 /// permanently "running" instance.
 #[must_use]
 pub fn running_state(instance_root: &Path) -> Option<LaunchState> {
-    let path = metadata_dir(instance_root).join(LAUNCH_LOCK_FILE);
-    read_state(&path)
-        .ok()
-        .flatten()
-        .filter(LaunchState::owner_is_alive)
+    running_launches(instance_root)
+        .into_iter()
+        .next()
+        .map(|launch| launch.state)
+}
+
+/// Every launch this instance currently holds, first one first.
+///
+/// More than one is an ordinary state: launching as a second account while the
+/// first client is still up is what produces it. The unnamed lock sorts first
+/// and the rest by their own ids, so two readings of the same directory agree.
+///
+/// A lock whose owner is gone is skipped rather than reported, for the same
+/// reason a single one is: a permanently "running" instance is worse than none.
+#[must_use]
+pub fn running_launches(instance_root: &Path) -> Vec<RunningLaunch> {
+    let directory = metadata_dir(instance_root);
+    let Ok(entries) = std::fs::read_dir(&directory) else {
+        return Vec::new();
+    };
+
+    let mut launches: Vec<RunningLaunch> = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let id = launch_id_of(&name)?.handle();
+            let state = read_state(&entry.path()).ok().flatten()?;
+            state
+                .owner_is_alive()
+                .then_some(RunningLaunch { id, state })
+        })
+        .collect();
+    launches.sort_by(|left, right| left.id.cmp(&right.id));
+    launches
+}
+
+/// Which launch a lock file's name names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LockName {
+    /// The first launch, which holds the unnamed lock.
+    First,
+    /// An additional launch, under the handle its starter gave it.
+    Additional(String),
+}
+
+impl LockName {
+    fn handle(self) -> Option<String> {
+        match self {
+            Self::First => None,
+            Self::Additional(id) => Some(id),
+        }
+    }
+}
+
+/// The launch a lock file's name names, if it names one at all.
+///
+/// `None` means the file is not a launch lock, which every other thing under
+/// `.launcher/` is.
+fn launch_id_of(name: &str) -> Option<LockName> {
+    if name == LAUNCH_LOCK_FILE {
+        return Some(LockName::First);
+    }
+    let id = name
+        .strip_prefix(LAUNCH_LOCK_PREFIX)?
+        .strip_suffix(".lock")?;
+    (!id.is_empty()).then(|| LockName::Additional(id.to_owned()))
 }
 
 /// Creates the lock file, failing if it already exists.
@@ -500,6 +648,79 @@ mod tests {
         )
         .expect("rewrite as an older build would have");
         assert_eq!(running_state(root.path()).expect("running"), state);
+    }
+
+    /// Launching as a second account while the first client is up is the whole
+    /// point of the additional lock: it must not be refused, and it must not
+    /// disturb the launch already holding the instance.
+    #[test]
+    fn a_second_launch_runs_alongside_the_first_without_clearing_it() {
+        let root = instance();
+        let first = LaunchLock::acquire(root.path()).expect("the first launch");
+        let second =
+            LaunchLock::acquire_additional(root.path(), "bob").expect("a second launch is allowed");
+
+        let launches = running_launches(root.path());
+        assert_eq!(launches.len(), 2);
+        assert_eq!(
+            launches[0].id, None,
+            "the first launch holds the unnamed lock"
+        );
+        assert_eq!(launches[1].id.as_deref(), Some("bob"));
+        assert!(
+            running_state(root.path()).is_some(),
+            "the instance is running while either of them is"
+        );
+
+        // Each releases only its own.
+        drop(second);
+        assert_eq!(running_launches(root.path()).len(), 1);
+        assert!(
+            LaunchLock::acquire(root.path()).is_err(),
+            "the first launch still holds the instance"
+        );
+        drop(first);
+        assert!(running_launches(root.path()).is_empty());
+    }
+
+    /// A plain launch is still exclusive. Only a caller that has said it is
+    /// content to run alongside another gets to.
+    #[test]
+    fn an_ordinary_second_launch_is_still_refused() {
+        let root = instance();
+        let _held = LaunchLock::acquire(root.path()).expect("the first launch");
+        assert!(matches!(
+            LaunchLock::acquire(root.path()),
+            Err(LockError::AlreadyRunning { .. })
+        ));
+    }
+
+    /// The id reaches a file name, so it cannot be anything that would leave
+    /// the directory or name something else in it.
+    #[test]
+    fn a_launch_id_that_could_name_another_file_is_refused() {
+        let root = instance();
+        for id in ["", "../escape", "a/b", "a.lock", "with space"] {
+            assert!(
+                LaunchLock::acquire_additional(root.path(), id).is_err(),
+                "{id:?} must not become a lock file name"
+            );
+        }
+        assert!(running_launches(root.path()).is_empty());
+    }
+
+    /// Only this launcher's own lock files are launches; everything else under
+    /// `.launcher/` is somebody else's business.
+    #[test]
+    fn only_launch_locks_are_read_as_launches() {
+        assert_eq!(launch_id_of(LAUNCH_LOCK_FILE), Some(LockName::First));
+        assert_eq!(
+            launch_id_of("launch.bob.lock"),
+            Some(LockName::Additional("bob".to_owned()))
+        );
+        assert_eq!(launch_id_of("mod-display.json"), None);
+        assert_eq!(launch_id_of("launch..lock"), None);
+        assert_eq!(launch_id_of("server-runtime.json"), None);
     }
 
     #[test]

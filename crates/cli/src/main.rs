@@ -169,6 +169,14 @@ struct LaunchArgs {
     /// Download a managed runtime if nothing installed is compatible.
     #[arg(long)]
     install_java: bool,
+    /// Run alongside a launch this instance already has.
+    ///
+    /// A second client, under a second account, sharing the instance's game
+    /// directory: its saves, its options and its logs. Fine when both clients
+    /// join a server. Two clients opening the same singleplayer world is
+    /// decided by Minecraft's own world lock, not by Ephervex.
+    #[arg(long, value_name = "HANDLE")]
+    alongside: Option<String>,
     /// Play as this account instead of the default one.
     ///
     /// Takes an account id or name, as `ephervex account list` shows them.
@@ -1970,6 +1978,7 @@ async fn run_launch(app: &mut App, args: &LaunchArgs, json: bool) -> anyhow::Res
         java_path: args.java_path.clone(),
         install_java_if_missing: args.install_java,
         account: args.account.clone(),
+        additional: args.alongside.clone(),
         dry_run: args.dry_run,
     };
 

@@ -83,7 +83,7 @@ fn a_running_instance_offers_a_kill_in_place_of_a_launch() {
     let ui = window();
     let killed: Rc<RefCell<Vec<String>>> = Rc::default();
     let record = Rc::clone(&killed);
-    ui.on_kill_instance(move |id| record.borrow_mut().push(id.to_string()));
+    ui.on_kill_instance(move |id, _launch| record.borrow_mut().push(id.to_string()));
 
     let mut running = instance();
     running.can_launch = false;

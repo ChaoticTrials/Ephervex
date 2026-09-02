@@ -71,7 +71,12 @@ pub enum Command {
     /// is what the button on a card knows, and because a launch that is still
     /// preparing has no operation id on screen yet. Stopping it then cancels
     /// the preparation, which is what the button means in that state.
-    KillInstance(InstanceId),
+    KillInstance {
+        instance: InstanceId,
+        /// Which of the instance's launches to stop, for one holding more
+        /// than one.
+        launch: Option<String>,
+    },
     /// `generation` is assigned by the controller the instant the attempt
     /// begins (before the file dialog even opens), not once a result comes
     /// back: that is what lets a later result be checked against the attempt
@@ -129,6 +134,8 @@ pub enum Command {
         /// Play as this account rather than the default. An account reference,
         /// or `None` for the default.
         account: Option<String>,
+        /// Run alongside a launch the instance already has, under this handle.
+        additional: Option<String>,
     },
     LaunchAndConnect {
         client: InstanceId,
@@ -240,7 +247,11 @@ pub enum Command {
     /// What this launcher is running, with live resource use.
     LoadRunning,
     /// End a launch this process is not supervising, and release its lock.
-    ForceStopLaunch(InstanceId),
+    ForceStopLaunch {
+        instance: InstanceId,
+        /// Which of the instance's launches, for one running more than one.
+        launch: Option<String>,
+    },
     /// Turn one mod on or off in place, on either kind of host.
     SetModEnabled {
         host: ModHost,
@@ -586,6 +597,9 @@ pub struct RunningData {
     /// `"client"` or `"server"`, which decides where every action goes.
     pub kind: String,
     pub id: String,
+    /// Which of that entity's launches this row is, empty for the first and
+    /// for every server.
+    pub launch: String,
     pub name: String,
     /// The process id, or empty where there is not one yet.
     pub pid: String,
@@ -1186,8 +1200,8 @@ fn run_worker(
                 }
             }
             Command::CancelOperation(id) => cancel_operation(&cancellations, &events, &id),
-            Command::KillInstance(instance) => {
-                kill_instance(&cancellations, &events, instance);
+            Command::KillInstance { instance, launch } => {
+                kill_instance(&cancellations, &events, instance, launch.as_deref());
             }
             Command::SaveInstanceRuntime {
                 instance,
@@ -1347,7 +1361,11 @@ fn run_worker(
                     },
                 );
             }
-            Command::LaunchClient { instance, account } => {
+            Command::LaunchClient {
+                instance,
+                account,
+                additional,
+            } => {
                 let paths = app.paths().clone();
                 let entity = app
                     .client(instance)
@@ -1359,6 +1377,7 @@ fn run_worker(
                     instance,
                     entity,
                     account,
+                    additional,
                 );
             }
             Command::LaunchAndConnect { client, server } => {
@@ -1897,20 +1916,22 @@ fn run_worker(
                     &cancellations,
                 )));
             }
-            Command::ForceStopLaunch(instance) => match app.force_stop_launch(instance) {
-                Ok(outcome) => {
-                    let _ = events.send(Event::Toast {
-                        message: lookup(if outcome.signaled_game || outcome.signaled_owner {
-                            "gui-force-stop-signaled"
-                        } else {
-                            "gui-force-stop-released"
-                        }),
-                        error: false,
-                    });
-                    send_snapshot(&app, &events);
+            Command::ForceStopLaunch { instance, launch } => {
+                match app.force_stop_launch(instance, launch.as_deref()) {
+                    Ok(outcome) => {
+                        let _ = events.send(Event::Toast {
+                            message: lookup(if outcome.signaled_game || outcome.signaled_owner {
+                                "gui-force-stop-signaled"
+                            } else {
+                                "gui-force-stop-released"
+                            }),
+                            error: false,
+                        });
+                        send_snapshot(&app, &events);
+                    }
+                    Err(error) => send_error(&events, &error),
                 }
-                Err(error) => send_error(&events, &error),
-            },
+            }
             Command::RefreshMods(host) => {
                 send_host_mods(&app, host, &events, &refreshed_mods, true);
             }
@@ -2717,6 +2738,17 @@ fn disable_suggested_mods(
 }
 
 /// What this launcher is running, with live resource use.
+/// How one launch is addressed while it runs.
+///
+/// An instance holding two launches has two rows, two cancellations and two
+/// locks, and all three have to agree on which is which.
+fn launch_key(instance: InstanceId, launch: Option<&str>) -> String {
+    match launch {
+        Some(id) => format!("{instance}#{id}"),
+        None => instance.to_string(),
+    }
+}
+
 fn running_data(
     app: &App,
     monitor: &mut ProcessMonitor,
@@ -2739,7 +2771,9 @@ fn running_data(
         .map(|process| {
             let id = process.host.id();
             let can_stop = match process.host {
-                ModHost::Instance(_) => supervised.contains(&id),
+                ModHost::Instance(instance) => {
+                    supervised.contains(&launch_key(instance, process.launch.as_deref()))
+                }
                 ModHost::Server(_) => process.controllable,
             };
             let uptime = format_uptime(process.uptime_seconds());
@@ -2752,6 +2786,7 @@ fn running_data(
                 last_line: process.last_line.unwrap_or_default(),
                 controllable: process.controllable,
                 can_stop,
+                launch: process.launch.unwrap_or_default(),
                 id,
             }
         })
@@ -3047,6 +3082,7 @@ fn spawn_launch(
     instance: InstanceId,
     entity: String,
     account: Option<String>,
+    additional: Option<String>,
 ) {
     spawn_detached(
         paths.clone(),
@@ -3058,7 +3094,13 @@ fn spawn_launch(
             // child and then waits for its real exit, so the instance's lock is
             // released rather than left claiming a process that is gone.
             let killing = Arc::clone(&cancellations);
-            hold_cancellation(&killing, instance.to_string(), &cancel);
+            // Keyed by the launch rather than by the instance: one instance can
+            // hold two, and a single key would let stopping either stop both.
+            hold_cancellation(
+                &killing,
+                launch_key(instance, additional.as_deref()),
+                &cancel,
+            );
             let event_sender = events.clone();
             let entity_for_events = entity.clone();
             let paths_for_events = paths.clone();
@@ -3086,6 +3128,7 @@ fn spawn_launch(
                         &LaunchOptions {
                             install_java_if_missing: true,
                             account,
+                            additional,
                             ..LaunchOptions::default()
                         },
                         &observer,
@@ -3848,11 +3891,13 @@ fn kill_instance(
     cancellations: &CancellationRegistry,
     events: &Sender<Event>,
     instance: InstanceId,
+    launch: Option<&str>,
 ) {
+    let key = launch_key(instance, launch);
     let token = cancellations
         .lock()
         .ok()
-        .and_then(|entries| entries.get(&instance.to_string()).cloned());
+        .and_then(|entries| entries.get(&key).cloned());
     match token {
         Some(token) => {
             token.cancel();

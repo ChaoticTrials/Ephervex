@@ -61,10 +61,12 @@ fn a_clients_two_ways_to_stop_are_offered_separately() {
     let ui = window();
     let killed: Rc<RefCell<Vec<String>>> = Rc::default();
     let record = Rc::clone(&killed);
-    ui.on_kill_instance(move |id| record.borrow_mut().push(id.to_string()));
+    ui.on_kill_instance(move |id, launch| {
+        record.borrow_mut().push(format!("{id}#{launch}"));
+    });
     let forced: Rc<RefCell<Vec<String>>> = Rc::default();
     let record = Rc::clone(&forced);
-    ui.on_force_stop_launch(move |id| record.borrow_mut().push(id.to_string()));
+    ui.on_force_stop_launch(move |id, _launch| record.borrow_mut().push(id.to_string()));
     let opened: Rc<RefCell<Vec<String>>> = Rc::default();
     let record = Rc::clone(&opened);
     ui.on_load_instance_workspace(move |id| record.borrow_mut().push(id.to_string()));
@@ -76,7 +78,7 @@ fn a_clients_two_ways_to_stop_are_offered_separately() {
         .find(|element| element.size().width > 0.0)
         .expect("a supervised launch can be stopped")
         .mock_single_click(PointerEventButton::Left);
-    assert_eq!(killed.borrow().as_slice(), ["repro-client"]);
+    assert_eq!(killed.borrow().as_slice(), ["repro-client#"]);
     assert!(
         forced.borrow().is_empty(),
         "the ordinary stop must not be the bigger hammer"
@@ -100,7 +102,9 @@ fn an_unsupervised_launch_cannot_be_stopped_the_ordinary_way() {
     let ui = window();
     let killed: Rc<RefCell<Vec<String>>> = Rc::default();
     let record = Rc::clone(&killed);
-    ui.on_kill_instance(move |id| record.borrow_mut().push(id.to_string()));
+    ui.on_kill_instance(move |id, launch| {
+        record.borrow_mut().push(format!("{id}#{launch}"));
+    });
 
     let mut orphan = client();
     orphan.can_stop = false;
@@ -205,6 +209,7 @@ fn client() -> RunningRow {
     RunningRow {
         kind: "client".into(),
         id: "repro-client".into(),
+        launch: SharedString::default(),
         name: "All the Mods 11".into(),
         pid: "48213".into(),
         uptime: "12m".into(),
@@ -219,6 +224,7 @@ fn server() -> RunningRow {
     RunningRow {
         kind: "server".into(),
         id: "repro-server".into(),
+        launch: SharedString::default(),
         name: "All the Mods 11 Server".into(),
         pid: "48999".into(),
         uptime: "2h1m".into(),

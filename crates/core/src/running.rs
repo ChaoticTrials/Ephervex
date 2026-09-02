@@ -60,6 +60,12 @@ pub struct ProcessUsage {
 pub struct RunningProcess {
     /// Which entity this belongs to, and therefore where its actions go.
     pub host: ModHost,
+    /// Which of that entity's launches this is, when it is not the first.
+    ///
+    /// An instance can hold more than one at a time -- a second account is a
+    /// second launch -- so the host alone does not name a row. `None` is the
+    /// first launch, and every server.
+    pub launch: Option<String>,
     pub name: String,
     /// The game or server process, once it exists.
     ///
@@ -160,19 +166,26 @@ impl App {
         let mut running = Vec::new();
 
         for record in self.list_clients()? {
-            let Some(state) = self.launch_state(record.id)? else {
-                continue;
-            };
-            running.push(RunningProcess {
-                host: ModHost::Instance(record.id),
-                name: record.name,
-                pid: state.game_pid,
-                owner_pid: Some(state.owner_pid),
-                since: Some(state.since),
-                controllable: false,
-                last_line: self.last_log_line(DiagnosticScope::Client(record.id)),
-                usage: None,
-            });
+            // Every launch, not just the first: a second account running
+            // alongside is a second row, or it would be invisible and could
+            // not be stopped.
+            let launches = ephervex_storage::running_launches(&record.root);
+            let shared_log = self.last_log_line(DiagnosticScope::Client(record.id));
+            for launch in launches {
+                running.push(RunningProcess {
+                    host: ModHost::Instance(record.id),
+                    launch: launch.id,
+                    name: record.name.clone(),
+                    pid: launch.state.game_pid,
+                    owner_pid: Some(launch.state.owner_pid),
+                    since: Some(launch.state.since),
+                    controllable: false,
+                    // The instance's own log, which both clients write to
+                    // because they share the game directory.
+                    last_line: shared_log.clone(),
+                    usage: None,
+                });
+            }
         }
 
         for record in self.list_servers()? {
@@ -182,6 +195,7 @@ impl App {
             };
             running.push(RunningProcess {
                 host: ModHost::Server(record.id),
+                launch: None,
                 name: record.name,
                 pid: Some(process.pid),
                 owner_pid: None,
@@ -211,9 +225,16 @@ impl App {
     /// Nothing is signaled without proof that the pid is still the process the
     /// lock describes, so this cannot reach an unrelated program that was given
     /// a recycled id.
-    pub fn force_stop_launch(&self, instance: InstanceId) -> CoreResult<ForcedStop> {
+    ///
+    /// `launch` names which of the instance's launches to end, for an instance
+    /// running more than one; `None` is the first.
+    pub fn force_stop_launch(
+        &self,
+        instance: InstanceId,
+        launch: Option<&str>,
+    ) -> CoreResult<ForcedStop> {
         let root = self.client(instance)?.root;
-        Ok(ephervex_storage::force_release(&root)?)
+        Ok(ephervex_storage::force_release(&root, launch)?)
     }
 
     /// The last line of a client's `latest.log`, best effort.
@@ -355,13 +376,15 @@ mod tests {
         let record = instance(&app, "Repro");
 
         // Nothing held: not a failure, and nothing was signaled.
-        let outcome = app.force_stop_launch(record.id).expect("no lock is held");
+        let outcome = app
+            .force_stop_launch(record.id, None)
+            .expect("no lock is held");
         assert_eq!(outcome, ephervex_storage::ForcedStop::default());
 
         let lock = LaunchLock::acquire(&record.root).expect("lock");
         assert_eq!(app.running_processes().expect("query").len(), 1);
 
-        let outcome = app.force_stop_launch(record.id).expect("ended");
+        let outcome = app.force_stop_launch(record.id, None).expect("ended");
         assert!(
             outcome.released,
             "the instance must become launchable again"
@@ -407,6 +430,58 @@ mod tests {
             ..recycled
         };
         assert!(!unspawned.game_is_alive());
+    }
+
+    /// Launching as a second account is a second launch of one instance, and
+    /// a row that did not appear could not be watched or stopped.
+    #[test]
+    fn a_second_launch_of_one_instance_is_its_own_row() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let record = instance(&app, "Repro");
+
+        let _first = LaunchLock::acquire(&record.root).expect("the first launch");
+        let _second =
+            LaunchLock::acquire_additional(&record.root, "bob").expect("a second account");
+
+        let running = app.running_processes().expect("query");
+        assert_eq!(running.len(), 2, "both clients are running");
+        assert!(
+            running
+                .iter()
+                .all(|process| process.host == ModHost::Instance(record.id)),
+            "both belong to the one instance"
+        );
+        let handles: Vec<Option<&str>> = running
+            .iter()
+            .map(|process| process.launch.as_deref())
+            .collect();
+        assert!(
+            handles.contains(&None) && handles.contains(&Some("bob")),
+            "each row names which launch it is: {handles:?}"
+        );
+    }
+
+    /// Ending one launch leaves the other alone, which is the whole reason
+    /// each holds its own lock.
+    #[test]
+    fn ending_one_launch_leaves_the_other_running() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let record = instance(&app, "Repro");
+
+        let _first = LaunchLock::acquire(&record.root).expect("the first launch");
+        let second = LaunchLock::acquire_additional(&record.root, "bob").expect("a second account");
+        std::mem::forget(second);
+
+        let outcome = app
+            .force_stop_launch(record.id, Some("bob"))
+            .expect("the second launch ends");
+        assert!(outcome.released);
+
+        let running = app.running_processes().expect("query");
+        assert_eq!(running.len(), 1, "the first client is untouched");
+        assert_eq!(running[0].launch, None);
     }
 
     /// An orphan is a recovery case, not a run this launcher is managing, and
@@ -496,6 +571,7 @@ mod tests {
         // This process exists, so memory is readable on the very first sample.
         let mut mine = vec![RunningProcess {
             host: ModHost::Instance(ephervex_model::InstanceId::new()),
+            launch: None,
             name: "self".to_owned(),
             pid: Some(std::process::id()),
             owner_pid: None,

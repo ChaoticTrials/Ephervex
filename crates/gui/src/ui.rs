@@ -207,6 +207,9 @@ slint::slint! {
         // "client" or "server", which decides where every action goes.
         kind: string,
         id: string,
+        // Which of that entity's launches this row is, empty for the first and
+        // for every server.
+        launch: string,
         name: string,
         pid: string,
         uptime: string,
@@ -914,7 +917,11 @@ slint::slint! {
     component LaunchAsButton inherits Rectangle {
         in property <[AccountRow]> accounts;
         in property <bool> enabled: true;
-        callback launch-as(string);
+        // Whether the instance is already running, so a launch from here is a
+        // second client rather than the first.
+        in property <bool> alongside;
+        // The account, and whether this is a second client alongside another.
+        callback launch-as(string, bool);
         callback add-account();
         // Sized the way `AppButton` is, so a row that pairs the two splits
         // evenly instead of letting the other one absorb the slack.
@@ -936,7 +943,7 @@ slint::slint! {
                     // plain Launch uses, and saying so twice would read as two
                     // different accounts.
                     title: account.is-default ? account.name + " (" + GuiI18n.text("gui-default") + ")" : account.name;
-                    activated => { root.launch-as(account.id); }
+                    activated => { root.launch-as(account.id, root.alongside); }
                 }
                 MenuSeparator {}
                 MenuItem {
@@ -1712,7 +1719,7 @@ slint::slint! {
         callback open-console(string);
         callback open-workspace(string, string);
         callback stop(string, string);
-        callback force-stop(string);
+        callback force-stop(string, string);
         height: 92px;
         border-radius: 8px;
         border-width: 1px;
@@ -1773,7 +1780,7 @@ slint::slint! {
                     // by another run of the launcher has nobody supervising it,
                     // so cancelling is not available and the instance would
                     // otherwise stay stuck claiming to be busy.
-                    if root.item.kind == "client" : AppButton { text: GuiI18n.text("gui-force-stop"); tone: "danger"; clicked => { root.force-stop(root.item.id); } }
+                    if root.item.kind == "client" : AppButton { text: GuiI18n.text("gui-force-stop"); tone: "danger"; clicked => { root.force-stop(root.item.id, root.item.launch); } }
                 }
             }
         }
@@ -1957,7 +1964,7 @@ slint::slint! {
         // The accounts a launch can be made as, for the control beside Launch.
         in property <[AccountRow]> accounts;
         callback launch(string);
-        callback launch-as(string, string);
+        callback launch-as(string, string, bool);
         callback add-account();
         callback kill(string);
         callback connect(string, string);
@@ -1993,11 +2000,15 @@ slint::slint! {
             // length. A layout gives each child its preferred width and shares
             // only the surplus, so two buttons whose captions differ come out
             // visibly unequal and the block stops reading as a grid.
-            if item.can-launch : HorizontalLayout { spacing: 8px;
-                AppButton { width: (parent.width - 8px) / 2; text: GuiI18n.text("gui-launch"); tone: "primary"; clicked => { root.launch(item.id); } }
-                LaunchAsButton { width: (parent.width - 8px) / 2; accounts: root.accounts; launch-as(account) => { root.launch-as(item.id, account); } add-account => { root.add-account(); } }
+            //
+            // Launch as keeps its place while the instance is running, because
+            // that is exactly when a second account is worth launching. What
+            // changes is what it means: a second client beside the first.
+            if item.can-launch || item.can-kill : HorizontalLayout { spacing: 8px;
+                if item.can-launch : AppButton { width: (parent.width - 8px) / 2; text: GuiI18n.text("gui-launch"); tone: "primary"; clicked => { root.launch(item.id); } }
+                if item.can-kill : AppButton { width: (parent.width - 8px) / 2; text: GuiI18n.text("gui-kill-instance"); tone: "danger"; clicked => { root.kill(item.id); } }
+                LaunchAsButton { width: (parent.width - 8px) / 2; accounts: root.accounts; alongside: item.can-kill; launch-as(account, alongside) => { root.launch-as(item.id, account, alongside); } add-account => { root.add-account(); } }
             }
-            if item.can-kill : AppButton { text: GuiI18n.text("gui-kill-instance"); tone: "danger"; clicked => { root.kill(item.id); } }
             if item.connect-server-id != "" : AppButton { text: GuiI18n.value("gui-launch-connect", item.connect-server-name); enabled: item.can-connect; clicked => { root.connect(item.id, item.connect-server-id); } }
             HorizontalLayout { spacing: 8px;
                 AppButton { width: (parent.width - 8px) / 2; text: GuiI18n.text("gui-open-workspace"); clicked => { root.workspace(item.id); } }
@@ -2473,8 +2484,12 @@ slint::slint! {
         callback remove-favorite-version(string);
         callback launch-client(string);
         // Launches one instance as a named account, for this launch only.
-        callback launch-client-as(string, string);
-        callback kill-instance(string);
+        // Launches one instance as a named account, for this launch only. The
+        // last argument asks for a second client alongside one already running.
+        callback launch-client-as(string, string, bool);
+        // The instance, and which of its launches to stop. An instance can hold
+        // more than one, and stopping should reach only the one asked for.
+        callback kill-instance(string, string);
         callback launch-and-connect(string, string);
         callback open-client-folder(string);
         callback open-server-folder(string);
@@ -2528,7 +2543,8 @@ slint::slint! {
         callback load-server-workspace(string);
         callback load-server-mods(string);
         callback load-running();
-        callback force-stop-launch(string);
+        // The instance, and which of its launches to end.
+        callback force-stop-launch(string, string);
         // Asks a provider about a host's mods again. Names and artwork are
         // otherwise fetched once per host per run and repainted from the
         // shared cache after that.
@@ -2729,7 +2745,7 @@ slint::slint! {
                                             selected: item.id == root.selected-instance-id;
                                             choose(id) => { root.selected-instance-id = id; root.select-instance(id); }
                                             launch(id) => { root.launch-client(id); }
-                                            kill(id) => { root.kill-instance(id); }
+                                            kill(id) => { root.kill-instance(id, ""); }
                                             open-workspace(id) => { root.selected-instance-id = id; root.selected-instance-index = index; root.select-instance(id); root.workspace = "instance"; root.workspace-tab = "Overview"; root.load-instance-workspace(id); }
                                             open-folder(id) => { root.open-client-folder(id); }
                                             create-server(id, name) => { root.create-server-client-id = id; root.create-server-name = name + " Server"; root.modal = "create-server"; }
@@ -2746,9 +2762,9 @@ slint::slint! {
                             item: root.selected-instance-index >= 0 ? root.instances[root.selected-instance-index] : {};
                             accounts: root.accounts;
                             launch(id) => { root.launch-client(id); }
-                            launch-as(id, account) => { root.launch-client-as(id, account); }
+                            launch-as(id, account, alongside) => { root.launch-client-as(id, account, alongside); }
                             add-account => { root.page = 4; root.workspace = ""; root.workspace-tab = "Accounts"; }
-                            kill(id) => { root.kill-instance(id); }
+                            kill(id) => { root.kill-instance(id, ""); }
                             connect(client, server) => { root.launch-and-connect(client, server); }
                             open-folder(id) => { root.open-client-folder(id); }
                             workspace(id) => { root.workspace = "instance"; root.workspace-tab = "Overview"; root.load-instance-workspace(id); }
@@ -2761,7 +2777,7 @@ slint::slint! {
                         horizontal-stretch: 1; background: Theme.background;
                         VerticalLayout {
                             padding: 22px; spacing: 14px;
-                            HorizontalLayout { spacing: 12px; AppButton { text: GuiI18n.text("gui-back-instances"); clicked => { root.close-live-log(); root.workspace = ""; } } Heading { text: root.selected-instance-index >= 0 ? root.instances[root.selected-instance-index].name : GuiI18n.text("gui-instance"); font-size: Theme.workspace-title-size; } Rectangle { horizontal-stretch: 1; } LaunchAsButton { accounts: root.accounts; enabled: root.selected-instance-index >= 0 && root.instances[root.selected-instance-index].can-launch; launch-as(account) => { root.launch-client-as(root.selected-instance-id, account); } add-account => { root.page = 4; root.workspace = ""; root.workspace-tab = "Accounts"; } } AppButton { text: GuiI18n.text("gui-launch"); tone: "primary"; enabled: root.selected-instance-index >= 0 && root.instances[root.selected-instance-index].can-launch; clicked => { root.launch-client(root.selected-instance-id); } } }
+                            HorizontalLayout { spacing: 12px; AppButton { text: GuiI18n.text("gui-back-instances"); clicked => { root.close-live-log(); root.workspace = ""; } } Heading { text: root.selected-instance-index >= 0 ? root.instances[root.selected-instance-index].name : GuiI18n.text("gui-instance"); font-size: Theme.workspace-title-size; } Rectangle { horizontal-stretch: 1; } LaunchAsButton { accounts: root.accounts; enabled: root.selected-instance-index >= 0 && (root.instances[root.selected-instance-index].can-launch || root.instances[root.selected-instance-index].can-kill); alongside: root.selected-instance-index >= 0 && root.instances[root.selected-instance-index].can-kill; launch-as(account, alongside) => { root.launch-client-as(root.selected-instance-id, account, alongside); } add-account => { root.page = 4; root.workspace = ""; root.workspace-tab = "Accounts"; } } AppButton { text: GuiI18n.text("gui-launch"); tone: "primary"; enabled: root.selected-instance-index >= 0 && root.instances[root.selected-instance-index].can-launch; clicked => { root.launch-client(root.selected-instance-id); } } }
                             HorizontalLayout {
                                 spacing: 4px;
                                 WorkspaceTab { text: GuiI18n.text("gui-instance-tab-overview"); selected: root.workspace-tab == "Overview"; clicked => { root.close-live-log(); root.workspace-tab = "Overview"; } }
@@ -3026,8 +3042,8 @@ slint::slint! {
                                 open-log(kind, id) => { if kind == "server" { root.selected-server-id = id; root.page = 1; root.workspace = "server"; root.workspace-tab = "Logs"; root.load-server-workspace(id); } else { root.selected-instance-id = id; root.page = 0; root.workspace = "instance"; root.workspace-tab = "Logs"; root.load-instance-workspace(id); } root.selected-diagnostic-kind = "log"; root.log-shows-files = false; root.selected-diagnostic-name = ""; root.open-live-log(kind, id); }
                                 open-console(id) => { root.selected-server-id = id; root.page = 1; root.workspace = "server"; root.workspace-tab = "Console"; root.load-server-workspace(id); root.open-live-log("server", id); }
                                 open-workspace(kind, id) => { if kind == "server" { root.selected-server-id = id; root.page = 1; root.workspace = "server"; root.workspace-tab = "Overview"; root.load-server-workspace(id); } else { root.selected-instance-id = id; root.page = 0; root.workspace = "instance"; root.workspace-tab = "Overview"; root.load-instance-workspace(id); } }
-                                stop(kind, id) => { if kind == "server" { root.server-stop(id); } else { root.kill-instance(id); } }
-                                force-stop(id) => { root.force-stop-launch(id); }
+                                stop(kind, id) => { if kind == "server" { root.server-stop(id); } else { root.kill-instance(id, item.launch); } }
+                                force-stop(id, launch) => { root.force-stop-launch(id, launch); }
                             } } }
                         }
                     }

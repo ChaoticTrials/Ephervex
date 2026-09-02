@@ -796,6 +796,7 @@ mod tests {
             java_path: Some(PathBuf::from("/exact/client-java")),
             install_java_if_missing: true,
             account: Some("Alice".to_owned()),
+            additional: None,
             dry_run: true,
         };
         let connected = connected_launch_options(&options, target);

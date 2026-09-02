@@ -67,6 +67,19 @@ pub struct LaunchOptions {
     /// before there was a way to say otherwise. Choosing one here does not
     /// change the default.
     pub account: Option<String>,
+    /// Run alongside a launch this instance already has, under this handle.
+    ///
+    /// `None` is the ordinary exclusive launch, which is refused while the
+    /// instance is running. `Some(id)` is a caller saying it knows one is in
+    /// progress and wants a second client anyway -- launching as another
+    /// account is the case it exists for. The two share the instance's game
+    /// directory, so they share its saves, its options and its logs; nothing
+    /// here makes that safe, and Minecraft's own world lock is what decides
+    /// what happens if both open one world.
+    ///
+    /// The handle is the caller's, and it is what finds this launch again in a
+    /// list and stops it.
+    pub additional: Option<String>,
     /// Prepare everything and return the command without starting the game.
     ///
     /// Everything means everything: the version is installed, the runtime is
@@ -219,7 +232,10 @@ impl App {
         // Taken before anything writes, and held until the game exits. A
         // second launch of the same instance is refused here rather than
         // discovered when two processes fight over `saves/`.
-        let mut lock = LaunchLock::acquire(&record.root)?;
+        let mut lock = match options.additional.as_deref() {
+            Some(id) => LaunchLock::acquire_additional(&record.root, id)?,
+            None => LaunchLock::acquire(&record.root)?,
+        };
 
         // Establish identity before metadata or artifacts are fetched. A
         // missing account is locally knowable and should fail without network.
