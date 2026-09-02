@@ -200,14 +200,23 @@ impl JavaCompatibilityRule for VersionBound {
     }
 }
 
-/// The Java 8 update from which old Forge is reported to stop working.
+/// The Java 8 update from which Forge is reported to stop working.
 ///
-/// **This number is policy, not a contract.** No vendor documents it: it is the
-/// most widely reported boundary in the modding community for Forge builds
-/// predating 1.13, whose launch path does things later 8u releases changed. It
+/// **This number is policy, not a contract.** No vendor documents it, and it
 /// lives here as a named constant precisely so it can be corrected without
-/// touching the rule engine, and so that a reader can see it is a judgement
-/// call rather than something the code derived.
+/// touching the rule engine, and so a reader can see it is a judgement call
+/// rather than something the code derived. It is deliberately conservative:
+/// being a few updates below the real boundary costs nothing, while being one
+/// above it costs a crash the user has to diagnose.
+///
+/// Two separate breakages sit above this line, which is why it applies to
+/// every Java 8 Forge rather than to one era. Up to 1.12.2 Forge launches
+/// through LaunchWrapper; from 1.13 through ModLauncher, whose
+/// `SecureJarHandler` links `sun.security.util.ManifestEntryVerifier`'s
+/// one-argument constructor. Later Java 8 updates gave that constructor a
+/// second parameter, so loading any class out of a jar whose manifest carries
+/// entry digests -- which the Minecraft client jar does -- raises
+/// `NoSuchMethodError` before a window ever opens.
 ///
 /// The Forge provider decides which builds it applies to. This crate only has
 /// to be able to express it.

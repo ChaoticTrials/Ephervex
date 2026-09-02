@@ -957,10 +957,11 @@ impl App {
         jvm_override: Option<ephervex_model::JvmSettings>,
         request: &JavaPlanRequest,
     ) -> CoreResult<JavaPlan> {
-        let loader_rules = self
-            .loaders()?
-            .provider(loader.kind)
-            .java_rules(minecraft_version, loader.version.as_deref());
+        let loader_rules = self.loaders()?.provider(loader.kind).java_rules(
+            minecraft_version,
+            loader.version.as_deref(),
+            required.major,
+        );
         let rules: Vec<&dyn JavaCompatibilityRule> = loader_rules
             .iter()
             .map(|rule| rule as &dyn JavaCompatibilityRule)

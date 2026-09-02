@@ -60,7 +60,20 @@ pub trait LoaderProvider: std::fmt::Debug + Send + Sync {
             .resolve(mode, exact)
     }
 
-    fn java_rules(&self, minecraft: &str, exact: Option<&str>) -> Vec<VersionBound>;
+    /// The runtime constraints this loader places on top of the Minecraft
+    /// version's own requirement.
+    ///
+    /// `required_major` is the feature release Minecraft itself asks for,
+    /// resolved from its metadata. A loader caveat is often a fact about the
+    /// *era* rather than about one release id, and the era is what that number
+    /// names; deriving it here from the version string instead would be a
+    /// second, worse answer to a question already settled.
+    fn java_rules(
+        &self,
+        minecraft: &str,
+        exact: Option<&str>,
+        required_major: u32,
+    ) -> Vec<VersionBound>;
 
     async fn install_client(
         &self,
@@ -119,7 +132,12 @@ impl LoaderProvider for VanillaProvider {
         Ok(String::new())
     }
 
-    fn java_rules(&self, _minecraft: &str, _exact: Option<&str>) -> Vec<VersionBound> {
+    fn java_rules(
+        &self,
+        _minecraft: &str,
+        _exact: Option<&str>,
+        _required_major: u32,
+    ) -> Vec<VersionBound> {
         Vec::new()
     }
 
@@ -182,8 +200,21 @@ impl LoaderProvider for ForgeProvider {
         self.catalog.forge(minecraft, reporter, cancel).await
     }
 
-    fn java_rules(&self, minecraft: &str, _exact: Option<&str>) -> Vec<VersionBound> {
-        if minecraft == "1.12.2" {
+    /// Every Forge that runs on Java 8 needs a Java 8 that is not too late.
+    ///
+    /// Keyed on the required feature release rather than on a list of
+    /// Minecraft versions, because that is the actual shape of the caveat:
+    /// Forge stopped needing Java 8 at 1.17, and every release before that is
+    /// affected. Two different launch stacks are involved -- LaunchWrapper up
+    /// to 1.12.2, ModLauncher from 1.13 -- and late Java 8 updates broke both,
+    /// so there is no line to draw between them.
+    fn java_rules(
+        &self,
+        _minecraft: &str,
+        _exact: Option<&str>,
+        required_major: u32,
+    ) -> Vec<VersionBound> {
+        if required_major == 8 {
             vec![
                 VersionBound::new("forge-legacy-java8")
                     .major(8)
@@ -263,7 +294,12 @@ impl LoaderProvider for NeoForgeProvider {
         self.catalog.neoforge(minecraft, reporter, cancel).await
     }
 
-    fn java_rules(&self, _minecraft: &str, _exact: Option<&str>) -> Vec<VersionBound> {
+    fn java_rules(
+        &self,
+        _minecraft: &str,
+        _exact: Option<&str>,
+        _required_major: u32,
+    ) -> Vec<VersionBound> {
         Vec::new()
     }
 
@@ -348,32 +384,73 @@ mod tests {
     };
     use std::path::PathBuf;
 
-    #[test]
-    fn legacy_forge_registers_the_java8_update_ceiling() {
+    fn forge() -> ForgeProvider {
         let manager =
             DownloadManager::new(ephervex_download::DownloaderConfig::default()).expect("manager");
-        let provider = ForgeProvider::new(manager, CacheLayout::new("/tmp/ephervex-loader-test"))
-            .expect("provider");
-        let rules = provider.java_rules("1.12.2", Some("14.23.5.2859"));
-        assert_eq!(rules.len(), 1);
-        let runtime = JavaRuntime {
+        ForgeProvider::new(manager, CacheLayout::new("/tmp/ephervex-loader-test"))
+            .expect("provider")
+    }
+
+    fn java(version: JavaVersion) -> JavaRuntime {
+        JavaRuntime {
             executable: PathBuf::from("/java"),
             home: None,
-            version: JavaVersion::new(8, 0, 321),
-            version_string: "1.8.0_321".to_owned(),
-            runtime_version: "1.8.0_321".to_owned(),
+            version,
+            version_string: version.to_string(),
+            runtime_version: version.to_string(),
             vendor: "test".to_owned(),
             arch: "amd64".to_owned(),
             origins: vec![JavaOrigin {
                 kind: JavaSourceKind::System,
                 path: PathBuf::from("/java"),
             }],
-        };
-        assert!(matches!(
-            rules[0].evaluate(&runtime),
-            RuleVerdict::Reject(_)
-        ));
-        assert!(provider.java_rules("1.16.5", None).is_empty());
+        }
+    }
+
+    /// The ceiling belongs to the era, not to one release id. Every Forge that
+    /// runs on Java 8 is affected, and 1.12.2 is only the oldest of them.
+    #[test]
+    fn every_java8_forge_registers_the_update_ceiling() {
+        let provider = forge();
+        // A 1.13-and-later release, which used to be left unconstrained and so
+        // was handed whatever late 8u the machine had.
+        for (minecraft, exact) in [
+            ("1.12.2", Some("14.23.5.2859")),
+            ("1.16.3", Some("34.1.42")),
+            ("1.16.5", None),
+        ] {
+            let rules = provider.java_rules(minecraft, exact, 8);
+            assert_eq!(rules.len(), 1, "{minecraft} is a Java 8 Forge");
+            assert!(
+                matches!(
+                    rules[0].evaluate(&java(JavaVersion::new(
+                        8,
+                        0,
+                        LEGACY_FORGE_MAX_JAVA_8_UPDATE + 1
+                    ))),
+                    RuleVerdict::Reject(_)
+                ),
+                "{minecraft} must refuse an update past the ceiling"
+            );
+            assert!(
+                rules[0]
+                    .evaluate(&java(JavaVersion::new(
+                        8,
+                        0,
+                        LEGACY_FORGE_MAX_JAVA_8_UPDATE
+                    )))
+                    .is_accepted(),
+                "{minecraft} must accept the ceiling itself"
+            );
+        }
+    }
+
+    /// A Forge that does not run on Java 8 has none of this to worry about, and
+    /// a rule demanding major 8 would refuse the runtime it actually needs.
+    #[test]
+    fn a_forge_past_java8_is_left_unconstrained() {
+        assert!(forge().java_rules("1.20.1", Some("47.4.10"), 17).is_empty());
+        assert!(forge().java_rules("1.18.2", None, 17).is_empty());
     }
 
     #[test]
