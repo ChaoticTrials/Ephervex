@@ -120,14 +120,27 @@ fn launch_as_is_offered_beside_launch_on_the_instances_page() {
     ])));
     settle(&ui);
 
+    let launch_as = widest(&ui, &lookup("gui-launch-as"))
+        .expect("the instances page offers a way to launch as somebody else");
+    let launch =
+        widest(&ui, &lookup("gui-launch")).expect("and plain Launch is still the one beside it");
+
+    // The pair splits its row evenly, like the Open Workspace / Open Folder
+    // row beneath it. A fixed width on one of them makes the other absorb the
+    // slack, which reads as two unrelated controls rather than a pair.
     assert!(
-        widest(&ui, &lookup("gui-launch-as")).is_some(),
-        "the instances page offers a way to launch as somebody else"
+        (launch.size().width - launch_as.size().width).abs() < 1.0,
+        "Launch and Launch as must share their row evenly ({} against {})",
+        launch.size().width,
+        launch_as.size().width
     );
-    assert!(
-        widest(&ui, &lookup("gui-launch")).is_some(),
-        "and plain Launch is still the one beside it"
-    );
+    for label in ["gui-open-workspace", "gui-open-folder"] {
+        let other = widest(&ui, &lookup(label)).expect("the row below");
+        assert!(
+            (launch.size().width - other.size().width).abs() < 1.0,
+            "every paired row in the block shares one column width ({label})"
+        );
+    }
 }
 
 /// A running instance cannot be launched at all, so neither control belongs

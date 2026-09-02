@@ -916,7 +916,9 @@ slint::slint! {
         in property <bool> enabled: true;
         callback launch-as(string);
         callback add-account();
-        width: 118px;
+        // Sized the way `AppButton` is, so a row that pairs the two splits
+        // evenly instead of letting the other one absorb the slack.
+        min-width: max(88px, content.preferred-width);
         height: Theme.control-height;
         horizontal-stretch: 0;
         border-radius: 6px;
@@ -943,8 +945,8 @@ slint::slint! {
                 }
             }
         }
-        HorizontalLayout {
-            padding-left: 10px; padding-right: 10px; spacing: 5px; alignment: center;
+        content := HorizontalLayout {
+            padding-left: 14px; padding-right: 14px; spacing: 5px; alignment: center;
             Text {
                 text: GuiI18n.text("gui-launch-as");
                 color: root.enabled ? Theme.text : Theme.text-muted;
@@ -1987,15 +1989,19 @@ slint::slint! {
             BodyText { text: item.path; color: Theme.text-muted; overflow: elide; }
             Divider { }
             Eyebrow { text: GuiI18n.text("gui-actions"); }
+            // A paired row is split down the middle rather than by label
+            // length. A layout gives each child its preferred width and shares
+            // only the surplus, so two buttons whose captions differ come out
+            // visibly unequal and the block stops reading as a grid.
             if item.can-launch : HorizontalLayout { spacing: 8px;
-                AppButton { text: GuiI18n.text("gui-launch"); tone: "primary"; clicked => { root.launch(item.id); } }
-                LaunchAsButton { accounts: root.accounts; launch-as(account) => { root.launch-as(item.id, account); } add-account => { root.add-account(); } }
+                AppButton { width: (parent.width - 8px) / 2; text: GuiI18n.text("gui-launch"); tone: "primary"; clicked => { root.launch(item.id); } }
+                LaunchAsButton { width: (parent.width - 8px) / 2; accounts: root.accounts; launch-as(account) => { root.launch-as(item.id, account); } add-account => { root.add-account(); } }
             }
             if item.can-kill : AppButton { text: GuiI18n.text("gui-kill-instance"); tone: "danger"; clicked => { root.kill(item.id); } }
             if item.connect-server-id != "" : AppButton { text: GuiI18n.value("gui-launch-connect", item.connect-server-name); enabled: item.can-connect; clicked => { root.connect(item.id, item.connect-server-id); } }
             HorizontalLayout { spacing: 8px;
-                AppButton { text: GuiI18n.text("gui-open-workspace"); clicked => { root.workspace(item.id); } }
-                AppButton { text: GuiI18n.text("gui-open-folder"); clicked => { root.open-folder(item.id); } }
+                AppButton { width: (parent.width - 8px) / 2; text: GuiI18n.text("gui-open-workspace"); clicked => { root.workspace(item.id); } }
+                AppButton { width: (parent.width - 8px) / 2; text: GuiI18n.text("gui-open-folder"); clicked => { root.open-folder(item.id); } }
             }
             AppButton { text: GuiI18n.text("gui-create-linked-server"); clicked => { root.create-server(item.id, item.name); } }
             Divider { }
