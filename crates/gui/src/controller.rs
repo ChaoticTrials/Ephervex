@@ -201,6 +201,29 @@ impl LiveViewerState {
         });
     }
 
+    /// Selects the word under a column, the way a double click does.
+    ///
+    /// "Word" is wider than a natural-language one because a log is not prose:
+    /// the things worth grabbing out of one are ids, versions and file names,
+    /// so the run continues through the punctuation those are built from. A
+    /// UUID, a mod version and a jar name each come out whole.
+    fn select_word_at(&mut self, row: usize, column: usize) {
+        let Some(text) = self.row_text(row) else {
+            return;
+        };
+        let offset = text
+            .char_indices()
+            .nth(column)
+            .map_or_else(|| text.len(), |(offset, _)| offset);
+        let Some((start, end)) = word_bounds(&text, offset) else {
+            return;
+        };
+        self.selection = Some(LogSelection {
+            anchor: SelectionPoint { row, offset: start },
+            focus: SelectionPoint { row, offset: end },
+        });
+    }
+
     /// Selects every row currently shown.
     fn select_all(&mut self) {
         let rows = self.chunks.row_count();
@@ -420,7 +443,7 @@ fn build_log_presentation(state: &LiveViewerState) -> LogPresentation {
     let match_count = visible_records.len();
 
     for record in visible_records {
-        let mut text = record.text.clone();
+        let mut text = expand_tabs(&record.text);
         if let Some(truncation) = record.truncation {
             text.push('\n');
             text.push_str(&lookup_args(
@@ -429,9 +452,7 @@ fn build_log_presentation(state: &LiveViewerState) -> LogPresentation {
             ));
         }
         content_columns = content_columns.max(
-            record
-                .text
-                .lines()
+            text.lines()
                 .map(|line| line.chars().count())
                 .max()
                 .unwrap_or(0),
@@ -456,6 +477,46 @@ fn build_log_presentation(state: &LiveViewerState) -> LogPresentation {
 /// `max_bytes` still applies, to the single line that exceeds it. A log can
 /// contain a line with no newline in it at all, and that is the case the cap
 /// exists for.
+/// How many columns a tab advances to. Four, like most log viewers.
+const TAB_WIDTH: usize = 4;
+
+/// Replaces tabs with the spaces they stand for.
+///
+/// Two reasons, and either alone would be enough. A tab has no glyph, so a font
+/// draws it as the missing-character box -- which is what FML's mod list, two
+/// tabs deep on every line, turned into. And the console's selection maps a
+/// pointer position to a column by dividing by one character's width, which is
+/// only true while every character occupies one column; a tab occupies as many
+/// as it takes to reach the next stop.
+///
+/// Expanded per line, because a tab stop is counted from the start of the line
+/// and a record can hold many.
+fn expand_tabs(text: &str) -> String {
+    if !text.contains('\t') {
+        return text.to_owned();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut column = 0;
+    for character in text.chars() {
+        match character {
+            '\t' => {
+                let width = TAB_WIDTH - (column % TAB_WIDTH);
+                out.extend(std::iter::repeat_n(' ', width));
+                column += width;
+            }
+            '\n' => {
+                out.push('\n');
+                column = 0;
+            }
+            other => {
+                out.push(other);
+                column += 1;
+            }
+        }
+    }
+    out
+}
+
 fn push_record_chunks(chunks: &mut Vec<LogChunk>, text: &str, level: LogLevel, max_bytes: usize) {
     for line in text.split('\n') {
         let mut rest = line;
@@ -554,6 +615,19 @@ fn register_log_selection(ui: &AppWindow, live_viewer: &Rc<RefCell<LiveViewerSta
     });
 
     let weak = ui.as_weak();
+    let word_state = Rc::clone(live_viewer);
+    ui.on_select_log_word_at(move |row, column| {
+        let (Ok(row), Ok(column)) = (usize::try_from(row), usize::try_from(column)) else {
+            return;
+        };
+        let mut state = word_state.borrow_mut();
+        state.select_word_at(row, column);
+        if let Some(ui) = weak.upgrade() {
+            publish_log_selection(&ui, &state);
+        }
+    });
+
+    let weak = ui.as_weak();
     let all_state = Rc::clone(live_viewer);
     ui.on_select_all_log(move || {
         let mut state = all_state.borrow_mut();
@@ -573,6 +647,50 @@ fn register_log_selection(ui: &AppWindow, live_viewer: &Rc<RefCell<LiveViewerSta
             ui.invoke_copy_text(text.into());
         }
     });
+}
+
+/// Whether a character belongs to the middle of a log's idea of a word.
+///
+/// Alphanumerics plus the punctuation identifiers are built from, so
+/// `6d000c93-8762-4090-89d8-097277cd6237`, `26.1.2-7.0.3` and
+/// `ftb-library-neoforge-26.1.2.7.jar` are each one word. A path separator is
+/// deliberately not one: a double click inside a path should give a segment,
+/// not the whole line.
+fn is_word_character(character: char) -> bool {
+    character.is_alphanumeric() || matches!(character, '-' | '_' | '.' | '+' | '@' | '#')
+}
+
+/// The byte range of the word containing `offset`.
+///
+/// A click on something that is not a word character takes that one character,
+/// which is what makes a double click on a bracket or a space do something
+/// small and predictable rather than nothing. `None` when there is nothing
+/// under the click at all.
+fn word_bounds(text: &str, offset: usize) -> Option<(usize, usize)> {
+    // A click past the end belongs to the last character, so double-clicking
+    // the empty space after a line still selects its final word.
+    let anchor = if offset >= text.len() {
+        text.char_indices().next_back().map(|(at, _)| at)?
+    } else {
+        offset
+    };
+    let character = text[anchor..].chars().next()?;
+    if !is_word_character(character) {
+        return Some((anchor, anchor + character.len_utf8()));
+    }
+
+    let start = text[..anchor]
+        .char_indices()
+        .rev()
+        .take_while(|(_, character)| is_word_character(*character))
+        .last()
+        .map_or(anchor, |(at, _)| at);
+    let end = text[anchor..]
+        .char_indices()
+        .take_while(|(_, character)| is_word_character(*character))
+        .last()
+        .map_or(anchor, |(at, character)| anchor + at + character.len_utf8());
+    Some((start, end))
 }
 
 /// Puts the selection on screen, in the reading order the rows expect.
@@ -1562,10 +1680,28 @@ fn register_callbacks(
     ui.on_cancel_operation(move |id| send(&sender, Command::CancelOperation(id.into())));
 }
 
+thread_local! {
+    /// The clipboard this window owns, kept for as long as the window is.
+    ///
+    /// On X11 a selection has an owning window, and the owner is the context
+    /// itself: whoever wants to paste asks that window for the bytes. A context
+    /// built per copy is therefore destroyed before anyone can ask, and the
+    /// clipboard is left empty -- the copy does not merely fail, it takes
+    /// whatever was there with it. So one context lives as long as the thread
+    /// that owns the window, and every copy goes through it.
+    static CLIPBOARD: RefCell<Option<ClipboardContext>> = const { RefCell::new(None) };
+}
+
 fn copy_to_clipboard(ui: &AppWindow, text: String) {
-    let copied = ClipboardContext::new()
-        .and_then(|mut clipboard| clipboard.set_contents(text))
-        .is_ok();
+    let copied = CLIPBOARD.with(|clipboard| {
+        let mut clipboard = clipboard.borrow_mut();
+        if clipboard.is_none() {
+            *clipboard = ClipboardContext::new().ok();
+        }
+        clipboard
+            .as_mut()
+            .is_some_and(|clipboard| clipboard.set_contents(text).is_ok())
+    });
     ui.invoke_present_toast(
         if copied {
             lookup("gui-clipboard-copied")
@@ -6141,6 +6277,149 @@ mod tests {
             text: text.into(),
             level: "info".into(),
         }
+    }
+
+    /// The thing a log is read for is an id, a version or a file name, and a
+    /// double click has to give one of those whole.
+    #[test]
+    fn a_double_click_takes_the_whole_identifier_under_it() {
+        let line = "instance 6d000c93-8762-4090-89d8-097277cd6237 started";
+        let uuid = line.find("6d00").expect("the id");
+        let (start, end) = word_bounds(line, uuid + 4).expect("a word");
+        assert_eq!(&line[start..end], "6d000c93-8762-4090-89d8-097277cd6237");
+
+        let jar = "mods/ftb-library-neoforge-26.1.2.7.jar";
+        let inside = jar.find("library").expect("inside the name");
+        let (start, end) = word_bounds(jar, inside).expect("a word");
+        assert_eq!(
+            &jar[start..end],
+            "ftb-library-neoforge-26.1.2.7.jar",
+            "a path separator bounds the word, so a click gives one segment"
+        );
+    }
+
+    /// A click on something that is not a word takes exactly that character,
+    /// which is small and predictable rather than nothing at all.
+    #[test]
+    fn a_double_click_off_a_word_takes_one_character() {
+        let line = "LibX 26.1.2 (libx)";
+        let space = line.find(' ').expect("a space");
+        assert_eq!(word_bounds(line, space), Some((space, space + 1)));
+
+        let bracket = line.find('(').expect("a bracket");
+        assert_eq!(word_bounds(line, bracket), Some((bracket, bracket + 1)));
+    }
+
+    #[test]
+    fn a_double_click_past_the_end_of_a_line_still_finds_its_last_word() {
+        let line = "NeoForge 26.1.2.101";
+        let (start, end) = word_bounds(line, line.len() + 40).expect("a word");
+        assert_eq!(&line[start..end], "26.1.2.101");
+
+        assert_eq!(word_bounds("", 0), None, "an empty row has no word");
+    }
+
+    /// Offsets are bytes, and a log is not always ASCII.
+    #[test]
+    fn a_word_containing_multibyte_characters_is_taken_whole() {
+        let line = "mod Ünïcödé-1.0 loaded";
+        let inside = line.find("nïc").expect("inside the word");
+        let (start, end) = word_bounds(line, inside).expect("a word");
+        assert_eq!(&line[start..end], "Ünïcödé-1.0");
+    }
+
+    #[test]
+    fn double_clicking_a_row_selects_that_words_text() {
+        let mut state = LiveViewerState::default();
+        state.chunks.set_vec(vec![chunk("start 26.1.2.101 end")]);
+
+        // The column of the "1" in the version, counted in characters.
+        state.select_word_at(0, 8);
+
+        assert_eq!(state.selected_text().as_deref(), Some("26.1.2.101"));
+    }
+
+    /// On X11 the clipboard's owner is the context, and whoever pastes asks it
+    /// for the bytes. A context built per copy is gone before anyone can ask,
+    /// which does not merely fail to copy -- it empties the clipboard.
+    ///
+    /// Guarded against the source because the failure needs a display to
+    /// observe, and by the time anyone notices they have already lost whatever
+    /// they had copied before.
+    #[test]
+    fn the_clipboard_owner_outlives_the_copy_that_wrote_it() {
+        let source = include_str!("controller.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the module above its tests");
+
+        assert!(production.contains("static CLIPBOARD: RefCell<Option<ClipboardContext>>"));
+        assert_eq!(
+            production.matches("ClipboardContext::new()").count(),
+            1,
+            "one context is built, and it is the long-lived one"
+        );
+        let copy = production
+            .split("fn copy_to_clipboard(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .unwrap_or_default();
+        assert!(
+            copy.contains("CLIPBOARD.with("),
+            "a copy goes through the context the window owns"
+        );
+    }
+
+    /// A tab has no glyph, so a console that passes one through draws the
+    /// missing-character box. FML's mod list is two tabs deep on every line.
+    #[test]
+    fn tabs_become_the_spaces_they_stand_for() {
+        assert_eq!(expand_tabs("\t\tFTB Library"), "        FTB Library");
+        assert_eq!(
+            expand_tabs("no tabs here"),
+            "no tabs here",
+            "text without one is returned untouched"
+        );
+    }
+
+    /// A tab stop is counted from the start of its own line, so how far one
+    /// advances depends on what precedes it, and a record can hold many lines.
+    #[test]
+    fn a_tab_advances_to_the_next_stop_on_its_own_line() {
+        assert_eq!(
+            expand_tabs("ab\tc"),
+            "ab  c",
+            "two columns to the next stop"
+        );
+        assert_eq!(expand_tabs("abc\td"), "abc d", "one column");
+        assert_eq!(expand_tabs("abcd\te"), "abcd    e", "a full stop");
+        assert_eq!(
+            expand_tabs("abcd\ne\tf"),
+            "abcd\ne   f",
+            "the second line counts from its own start, not from the first"
+        );
+    }
+
+    /// The console's selection maps a pointer position to a column by dividing
+    /// by one character's width, which is only true while every character is
+    /// one column wide.
+    #[test]
+    fn an_expanded_row_is_as_wide_as_it_looks() {
+        let mut chunks = Vec::new();
+        push_record_chunks(
+            &mut chunks,
+            &expand_tabs("\t\tLibX"),
+            LogLevel::Info,
+            32 * 1024,
+        );
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].text.chars().count(), 12);
+        assert!(
+            !chunks[0].text.contains('\t'),
+            "a tab left in a row would make its columns lie"
+        );
     }
 
     /// A plain document keeps the native selection; the console cannot.

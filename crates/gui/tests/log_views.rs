@@ -199,6 +199,89 @@ fn pressing_a_console_line_selects_at_the_column_under_the_pointer() {
     );
 }
 
+/// The keyboard half of the console's selection. Whether a shortcut reaches the
+/// handler depends on something holding focus, which only a real window can say.
+#[test]
+fn ctrl_c_and_ctrl_a_reach_the_console() {
+    let ui = window();
+    let copied: Rc<RefCell<usize>> = Rc::default();
+    let record = Rc::clone(&copied);
+    ui.on_copy_log_selection(move || *record.borrow_mut() += 1);
+    let all: Rc<RefCell<usize>> = Rc::default();
+    let record = Rc::clone(&all);
+    ui.on_select_all_log(move || *record.borrow_mut() += 1);
+
+    server_console(&ui);
+    settle(&ui);
+
+    // Pressing inside the log is what gives the console the keyboard, exactly
+    // as it does for a user.
+    let rows = console_rows(&ui);
+    press(&ui, center(&rows[1]));
+    release(&ui, center(&rows[1]));
+    settle(&ui);
+
+    hold_control(&ui);
+    key(&ui, "c");
+    assert_eq!(*copied.borrow(), 1, "Ctrl+C copies the selection");
+    key(&ui, "a");
+    assert_eq!(*all.borrow(), 1, "Ctrl+A selects everything shown");
+    release_control(&ui);
+
+    // Without the modifier the same letters are ordinary text and must not act.
+    key(&ui, "c");
+    assert_eq!(*copied.borrow(), 1, "an unmodified c is not a shortcut");
+}
+
+/// A double click selects the word under it, which is how an id gets copied.
+#[test]
+fn double_clicking_a_console_line_selects_the_word_under_it() {
+    let ui = window();
+    let words: Rc<RefCell<Vec<(i32, i32)>>> = Rc::default();
+    let record = Rc::clone(&words);
+    ui.on_select_log_word_at(move |row, column| record.borrow_mut().push((row, column)));
+
+    server_console(&ui);
+    settle(&ui);
+
+    let rows = console_rows(&ui);
+    let position = LogicalPosition::new(
+        rows[2].absolute_position().x + 120.0,
+        rows[2].absolute_position().y + rows[2].size().height / 2.0,
+    );
+    for _ in 0..2 {
+        press(&ui, position);
+        release(&ui, position);
+    }
+
+    let words = words.borrow();
+    let (row, column) = *words.last().expect("the double click is reported");
+    assert_eq!(row, 2);
+    assert!(
+        column > 0,
+        "the word is taken at the column under the pointer"
+    );
+}
+
+fn hold_control(ui: &AppWindow) {
+    ui.window().dispatch_event(WindowEvent::KeyPressed {
+        text: slint::platform::Key::Control.into(),
+    });
+}
+
+fn release_control(ui: &AppWindow) {
+    ui.window().dispatch_event(WindowEvent::KeyReleased {
+        text: slint::platform::Key::Control.into(),
+    });
+}
+
+fn key(ui: &AppWindow, text: &str) {
+    ui.window()
+        .dispatch_event(WindowEvent::KeyPressed { text: text.into() });
+    ui.window()
+        .dispatch_event(WindowEvent::KeyReleased { text: text.into() });
+}
+
 /// The console's rows, in order.
 fn console_rows(ui: &AppWindow) -> Vec<ElementHandle> {
     ElementHandle::find_by_accessible_label(ui, &lookup("gui-log-output-block")).collect()
