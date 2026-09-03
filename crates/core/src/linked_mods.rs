@@ -59,7 +59,7 @@ use tracing::{info, instrument, warn};
 
 use crate::app::App;
 use crate::error::{CoreError, CoreResult};
-use crate::mods::{InstalledMods, ModInstallRequest};
+use crate::mods::{InstalledMods, ModInstallRequest, side_requirement};
 use crate::mutation::{
     DependencyScope, ModMutation, ModMutationPlan, ModVersionChoice, PlannedFile,
 };
@@ -1408,20 +1408,6 @@ fn display_name(project: &ModProject, fallback: &str) -> String {
         fallback.to_owned()
     } else {
         project.title.clone()
-    }
-}
-
-/// Maps a provider's declared side support onto the recipe's own four states.
-///
-/// One-to-one. Collapsing `unknown` into `required` would assert something the
-/// author declined to assert, and would put a mod onto a server on that
-/// assertion.
-const fn side_requirement(support: SideSupport) -> SideRequirement {
-    match support {
-        SideSupport::Required => SideRequirement::Required,
-        SideSupport::Optional => SideRequirement::Optional,
-        SideSupport::Unsupported => SideRequirement::Unsupported,
-        SideSupport::Unknown => SideRequirement::Unknown,
     }
 }
 

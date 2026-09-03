@@ -1548,8 +1548,10 @@ fn exact_file_id(provider: ModProvider, version_id: &str) -> Option<String> {
 ///
 /// One-to-one, deliberately. Collapsing `unknown` into `required` would assert
 /// something the author declined to assert, and would put the mod into a
-/// reconstructed server on that assertion.
-const fn side_requirement(support: SideSupport) -> SideRequirement {
+/// reconstructed server on that assertion. Shared with [`crate::linked_mods`]
+/// and [`crate::curseforge_pack`] so the two provider-declared vocabularies
+/// meet exactly one translation rather than several that could drift apart.
+pub(crate) const fn side_requirement(support: SideSupport) -> SideRequirement {
     match support {
         SideSupport::Required => SideRequirement::Required,
         SideSupport::Optional => SideRequirement::Optional,

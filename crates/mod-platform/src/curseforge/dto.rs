@@ -114,6 +114,14 @@ pub struct CurseForgeProject {
     /// The project's artwork, when it has any.
     #[serde(default)]
     pub logo: Option<CurseForgeLogo>,
+    /// The project's most recently published files.
+    ///
+    /// CurseForge never states client/server support on the project itself: it
+    /// states it per file, folded into that file's `gameVersions` array. Read
+    /// only for that declaration, which is why each entry is nothing more than
+    /// its `gameVersions`.
+    #[serde(default)]
+    pub latest_files: Vec<CurseForgeProjectFile>,
 }
 
 /// One credited author of a project.
@@ -122,6 +130,21 @@ pub struct CurseForgeProject {
 #[non_exhaustive]
 pub struct CurseForgeAuthor {
     pub name: String,
+}
+
+/// One of a project's `latestFiles`, read only for its client/server
+/// declaration.
+///
+/// The full file record has everything [`CurseForgeFileDocument`] declares and
+/// more, but nothing here needs any of it: which exact file a project's
+/// "latest" happens to be is not tracked, only what its `gameVersions` says
+/// about which side(s) it runs on.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct CurseForgeProjectFile {
+    #[serde(default)]
+    pub game_versions: Vec<String>,
 }
 
 /// A project's artwork, as the API describes it.

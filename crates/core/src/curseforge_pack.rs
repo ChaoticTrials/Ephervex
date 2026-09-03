@@ -821,11 +821,16 @@ fn declared_ids(
 /// The destination directory comes from the project's confirmed class, never
 /// from the file's own name or extension: a `.zip` is not evidence that a
 /// project is a Resource Pack, and a provider-declared Resource Pack is never
-/// routed as though it were a mod. The side requirements come from the
-/// *pack*, not from the API: pack inclusion is what the manifest stated, and
-/// CurseForge's file document says nothing about servers at all. Everything
-/// the API contributes is what the launcher needs to fetch and verify an
-/// artifact.
+/// routed as though it were a mod.
+///
+/// The two sides come from two different places, and that is deliberate
+/// rather than an inconsistency. The client side is pack inclusion, exactly
+/// as the manifest stated it: `required` names the client's desired state,
+/// and nothing about a project's own environment overrides that choice. The
+/// server side has no such flag to read, so it comes from what this exact
+/// file's `gameVersions` says about itself; a file that names neither side
+/// stays [`SideRequirement::Unknown`], which is still the honest answer for a
+/// CurseForge author who declared nothing.
 fn recipe_entry(
     entry: &PendingProviderFile,
     release: &CurseForgeFileRelease,
@@ -858,7 +863,7 @@ fn recipe_entry(
         downloads: vec![address.to_string()],
         size: release.artifact.size,
         client: entry.client,
-        server: entry.server,
+        server: crate::mods::side_requirement(release.server_side),
         selected: None,
         // The pack asked for this file. Resolving it exactly does not make it
         // anybody else's, and the pack-owned mutation policy depends on that.
@@ -979,6 +984,38 @@ mod tests {
                 "displayName":"{name}","fileName":"{name}","releaseType":1,"fileStatus":4,
                 "fileLength":{length},
                 "downloadUrl":"{base}/files/{project}/{file}/{name}",
+                "hashes":[{{"value":"{digest}","algo":1}},
+                          {{"value":"0123456789abcdef0123456789abcdef","algo":2}}]}}}}"#,
+            length = body.len(),
+            base = server.uri(),
+            digest = sha1_of(body),
+        )
+    }
+
+    /// The same document [`file_document`] serves, but declaring an
+    /// environment (`Client` and/or `Server`) in `gameVersions` — the one
+    /// piece of the wire shape that decides a resolved file's own server-side
+    /// requirement, as opposed to the pack's `required` flag, which decides
+    /// only the client side.
+    fn file_document_with_environment(
+        server: &MockServer,
+        project: u32,
+        file: u32,
+        name: &str,
+        body: &[u8],
+        game_versions: &[&str],
+    ) -> String {
+        let game_versions = game_versions
+            .iter()
+            .map(|entry| format!("\"{entry}\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            r#"{{"data":{{"id":{file},"gameId":432,"modId":{project},"isAvailable":true,
+                "displayName":"{name}","fileName":"{name}","releaseType":1,"fileStatus":4,
+                "fileLength":{length},
+                "downloadUrl":"{base}/files/{project}/{file}/{name}",
+                "gameVersions":[{game_versions}],
                 "hashes":[{{"value":"{digest}","algo":1}},
                           {{"value":"0123456789abcdef0123456789abcdef","algo":2}}]}}}}"#,
             length = body.len(),
@@ -1354,6 +1391,64 @@ mod tests {
             optional.selected,
             Some(false),
             "the user was asked and said no"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pinned_files_own_environment_decides_its_server_requirement() {
+        // The `required` flag still decides the client side. The server side
+        // is not a placeholder here: this exact file says `Client` about
+        // itself, and that is what the recipe must record for the server.
+        let server = MockServer::start().await;
+        serve_pack_as_mods(&server).await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/v1/mods/{REQUIRED_PROJECT}/files/{REQUIRED_FILE}"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                file_document_with_environment(
+                    &server,
+                    REQUIRED_PROJECT,
+                    REQUIRED_FILE,
+                    "required-1.0.0.jar",
+                    REQUIRED_BODY,
+                    &["Client", "1.20.1", "Forge"],
+                ),
+                "application/json",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/files/{REQUIRED_PROJECT}/{REQUIRED_FILE}/required-1.0.0.jar"
+            )))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(REQUIRED_BODY.to_vec(), "application/java-archive"),
+            )
+            .mount(&server)
+            .await;
+        serve_file(
+            &server,
+            OPTIONAL_PROJECT,
+            OPTIONAL_FILE,
+            "optional-1.0.0.jar",
+            OPTIONAL_BODY,
+        )
+        .await;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = archive_at(dir.path(), "repro.zip");
+        let app = app_against(dir.path(), &server);
+
+        let imported = import(&app, &archive).await.expect("import");
+        let recipe = imported.recipe();
+        let required = &recipe.files[0];
+        assert_eq!(required.client, SideRequirement::Required);
+        assert_eq!(
+            required.server,
+            SideRequirement::Unsupported,
+            "the file names Client and not Server, which is a claim to be client-only"
         );
     }
 

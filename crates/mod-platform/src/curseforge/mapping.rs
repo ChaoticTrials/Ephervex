@@ -16,18 +16,23 @@
 //!   before it can name a machine this launcher connects to;
 //! * a relation whose type this build does not act on is left out rather than
 //!   promoted to a requirement;
-//! * CurseForge states nothing about client and server support, so both sides
-//!   stay undeclared rather than being filled in from a category or a name.
+//! * CurseForge states client and server support per file, not per project, as
+//!   `Client`/`Server` entries folded into a file's `gameVersions`; a project
+//!   is read as supporting a side when one of its own recent files declares
+//!   it, and stays undeclared only when none of them names either side.
 
 use chrono::{DateTime, Utc};
 use ephervex_download::DomainAllowlist;
 use ephervex_model::{CurseForgeFileId, CurseForgeProjectId, ModProvider};
 
-use super::api::{CurseForgeProjectClasses, DOCUMENTED_LOADER_NAMES, supported_hashes};
+use super::api::{
+    CURSEFORGE_CLIENT_ENVIRONMENT, CURSEFORGE_ENVIRONMENT_NAMES, CURSEFORGE_SERVER_ENVIRONMENT,
+    CurseForgeProjectClasses, DOCUMENTED_LOADER_NAMES, supported_hashes,
+};
 use super::dto::{
-    CurseForgeFileDocument, CurseForgeProject, RELATION_EMBEDDED_LIBRARY, RELATION_INCLUDE,
-    RELATION_INCOMPATIBLE, RELATION_OPTIONAL_DEPENDENCY, RELATION_REQUIRED_DEPENDENCY,
-    RELEASE_TYPE_BETA, RELEASE_TYPE_RELEASE,
+    CurseForgeFileDocument, CurseForgeProject, CurseForgeProjectFile, RELATION_EMBEDDED_LIBRARY,
+    RELATION_INCLUDE, RELATION_INCOMPATIBLE, RELATION_OPTIONAL_DEPENDENCY,
+    RELATION_REQUIRED_DEPENDENCY, RELEASE_TYPE_BETA, RELEASE_TYPE_RELEASE,
 };
 use crate::error::{ModPlatformError, ModPlatformResult};
 use crate::model::{
@@ -51,6 +56,7 @@ pub(super) fn checked_project(
 
 /// One confirmed Mods project as the neutral model.
 fn project(raw: CurseForgeProject) -> ModProject {
+    let (client_side, server_side) = declared_sides(&raw.latest_files);
     ModProject {
         provider: ModProvider::CurseForge,
         id: raw.id.to_string(),
@@ -65,13 +71,61 @@ fn project(raw: CurseForgeProject) -> ModProject {
             .into_iter()
             .map(|author| author.name)
             .find(|name| !name.trim().is_empty()),
-        // CurseForge publishes no client/server declaration for a project.
-        // Undeclared is the honest answer, and it is what keeps a browsed mod
-        // from being pushed onto a linked server on the strength of a guess.
-        client_side: SideSupport::Unknown,
-        server_side: SideSupport::Unknown,
+        client_side,
+        server_side,
         icon_url: raw.logo.and_then(|logo| non_empty(logo.url)),
     }
+}
+
+/// What a project's own recent files say about which side(s) they run on.
+///
+/// CurseForge states this per file, folded into the same `gameVersions` array
+/// that carries Minecraft releases and loader names: a `Client` or `Server`
+/// entry is the file's own claim. A project is read as supporting a side when
+/// any of its listed files declares it; a project none of whose files names
+/// either side is undeclared rather than assumed to run everywhere, because
+/// naming neither is not the same claim as naming both.
+fn declared_sides(files: &[CurseForgeProjectFile]) -> (SideSupport, SideSupport) {
+    sides_from_entries(files.iter().flat_map(|file| file.game_versions.iter()))
+}
+
+/// What one exact file's own `gameVersions` says about which side(s) it runs
+/// on.
+///
+/// The single-file counterpart to [`declared_sides`]: used wherever the exact
+/// release is already known, such as a pack import resolving one pinned
+/// CurseForge file, rather than a project consulted with no particular
+/// release in mind.
+pub(super) fn file_declared_sides(game_versions: &[String]) -> (SideSupport, SideSupport) {
+    sides_from_entries(game_versions.iter())
+}
+
+/// The shared read behind [`declared_sides`] and [`file_declared_sides`]:
+/// a side is `Required` when some entry names it, `Unsupported` when entries
+/// exist but never name it, and both stay `Unknown` when nothing names either
+/// side at all.
+fn sides_from_entries<'a>(entries: impl Iterator<Item = &'a String>) -> (SideSupport, SideSupport) {
+    let mut client = false;
+    let mut server = false;
+    for entry in entries {
+        let entry = entry.trim();
+        if entry.eq_ignore_ascii_case(CURSEFORGE_CLIENT_ENVIRONMENT) {
+            client = true;
+        } else if entry.eq_ignore_ascii_case(CURSEFORGE_SERVER_ENVIRONMENT) {
+            server = true;
+        }
+    }
+    if !client && !server {
+        return (SideSupport::Unknown, SideSupport::Unknown);
+    }
+    let side = |declared: bool| {
+        if declared {
+            SideSupport::Required
+        } else {
+            SideSupport::Unsupported
+        }
+    };
+    (side(client), side(server))
 }
 
 /// One file as an installable version.
@@ -180,17 +234,25 @@ pub(super) fn version(
 
 /// Splits one `gameVersions` array into Minecraft releases and loader names.
 ///
-/// CurseForge mixes both, plus values that are neither. Anything matching a
-/// name from the API's own documented loader enum is a loader; everything else
-/// is left where a Minecraft release would be, which is harmless because
-/// compatibility asks whether the *exact* instance release is present rather
-/// than what else the list contains.
+/// CurseForge mixes both, plus environment entries that are neither. Anything
+/// matching a name from the API's own documented loader enum is a loader;
+/// an environment entry ([`CURSEFORGE_ENVIRONMENT_NAMES`]) is dropped, since it
+/// names a side rather than a release and is read separately, at the project
+/// level; everything else is left where a Minecraft release would be, which is
+/// harmless because compatibility asks whether the *exact* instance release is
+/// present rather than what else the list contains.
 fn split_declared_support(declared: &[String]) -> (Vec<String>, Vec<String>) {
     let mut versions = Vec::new();
     let mut loaders = Vec::new();
     for entry in declared {
         let entry = entry.trim();
         if entry.is_empty() {
+            continue;
+        }
+        if CURSEFORGE_ENVIRONMENT_NAMES
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(entry))
+        {
             continue;
         }
         if DOCUMENTED_LOADER_NAMES
@@ -257,5 +319,79 @@ fn invalid_id(field: &str) -> ModPlatformError {
     ModPlatformError::ResponseInvalid {
         provider: ModProvider::CurseForge,
         detail: format!("a file document reported `{field}` as 0, which names nothing"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use super::*;
+
+    fn project_with_latest_files(game_versions: &[&[&str]]) -> CurseForgeProject {
+        let files: Vec<_> = game_versions
+            .iter()
+            .map(|versions| serde_json::json!({ "gameVersions": versions }))
+            .collect();
+        let raw = serde_json::json!({
+            "id": 1,
+            "gameId": 432,
+            "name": "X",
+            "slug": "x",
+            "latestFiles": files,
+        });
+        serde_json::from_value(raw).expect("parse")
+    }
+
+    #[test]
+    fn a_file_naming_only_client_makes_the_project_client_only() {
+        let raw = project_with_latest_files(&[&["Client", "NeoForge", "26.2"]]);
+        let mapped = project(raw);
+        assert_eq!(mapped.client_side, SideSupport::Required);
+        assert_eq!(mapped.server_side, SideSupport::Unsupported);
+    }
+
+    #[test]
+    fn a_file_naming_only_server_makes_the_project_server_only() {
+        let raw = project_with_latest_files(&[&["NeoForge", "Server", "26.2"]]);
+        let mapped = project(raw);
+        assert_eq!(mapped.client_side, SideSupport::Unsupported);
+        assert_eq!(mapped.server_side, SideSupport::Required);
+    }
+
+    #[test]
+    fn a_file_naming_neither_side_leaves_the_project_undeclared() {
+        let raw = project_with_latest_files(&[&["1.15.2", "Fabric", "1.15.1"]]);
+        let mapped = project(raw);
+        assert_eq!(mapped.client_side, SideSupport::Unknown);
+        assert_eq!(mapped.server_side, SideSupport::Unknown);
+    }
+
+    #[test]
+    fn a_project_with_no_files_at_all_is_undeclared_rather_than_assumed() {
+        let raw = project_with_latest_files(&[]);
+        let mapped = project(raw);
+        assert_eq!(mapped.client_side, SideSupport::Unknown);
+        assert_eq!(mapped.server_side, SideSupport::Unknown);
+    }
+
+    #[test]
+    fn any_recent_file_naming_a_side_is_enough_to_declare_it_for_the_project() {
+        // One old file names neither side, but a newer one names both: the
+        // project is read as supporting whatever any of its files declares.
+        let raw = project_with_latest_files(&[&["1.16.5", "Fabric"], &["Client", "Server"]]);
+        let mapped = project(raw);
+        assert_eq!(mapped.client_side, SideSupport::Required);
+        assert_eq!(mapped.server_side, SideSupport::Required);
+    }
+
+    #[test]
+    fn an_environment_entry_never_becomes_a_minecraft_version_or_a_loader() {
+        let (versions, loaders) = split_declared_support(&[
+            "Client".to_owned(),
+            "Server".to_owned(),
+            "1.20.1".to_owned(),
+        ]);
+        assert_eq!(versions, vec!["1.20.1".to_owned()]);
+        assert!(loaders.is_empty());
     }
 }

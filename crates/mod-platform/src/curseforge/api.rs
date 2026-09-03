@@ -38,8 +38,9 @@ use super::dto::{
     ApiEnvelope, CurseForgeCategoryClass, CurseForgeFileDocument, CurseForgeFileHash,
     CurseForgeGame, CurseForgePagination, CurseForgeProject, HASH_ALGO_SHA1,
 };
+use super::mapping::file_declared_sides;
 use crate::error::{ModPlatformError, ModPlatformResult};
-use crate::model::ModFile;
+use crate::model::{ModFile, SideSupport};
 
 /// The production API root.
 pub const CURSEFORGE_API_BASE: &str = "https://api.curseforge.com/v1";
@@ -748,6 +749,19 @@ pub(super) const DOCUMENTED_LOADER_NAMES: &[&str] = &[
     "NeoForge",
 ];
 
+/// The `gameVersions` entries in the API's "Environment" version type, which
+/// states which side a file runs on.
+///
+/// This is a second pseudo-version type mixed into the same array as
+/// [`DOCUMENTED_LOADER_NAMES`] and actual Minecraft releases. A file names one
+/// side, both, or neither: naming one side and not the other is the file's own
+/// claim to be exclusive to it, and naming neither leaves the question
+/// undeclared rather than answered.
+pub(super) const CURSEFORGE_CLIENT_ENVIRONMENT: &str = "Client";
+pub(super) const CURSEFORGE_SERVER_ENVIRONMENT: &str = "Server";
+pub(super) const CURSEFORGE_ENVIRONMENT_NAMES: &[&str] =
+    &[CURSEFORGE_CLIENT_ENVIRONMENT, CURSEFORGE_SERVER_ENVIRONMENT];
+
 /// The `sortField` a browse uses.
 ///
 /// Popularity, descending, which is what CurseForge's own catalog opens on.
@@ -1013,7 +1027,9 @@ impl CurseForgeProjectClass {
 /// for.
 ///
 /// The provider's wire shape stops here: everything above works from
-/// [`ModFile`] plus the two ids that name it.
+/// [`ModFile`], the two ids that name it, and this exact file's own
+/// client/server declaration — read from its `gameVersions`, not guessed at
+/// from the project it belongs to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CurseForgeFileRelease {
     pub project: CurseForgeProjectId,
@@ -1021,6 +1037,10 @@ pub struct CurseForgeFileRelease {
     /// The name, address, size, and verifiable digests, in the provider-neutral
     /// shape the rest of the launcher installs from.
     pub artifact: ModFile,
+    /// What this exact file's own `gameVersions` says about which side(s) it
+    /// runs on. See [`file_declared_sides`] for how it is read.
+    pub client_side: SideSupport,
+    pub server_side: SideSupport,
 }
 
 /// Checks one file document against the request and normalizes it.
@@ -1075,6 +1095,8 @@ fn normalize_file(
         });
     }
 
+    let (client_side, server_side) = file_declared_sides(&document.game_versions);
+
     Ok(CurseForgeFileRelease {
         project,
         file,
@@ -1084,6 +1106,8 @@ fn normalize_file(
             size: document.file_length,
             hashes,
         },
+        client_side,
+        server_side,
     })
 }
 
