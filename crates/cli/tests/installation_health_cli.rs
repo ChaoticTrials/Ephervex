@@ -165,7 +165,15 @@ fn doctor_reports_the_credential_backend_without_reporting_a_credential() {
     );
     // Availability is a fact about the machine. What is stored, and what it is,
     // are not part of this report at all (ADR 0004).
-    let rendered = credentials.to_string();
+    //
+    // Secret Service is the name of the desktop facility whose reachability is
+    // being reported, and a machine without one says so in those words. Its
+    // name is removed before the scan, which is otherwise looking for stored
+    // material and is case-insensitive so that casing cannot hide a marker.
+    let rendered = credentials
+        .to_string()
+        .to_lowercase()
+        .replace("secret service", "");
     for marker in ["token", "secret", "password", "api_key", "credential_value"] {
         assert!(
             !rendered.contains(marker),
