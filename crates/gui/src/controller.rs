@@ -1521,6 +1521,16 @@ pub fn attach(ui: &AppWindow) -> Controller {
     }
 }
 
+/// The navigation entry that lists client instances.
+///
+/// Both workspaces hang off a page, so navigating to one means setting the page
+/// as well. Named for the same reason as the others: a bare number in that
+/// assignment would say nothing about where the user is being sent.
+const INSTANCES_PAGE: i32 = 0;
+
+/// The navigation entry that lists servers, and hosts the server workspace.
+const SERVERS_PAGE: i32 = 1;
+
 /// The navigation entry that lists what is running.
 ///
 /// Named because the poll that feeds it has to know when it is on screen, and a
@@ -2546,15 +2556,33 @@ fn register_mod_state_actions(ui: &AppWindow, commands: &Sender<Command>) {
 
 /// Selects one server and puts its console on screen, following its output.
 ///
-/// The console is a tab of the server workspace, so reaching it means selecting
-/// the server and choosing both the workspace and the tab. Following is turned
-/// on because the output being waited for has not been written yet.
+/// The console is a tab of the server workspace, which is itself a branch of
+/// the servers page. Start is offered from a client's workspace too, so the
+/// page has to be set alongside the workspace: the body renders whichever
+/// branch matches both, and a pair that matches none renders nothing at all.
+/// Following is turned on because the output being waited for has not been
+/// written yet.
 fn show_server_console(ui: &AppWindow, server: SharedString) {
-    ui.set_selected_server_id(server);
+    // Which client, if any, Back returns to. Coming from a client's workspace
+    // that is the client the server was started from. Coming from the servers
+    // list there is none, and a value left over from an earlier visit would
+    // send Back to an unrelated instance. Already inside the server workspace,
+    // whatever brought the user there still holds.
+    if ui.get_page() == INSTANCES_PAGE && ui.get_workspace() == "instance" {
+        ui.set_server_workspace_return_client(ui.get_selected_instance_id());
+    } else if ui.get_workspace() != "server" {
+        ui.set_server_workspace_return_client(SharedString::default());
+    }
+    ui.set_selected_server_id(server.clone());
+    ui.set_page(SERVERS_PAGE);
     ui.set_workspace("server".into());
     ui.set_workspace_tab("Console".into());
     ui.set_log_query(SharedString::default());
     ui.set_log_follow(true);
+    // What resolves the row the whole workspace indexes and loads the crash
+    // notice. Without it the header has no name and the command field stays
+    // disabled until the next snapshot happens to arrive.
+    ui.invoke_load_server_workspace(server);
 }
 
 /// Starting a server, which also puts its console on screen.
@@ -5419,19 +5447,29 @@ mod tests {
 
     use super::*;
 
+    /// A window on the testing backend.
+    ///
+    /// The backend is process-wide and installs once, so a second attempt from
+    /// another test in the same binary is the ordinary outcome rather than a
+    /// failure.
+    fn test_window() -> AppWindow {
+        let _ =
+            slint::platform::set_platform(Box::new(i_slint_backend_testing::TestingBackend::new(
+                i_slint_backend_testing::TestingBackendOptions {
+                    threading: false,
+                    ..Default::default()
+                },
+            )));
+        AppWindow::new().expect("window")
+    }
+
     /// Start is offered from four places. Every one of them has to leave the
     /// user watching the output the run is about to produce, which means
-    /// selecting the server and choosing both the workspace and the tab.
+    /// selecting the server and choosing both the page and the workspace that
+    /// the console is a tab of.
     #[test]
     fn showing_a_servers_console_selects_it_and_opens_the_console_tab() {
-        slint::platform::set_platform(Box::new(i_slint_backend_testing::TestingBackend::new(
-            i_slint_backend_testing::TestingBackendOptions {
-                threading: false,
-                ..Default::default()
-            },
-        )))
-        .expect("testing backend");
-        let ui = AppWindow::new().expect("window");
+        let ui = test_window();
 
         ui.set_workspace("instance".into());
         ui.set_workspace_tab("Overview".into());
@@ -5441,6 +5479,12 @@ mod tests {
         show_server_console(&ui, "repro-server".into());
 
         assert_eq!(ui.get_selected_server_id(), "repro-server");
+        assert_eq!(
+            ui.get_page(),
+            SERVERS_PAGE,
+            "the console is a branch of the servers page, and a page the \
+             workspace does not belong to renders nothing"
+        );
         assert_eq!(ui.get_workspace(), "server");
         assert_eq!(ui.get_workspace_tab(), "Console");
         assert!(
@@ -5452,6 +5496,52 @@ mod tests {
             "",
             "a search left over from another log would hide the run being started"
         );
+    }
+
+    /// Started from a client's workspace, Back returns to that client.
+    #[test]
+    fn starting_a_linked_server_keeps_its_clients_workspace_as_the_way_back() {
+        let ui = test_window();
+
+        ui.set_page(INSTANCES_PAGE);
+        ui.set_workspace("instance".into());
+        ui.set_selected_instance_id("repro-client".into());
+
+        show_server_console(&ui, "repro-server".into());
+
+        assert_eq!(ui.get_page(), SERVERS_PAGE);
+        assert_eq!(ui.get_server_workspace_return_client(), "repro-client");
+    }
+
+    /// Started from the servers list there is no client to go back to, and a
+    /// value left over from an earlier visit would send Back to an instance the
+    /// user never came from.
+    #[test]
+    fn starting_a_server_from_the_servers_list_clears_a_stale_way_back() {
+        let ui = test_window();
+
+        ui.set_page(SERVERS_PAGE);
+        ui.set_workspace(SharedString::default());
+        ui.set_server_workspace_return_client("some-other-client".into());
+
+        show_server_console(&ui, "repro-server".into());
+
+        assert_eq!(ui.get_server_workspace_return_client(), "");
+    }
+
+    /// Started from inside the server workspace, whatever brought the user
+    /// there still holds, including a client they reached it from.
+    #[test]
+    fn starting_a_server_from_its_own_workspace_keeps_the_way_back() {
+        let ui = test_window();
+
+        ui.set_page(SERVERS_PAGE);
+        ui.set_workspace("server".into());
+        ui.set_server_workspace_return_client("repro-client".into());
+
+        show_server_console(&ui, "repro-server".into());
+
+        assert_eq!(ui.get_server_workspace_return_client(), "repro-client");
     }
 
     fn activity(id: &str, status_kind: &'static str) -> ActivityData {
