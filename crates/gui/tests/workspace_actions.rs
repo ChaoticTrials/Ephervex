@@ -1,0 +1,161 @@
+//! What a workspace offers to do with the thing it is a workspace for.
+//!
+//! A client workspace names the instance's directory on its overview card, so
+//! it has to be able to open it. The button that does is the same one the
+//! server workspace carries, which is why it is easy for one of the two to be
+//! wired to the other's folder.
+
+#![allow(clippy::expect_used)]
+
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use ephervex_gui::ui::{AppWindow, GuiI18n, InstanceRow};
+use ephervex_i18n::{Arg, lookup, lookup_args};
+use i_slint_backend_testing::{ElementHandle, TestingBackend, TestingBackendOptions};
+use slint::{ComponentHandle, ModelRc, PhysicalSize, SharedString, VecModel};
+
+/// The client workspace opens the client's own folder.
+///
+/// Its overview already prints the instance path, and the only Open Folder in
+/// that view used to belong to the linked-server card, so the workspace named a
+/// directory it could not open and offered the server's instead.
+#[test]
+fn the_client_workspace_opens_the_clients_own_folder() {
+    let ui = window();
+    let clients: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let servers: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+
+    let client_sink = Rc::clone(&clients);
+    ui.on_open_client_folder(move |id| client_sink.borrow_mut().push(id.to_string()));
+    let server_sink = Rc::clone(&servers);
+    ui.on_open_server_folder(move |id| server_sink.borrow_mut().push(id.to_string()));
+
+    client_workspace(&ui);
+
+    let open_folder = widest(&ui, &lookup("gui-open-folder"))
+        .expect("the client workspace offers a way to open the instance folder");
+    open_folder.invoke_accessible_default_action();
+
+    assert_eq!(
+        clients.borrow().as_slice(),
+        ["repro-client".to_owned()],
+        "the button opens the instance the workspace is for"
+    );
+    assert!(
+        servers.borrow().is_empty(),
+        "and never a server's folder in its place"
+    );
+}
+
+/// A vanilla instance has no build to change, so the row the folder button
+/// shares carries nothing else. The way into the folder has to survive that.
+#[test]
+fn a_vanilla_instance_still_offers_its_folder() {
+    let ui = window();
+    let clients: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+
+    let client_sink = Rc::clone(&clients);
+    ui.on_open_client_folder(move |id| client_sink.borrow_mut().push(id.to_string()));
+
+    let mut vanilla = instance();
+    vanilla.loader = "Vanilla".into();
+    vanilla.loader_kind = "vanilla".into();
+    client_workspace_with(&ui, vanilla);
+
+    assert!(
+        widest(&ui, &lookup("gui-loader-change-open")).is_none(),
+        "there is no build to change on a vanilla instance"
+    );
+    let open_folder =
+        widest(&ui, &lookup("gui-open-folder")).expect("a vanilla instance still opens its folder");
+    open_folder.invoke_accessible_default_action();
+
+    assert_eq!(clients.borrow().as_slice(), ["repro-client".to_owned()]);
+}
+
+fn client_workspace(ui: &AppWindow) {
+    client_workspace_with(ui, instance());
+}
+
+fn client_workspace_with(ui: &AppWindow, row: InstanceRow) {
+    ui.set_loading(false);
+    ui.set_page(0);
+    ui.set_workspace("instance".into());
+    ui.set_workspace_tab("Overview".into());
+    ui.set_instances(ModelRc::new(VecModel::from(vec![row])));
+    ui.set_selected_instance_index(0);
+    ui.set_selected_instance_id("repro-client".into());
+    settle(ui);
+}
+
+fn instance() -> InstanceRow {
+    InstanceRow {
+        id: "repro-client".into(),
+        name: "Repro Client".into(),
+        minecraft: "1.21.1".into(),
+        loader: "NeoForge 21.1.249".into(),
+        loader_kind: "neoforge".into(),
+        storage: "Temporary".into(),
+        storage_kind: "temporary".into(),
+        source: "Created in Ephervex".into(),
+        path: "/tmp/ephervex/instances/repro-client".into(),
+        updated: "Just now".into(),
+        linked_servers: 0,
+        mods: 0,
+        needs_attention: false,
+        state: "Ready".into(),
+        state_kind: "ready".into(),
+        can_launch: true,
+        can_kill: false,
+        connect_server_id: SharedString::default(),
+        connect_server_name: SharedString::default(),
+        can_connect: false,
+    }
+}
+
+fn widest(ui: &AppWindow, label: &str) -> Option<ElementHandle> {
+    ElementHandle::find_by_accessible_label(ui, label)
+        .max_by(|left, right| left.size().width.total_cmp(&right.size().width))
+        .filter(|element| element.size().width > 0.0)
+}
+
+fn settle(ui: &AppWindow) {
+    slint::platform::update_timers_and_animations();
+    ui.window().take_snapshot().expect("render");
+}
+
+fn window() -> AppWindow {
+    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
+        renderer_name: Some("software".into()),
+        mock_time: true,
+        threading: false,
+    })))
+    .expect("testing backend");
+    let ui = AppWindow::new().expect("window");
+    install_i18n(&ui);
+    ui.window().set_size(PhysicalSize::new(1480, 900));
+    ui.show().expect("show");
+    ui
+}
+
+fn install_i18n(ui: &AppWindow) {
+    let global = ui.global::<GuiI18n>();
+    global.on_text(|id| lookup(id.as_str()).into());
+    global.on_count(|id, count| {
+        lookup_args(id.as_str(), [("count", Arg::Count(i64::from(count)))]).into()
+    });
+    global.on_value(|id, value| {
+        lookup_args(id.as_str(), [("value", Arg::from(value.to_string()))]).into()
+    });
+    global.on_values(|id, first, second| {
+        lookup_args(
+            id.as_str(),
+            [
+                ("first", Arg::from(first.to_string())),
+                ("second", Arg::from(second.to_string())),
+            ],
+        )
+        .into()
+    });
+}

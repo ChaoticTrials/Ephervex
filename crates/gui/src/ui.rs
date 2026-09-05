@@ -2794,7 +2794,20 @@ slint::slint! {
                                     Rectangle { height: 126px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface;
                                         HorizontalLayout { padding: 18px; spacing: 18px; LoaderGlyph { kind: root.instances[root.selected-instance-index].loader-kind; } VerticalLayout { Heading { text: root.instances[root.selected-instance-index].name; } BodyText { text: GuiI18n.values("gui-target-summary", root.instances[root.selected-instance-index].minecraft, root.instances[root.selected-instance-index].loader); } BodyText { text: root.instances[root.selected-instance-index].storage + " | " + root.instances[root.selected-instance-index].source; } BodyText { text: root.instances[root.selected-instance-index].path; color: Theme.text-muted; } } }
                                     }
-                                    if root.instances[root.selected-instance-index].loader-kind != "vanilla" : HorizontalLayout { spacing: 10px; BodyText { text: GuiI18n.value("gui-loader-change-summary", root.instances[root.selected-instance-index].loader); color: Theme.text-secondary; } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-loader-change-open"); clicked => { root.open-loader-change(); } } }
+                                    // The instance's own files, offered where the server
+                                    // workspace offers a server's: the card above prints
+                                    // the path, so the workspace would otherwise name a
+                                    // folder it cannot open. It shares the row the loader
+                                    // summary already leaves half empty rather than taking
+                                    // one of its own, and the row itself is unconditional
+                                    // so a vanilla instance, which has no build to change,
+                                    // still has a way into its folder.
+                                    HorizontalLayout { spacing: 10px;
+                                        if root.instances[root.selected-instance-index].loader-kind != "vanilla" : BodyText { text: GuiI18n.value("gui-loader-change-summary", root.instances[root.selected-instance-index].loader); color: Theme.text-secondary; vertical-alignment: center; }
+                                        Rectangle { horizontal-stretch: 1; }
+                                        AppButton { text: GuiI18n.text("gui-open-folder"); clicked => { root.open-client-folder(root.selected-instance-id); } }
+                                        if root.instances[root.selected-instance-index].loader-kind != "vanilla" : AppButton { text: GuiI18n.text("gui-loader-change-open"); clicked => { root.open-loader-change(); } }
+                                    }
                                     BodyText { text: root.instances[root.selected-instance-index].storage-kind == "temporary" ? GuiI18n.text("gui-temporary-lifecycle") : GuiI18n.text("gui-persistent-lifecycle"); color: Theme.text-muted; wrap: word-wrap; }
                                     Divider { }
                                     HorizontalLayout { Heading { text: GuiI18n.text("gui-linked-server"); font-size: Theme.section-size; } Rectangle { horizontal-stretch: 1; } if root.linked-servers.length == 0 && root.linked-pending-servers.length == 0 : AppButton { text: GuiI18n.text("gui-create-linked-server"); clicked => { root.create-server-client-id = root.selected-instance-id; root.create-server-name = root.instances[root.selected-instance-index].name + " Server"; root.modal = "create-server"; } } }
