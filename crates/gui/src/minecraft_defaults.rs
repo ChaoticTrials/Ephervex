@@ -115,25 +115,40 @@ pub fn category_label(category: PreferenceCategory) -> String {
     })
 }
 
-/// The order sections are shown in inside a category.
+/// The order sections are shown in, one list per category.
 ///
 /// A stable product decision rather than anything the catalog states: the
 /// generated `section` names are unordered, and listing key bindings as
-/// movement-then-gameplay-then-the-rest reads better than alphabetically. A
-/// section missing from this table sorts after every listed one, by name, so a
-/// future section still lands somewhere deterministic.
-const SECTION_ORDER: &[&str] = &[
-    "movement",
-    "gameplay",
-    "inventory",
-    "multiplayer",
-    "creative",
-    "spectator",
-    "misc",
-    "debug",
-    "volume",
-    "skin_parts",
-];
+/// movement-then-gameplay-then-the-rest reads better than alphabetically.
+///
+/// `None` is the preferences that carry no section, shown under the "General"
+/// heading. It is listed here like any other entry, because where it belongs is
+/// a judgement per category rather than a rule: Sound leads with its volumes
+/// and leaves its four remaining settings after them, while every other
+/// category opens with its general ones.
+///
+/// To reorder a category, reorder its list. A section missing from it sorts
+/// after every listed one, by name, so a section the catalog grows later still
+/// lands somewhere deterministic.
+fn section_order(category: PreferenceCategory) -> &'static [Option<&'static str>] {
+    match category {
+        // Neither category has ever carried a section.
+        PreferenceCategory::Video | PreferenceCategory::LanguageAndAccessibility => &[None],
+        PreferenceCategory::SoundAndMusic => &[Some("volume"), None],
+        PreferenceCategory::Gameplay => &[None, Some("skin_parts")],
+        PreferenceCategory::Controls => &[
+            None,
+            Some("movement"),
+            Some("gameplay"),
+            Some("inventory"),
+            Some("multiplayer"),
+            Some("creative"),
+            Some("spectator"),
+            Some("misc"),
+            Some("debug"),
+        ],
+    }
+}
 
 /// Product concepts whose readable name is not derivable from their id.
 ///
@@ -1972,13 +1987,14 @@ impl MinecraftDefaultsModel {
 }
 
 /// Where one section sorts inside its category.
-fn section_rank(section: Option<&str>) -> (usize, String) {
-    match section {
-        None => (0, String::new()),
-        Some(name) => match SECTION_ORDER.iter().position(|known| *known == name) {
-            Some(index) => (index + 1, String::new()),
-            None => (SECTION_ORDER.len() + 1, name.to_owned()),
-        },
+fn section_rank(category: PreferenceCategory, section: Option<&str>) -> (usize, String) {
+    let order = section_order(category);
+    match order.iter().position(|known| *known == section) {
+        Some(index) => (index, String::new()),
+        // Unlisted sorts after everything listed, by name, which keeps the
+        // order total. Every category lists `None`, so an unlisted section
+        // always has a name to be ordered by.
+        None => (order.len(), section.unwrap_or_default().to_owned()),
     }
 }
 
@@ -2114,7 +2130,7 @@ impl MinecraftDefaultsModel {
             })
             .filter(|entry| query.is_empty() || matches_query(&entry.descriptor, &query))
             .collect();
-        visible.sort_by_key(|entry| section_rank(entry.descriptor.section.as_deref()));
+        visible.sort_by_key(|entry| section_rank(category, entry.descriptor.section.as_deref()));
         visible
     }
 
@@ -3124,6 +3140,63 @@ mod tests {
         assert_eq!(scale.max, None, "no maximum was ever proven");
         assert!(!scale.slider, "and none may be fabricated to make one");
         assert_eq!(scale.zero_label, Some("gui-minecraft-scale-automatic"));
+    }
+
+    /// The headings a category shows, in the order it shows them.
+    fn headings(category_index: usize) -> Vec<String> {
+        let mut model = loaded_model();
+        model.set_show_advanced(true);
+        model.select_category(category_index);
+        let mut seen: Vec<String> = Vec::new();
+        for entry in model.visible_entries() {
+            let heading = section_label(entry.descriptor.section.as_deref());
+            if seen.last() != Some(&heading) {
+                seen.push(heading);
+            }
+        }
+        seen
+    }
+
+    /// Where the unsectioned preferences sit is a decision per category, not a
+    /// rule. Sound leads with its volumes, because they are what the category
+    /// is for; every other category opens with its general settings.
+    #[test]
+    fn each_category_orders_its_sections_for_itself() {
+        assert_eq!(headings(2), ["Volume", "General"], "sound and music");
+        assert_eq!(headings(0), ["General", "Skin parts"], "gameplay");
+        assert_eq!(headings(1), ["General"], "video");
+        assert_eq!(headings(4), ["General"], "language and accessibility");
+        assert_eq!(
+            headings(3),
+            [
+                "General",
+                "Movement",
+                "Gameplay",
+                "Inventory",
+                "Multiplayer",
+                "Creative",
+                "Spectator",
+                "Miscellaneous",
+                "Debug",
+            ],
+            "controls"
+        );
+    }
+
+    /// A section the catalog grows later still lands somewhere deterministic:
+    /// after everything the category lists, ordered by name.
+    #[test]
+    fn a_section_no_category_lists_sorts_last_by_name() {
+        let listed = section_rank(PreferenceCategory::SoundAndMusic, Some("volume"));
+        let unlisted = section_rank(PreferenceCategory::SoundAndMusic, Some("ambience"));
+        let later = section_rank(PreferenceCategory::SoundAndMusic, Some("binaural"));
+
+        assert!(listed < unlisted);
+        assert!(section_rank(PreferenceCategory::SoundAndMusic, None) < unlisted);
+        assert!(
+            unlisted < later,
+            "and unlisted sections are ordered by name"
+        );
     }
 
     // ------------------------------------------------------- Sound and Music
