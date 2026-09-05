@@ -41,13 +41,17 @@ Secret Service provider (GNOME Keyring, KWallet, or equivalent) is optional; see
 The release artifact is a single AppImage:
 
 ```bash
-chmod +x Ephervex-<version>-x86_64.AppImage
-./Ephervex-<version>-x86_64.AppImage
+chmod +x Ephervex-x86_64.AppImage
+./Ephervex-x86_64.AppImage
 ```
 
 That starts the desktop application. Nothing is installed, nothing runs as root,
 and nothing is written outside the directories listed under
 [Where Ephervex keeps things](#where-ephervex-keeps-things).
+
+The name is the same on every release, so a download address, a symlink, and a
+desktop integration all stay valid across upgrades. Which release you have is
+the tag it was published under, and what `ephervex --version` reports.
 
 ### When FUSE is unavailable
 
@@ -57,7 +61,7 @@ and Ubuntu, `fuse` on Fedora) if the machine should have one, or run it without
 mounting at all:
 
 ```bash
-APPIMAGE_EXTRACT_AND_RUN=1 ./Ephervex-<version>-x86_64.AppImage
+APPIMAGE_EXTRACT_AND_RUN=1 ./Ephervex-x86_64.AppImage
 ```
 
 That unpacks the artifact to a temporary directory for each run. It is slower to
@@ -75,7 +79,7 @@ The same artifact carries `ephervex`, the command-line interface. It is reached
 by invoking the artifact under that name:
 
 ```bash
-ln -s Ephervex-<version>-x86_64.AppImage ephervex
+ln -s Ephervex-x86_64.AppImage ephervex
 ./ephervex --help
 ./ephervex doctor
 ./ephervex import some-pack.mrpack
@@ -259,20 +263,19 @@ running, and a machine with no usable Java is one Ephervex offers to fix.
 
 ### Host dependencies
 
-Two tools must already be installed. Nothing in this repository downloads,
-fetches, or bootstraps either of them, and no script here contains a URL for
-one.
+Two tools must already be installed. `build-appimage.sh` downloads, fetches, and
+bootstraps neither of them: a missing one is an error naming what to install.
 
-| Tool | Verified version | SHA-256 |
-|---|---|---|
-| `appimagetool` | continuous, git `8c8c91f`, build 295 (2025-12-04) | `a6d71e2b6cd66f8e8d16c37ad164658985e0cf5fcaa950c90a482890cb9d13e0` |
-| AppImage type-2 runtime (`runtime-x86_64`) | continuous, fetched 2026-08-23 | `1cc49bcf1e2ccd593c379adb17c9f85a36d619088296504de95b1d06215aebbf` |
+Both are pinned in [`packaging/host-tools`](../packaging/host-tools), which
+names the address each comes from and the SHA-256 the release procedure was
+verified against: `appimagetool` from the AppImage project's
+`AppImage/appimagetool` repository, the runtime (`runtime-x86_64`) from
+`AppImage/type2-runtime`. Check what you install against that file before
+trusting it; the automated release checks it for you and refuses a mismatch.
 
-Both come from the AppImage project's own releases: `appimagetool` from the
-`AppImage/appimagetool` repository, the runtime from `AppImage/type2-runtime`.
-Check what you install against the digests above before trusting it. The
-versions are recorded rather than enforced, so an unrelated upstream release
-does not break the build, but a discrepancy is visible.
+Upstream publishes both under rolling `continuous` tags, so a replaced asset
+makes the pinned digest stop matching and stops the release. That is the intent.
+Check the new binary, then update `packaging/host-tools` deliberately.
 
 `appimagetool` ships as an AppImage itself. Where FUSE is unavailable, extract
 it once with `--appimage-extract` and point `$APPIMAGETOOL` at the resulting
@@ -373,7 +376,7 @@ source tree, which the smoke test checks by running the packaged CLI from `/`.
 Run by `build-appimage.sh`, and repeatable by hand against any artifact:
 
 ```bash
-packaging/smoke-test-appimage.sh Ephervex-<version>-x86_64.AppImage
+packaging/smoke-test-appimage.sh Ephervex-x86_64.AppImage
 ```
 
 Most of it works on an extracted copy, so it needs no FUSE and runs in the build
@@ -446,6 +449,36 @@ then the baseline build and its smoke test, above, followed by one more run of
 the smoke test on a desktop host so the mounted artifact and the desktop
 application are covered too. The Rust test suite is offline: it uses fixtures
 and loopback servers and contacts no production service.
+
+### Publishing from a tag
+
+[`.forgejo/workflows/release.yml`](../.forgejo/workflows/release.yml) runs the
+procedure above on a pushed `v*` tag and publishes the result as a Forgejo
+release. Announcing a release is therefore:
+
+```bash
+# with the workspace version already bumped and committed
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The job runs on the runner's own image, refuses to continue when the tag and the
+`[workspace.package]` version disagree, runs the gate above, fetches the two
+host tools and checks them against `packaging/host-tools`, then builds, packages,
+and uploads `Ephervex-x86_64.AppImage` with a `.sha256` beside it. Nothing pins
+that image to the baseline distribution, so the glibc floor is held by the check
+`build-appimage.sh` runs against the binaries it produced: a runner too new to
+reach the floor fails the release instead of publishing a package that will not
+start. Publishing
+needs a `RELEASE_TOKEN` repository secret: a personal access token with
+repository write access, so the release is attributed to an account rather than
+to Forgejo's Ghost user.
+
+**It does not replace the desktop smoke test.** A container has neither
+`/dev/fuse` nor a display, so the two steps that exercise the mounted artifact
+and start the desktop application skip and say so. Download the published
+artifact and run `packaging/smoke-test-appimage.sh` against it on a desktop host
+before telling anyone the release is there.
 
 ## Known limitations
 

@@ -57,9 +57,9 @@ Building on a newer machine silently raises the floor for everyone, and nobody
 finds out until a user on an older distribution reports a loader error nobody
 can reproduce. So `build-appimage.sh` reads the highest `GLIBC_` symbol version
 the built binaries actually require and refuses to package anything above the
-declared baseline, naming the symbols responsible. The release build runs inside
-a container pinned to the baseline distribution; the check is what makes
-forgetting that a hard failure instead of a silent regression. There is
+declared baseline, naming the symbols responsible. That check, rather than the
+choice of build environment, is what holds the floor: a build machine or runner
+image too new to reach it fails here instead of silently regressing. There is
 deliberately no flag to skip it.
 
 The check covers every ELF that ships, the supplied type-2 runtime included.
@@ -100,18 +100,23 @@ nothing new.
 
 ### `appimagetool` and the type-2 runtime are host dependencies
 
-Neither is downloaded, fetched, vendored, or bootstrapped by anything in this
-repository, and no script here contains a URL for either. A missing one is an
-error naming what to install.
+Neither is downloaded, fetched, vendored, or bootstrapped by the packaging
+script. A missing one is an error naming what to install.
 
-This keeps the release procedure free of a network step that decides what ends
-up in the artifact. The runtime in particular is an executable prepended to
-every AppImage: left to itself `appimagetool` downloads a fresh one, which both
+This keeps packaging free of a network step that decides what ends up in the
+artifact. The runtime in particular is an executable prepended to every
+AppImage: left to itself `appimagetool` downloads a fresh one, which both
 requires the network and lets the launcher change between two builds of the same
 source. Supplied through `$APPIMAGE_RUNTIME_FILE`, it is pinned like any other
-input. `docs/release.md` records the versions the procedure was verified with
-and their SHA-256 digests, so a maintainer can check what they installed before
-trusting it.
+input.
+
+Provisioning them is the caller's job, and `packaging/host-tools` is what a
+caller provisions from: the address each tool comes from and the SHA-256 the
+procedure was verified against. A maintainer checks what they installed against
+it; the automated release fetches exactly what it names and refuses anything
+whose digest differs. Either way the choice of what ends up in the artifact is
+made in a reviewed file rather than by whatever a tool happens to fetch while
+packaging.
 
 ## Consequences
 

@@ -1,0 +1,197 @@
+# Builds the Linux release artifact and publishes it as a Forgejo release
+# whenever a version tag (for example v1.0.0) is pushed.
+#
+# The artifact has the same name on every release, Ephervex-x86_64.AppImage, so
+# a download address stays valid. What identifies a release is its tag, the
+# release page, and what the binaries report for `--version`, which is why the
+# tag and the workspace version have to agree before anything is built.
+#
+# Nothing here is cached: a release runs a few times a year, and a cargo cache
+# for this workspace is gigabytes the runner host keeps between them.
+#
+# The glibc floor in packaging/linux-baseline is enforced against the binaries
+# the job produced rather than against the image that built them:
+# build-appimage.sh reads the highest GLIBC_ symbol version they require and
+# refuses anything above the floor. A runner image too new to reach it fails the
+# build rather than shipping a package that will not start.
+#
+# `appimagetool` and the AppImage type-2 runtime are host dependencies that
+# build-appimage.sh never downloads. Provisioning them is this workflow's job,
+# and it fetches exactly what packaging/host-tools pins and verifies each digest
+# before use. See docs/release.md and ADR 0023.
+#
+# The release is created through the Forgejo REST API with a personal access
+# token stored as the repository secret RELEASE_TOKEN (Settings -> Actions ->
+# Secrets). Use a token with repository write access belonging to your account,
+# so the release is published under your name rather than the "Ghost" user the
+# automatic per-run token is attributed to.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  appimage:
+    runs-on: docker
+    steps:
+      - name: Install build dependencies
+        # The package set docs/release.md documents for the baseline image, plus
+        # jq and sha256sum for the steps below. desktop-file-utils and appstream
+        # are what validate the desktop entry and the AppStream component;
+        # packaging skips them silently when they are absent, so a release
+        # installs them rather than leaving those checks unrun.
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential curl ca-certificates pkg-config git file jq \
+            python3 desktop-file-utils binutils coreutils zsync appstream \
+            libfontconfig-dev libfreetype-dev libssl-dev
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --component rustfmt --component clippy
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Check the tag against the workspace version
+        # The artifact name carries no version, so the tag is where a release
+        # says which one it is. A tag that disagrees with what the binaries
+        # report would publish a mislabeled release.
+        run: |
+          set -eu
+          version=$(packaging/workspace-version.sh)
+          if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
+            echo "ERROR: tag ${GITHUB_REF_NAME} does not match the workspace version ${version}." >&2
+            echo "Bump [workspace.package] version in Cargo.toml, or tag v${version}." >&2
+            exit 1
+          fi
+          echo "Releasing ${GITHUB_REF_NAME} from workspace version ${version}"
+
+      - name: Verify the tooling datasets
+        run: |
+          python3 -m py_compile tools/minecraft-options/*.py
+          python3 -m unittest discover -s tools/minecraft-options
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      - name: Lints
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Tests
+        # Offline by contract: fixtures and loopback servers only, no Mojang,
+        # Microsoft, Modrinth, CurseForge, Forge, or NeoForge service.
+        run: cargo test --workspace --no-fail-fast
+
+      - name: Provision the pinned host tools
+        run: |
+          set -eu
+          . ./packaging/host-tools
+          mkdir -p host-tools
+          cd host-tools
+
+          fetch() {
+            url=$1; file=$2; expected=$3
+            curl --proto '=https' --tlsv1.2 -sSfL -o "${file}" "${url}"
+            actual=$(sha256sum "${file}" | cut -d' ' -f1)
+            if [ "${actual}" != "${expected}" ]; then
+              echo "ERROR: ${file} is not what packaging/host-tools pins." >&2
+              echo "  expected ${expected}" >&2
+              echo "  fetched  ${actual}" >&2
+              echo "Upstream publishes these under rolling tags. Check the new binary," >&2
+              echo "then update packaging/host-tools deliberately." >&2
+              exit 1
+            fi
+            chmod +x "${file}"
+          }
+
+          fetch "${EPHERVEX_APPIMAGETOOL_URL}" appimagetool-x86_64.AppImage \
+                "${EPHERVEX_APPIMAGETOOL_SHA256}"
+          fetch "${EPHERVEX_APPIMAGE_RUNTIME_URL}" runtime-x86_64 \
+                "${EPHERVEX_APPIMAGE_RUNTIME_SHA256}"
+
+          # appimagetool ships as an AppImage, and a container has no FUSE to
+          # mount one with, so it is extracted once and run from the AppDir.
+          ./appimagetool-x86_64.AppImage --appimage-extract >/dev/null
+
+      - name: Build and package the AppImage
+        env:
+          # `SOURCE_DATE_EPOCH` is honored by the squashfs step, so two builds of
+          # the same source produce the same bytes.
+          SOURCE_DATE_EPOCH: "0"
+        run: |
+          set -eu
+          export APPIMAGETOOL="${PWD}/host-tools/squashfs-root/AppRun"
+          export APPIMAGE_RUNTIME_FILE="${PWD}/host-tools/runtime-x86_64"
+          cargo fetch --locked
+          packaging/build-appimage.sh dist
+
+      - name: Publish the release
+        env:
+          TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          set -eu
+
+          if [ -z "${TOKEN:-}" ]; then
+            echo "ERROR: the RELEASE_TOKEN secret is empty or not set." >&2
+            echo "Create a personal access token with repository WRITE scope and" >&2
+            echo "add it under Settings -> Actions -> Secrets as RELEASE_TOKEN." >&2
+            exit 1
+          fi
+
+          ARTIFACT=Ephervex-x86_64.AppImage
+          cd dist
+          sha256sum "${ARTIFACT}" > "${ARTIFACT}.sha256"
+          cd ..
+
+          API="${GITHUB_API_URL}"
+          REPO="${GITHUB_REPOSITORY}"
+          TAG="${GITHUB_REF_NAME}"
+          AUTH="Authorization: token ${TOKEN}"
+
+          # curl that prints the server's error body rather than just a number,
+          # and fails the step on any HTTP >= 400.
+          api() {
+            method="$1"; path="$2"; shift 2
+            curl -sS --fail-with-body -X "$method" -H "$AUTH" "$@" "${API}${path}"
+          }
+
+          # Reuse an existing release for this tag if there is one, else create it.
+          existing="$(curl -sS -H "$AUTH" "${API}/repos/${REPO}/releases/tags/${TAG}" || true)"
+          rel_id="$(echo "$existing" | jq -r '.id // empty')"
+
+          if [ -z "$rel_id" ]; then
+            echo "Creating release for ${TAG}"
+            created="$(api POST "/repos/${REPO}/releases" \
+              -H 'Content-Type: application/json' \
+              -d "{\"tag_name\":\"${TAG}\",\"name\":\"${TAG}\",\"body\":\"Ephervex ${TAG} for Linux x86_64.\"}")"
+            rel_id="$(echo "$created" | jq -r '.id')"
+          else
+            echo "Reusing existing release for ${TAG}"
+          fi
+
+          # Named one by one rather than globbed: build-appimage.sh leaves the
+          # AppDir it assembled in the same output directory, and a glob would
+          # try to upload a directory.
+          #
+          # Publishing over an existing release replaces its assets rather than
+          # adding to them. Forgejo accepts a second attachment under a name it
+          # already carries, which would leave the release offering two
+          # different files under one name and a download address unable to say
+          # which one it means.
+          assets="$(curl -sS -H "$AUTH" "${API}/repos/${REPO}/releases/${rel_id}/assets" || echo '[]')"
+          for name in "${ARTIFACT}" "${ARTIFACT}.sha256"; do
+            for old in $(echo "$assets" | jq -r --arg n "$name" '.[] | select(.name == $n) | .id'); do
+              echo "Removing the existing ${name} (asset ${old})"
+              api DELETE "/repos/${REPO}/releases/${rel_id}/assets/${old}" >/dev/null
+            done
+            echo "Uploading ${name}"
+            api POST "/repos/${REPO}/releases/${rel_id}/assets?name=${name}" \
+              -F "attachment=@dist/${name}"
+          done

@@ -11,9 +11,9 @@
 #     names the image whose glibc the release targets);
 #   * `appimagetool`, on PATH or named by $APPIMAGETOOL.
 #
-# Neither is downloaded, fetched, installed, or bootstrapped here. There is no
-# URL for either in this file, and a missing one is an error rather than an
-# opportunity to reach out to the network.
+# Neither is downloaded, fetched, installed, or bootstrapped here: a missing one
+# is an error rather than an opportunity to reach out to the network. What to
+# install is pinned in packaging/host-tools, with the digest to check it against.
 #
 #   usage: packaging/build-appimage.sh <output-directory>
 set -euo pipefail
@@ -47,8 +47,8 @@ APPIMAGETOOL=${APPIMAGETOOL:-$(command -v appimagetool || true)}
     "appimagetool was not found.
 It is an external host dependency: this script never downloads or installs it.
 Install it, or point \$APPIMAGETOOL at it, and run this again.
-docs/release.md records the version this procedure was verified against and its
-SHA-256, so you can check what you installed before trusting it."
+packaging/host-tools names where it comes from and the SHA-256 this procedure
+was verified against, so you can check what you installed before trusting it."
 
 for tool in cargo readelf sha256sum; do
     command -v "${tool}" >/dev/null || fail "${tool} is required and was not found"
@@ -61,15 +61,15 @@ APPIMAGETOOL_VERSION=$("${APPIMAGETOOL}" --version 2>&1 | head -n 1 || true)
 # itself appimagetool downloads one, which would make packaging a network step
 # and let the artifact's launcher change between two builds of the same tree.
 # So it is a host dependency like appimagetool itself: supply it through
-# $APPIMAGE_RUNTIME_FILE, and docs/release.md records where to get it and the
-# SHA-256 to check it against.
+# $APPIMAGE_RUNTIME_FILE, and packaging/host-tools records where to get it and
+# the SHA-256 to check it against.
 [[ -n ${APPIMAGE_RUNTIME_FILE:-} ]] || fail \
     "\$APPIMAGE_RUNTIME_FILE is not set.
 The AppImage type-2 runtime is a host dependency like appimagetool: this script
 never downloads one. Without it appimagetool would fetch a runtime over the
 network, which would make packaging a network step and let the artifact's
 launcher change between two builds of the same source.
-docs/release.md records where to get it and the SHA-256 to check it against."
+packaging/host-tools records where to get it and the SHA-256 to check it against."
 [[ -f ${APPIMAGE_RUNTIME_FILE} ]] ||
     fail "\$APPIMAGE_RUNTIME_FILE is set to ${APPIMAGE_RUNTIME_FILE}, which is not a file"
 RUNTIME_ARGS=(--runtime-file "${APPIMAGE_RUNTIME_FILE}")
@@ -234,9 +234,12 @@ if command -v appstreamcli >/dev/null; then
 fi
 
 # --- package -----------------------------------------------------------------
-VERSION=$(sed -n 's/^version *= *"\(.*\)"/\1/p' "${REPO_ROOT}/Cargo.toml" | head -n 1)
-[[ -n ${VERSION} ]] || fail "could not read the workspace version"
-ARTIFACT="${OUTPUT_DIR}/Ephervex-${VERSION}-${EPHERVEX_BASELINE_ARCH}.AppImage"
+VERSION=$("${PACKAGING_DIR}/workspace-version.sh")
+# The name carries no version. A release is identified by its tag and by what
+# the binaries themselves report, so one stable name keeps a download address,
+# a symlink, and a desktop integration valid across releases instead of
+# breaking every one of them on every publish. `AppRun` documents the same name.
+ARTIFACT="${OUTPUT_DIR}/Ephervex-${EPHERVEX_BASELINE_ARCH}.AppImage"
 rm -f "${ARTIFACT}"
 
 note "packaging with ${APPIMAGETOOL_VERSION}"
@@ -260,6 +263,7 @@ enforce_glibc_baseline "${ARTIFACT}" static-ok
 
 # --- summary -----------------------------------------------------------------
 printf '\n'
+note "version       ${VERSION}"
 note "artifact      ${ARTIFACT}"
 note "sha256        $(sha256sum "${ARTIFACT}" | cut -d' ' -f1)"
 note "glibc floor   ${REQUIRED_GLIBC} (baseline ${EPHERVEX_BASELINE_GLIBC})"

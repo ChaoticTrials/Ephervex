@@ -189,15 +189,15 @@ shell configuration files or install completion scripts automatically.
 Ephervex is distributed as a single AppImage for Linux on `x86_64`.
 
 ```bash
-chmod +x Ephervex-<version>-x86_64.AppImage
-./Ephervex-<version>-x86_64.AppImage
+chmod +x Ephervex-x86_64.AppImage
+./Ephervex-x86_64.AppImage
 ```
 
 That starts the desktop application. The same artifact carries the command-line
 interface, reached by invoking it under that name:
 
 ```bash
-ln -s Ephervex-<version>-x86_64.AppImage ephervex
+ln -s Ephervex-x86_64.AppImage ephervex
 ./ephervex --help
 ./ephervex doctor
 ```
@@ -206,7 +206,7 @@ The supported baseline is glibc 2.35, which covers Ubuntu 22.04 LTS, Linux Mint
 21, Debian 12, and anything newer. Like every AppImage, the artifact mounts
 itself through FUSE, which needs `/dev/fuse` and a `fusermount` helper; where
 that is unavailable,
-`APPIMAGE_EXTRACT_AND_RUN=1 ./Ephervex-<version>-x86_64.AppImage` runs it
+`APPIMAGE_EXTRACT_AND_RUN=1 ./Ephervex-x86_64.AppImage` runs it
 without mounting. Nothing is installed and nothing runs as root; uninstalling is
 deleting the file, plus the XDG directories if you want your instances gone too.
 
