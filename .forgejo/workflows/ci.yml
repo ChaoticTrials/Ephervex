@@ -1,0 +1,69 @@
+# Runs the checks on every push to main and on every pull request.
+#
+# Same job as the release gate, on the same runner image, so what passes here is
+# what a tag will find rather than a different toolchain's opinion of the tree.
+#
+# The cargo cache belongs to this workflow alone. Pushes to main are frequent
+# enough to keep an entry warm, while a release is rare enough that one would be
+# cold whenever it mattered. Restoring is slow, so the cache sits after every
+# check that does not read it: a tree that fails formatting fails without
+# waiting for it.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    name: fmt, clippy, test
+    runs-on: docker
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential curl ca-certificates pkg-config git python3 \
+            libfontconfig-dev libfreetype-dev libssl-dev
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --component rustfmt --component clippy
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Verify the tooling datasets
+        run: |
+          python3 -m py_compile tools/minecraft-options/*.py
+          python3 -m unittest discover -s tools/minecraft-options
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      - name: Cache cargo registry and target dir
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Lints
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Tests
+        # Offline by contract: fixtures and loopback servers only, no Mojang,
+        # Microsoft, Modrinth, CurseForge, Forge, or NeoForge service.
+        run: cargo test --workspace
