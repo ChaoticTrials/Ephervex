@@ -9,7 +9,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use ephervex_download::{
     ArtifactSource, CacheLayout, ChannelSink, ContentStore, DownloadError, DownloadManager,
@@ -939,24 +939,37 @@ async fn the_file_named_beside_a_batch_count_advances_with_it() {
         snapshots.push(operation);
     }
 
-    // The staggered delays make the completion order the request order, so the
-    // file a count of `n` refers to is exactly `file-{n - 1}`. Every snapshot
-    // that names a file has to name that one: a name is published with its own
-    // count or not at all, so the two can never describe different moments.
+    // Which file a count refers to is the order they landed in, and the delays
+    // only make that order likely: a loaded machine inverts two neighbors. Each
+    // file records when it landed, so read the order rather than assume it.
+    let mut landed_order: Vec<(SystemTime, String)> = (0..8)
+        .map(|index| {
+            let name = format!("file-{index}.jar");
+            let modified = std::fs::metadata(dir.path().join(&name))
+                .expect("every file landed")
+                .modified()
+                .expect("a modification time");
+            (modified, name)
+        })
+        .collect();
+    landed_order.sort();
+
+    // A name is published with its own count or not at all, so the two can
+    // never describe different moments.
     let mut named_snapshots = 0;
     for snapshot in &snapshots {
         let Some(named) = snapshot.current_step.as_deref() else {
             continue;
         };
         named_snapshots += 1;
-        let landed = snapshot.items.current;
+        let landed = usize::try_from(snapshot.items.current).expect("a count of eight files");
         assert!(
             landed > 0,
             "`{named}` was named before anything had finished downloading"
         );
         assert_eq!(
             named,
-            format!("file-{}.jar", landed - 1),
+            landed_order[landed - 1].1.as_str(),
             "the name beside `{landed} of 8` is not the file that count refers to"
         );
     }
