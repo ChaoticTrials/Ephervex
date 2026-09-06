@@ -204,7 +204,7 @@ impl App {
             // into a report is findable by the id they were shown.
             tracing::warn!(
                 message_id = error.message_id(),
-                detail = %error,
+                detail = %crate::ErrorChain(error),
                 "launch failed"
             );
             observer.emit(LaunchEvent::Failed {

@@ -23,6 +23,26 @@ use ephervex_storage::StorageError;
 
 use crate::ConnectError;
 
+/// An error together with everything that caused it, for one log line.
+///
+/// `Display` on a `thiserror` enum prints only the outermost message, so a
+/// wrapper reaches the log without the artifact, status, or io error that
+/// explains it. Every url a download error names is already redacted.
+#[derive(Debug)]
+pub struct ErrorChain<'a>(pub &'a dyn std::error::Error);
+
+impl std::fmt::Display for ErrorChain<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}", self.0)?;
+        let mut cause = self.0.source();
+        while let Some(error) = cause {
+            write!(formatter, ": {error}")?;
+            cause = error.source();
+        }
+        Ok(())
+    }
+}
+
 /// Anything an application service can fail with.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -752,6 +772,28 @@ mod tests {
         assert_eq!(
             error.failing_path(),
             Some(PathBuf::from("/cache/ephervex/artifact-cache.lock"))
+        );
+    }
+
+    /// What a `Display`-only log line threw away.
+    #[test]
+    fn logging_an_error_keeps_the_cause_the_outer_message_hides() {
+        #[derive(Debug, thiserror::Error)]
+        #[error("http 404 from https://piston-meta.mojang.com/v1/packages/x/26.1.2.json")]
+        struct Fetch;
+
+        #[derive(Debug, thiserror::Error)]
+        #[error("vanilla installation failed")]
+        struct Install(#[source] Fetch);
+
+        let install = Install(Fetch);
+        // The outer message alone is what the report reader was given, and it
+        // names neither the artifact nor the status.
+        assert_eq!(install.to_string(), "vanilla installation failed");
+        assert_eq!(
+            ErrorChain(&install).to_string(),
+            "vanilla installation failed: http 404 from \
+             https://piston-meta.mojang.com/v1/packages/x/26.1.2.json"
         );
     }
 }

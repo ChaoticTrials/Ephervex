@@ -15,8 +15,8 @@ use ephervex_core::live_diagnostics::TailedLine;
 use ephervex_core::{
     App, AuthEvent, AuthObserver, CancellationToken, ClientFolder, ClientModOutcome, ClientModPlan,
     CoreError, CoreResult, CrashReview, DiagnosticKind, DiagnosticRequest, DiagnosticScope,
-    EulaStatus, ImportRequest, LaunchAndConnectObserver, LaunchAndConnectOptions, LaunchEvent,
-    LaunchObserver, LaunchOptions, LinkedModOutcome, LinkedModPlan, LinkedModRequest,
+    ErrorChain, EulaStatus, ImportRequest, LaunchAndConnectObserver, LaunchAndConnectOptions,
+    LaunchEvent, LaunchObserver, LaunchOptions, LinkedModOutcome, LinkedModPlan, LinkedModRequest,
     LinkedTargetPlan, LinkedTargetResult, LinkedTargetState, LoginOptions, ManagedModEntry,
     ManagedModSnapshot, MetadataAvailability, ModHost, ModInstallPlan, ModMutability, ModMutation,
     ModMutationPlan, ModSearchQuery, MutationRestriction, NewClient, NewServer, OperationReporter,
@@ -1692,7 +1692,7 @@ fn run_worker(
                             // the reason survives longer than a toast does.
                             tracing::warn!(
                                 message_id = error.message_id(),
-                                detail = %error,
+                                detail = %ErrorChain(&error),
                                 "mod search failed"
                             );
                             ModResultsData {
@@ -3822,7 +3822,7 @@ fn analyze_import(
         Err(error) => {
             tracing::warn!(
                 message_id = error.message_id(),
-                detail = %error,
+                detail = %ErrorChain(&error),
                 "pack analysis failed"
             );
             let _ = events.send(Event::ImportAnalyzed {
@@ -4910,7 +4910,7 @@ fn send_error(events: &Sender<Event>, error: &CoreError) {
 /// A failure as the user sees it, logged with the technical detail the toast
 /// deliberately leaves out.
 fn error_toast(error: &CoreError) -> Event {
-    tracing::warn!(message_id = error.message_id(), detail = %error, "GUI operation failed");
+    tracing::warn!(message_id = error.message_id(), detail = %ErrorChain(error), "GUI operation failed");
     Event::Toast {
         message: localized_error(error),
         error: true,
@@ -4918,7 +4918,7 @@ fn error_toast(error: &CoreError) -> Event {
 }
 
 fn send_modal_error(events: &Sender<Event>, error: &CoreError) {
-    tracing::warn!(message_id = error.message_id(), detail = %error, "GUI form submission failed");
+    tracing::warn!(message_id = error.message_id(), detail = %ErrorChain(error), "GUI form submission failed");
     let _ = events.send(Event::ModalError(localized_error(error)));
 }
 

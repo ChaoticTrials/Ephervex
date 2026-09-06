@@ -69,7 +69,7 @@ pub use diagnostics::{
     DiagnosticSearch, DiagnosticSection,
 };
 pub use download_watch::{DownloadWatcher, RESCAN_INTERVAL, WatchTarget};
-pub use error::{CoreError, CoreResult};
+pub use error::{CoreError, CoreResult, ErrorChain};
 pub use health::{
     ApplicationIdentity, ArtifactCacheHealth, BundledDataHealth, BundledDocumentHealth,
     ConfigurationHealth, CredentialBackendHealth, DirectoryHealth, DirectoryState,
