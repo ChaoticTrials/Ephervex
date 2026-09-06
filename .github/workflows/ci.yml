@@ -1,3 +1,9 @@
+# Runs the checks on every push to main and on every pull request.
+#
+# The same gate a version tag runs before it publishes anything, so what passes
+# here is what a release will find rather than a different toolchain's opinion
+# of the tree.
+
 name: CI
 
 on:
@@ -14,13 +20,29 @@ jobs:
     name: fmt, clippy, test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        # What the desktop application links against. The rest of the set the
+        # release job installs is already on the runner image.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libfontconfig-dev libfreetype-dev
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - name: Cache cargo registry and target dir
+        uses: Swatinem/rust-cache@v2
+
+      - name: Verify the tooling datasets
+        run: |
+          python3 -m py_compile tools/minecraft-options/*.py
+          python3 -m unittest discover -s tools/minecraft-options
 
       - name: Formatting
         run: cargo fmt --all --check
@@ -28,7 +50,7 @@ jobs:
       - name: Lints
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      # Tests must not depend on Mojang, Modrinth, CurseForge, Forge,
-      # NeoForge, or Microsoft production services.
       - name: Tests
+        # Offline by contract: fixtures and loopback servers only, no Mojang,
+        # Microsoft, Modrinth, CurseForge, Forge, or NeoForge service.
         run: cargo test --workspace

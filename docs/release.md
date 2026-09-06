@@ -454,7 +454,9 @@ and loopback servers and contacts no production service.
 
 [`.forgejo/workflows/release.yml`](../.forgejo/workflows/release.yml) runs the
 procedure above on a pushed `v*` tag and publishes the result as a Forgejo
-release. Announcing a release is therefore:
+release. [`.github/workflows/release.yml`](../.github/workflows/release.yml) is
+the same procedure published through GitHub's API. Announcing a release is
+therefore:
 
 ```bash
 # with the workspace version already bumped and committed
@@ -469,14 +471,18 @@ and uploads `Ephervex-x86_64.AppImage` with a `.sha256` beside it. Nothing pins
 that image to the baseline distribution, so the glibc floor is held by the check
 `build-appimage.sh` runs against the binaries it produced: a runner too new to
 reach the floor fails the release instead of publishing a package that will not
-start. Publishing
-needs a `RELEASE_TOKEN` repository secret: a personal access token with
-repository write access, so the release is attributed to an account rather than
-to Forgejo's Ghost user.
+start. The GitHub job pins that image instead, because its runners are well
+above the floor and its containers can run the actions a checkout needs.
 
-No job caches cargo, release or CI: an entry for this workspace is gigabytes the
-runner keeps on its own disk, and nothing can replace the entry it supersedes,
-so they accumulate.
+Publishing on Forgejo needs a `RELEASE_TOKEN` repository secret: a personal
+access token with repository write access, so the release is attributed to an
+account rather than to Forgejo's Ghost user. The GitHub job needs no secret; it
+uses the token that workflow is given.
+
+No Forgejo job caches cargo, release or CI: an entry for this workspace is
+gigabytes a self-hosted runner keeps on its own disk, and nothing can replace
+the entry it supersedes, so they accumulate. The GitHub jobs do cache, because
+there the storage is GitHub's.
 
 **It does not replace the desktop smoke test.** A container has neither
 `/dev/fuse` nor a display, so the two steps that exercise the mounted artifact
