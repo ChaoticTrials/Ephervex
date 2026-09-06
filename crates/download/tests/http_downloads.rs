@@ -8,6 +8,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -976,6 +977,83 @@ async fn the_file_named_beside_a_batch_count_advances_with_it() {
     assert!(
         named_snapshots > 1,
         "the batch never named a file it was downloading"
+    );
+}
+
+/// A batch of cached artifacts must not open all of them at once.
+///
+/// The cache probe runs before a transfer permit is taken, so that a cached
+/// artifact never queues behind a download. Left unbounded that opened every
+/// destination in the batch at the same instant: installing a Minecraft
+/// version's assets is thousands of objects, which exhausts the 1024 descriptor
+/// limit a desktop session hands out and surfaces as an unreadable cache entry.
+#[tokio::test]
+async fn a_batch_of_cached_artifacts_bounds_the_files_it_opens() {
+    /// Only descriptors pointing into `directory`, so the rest of the test
+    /// binary's sockets and files cannot move the count.
+    fn open_under(directory: &Path) -> usize {
+        let Ok(entries) = std::fs::read_dir("/proc/self/fd") else {
+            return 0;
+        };
+        entries
+            .flatten()
+            .filter(|entry| {
+                std::fs::read_link(entry.path()).is_ok_and(|target| target.starts_with(directory))
+            })
+            .count()
+    }
+
+    // Large enough that hashing them takes long enough to observe, and more of
+    // them than the probe is allowed to hold open.
+    const FILES: usize = 300;
+    let body = vec![b'a'; 256 * 1024];
+    let digest = sha1_of(&body);
+
+    let server = MockServer::start().await;
+    let dir = TempDir::new().expect("temp dir");
+    let root = dir.path().to_path_buf();
+    let mut requests = Vec::with_capacity(FILES);
+    for index in 0..FILES {
+        let destination = root.join(format!("cached-{index}.jar"));
+        std::fs::write(&destination, &body).expect("seed the cache entry");
+        requests.push(
+            request(&server, &format!("/cached-{index}.jar"), &destination)
+                .verifying(digest.clone())
+                .sized(body.len() as u64),
+        );
+    }
+
+    let watched = root.clone();
+    let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed = Arc::clone(&peak);
+    let sampler = tokio::spawn(async move {
+        loop {
+            let open = open_under(&watched);
+            observed.fetch_max(open, std::sync::atomic::Ordering::Relaxed);
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    });
+
+    let (sink, _events) = ChannelSink::new();
+    let sink: Arc<dyn ProgressSink> = sink;
+    let reporter = OperationReporter::new("download-batch", true, sink);
+    let outcomes = manager_with(RetryPolicy::none(), 6)
+        .download_all(&requests, &reporter, &CancellationToken::new())
+        .await
+        .expect("every artifact is already cached");
+    sampler.abort();
+
+    assert_eq!(outcomes.len(), FILES);
+    // No request reached the server, which mounted no route to answer one.
+    assert!(
+        outcomes
+            .iter()
+            .all(|outcome| outcome.source == ArtifactSource::AlreadyCached)
+    );
+    let peak = peak.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        peak < FILES / 2,
+        "the batch held {peak} of {FILES} cached files open at once"
     );
 }
 

@@ -24,6 +24,9 @@ ephervex-pack.workspace = true
 ephervex-options.workspace = true
 ephervex-server.workspace = true
 ephervex-i18n.workspace = true
+# Raising this process's descriptor limit, which std cannot do and which the
+# workspace's `unsafe_code = "deny"` rules out doing through libc directly.
+rustix.workspace = true
 image.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true

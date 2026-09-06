@@ -33,10 +33,17 @@ pub struct ErrorChain<'a>(pub &'a dyn std::error::Error);
 
 impl std::fmt::Display for ErrorChain<'_> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "{}", self.0)?;
+        let mut printed = self.0.to_string();
+        write!(formatter, "{printed}")?;
         let mut cause = self.0.source();
         while let Some(error) = cause {
-            write!(formatter, ": {error}")?;
+            let message = error.to_string();
+            // Some errors render their own source, so appending it would say
+            // the same thing twice. Deeper causes are still worth walking to.
+            if !printed.ends_with(&message) {
+                write!(formatter, ": {message}")?;
+            }
+            printed = message;
             cause = error.source();
         }
         Ok(())
@@ -794,6 +801,29 @@ mod tests {
             ErrorChain(&install).to_string(),
             "vanilla installation failed: http 404 from \
              https://piston-meta.mojang.com/v1/packages/x/26.1.2.json"
+        );
+    }
+
+    /// An error that renders its own source must not have it repeated.
+    #[test]
+    fn a_cause_the_outer_message_already_prints_is_not_printed_twice() {
+        #[derive(Debug, thiserror::Error)]
+        #[error("Too many open files (os error 24)")]
+        struct Limit;
+
+        // The shape `DownloadError::Io` has: the message ends with its source.
+        #[derive(Debug, thiserror::Error)]
+        #[error("could not read the cached artifact at /objects/86/8670: {0}")]
+        struct Read(#[source] Limit);
+
+        #[derive(Debug, thiserror::Error)]
+        #[error("vanilla installation failed")]
+        struct Install(#[source] Read);
+
+        assert_eq!(
+            ErrorChain(&Install(Read(Limit))).to_string(),
+            "vanilla installation failed: could not read the cached artifact at \
+             /objects/86/8670: Too many open files (os error 24)"
         );
     }
 }

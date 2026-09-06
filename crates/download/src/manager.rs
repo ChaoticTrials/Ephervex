@@ -447,7 +447,17 @@ pub struct DownloadManager {
     client: Client,
     config: DownloaderConfig,
     permits: Arc<Semaphore>,
+    cache_probes: Arc<Semaphore>,
 }
+
+/// How many cached artifacts may be open at once.
+///
+/// The probe below runs before a transfer permit is taken, so a batch whose
+/// artifacts are all cached would otherwise open every one of them at the same
+/// instant. An install of a Minecraft version's assets is thousands of objects,
+/// which exhausts a 1024 descriptor limit and fails as an unreadable cache
+/// entry rather than as the resource exhaustion it is.
+const CACHE_PROBES: usize = 64;
 
 impl DownloadManager {
     /// Builds a manager and its HTTP client.
@@ -465,6 +475,7 @@ impl DownloadManager {
             client,
             config,
             permits: Arc::new(Semaphore::new(concurrency)),
+            cache_probes: Arc::new(Semaphore::new(CACHE_PROBES)),
         }
     }
 
@@ -635,7 +646,17 @@ impl DownloadManager {
         let destination_lock = destination_lock(&request.destination);
         let _destination_guard = destination_lock.lock().await;
 
-        if let Some(cached) = already_cached(request, cursor).await? {
+        // Bounded on its own, because this runs before a transfer permit is
+        // taken so that a cached artifact never waits behind a download.
+        let probe = {
+            let _probe_permit = self
+                .cache_probes
+                .acquire()
+                .await
+                .map_err(|_| DownloadError::ShuttingDown)?;
+            already_cached(request, cursor).await?
+        };
+        if let Some(cached) = probe {
             trace!(url = %url_label, path = %request.destination.display(), "artifact already cached");
             return Ok(cached);
         }

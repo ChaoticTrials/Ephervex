@@ -1577,6 +1577,7 @@ dependencies = [
  "image",
  "open",
  "reqwest",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "sha1",

@@ -14,6 +14,13 @@ fn main() -> Result<(), slint::PlatformError> {
         launcher_logs.as_deref(),
     );
 
+    // Before any install: a session that starts this from a desktop entry gives
+    // it a far lower limit than the same session's terminal does.
+    match ephervex_core::open_files::raise_limit() {
+        Ok(limit) => tracing::debug!(limit, "open file limit"),
+        Err(error) => tracing::warn!(%error, "could not raise the open file limit"),
+    }
+
     // Chosen before the window exists, because that is when a backend can still
     // be given a handler. A display server that cannot deliver file drops, or a
     // build with no windowing backend to configure, simply keeps the file

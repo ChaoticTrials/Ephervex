@@ -45,6 +45,7 @@ pub mod minecraft_preferences;
 mod mod_display_cache;
 pub mod mods;
 pub mod mutation;
+pub mod open_files;
 pub mod running;
 pub mod server;
 

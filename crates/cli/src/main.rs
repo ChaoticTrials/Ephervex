@@ -1119,6 +1119,13 @@ fn main() -> ExitCode {
         launcher_logs.as_deref(),
     );
 
+    // Before any install: a session that starts this from a desktop entry gives
+    // it a far lower limit than the same session's terminal does.
+    match ephervex_core::open_files::raise_limit() {
+        Ok(limit) => tracing::debug!(limit, "open file limit"),
+        Err(error) => tracing::warn!(%error, "could not raise the open file limit"),
+    }
+
     // Not routed through `run`, whose contract is "an error means the command
     // did not do its job". `doctor` always does its job; what varies is what it
     // found, and that is what its exit status reports.
