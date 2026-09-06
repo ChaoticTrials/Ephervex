@@ -54,6 +54,12 @@ slint::slint! {
         // The primary navigation column. Named because the page bodies beside
         // it have to know how much of the window is left.
         out property <length> sidebar-width: 218px;
+        // One entity card's height and the gap under it. Named because the
+        // cards and the arithmetic that scrolls one into view have to agree,
+        // and a list of fixed-height rows is the only reason that arithmetic
+        // can be written at all.
+        out property <length> card-height: 112px;
+        out property <length> card-gap: 12px;
     }
 
     export struct InstanceRow {
@@ -877,16 +883,21 @@ slint::slint! {
                     spacing: 5px;
                     for item in root.items : Rectangle {
                         height: 66px;
-                        background: Theme.background;
+                        background: open-area.has-hover ? Theme.elevated : Theme.background;
                         border-radius: 6px;
                         border-width: item.name == root.selected ? 2px : 1px;
-                        border-color: item.name == root.selected ? Theme.accent : Theme.border;
+                        border-color: item.name == root.selected ? Theme.accent : open-area.has-hover ? Theme.accent.with-alpha(0.7) : Theme.border;
+                        accessible-role: button;
+                        accessible-label: item.name;
+                        accessible-action-default => { root.opened(item.name); }
                         VerticalLayout {
                             padding: 8px;
                             Text { text: item.name; color: root.crash ? Theme.warning : Theme.text; overflow: elide; }
                             BodyText { text: item.summary != "" ? item.summary : item.size; overflow: elide; font-size: Theme.caption-size; }
                         }
-                        TouchArea { mouse-cursor: pointer; clicked => { root.opened(item.name); } }
+                        // Hover is the whole affordance here: without it a row
+                        // that opens on one press looks like a label.
+                        open-area := TouchArea { mouse-cursor: pointer; clicked => { root.opened(item.name); } }
                     }
                 }
             }
@@ -1711,7 +1722,7 @@ slint::slint! {
 
     component PendingCard inherits Rectangle {
         in property <PendingEntityRow> item;
-        height: 112px;
+        height: Theme.card-height;
         border-radius: 8px;
         border-width: 1px;
         border-color: Theme.accent.with-alpha(0.7);
@@ -1864,7 +1875,7 @@ slint::slint! {
         callback create-server(string, string);
         callback duplicate(string);
         callback delete(string, string);
-        height: 112px;
+        height: Theme.card-height;
         border-radius: 8px;
         border-width: selected ? 2px : 1px;
         border-color: selected ? Theme.accent : Theme.border;
@@ -1938,7 +1949,7 @@ slint::slint! {
         callback restart(string);
         callback kill(string, string);
         callback delete(string, string);
-        height: 112px;
+        height: Theme.card-height;
         border-radius: 8px;
         border-width: selected ? 2px : 1px;
         border-color: selected ? Theme.accent : Theme.border;
@@ -2224,6 +2235,7 @@ slint::slint! {
         in-out property <int> minecraft-category-index: 0;
         in-out property <string> minecraft-query;
         in-out property <bool> minecraft-show-advanced: false;
+        in-out property <bool> minecraft-only-overridden: false;
         // The row waiting for a key or mouse press, by product id. Kept out of
         // the row model on purpose: entering capture must not rebuild the
         // rows, because rebuilding them would destroy the control that just
@@ -2391,7 +2403,12 @@ slint::slint! {
         in-out property <int> mod-plan-warning-count;
 
         // Dialog form state.
+        // What the user typed, which is empty until they type. The launcher's
+        // own suggestion is shown as the placeholder beside it and is what a
+        // field left empty means, so a suggestion can never go stale against
+        // the release and loader actually selected.
         in-out property <string> create-name;
+        in-out property <string> create-name-suggestion;
         in-out property <[string]> minecraft-releases;
         // The releases pinned to the front of every version list, in the order
         // the user recorded them.
@@ -2566,10 +2583,18 @@ slint::slint! {
         // has to hear that, or the next queued install never starts.
         callback abandon-browser-install();
         callback set-mod-page-size(string);
+        // Bumped to put the selected instance's card in view. A counter rather
+        // than a function, because the list only exists while there is one to
+        // show and a name inside a conditional cannot be reached from here.
+        in-out property <int> reveal-selected-instance: 0;
+        // The instance still waiting to be scrolled to, if any. An id rather
+        // than a flag: a card's position is only known once the list holding it
+        // has arrived, and by then the request has to still name what it was
+        // for.
+        in-out property <string> pending-reveal-instance;
         callback install-mod(string, string, string, string);
         callback submit-create-instance(string, string, string, string, bool);
         callback open-create-instance-modal();
-        callback create-name-edited(string);
         callback recompute-create-name();
         callback open-import-modal();
         callback close-import-modal();
@@ -2649,6 +2674,7 @@ slint::slint! {
         callback minecraft-select-category(int);
         callback minecraft-set-query(string);
         callback minecraft-set-show-advanced(bool);
+        callback minecraft-set-only-overridden(bool);
         callback minecraft-set-preview-release(string);
         callback minecraft-set-boolean(string, bool);
         callback minecraft-set-number(string, float);
@@ -2796,10 +2822,21 @@ slint::slint! {
                                     primary => { root.open-create-instance-modal(); }
                                     secondary => { root.open-import-modal(); }
                                 }
-                                if !root.loading && (root.instances.length > 0 || root.pending-instances.length > 0) : ScrollView {
+                                if !root.loading && (root.instances.length > 0 || root.pending-instances.length > 0) : instance-scroll := ScrollView {
                                     viewport-width: self.width;
+                                    // Cards and the gap between them are fixed,
+                                    // so where one sits is arithmetic rather
+                                    // than a query into the list.
+                                    private property <int> observed-reveal: root.reveal-selected-instance;
+                                    changed observed-reveal => {
+                                        if root.selected-instance-index >= 0 {
+                                            instance-scroll.viewport-y = max(
+                                                min(0px, instance-scroll.visible-height - instance-scroll.viewport-height),
+                                                -1 * (root.pending-instances.length + root.selected-instance-index) * (Theme.card-height + Theme.card-gap));
+                                        }
+                                    }
                                     VerticalLayout {
-                                        spacing: 12px;
+                                        spacing: Theme.card-gap;
                                         for pending in root.pending-instances : PendingCard { item: pending; }
                                         for item[index] in root.instances : InstanceCard {
                                             visible: root.instance-filter == "all" || item.storage-kind == root.instance-filter;
@@ -3229,6 +3266,8 @@ slint::slint! {
                                     }
                                     if root.minecraft-query != "" : AppButton { text: GuiI18n.text("gui-clear"); min-width: 84px; clicked => { filter-field.text = ""; root.minecraft-query = ""; root.minecraft-set-query(""); } }
                                     Rectangle { horizontal-stretch: 1; min-width: 4px; }
+                                    BodyText { text: GuiI18n.text("gui-minecraft-only-overridden"); horizontal-stretch: 0; }
+                                    Toggle { accessible-name: GuiI18n.text("gui-minecraft-only-overridden"); checked: root.minecraft-only-overridden; toggled(value) => { root.minecraft-set-only-overridden(value); } }
                                     BodyText { text: GuiI18n.text("gui-minecraft-show-advanced"); horizontal-stretch: 0; }
                                     Toggle { accessible-name: GuiI18n.text("gui-minecraft-show-advanced"); checked: root.minecraft-show-advanced; toggled(value) => { root.minecraft-set-show-advanced(value); } }
                                 }
@@ -3487,7 +3526,7 @@ slint::slint! {
                 VerticalLayout { padding: 22px; spacing: 13px;
                     HorizontalLayout { cross-axis-alignment: center; Heading { text: root.modal == "create-instance" ? GuiI18n.text("gui-modal-new-instance") : root.modal == "import" ? GuiI18n.text("gui-modal-import") : root.modal == "create-server" ? GuiI18n.text("gui-modal-new-server") : root.modal == "mod-plan" ? GuiI18n.text("gui-modal-install-mod") : root.modal == "mod-manage" ? GuiI18n.text("gui-modal-manage-mod") : root.modal == "loader-change" ? GuiI18n.text("gui-modal-change-loader") : root.modal == "mod-remove" ? GuiI18n.text("gui-modal-remove-mod") : root.modal == "mod-apply" ? GuiI18n.text("gui-modal-apply-mod") : root.modal == "mod-result" ? GuiI18n.text("gui-modal-mod-result") : root.modal == "eula" ? GuiI18n.text("gui-server-eula") : root.modal == "kill" ? GuiI18n.text("gui-modal-force-kill") : root.modal == "delete-instance" ? GuiI18n.text("gui-delete-instance") : root.modal == "delete-server" ? GuiI18n.text("gui-delete-server") : root.modal == "license" ? GuiI18n.text("gui-modal-apache-license") : GuiI18n.text("gui-third-party-licenses"); font-size: 20px; } Rectangle { horizontal-stretch: 1; } IconButton { icon: @image-url("../../../assets/icons/close.svg"); accessible-name: GuiI18n.text("gui-close"); clicked => { if root.modal == "import" { root.close-import-modal(); } else { if root.modal == "mod-plan" { root.abandon-browser-install(); } root.modal = ""; root.modal-error = ""; } } } }
                     Divider { }
-                    if root.modal == "create-instance" : VerticalLayout { spacing: 11px; BodyText { text: GuiI18n.text("gui-create-instance-detail"); wrap: word-wrap; } Text { text: GuiI18n.text("gui-name"); color: Theme.text-secondary; font-size: 12px; } TextField { text <=> root.create-name; placeholder: GuiI18n.text("gui-instance-name-placeholder"); edited(text) => { root.create-name-edited(text); } } Text { text: GuiI18n.text("gui-minecraft-release"); color: Theme.text-secondary; font-size: 12px; } HorizontalLayout { spacing: 8px; ComboBox { horizontal-stretch: 1; model: root.minecraft-releases; current-value <=> root.create-minecraft; selected(value) => { root.create-minecraft = value; root.create-loader-version = ""; root.create-loader-versions = []; root.minecraft-selection-changed("client", value); if root.create-loader != "Vanilla" { root.request-loader-catalog("client", root.create-loader, value); } root.recompute-create-name(); } } FavoriteToggle { version: root.create-minecraft; favorite: root.create-minecraft-favorite; enabled: root.create-minecraft != ""; toggled => { root.toggle-favorite-version(root.create-minecraft); } } } Text { text: GuiI18n.text("gui-loader"); color: Theme.text-secondary; font-size: 12px; } ComboBox { model: root.create-loaders; current-value <=> root.create-loader; selected(value) => { root.create-loader = value; root.create-loader-version = ""; root.create-loader-versions = []; if value != "Vanilla" { root.request-loader-catalog("client", value, root.create-minecraft); } root.recompute-create-name(); } } if root.create-loader != "Vanilla" : ComboBox { model: root.create-loader-versions; current-value <=> root.create-loader-version; changed current-value => { root.recompute-create-name(); } } HorizontalLayout { BodyText { text: GuiI18n.text("gui-store-persistently"); } Toggle { checked <=> root.create-persistent; } BodyText { text: root.create-persistent ? GuiI18n.text("gui-persistent-root") : GuiI18n.text("gui-temporary-root"); color: Theme.text-muted; } } if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; } ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; } } AppButton { text: GuiI18n.text("gui-create-instance"); tone: "primary"; enabled: root.minecraft-releases.length > 0 && root.create-name != "" && root.create-minecraft != "" && (root.create-loader == "Vanilla" || root.create-loader-version != ""); clicked => { root.submit-create-instance(root.create-name, root.create-minecraft, root.create-loader, root.create-loader-version, root.create-persistent); } } } }
+                    if root.modal == "create-instance" : VerticalLayout { spacing: 11px; BodyText { text: GuiI18n.text("gui-create-instance-detail"); wrap: word-wrap; } Text { text: GuiI18n.text("gui-name"); color: Theme.text-secondary; font-size: 12px; } TextField { text <=> root.create-name; placeholder: root.create-name-suggestion; accessible-name: GuiI18n.text("gui-name"); } Text { text: GuiI18n.text("gui-minecraft-release"); color: Theme.text-secondary; font-size: 12px; } HorizontalLayout { spacing: 8px; ComboBox { horizontal-stretch: 1; model: root.minecraft-releases; current-value <=> root.create-minecraft; selected(value) => { root.create-minecraft = value; root.create-loader-version = ""; root.create-loader-versions = []; root.minecraft-selection-changed("client", value); if root.create-loader != "Vanilla" { root.request-loader-catalog("client", root.create-loader, value); } root.recompute-create-name(); } } FavoriteToggle { version: root.create-minecraft; favorite: root.create-minecraft-favorite; enabled: root.create-minecraft != ""; toggled => { root.toggle-favorite-version(root.create-minecraft); } } } Text { text: GuiI18n.text("gui-loader"); color: Theme.text-secondary; font-size: 12px; } ComboBox { model: root.create-loaders; current-value <=> root.create-loader; selected(value) => { root.create-loader = value; root.create-loader-version = ""; root.create-loader-versions = []; if value != "Vanilla" { root.request-loader-catalog("client", value, root.create-minecraft); } root.recompute-create-name(); } } if root.create-loader != "Vanilla" : ComboBox { model: root.create-loader-versions; current-value <=> root.create-loader-version; changed current-value => { root.recompute-create-name(); } } HorizontalLayout { BodyText { text: GuiI18n.text("gui-store-persistently"); } Toggle { checked <=> root.create-persistent; } BodyText { text: root.create-persistent ? GuiI18n.text("gui-persistent-root") : GuiI18n.text("gui-temporary-root"); color: Theme.text-muted; } } if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; } ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; } } AppButton { text: GuiI18n.text("gui-create-instance"); tone: "primary"; enabled: root.minecraft-releases.length > 0 && (root.create-name != "" || root.create-name-suggestion != "") && root.create-minecraft != "" && (root.create-loader == "Vanilla" || root.create-loader-version != ""); clicked => { root.submit-create-instance(root.create-name != "" ? root.create-name : root.create-name-suggestion, root.create-minecraft, root.create-loader, root.create-loader-version, root.create-persistent); } } } }
                     if root.modal == "import" : ScrollView {
                         viewport-width: self.width;
                         VerticalLayout {

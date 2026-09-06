@@ -988,6 +988,13 @@ pub enum Event {
     CreationFinished {
         request_id: String,
     },
+    /// A client instance now exists, by whichever route made it. Carries the
+    /// new instance's own id so the list can put the user in front of what
+    /// they just made rather than leaving them on whatever was selected
+    /// before.
+    ClientCreated {
+        instance: String,
+    },
     /// One browser install ended, whichever way it ended. The browser installs
     /// serially and needs to know when it may start the next one, which a
     /// success-only report cannot tell it.
@@ -1335,6 +1342,7 @@ fn run_worker(
                 Ok(loader) => {
                     let paths = app.paths().clone();
                     let entity = name.clone();
+                    let reports = events.clone();
                     spawn_creation_operation(
                         paths,
                         &events,
@@ -1349,6 +1357,9 @@ fn run_worker(
                             )
                             .await
                             .map(|created| {
+                                let _ = reports.send(Event::ClientCreated {
+                                    instance: created.record.id.to_string(),
+                                });
                                 localized_value("gui-created-entity", &created.record.name)
                             })
                         },
@@ -4183,6 +4194,9 @@ fn spawn_import_submission(
                         }
                     }
                     reporter.finish(OperationStatus::Completed);
+                    let _ = events.send(Event::ClientCreated {
+                        instance: pack.record.id.to_string(),
+                    });
                     let _ = events.send(Event::Toast {
                         message: localized_value("gui-imported-pack", &pack.record.name),
                         error: false,

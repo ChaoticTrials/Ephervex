@@ -277,10 +277,12 @@ impl LiveViewerState {
         self.pending_lines = 0;
     }
 
-    fn apply(&mut self, update: LiveLogUpdate) -> bool {
+    /// Takes one update, and says what the view has to do about it.
+    fn apply(&mut self, update: LiveLogUpdate) -> LiveLogChange {
         if self.active.as_ref() != Some(&update.source) {
-            return false;
+            return LiveLogChange::Nothing;
         }
+        let reset = update.reset;
         if update.reset {
             self.history.clear();
             self.pending_lines = 0;
@@ -296,7 +298,42 @@ impl LiveViewerState {
             }
         }
         self.pending_lines = self.pending_lines.saturating_add(added);
-        update.reset || update.missing || update.source_truncated || added > 0
+        if reset {
+            // A source's whole content, not growth: this is what a file being
+            // opened looks like, and it has to be drawn whether or not the
+            // view is following. Following decides where a growing log scrolls
+            // to; it does not decide whether a log that just arrived is shown.
+            return LiveLogChange::Reset;
+        }
+        if update.missing || update.source_truncated || added > 0 {
+            return LiveLogChange::Grew;
+        }
+        LiveLogChange::Nothing
+    }
+}
+
+/// What one live-log update means for the view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LiveLogChange {
+    /// Nothing to draw: the update was for a source this view is not on, or it
+    /// carried no lines.
+    Nothing,
+    /// The source grew. A view that is following redraws; one the user has
+    /// scrolled away from counts the new lines instead.
+    Grew,
+    /// A source's whole content arrived. Always drawn.
+    Reset,
+}
+
+impl LiveLogChange {
+    /// Whichever of two outcomes asks for more, because one poll can drain
+    /// several updates and the view is rendered once for all of them.
+    const fn max(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Reset, _) | (_, Self::Reset) => Self::Reset,
+            (Self::Grew, _) | (_, Self::Grew) => Self::Grew,
+            _ => Self::Nothing,
+        }
     }
 }
 
@@ -1126,18 +1163,6 @@ struct ModBrowser {
     search_requests: Cell<u64>,
 }
 
-/// Tracks whether the "New Instance" name field is still following the
-/// launcher's own suggestion or has been taken over by the user.
-///
-/// Unlike [`ImportFlowState`], there is no async step that could race a
-/// suggestion against itself here: the suggestion is recomputed synchronously
-/// from whatever the Minecraft version/loader/loader version fields already
-/// hold, so a single flag is enough.
-#[derive(Debug, Default)]
-struct CreateInstanceNameState {
-    name_edited: bool,
-}
-
 /// One optional component's checkbox state in the import modal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ImportOptionState {
@@ -1519,7 +1544,6 @@ pub fn attach(ui: &AppWindow) -> Controller {
     let live_viewer = Rc::new(RefCell::new(LiveViewerState::default()));
     let import_flow = Rc::new(RefCell::new(ImportFlowState::default()));
     let minecraft = Rc::new(RefCell::new(MinecraftDefaultsModel::new()));
-    let create_instance_name = Rc::new(RefCell::new(CreateInstanceNameState::default()));
     let browser = Rc::new(ModBrowser::default());
     register_i18n(ui);
     register_toasts(ui);
@@ -1530,7 +1554,6 @@ pub fn attach(ui: &AppWindow) -> Controller {
         &live_viewer,
         &import_flow,
         &minecraft,
-        &create_instance_name,
         &browser,
     );
 
@@ -1541,7 +1564,6 @@ pub fn attach(ui: &AppWindow) -> Controller {
     let poll_live_viewer = Rc::clone(&live_viewer);
     let poll_import_flow = Rc::clone(&import_flow);
     let poll_minecraft = Rc::clone(&minecraft);
-    let poll_create_instance_name = Rc::clone(&create_instance_name);
     let poll_browser = Rc::clone(&browser);
     let poll_commands = backend.commands.clone();
     let poll_timer = Timer::default();
@@ -1559,11 +1581,11 @@ pub fn attach(ui: &AppWindow) -> Controller {
         if ui.get_compact_layout() != compact_layout {
             ui.set_compact_layout(compact_layout);
         }
-        let mut live_dirty = false;
+        let mut live_change = LiveLogChange::Nothing;
         for event in poll_receiver.borrow_mut().try_iter() {
             match event {
                 Event::LiveLog(update) => {
-                    live_dirty |= poll_live_viewer.borrow_mut().apply(update);
+                    live_change = live_change.max(poll_live_viewer.borrow_mut().apply(update));
                 }
                 other => apply_event(
                     &ui,
@@ -1572,18 +1594,25 @@ pub fn attach(ui: &AppWindow) -> Controller {
                     &poll_creations,
                     &poll_import_flow,
                     &poll_minecraft,
-                    &poll_create_instance_name,
                     &poll_browser,
                     &poll_commands,
                 ),
             }
         }
-        if live_dirty {
-            if ui.get_log_follow() {
+        match live_change {
+            // A saved log is opened with following off, because a finished log
+            // has nothing to follow. Counting its lines instead of drawing them
+            // left the view empty until it was opened a second time.
+            LiveLogChange::Reset => {
                 render_live_viewer(&ui, &mut poll_live_viewer.borrow_mut());
-            } else {
+            }
+            LiveLogChange::Grew if ui.get_log_follow() => {
+                render_live_viewer(&ui, &mut poll_live_viewer.borrow_mut());
+            }
+            LiveLogChange::Grew => {
                 ui.set_log_pending_lines(to_i32(poll_live_viewer.borrow().pending_lines));
             }
+            LiveLogChange::Nothing => {}
         }
     });
 
@@ -1679,13 +1708,12 @@ fn register_callbacks(
     live_viewer: &Rc<RefCell<LiveViewerState>>,
     import_flow: &Rc<RefCell<ImportFlowState>>,
     minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
-    create_instance_name: &Rc<RefCell<CreateInstanceNameState>>,
     browser: &Rc<ModBrowser>,
 ) {
     register_catalog_actions(ui, commands);
     register_client_actions(ui, commands, Rc::clone(&creations));
     register_mod_actions(ui, commands, browser);
-    register_create_instance_naming(ui, commands, create_instance_name);
+    register_create_instance_naming(ui, commands);
     register_import_flow(ui, commands, import_flow, &creations);
 
     let sender = commands.clone();
@@ -1844,19 +1872,16 @@ fn register_catalog_actions(ui: &AppWindow, commands: &Sender<Command>) {
 
 /// Wires the "New Instance" modal's own name-suggestion mechanics: opening it,
 /// recomputing the suggestion, and noticing when the user takes it over.
-fn register_create_instance_naming(
-    ui: &AppWindow,
-    commands: &Sender<Command>,
-    create_instance_name: &Rc<RefCell<CreateInstanceNameState>>,
-) {
+fn register_create_instance_naming(ui: &AppWindow, commands: &Sender<Command>) {
     let sender = commands.clone();
     let weak = ui.as_weak();
-    let name_state = Rc::clone(create_instance_name);
     ui.on_open_create_instance_modal(move || {
         let Some(ui) = weak.upgrade() else {
             return;
         };
-        name_state.borrow_mut().name_edited = false;
+        // The field starts empty, so the suggestion beside it is what an
+        // untouched dialog means.
+        ui.set_create_name(SharedString::default());
         ui.set_modal_error(SharedString::default());
         send(&sender, Command::LoadMinecraftReleases);
         if !ui.get_create_minecraft().is_empty() {
@@ -1866,21 +1891,17 @@ fn register_create_instance_naming(
             );
         }
         ui.set_modal("create-instance".into());
-        recompute_create_name(&ui, &name_state.borrow());
-    });
-
-    let name_state = Rc::clone(create_instance_name);
-    ui.on_create_name_edited(move |_text| {
-        name_state.borrow_mut().name_edited = true;
+        recompute_create_name(&ui);
     });
 
     let weak = ui.as_weak();
-    let name_state = Rc::clone(create_instance_name);
     ui.on_recompute_create_name(move || {
         if let Some(ui) = weak.upgrade() {
-            recompute_create_name(&ui, &name_state.borrow());
+            recompute_create_name(&ui);
         }
     });
+
+    register_loader_options(ui);
 }
 
 /// A handle for one additional launch, unique for the life of this process.
@@ -2058,7 +2079,6 @@ fn register_mod_actions(ui: &AppWindow, commands: &Sender<Command>, browser: &Rc
     register_mod_mutations(ui, commands);
     register_mod_browser(ui, commands, browser);
     register_browser_install(ui, commands, browser);
-    register_loader_options(ui);
     register_favorite_versions(ui, commands);
 
     let sender = commands.clone();
@@ -2352,13 +2372,21 @@ fn register_loader_options(ui: &AppWindow) {
 }
 
 /// What follows from choosing a Minecraft release in a creation dialog: which
-/// loaders it can have, and whether its star is on.
+/// loaders it can have, whether its star is on, and what the instance is
+/// called.
+///
+/// The suggested name is recomputed here rather than only where the user picked
+/// something, because a release that does not offer the selected loader resets
+/// it. A name worked out before that reset describes a loader the dialog no
+/// longer holds, and creating from it produced an instance whose name and
+/// target disagreed.
 fn apply_minecraft_selection(ui: &AppWindow, form: &str, minecraft: &str) {
     apply_loader_options(ui, form, minecraft);
     if form != "server" {
         ui.set_create_minecraft_favorite(
             favorite_versions(ui).iter().any(|kept| kept == minecraft),
         );
+        recompute_create_name(ui);
     }
 }
 
@@ -3202,6 +3230,15 @@ fn register_minecraft_defaults(
         render_minecraft(&ui, &state);
     });
 
+    let handle = ui.as_weak();
+    let state = Rc::clone(minecraft);
+    ui.on_minecraft_set_only_overridden(move |only| {
+        let Some(ui) = handle.upgrade() else { return };
+        state.borrow_mut().set_only_overridden(only);
+        ui.set_minecraft_capturing_id(SharedString::default());
+        render_minecraft(&ui, &state);
+    });
+
     // -- the compatibility preview, which changes what rows say and never
     //    what they hold.
     let handle = ui.as_weak();
@@ -4014,6 +4051,7 @@ fn render_minecraft(ui: &AppWindow, minecraft: &Rc<RefCell<MinecraftDefaultsMode
     ui.set_minecraft_preference_rows(model(state.rows()));
     ui.set_minecraft_category_index(to_i32(state.category_index()));
     ui.set_minecraft_show_advanced(state.show_advanced());
+    ui.set_minecraft_only_overridden(state.only_overridden());
     ui.set_minecraft_preview_release(state.preview_release().into());
     ui.set_minecraft_languages_available(matches!(
         state.languages(),
@@ -4178,7 +4216,6 @@ fn apply_event(
     creations: &Rc<RefCell<CreationTracker>>,
     import_flow: &Rc<RefCell<ImportFlowState>>,
     minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
-    create_instance_name: &Rc<RefCell<CreateInstanceNameState>>,
     browser: &Rc<ModBrowser>,
     commands: &Sender<Command>,
 ) {
@@ -4218,21 +4255,14 @@ fn apply_event(
             apply_pending_creations(ui, &creations.borrow());
         }
         Event::MinecraftReleases(versions) => {
-            apply_minecraft_releases(ui, versions, create_instance_name);
+            apply_minecraft_releases(ui, versions);
         }
         Event::LoaderVersions {
             form,
             loader,
             minecraft,
             versions,
-        } => apply_loader_versions(
-            ui,
-            &form,
-            loader,
-            &minecraft,
-            &versions,
-            create_instance_name,
-        ),
+        } => apply_loader_versions(ui, &form, loader, &minecraft, &versions),
         Event::ManagedMods(data) => {
             // A late answer for a workspace the user has already navigated
             // away from is discarded rather than rendered under the wrong
@@ -4359,6 +4389,12 @@ fn apply_event(
             ui.set_modal_error(SharedString::default());
             // The operation that disabled the modal's actions has answered.
             ui.set_mod_action_pending(false);
+        }
+        // A new instance is what the user was just looking at the dialog for,
+        // so it is what they are looking at now. The snapshot that follows this
+        // keeps the selection, because it keeps whatever was selected.
+        Event::ClientCreated { instance } => {
+            reveal_instance(ui, &instance);
         }
         Event::CreationFinished { request_id } => {
             creations.borrow_mut().finish(&request_id);
@@ -4489,6 +4525,22 @@ fn import_submission_action(
     }
 }
 
+/// Selects one instance and puts its card in front of the user.
+///
+/// The list can be filtered or searched down to something the new instance is
+/// not in, and a selection nothing shows is no selection at all, so a filter
+/// that would hide it is cleared rather than left to hide it.
+fn reveal_instance(ui: &AppWindow, instance: &str) {
+    ui.set_selected_instance_id(instance.into());
+    ui.set_instance_filter("all".into());
+    ui.set_instance_query(SharedString::default());
+    ui.invoke_select_instance(instance.into());
+    // Where the card sits is not known until the list holding it has arrived,
+    // so the scroll waits for the snapshot rather than happening here.
+    ui.set_pending_reveal_instance(instance.into());
+    ui.invoke_refresh();
+}
+
 /// Records the saved favorites and reorders whatever release list is on screen.
 ///
 /// The list itself is not refetched: reordering is the whole effect, and a
@@ -4509,11 +4561,7 @@ fn apply_favorite_versions(ui: &AppWindow, favorites: Vec<String>) {
     ));
 }
 
-fn apply_minecraft_releases(
-    ui: &AppWindow,
-    versions: Vec<String>,
-    create_instance_name: &Rc<RefCell<CreateInstanceNameState>>,
-) {
+fn apply_minecraft_releases(ui: &AppWindow, versions: Vec<String>) {
     // Favorites first, so the default selection below lands on one of them
     // rather than on whatever Mojang published most recently.
     let versions = presentation::releases_with_favorites_first(versions, &favorite_versions(ui));
@@ -4540,21 +4588,20 @@ fn apply_minecraft_releases(
     // whether the release is starred depend on it.
     apply_minecraft_selection(ui, "client", ui.get_create_minecraft().as_ref());
     apply_minecraft_selection(ui, "server", ui.get_create_server_minecraft().as_ref());
-    recompute_create_name(ui, &create_instance_name.borrow());
 }
 
-/// Refreshes `create-name` with the launcher's own suggestion, unless the
-/// user has already typed one for the archive/target currently in the
-/// dialog.
-fn recompute_create_name(ui: &AppWindow, state: &CreateInstanceNameState) {
-    if state.name_edited {
-        return;
-    }
+/// Refreshes the name the dialog suggests for the release and loader currently
+/// selected.
+///
+/// Only the suggestion: it is shown as the field's placeholder, never written
+/// into it, so recomputing is always safe and a name the user typed is never
+/// touched.
+fn recompute_create_name(ui: &AppWindow) {
     let loader = loader_kind_of(ui.get_create_loader().as_str())
         .unwrap_or(ephervex_model::LoaderKind::Vanilla);
     let loader_version = ui.get_create_loader_version();
     let loader_version = (!loader_version.is_empty()).then(|| loader_version.as_str());
-    ui.set_create_name(
+    ui.set_create_name_suggestion(
         ephervex_model::default_instance_name(
             ui.get_create_minecraft().as_str(),
             loader,
@@ -4570,7 +4617,6 @@ fn apply_loader_versions(
     loader: ephervex_model::LoaderKind,
     minecraft: &str,
     versions: &[String],
-    create_instance_name: &Rc<RefCell<CreateInstanceNameState>>,
 ) {
     let label = loader.to_string();
     // The loader-change form asks for one instance's own family and release, so
@@ -4602,7 +4648,7 @@ fn apply_loader_versions(
     } else {
         ui.set_create_loader_versions(rows);
         ui.set_create_loader_version(versions.first().cloned().unwrap_or_default().into());
-        recompute_create_name(ui, &create_instance_name.borrow());
+        recompute_create_name(ui);
     }
 }
 
@@ -5012,6 +5058,15 @@ fn apply_instance_snapshot(
         ui.set_selected_instance_index(-1);
     }
     ui.set_instances(reconciled(&ui.get_instances(), instance_rows));
+    // The list a pending reveal was waiting for. Cleared whether or not the
+    // card turned up, so a request cannot outlive the list it was made against.
+    let pending = ui.get_pending_reveal_instance();
+    if !pending.is_empty() {
+        ui.set_pending_reveal_instance(SharedString::default());
+        if instance_index.is_some() && ui.get_selected_instance_id() == pending {
+            ui.set_reveal_selected_instance(ui.get_reveal_selected_instance().saturating_add(1));
+        }
+    }
 }
 
 fn apply_server_snapshot(ui: &AppWindow, servers: Vec<crate::presentation::ServerPresentation>) {
@@ -6321,6 +6376,46 @@ mod tests {
     }
 
     #[test]
+    fn the_suggested_name_follows_a_release_that_drops_the_selected_loader() {
+        let ui = test_window();
+
+        ui.set_create_minecraft("1.21.1".into());
+        ui.set_create_loader("NeoForge".into());
+        ui.set_create_loader_version("21.1.249".into());
+        recompute_create_name(&ui);
+        assert_eq!(ui.get_create_name_suggestion(), "1.21.1-NeoForge-21.1.249");
+
+        // 1.20.1 predates NeoForge's first build, so choosing it resets the
+        // loader. The suggestion has to follow, or the dialog offers a name
+        // describing a loader it no longer holds.
+        ui.set_create_minecraft("1.20.1".into());
+        apply_minecraft_selection(&ui, "client", "1.20.1");
+
+        assert_eq!(ui.get_create_loader(), "Vanilla");
+        assert_eq!(ui.get_create_loader_version(), "");
+        // A vanilla instance is named after its release alone.
+        assert_eq!(ui.get_create_name_suggestion(), "1.20.1");
+    }
+
+    #[test]
+    fn a_name_the_user_typed_is_never_replaced_by_a_suggestion() {
+        let ui = test_window();
+
+        ui.set_create_minecraft("1.20.1".into());
+        ui.set_create_loader("NeoForge".into());
+        ui.set_create_name("Crash repro".into());
+        apply_minecraft_selection(&ui, "client", "1.20.1");
+
+        assert_eq!(ui.get_create_loader(), "Vanilla");
+        assert_eq!(
+            ui.get_create_name(),
+            "Crash repro",
+            "the suggestion is a placeholder, so it can never overwrite the field"
+        );
+        assert_eq!(ui.get_create_name_suggestion(), "1.20.1");
+    }
+
+    #[test]
     fn the_install_queue_runs_one_request_at_a_time_in_the_order_they_were_pressed() {
         let request = |project: &str| BrowserInstall {
             instance: "repro-client".to_owned(),
@@ -6971,6 +7066,56 @@ mod tests {
     }
 
     #[test]
+    fn a_sources_whole_content_is_drawn_even_when_the_view_is_not_following() {
+        let source = LiveLogSource::Client(ephervex_model::InstanceId::new());
+        let mut state = LiveViewerState::default();
+        state.activate(source.clone());
+        let line = |text: &str| {
+            LiveLogLine::Client(ephervex_core::live_diagnostics::TailedLine {
+                text: text.to_owned(),
+                truncation: None,
+            })
+        };
+
+        // A saved log is opened with following off, so an arrival that is only
+        // counted rather than drawn leaves the view empty until it is opened a
+        // second time.
+        assert_eq!(
+            state.apply(LiveLogUpdate {
+                source: source.clone(),
+                reset: true,
+                missing: false,
+                source_truncated: false,
+                lines: vec![line("[12:00:00] [main/INFO]: opened")],
+            }),
+            LiveLogChange::Reset
+        );
+        // Growth is the case the pending-lines count exists for.
+        assert_eq!(
+            state.apply(LiveLogUpdate {
+                source: source.clone(),
+                reset: false,
+                missing: false,
+                source_truncated: false,
+                lines: vec![line("[12:00:01] [main/INFO]: grew")],
+            }),
+            LiveLogChange::Grew
+        );
+        // An update for a source this view is not on changes nothing at all.
+        assert_eq!(
+            state.apply(LiveLogUpdate {
+                source: LiveLogSource::Client(ephervex_model::InstanceId::new()),
+                reset: true,
+                missing: false,
+                source_truncated: false,
+                lines: vec![line("[12:00:02] [main/INFO]: elsewhere")],
+            }),
+            LiveLogChange::Nothing
+        );
+        assert_eq!(state.history.len(), 2);
+    }
+
+    #[test]
     fn large_live_history_uses_bounded_production_filter_and_chunk_updates() {
         let source = LiveLogSource::Client(ephervex_model::InstanceId::new());
         let mut state = LiveViewerState::default();
@@ -6991,13 +7136,16 @@ mod tests {
                     })
                 })
                 .collect();
-            assert!(state.apply(LiveLogUpdate {
-                source: source.clone(),
-                reset: batch == 0,
-                missing: false,
-                source_truncated: false,
-                lines,
-            }));
+            assert_ne!(
+                state.apply(LiveLogUpdate {
+                    source: source.clone(),
+                    reset: batch == 0,
+                    missing: false,
+                    source_truncated: false,
+                    lines,
+                }),
+                LiveLogChange::Nothing
+            );
             let presentation = build_log_presentation(&state);
             sync_log_chunks(&state.chunks, presentation.chunks);
         }

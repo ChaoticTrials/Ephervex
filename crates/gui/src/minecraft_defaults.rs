@@ -738,6 +738,10 @@ enum PendingText {
 // -------------------------------------------------------------------- model
 
 /// The whole settings screen's state.
+///
+/// The flags are independent switches over one screen (two filters, a save in
+/// flight, a window held to a ratio), not a state machine a type could model.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Default)]
 pub struct MinecraftDefaultsModel {
     /// Every shipped product preference, in catalog order, as core reports it.
@@ -759,6 +763,7 @@ pub struct MinecraftDefaultsModel {
     category: usize,
     query: String,
     show_advanced: bool,
+    only_overridden: bool,
     capturing: Option<PreferenceId>,
     preview: Option<MinecraftPreferencePreview>,
     preview_release: String,
@@ -1793,6 +1798,28 @@ impl MinecraftDefaultsModel {
         self.capturing = None;
     }
 
+    /// Whether only the preferences Ephervex writes are shown.
+    #[must_use]
+    pub const fn only_overridden(&self) -> bool {
+        self.only_overridden
+    }
+
+    /// Narrows the list to what Ephervex writes, or widens it again. Draft
+    /// state is untouched, exactly as the tier filter leaves it.
+    pub fn set_only_overridden(&mut self, only: bool) {
+        self.only_overridden = only;
+        self.capturing = None;
+    }
+
+    /// Whether this preference survives the "only overridden" filter.
+    ///
+    /// An unsaved edit counts even when it is a reset: a row that vanished the
+    /// moment it was cleared would take its own Reset button with it, leaving
+    /// no way to undo the clearing.
+    fn is_kept_by_override_filter(&self, id: &PreferenceId) -> bool {
+        self.origin_of(id) == ValueOrigin::Overridden || self.overlay.contains_key(id)
+    }
+
     /// The release the compatibility preview is resolved against.
     #[must_use]
     pub fn preview_release(&self) -> &str {
@@ -2129,6 +2156,11 @@ impl MinecraftDefaultsModel {
                 self.show_advanced || entry.descriptor.tier == PresentationTier::Standard
             })
             .filter(|entry| query.is_empty() || matches_query(&entry.descriptor, &query))
+            .filter(|entry| {
+                !self.only_overridden
+                    || PreferenceId::parse(&entry.descriptor.id)
+                        .is_ok_and(|id| self.is_kept_by_override_filter(&id))
+            })
             .collect();
         visible.sort_by_key(|entry| section_rank(category, entry.descriptor.section.as_deref()));
         visible
@@ -2771,6 +2803,89 @@ mod tests {
     }
 
     #[test]
+    fn only_overridden_narrows_the_list_to_what_ephervex_writes() {
+        let mut model = loaded_model();
+        model.set_show_advanced(true);
+        let category = category_of(&mut model, "fullscreen");
+        model.select_category(category);
+        let everything = model.visible_entries().len();
+
+        // Nothing is configured yet, so the filter has nothing to show.
+        model.set_only_overridden(true);
+        assert!(model.visible_entries().is_empty());
+
+        model.set_boolean(&id("fullscreen"), true);
+        assert_eq!(
+            model
+                .visible_entries()
+                .iter()
+                .map(|entry| entry.id().to_owned())
+                .collect::<Vec<_>>(),
+            ["fullscreen"],
+            "an unsaved override is still an override"
+        );
+
+        // Undoing the edit leaves nothing configured, so the row is honestly
+        // out of scope again.
+        model.reset_row(&id("fullscreen"));
+        assert!(model.visible_entries().is_empty());
+
+        model.set_only_overridden(false);
+        assert_eq!(
+            model.visible_entries().len(),
+            everything,
+            "the filter narrows the list, it does not delete rows from it"
+        );
+    }
+
+    #[test]
+    fn only_overridden_keeps_a_row_whose_override_is_being_cleared() {
+        let mut model = MinecraftDefaultsModel::new();
+        let mut snapshot = bundled_snapshot();
+        for entry in &mut snapshot.entries {
+            if entry.id() == "fullscreen" {
+                entry.managed = true;
+                entry.value = Some(MinecraftPreferenceValue::Boolean(true));
+            }
+        }
+        model.apply_snapshot(snapshot);
+        let category = category_of(&mut model, "fullscreen");
+        model.select_category(category);
+        model.set_only_overridden(true);
+
+        // Pressing Reset on a saved override is an unsaved edit until it is
+        // saved. The row has to stay on screen while that is true, or its own
+        // Save and its own way back both disappear with it.
+        model.reset_row(&id("fullscreen"));
+        assert!(model.is_dirty());
+        assert_eq!(
+            model
+                .visible_entries()
+                .iter()
+                .map(|entry| entry.id().to_owned())
+                .collect::<Vec<_>>(),
+            ["fullscreen"]
+        );
+    }
+
+    /// Which tab a preference is reachable through, since every descriptor
+    /// belongs to exactly one. Leaves the model on that tab.
+    fn category_of(model: &mut MinecraftDefaultsModel, preference: &str) -> usize {
+        model.set_show_advanced(true);
+        for index in 0..CATEGORIES.len() {
+            model.select_category(index);
+            if model
+                .visible_entries()
+                .iter()
+                .any(|entry| entry.id() == preference)
+            {
+                return index;
+            }
+        }
+        panic!("the preference is reachable through some category")
+    }
+
+    #[test]
     fn an_advanced_row_edited_and_then_hidden_is_still_saved() {
         let mut model = loaded_model();
         model.select_category(3);
@@ -2788,7 +2903,7 @@ mod tests {
         assert_eq!(model.edits().len(), 1, "hidden is not discarded");
     }
 
-    // -------------------------------------------------------- save и discard
+    // -------------------------------------------------------- save and discard
 
     #[test]
     fn the_draft_becomes_one_batch_naming_only_what_changed() {

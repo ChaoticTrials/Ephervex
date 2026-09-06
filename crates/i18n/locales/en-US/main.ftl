@@ -1523,6 +1523,7 @@ gui-minecraft-total-count = { $count ->
 }
 gui-minecraft-filter = Filter settings...
 gui-minecraft-show-advanced = Show advanced
+gui-minecraft-only-overridden = Only overridden
 gui-minecraft-preview = Compatibility preview
 gui-minecraft-preview-detail = Pick a Minecraft release to see what it would do with these defaults. Nothing configured here changes.
 gui-minecraft-no-matches = Nothing matches
@@ -1712,7 +1713,6 @@ gui-modal-force-kill = Force Kill Server
 gui-modal-apache-license = Apache License 2.0
 gui-create-instance-detail = Create an exact client environment. Temporary storage is the default.
 gui-name = Name
-gui-instance-name-placeholder = Reproduction environment
 gui-minecraft-release = Minecraft release
 gui-loader-version-placeholder = Exact loader version
 gui-store-persistently = Store persistently
