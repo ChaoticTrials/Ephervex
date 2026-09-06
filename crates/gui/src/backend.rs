@@ -559,6 +559,10 @@ pub struct ManagedModData {
     pub version: String,
     pub version_known: bool,
     pub provider: String,
+    /// The catalog's own identifier behind `provider`, or empty for an entry
+    /// with no catalog identity. `provider` is what a reader sees; this is what
+    /// the row is colored by.
+    pub provider_kind: String,
     pub origin: String,
     /// `pack`, `user`, `dependency`, for the row's accent.
     pub origin_kind: String,
@@ -4836,6 +4840,11 @@ fn managed_mod_data(entry: &ManagedModEntry, review: Option<&CrashReview>) -> Ma
             .identity
             .provider()
             .map_or_else(|| lookup("gui-mod-provider-unknown"), |it| it.to_string()),
+        provider_kind: entry
+            .identity
+            .provider()
+            .map(|it| it.as_str().to_owned())
+            .unwrap_or_default(),
         origin: lookup(entry.origin.message_id()),
         origin_kind: origin_kind(entry.origin).to_owned(),
         compatibility: compatibility_summary(entry.game_versions(), entry.loaders()),

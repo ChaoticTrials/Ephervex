@@ -199,6 +199,55 @@ fn pressing_a_console_line_selects_at_the_column_under_the_pointer() {
     );
 }
 
+/// Wrapping turns one line into several, and the row that holds it has to grow
+/// with it. A row fixed at one line's height sits under the text of the row
+/// above, which is what a wrapped log looked like.
+#[test]
+fn wrapped_log_rows_do_not_overlap_the_rows_above_them() {
+    let ui = window();
+    server_console(&ui);
+    ui.set_log_chunks(long_chunks(20));
+    ui.set_log_wrap_lines(true);
+    settle(&ui);
+
+    let rows = console_rows(&ui);
+    assert!(rows.len() > 2, "the console has to have rows to compare");
+    let mut wrapped = false;
+    for pair in rows.windows(2) {
+        let (above, below) = (&pair[0], &pair[1]);
+        wrapped |= above.size().height > 2.0 * one_line_height(&ui);
+        assert!(
+            below.absolute_position().y + 0.5 >= above.absolute_position().y + above.size().height,
+            "a wrapped row must reach its own bottom before the next one starts"
+        );
+    }
+    assert!(
+        wrapped,
+        "the fixture has to be wide enough to actually wrap, or this proves nothing"
+    );
+}
+
+/// A log wider than the view has to be reachable sideways.
+#[test]
+fn an_unwrapped_log_can_be_scrolled_past_the_right_edge() {
+    let ui = window();
+    server_console(&ui);
+    ui.set_log_chunks(long_chunks(20));
+    ui.set_log_wrap_lines(false);
+    ui.set_log_content_columns(600);
+    settle(&ui);
+
+    let rows = console_rows(&ui);
+    let widest = rows
+        .iter()
+        .map(|row| row.size().width)
+        .fold(0.0_f32, f32::max);
+    assert!(
+        f64::from(widest) > f64::from(ui.window().size().width),
+        "an unwrapped line must extend past the view, or there is nothing to scroll to"
+    );
+}
+
 /// The keyboard half of the console's selection. Whether a shortcut reaches the
 /// handler depends on something holding focus, which only a real window can say.
 #[test]
@@ -352,6 +401,35 @@ fn chunks(count: usize) -> ModelRc<LogChunk> {
             })
             .collect::<Vec<_>>(),
     ))
+}
+
+/// Lines far wider than the window, so wrapping has something to do.
+fn long_chunks(count: usize) -> ModelRc<LogChunk> {
+    ModelRc::new(VecModel::from(
+        (0..count)
+            .map(|index| LogChunk {
+                text: format!(
+                    "[12:00:{index:02}] [Server thread/INFO]: {}",
+                    "entity data goes on and on ".repeat(20)
+                )
+                .into(),
+                level: "info".into(),
+            })
+            .collect::<Vec<_>>(),
+    ))
+}
+
+/// One unwrapped row's height, measured from the view itself rather than
+/// assumed, because it follows the resolved monospace family.
+fn one_line_height(ui: &AppWindow) -> f32 {
+    ui.set_log_wrap_lines(false);
+    settle(ui);
+    let height = console_rows(ui)
+        .first()
+        .map_or(0.0, |row| row.size().height);
+    ui.set_log_wrap_lines(true);
+    settle(ui);
+    height
 }
 
 fn log_file() -> DiagnosticRow {

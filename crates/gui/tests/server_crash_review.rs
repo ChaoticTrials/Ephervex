@@ -207,6 +207,7 @@ fn ordinary_mod() -> ModRow {
         version: "1.13.2".into(),
         version_known: true,
         provider: "Modrinth".into(),
+        provider_kind: "modrinth".into(),
         origin: "From the pack".into(),
         origin_kind: "pack".into(),
         compatibility: "1.21.1 | NeoForge".into(),

@@ -735,7 +735,7 @@ fn render_live_viewer(ui: &AppWindow, state: &mut LiveViewerState) {
     ui.set_log_status(status.into());
     ui.set_log_history_truncated(state.source_truncated || state.history.history_truncated());
     ui.set_log_pending_lines(0);
-    ui.set_log_content_columns(to_i32(presentation.content_columns.min(10_000)));
+    ui.set_log_content_columns(to_i32(presentation.content_columns.min(100_000)));
     ui.set_log_trace_enabled(state.filter.is_enabled(LogLevel::Trace));
     ui.set_log_debug_enabled(state.filter.is_enabled(LogLevel::Debug));
     ui.set_log_info_enabled(state.filter.is_enabled(LogLevel::Info));
@@ -5302,6 +5302,7 @@ fn managed_mod_rows(rows: Vec<ManagedModData>) -> Vec<ModRow> {
             version: row.version.into(),
             version_known: row.version_known,
             provider: row.provider.into(),
+            provider_kind: row.provider_kind.into(),
             origin: row.origin.into(),
             origin_kind: row.origin_kind.into(),
             compatibility: row.compatibility.into(),
