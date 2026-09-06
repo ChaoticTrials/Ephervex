@@ -733,6 +733,39 @@ pub fn browser_answer_is_current(
         && answer.reference == waiting.reference
 }
 
+/// Whether any target of a finished linked operation needs to be looked at.
+///
+/// What decides whether the per-target report is put on screen. An operation
+/// that reached every target it was asked to has nothing a reader has to act
+/// on, and interrupting them for it costs more than it says; one that did not
+/// is the case the report exists for.
+///
+/// Skipped is not failed: a server deliberately left out of an operation was
+/// reported as such before it ran.
+#[must_use]
+pub fn linked_result_needs_review<'a>(tones: impl IntoIterator<Item = &'a str>) -> bool {
+    tones.into_iter().any(|tone| tone == "error")
+}
+
+/// The largest page size the mod browser offers.
+///
+/// Larger than what one provider request may take, deliberately: the request
+/// ceiling is a budget on how much a single answer costs, and a reader asking
+/// for a hundred results is asking for a hundred results, not for one request.
+/// The difference is filled by asking again.
+pub const MAX_RESULT_PAGE_SIZE: usize = 100;
+
+/// Reads a page size the picker spells, or `None` for anything it does not
+/// offer.
+///
+/// Parsed rather than indexed, so the list of choices is the markup's business
+/// and adding one does not mean changing two places that must agree.
+#[must_use]
+pub fn result_page_size(label: &str) -> Option<usize> {
+    let size = label.trim().parse::<usize>().ok()?;
+    (1..=MAX_RESULT_PAGE_SIZE).contains(&size).then_some(size)
+}
+
 /// Whether one page of search results belongs where the browser is currently
 /// waiting for its next page.
 ///
@@ -817,6 +850,28 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn a_page_size_is_taken_only_from_the_sizes_the_picker_offers() {
+        assert_eq!(result_page_size("10"), Some(10));
+        assert_eq!(result_page_size(" 100 "), Some(100));
+        // Nothing outside the offered range: a fill aiming at zero, or at more
+        // than the largest choice, would keep asking a provider for pages.
+        assert_eq!(result_page_size("0"), None);
+        assert_eq!(result_page_size("250"), None);
+        assert_eq!(result_page_size("-25"), None);
+        assert_eq!(result_page_size("twenty five"), None);
+    }
+
+    #[test]
+    fn only_a_target_that_refused_the_operation_is_worth_interrupting_for() {
+        assert!(!linked_result_needs_review(["ok", "ok"]));
+        // Skipped is not failed: a server deliberately left out was reported as
+        // such before the operation ran.
+        assert!(!linked_result_needs_review(["ok", "muted"]));
+        assert!(linked_result_needs_review(["ok", "error"]));
+        assert!(!linked_result_needs_review([]));
+    }
 
     fn client(storage: StorageClass, loader: LoaderSelection) -> ClientRecord {
         ClientRecord {

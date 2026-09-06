@@ -1042,6 +1042,90 @@ enum ImportPhase {
     Submitting,
 }
 
+/// One mod the browser was asked to install, by the identity its plan and its
+/// completion both come back under.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BrowserInstall {
+    instance: String,
+    provider: String,
+    project: String,
+}
+
+/// The browser's install requests, in the order they were pressed.
+///
+/// One at a time, and that is not a presentation choice: installing reads the
+/// instance's recipe, adds to it, and writes it back, so two installs running
+/// against one instance would lose one of the two updates. Queuing is what lets
+/// every Install button stay live while only one install is under way, instead
+/// of a second press replacing the first request and quietly discarding it.
+#[derive(Debug, Default)]
+struct BrowserInstallQueue {
+    /// The request whose plan is being awaited, is being confirmed, or is
+    /// installing. Nothing else starts while this is set.
+    active: Option<BrowserInstall>,
+    waiting: std::collections::VecDeque<BrowserInstall>,
+}
+
+impl BrowserInstallQueue {
+    /// Adds a request, and hands back the one to start now if nothing is
+    /// running. A request already queued or already running is ignored: two
+    /// presses on one row mean the same single install.
+    fn enqueue(&mut self, request: BrowserInstall) -> Option<BrowserInstall> {
+        if self.active.as_ref() == Some(&request) || self.waiting.contains(&request) {
+            return None;
+        }
+        if self.active.is_some() {
+            self.waiting.push_back(request);
+            return None;
+        }
+        self.active = Some(request.clone());
+        Some(request)
+    }
+
+    /// Retires the running request, if `request` is it, and hands back the one
+    /// to start next.
+    ///
+    /// A report for anything else is ignored rather than trusted: an install
+    /// the user started from the managed-mods side finishes through the same
+    /// event and must not advance this queue.
+    fn finish(&mut self, request: &BrowserInstall) -> Option<BrowserInstall> {
+        if self.active.as_ref() != Some(request) {
+            return None;
+        }
+        self.active = self.waiting.pop_front();
+        self.active.clone()
+    }
+
+    /// Retires whatever is running, whether or not its identity is known.
+    ///
+    /// For the endings that arrive without one, such as a confirmation the user
+    /// closed.
+    fn finish_active(&mut self) -> Option<BrowserInstall> {
+        self.active.take()?;
+        self.active = self.waiting.pop_front();
+        self.active.clone()
+    }
+
+    /// Every project this queue still owes an install, running one included.
+    fn outstanding(&self, instance: &str, provider: &str) -> Vec<&str> {
+        self.active
+            .iter()
+            .chain(self.waiting.iter())
+            .filter(|request| request.instance == instance && request.provider == provider)
+            .map(|request| request.project.as_str())
+            .collect()
+    }
+}
+
+/// The mod browser's own bookkeeping, kept together because a chained fill
+/// needs both halves: the queue decides what may install next, and the counter
+/// hands every request in a fill its own identity.
+#[derive(Debug, Default)]
+struct ModBrowser {
+    installs: RefCell<BrowserInstallQueue>,
+    search_requests: Cell<u64>,
+}
+
 /// Tracks whether the "New Instance" name field is still following the
 /// launcher's own suggestion or has been taken over by the user.
 ///
@@ -1436,6 +1520,7 @@ pub fn attach(ui: &AppWindow) -> Controller {
     let import_flow = Rc::new(RefCell::new(ImportFlowState::default()));
     let minecraft = Rc::new(RefCell::new(MinecraftDefaultsModel::new()));
     let create_instance_name = Rc::new(RefCell::new(CreateInstanceNameState::default()));
+    let browser = Rc::new(ModBrowser::default());
     register_i18n(ui);
     register_toasts(ui);
     register_callbacks(
@@ -1446,6 +1531,7 @@ pub fn attach(ui: &AppWindow) -> Controller {
         &import_flow,
         &minecraft,
         &create_instance_name,
+        &browser,
     );
 
     let weak = ui.as_weak();
@@ -1456,6 +1542,7 @@ pub fn attach(ui: &AppWindow) -> Controller {
     let poll_import_flow = Rc::clone(&import_flow);
     let poll_minecraft = Rc::clone(&minecraft);
     let poll_create_instance_name = Rc::clone(&create_instance_name);
+    let poll_browser = Rc::clone(&browser);
     let poll_commands = backend.commands.clone();
     let poll_timer = Timer::default();
     poll_timer.start(TimerMode::Repeated, Duration::from_millis(80), move || {
@@ -1486,6 +1573,7 @@ pub fn attach(ui: &AppWindow) -> Controller {
                     &poll_import_flow,
                     &poll_minecraft,
                     &poll_create_instance_name,
+                    &poll_browser,
                     &poll_commands,
                 ),
             }
@@ -1592,9 +1680,11 @@ fn register_callbacks(
     import_flow: &Rc<RefCell<ImportFlowState>>,
     minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
     create_instance_name: &Rc<RefCell<CreateInstanceNameState>>,
+    browser: &Rc<ModBrowser>,
 ) {
     register_catalog_actions(ui, commands);
     register_client_actions(ui, commands, Rc::clone(&creations));
+    register_mod_actions(ui, commands, browser);
     register_create_instance_naming(ui, commands, create_instance_name);
     register_import_flow(ui, commands, import_flow, &creations);
 
@@ -1962,14 +2052,12 @@ fn register_client_actions(
             send(&sender, Command::LoadInstanceWorkspace(id));
         }
     });
-
-    register_mod_actions(ui, commands);
 }
 
-fn register_mod_actions(ui: &AppWindow, commands: &Sender<Command>) {
+fn register_mod_actions(ui: &AppWindow, commands: &Sender<Command>, browser: &Rc<ModBrowser>) {
     register_mod_mutations(ui, commands);
-    register_mod_browser(ui, commands);
-    register_browser_install(ui, commands);
+    register_mod_browser(ui, commands, browser);
+    register_browser_install(ui, commands, browser);
     register_loader_options(ui);
     register_favorite_versions(ui, commands);
 
@@ -2011,18 +2099,17 @@ fn register_mod_actions(ui: &AppWindow, commands: &Sender<Command>) {
 ///
 /// Deciding what fits this instance and resolving a dependency graph both
 /// happen in `ephervex-core`; this side never asks a provider anything.
-fn register_mod_browser(ui: &AppWindow, commands: &Sender<Command>) {
-    // One counter for every search request this browser ever sends, searches
-    // and "load more" alike, so two requests that end up identical in every
-    // other way (the same instance, catalog, text, and offset, asked for
-    // twice because the user switched catalog and back) still mint distinct
-    // ids. Owned here rather than read from the query/provider/offset the
-    // request carries: those are exactly the fields that can repeat.
-    let request_ids = Rc::new(Cell::new(0_u64));
-
+fn register_mod_browser(ui: &AppWindow, commands: &Sender<Command>, browser: &Rc<ModBrowser>) {
+    // One counter for every search request this browser ever sends, searches,
+    // "load more", and the continuations of a page size larger than one
+    // request alike, so two requests that end up identical in every other way
+    // (the same instance, catalog, text, and offset, asked for twice because
+    // the user switched catalog and back) still mint distinct ids. Owned by
+    // the browser rather than read from the query/provider/offset the request
+    // carries: those are exactly the fields that can repeat.
     let sender = commands.clone();
     let handle = ui.as_weak();
-    let ids = Rc::clone(&request_ids);
+    let ids = Rc::clone(browser);
     ui.on_search_mods(move |instance, provider, query| {
         let Some(ui) = handle.upgrade() else { return };
         let Some(instance) = backend::parse_instance_id(&instance) else {
@@ -2035,7 +2122,7 @@ fn register_mod_browser(ui: &AppWindow, commands: &Sender<Command>) {
         // request id that could not be allocated must leave the browser
         // exactly as it was, not part-way into a request that was never
         // actually sent.
-        let Some(request_id) = next_mod_search_request_id(&ids) else {
+        let Some(request_id) = next_mod_search_request_id(&ids.search_requests) else {
             return;
         };
         // What was submitted, which is not what the fields say: the user may
@@ -2054,6 +2141,9 @@ fn register_mod_browser(ui: &AppWindow, commands: &Sender<Command>) {
         // A fresh search always starts at zero; a page arriving for any other
         // offset belongs to a "load more" this search has superseded.
         ui.set_mod_search_requested_offset(0);
+        // What this fill is aiming for. A page size larger than one request
+        // reaches it by asking again, so the target is what says when to stop.
+        ui.set_mod_results_target(ui.get_mod_page_size());
         // Instance, catalog, text, and offset can all repeat (typing the same
         // query again, or switching catalog away and back), and this is what
         // still tells this request apart from an older, unrelated one that
@@ -2066,6 +2156,7 @@ fn register_mod_browser(ui: &AppWindow, commands: &Sender<Command>) {
                 provider: catalog,
                 query: query.to_string(),
                 offset: 0,
+                limit: request_limit(),
                 request_id,
             },
         );
@@ -2073,7 +2164,7 @@ fn register_mod_browser(ui: &AppWindow, commands: &Sender<Command>) {
 
     let sender = commands.clone();
     let handle = ui.as_weak();
-    let ids = Rc::clone(&request_ids);
+    let ids = Rc::clone(browser);
     ui.on_load_more_mods(move |instance, provider, query, offset| {
         let Some(ui) = handle.upgrade() else { return };
         let Some(instance) = backend::parse_instance_id(&instance) else {
@@ -2085,7 +2176,7 @@ fn register_mod_browser(ui: &AppWindow, commands: &Sender<Command>) {
         // Minted before anything about the browser's own state changes, for
         // the same reason a fresh search does this first: an id that could
         // not be allocated must leave the browser exactly as it was.
-        let Some(request_id) = next_mod_search_request_id(&ids) else {
+        let Some(request_id) = next_mod_search_request_id(&ids.search_requests) else {
             return;
         };
         // Continues the search already on screen, at the offset the provider
@@ -2093,6 +2184,11 @@ fn register_mod_browser(ui: &AppWindow, commands: &Sender<Command>) {
         // was asked for, and an answer for any other offset is stale.
         ui.set_mod_search_loading(true);
         ui.set_mod_search_requested_offset(offset);
+        // One more page on top of what is already shown, rather than a target
+        // the list has long since passed.
+        ui.set_mod_results_target(
+            to_i32(ui.get_mod_results().row_count()) + ui.get_mod_page_size(),
+        );
         // Its own fresh id, from the same counter a fresh search uses: a
         // "load more" is just as much an individual request as a search is,
         // and its offset alone does not distinguish it from another one
@@ -2105,6 +2201,7 @@ fn register_mod_browser(ui: &AppWindow, commands: &Sender<Command>) {
                 provider: catalog,
                 query: query.to_string(),
                 offset: offset.try_into().unwrap_or(0),
+                limit: request_limit(),
                 request_id,
             },
         );
@@ -2114,6 +2211,18 @@ fn register_mod_browser(ui: &AppWindow, commands: &Sender<Command>) {
     ui.on_switch_mod_catalog(move |provider| {
         let Some(ui) = handle.upgrade() else { return };
         show_mod_catalog(&ui, &provider);
+    });
+
+    // Held for the session only. It is a reading preference for one panel, not
+    // a setting the launcher has any reason to remember.
+    let handle = ui.as_weak();
+    ui.on_set_mod_page_size(move |label| {
+        let Some(ui) = handle.upgrade() else { return };
+        let Some(size) = presentation::result_page_size(&label) else {
+            return;
+        };
+        ui.set_mod_page_size(to_i32(size));
+        ui.set_mod_page_size_label(label);
     });
 }
 
@@ -2265,29 +2374,71 @@ fn apply_minecraft_selection(ui: &AppWindow, form: &str, minecraft: &str) {
 /// Kept apart from `register_mod_browser`: this is not a search, carries no
 /// request id or offset of its own, and does not touch any of the search
 /// staleness bookkeeping.
-fn register_browser_install(ui: &AppWindow, commands: &Sender<Command>) {
+fn register_browser_install(ui: &AppWindow, commands: &Sender<Command>, browser: &Rc<ModBrowser>) {
     let sender = commands.clone();
     let handle = ui.as_weak();
+    let install_queue = Rc::clone(browser);
     ui.on_install_from_browser(move |instance, provider, project| {
         let Some(ui) = handle.upgrade() else { return };
-        let Some(instance) = backend::parse_instance_id(&instance) else {
+        if backend::parse_instance_id(&instance).is_none()
+            || ModProvider::parse(&provider).is_none()
+        {
             return;
+        }
+        let request = BrowserInstall {
+            instance: instance.to_string(),
+            provider: provider.to_string(),
+            project: project.to_string(),
         };
-        let Some(catalog) = ModProvider::parse(&provider) else {
-            return;
-        };
-        ui.set_mod_plan_requested(project.clone());
-        ui.set_mod_plan_requested_provider(provider);
-        ui.set_mod_plan_direct(true);
-        send(
-            &sender,
-            Command::PlanMod {
-                instance,
-                provider: catalog,
-                project: project.to_string(),
-            },
-        );
+        let start = install_queue.installs.borrow_mut().enqueue(request);
+        if let Some(request) = start {
+            start_browser_install(&ui, &sender, &request);
+        }
+        mark_queued_results(&ui, &install_queue.installs.borrow());
     });
+
+    let handle = ui.as_weak();
+    let sender = commands.clone();
+    let install_queue = Rc::clone(browser);
+    ui.on_abandon_browser_install(move || {
+        let Some(ui) = handle.upgrade() else { return };
+        let next = install_queue.installs.borrow_mut().finish_active();
+        advance_browser_install(&ui, &sender, &install_queue, next);
+    });
+}
+
+/// Asks for one queued install's plan and records the question it answers.
+fn start_browser_install(ui: &AppWindow, commands: &Sender<Command>, request: &BrowserInstall) {
+    let (Some(instance), Some(catalog)) = (
+        backend::parse_instance_id(&request.instance),
+        ModProvider::parse(&request.provider),
+    ) else {
+        return;
+    };
+    ui.set_mod_plan_requested(request.project.as_str().into());
+    ui.set_mod_plan_requested_provider(request.provider.as_str().into());
+    ui.set_mod_plan_direct(true);
+    send(
+        commands,
+        Command::PlanMod {
+            instance,
+            provider: catalog,
+            project: request.project.clone(),
+        },
+    );
+}
+
+/// Starts whatever the queue handed back, and repaints the rows either way.
+fn advance_browser_install(
+    ui: &AppWindow,
+    commands: &Sender<Command>,
+    browser: &Rc<ModBrowser>,
+    next: Option<BrowserInstall>,
+) {
+    if let Some(next) = next {
+        start_browser_install(ui, commands, &next);
+    }
+    mark_queued_results(ui, &browser.installs.borrow());
 }
 
 /// The next opaque id for a mod search request, unique for the life of this
@@ -4028,6 +4179,7 @@ fn apply_event(
     import_flow: &Rc<RefCell<ImportFlowState>>,
     minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
     create_instance_name: &Rc<RefCell<CreateInstanceNameState>>,
+    browser: &Rc<ModBrowser>,
     commands: &Sender<Command>,
 ) {
     match event {
@@ -4102,6 +4254,9 @@ fn apply_event(
                     managed_mod_rows(data.mods),
                 ));
                 ui.set_managed_mods_notice(data.notice.into());
+                // What the instance has just changed, and the browser beside
+                // this list says whether each result is already one of them.
+                mark_installed_results(ui);
             }
         }
         Event::CrashNotice(notice) => {
@@ -4138,8 +4293,36 @@ fn apply_event(
         }
         Event::ModVersions(data) => apply_mod_versions(ui, data),
         Event::ModRemovalPlan(data) => apply_mod_removal_plan(ui, data),
-        Event::ModResults(results) => apply_mod_results(ui, results),
-        Event::ModPlan(plan) => apply_mod_install_plan(ui, plan),
+        Event::ModResults(results) => apply_mod_results(ui, results, browser, commands),
+        Event::ModPlan(plan) => apply_mod_install_plan(ui, plan, browser, commands),
+        Event::ModInstallFinished {
+            instance,
+            provider,
+            project,
+        } => {
+            let finished = BrowserInstall {
+                instance,
+                provider,
+                project,
+            };
+            let next = browser.installs.borrow_mut().finish(&finished);
+            advance_browser_install(ui, commands, browser, next);
+        }
+        // The question will never be answered, so whatever asked it stops
+        // waiting. The reason itself already arrived as an error.
+        Event::ModPlanFailed {
+            instance,
+            provider,
+            requested,
+        } => {
+            let abandoned = BrowserInstall {
+                instance,
+                provider,
+                project: requested,
+            };
+            let next = browser.installs.borrow_mut().finish(&abandoned);
+            advance_browser_install(ui, commands, browser, next);
+        }
         Event::LinkedApply(section) => apply_linked_confirmation(ui, section),
         Event::LinkedResult(result) => apply_linked_result(ui, result),
         Event::ServerWorkspace(workspace) => apply_server_workspace(ui, workspace),
@@ -5038,7 +5221,12 @@ fn apply_mod_versions(ui: &AppWindow, data: backend::ModVersionsData) {
 /// again), which is exactly why the fifth exists. Searches run on their own
 /// threads and can finish in either order, so without all five a slow older
 /// one could replace or truncate the results already shown.
-fn apply_mod_results(ui: &AppWindow, results: backend::ModResultsData) {
+fn apply_mod_results(
+    ui: &AppWindow,
+    results: backend::ModResultsData,
+    browser: &Rc<ModBrowser>,
+    commands: &Sender<Command>,
+) {
     let selected = ui.get_selected_instance_id();
     let submitted = ui.get_mod_search_submitted();
     let catalog = ui.get_mod_search_provider();
@@ -5063,21 +5251,68 @@ fn apply_mod_results(ui: &AppWindow, results: backend::ModResultsData) {
         return;
     }
 
-    ui.set_mod_search_loading(false);
     ui.set_mod_search_notice(results.notice.clone().into());
     if !results.notice.is_empty() {
+        ui.set_mod_search_loading(false);
         return;
     }
 
     let mut rows: Vec<ModSearchRow> = ui.get_mod_results().iter().collect();
     rows.extend(mod_search_rows(results.rows));
+    let shown = rows.len();
     ui.set_mod_results_total(to_i32(usize::try_from(results.total).unwrap_or(usize::MAX)));
     ui.set_mod_results(model(rows));
+    mark_installed_results(ui);
+    mark_queued_results(ui, &browser.installs.borrow());
     // The provider's own continuation, never how many rows are now on screen:
     // a page can consume results this launcher declined to show.
-    ui.set_mod_results_next_offset(results.next_offset.map_or(-1, |offset| {
+    let next_offset = results.next_offset.map_or(-1, |offset| {
         to_i32(usize::try_from(offset).unwrap_or(usize::MAX))
-    }));
+    });
+    ui.set_mod_results_next_offset(next_offset);
+    // A page size larger than one provider request is filled by asking again
+    // rather than by asking for more at once: the ceiling on a single request
+    // is a budget, because deciding compatibility costs one version lookup per
+    // hit. Each continuation is an ordinary request with its own id, so the
+    // staleness rules above hold for it exactly as they do for the first.
+    if shown < result_target(ui)
+        && next_offset >= 0
+        && let Some(instance) = backend::parse_instance_id(&results.instance)
+        && let Some(catalog) = ModProvider::parse(&results.provider)
+        && let Some(request_id) = next_mod_search_request_id(&browser.search_requests)
+    {
+        ui.set_mod_search_requested_offset(next_offset);
+        ui.set_mod_search_expected_request_id(request_id.to_string().into());
+        send(
+            commands,
+            Command::SearchMods {
+                instance,
+                provider: catalog,
+                query: results.query,
+                offset: u32::try_from(next_offset).unwrap_or(0),
+                limit: request_limit(),
+                request_id,
+            },
+        );
+        return;
+    }
+    ui.set_mod_search_loading(false);
+}
+
+/// The largest page a single provider request may take, which is the launcher's
+/// budget rather than the user's choice.
+fn request_limit() -> u8 {
+    ephervex_core::MAX_SEARCH_LIMIT
+}
+
+/// How many rows the fill currently under way is aiming for.
+///
+/// Clamped rather than trusted: it is derived from a picker, and a fill aiming
+/// at more than the largest offered page size would keep asking for pages.
+fn result_target(ui: &AppWindow) -> usize {
+    usize::try_from(ui.get_mod_results_target())
+        .unwrap_or(usize::from(ephervex_core::DEFAULT_SEARCH_LIMIT))
+        .clamp(1, presentation::MAX_RESULT_PAGE_SIZE.saturating_mul(100))
 }
 
 /// Shows what installing a mod would involve, here and on each linked server.
@@ -5112,8 +5347,30 @@ fn plan_disposition(direct: bool, plan: &backend::ModPlanData) -> PlanDispositio
     PlanDisposition::Install
 }
 
-fn apply_mod_install_plan(ui: &AppWindow, plan: backend::ModPlanData) {
+fn apply_mod_install_plan(
+    ui: &AppWindow,
+    plan: backend::ModPlanData,
+    browser: &Rc<ModBrowser>,
+    commands: &Sender<Command>,
+) {
+    // Whether the queue is waiting on this exact answer, decided before
+    // anything below can discard it: a plan that is dropped still ends the
+    // request that asked for it, or everything behind it waits forever.
+    let awaited = BrowserInstall {
+        instance: plan.instance.clone(),
+        provider: plan.provider.clone(),
+        project: plan.requested.clone(),
+    };
+    let queued = browser.installs.borrow().active.as_ref() == Some(&awaited);
+    let retire = |ui: &AppWindow| {
+        if queued {
+            let next = browser.installs.borrow_mut().finish(&awaited);
+            advance_browser_install(ui, commands, browser, next);
+        }
+    };
+
     if !presentation::result_is_current(&plan.instance, &ui.get_selected_instance_id()) {
+        retire(ui);
         return;
     }
     // A confirmation arriving over a modal the user opened while it was being
@@ -5122,6 +5379,7 @@ fn apply_mod_install_plan(ui: &AppWindow, plan: backend::ModPlanData) {
     // screen.
     let modal = ui.get_modal();
     if !modal.is_empty() && modal != "mod-plan" {
+        retire(ui);
         return;
     }
     // Two reviews can be in flight; the older one must not replace the newer,
@@ -5141,12 +5399,15 @@ fn apply_mod_install_plan(ui: &AppWindow, plan: backend::ModPlanData) {
             reference: &plan.requested,
         },
     ) {
+        retire(ui);
         return;
     }
     let direct = ui.get_mod_plan_direct();
     ui.set_mod_plan_direct(false);
     match plan_disposition(direct, &plan) {
         PlanDisposition::Install => {
+            // The queue is retired by this install's own completion, not here:
+            // the next one may not start while this one is writing the recipe.
             ui.set_mod_action_pending(true);
             ui.invoke_install_mod(
                 plan.instance.into(),
@@ -5158,8 +5419,10 @@ fn apply_mod_install_plan(ui: &AppWindow, plan: backend::ModPlanData) {
         }
         PlanDisposition::NothingToDo => {
             ui.invoke_present_toast(lookup("gui-mod-already-present").into(), false);
+            retire(ui);
             return;
         }
+        // The confirmation owns the request until it is answered or closed.
         PlanDisposition::Confirm => {}
     }
     ui.set_mod_plan_instance(plan.instance.into());
@@ -5181,12 +5444,23 @@ fn apply_mod_install_plan(ui: &AppWindow, plan: backend::ModPlanData) {
 
 /// Shows what one finished operation did to each target that took part.
 fn apply_linked_result(ui: &AppWindow, result: backend::LinkedResultData) {
+    let needs_review =
+        presentation::linked_result_needs_review(result.rows.iter().map(|row| row.tone.as_str()));
+    let summary = result.summary.clone();
     ui.set_linked_result_title(result.title.into());
     ui.set_linked_result_summary(result.summary.into());
     ui.set_linked_results(model(linked_target_rows(result.rows)));
     ui.set_mod_action_pending(false);
     ui.set_modal_error(SharedString::default());
-    ui.set_modal("mod-result".into());
+    // An operation that reached every target it was asked to says so in one
+    // line. The per-target report is opened only when a target did not take
+    // it, which is the case a reader has to act on.
+    if needs_review {
+        ui.set_modal("mod-result".into());
+    } else {
+        ui.set_modal(SharedString::default());
+        ui.invoke_present_toast(summary.into(), false);
+    }
 }
 
 /// Shows what a removal would take with it, here and on each linked server.
@@ -5317,6 +5591,49 @@ fn managed_mod_rows(rows: Vec<ManagedModData>) -> Vec<ModRow> {
         .collect()
 }
 
+/// Marks the results this instance already has.
+///
+/// Decided against the managed-mods list rather than remembered from a press,
+/// so a mod installed from anywhere — this browser, a pack import, a linked
+/// server operation — is shown as installed without a re-search, and one
+/// removed stops being.
+fn mark_installed_results(ui: &AppWindow) {
+    let managed: std::collections::HashSet<SharedString> = ui
+        .get_managed_mods()
+        .iter()
+        .map(|row| row.project_id)
+        .filter(|project| !project.is_empty())
+        .collect();
+    let rows = ui
+        .get_mod_results()
+        .iter()
+        .map(|row| ModSearchRow {
+            installed: managed.contains(&row.project_id),
+            ..row
+        })
+        .collect::<Vec<_>>();
+    ui.set_mod_results(model(rows));
+}
+
+/// Marks the results whose install is queued or under way.
+fn mark_queued_results(ui: &AppWindow, queue: &BrowserInstallQueue) {
+    let instance = ui.get_selected_instance_id();
+    let provider = ui.get_mod_provider();
+    let outstanding: std::collections::HashSet<&str> = queue
+        .outstanding(instance.as_str(), provider.as_str())
+        .into_iter()
+        .collect();
+    let rows = ui
+        .get_mod_results()
+        .iter()
+        .map(|row| ModSearchRow {
+            queued: outstanding.contains(row.project_id.as_str()),
+            ..row
+        })
+        .collect::<Vec<_>>();
+    ui.set_mod_results(model(rows));
+}
+
 /// Loads an image the application service already put in its cache.
 ///
 /// The path comes from `ephervex-core`, which is the only thing that decides
@@ -5342,6 +5659,10 @@ fn mod_search_rows(rows: Vec<ModSearchData>) -> Vec<ModSearchRow> {
             author: row.author.into(),
             note: row.note.into(),
             icon: cached_image(&row.icon),
+            // Both are decided against state the row cannot see, so a fresh
+            // page arrives unmarked and is marked by the two passes below.
+            installed: false,
+            queued: false,
         })
         .collect()
 }
@@ -5997,6 +6318,68 @@ mod tests {
             plan_disposition(false, &plan(2, 0)),
             PlanDisposition::Confirm
         );
+    }
+
+    #[test]
+    fn the_install_queue_runs_one_request_at_a_time_in_the_order_they_were_pressed() {
+        let request = |project: &str| BrowserInstall {
+            instance: "repro-client".to_owned(),
+            provider: "modrinth".to_owned(),
+            project: project.to_owned(),
+        };
+        let mut queue = BrowserInstallQueue::default();
+
+        // The first press starts at once; the two behind it wait, because two
+        // installs into one instance would race each other's recipe write.
+        assert_eq!(
+            queue.enqueue(request("utilitix")),
+            Some(request("utilitix"))
+        );
+        assert_eq!(queue.enqueue(request("jei")), None);
+        assert_eq!(queue.enqueue(request("sodium")), None);
+        // Pressing a row that is already waiting means the same single install.
+        assert_eq!(queue.enqueue(request("jei")), None);
+
+        assert_eq!(queue.finish(&request("utilitix")), Some(request("jei")));
+        assert_eq!(
+            queue.finish(&request("sodium")),
+            None,
+            "not the running one"
+        );
+        assert_eq!(queue.finish(&request("jei")), Some(request("sodium")));
+        assert_eq!(queue.finish(&request("sodium")), None);
+        assert_eq!(
+            queue.enqueue(request("utilitix")),
+            Some(request("utilitix")),
+            "an emptied queue starts the next press immediately"
+        );
+    }
+
+    #[test]
+    fn a_queue_reports_every_project_it_still_owes_an_install() {
+        let request = |instance: &str, provider: &str, project: &str| BrowserInstall {
+            instance: instance.to_owned(),
+            provider: provider.to_owned(),
+            project: project.to_owned(),
+        };
+        let mut queue = BrowserInstallQueue::default();
+        queue.enqueue(request("repro-client", "modrinth", "utilitix"));
+        queue.enqueue(request("repro-client", "modrinth", "jei"));
+        queue.enqueue(request("repro-client", "curseforge", "jei"));
+        queue.enqueue(request("other-client", "modrinth", "sodium"));
+
+        assert_eq!(
+            queue.outstanding("repro-client", "modrinth"),
+            ["utilitix", "jei"],
+            "the running request counts as outstanding, and another catalog's does not"
+        );
+        // A closed confirmation ends the request it belonged to, whose identity
+        // the closing itself does not carry.
+        assert_eq!(
+            queue.finish_active(),
+            Some(request("repro-client", "modrinth", "jei"))
+        );
+        assert_eq!(queue.outstanding("repro-client", "modrinth"), ["jei"]);
     }
 
     #[test]

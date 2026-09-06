@@ -198,6 +198,11 @@ pub enum Command {
         /// How far into the result list this page starts. Non-zero only when
         /// the user asked for more of a list they are already looking at.
         offset: u32,
+        /// How many hits this one request may take. Clamped by the model to
+        /// what a provider may be asked for at once, which is a request budget
+        /// rather than a display preference: deciding compatibility costs one
+        /// version lookup per hit.
+        limit: u8,
         /// Opaque frontend bookkeeping, echoed back unchanged. Two requests
         /// can otherwise carry an identical instance, provider, query, and
         /// offset (a search resubmitted after switching catalog away and
@@ -983,6 +988,22 @@ pub enum Event {
     CreationFinished {
         request_id: String,
     },
+    /// One browser install ended, whichever way it ended. The browser installs
+    /// serially and needs to know when it may start the next one, which a
+    /// success-only report cannot tell it.
+    ModInstallFinished {
+        instance: String,
+        provider: String,
+        project: String,
+    },
+    /// A plan could not be produced. The reason has already been reported
+    /// through [`Event::Error`]; this only names the question that will never
+    /// be answered, so nothing waits on it forever.
+    ModPlanFailed {
+        instance: String,
+        provider: String,
+        requested: String,
+    },
     /// The native file dialog for [`Command::PickImport`] closed without a
     /// choice. A receiver must discard this unless `generation` still names
     /// the attempt it is tracking, exactly like [`Event::ImportAnalyzed`].
@@ -1646,11 +1667,14 @@ fn run_worker(
                 provider,
                 query,
                 offset,
+                limit,
                 request_id,
             } => {
                 let paths = app.paths().clone();
                 spawn_detached(paths, events.clone(), move |app, events, runtime| {
-                    let request = ModSearchQuery::new(query.clone()).from_offset(offset);
+                    let request = ModSearchQuery::new(query.clone())
+                        .from_offset(offset)
+                        .limited(limit);
                     let result = runtime.block_on(app.search_mods(instance, provider, &request));
                     let answer = match result {
                         Ok(results) => {
@@ -1736,7 +1760,14 @@ fn run_worker(
                         Ok(plan) => {
                             let _ = events.send(Event::ModPlan(install_plan_data(&plan, &project)));
                         }
-                        Err(error) => send_error(&events, &error),
+                        Err(error) => {
+                            send_error(&events, &error);
+                            let _ = events.send(Event::ModPlanFailed {
+                                instance: instance.to_string(),
+                                provider: provider.as_str().to_owned(),
+                                requested: project,
+                            });
+                        }
                     }
                 });
             }
@@ -1755,6 +1786,11 @@ fn run_worker(
                     Arc::clone(&cancellations),
                     "operation-installing-mods",
                     project.clone(),
+                    Some(Event::ModInstallFinished {
+                        instance: instance.to_string(),
+                        provider: provider.as_str().to_owned(),
+                        project: project.clone(),
+                    }),
                     move |app, reporter, cancel| async move {
                         let request = LinkedModRequest::Install {
                             provider,
@@ -3634,20 +3670,30 @@ fn refresh_snapshot(paths: &Paths, events: &Sender<Event>) {
     }
 }
 
+/// `finished` is sent whichever way the operation ended, including a
+/// cancellation and a setup failure. Anything waiting its turn behind this
+/// operation has to hear about every ending, not only the successful one.
 fn spawn_async_operation<F, Fut>(
     paths: Paths,
     events: &Sender<Event>,
     cancellations: CancellationRegistry,
     title: &'static str,
     entity: String,
+    finished: Option<Event>,
     operation: F,
 ) where
     F: FnOnce(App, OperationReporter, CancellationToken) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = Result<OperationReport, CoreError>> + 'static,
 {
-    spawn_detached(
+    let announcement = finished.clone();
+    spawn_detached_with_setup_failure(
         paths.clone(),
         events.clone(),
+        move |events| {
+            if let Some(finished) = announcement {
+                let _ = events.send(finished);
+            }
+        },
         move |app, events, runtime| {
             let sink = Arc::new(UiProgressSink {
                 events: events.clone(),
@@ -3688,6 +3734,9 @@ fn spawn_async_operation<F, Fut>(
                         send_error(&events, &error);
                     }
                 }
+            }
+            if let Some(finished) = finished {
+                let _ = events.send(finished);
             }
             if let Ok(app) = App::open_at(paths) {
                 send_snapshot(&app, &events);
