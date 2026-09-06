@@ -474,6 +474,10 @@ needs a `RELEASE_TOKEN` repository secret: a personal access token with
 repository write access, so the release is attributed to an account rather than
 to Forgejo's Ghost user.
 
+No job caches cargo, release or CI: an entry for this workspace is gigabytes the
+runner keeps on its own disk, and nothing can replace the entry it supersedes,
+so they accumulate.
+
 **It does not replace the desktop smoke test.** A container has neither
 `/dev/fuse` nor a display, so the two steps that exercise the mounted artifact
 and start the desktop application skip and say so. Download the published

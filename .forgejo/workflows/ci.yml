@@ -3,11 +3,8 @@
 # Same job as the release gate, on the same runner image, so what passes here is
 # what a tag will find rather than a different toolchain's opinion of the tree.
 #
-# The cargo cache belongs to this workflow alone. Pushes to main are frequent
-# enough to keep an entry warm, while a release is rare enough that one would be
-# cold whenever it mattered. Restoring is slow, so the cache sits after every
-# check that does not read it: a tree that fails formatting fails without
-# waiting for it.
+# Nothing is cached: an entry for this workspace is gigabytes the runner host
+# keeps, and it cannot replace the one it supersedes.
 
 name: CI
 
@@ -48,17 +45,6 @@ jobs:
 
       - name: Formatting
         run: cargo fmt --all --check
-
-      - name: Cache cargo registry and target dir
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
 
       - name: Lints
         run: cargo clippy --workspace --all-targets -- -D warnings
