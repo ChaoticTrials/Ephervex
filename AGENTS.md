@@ -107,6 +107,8 @@ If a required manual acceptance step cannot run because of an external environme
 - Do not create, rename, or delete branches, rewrite existing commits, force-push, or otherwise alter published history unless the user explicitly asks for that operation.
 - Preserve unrelated user changes.
 - Commit messages must describe the delivered feature or fix in durable product terms, not implementation chronology or agent activity.
+- Write one line and stop. A commit message is its subject: no body, no explanation of the reasoning, no summary of what changed. The diff says what changed and the code's own comments say why.
+- The only thing that may follow the subject is a `Co-Authored-By:` trailer after one blank line. Never add a session, chat, transcript, or agent link of any kind, in any trailer or footer.
 - Before finishing a change, check `git status` and report any intentionally uncommitted files.
 - Use Conventional Commit-style subjects where they fit naturally, such as `feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`, or `ci:`.
 - Do not use implementation-stage numbers, planning references, WIP/checkpoint wording, session provenance, or temporary milestone names in commit subjects or bodies.
