@@ -44,9 +44,15 @@ slint::slint! {
         // one a mod came from without being read.
         out property <color> modrinth: #1bd96a;
         out property <color> curseforge: #f16436;
-        out property <color> vanilla: #8fb8cd;
-        out property <color> forge: #d8a653;
-        out property <color> neoforge: #65c58a;
+        // The game's own grass, at the color a plains biome tints it.
+        out property <color> vanilla: #91bd59;
+        // The two loaders in their own marks' colors, the same way the two
+        // catalogs above are. NeoForge is the rust its fox is drawn in. Forge's
+        // anvil sits on a navy so dark (#1e2d44) that it disappears against
+        // this background, so its own hue is kept and lifted into the range the
+        // rest of this palette works in.
+        out property <color> forge: #5981c0;
+        out property <color> neoforge: #a44e37;
         // Every control that can share a toolbar row is this tall, so a row
         // that mixes a button, a chip and a field lines up without each caller
         // having to know what the others chose.
@@ -480,7 +486,9 @@ slint::slint! {
         accessible-label: accessible-name;
         accessible-enabled: enabled;
         accessible-action-default => { if root.enabled { root.clicked(); } }
-        Image { x: 8px; y: 8px; width: parent.width - 16px; height: parent.height - 16px; source: root.icon; image-fit: contain; }
+        // A disabled button keeps its border and loses its click, so the glyph
+        // has to go quiet too or the control still reads as available.
+        Image { x: 8px; y: 8px; width: parent.width - 16px; height: parent.height - 16px; source: root.icon; image-fit: contain; colorize: root.enabled ? Theme.text-secondary : Theme.text-muted; }
         area := TouchArea { enabled: root.enabled; clicked => { root.clicked(); } }
     }
 
@@ -1107,7 +1115,9 @@ slint::slint! {
             // which has no fixed height, stretches and centers itself inside it.
             cross-axis-alignment: center;
             padding-left: 16px; padding-right: 12px; spacing: 13px;
-            Image { source: root.icon; width: 22px; height: 22px; image-fit: contain; }
+            // Colorized here rather than in the file, so the glyph follows the
+            // selected state along with the label and the marker beside it.
+            Image { source: root.icon; width: 22px; height: 22px; image-fit: contain; colorize: root.selected ? Theme.accent : Theme.text-secondary; }
             Text { text: root.label; color: root.selected ? Theme.accent : Theme.text-secondary; font-size: Theme.row-heading-size; vertical-alignment: center; }
         }
         area := TouchArea { clicked => { root.clicked(); } }
@@ -1175,12 +1185,18 @@ slint::slint! {
         border-width: 1px;
         border-color: server ? Theme.server : kind == "forge" ? Theme.forge : kind == "neoforge" ? Theme.neoforge : Theme.vanilla;
         background: root.border-color.with-alpha(0.09);
-        if !root.server : Image {
+        // Every glyph is drawn in the same 48-unit box at the same stroke
+        // weight, so one geometry serves all of them and a server does not come
+        // out visibly heavier than the loader beside it in the same list.
+        //
+        // Colorized from the tile's own border, so the glyph and the frame
+        // around it can never disagree and the tones live in `Theme` alone.
+        Image {
             x: 7px; y: 7px; width: 38px; height: 38px;
-            source: root.kind == "forge" ? @image-url("../../../assets/icons/environment-forge.svg") : root.kind == "neoforge" ? @image-url("../../../assets/icons/environment-neoforge.svg") : @image-url("../../../assets/icons/environment-vanilla.svg");
+            source: root.server ? @image-url("../../../assets/icons/environment-server.svg") : root.kind == "forge" ? @image-url("../../../assets/icons/environment-forge.svg") : root.kind == "neoforge" ? @image-url("../../../assets/icons/environment-neoforge.svg") : @image-url("../../../assets/icons/environment-vanilla.svg");
             image-fit: contain;
+            colorize: root.border-color;
         }
-        if root.server : Image { x: 11px; y: 11px; width: 30px; height: 30px; source: @image-url("../../../assets/icons/semantic-server.svg"); image-fit: contain; }
     }
 
     // A mod's artwork, or the same shape without it. The rectangle is drawn
@@ -1201,7 +1217,7 @@ slint::slint! {
         background: root.tone.with-alpha(0.1);
         clip: true;
         if root.icon.width > 0 : Image { x: 3px; y: 3px; width: root.size - 6px; height: root.size - 6px; source: root.icon; image-fit: contain; }
-        if root.icon.width == 0 : Image { x: root.size / 4; y: root.size / 4; width: root.size / 2; height: root.size / 2; source: @image-url("../../../assets/icons/environment-generic.svg"); image-fit: contain; colorize: root.tone; }
+        if root.icon.width == 0 : Image { x: root.size / 4; y: root.size / 4; width: root.size / 2; height: root.size / 2; source: @image-url("../../../assets/icons/semantic-mod.svg"); image-fit: contain; colorize: root.tone; }
     }
 
     // One row of the Managed Mods list.
@@ -1280,6 +1296,11 @@ slint::slint! {
     component EmptyState inherits VerticalLayout {
         in property <string> title;
         in property <string> message;
+        // What is missing, said in a glyph as well as in the heading. The
+        // neutral environment mark stands for a list this application has
+        // nothing better to show, so a caller only names an icon when the
+        // absent thing has one of its own.
+        in property <image> icon: @image-url("../../../assets/icons/environment-generic.svg");
         callback primary();
         callback secondary();
         in property <string> primary-text;
@@ -1294,7 +1315,7 @@ slint::slint! {
             VerticalLayout {
             max-width: 560px;
             alignment: center; spacing: 10px;
-            HorizontalLayout { alignment: center; Image { source: @image-url("../../../assets/icons/environment-generic.svg"); width: 64px; height: 64px; image-fit: contain; } }
+            HorizontalLayout { alignment: center; Image { source: root.icon; width: 64px; height: 64px; image-fit: contain; colorize: Theme.text-muted; } }
             Heading { text: root.title; horizontal-alignment: center; }
             BodyText { text: root.message; horizontal-alignment: center; wrap: word-wrap; }
             Rectangle { height: 5px; }
@@ -2950,7 +2971,7 @@ slint::slint! {
                                 Rectangle { width: 46%; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface;
                                     VerticalLayout { padding: 16px; spacing: 10px; HorizontalLayout { spacing: 8px; cross-axis-alignment: center; Heading { text: GuiI18n.text("gui-managed-mods"); horizontal-stretch: 1; } IconButton { icon: @image-url("../../../assets/icons/refresh.svg"); accessible-name: GuiI18n.text("gui-refresh-mod-details"); clicked => { root.refresh-mods("client", root.selected-instance-id); } } } BodyText { text: GuiI18n.text("gui-managed-mods-detail"); wrap: word-wrap; }
                                         if root.managed-mods-notice != "" : BodyText { text: root.managed-mods-notice; color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
-                                        if root.managed-mods.length == 0 : EmptyState { title: GuiI18n.text("gui-no-managed-mods"); message: GuiI18n.text("gui-no-managed-mods-detail"); }
+                                        if root.managed-mods.length == 0 : EmptyState { icon: @image-url("../../../assets/icons/semantic-mod.svg"); title: GuiI18n.text("gui-no-managed-mods"); message: GuiI18n.text("gui-no-managed-mods-detail"); }
                                         ScrollView { viewport-width: self.width; VerticalLayout { spacing: 8px; for mod in root.managed-mods : ModCard { item: mod; manage(path) => { root.open-mod-manager(path); } } } }
                                     }
                                 }
@@ -2966,7 +2987,7 @@ slint::slint! {
                                         ActionRow { TextField { text <=> root.mod-query; placeholder: GuiI18n.text("gui-search-compatible-mods"); input-type: InputType.search; horizontal-stretch: 1; accepted => { root.search-mods(root.selected-instance-id, root.mod-provider, root.mod-query); } } AppButton { text: GuiI18n.text("gui-search"); tone: "primary"; enabled: !root.mod-search-loading; clicked => { root.search-mods(root.selected-instance-id, root.mod-provider, root.mod-query); } } }
                                         if root.mod-search-notice != "" : Rectangle { border-radius: 6px; border-width: 1px; border-color: Theme.danger; background: Theme.background; VerticalLayout { padding: 10px; spacing: 6px; BodyText { text: root.mod-search-notice; color: Theme.text-secondary; wrap: word-wrap; } if root.mod-provider == "curseforge" : HorizontalLayout { AppButton { text: GuiI18n.text("gui-open-providers-settings"); clicked => { root.page = 4; root.workspace = ""; root.workspace-tab = "Providers & APIs"; } } Rectangle { horizontal-stretch: 1; } } } }
                                         if root.mod-search-loading : BodyText { text: GuiI18n.text("gui-mod-search-running"); color: Theme.text-muted; }
-                                        if !root.mod-search-loading && root.mod-search-ran && root.mod-search-notice == "" && root.mod-results.length == 0 && root.mod-results-next-offset < 0 : EmptyState { title: GuiI18n.text("gui-no-mod-results"); message: GuiI18n.text("gui-no-mod-results-detail"); }
+                                        if !root.mod-search-loading && root.mod-search-ran && root.mod-search-notice == "" && root.mod-results.length == 0 && root.mod-results-next-offset < 0 : EmptyState { icon: @image-url("../../../assets/icons/semantic-mod.svg"); title: GuiI18n.text("gui-no-mod-results"); message: GuiI18n.text("gui-no-mod-results-detail"); }
                                         ScrollView { VerticalLayout { spacing: 8px; for mod in root.mod-results : Rectangle { height: 92px; clip: true; border-radius: 6px; border-width: 1px; border-color: Theme.border; background: Theme.background; HorizontalLayout { padding: 10px; spacing: 11px; VerticalLayout { alignment: center; ModArtwork { icon: mod.icon; origin-kind: "user"; } } VerticalLayout { horizontal-stretch: 1; Heading { text: mod.title; font-size: Theme.row-heading-size; overflow: elide; } BodyText { text: mod.description; wrap: word-wrap; overflow: elide; vertical-alignment: top; height: Theme.body-size * 2.7; } BodyText { text: GuiI18n.values("gui-mod-result-meta", mod.author, mod.note); color: Theme.text-muted; overflow: elide; } } VerticalLayout { alignment: center; AppButton { width: 120px; text: mod.installed ? GuiI18n.text("gui-mod-result-installed") : mod.queued ? GuiI18n.text("gui-mod-result-queued") : GuiI18n.text("gui-install"); tone: mod.installed || mod.queued ? "secondary" : "primary"; enabled: !mod.installed && !mod.queued; clicked => { root.install-from-browser(root.selected-instance-id, root.mod-provider, mod.project-id); } } } } }
                                             if root.mod-results-next-offset >= 0 : HorizontalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-load-more"); enabled: !root.mod-search-loading; clicked => { root.load-more-mods(root.selected-instance-id, root.mod-search-provider, root.mod-search-submitted, root.mod-results-next-offset); } } }
                                         } }
@@ -3013,7 +3034,7 @@ slint::slint! {
                                 // one and is read for the same reasons.
                                 if root.selected-diagnostic-kind != "crash-report" && root.log-shows-files : HorizontalLayout { spacing: 10px;
                                     DiagnosticFileList { items: root.diagnostics; selected: root.selected-diagnostic-name; opened(name) => { root.selected-diagnostic-name = name; root.open-log-file("client", root.selected-instance-id, name); } }
-                                    if root.selected-diagnostic-name == "" : Rectangle { horizontal-stretch: 1; background: rgb(11, 14, 16); border-radius: 8px; border-width: 1px; border-color: Theme.border; EmptyState { title: GuiI18n.text("gui-no-file-open"); message: GuiI18n.text("gui-no-file-open-detail"); } }
+                                    if root.selected-diagnostic-name == "" : Rectangle { horizontal-stretch: 1; background: rgb(11, 14, 16); border-radius: 8px; border-width: 1px; border-color: Theme.border; EmptyState { icon: @image-url("../../../assets/icons/nav-logs.svg"); title: GuiI18n.text("gui-no-file-open"); message: GuiI18n.text("gui-no-file-open-detail"); } }
                                     if root.selected-diagnostic-name != "" : LiveLogViewer {
                                     chunks: root.log-chunks; has-content: root.log-has-content; status: root.log-status; history-truncated: root.log-history-truncated; pending-lines: root.log-pending-lines; content-columns: root.log-content-columns; font-size: root.technical-text-size * 1px; query <=> root.log-query; wrap-lines <=> root.log-wrap-lines; follow <=> root.log-follow; trace-enabled: root.log-trace-enabled; debug-enabled: root.log-debug-enabled; info-enabled: root.log-info-enabled; warn-enabled: root.log-warn-enabled; error-enabled: root.log-error-enabled; fatal-enabled: root.log-fatal-enabled; other-enabled: root.log-other-enabled; revision: root.log-revision; selection-start-row: root.log-selection-start-row; selection-start-offset: root.log-selection-start-offset; selection-end-row: root.log-selection-end-row; selection-end-offset: root.log-selection-end-offset; has-selection: root.log-has-selection; selection-revision: root.log-selection-revision;
                                     set-level(level, enabled) => { root.set-log-level(level, enabled); } search(query) => { root.search-live-log(query); } copy => { root.copy-live-log(); } copy-selection => { root.copy-log-selection(); } select-at(row, column, extend) => { root.select-log-at(row, column, extend); } select-word-at(row, column) => { root.select-log-word-at(row, column); } select-all => { root.select-all-log(); } follow-changed(follow) => { root.live-log-follow-changed(follow); }
@@ -3026,7 +3047,7 @@ slint::slint! {
                                     HorizontalLayout { spacing: 8px; Rectangle { horizontal-stretch: 1; } TextField { text <=> root.diagnostic-query; placeholder: GuiI18n.text("gui-search-loaded-content"); input-type: InputType.search; width: 250px; accepted => { root.search-diagnostic("client", root.selected-instance-id, "crash-report", root.selected-diagnostic-name, root.diagnostic-query); } } AppButton { text: GuiI18n.text("gui-find"); enabled: root.selected-diagnostic-name != ""; clicked => { root.search-diagnostic("client", root.selected-instance-id, "crash-report", root.selected-diagnostic-name, root.diagnostic-query); } } }
                                     HorizontalLayout { spacing: 10px;
                                         DiagnosticFileList { items: root.diagnostics; selected: root.selected-diagnostic-name; crash: true; opened(name) => { root.selected-diagnostic-name = name; root.open-diagnostic("client", root.selected-instance-id, "crash-report", name); } }
-                                        Rectangle { horizontal-stretch: 1; background: rgb(11, 14, 16); border-radius: 8px; border-width: 1px; border-color: Theme.border; VerticalLayout { if root.diagnostic-content == "" : EmptyState { title: GuiI18n.text("gui-no-file-open"); message: GuiI18n.text("gui-no-file-open-detail"); } if root.diagnostic-content != "" : SelectableText { text: root.diagnostic-content; font-size: root.technical-text-size * 1px; } if root.diagnostic-content != "" : AppButton { text: GuiI18n.text("gui-copy"); clicked => { root.copy-text(root.diagnostic-content); } } } }
+                                        Rectangle { horizontal-stretch: 1; background: rgb(11, 14, 16); border-radius: 8px; border-width: 1px; border-color: Theme.border; VerticalLayout { if root.diagnostic-content == "" : EmptyState { icon: @image-url("../../../assets/icons/nav-logs.svg"); title: GuiI18n.text("gui-no-file-open"); message: GuiI18n.text("gui-no-file-open-detail"); } if root.diagnostic-content != "" : SelectableText { text: root.diagnostic-content; font-size: root.technical-text-size * 1px; } if root.diagnostic-content != "" : AppButton { text: GuiI18n.text("gui-copy"); clicked => { root.copy-text(root.diagnostic-content); } } } }
                                     }
                                 }
                             }
@@ -3043,12 +3064,12 @@ slint::slint! {
                                     PageIntro { title: GuiI18n.text("gui-servers"); subtitle: GuiI18n.text("gui-servers-detail"); }
                                     TextField { text <=> root.server-query; placeholder: GuiI18n.text("gui-filter-servers"); input-type: InputType.search; width: 290px; accepted => { root.refresh(); } }
                                 }
-                                if root.global-servers.length == 0 && root.pending-servers.length == 0 : EmptyState { title: GuiI18n.text("gui-no-servers"); message: GuiI18n.text("gui-no-standalone-servers-detail"); primary-text: GuiI18n.text("gui-modal-new-server"); primary => { root.create-server-client-id = ""; root.create-server-name = ""; root.modal-error = ""; root.request-version-catalog(); root.warm-language-catalog(root.create-server-minecraft); root.create-server-pack = ""; root.create-server-pack-name = ""; root.modal = "create-server"; } }
+                                if root.global-servers.length == 0 && root.pending-servers.length == 0 : EmptyState { icon: @image-url("../../../assets/icons/nav-servers.svg"); title: GuiI18n.text("gui-no-servers"); message: GuiI18n.text("gui-no-standalone-servers-detail"); primary-text: GuiI18n.text("gui-modal-new-server"); primary => { root.create-server-client-id = ""; root.create-server-name = ""; root.modal-error = ""; root.request-version-catalog(); root.warm-language-catalog(root.create-server-minecraft); root.create-server-pack = ""; root.create-server-pack-name = ""; root.modal = "create-server"; } }
                                 if root.global-servers.length > 0 || root.pending-servers.length > 0 : ScrollView { viewport-width: self.width; VerticalLayout { spacing: 12px; for pending in root.pending-servers : PendingCard { visible: root.show-linked-servers || pending.linked-client-id == ""; item: pending; } for item[index] in root.global-servers : ServerCard { item: item; selected: item.id == root.selected-global-server-id; choose(id) => { root.selected-global-server-id = id; root.selected-global-server-index = index; root.select-server(id); } primary(id) => { if item.can-start { root.server-start(id); } else { root.server-stop(id); } } open-workspace(id) => { root.selected-global-server-id = id; root.selected-global-server-index = index; root.selected-server-id = id; root.server-workspace-return-client = ""; root.select-server(id); root.workspace = "server"; root.workspace-tab = "Overview"; root.load-server-workspace(id); } open-folder(id) => { root.open-server-folder(id); } restart(id) => { root.server-restart(id); } kill(id, name) => { root.selected-server-id = id; root.pending-action-name = name; root.modal = "kill"; } delete(id, name) => { root.pending-action-id = id; root.pending-action-name = name; root.modal = "delete-server"; } } } }
                             }
                         }
                         if root.show-inspector && root.selected-global-server-index >= 0 : Rectangle { width: 360px; background: Theme.surface; border-width: 1px; border-color: Theme.border;
-                            if root.selected-global-server-index < 0 : EmptyState { title: GuiI18n.text("gui-no-server-selected"); message: GuiI18n.text("gui-select-server"); }
+                            if root.selected-global-server-index < 0 : EmptyState { icon: @image-url("../../../assets/icons/nav-servers.svg"); title: GuiI18n.text("gui-no-server-selected"); message: GuiI18n.text("gui-select-server"); }
                             if root.selected-global-server-index >= 0 : VerticalLayout { alignment: start; padding: 22px; spacing: 12px;
                                 HorizontalLayout {
                                     spacing: 12px;
@@ -3124,7 +3145,7 @@ slint::slint! {
                                 // one and is read for the same reasons.
                                 if root.selected-diagnostic-kind != "crash-report" && root.log-shows-files : HorizontalLayout { spacing: 10px;
                                     DiagnosticFileList { items: root.diagnostics; selected: root.selected-diagnostic-name; opened(name) => { root.selected-diagnostic-name = name; root.open-log-file("server", root.selected-server-id, name); } }
-                                    if root.selected-diagnostic-name == "" : Rectangle { horizontal-stretch: 1; background: rgb(11, 14, 16); border-radius: 8px; border-width: 1px; border-color: Theme.border; EmptyState { title: GuiI18n.text("gui-no-file-open"); message: GuiI18n.text("gui-no-file-open-detail"); } }
+                                    if root.selected-diagnostic-name == "" : Rectangle { horizontal-stretch: 1; background: rgb(11, 14, 16); border-radius: 8px; border-width: 1px; border-color: Theme.border; EmptyState { icon: @image-url("../../../assets/icons/nav-logs.svg"); title: GuiI18n.text("gui-no-file-open"); message: GuiI18n.text("gui-no-file-open-detail"); } }
                                     if root.selected-diagnostic-name != "" : LiveLogViewer {
                                     chunks: root.log-chunks; has-content: root.log-has-content; status: root.log-status; history-truncated: root.log-history-truncated; pending-lines: root.log-pending-lines; content-columns: root.log-content-columns; font-size: root.technical-text-size * 1px; query <=> root.log-query; wrap-lines <=> root.log-wrap-lines; follow <=> root.log-follow; trace-enabled: root.log-trace-enabled; debug-enabled: root.log-debug-enabled; info-enabled: root.log-info-enabled; warn-enabled: root.log-warn-enabled; error-enabled: root.log-error-enabled; fatal-enabled: root.log-fatal-enabled; other-enabled: root.log-other-enabled; revision: root.log-revision; selection-start-row: root.log-selection-start-row; selection-start-offset: root.log-selection-start-offset; selection-end-row: root.log-selection-end-row; selection-end-offset: root.log-selection-end-offset; has-selection: root.log-has-selection; selection-revision: root.log-selection-revision;
                                     set-level(level, enabled) => { root.set-log-level(level, enabled); } search(query) => { root.search-live-log(query); } copy => { root.copy-live-log(); } copy-selection => { root.copy-log-selection(); } select-at(row, column, extend) => { root.select-log-at(row, column, extend); } select-word-at(row, column) => { root.select-log-word-at(row, column); } select-all => { root.select-all-log(); } follow-changed(follow) => { root.live-log-follow-changed(follow); }
@@ -3137,7 +3158,7 @@ slint::slint! {
                                     HorizontalLayout { spacing: 8px; Rectangle { horizontal-stretch: 1; } TextField { text <=> root.diagnostic-query; placeholder: GuiI18n.text("gui-search-loaded-content"); input-type: InputType.search; width: 250px; accepted => { root.search-diagnostic("server", root.selected-server-id, "crash-report", root.selected-diagnostic-name, root.diagnostic-query); } } AppButton { text: GuiI18n.text("gui-find"); enabled: root.selected-diagnostic-name != ""; clicked => { root.search-diagnostic("server", root.selected-server-id, "crash-report", root.selected-diagnostic-name, root.diagnostic-query); } } }
                                     HorizontalLayout { spacing: 10px;
                                         DiagnosticFileList { items: root.diagnostics; selected: root.selected-diagnostic-name; crash: true; opened(name) => { root.selected-diagnostic-name = name; root.open-diagnostic("server", root.selected-server-id, "crash-report", name); } }
-                                        Rectangle { horizontal-stretch: 1; background: rgb(11, 14, 16); border-radius: 8px; border-width: 1px; border-color: Theme.border; VerticalLayout { if root.diagnostic-content == "" : EmptyState { title: GuiI18n.text("gui-no-file-open"); message: GuiI18n.text("gui-no-file-open-detail"); } if root.diagnostic-content != "" : SelectableText { text: root.diagnostic-content; font-size: root.technical-text-size * 1px; } if root.diagnostic-content != "" : AppButton { text: GuiI18n.text("gui-copy"); clicked => { root.copy-text(root.diagnostic-content); } } } }
+                                        Rectangle { horizontal-stretch: 1; background: rgb(11, 14, 16); border-radius: 8px; border-width: 1px; border-color: Theme.border; VerticalLayout { if root.diagnostic-content == "" : EmptyState { icon: @image-url("../../../assets/icons/nav-logs.svg"); title: GuiI18n.text("gui-no-file-open"); message: GuiI18n.text("gui-no-file-open-detail"); } if root.diagnostic-content != "" : SelectableText { text: root.diagnostic-content; font-size: root.technical-text-size * 1px; } if root.diagnostic-content != "" : AppButton { text: GuiI18n.text("gui-copy"); clicked => { root.copy-text(root.diagnostic-content); } } } }
                                     }
                                 }
                             }
@@ -3145,7 +3166,7 @@ slint::slint! {
                                 HorizontalLayout { spacing: 8px; SectionTitle { title: GuiI18n.text("gui-server-mods"); detail: GuiI18n.text("gui-server-mods-detail"); horizontal-stretch: 1; } VerticalLayout { alignment: center; IconButton { icon: @image-url("../../../assets/icons/refresh.svg"); accessible-name: GuiI18n.text("gui-refresh-mod-details"); clicked => { root.refresh-mods("server", root.selected-server-id); } } } }
                                 if root.crash-report != "" : CrashNotice { report: root.crash-report; failure: root.crash-failure; client-code-on-server: root.crash-client-code-on-server; suggested: root.crash-suggested; beside-the-mods: true; disable-suggested => { root.disable-suggested-mods(root.selected-server-id); } }
                                 if root.server-mods-notice != "" : BodyText { text: root.server-mods-notice; color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
-                                if root.server-mods.length == 0 : EmptyState { title: GuiI18n.text("gui-no-managed-mods"); message: GuiI18n.text("gui-no-server-mods-detail"); }
+                                if root.server-mods.length == 0 : EmptyState { icon: @image-url("../../../assets/icons/semantic-mod.svg"); title: GuiI18n.text("gui-no-managed-mods"); message: GuiI18n.text("gui-no-server-mods-detail"); }
                                 if root.server-mods.length > 0 : ScrollView { viewport-width: self.width; VerticalLayout { spacing: 8px; for mod in root.server-mods : ModCard { item: mod; togglable: true; toggle(path, on) => { root.set-mod-enabled("server", root.selected-server-id, path, on); } } } }
                             }
                             if root.workspace-tab == "Properties" : ScrollView { VerticalLayout { alignment: start; width: min(parent.width, 1100px); spacing: 14px;
@@ -3168,7 +3189,7 @@ slint::slint! {
                     if root.page == 2 : Rectangle { horizontal-stretch: 1; background: Theme.background;
                         VerticalLayout { padding: 24px; spacing: 18px;
                             PageIntro { title: GuiI18n.text("gui-running"); subtitle: GuiI18n.text("gui-running-detail"); }
-                            if root.running.length == 0 : EmptyState { title: GuiI18n.text("gui-nothing-running"); message: GuiI18n.text("gui-nothing-running-detail"); }
+                            if root.running.length == 0 : EmptyState { icon: @image-url("../../../assets/icons/nav-activity.svg"); title: GuiI18n.text("gui-nothing-running"); message: GuiI18n.text("gui-nothing-running-detail"); }
                             ScrollView { viewport-width: self.width; VerticalLayout { spacing: 10px; for item in root.running : RunningCard {
                                 item: item;
                                 open-log(kind, id) => { if kind == "server" { root.selected-server-id = id; root.page = 1; root.workspace = "server"; root.workspace-tab = "Logs"; root.load-server-workspace(id); } else { root.selected-instance-id = id; root.page = 0; root.workspace = "instance"; root.workspace-tab = "Logs"; root.load-instance-workspace(id); } root.selected-diagnostic-kind = "log"; root.log-shows-files = false; root.selected-diagnostic-name = ""; root.open-live-log(kind, id); }
@@ -3183,7 +3204,7 @@ slint::slint! {
                     if root.page == 3 : Rectangle { horizontal-stretch: 1; background: Theme.background;
                         VerticalLayout { padding: 24px; spacing: 18px;
                             PageIntro { title: GuiI18n.text("gui-activity"); subtitle: GuiI18n.text("gui-activity-detail"); }
-                            if root.activities.length == 0 : EmptyState { title: GuiI18n.text("gui-no-recent-activity"); message: GuiI18n.text("gui-no-recent-activity-detail"); }
+                            if root.activities.length == 0 : EmptyState { icon: @image-url("../../../assets/icons/nav-activity.svg"); title: GuiI18n.text("gui-no-recent-activity"); message: GuiI18n.text("gui-no-recent-activity-detail"); }
                             ScrollView { viewport-width: self.width; VerticalLayout { spacing: 10px; for item in root.activities : ActivityCard { item: item; cancel(id) => { root.cancel-operation(id); } } } }
                         }
                     }
