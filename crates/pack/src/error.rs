@@ -203,6 +203,20 @@ pub enum PackError {
         source: Box<DownloadError>,
     },
 
+    /// A file the launcher just installed could not be read back to be
+    /// recorded.
+    ///
+    /// Distinct from [`Self::Unreadable`], which is about the archive coming
+    /// in. This one is about the installed tree going out: without a digest
+    /// there is nothing to record the file as, so the installation is refused
+    /// rather than written down as content whose identity is a guess.
+    #[error("the installed file {path} could not be measured")]
+    FileUnmeasurable {
+        path: PathBuf,
+        #[source]
+        source: Box<DownloadError>,
+    },
+
     /// An artifact's provider serves it only to an authenticated request, the
     /// verified copy is not in the shared cache, and no credential could be
     /// obtained.
@@ -352,6 +366,7 @@ impl PackError {
             Self::FileDownloadsMissing { .. } => "error-pack-file-downloads-missing",
             Self::DownloadUrlRejected { .. } => "error-pack-download-url-rejected",
             Self::DownloadFailed { .. } => "error-pack-download-failed",
+            Self::FileUnmeasurable { .. } => "error-pack-file-unmeasurable",
             Self::ArtifactCredentialUnavailable { .. } => {
                 "error-pack-artifact-credential-unavailable"
             }
@@ -393,7 +408,8 @@ impl PackError {
             | Self::UnknownServerSelection { path }
             | Self::RecipeDestinationCollision { path }
             | Self::RecipeDestinationOccupied { path }
-            | Self::DestinationOccupied { path } => Some(path.clone()),
+            | Self::DestinationOccupied { path }
+            | Self::FileUnmeasurable { path, .. } => Some(path.clone()),
             _ => None,
         }
     }

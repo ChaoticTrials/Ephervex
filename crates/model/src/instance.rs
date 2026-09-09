@@ -26,6 +26,10 @@ pub enum ImportSourceKind {
     CurseForgePack,
     /// Retained for metadata compatibility. Current imports reject this format.
     PrismExport,
+    /// A dedicated-server archive published alongside a pack, installed as the
+    /// complete content of a server. It names no catalog because the archive is
+    /// the authority: whoever published it decided what the server contains.
+    ServerPack,
 }
 
 impl fmt::Display for ImportSourceKind {
@@ -35,6 +39,7 @@ impl fmt::Display for ImportSourceKind {
             Self::ModrinthPack => "Modrinth",
             Self::CurseForgePack => "CurseForge",
             Self::PrismExport => "Prism",
+            Self::ServerPack => "Server pack",
         })
     }
 }

@@ -63,9 +63,10 @@ pub mod mutate;
 pub mod path;
 pub mod policy;
 pub mod recipe;
+pub mod server_pack;
 pub mod store;
 
-pub use archive::{ExtractionLimits, ExtractionReport, PackArchive};
+pub use archive::{EntryDecision, ExtractionLimits, ExtractionReport, PackArchive};
 pub use credentials::{ArtifactCredentials, CredentialUnavailable, OpenArtifacts};
 pub use detect::{
     CURSEFORGE_MANIFEST, MODRINTH_INDEX, PRISM_PACK, PackFormat, has_mrpack_extension, identify,
@@ -96,5 +97,9 @@ pub use recipe::{
     OverrideLayer, OverrideScope, PackFileRecipe, PackRecipe, PackSide, PendingProviderFile,
     ProviderFileIdentity, ProviderRecipeMetadata, RECIPE_VERSION, RecordedMod,
     ServerReconstructionPlan, SidePlan, SideRequirement, UnknownServerFiles,
+};
+pub use server_pack::{
+    EULA_FILE, InstalledServerPack, LIBRARIES_DIR, ServerPackInstall, ServerPackMod,
+    install_server_pack, measure_installed_mods, server_pack_recipe,
 };
 pub use store::{RECIPE_FILE, SourceStore, provider_directory};

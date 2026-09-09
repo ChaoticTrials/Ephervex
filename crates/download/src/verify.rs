@@ -167,6 +167,74 @@ pub async fn file_matches_hashes(path: &Path, expected: &[Hash]) -> Result<bool,
     Ok(verifier.finish().is_ok())
 }
 
+/// Computes one digest of a file already on disk.
+///
+/// The counterpart to [`file_matches_hashes`] for bytes whose digest nobody
+/// published: a jar that arrived inside an archive has no expectation to check
+/// against, and the launcher has to produce one before it can record what the
+/// file is.
+pub async fn hash_file(path: &Path, algorithm: HashAlgorithm) -> Result<Hash, DownloadError> {
+    let mut file = File::open(path)
+        .await
+        .map_err(|source| DownloadError::io(ArtifactStep::ReadCached, path, source))?;
+    let mut hasher = SingleHasher::new(algorithm);
+    let mut buffer = vec![0; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .await
+            .map_err(|source| DownloadError::io(ArtifactStep::ReadCached, path, source))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let digest = hasher.finish();
+    // Unreachable: the hasher produced this hex itself, at this algorithm's own
+    // length. Treating it as a read failure keeps the impossible case out of
+    // the caller's model without a panic.
+    Hash::new(algorithm, &digest).ok_or_else(|| {
+        DownloadError::io(
+            ArtifactStep::ReadCached,
+            path,
+            std::io::Error::other("computed digest is not a valid hash"),
+        )
+    })
+}
+
+/// One algorithm's running digest.
+enum SingleHasher {
+    Sha1(Sha1),
+    Sha256(Sha256),
+    Sha512(Sha512),
+}
+
+impl SingleHasher {
+    fn new(algorithm: HashAlgorithm) -> Self {
+        match algorithm {
+            HashAlgorithm::Sha1 => Self::Sha1(Sha1::new()),
+            HashAlgorithm::Sha256 => Self::Sha256(Sha256::new()),
+            HashAlgorithm::Sha512 => Self::Sha512(Sha512::new()),
+        }
+    }
+
+    fn update(&mut self, chunk: &[u8]) {
+        match self {
+            Self::Sha1(hasher) => hasher.update(chunk),
+            Self::Sha256(hasher) => hasher.update(chunk),
+            Self::Sha512(hasher) => hasher.update(chunk),
+        }
+    }
+
+    fn finish(self) -> String {
+        match self {
+            Self::Sha1(hasher) => hex::encode(hasher.finalize()),
+            Self::Sha256(hasher) => hex::encode(hasher.finalize()),
+            Self::Sha512(hasher) => hex::encode(hasher.finalize()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]

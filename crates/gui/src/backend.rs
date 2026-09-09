@@ -21,8 +21,9 @@ use ephervex_core::{
     ManagedModSnapshot, MetadataAvailability, ModHost, ModInstallPlan, ModMutability, ModMutation,
     ModMutationPlan, ModSearchQuery, MutationRestriction, NewClient, NewServer, OperationReporter,
     OptionalSelection, PackAnalysis, Paths, PlannedOutcome, ProcessMonitor, ProgressSink,
-    ProviderFileIdentity, SearchOptions, ServerCreateOptions, ServerEvent, ServerFolder,
-    ServerNetworkSettings, ServerObserver, SideRequirement, SuspectReason, WatchTarget,
+    ProviderFileIdentity, SearchOptions, ServerContentSource, ServerCreateOptions, ServerEvent,
+    ServerFolder, ServerNetworkSettings, ServerObserver, SideRequirement, SuspectReason,
+    WatchTarget,
 };
 use ephervex_core::{
     ConfiguredPreferences, LanguageAvailability, LanguageEntry, MinecraftPreferencePreview,
@@ -40,6 +41,20 @@ use crate::presentation::{
 };
 
 type CancellationRegistry = Arc<Mutex<HashMap<String, CancellationToken>>>;
+
+/// Which dialog is asking for a published server archive.
+///
+/// A file dialog is modal to the desktop but not to this application's own
+/// state, and both the create-server dialog and the import dialog can name one.
+/// The request carries where its answer belongs, so a slow dialog cannot fill
+/// in the field the user has since moved on from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerPackTarget {
+    /// The create-server dialog.
+    NewServer,
+    /// The server an import builds alongside its client.
+    Import,
+}
 
 #[derive(Debug)]
 pub enum Command {
@@ -97,6 +112,13 @@ pub enum Command {
     /// starting the next one, so this is for the modal closing outright.
     CancelImportAnalysis,
     PickStorageRoot,
+    /// Ask for a published server archive to build a server from.
+    ///
+    /// Carries which dialog asked, because both can name one and the answer
+    /// arrives long after the click.
+    PickServerPack {
+        target: ServerPackTarget,
+    },
     CreateClient {
         request_id: String,
         name: String,
@@ -128,6 +150,10 @@ pub enum Command {
         /// Whether to build a server from the same pack once the instance is
         /// published. Part of the same operation, so one card reports both.
         create_linked_server: bool,
+        /// The pack's own published server files, when the user named them.
+        /// The linked server is built from these instead of from the client's
+        /// recipe (ADR 0024).
+        server_pack: Option<PathBuf>,
     },
     LaunchClient {
         instance: InstanceId,
@@ -233,6 +259,9 @@ pub enum Command {
         loader_version: String,
         persistent: bool,
         port: Option<u16>,
+        /// A published server archive to install as the server's content,
+        /// instead of reconstructing it from a client's recipe.
+        server_pack: Option<PathBuf>,
     },
     StartServer(ServerId),
     StopServer(ServerId),
@@ -1069,6 +1098,10 @@ pub enum Event {
         request_id: Option<String>,
     },
     StorageRootPicked(PathBuf),
+    ServerPackPicked {
+        target: ServerPackTarget,
+        path: PathBuf,
+    },
     WatchedFolderPicked(PathBuf),
     ArtifactCacheStatus(ArtifactCacheStatusData),
     /// A manual clear has finished without a fresh usage figure to show, because
@@ -1323,6 +1356,15 @@ fn run_worker(
                     let _ = events.send(Event::StorageRootPicked(path));
                 }
             }
+            Command::PickServerPack { target } => {
+                if let Some(path) = rfd::FileDialog::new()
+                    .set_title(lookup("gui-choose-server-pack"))
+                    .add_filter(lookup("gui-server-pack-archives"), &["zip"])
+                    .pick_file()
+                {
+                    let _ = events.send(Event::ServerPackPicked { target, path });
+                }
+            }
             Command::PickWatchedFolder => {
                 if let Some(path) = rfd::FileDialog::new()
                     .set_title(lookup("gui-choose-watched-folder"))
@@ -1379,6 +1421,7 @@ fn run_worker(
                 generation,
                 request_id,
                 create_linked_server,
+                server_pack,
             } => {
                 let paths = app.paths().clone();
                 spawn_import_submission(
@@ -1394,6 +1437,7 @@ fn run_worker(
                         skip_blocked,
                         request_id,
                         create_linked_server,
+                        server_pack,
                     },
                 );
             }
@@ -1853,6 +1897,7 @@ fn run_worker(
                 loader_version,
                 persistent,
                 port,
+                server_pack,
             } => {
                 let request = if let Some(client) = client {
                     Ok(NewServer::linked(name, client).with_storage(storage_class(persistent)))
@@ -1882,6 +1927,10 @@ fn run_worker(
                                     request,
                                     &ServerCreateOptions {
                                         install_java_if_missing: true,
+                                        content: server_pack
+                                            .map_or(ServerContentSource::Recipe, |path| {
+                                                ServerContentSource::Archive { path }
+                                            }),
                                         ..ServerCreateOptions::default()
                                     },
                                     &cancel,
@@ -4107,6 +4156,7 @@ struct ImportSubmission {
     skip_blocked: Vec<ProviderFileIdentity>,
     request_id: Option<String>,
     create_linked_server: bool,
+    server_pack: Option<PathBuf>,
 }
 
 /// Runs an `ImportPack` submission on a thread of its own and, on every
@@ -4131,6 +4181,7 @@ fn spawn_import_submission(
         skip_blocked,
         request_id,
         create_linked_server,
+        server_pack,
     } = submission;
     // Cloned for the setup-failure path, which runs instead of the body rather
     // than after it.
@@ -4184,6 +4235,9 @@ fn spawn_import_submission(
                         .with_storage(pack.record.storage);
                         let options = ServerCreateOptions {
                             install_java_if_missing: true,
+                            content: server_pack.map_or(ServerContentSource::Recipe, |path| {
+                                ServerContentSource::Archive { path }
+                            }),
                             reporter: Some(reporter.clone()),
                             ..ServerCreateOptions::default()
                         };

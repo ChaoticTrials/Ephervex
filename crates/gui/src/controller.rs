@@ -20,7 +20,7 @@ use slint::{
 use crate::backend::{
     self, AccountData, ActivityData, ArtifactCacheStatusData, Command, DiagnosticContent,
     DiagnosticData, Event, JavaData, LiveLogLine, LiveLogSource, LiveLogUpdate, ManagedModData,
-    ModSearchData, ServerWorkspaceData, SettingsData, Snapshot,
+    ModSearchData, ServerPackTarget, ServerWorkspaceData, SettingsData, Snapshot,
 };
 use crate::file_drop::{FileDrop, FileDrops};
 use crate::minecraft_defaults::{
@@ -65,6 +65,10 @@ enum CreationKey {
         loader_version: String,
         persistent: bool,
         port: Option<u16>,
+        /// The archive this server's content comes from, empty when it has
+        /// none. Part of the key so that picking a different archive is a
+        /// different creation rather than a second click on the same one.
+        server_pack: String,
     },
     /// One import attempt, identified by the archive it is reading. A second
     /// click on the same archive is the same attempt, not a second one.
@@ -878,6 +882,7 @@ fn register_import_flow(
         // dialog happens to close.
         let generation = pick_state.borrow_mut().begin_attempt();
         if let Some(ui) = weak.upgrade() {
+            set_server_pack(&ui, ServerPackTarget::Import, None);
             render_import_flow(&ui, &pick_state.borrow());
         }
         send(&sender, Command::PickImport { generation });
@@ -888,6 +893,7 @@ fn register_import_flow(
     ui.on_open_import_modal(move || {
         open_state.borrow_mut().reset();
         if let Some(ui) = weak.upgrade() {
+            set_server_pack(&ui, ServerPackTarget::Import, None);
             render_import_flow(&ui, &open_state.borrow());
             ui.set_modal_error(SharedString::default());
             ui.set_modal("import".into());
@@ -904,6 +910,7 @@ fn register_import_flow(
         // `CancelOperation` path and goes straight to the worker.
         send(&sender, Command::CancelImportAnalysis);
         if let Some(ui) = weak.upgrade() {
+            set_server_pack(&ui, ServerPackTarget::Import, None);
             render_import_flow(&ui, &close_state.borrow());
             ui.set_modal(SharedString::default());
             ui.set_modal_error(SharedString::default());
@@ -931,7 +938,7 @@ fn register_import_flow(
     let sender = commands.clone();
     let weak = ui.as_weak();
     let submit_state = Rc::clone(import_flow);
-    ui.on_submit_import(move |name, persistent, create_server| {
+    ui.on_submit_import(move |name, persistent, create_server, server_pack| {
         // The archive comes from the flow's own state, never from a UI
         // field: `import-path` only ever displays what the last successful
         // analysis found, and is not itself a source of a new one.
@@ -973,6 +980,8 @@ fn register_import_flow(
                 generation: submission.generation,
                 request_id,
                 create_linked_server: create_server,
+                server_pack: (create_server && !server_pack.is_empty())
+                    .then(|| PathBuf::from(server_pack.as_str())),
             },
         );
     });
@@ -1494,43 +1503,79 @@ impl std::fmt::Debug for Controller {
     }
 }
 
-/// Routes archives dropped on the window into the import dialog.
+/// What a file let go on the window is asking for.
 ///
-/// The drop is the same act as choosing a file, so it takes the same path: the
-/// attempt begins here, synchronously, and the analysis that follows is checked
-/// against it exactly as a dialog's would be. Opening the dialog is part of
-/// accepting the drop, because a drop with nothing on screen would look like
-/// nothing happened.
+/// Winit reports a drop with no cursor position, so a drop cannot be aimed at a
+/// field the way a click is. What the window is currently asking for decides
+/// instead, and that is legible on screen: a dialog showing an empty archive
+/// slot is asking for that archive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DropIntent {
+    /// Import it as a pack. The default, and what a drop with nothing open
+    /// means.
+    Import,
+    /// Fill one of the dialogs' server-archive fields.
+    ServerPack(ServerPackTarget),
+    /// Nothing. A file let go over a confirmation the user is in the middle of
+    /// is far more likely to be a misplaced gesture than a request to abandon
+    /// it.
+    Ignored,
+}
+
+/// Which field, if any, a drop belongs to right now.
+fn drop_intent(ui: &AppWindow) -> DropIntent {
+    match ui.get_modal().as_str() {
+        "create-server" => DropIntent::ServerPack(ServerPackTarget::NewServer),
+        // The import dialog asks for two archives once a server is wanted, and
+        // the pack itself is already chosen by the time that toggle can be
+        // reached. So a drop there names the server files.
+        "import" if ui.get_import_create_server() => {
+            DropIntent::ServerPack(ServerPackTarget::Import)
+        }
+        "" | "import" => DropIntent::Import,
+        _ => DropIntent::Ignored,
+    }
+}
+
+/// Routes archives dropped on the window to whatever is asking for one.
 ///
-/// A drop is ignored while another modal is open. A file let go over a
-/// confirmation the user is in the middle of is far more likely to be a
-/// misplaced gesture than a request to abandon it.
+/// For an import the drop is the same act as choosing a file, so it takes the
+/// same path: the attempt begins here, synchronously, and the analysis that
+/// follows is checked against it exactly as a dialog's would be. Opening the
+/// dialog is part of accepting the drop, because a drop with nothing on screen
+/// would look like nothing happened.
 pub fn accept_file_drops(ui: &AppWindow, drops: &FileDrops, controller: &Controller) {
     let weak = ui.as_weak();
     let sender = controller.commands.clone();
     let flow = Rc::clone(&controller.import_flow);
     drops.listen(move |drop| {
         let Some(ui) = weak.upgrade() else { return };
-        let busy = !ui.get_modal().is_empty() && ui.get_modal() != "import";
+        let intent = drop_intent(&ui);
         match drop {
-            FileDrop::Hovering => ui.set_file_drop_active(!busy),
+            FileDrop::Hovering => ui.set_file_drop_active(intent != DropIntent::Ignored),
             FileDrop::Left => ui.set_file_drop_active(false),
             FileDrop::Dropped(archive) => {
                 ui.set_file_drop_active(false);
-                if busy {
-                    return;
+                match intent {
+                    DropIntent::Ignored => {}
+                    DropIntent::ServerPack(target) => {
+                        set_server_pack(&ui, target, Some(&archive));
+                    }
+                    DropIntent::Import => {
+                        let generation = flow.borrow_mut().begin_attempt();
+                        set_server_pack(&ui, ServerPackTarget::Import, None);
+                        render_import_flow(&ui, &flow.borrow());
+                        ui.set_modal_error(SharedString::default());
+                        ui.set_modal("import".into());
+                        send(
+                            &sender,
+                            Command::AnalyzeImport {
+                                generation,
+                                archive,
+                            },
+                        );
+                    }
                 }
-                let generation = flow.borrow_mut().begin_attempt();
-                render_import_flow(&ui, &flow.borrow());
-                ui.set_modal_error(SharedString::default());
-                ui.set_modal("import".into());
-                send(
-                    &sender,
-                    Command::AnalyzeImport {
-                        generation,
-                        archive,
-                    },
-                );
             }
         }
     });
@@ -1550,7 +1595,7 @@ pub fn attach(ui: &AppWindow) -> Controller {
     register_callbacks(
         ui,
         &backend.commands,
-        Rc::clone(&creations),
+        &creations,
         &live_viewer,
         &import_flow,
         &minecraft,
@@ -1700,26 +1745,24 @@ where
     });
 }
 
-#[allow(clippy::too_many_arguments)]
-fn register_callbacks(
+/// Submitting the create-server dialog.
+fn register_create_server(
     ui: &AppWindow,
     commands: &Sender<Command>,
     creations: Rc<RefCell<CreationTracker>>,
-    live_viewer: &Rc<RefCell<LiveViewerState>>,
-    import_flow: &Rc<RefCell<ImportFlowState>>,
-    minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
-    browser: &Rc<ModBrowser>,
 ) {
-    register_catalog_actions(ui, commands);
-    register_client_actions(ui, commands, Rc::clone(&creations));
-    register_mod_actions(ui, commands, browser);
-    register_create_instance_naming(ui, commands);
-    register_import_flow(ui, commands, import_flow, &creations);
-
     let sender = commands.clone();
     let weak = ui.as_weak();
     ui.on_submit_create_server(
-        move |name, client, minecraft, loader, loader_version, persistent, automatic_port, port| {
+        move |name,
+              client,
+              minecraft,
+              loader,
+              loader_version,
+              persistent,
+              automatic_port,
+              port,
+              server_pack| {
             let linked = !client.is_empty();
             let port = if automatic_port {
                 None
@@ -1753,6 +1796,7 @@ fn register_callbacks(
                 },
                 persistent,
                 port,
+                server_pack: server_pack.as_str().to_owned(),
             };
             let pending = pending_creation(&key, false);
             let Some(request_id) = creations.borrow_mut().accept(key, pending) else {
@@ -1782,10 +1826,100 @@ fn register_callbacks(
                     loader_version: loader_version.into(),
                     persistent,
                     port,
+                    server_pack: (!server_pack.is_empty())
+                        .then(|| PathBuf::from(server_pack.as_str())),
                 },
             );
         },
     );
+}
+
+/// Choosing, and unchoosing, the archive a server's content comes from.
+///
+/// Two dialogs can name one, and the pick is asynchronous, so each request says
+/// where its answer belongs rather than the reply guessing from whatever modal
+/// happens to be open when it lands.
+fn register_server_pack_choice(ui: &AppWindow, commands: &Sender<Command>) {
+    let sender = commands.clone();
+    ui.on_choose_server_pack(move || {
+        send(
+            &sender,
+            Command::PickServerPack {
+                target: ServerPackTarget::NewServer,
+            },
+        );
+    });
+
+    let sender = commands.clone();
+    ui.on_choose_import_server_pack(move || {
+        send(
+            &sender,
+            Command::PickServerPack {
+                target: ServerPackTarget::Import,
+            },
+        );
+    });
+
+    let weak = ui.as_weak();
+    ui.on_clear_server_pack(move || {
+        if let Some(ui) = weak.upgrade() {
+            set_server_pack(&ui, ServerPackTarget::NewServer, None);
+        }
+    });
+
+    let weak = ui.as_weak();
+    ui.on_clear_import_server_pack(move || {
+        if let Some(ui) = weak.upgrade() {
+            set_server_pack(&ui, ServerPackTarget::Import, None);
+        }
+    });
+}
+
+/// Shows a chosen archive, or clears the choice.
+///
+/// The full path is what the backend needs and the file name is what the dialog
+/// shows: a path long enough to be interesting is long enough to push
+/// everything else out of a modal.
+fn set_server_pack(ui: &AppWindow, target: ServerPackTarget, path: Option<&Path>) {
+    let (full, name) = path.map_or_else(
+        || (SharedString::default(), SharedString::default()),
+        |path| {
+            let name = path.file_name().map_or_else(
+                || path.display().to_string(),
+                |name| name.to_string_lossy().into_owned(),
+            );
+            (path.display().to_string().into(), name.into())
+        },
+    );
+    match target {
+        ServerPackTarget::NewServer => {
+            ui.set_create_server_pack(full);
+            ui.set_create_server_pack_name(name);
+        }
+        ServerPackTarget::Import => {
+            ui.set_import_server_pack(full);
+            ui.set_import_server_pack_name(name);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn register_callbacks(
+    ui: &AppWindow,
+    commands: &Sender<Command>,
+    creations: &Rc<RefCell<CreationTracker>>,
+    live_viewer: &Rc<RefCell<LiveViewerState>>,
+    import_flow: &Rc<RefCell<ImportFlowState>>,
+    minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
+    browser: &Rc<ModBrowser>,
+) {
+    register_catalog_actions(ui, commands);
+    register_client_actions(ui, commands, Rc::clone(creations));
+    register_mod_actions(ui, commands, browser);
+    register_create_instance_naming(ui, commands);
+    register_import_flow(ui, commands, import_flow, creations);
+    register_server_pack_choice(ui, commands);
+    register_create_server(ui, commands, Rc::clone(creations));
 
     let sender = commands.clone();
     ui.on_select_server(move |_| send(&sender, Command::Refresh));
@@ -4445,6 +4579,9 @@ fn apply_event(
         Event::StorageRootPicked(path) => {
             ui.set_persistent_root(path.display().to_string().into());
         }
+        Event::ServerPackPicked { target, path } => {
+            set_server_pack(ui, target, Some(&path));
+        }
         Event::WatchedFolderPicked(path) => {
             let mut folders: Vec<String> = ui
                 .get_watched_download_folders()
@@ -5840,6 +5977,76 @@ mod tests {
         AppWindow::new().expect("window")
     }
 
+    /// A file dropped on the window carries no cursor position, so what it is
+    /// for is decided by what the window is asking for. Every state the user
+    /// can be in when they let go has to have an answer.
+    #[test]
+    fn a_drop_belongs_to_whichever_dialog_is_asking_for_an_archive() {
+        let ui = test_window();
+
+        ui.set_modal(SharedString::default());
+        assert_eq!(drop_intent(&ui), DropIntent::Import);
+
+        ui.set_modal("create-server".into());
+        assert_eq!(
+            drop_intent(&ui),
+            DropIntent::ServerPack(ServerPackTarget::NewServer)
+        );
+
+        ui.set_modal("import".into());
+        ui.set_import_create_server(false);
+        assert_eq!(
+            drop_intent(&ui),
+            DropIntent::Import,
+            "an import with no server wanted is still asking for the pack"
+        );
+
+        ui.set_import_create_server(true);
+        assert_eq!(
+            drop_intent(&ui),
+            DropIntent::ServerPack(ServerPackTarget::Import),
+            "the pack is already chosen by the time that toggle can be reached"
+        );
+
+        ui.set_modal("delete-server".into());
+        assert_eq!(
+            drop_intent(&ui),
+            DropIntent::Ignored,
+            "a file let go over a confirmation is a misplaced gesture"
+        );
+    }
+
+    /// The two dialogs keep separate choices, and neither shows the other's.
+    #[test]
+    fn a_chosen_archive_fills_only_the_field_that_asked_for_it() {
+        let ui = test_window();
+
+        set_server_pack(
+            &ui,
+            ServerPackTarget::NewServer,
+            Some(Path::new("/tmp/one_server_pack.zip")),
+        );
+        set_server_pack(
+            &ui,
+            ServerPackTarget::Import,
+            Some(Path::new("/tmp/two_server_pack.zip")),
+        );
+
+        assert_eq!(ui.get_create_server_pack(), "/tmp/one_server_pack.zip");
+        assert_eq!(ui.get_create_server_pack_name(), "one_server_pack.zip");
+        assert_eq!(ui.get_import_server_pack(), "/tmp/two_server_pack.zip");
+        assert_eq!(ui.get_import_server_pack_name(), "two_server_pack.zip");
+
+        set_server_pack(&ui, ServerPackTarget::Import, None);
+        assert_eq!(ui.get_import_server_pack(), "");
+        assert_eq!(ui.get_import_server_pack_name(), "");
+        assert_eq!(
+            ui.get_create_server_pack(),
+            "/tmp/one_server_pack.zip",
+            "clearing one dialog's choice never touches the other's"
+        );
+    }
+
     /// Start is offered from four places. Every one of them has to leave the
     /// user watching the output the run is about to produce, which means
     /// selecting the server and choosing both the page and the workspace that
@@ -6016,6 +6223,7 @@ mod tests {
             loader_version: "47.3.0".to_owned(),
             persistent: false,
             port: None,
+            server_pack: String::new(),
         };
         let mut second = first.clone();
         if let CreationKey::Server { name, .. } = &mut second {
@@ -6061,6 +6269,7 @@ mod tests {
                 },
                 persistent: false,
                 port: None,
+                server_pack: String::new(),
             }
         };
         let first = normalize("1.20.1", "Forge", "47.3.0");

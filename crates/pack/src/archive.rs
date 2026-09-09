@@ -70,7 +70,22 @@ impl Default for ExtractionLimits {
 pub struct ExtractionReport {
     pub files: u64,
     pub directories: u64,
+    /// Entries the caller's own policy declined. Always zero for an extraction
+    /// that asked no questions.
+    pub skipped: u64,
     pub bytes: u64,
+}
+
+/// What an extraction should do with one entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryDecision {
+    Extract,
+    /// Leave the entry out and count it. For a destination the launcher owns,
+    /// where the archive's copy is simply not wanted.
+    Skip,
+    /// Refuse the whole extraction. For an entry that should never have been
+    /// offered at all.
+    Refuse,
 }
 
 impl ExtractionReport {
@@ -164,6 +179,43 @@ impl PackArchive {
             .any(|name| name.replace('\\', "/").starts_with(&prefix))
     }
 
+    /// The one top-level directory every entry lives under, if there is one.
+    ///
+    /// Archives published for people to unzip themselves are usually wrapped in
+    /// a single folder so that unpacking them in a downloads directory does not
+    /// scatter files everywhere. Stripping that wrapper is destructive when it
+    /// is guessed wrong -- everything lands one level from where it belongs --
+    /// so this answers `None` unless the shape is unambiguous.
+    ///
+    /// Two conditions. Nothing may sit at the archive's root, and there may be
+    /// only one top-level directory: either would mean the directory is content
+    /// rather than a wrapper. And that directory must itself contain a
+    /// directory, because an archive holding one folder of loose files is
+    /// exactly as consistent with being a content folder as with being a
+    /// wrapper, and there is no evidence in the archive to tell them apart.
+    ///
+    /// Computed from the central directory, before anything is written.
+    #[must_use]
+    pub fn single_root(&self) -> Option<String> {
+        let mut root: Option<String> = None;
+        let mut nested_directory = false;
+        for name in self.zip.file_names() {
+            let name = name.replace('\\', "/");
+            let trimmed = name.trim_start_matches("./");
+            let (first, rest) = trimmed.split_once('/')?;
+            if first.is_empty() || first == "." || first == ".." {
+                return None;
+            }
+            nested_directory |= rest.contains('/');
+            match &root {
+                Some(existing) if existing != first => return None,
+                Some(_) => {}
+                None => root = Some(first.to_owned()),
+            }
+        }
+        nested_directory.then_some(root).flatten()
+    }
+
     /// Reads one entry into memory, bounded by the per-entry limit.
     ///
     /// Manifests are the only thing read this way; everything else is streamed
@@ -212,6 +264,23 @@ impl PackArchive {
         prefix: &str,
         destination: &Path,
     ) -> PackResult<ExtractionReport> {
+        self.extract_prefix_filtered(prefix, destination, &mut |_| EntryDecision::Extract)
+    }
+
+    /// The same extraction, with the caller deciding entry by entry.
+    ///
+    /// `decide` is asked about each entry's path relative to `destination`,
+    /// before anything is written. It exists so a policy about which
+    /// destinations belong to the archive can live with the caller that owns
+    /// that destination, rather than in a reader that is shared by every
+    /// importer.
+    #[instrument(skip(self, decide), fields(archive = %self.path.display(), destination = %destination.display()))]
+    pub fn extract_prefix_filtered(
+        &mut self,
+        prefix: &str,
+        destination: &Path,
+        decide: &mut dyn FnMut(&Path) -> EntryDecision,
+    ) -> PackResult<ExtractionReport> {
         let prefix = normalize_prefix(prefix);
         if !self.contains_prefix(&prefix) {
             return Ok(ExtractionReport::default());
@@ -257,6 +326,17 @@ impl PackArchive {
                 (name, relative, entry.is_dir(), entry.size())
             };
 
+            match decide(&relative) {
+                EntryDecision::Extract => {}
+                EntryDecision::Skip => {
+                    report.skipped += 1;
+                    continue;
+                }
+                EntryDecision::Refuse => {
+                    return Err(PackError::EntryPathUnsafe { entry: name });
+                }
+            }
+
             let Some(target) = contained_join(&root, &relative) else {
                 return Err(PackError::EntryPathUnsafe { entry: name });
             };
@@ -283,6 +363,7 @@ impl PackArchive {
             prefix = %prefix,
             files = report.files,
             directories = report.directories,
+            skipped = report.skipped,
             bytes = report.bytes,
             "extracted a pack override layer"
         );
@@ -394,12 +475,19 @@ fn entry_under(raw: &[u8], prefix: &str) -> PackResult<Option<PathBuf>> {
 }
 
 /// A directory prefix with exactly one trailing slash and no leading `./`.
+///
+/// The archive root is the empty string rather than `"/"`: every entry name is
+/// relative, so a root prefix has to be a prefix every name already starts
+/// with.
 fn normalize_prefix(prefix: &str) -> String {
     let trimmed = prefix
         .replace('\\', "/")
         .trim_start_matches("./")
         .trim_matches('/')
         .to_owned();
+    if trimmed.is_empty() {
+        return trimmed;
+    }
     format!("{trimmed}/")
 }
 

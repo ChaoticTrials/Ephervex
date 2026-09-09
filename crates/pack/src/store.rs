@@ -50,6 +50,7 @@ pub const fn provider_directory(kind: ImportSourceKind) -> &'static str {
         ImportSourceKind::CurseForgePack => "curseforge",
         ImportSourceKind::PrismExport => "prism",
         ImportSourceKind::Manual => "manual",
+        ImportSourceKind::ServerPack => "server-pack",
     }
 }
 

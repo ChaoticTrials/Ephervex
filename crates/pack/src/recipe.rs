@@ -62,7 +62,12 @@ use crate::error::{PackError, PackResult};
 /// reading one of these files would drop every browser-installed mod without
 /// noticing, and build a server missing them. Reading a version 1 recipe still
 /// works, because the new fields default.
-pub const RECIPE_VERSION: u32 = 2;
+///
+/// Version 3 added [`ImportSourceKind::ServerPack`], which a version 2 build
+/// cannot deserialize at all. Bumping the version is what turns that into the
+/// clean refusal `SourceStore::read_recipe` already performs (ADR 0012) rather
+/// than an unreadable file.
+pub const RECIPE_VERSION: u32 = 3;
 
 /// The extension a mod loader loads out of `mods/`.
 ///

@@ -99,4 +99,4 @@ pub use progress::{ByteTally, ChannelSink, OperationReporter, ProgressSink};
 /// crate that only parses text.
 pub use reqwest::Url;
 pub use retry::{RetryPolicy, retry_after, status_is_transient};
-pub use verify::{HashMismatch, HashVerifier, file_matches_hashes};
+pub use verify::{HashMismatch, HashVerifier, file_matches_hashes, hash_file};

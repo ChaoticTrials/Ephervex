@@ -905,6 +905,7 @@ mod tests {
     use crate::error::CoreError;
     use crate::import::ImportRequest;
     use crate::server::ServerCreateOptions;
+    use crate::server_pack::ServerContentSource;
 
     use super::*;
 
@@ -3204,6 +3205,7 @@ mod tests {
             java_path: None,
             install_java_if_missing: false,
             unknown_server_files,
+            content: ServerContentSource::Recipe,
             reporter: None,
         };
         app.materialize_linked_server_recipe(

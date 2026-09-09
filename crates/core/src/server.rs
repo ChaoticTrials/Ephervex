@@ -29,6 +29,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::app::{App, JavaPlanRequest, JavaTarget};
+use crate::server_pack::{ServerArchiveInstall, ServerContentSource, archive_import_source};
 use crate::{CoreError, CoreResult};
 
 const SERVER_PROPERTIES_FILE: &str = "server.properties";
@@ -44,7 +45,16 @@ pub struct ServerCreateOptions {
     /// What to do with recipe entries whose server applicability the pack
     /// never declared. Reconstructing them is the default; see
     /// [`UnknownServerFiles`].
+    ///
+    /// Meaningless when [`Self::content`] names an archive: there is no
+    /// reconstruction to make a decision about.
     pub unknown_server_files: UnknownServerFiles,
+    /// Where the server's content comes from.
+    ///
+    /// Reconstruction from the linked client's recipe by default. An archive
+    /// published as a pack's server files replaces that entirely, for a linked
+    /// and a standalone server alike.
+    pub content: ServerContentSource,
     /// Where to report the loader install and the content reconstruction, for
     /// a caller that is showing this work to someone.
     ///
@@ -191,8 +201,18 @@ impl App {
         self.resolve_creation_network(&mut request)?;
         let mut record = self.registry_for_services().prepare_server(request)?;
         record.operator_setup = self.default_operator_setup(&record.network);
-        let linked_recipe =
-            self.linked_server_recipe(&mut record, &options.unknown_server_files)?;
+        let linked_recipe = match options.content.archive() {
+            // An archive is the server's whole content, so the client's recipe
+            // is never read and nothing is reconstructed from it. The exact
+            // Minecraft and loader selection still came from the client, by way
+            // of `prepare_server`.
+            Some(archive) => {
+                validate_server_archive(archive)?;
+                record.source = archive_import_source(archive);
+                None
+            }
+            None => self.linked_server_recipe(&mut record, &options.unknown_server_files)?,
+        };
         let staging = staging_root(&record.root);
         if staging.exists() {
             return Err(storage_io(
@@ -234,8 +254,21 @@ impl App {
         record.installation = ServerInstallation::Installed {
             launch: normalize_launch(&target, &installed.launch)?,
         };
-        if let Some((client_source, recipe)) = linked_recipe {
-            let server_source = ephervex_storage::metadata::source_dir(&staging);
+        let server_source = ephervex_storage::metadata::source_dir(&staging);
+        if let Some(archive) = options.content.archive() {
+            self.install_server_archive(ServerArchiveInstall {
+                archive,
+                name: &record.name,
+                minecraft_version: &record.minecraft_version,
+                loader: &record.loader,
+                launch: record.installation.launch(),
+                game_dir: &target,
+                server_source: &server_source,
+                reporter: options.reporter.as_ref(),
+                cancel,
+            })
+            .await?;
+        } else if let Some((client_source, recipe)) = linked_recipe {
             let unconfirmed_unknown = self
                 .materialize_linked_server_recipe(
                     &recipe,
@@ -283,16 +316,21 @@ impl App {
         }
         let target = ephervex_storage::metadata::server_game_dir(&record.root);
         ensure_empty_directory(&target)?;
-        let linked_recipe =
-            self.linked_server_recipe(&mut record, &options.unknown_server_files)?;
+        let linked_recipe = match options.content.archive() {
+            Some(archive) => {
+                validate_server_archive(archive)?;
+                record.source = archive_import_source(archive);
+                None
+            }
+            None => self.linked_server_recipe(&mut record, &options.unknown_server_files)?,
+        };
         let server_source = ephervex_storage::metadata::source_dir(&record.root);
-        if linked_recipe.is_some() {
+        let owns_source = linked_recipe.is_some() || options.content.archive().is_some();
+        if owns_source {
             ensure_empty_directory(&server_source)?;
         }
-        let cleanup = InstallationCleanup::new(
-            target.clone(),
-            linked_recipe.as_ref().map(|_| server_source.clone()),
-        );
+        let cleanup =
+            InstallationCleanup::new(target.clone(), owns_source.then(|| server_source.clone()));
         let java = self
             .plan_java(
                 &record.minecraft_version,
@@ -315,7 +353,20 @@ impl App {
         record.installation = ServerInstallation::Installed {
             launch: normalize_launch(&target, &installed.launch)?,
         };
-        if let Some((client_source, recipe)) = linked_recipe {
+        if let Some(archive) = options.content.archive() {
+            self.install_server_archive(ServerArchiveInstall {
+                archive,
+                name: &record.name,
+                minecraft_version: &record.minecraft_version,
+                loader: &record.loader,
+                launch: record.installation.launch(),
+                game_dir: &target,
+                server_source: &server_source,
+                reporter: options.reporter.as_ref(),
+                cancel,
+            })
+            .await?;
+        } else if let Some((client_source, recipe)) = linked_recipe {
             let unconfirmed_unknown = self
                 .materialize_linked_server_recipe(
                     &recipe,
@@ -738,6 +789,17 @@ fn normalize_launch(
         ephervex_loaders::ServerLaunch::Jar { .. } => ServerLaunch::Jar { path },
         ephervex_loaders::ServerLaunch::ArgFile { .. } => ServerLaunch::ArgFile { path },
     })
+}
+
+/// Refuses an unusable archive before any expensive work starts.
+///
+/// Java probing and a loader installation take minutes and megabytes. Opening
+/// the archive first means "that file is not a readable ZIP" is answered in
+/// milliseconds, which is the same reason `linked_server_recipe` validates a
+/// recipe before this point.
+fn validate_server_archive(archive: &Path) -> CoreResult<()> {
+    ephervex_pack::PackArchive::open(archive, ephervex_pack::ExtractionLimits::default())?;
+    Ok(())
 }
 
 fn add_unknown_attention(record: &mut ServerRecord, paths: Vec<PathBuf>) {

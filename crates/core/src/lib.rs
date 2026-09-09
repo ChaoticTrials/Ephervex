@@ -48,6 +48,7 @@ pub mod mutation;
 pub mod open_files;
 pub mod running;
 pub mod server;
+pub mod server_pack;
 
 pub use account::{AccountStatus, AccountSummary, ApiSettings, LoginOptions, TOKEN_REFRESH_MARGIN};
 pub use app::{
@@ -100,6 +101,7 @@ pub use mutation::{
 };
 pub use running::{ProcessMonitor, ProcessUsage, RunningProcess};
 pub use server::{CaptureSnapshot, ServerCreateOptions, ServerPersistenceHealth, ServerStatus};
+pub use server_pack::{ServerContentSource, ServerPackOutcome};
 
 /// Cancellation, re-exported because the services take one.
 ///

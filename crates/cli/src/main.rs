@@ -37,10 +37,11 @@ use ephervex_core::{
     OptionalSelection, OutputLine, PackAnalysis, PackRecipe, PackSide, Paths, PlanWarning,
     PlannedMod, PreferenceApplication, PreferenceId, PreferenceKey, ProcessMonitor,
     ReconciliationReport, ReleaseListing, RequirementBasis, RuntimeClassification,
-    RuntimeInventory, SearchOptions, SecretString, ServerCommitWarning, ServerCreateOptions,
-    ServerEvent, ServerFolder, ServerNetworkSettings, ServerObserver, ServerPersistenceHealth,
-    ServerRecord, ServerWarning, Session, SideRequirement, SkipReason, SuspectConfidence,
-    SuspectReason, TextAnchor, TextView, UnknownServerFiles, VersionMetadata, VersionRecord,
+    RuntimeInventory, SearchOptions, SecretString, ServerCommitWarning, ServerContentSource,
+    ServerCreateOptions, ServerEvent, ServerFolder, ServerNetworkSettings, ServerObserver,
+    ServerPersistenceHealth, ServerRecord, ServerWarning, Session, SideRequirement, SkipReason,
+    SuspectConfidence, SuspectReason, TextAnchor, TextView, UnknownServerFiles, VersionMetadata,
+    VersionRecord,
 };
 use ephervex_i18n::Arg as MessageArg;
 use ephervex_model::{
@@ -795,6 +796,12 @@ enum ServerCommand {
         id: ServerId,
         #[arg(long)]
         java: Option<PathBuf>,
+        /// Install this published server archive as the server's content.
+        ///
+        /// See `ephervex server create --help` for what the archive decides
+        /// and what Ephervex still installs itself.
+        #[arg(long = "server-pack", value_name = "FILE")]
+        server_pack: Option<PathBuf>,
     },
     /// Show canonical server metadata.
     Show { id: ServerId },
@@ -924,6 +931,23 @@ struct CreateServerArgs {
     /// Reconstruct none of the files whose server applicability is undeclared.
     #[arg(long = "skip-unknown", requires = "client")]
     skip_unknown: bool,
+    /// Install this published server archive as the server's content.
+    ///
+    /// Many packs publish server files of their own. Those files are what the
+    /// author decided the server contains, so they are copied in as they are:
+    /// nothing is looked up, no mod list is planned, and no optional file is
+    /// decided. Works for a standalone server and for one built from a client.
+    ///
+    /// Ephervex still installs the loader and its libraries, for every server,
+    /// even when the archive ships them. An archive's installer jar and start
+    /// script are never run, and its `libraries` folder and `eula.txt` are left
+    /// out. Everything else in the archive is installed.
+    #[arg(
+        long = "server-pack",
+        value_name = "FILE",
+        conflicts_with_all = ["include_unknown", "skip_unknown"]
+    )]
+    server_pack: Option<PathBuf>,
     #[command(flatten)]
     storage: StorageArgs,
 }
@@ -1407,6 +1431,7 @@ async fn run_server_command(
                             &args.include_unknown,
                             args.skip_unknown,
                         ),
+                        content: server_content(args.server_pack.as_deref()),
                         reporter: None,
                     },
                     &CancellationToken::new(),
@@ -1414,7 +1439,11 @@ async fn run_server_command(
                 .await?;
             print_server_commit(&committed.record, &committed.warnings, json);
         }
-        ServerCommand::Install { id, java } => {
+        ServerCommand::Install {
+            id,
+            java,
+            server_pack,
+        } => {
             let committed = app
                 .install_server(
                     *id,
@@ -1422,6 +1451,7 @@ async fn run_server_command(
                         java_path: java.clone(),
                         install_java_if_missing: true,
                         unknown_server_files: UnknownServerFiles::default(),
+                        content: server_content(server_pack.as_deref()),
                         reporter: None,
                     },
                     &CancellationToken::new(),
@@ -2295,6 +2325,16 @@ fn unknown_server_files(include: &[PathBuf], skip: bool) -> UnknownServerFiles {
     } else {
         UnknownServerFiles::only(OptionalSelection::of(include.to_vec()))
     }
+}
+
+/// Where a `server create` or `server install` invocation takes its content
+/// from.
+fn server_content(archive: Option<&Path>) -> ServerContentSource {
+    archive.map_or(ServerContentSource::Recipe, |path| {
+        ServerContentSource::Archive {
+            path: path.to_path_buf(),
+        }
+    })
 }
 
 fn build_loader(loader: LoaderArg, version: Option<&str>) -> anyhow::Result<LoaderSelection> {
@@ -4952,6 +4992,14 @@ fn print_server(record: &ServerRecord, json: bool) {
         println!("loader:    {}", record.loader);
         println!("root:      {}", record.root.display());
         println!("installed: {}", record.installation.is_installed());
+        if record.source.kind == ephervex_model::ImportSourceKind::ServerPack {
+            // The one fact `ephervex server mods` cannot answer: these files
+            // came from an archive, so nothing about them can be looked up.
+            match record.source.reference.as_deref() {
+                Some(archive) => println!("content:   server files from {archive}"),
+                None => println!("content:   server files from an archive"),
+            }
+        }
         for reason in &record.attention {
             if let ephervex_model::AttentionReason::UnknownServerApplicability(path) = reason {
                 eprintln!(

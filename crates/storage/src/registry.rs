@@ -976,6 +976,7 @@ const fn source_kind_to_sql(value: ImportSourceKind) -> &'static str {
         ImportSourceKind::ModrinthPack => "modrinth_pack",
         ImportSourceKind::CurseForgePack => "curseforge_pack",
         ImportSourceKind::PrismExport => "prism_export",
+        ImportSourceKind::ServerPack => "server_pack",
     }
 }
 
@@ -985,6 +986,7 @@ fn source_kind_from_sql(value: &str) -> Result<ImportSourceKind, IndexError> {
         "modrinth_pack" => Ok(ImportSourceKind::ModrinthPack),
         "curseforge_pack" => Ok(ImportSourceKind::CurseForgePack),
         "prism_export" => Ok(ImportSourceKind::PrismExport),
+        "server_pack" => Ok(ImportSourceKind::ServerPack),
         other => Err(IndexError::MalformedRow {
             column: "source_kind",
             value: other.to_owned(),

@@ -183,6 +183,18 @@ hidden sibling root
         published server ──▶ SQLite query index
 ```
 
+A server may instead be given a published server archive (ADR 0024), and then
+none of the reconstruction below runs. The archive is extracted over the
+installed loader and the server's content is complete: nothing is resolved, no
+side is planned, and no optional file is decided. Available to a standalone
+server as well as a linked one. `libraries/`, the launch descriptor, `eula.txt`,
+and `.launcher/` never come from the archive -- `libraries` is a link into the
+shared store, and extraction containment is lexical, so an entry there would be
+written into storage every instance shares. A single wrapping directory is
+stripped only when the archive's shape is unambiguous. The server keeps an
+ordinary recipe listing every installed jar with a digest the launcher
+computed and no download address.
+
 A linked server reads the client's retained recipe and retained override
 layers. It never scans or copies the mutable client game directory, so manually
 added jars and local debugging changes remain unmanaged. Required content is

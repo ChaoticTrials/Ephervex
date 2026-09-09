@@ -646,6 +646,7 @@ operation-stage-retaining-source = Keeping the pack's source
 operation-stage-applying-settings = Applying settings
 operation-stage-publishing = Finishing up
 operation-stage-installing-server = Installing the linked server
+operation-stage-installing-server-pack = Installing the server files
 operation-importing-pack = Importing modpack
 operation-installing-mods = Installing mods
 operation-creating-server = Creating server
@@ -899,6 +900,9 @@ error-pack-download-url-rejected = One of the pack's files is hosted somewhere E
 .action = Ephervex only downloads pack files over HTTPS, and only from the hosts the pack's own provider publishes them on.
 
 # a hash mismatch is a hard failure, and the bad file is deleted.
+error-pack-file-unmeasurable = An installed file could not be read back to be recorded.
+.action = Check that { $path } is readable, then create the server again.
+
 error-pack-download-failed = A file from the pack could not be downloaded or did not match its checksum.
 .action = Ephervex deleted the bad file rather than installing it. Check the network connection and try again.
 
@@ -1802,6 +1806,14 @@ gui-background-service-failed = The background service could not start: { $value
 gui-background-runtime-failed = The background runtime could not start: { $value }
 gui-choose-modpack-archive = Choose a modpack archive
 gui-modpack-archives = Modpack archives
+gui-choose-server-pack = Choose server files
+gui-clear-server-pack = Clear the chosen server files
+gui-server-pack-archives = Server file archives
+gui-server-pack = Server files (optional)
+# Shown under the file picker in the create-server dialog. Says what the archive
+# decides and what Ephervex installs regardless, because both halves are
+# surprising if you only know one of them.
+gui-server-pack-detail = If the pack publishes its own server files, choose that archive and it becomes the server's content as it is. Ephervex still installs the loader and its libraries, and never runs the archive's installer or start script.
 gui-import-pack-header = { $first } - { $second }
 gui-import-author = by { $value }
 gui-minecraft-version-label = Minecraft { $value }
