@@ -1388,6 +1388,15 @@ impl App {
     }
 
     fn modrinth_provider(&self) -> CoreResult<&dyn ModProviderApi> {
+        Ok(self.modrinth_catalog()?)
+    }
+
+    /// The same catalog as its own type.
+    ///
+    /// Recognizing installed files by digest is Modrinth's alone -- CurseForge
+    /// answers a different question with a different key -- so it is not on the
+    /// shared provider trait and needs the concrete client.
+    pub(crate) fn modrinth_catalog(&self) -> CoreResult<&ModrinthProvider> {
         if let Some(provider) = self.mods.get() {
             return Ok(provider);
         }

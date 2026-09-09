@@ -34,11 +34,14 @@
 //! typed and nothing a provider named reaches a path, which is what keeps the
 //! filename a fixed length no matter how long a slug or a search query is.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use ephervex_download::{
     CacheLayout, DownloadManager, MetadataCache, MetadataCacheError, MetadataKey,
-    OperationReporter, Url,
+    OperationReporter, Url, build_single_origin_client, check_transport,
 };
-use ephervex_model::ModProvider;
+use ephervex_model::{Hash, ModProvider};
+use reqwest::Client;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
@@ -46,7 +49,7 @@ use super::PROJECT_TYPE;
 use super::cache_key::{CompatibilityFilter, ModrinthRequest};
 use super::dto::{RawProject, RawSearch, RawVersion};
 use crate::error::{ModPlatformError, ModPlatformResult};
-use crate::model::{InstanceTarget, MAX_SEARCH_LIMIT, ModSearchQuery};
+use crate::model::{InstanceTarget, MAX_SEARCH_LIMIT, ModSearchQuery, RecognizedFile};
 
 /// The production API root.
 pub const MODRINTH_API_BASE: &str = "https://api.modrinth.com/v2";
@@ -57,6 +60,10 @@ pub(super) struct ModrinthApi {
     manager: DownloadManager,
     cache: MetadataCache,
     base: Url,
+    /// A client of this API's own origin, for the one request that is not a
+    /// GET. Everything else goes through the download manager, which fetches a
+    /// URL into the metadata cache and has no way to send a body.
+    client: Client,
 }
 
 impl ModrinthApi {
@@ -78,11 +85,94 @@ impl ModrinthApi {
                 detail: error.to_string(),
             }
         })?;
+        check_transport(&base, manager.config().http.allow_plaintext_http).map_err(|error| {
+            ModPlatformError::ResponseInvalid {
+                provider: ModProvider::Modrinth,
+                detail: error.to_string(),
+            }
+        })?;
+        let client =
+            build_single_origin_client(&manager.config().http, &base).map_err(|error| {
+                ModPlatformError::ResponseInvalid {
+                    provider: ModProvider::Modrinth,
+                    detail: error.to_string(),
+                }
+            })?;
         Ok(Self {
             manager,
             cache: MetadataCache::new(layout),
             base,
+            client,
         })
+    }
+
+    /// Which catalog releases these files are, by digest.
+    ///
+    /// `POST /v2/version_files`, which answers a whole batch in one request.
+    /// Modrinth indexes its files by SHA-1, so unlike CurseForge this needs no
+    /// separate lookup key and no second check: the digest asked with is the
+    /// digest matched on, and the answer is keyed by it.
+    ///
+    /// Not cached. The answer is about specific bytes the launcher already has,
+    /// it is asked once per server, and a stale copy would name a release for a
+    /// file that is no longer there.
+    pub(super) async fn version_files(
+        &self,
+        digests: &[Hash],
+        cancel: &CancellationToken,
+    ) -> ModPlatformResult<BTreeMap<String, RecognizedFile>> {
+        if digests.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let url = self.endpoint(&["version_files"], &[])?;
+        let hashes: Vec<&str> = digests.iter().map(Hash::digest).collect();
+        let request = self
+            .client
+            .post(url.clone())
+            .json(&serde_json::json!({ "hashes": hashes, "algorithm": "sha1" }));
+
+        let response = tokio::select! {
+            () = cancel.cancelled() => return Err(ModPlatformError::Canceled),
+            response = request.send() => response,
+        }
+        .map_err(|error| ModPlatformError::RequestFailed {
+            provider: ModProvider::Modrinth,
+            detail: error.to_string(),
+        })?;
+        if !response.status().is_success() {
+            return Err(ModPlatformError::RequestFailed {
+                provider: ModProvider::Modrinth,
+                detail: format!("the catalog answered {}", response.status().as_u16()),
+            });
+        }
+        let matched: BTreeMap<String, RawVersion> =
+            response
+                .json()
+                .await
+                .map_err(|error| ModPlatformError::ResponseInvalid {
+                    provider: ModProvider::Modrinth,
+                    detail: error.to_string(),
+                })?;
+
+        let asked: BTreeSet<&str> = hashes.iter().copied().collect();
+        let recognized = matched
+            .into_iter()
+            // The map is keyed by the digest that was asked with, so an answer
+            // under any other key is about a file nobody asked about.
+            .filter(|(digest, _)| asked.contains(digest.as_str()))
+            .map(|(digest, version)| {
+                (
+                    digest,
+                    RecognizedFile {
+                        provider: ModProvider::Modrinth,
+                        project_id: version.project_id,
+                        version_id: version.id,
+                        file_id: None,
+                    },
+                )
+            })
+            .collect();
+        Ok(recognized)
     }
 
     /// One page of search results.

@@ -4993,8 +4993,6 @@ fn print_server(record: &ServerRecord, json: bool) {
         println!("root:      {}", record.root.display());
         println!("installed: {}", record.installation.is_installed());
         if record.source.kind == ephervex_model::ImportSourceKind::ServerPack {
-            // The one fact `ephervex server mods` cannot answer: these files
-            // came from an archive, so nothing about them can be looked up.
             match record.source.reference.as_deref() {
                 Some(archive) => println!("content:   server files from {archive}"),
                 None => println!("content:   server files from an archive"),

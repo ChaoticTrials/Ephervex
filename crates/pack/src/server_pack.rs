@@ -33,7 +33,8 @@ use crate::archive::{EntryDecision, ExtractionLimits, ExtractionReport, PackArch
 use crate::error::{PackError, PackResult};
 use crate::managed::MODS_DIR;
 use crate::recipe::{
-    PackFileRecipe, PackRecipe, ProviderRecipeMetadata, RECIPE_VERSION, SideRequirement,
+    PackFileRecipe, PackRecipe, ProviderFileIdentity, ProviderRecipeMetadata, RECIPE_VERSION,
+    SideRequirement,
 };
 
 /// The loader installation's own library tree, which is a link into the shared
@@ -245,6 +246,10 @@ pub struct ServerPackMod {
     /// these are the only identity the file has until a catalog recognizes it.
     pub hashes: Vec<Hash>,
     pub size: Option<u64>,
+    /// The catalog release this jar turned out to be, where something
+    /// recognized it. `None` is a real answer: a file nothing knows about is
+    /// recorded as one rather than given an invented identity.
+    pub identity: Option<ProviderFileIdentity>,
 }
 
 /// Gives each installed jar the digest it needs to be recorded at all.
@@ -273,6 +278,7 @@ pub async fn measure_installed_mods(
             logical_path: logical_path.clone(),
             hashes: vec![hash],
             size,
+            identity: None,
         });
     }
     debug!(mods = measured.len(), "measured a server archive's mods");
@@ -319,7 +325,7 @@ pub fn server_pack_recipe(
                 server: SideRequirement::Required,
                 selected: Some(true),
                 origin: ModOrigin::PackDeclared,
-                identity: None,
+                identity: entry.identity.clone(),
             })
             .collect(),
         override_layers: Vec::new(),
@@ -651,6 +657,57 @@ mod tests {
             installed.mods,
             vec![PathBuf::from("mods/one.jar"), PathBuf::from("mods/two.jar")]
         );
+    }
+
+    /// An identity established for a jar has to survive into the recipe, which
+    /// is the only place anything later reads it from. Establishing one and
+    /// then writing `None` looks entirely successful in the logs.
+    #[test]
+    fn an_established_identity_reaches_the_recipe() {
+        let identified = ServerPackMod {
+            logical_path: PathBuf::from("mods/jei.jar"),
+            hashes: vec![
+                Hash::new(ephervex_model::HashAlgorithm::Sha1, &"a".repeat(40)).expect("sha1"),
+            ],
+            size: Some(3),
+            identity: Some(ProviderFileIdentity {
+                provider: Some(ephervex_model::ModProvider::CurseForge),
+                project_id: Some("238222".to_owned()),
+                version_id: Some("4712354".to_owned()),
+                file_id: Some("4712354".to_owned()),
+            }),
+        };
+        let unidentified = ServerPackMod {
+            logical_path: PathBuf::from("mods/mystery.jar"),
+            hashes: vec![
+                Hash::new(ephervex_model::HashAlgorithm::Sha1, &"b".repeat(40)).expect("sha1"),
+            ],
+            size: Some(3),
+            identity: None,
+        };
+
+        let recipe = server_pack_recipe(
+            "Repro Server",
+            "1.21.1",
+            LoaderSelection::vanilla(),
+            None,
+            &[identified.clone(), unidentified],
+        );
+
+        assert_eq!(recipe.files[0].identity, identified.identity);
+        assert_eq!(
+            recipe.files[1].identity, None,
+            "a jar nothing recognized is recorded as such, not given one"
+        );
+
+        // And it has to survive the step every mod view actually reads, which
+        // is where a provider stops being "No provider" on screen.
+        let recorded = recipe.recorded_mods_for(crate::recipe::PackSide::Server);
+        assert_eq!(
+            recorded[0].identity.provider(),
+            Some(ephervex_model::ModProvider::CurseForge)
+        );
+        assert_eq!(recorded[1].identity.provider(), None);
     }
 
     #[tokio::test]

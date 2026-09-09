@@ -213,6 +213,7 @@ impl App {
             }
             None => self.linked_server_recipe(&mut record, &options.unknown_server_files)?,
         };
+        let client_source = self.linked_client_source(&record);
         let staging = staging_root(&record.root);
         if staging.exists() {
             return Err(storage_io(
@@ -264,6 +265,7 @@ impl App {
                 launch: record.installation.launch(),
                 game_dir: &target,
                 server_source: &server_source,
+                client_source: client_source.as_deref(),
                 reporter: options.reporter.as_ref(),
                 cancel,
             })
@@ -324,6 +326,7 @@ impl App {
             }
             None => self.linked_server_recipe(&mut record, &options.unknown_server_files)?,
         };
+        let client_source = self.linked_client_source(&record);
         let server_source = ephervex_storage::metadata::source_dir(&record.root);
         let owns_source = linked_recipe.is_some() || options.content.archive().is_some();
         if owns_source {
@@ -362,6 +365,7 @@ impl App {
                 launch: record.installation.launch(),
                 game_dir: &target,
                 server_source: &server_source,
+                client_source: client_source.as_deref(),
                 reporter: options.reporter.as_ref(),
                 cancel,
             })
@@ -385,6 +389,16 @@ impl App {
             .update_server_committed(&mut record)?;
         cleanup.disarm();
         Ok(committed)
+    }
+
+    /// Where a linked server's client keeps its retained source.
+    ///
+    /// `None` for a standalone server, and for a client that has gone missing:
+    /// both mean there is no local record to recognize an archive's jars
+    /// against, which costs identification and nothing else.
+    fn linked_client_source(&self, record: &ServerRecord) -> Option<PathBuf> {
+        let client = self.client(record.linked_client_id?).ok()?;
+        Some(ephervex_storage::metadata::source_dir(&client.root))
     }
 
     fn linked_server_recipe(

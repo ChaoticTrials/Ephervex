@@ -88,6 +88,25 @@ pub struct ModFile {
     pub hashes: Vec<Hash>,
 }
 
+/// A catalog release a file on disk turned out to be.
+///
+/// The answer to "what is this jar?" for a file that arrived without any
+/// identity of its own -- out of a published server archive, most of all. It
+/// carries only what identifies the release, because that is all a recipe entry
+/// needs: an address can always be resolved from it later, and one recorded now
+/// would be a second copy of something the catalog already owns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecognizedFile {
+    pub provider: ModProvider,
+    pub project_id: String,
+    /// The release, as this provider names it. Modrinth's version id, or
+    /// CurseForge's file id.
+    pub version_id: String,
+    /// CurseForge's separate file id, where the provider has one distinct from
+    /// the version. Modrinth does not.
+    pub file_id: Option<String>,
+}
+
 /// How stable a release claims to be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ReleaseChannel {

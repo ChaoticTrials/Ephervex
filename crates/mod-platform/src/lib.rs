@@ -46,6 +46,7 @@
 
 pub mod curseforge;
 pub mod error;
+pub mod fingerprint;
 pub mod model;
 pub mod modrinth;
 pub mod provider;
@@ -61,10 +62,12 @@ pub use curseforge::{
     CurseForgeProvider, MINECRAFT_GAME_ID, credential_refusal,
 };
 pub use error::{ModPlatformError, ModPlatformResult};
+pub use fingerprint::curseforge_fingerprint;
 pub use model::{
     AnnotatedVersion, Compatibility, DEFAULT_SEARCH_LIMIT, DependencyKind, IncompatibilityReason,
     InstanceTarget, MAX_SEARCH_LIMIT, ModDependency, ModFile, ModProject, ModProjectDetails,
-    ModSearchHit, ModSearchQuery, ModSearchResults, ModVersionInfo, ReleaseChannel, SideSupport,
+    ModSearchHit, ModSearchQuery, ModSearchResults, ModVersionInfo, RecognizedFile, ReleaseChannel,
+    SideSupport,
 };
 pub use modrinth::{MODRINTH_API_BASE, ModrinthProvider};
 pub use provider::{ModProviderApi, loader_name_for};

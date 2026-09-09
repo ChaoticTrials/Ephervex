@@ -63,6 +63,28 @@ recorded: the bytes came from an archive rather than a catalog, and an entry
 naming no address is the honest statement that this content cannot be
 re-fetched.
 
+Those jars are then identified by digest, cheapest and most certain answer
+first: what the launcher already recorded, then CurseForge, then Modrinth, then
+nothing.
+
+The first step reads the linked client's retained recipe, which pairs a digest
+with a catalog identity for every file it installed. That is a lookup table and
+not a source of content -- what the server contains was decided by the archive
+and is already on disk before this runs -- so it does not weaken the rule above.
+It is also the only step that cannot be wrong, because the digest it matches on
+is one this launcher computed and wrote itself.
+
+CurseForge is asked by its own file fingerprint, which is what its catalog is
+indexed by; a fingerprint is a lookup key with no collision guarantee, so a
+match is believed only when the release it names publishes the same SHA-1 the
+file on disk has. Modrinth is asked by SHA-1 directly, in one batch, with no
+credential.
+
+None of this can fail the installation. A catalog that cannot be reached, a key
+that is not configured, and a file nothing recognizes all leave an entry with a
+digest and no provider, which is what `ModIdentity::Unknown` already means. An
+identity is never overwritten by a later step.
+
 ## Consequences
 
 - A CurseForge-derived server can be exactly what its author published, rather
@@ -74,6 +96,10 @@ re-fetched.
   of failing to deserialize it.
 - The archive is not retained. Installing the same server again means naming
   the file again, which is the same bargain import already makes with a pack.
-- A jar the archive installed has no catalog identity until something
-  recognizes it. It is recorded with its digest and no provider, which is what
-  `ModIdentity::Unknown` already means.
+- A jar the archive installed carries whatever identity could be established
+  for it, and none where nothing recognized it. What a server's mod list can
+  say about a file therefore depends on which catalogs were reachable when it
+  was built, and a server built offline is not wrong -- only less complete.
+- Identification reads the bytes of every still-unknown jar a second time to
+  compute a CurseForge fingerprint. The files a client recipe already answered
+  for are not read again, which is what keeps that cost off the common case.

@@ -248,6 +248,28 @@ pub(super) struct CurseForgeFileDocument {
     pub(super) hashes: Vec<CurseForgeFileHash>,
 }
 
+/// What `POST /v1/fingerprints` answers with.
+///
+/// Only the exact matches are read. The response also reports which
+/// fingerprints matched and which did not, and carries each project's latest
+/// files: none of that identifies the file that was asked about, which is the
+/// only question this endpoint is used for.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct CurseForgeFingerprintMatches {
+    #[serde(default)]
+    pub(super) exact_matches: Vec<CurseForgeFingerprintMatch>,
+}
+
+/// One file CurseForge recognized, and the release it belongs to.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct CurseForgeFingerprintMatch {
+    /// The project the matched file belongs to.
+    pub(super) id: u32,
+    pub(super) file: CurseForgeFileDocument,
+}
+
 /// One relation this file declares to another project.
 ///
 /// CurseForge states relations project to project and never file to file, so

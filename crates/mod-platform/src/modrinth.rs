@@ -24,9 +24,11 @@ mod cache_key;
 mod dto;
 mod mapping;
 
+use std::collections::BTreeMap;
+
 use async_trait::async_trait;
 use ephervex_download::{CacheLayout, DownloadManager, OperationReporter};
-use ephervex_model::{LoaderKind, ModProvider};
+use ephervex_model::{Hash, LoaderKind, ModProvider};
 use futures_util::StreamExt as _;
 use tokio_util::sync::CancellationToken;
 use tracing::{instrument, warn};
@@ -34,7 +36,7 @@ use tracing::{instrument, warn};
 use crate::error::{ModPlatformError, ModPlatformResult};
 use crate::model::{
     Compatibility, IncompatibilityReason, InstanceTarget, ModProject, ModSearchHit, ModSearchQuery,
-    ModSearchResults, ModVersionInfo,
+    ModSearchResults, ModVersionInfo, RecognizedFile,
 };
 use crate::provider::ModProviderApi;
 use crate::resolve::newest_compatible;
@@ -89,6 +91,19 @@ impl ModrinthProvider {
         Ok(Self {
             api: ModrinthApi::new(manager, layout, base)?,
         })
+    }
+
+    /// Which Modrinth releases these files on disk are.
+    ///
+    /// Answers only about digests it was asked with, and says nothing about the
+    /// ones it does not recognize: a file Modrinth has never seen is simply
+    /// absent from the result, which is not a failure.
+    pub async fn recognize(
+        &self,
+        digests: &[Hash],
+        cancel: &CancellationToken,
+    ) -> ModPlatformResult<BTreeMap<String, RecognizedFile>> {
+        self.api.version_files(digests, cancel).await
     }
 }
 

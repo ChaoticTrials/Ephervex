@@ -101,7 +101,7 @@ pub use mutation::{
 };
 pub use running::{ProcessMonitor, ProcessUsage, RunningProcess};
 pub use server::{CaptureSnapshot, ServerCreateOptions, ServerPersistenceHealth, ServerStatus};
-pub use server_pack::{ServerContentSource, ServerPackOutcome};
+pub use server_pack::{IdentificationOutcome, ServerContentSource, ServerPackOutcome};
 
 /// Cancellation, re-exported because the services take one.
 ///

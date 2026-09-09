@@ -20,15 +20,20 @@
 
 use std::path::{Path, PathBuf};
 
+use std::collections::BTreeMap;
+
 use ephervex_download::OperationReporter;
-use ephervex_model::{ImportSourceKind, LoaderSelection, ServerLaunch};
+use ephervex_mod_platform::{ModPlatformError, RecognizedFile, curseforge_fingerprint};
+use ephervex_model::{
+    Hash, HashAlgorithm, ImportSourceKind, LoaderSelection, ModProvider, ServerLaunch,
+};
 use ephervex_pack::{
-    ExtractionLimits, InstalledServerPack, PackError, ServerPackInstall, SourceStore,
-    install_server_pack, measure_installed_mods, server_pack_recipe,
+    ExtractionLimits, InstalledServerPack, PackError, ProviderFileIdentity, ServerPackInstall,
+    ServerPackMod, SourceStore, install_server_pack, measure_installed_mods, server_pack_recipe,
 };
 use ephervex_storage::ImportSource;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, instrument};
+use tracing::{debug, info, instrument};
 
 use crate::CoreResult;
 use crate::app::App;
@@ -79,6 +84,9 @@ pub(crate) struct ServerArchiveInstall<'a> {
     pub game_dir: &'a Path,
     /// The server's own `.launcher/source/`, where its recipe is written.
     pub server_source: &'a Path,
+    /// The linked client's retained source, when this server has one. Read only
+    /// to recognize the archive's jars by digest, never for content.
+    pub client_source: Option<&'a Path>,
     pub reporter: Option<&'a OperationReporter>,
     pub cancel: &'a CancellationToken,
 }
@@ -94,6 +102,8 @@ pub struct ServerPackOutcome {
     /// Entries left out because their destination belongs to the launcher.
     pub declined: Vec<PathBuf>,
     pub mods: usize,
+    /// What the catalogs made of those mods.
+    pub identification: IdentificationOutcome,
 }
 
 impl App {
@@ -115,6 +125,7 @@ impl App {
             launch,
             game_dir,
             server_source,
+            client_source,
             reporter,
             cancel,
         } = request;
@@ -144,7 +155,10 @@ impl App {
         if cancel.is_cancelled() {
             return Err(PackError::Canceled.into());
         }
-        let mods = measure_installed_mods(game_dir, &installed.mods).await?;
+        let mut mods = measure_installed_mods(game_dir, &installed.mods).await?;
+        let identification = self
+            .identify_installed_mods(&mut mods, game_dir, client_source, cancel)
+            .await;
         let recipe = server_pack_recipe(
             name,
             minecraft_version,
@@ -167,11 +181,241 @@ impl App {
             bytes: installed.report.bytes,
             declined: installed.declined,
             mods: mods.len(),
+            identification,
         })
     }
 }
 
-/// The record's own note of where its content came from.
+/// Where an installed jar's catalog identity came from, if anywhere.
+///
+/// Reported so a frontend can say why a mod has no provider without guessing,
+/// and so a run against an unreachable catalog is distinguishable from one that
+/// simply found nothing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IdentificationOutcome {
+    /// Matched against a recipe the launcher already had. No request made.
+    pub from_local_records: usize,
+    pub from_curseforge: usize,
+    pub from_modrinth: usize,
+    /// Recognized by nothing. Recorded with a digest and no provider.
+    pub unidentified: usize,
+    /// A catalog that could not be asked at all: no credential, or it did not
+    /// answer. Identification degrades; the server is complete either way.
+    pub curseforge_unavailable: bool,
+    pub modrinth_unavailable: bool,
+}
+
+impl App {
+    /// Gives each installed jar the best catalog identity that can be
+    /// established for it.
+    ///
+    /// Cheapest and most certain first. What the launcher already recorded
+    /// costs no request and cannot be wrong about a digest it wrote itself;
+    /// only what is left over is worth asking a catalog about.
+    ///
+    /// No step here can fail the installation. A server built from an archive
+    /// is complete before this runs, and a mod with no provider is a mod with
+    /// no provider -- which the model has always been able to say.
+    #[instrument(skip_all, fields(mods = mods.len()))]
+    pub(crate) async fn identify_installed_mods(
+        &self,
+        mods: &mut [ServerPackMod],
+        game_dir: &Path,
+        client_source: Option<&Path>,
+        cancel: &CancellationToken,
+    ) -> IdentificationOutcome {
+        let mut outcome = IdentificationOutcome::default();
+        if mods.is_empty() {
+            return outcome;
+        }
+
+        outcome.from_local_records = apply_local_records(mods, client_source);
+        if !cancel.is_cancelled() {
+            match self.recognize_with_curseforge(mods, game_dir, cancel).await {
+                Ok(matched) => outcome.from_curseforge = matched,
+                Err(error) => {
+                    debug!(%error, "curseforge did not identify this server's mods");
+                    outcome.curseforge_unavailable = true;
+                }
+            }
+        }
+        if !cancel.is_cancelled() {
+            match self.recognize_with_modrinth(mods, cancel).await {
+                Ok(matched) => outcome.from_modrinth = matched,
+                Err(error) => {
+                    debug!(%error, "modrinth did not identify this server's mods");
+                    outcome.modrinth_unavailable = true;
+                }
+            }
+        }
+
+        outcome.unidentified = mods.iter().filter(|entry| entry.identity.is_none()).count();
+        info!(
+            local = outcome.from_local_records,
+            curseforge = outcome.from_curseforge,
+            modrinth = outcome.from_modrinth,
+            unidentified = outcome.unidentified,
+            "identified a server archive's mods"
+        );
+        outcome
+    }
+
+    /// Asks CurseForge which of the still-unknown files it recognizes.
+    ///
+    /// CurseForge indexes by a fingerprint of its own rather than by a digest,
+    /// so each candidate is read once more to compute one. Only files nothing
+    /// has identified yet are read, and each is dropped before the next, so the
+    /// cost is one jar in memory rather than a whole `mods/` directory.
+    async fn recognize_with_curseforge(
+        &self,
+        mods: &mut [ServerPackMod],
+        game_dir: &Path,
+        cancel: &CancellationToken,
+    ) -> CoreResult<usize> {
+        let api = self.curseforge_api()?;
+        // Asked before anything is read: with no key the request could only be
+        // refused, and fingerprinting a hundred jars for it would be wasted.
+        if !api.has_credential()? {
+            return Err(ModPlatformError::CredentialMissing {
+                provider: ModProvider::CurseForge,
+            }
+            .into());
+        }
+
+        let mut wanted: Vec<(u32, Hash)> = Vec::new();
+        for entry in mods.iter().filter(|entry| entry.identity.is_none()) {
+            if cancel.is_cancelled() {
+                return Err(PackError::Canceled.into());
+            }
+            let Some(digest) = sha1_of(entry) else {
+                continue;
+            };
+            let path = game_dir.join(&entry.logical_path);
+            // A jar that cannot be read is one this pass cannot identify. It is
+            // still installed, and the installation already succeeded.
+            let Ok(bytes) = tokio::fs::read(&path).await else {
+                continue;
+            };
+            wanted.push((curseforge_fingerprint(&bytes), digest.clone()));
+        }
+        if wanted.is_empty() {
+            return Ok(0);
+        }
+
+        let operation = api.begin_operation()?;
+        let recognized = operation.fingerprints(&wanted, cancel).await?;
+        Ok(apply_recognized(mods, &recognized))
+    }
+
+    /// Asks Modrinth about whatever is still unidentified, by digest.
+    ///
+    /// One request for the whole batch, and no credential: Modrinth indexes its
+    /// files by SHA-1, which the launcher already computed.
+    async fn recognize_with_modrinth(
+        &self,
+        mods: &mut [ServerPackMod],
+        cancel: &CancellationToken,
+    ) -> CoreResult<usize> {
+        let digests: Vec<Hash> = mods
+            .iter()
+            .filter(|entry| entry.identity.is_none())
+            .filter_map(sha1_of)
+            .collect();
+        if digests.is_empty() {
+            return Ok(0);
+        }
+        let recognized = self.modrinth_catalog()?.recognize(&digests, cancel).await?;
+        Ok(apply_recognized(mods, &recognized))
+    }
+}
+
+/// The SHA-1 this entry was measured with, which is the key both catalogs are
+/// matched on.
+fn sha1_of(entry: &ServerPackMod) -> Option<Hash> {
+    entry
+        .hashes
+        .iter()
+        .find(|hash| hash.algorithm == HashAlgorithm::Sha1)
+        .cloned()
+}
+
+/// Fills in identities from a recipe the launcher already holds.
+///
+/// A linked server's client keeps one, and it records a digest and a catalog
+/// identity for every file it installed. A server archive is largely the same
+/// files, so this answers most of them offline, with no credential and no
+/// request -- and it is the only step that cannot be wrong, because the digest
+/// it matches on is one this launcher computed and wrote itself.
+///
+/// Reading the client's recipe here is a lookup, not a source of content: what
+/// the server contains was decided by the archive and is already on disk
+/// (ADR 0024).
+fn apply_local_records(mods: &mut [ServerPackMod], client_source: Option<&Path>) -> usize {
+    let Some(source) = client_source else {
+        return 0;
+    };
+    let store = SourceStore::new(source);
+    if !store.has_recipe() {
+        return 0;
+    }
+    let Ok(recipe) = store.read_recipe() else {
+        return 0;
+    };
+
+    let mut known: BTreeMap<String, ProviderFileIdentity> = BTreeMap::new();
+    for file in &recipe.files {
+        let Some(identity) = file
+            .identity
+            .as_ref()
+            .filter(|identity| !identity.is_empty())
+        else {
+            continue;
+        };
+        for hash in &file.hashes {
+            if hash.algorithm == HashAlgorithm::Sha1 {
+                known.insert(hash.digest().to_owned(), identity.clone());
+            }
+        }
+    }
+
+    let mut matched = 0;
+    for entry in mods.iter_mut().filter(|entry| entry.identity.is_none()) {
+        let Some(digest) = sha1_of(entry) else {
+            continue;
+        };
+        if let Some(identity) = known.get(digest.digest()) {
+            entry.identity = Some(identity.clone());
+            matched += 1;
+        }
+    }
+    matched
+}
+
+/// Writes a catalog's answers onto the entries they are about.
+fn apply_recognized(
+    mods: &mut [ServerPackMod],
+    recognized: &BTreeMap<String, RecognizedFile>,
+) -> usize {
+    let mut matched = 0;
+    for entry in mods.iter_mut().filter(|entry| entry.identity.is_none()) {
+        let Some(digest) = sha1_of(entry) else {
+            continue;
+        };
+        let Some(found) = recognized.get(digest.digest()) else {
+            continue;
+        };
+        entry.identity = Some(ProviderFileIdentity {
+            provider: Some(found.provider),
+            project_id: Some(found.project_id.clone()),
+            version_id: Some(found.version_id.clone()),
+            file_id: found.file_id.clone(),
+        });
+        matched += 1;
+    }
+    matched
+}
+
+/// The record's own note of where its content came from./// The record's own note of where its content came from.
 ///
 /// The archive's file name is display evidence, not an address: nothing
 /// re-reads it, and the file is usually gone by the time anyone looks.
@@ -246,6 +490,7 @@ mod tests {
                 launch: None,
                 game_dir: &game_dir,
                 server_source: &server_source,
+                client_source: None,
                 reporter: None,
                 cancel: &CancellationToken::new(),
             })
@@ -298,6 +543,7 @@ mod tests {
             launch: Some(&launch),
             game_dir: &game_dir,
             server_source: &directory.path().join("source"),
+            client_source: None,
             reporter: None,
             cancel: &CancellationToken::new(),
         })
@@ -308,6 +554,127 @@ mod tests {
             std::fs::read(game_dir.join("server.jar")).expect("read"),
             b"installed",
             "a server launches the loader Ephervex installed, never the archive's copy"
+        );
+    }
+
+    fn measured(path: &str, digest: &str) -> ServerPackMod {
+        ServerPackMod {
+            logical_path: PathBuf::from(path),
+            hashes: vec![Hash::new(HashAlgorithm::Sha1, digest).expect("sha1")],
+            size: Some(3),
+            identity: None,
+        }
+    }
+
+    fn curseforge_identity(project: &str, file: &str) -> ProviderFileIdentity {
+        ProviderFileIdentity {
+            provider: Some(ModProvider::CurseForge),
+            project_id: Some(project.to_owned()),
+            version_id: Some(file.to_owned()),
+            file_id: Some(file.to_owned()),
+        }
+    }
+
+    /// The client's own recipe answers most of a server archive without any
+    /// request at all: the two share the same jars, and the launcher wrote
+    /// those digests itself.
+    #[test]
+    fn a_client_recipe_identifies_the_jars_it_shares_with_the_archive() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let source = directory.path().join("source");
+        let store = SourceStore::new(&source);
+        let mut recipe =
+            PackRecipe::for_manual_instance("Repro", "1.21.1", LoaderSelection::vanilla());
+        recipe.files.push(ephervex_pack::PackFileRecipe {
+            logical_path: PathBuf::from("mods/known.jar"),
+            hashes: vec![Hash::new(HashAlgorithm::Sha1, &"a".repeat(40)).expect("sha1")],
+            downloads: Vec::new(),
+            size: None,
+            client: SideRequirement::Required,
+            server: SideRequirement::Required,
+            selected: None,
+            origin: ephervex_pack::ModOrigin::PackDeclared,
+            identity: Some(curseforge_identity("238222", "4712354")),
+        });
+        store.write_recipe(&recipe).expect("write");
+
+        let mut mods = vec![
+            measured("mods/known.jar", &"a".repeat(40)),
+            measured("mods/server-only.jar", &"b".repeat(40)),
+        ];
+
+        let matched = apply_local_records(&mut mods, Some(&source));
+
+        assert_eq!(matched, 1);
+        assert_eq!(
+            mods[0].identity,
+            Some(curseforge_identity("238222", "4712354"))
+        );
+        assert_eq!(
+            mods[1].identity, None,
+            "a jar the client never had stays for a catalog to answer"
+        );
+    }
+
+    /// A standalone server has no client, and an entry with no identity is a
+    /// real answer rather than a failure.
+    #[test]
+    fn no_client_record_leaves_every_jar_for_the_catalogs() {
+        let mut mods = vec![measured("mods/one.jar", &"c".repeat(40))];
+
+        assert_eq!(apply_local_records(&mut mods, None), 0);
+        assert_eq!(mods[0].identity, None);
+    }
+
+    /// An entry the launcher already answered for is never asked about again,
+    /// so a later catalog cannot overwrite a more certain answer.
+    #[test]
+    fn a_catalog_never_replaces_an_identity_already_established() {
+        let mut mods = vec![measured("mods/one.jar", &"d".repeat(40))];
+        mods[0].identity = Some(curseforge_identity("1", "2"));
+
+        let recognized = BTreeMap::from([(
+            "d".repeat(40),
+            RecognizedFile {
+                provider: ModProvider::Modrinth,
+                project_id: "wrong".to_owned(),
+                version_id: "wrong".to_owned(),
+                file_id: None,
+            },
+        )]);
+
+        assert_eq!(apply_recognized(&mut mods, &recognized), 0);
+        assert_eq!(mods[0].identity, Some(curseforge_identity("1", "2")));
+    }
+
+    /// A catalog's answer is written onto the entry whose digest it is about,
+    /// and onto no other.
+    #[test]
+    fn a_recognized_digest_identifies_only_its_own_entry() {
+        let mut mods = vec![
+            measured("mods/one.jar", &"e".repeat(40)),
+            measured("mods/two.jar", &"f".repeat(40)),
+        ];
+        let recognized = BTreeMap::from([(
+            "f".repeat(40),
+            RecognizedFile {
+                provider: ModProvider::Modrinth,
+                project_id: "AABBCCDD".to_owned(),
+                version_id: "vvvv".to_owned(),
+                file_id: None,
+            },
+        )]);
+
+        assert_eq!(apply_recognized(&mut mods, &recognized), 1);
+        assert_eq!(mods[0].identity, None);
+        assert_eq!(
+            mods[1].identity,
+            Some(ProviderFileIdentity {
+                provider: Some(ModProvider::Modrinth),
+                project_id: Some("AABBCCDD".to_owned()),
+                version_id: Some("vvvv".to_owned()),
+                file_id: None,
+            })
         );
     }
 

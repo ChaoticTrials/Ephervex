@@ -17,9 +17,11 @@ use ephervex_mod_platform::{
     ConfiguredApiKey, CurseForgeApi, CurseForgeCredentialSource, MINECRAFT_GAME_ID,
     ModPlatformError,
 };
-use ephervex_model::{CurseForgeFileId, CurseForgeProjectId, HashAlgorithm, SecretString};
+use ephervex_model::{
+    CurseForgeFileId, CurseForgeProjectId, Hash, HashAlgorithm, ModProvider, SecretString,
+};
 use tokio_util::sync::CancellationToken;
-use wiremock::matchers::{header, method, path};
+use wiremock::matchers::{body_json, header, method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 /// Obviously not a credential, and the only one this file ever uses.
@@ -448,4 +450,91 @@ fn received_any_key(requests: &[Request]) -> Vec<&Request> {
         .iter()
         .filter(|request| request.headers.contains_key(API_KEY_HEADER))
         .collect()
+}
+
+/// The fingerprint endpoint is what identifies a jar that arrived with no id
+/// of its own, which is every file in a published server archive.
+#[tokio::test]
+async fn a_fingerprint_lookup_identifies_a_file_by_its_bytes() {
+    let digest = "a".repeat(40);
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/fingerprints"))
+        .and(header(API_KEY_HEADER, FAKE_KEY))
+        .and(body_json(serde_json::json!({ "fingerprints": [2_038_518_775_u32] })))
+        .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+            r#"{{"data":{{"isCacheBuilt":true,"exactMatches":[{{"id":238222,"file":{{"id":4712354,"modId":238222,"isAvailable":true,"fileName":"jei.jar","hashes":[{{"value":"{digest}","algo":1}}]}}}}],"exactFingerprints":[2038518775]}}}}"#
+        )))
+        .mount(&server)
+        .await;
+
+    let api = configured(&server);
+    let operation = api.begin_operation().expect("an operation begins");
+    let wanted = vec![(
+        2_038_518_775_u32,
+        Hash::new(HashAlgorithm::Sha1, &digest).expect("sha1"),
+    )];
+
+    let recognized = operation
+        .fingerprints(&wanted, &CancellationToken::new())
+        .await
+        .expect("the lookup answers");
+
+    let found = recognized.get(&digest).expect("the file is recognized");
+    assert_eq!(found.provider, ModProvider::CurseForge);
+    assert_eq!(found.project_id, "238222");
+    assert_eq!(found.file_id.as_deref(), Some("4712354"));
+}
+
+/// A fingerprint is a lookup key, not a digest. An answer whose own SHA-1 is
+/// not the file's is a collision or the wrong file, and identifying the jar
+/// from it would put a made-up release in the server's recipe.
+#[tokio::test]
+async fn a_match_whose_digest_disagrees_is_not_believed() {
+    let asked = "a".repeat(40);
+    let answered = "b".repeat(40);
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/fingerprints"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+            r#"{{"data":{{"exactMatches":[{{"id":238222,"file":{{"id":4712354,"modId":238222,"isAvailable":true,"fileName":"other.jar","hashes":[{{"value":"{answered}","algo":1}}]}}}}]}}}}"#
+        )))
+        .mount(&server)
+        .await;
+
+    let api = configured(&server);
+    let operation = api.begin_operation().expect("an operation begins");
+    let wanted = vec![(1_u32, Hash::new(HashAlgorithm::Sha1, &asked).expect("sha1"))];
+
+    let recognized = operation
+        .fingerprints(&wanted, &CancellationToken::new())
+        .await
+        .expect("the lookup answers");
+
+    assert!(
+        recognized.is_empty(),
+        "an answer about other bytes identifies nothing"
+    );
+}
+
+/// Nothing to ask about is not a request.
+#[tokio::test]
+async fn an_empty_fingerprint_batch_contacts_nobody() {
+    let server = MockServer::start().await;
+    let api = configured(&server);
+    let operation = api.begin_operation().expect("an operation begins");
+
+    let recognized = operation
+        .fingerprints(&[], &CancellationToken::new())
+        .await
+        .expect("no request is made");
+
+    assert!(recognized.is_empty());
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty()
+    );
 }

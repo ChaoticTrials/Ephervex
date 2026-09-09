@@ -193,7 +193,11 @@ shared store, and extraction containment is lexical, so an entry there would be
 written into storage every instance shares. A single wrapping directory is
 stripped only when the archive's shape is unambiguous. The server keeps an
 ordinary recipe listing every installed jar with a digest the launcher
-computed and no download address.
+computed and no download address. Those jars are then identified by digest --
+the linked client's retained recipe first, which costs no request, then
+CurseForge by its own file fingerprint, then Modrinth by SHA-1 -- and a file
+nothing recognizes keeps its digest and no provider. No catalog failure can
+fail the installation.
 
 A linked server reads the client's retained recipe and retained override
 layers. It never scans or copies the mutable client game directory, so manually

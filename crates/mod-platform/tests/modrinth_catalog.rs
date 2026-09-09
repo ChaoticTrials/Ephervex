@@ -18,7 +18,7 @@ use ephervex_mod_platform::{
     InstallSelection, InstanceTarget, ModProviderApi, ModSearchQuery, ModrinthProvider,
     ResolveRequest, resolve,
 };
-use ephervex_model::LoaderKind;
+use ephervex_model::{Hash, HashAlgorithm, LoaderKind, ModProvider};
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{method, path, query_param};
@@ -590,4 +590,105 @@ async fn an_unreachable_provider_is_reported_as_such_rather_than_as_an_empty_cat
     // Reported, not swallowed: an empty list would look like a mod with no
     // releases rather than a service that could not be reached.
     assert!(!error.is_cancellation());
+}
+
+/// Recognizing installed files is one request for the whole batch, keyed by the
+/// digest the launcher already computed. It needs no credential and no
+/// fingerprint of its own, which is the whole difference from CurseForge.
+#[tokio::test]
+async fn installed_files_are_recognized_by_digest_in_one_request() {
+    let catalog = Catalog::start().await;
+    let known = "a".repeat(40);
+    let unknown = "b".repeat(40);
+    Mock::given(method("POST"))
+        .and(path("/v2/version_files"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+            r#"{{"{known}":{{"id":"vAbCdEfG","project_id":"AANobbMI","date_published":"2024-01-01T00:00:00Z","files":[]}}}}"#
+        )))
+        .mount(&catalog.server)
+        .await;
+
+    let digests = vec![
+        Hash::new(HashAlgorithm::Sha1, &known).expect("sha1"),
+        Hash::new(HashAlgorithm::Sha1, &unknown).expect("sha1"),
+    ];
+    let recognized = catalog
+        .provider
+        .recognize(&digests, &CancellationToken::new())
+        .await
+        .expect("the lookup answers");
+
+    assert_eq!(recognized.len(), 1);
+    let found = recognized
+        .get(&known)
+        .expect("the known file is recognized");
+    assert_eq!(found.provider, ModProvider::Modrinth);
+    assert_eq!(found.project_id, "AANobbMI");
+    assert_eq!(found.version_id, "vAbCdEfG");
+    assert_eq!(
+        found.file_id, None,
+        "modrinth names a version and has no separate file id"
+    );
+    assert_eq!(
+        catalog
+            .server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .len(),
+        1,
+        "a batch is one request however many files it asks about"
+    );
+}
+
+/// The answer is about specific bytes on disk and is asked once per server, so
+/// caching it would only risk naming a release for a file that has since gone.
+#[tokio::test]
+async fn recognizing_files_writes_nothing_to_the_metadata_store() {
+    let catalog = Catalog::start().await;
+    let digest = "c".repeat(40);
+    Mock::given(method("POST"))
+        .and(path("/v2/version_files"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+        .mount(&catalog.server)
+        .await;
+
+    let digests = vec![Hash::new(HashAlgorithm::Sha1, &digest).expect("sha1")];
+    let recognized = catalog
+        .provider
+        .recognize(&digests, &CancellationToken::new())
+        .await
+        .expect("the lookup answers");
+
+    assert!(
+        recognized.is_empty(),
+        "a file modrinth does not know is absent"
+    );
+    assert!(
+        catalog.metadata_entries().is_empty(),
+        "left behind: {:?}",
+        catalog.metadata_entries()
+    );
+}
+
+/// Nothing to ask about is not a request.
+#[tokio::test]
+async fn an_empty_recognition_batch_contacts_nobody() {
+    let catalog = Catalog::start().await;
+
+    let recognized = catalog
+        .provider
+        .recognize(&[], &CancellationToken::new())
+        .await
+        .expect("no request is made");
+
+    assert!(recognized.is_empty());
+    assert!(
+        catalog
+            .server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty()
+    );
 }

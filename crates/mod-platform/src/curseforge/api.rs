@@ -18,7 +18,7 @@
 //! module documentation on [`super`] for why that is a requirement rather than
 //! an omission.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -36,11 +36,12 @@ use tracing::debug;
 use super::credential::{CurseForgeCredentialSource, missing};
 use super::dto::{
     ApiEnvelope, CurseForgeCategoryClass, CurseForgeFileDocument, CurseForgeFileHash,
-    CurseForgeGame, CurseForgePagination, CurseForgeProject, HASH_ALGO_SHA1,
+    CurseForgeFingerprintMatches, CurseForgeGame, CurseForgePagination, CurseForgeProject,
+    HASH_ALGO_SHA1,
 };
 use super::mapping::file_declared_sides;
 use crate::error::{ModPlatformError, ModPlatformResult};
-use crate::model::{ModFile, SideSupport};
+use crate::model::{ModFile, RecognizedFile, SideSupport};
 
 /// The production API root.
 pub const CURSEFORGE_API_BASE: &str = "https://api.curseforge.com/v1";
@@ -674,6 +675,66 @@ impl CurseForgeOperation<'_> {
             )
             .await?;
         Ok(documents)
+    }
+
+    /// Which catalog releases these files are, by fingerprint.
+    ///
+    /// `POST /v1/fingerprints`. The one lookup that works from bytes alone,
+    /// which is what a jar out of a published server archive is: it arrives
+    /// with a name and no identity, and CurseForge indexes exactly this hash
+    /// for exactly this question.
+    ///
+    /// The answer is keyed back by SHA-1 rather than by the fingerprint that
+    /// was sent. A fingerprint is a lookup key with no collision guarantee, so
+    /// a match is only believed when the release CurseForge named publishes the
+    /// same digest the file on disk has. A match that fails that check is
+    /// dropped rather than recorded, leaving the file unidentified -- which is
+    /// the honest answer and the safe one.
+    pub async fn fingerprints(
+        &self,
+        wanted: &[(u32, Hash)],
+        cancel: &CancellationToken,
+    ) -> ModPlatformResult<BTreeMap<String, RecognizedFile>> {
+        if wanted.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let url = self.api.endpoint(&["fingerprints"])?;
+        let sent: Vec<u32> = wanted.iter().map(|(fingerprint, _)| *fingerprint).collect();
+        let (matches, _) = self
+            .api
+            .send_with_key::<CurseForgeFingerprintMatches>(
+                Method::POST,
+                &url,
+                Some(serde_json::json!({ "fingerprints": sent })),
+                &self.key,
+                cancel,
+            )
+            .await?;
+
+        let expected: BTreeSet<&str> = wanted.iter().map(|(_, hash)| hash.digest()).collect();
+        let mut recognized = BTreeMap::new();
+        for matched in matches.exact_matches {
+            for digest in supported_hashes(&matched.file.hashes) {
+                if !expected.contains(digest.digest()) {
+                    continue;
+                }
+                recognized.insert(
+                    digest.digest().to_owned(),
+                    RecognizedFile {
+                        provider: ModProvider::CurseForge,
+                        project_id: matched.id.to_string(),
+                        version_id: matched.file.id.to_string(),
+                        file_id: Some(matched.file.id.to_string()),
+                    },
+                );
+            }
+        }
+        debug!(
+            asked = wanted.len(),
+            recognized = recognized.len(),
+            "matched installed files against the curseforge catalog"
+        );
+        Ok(recognized)
     }
 }
 
