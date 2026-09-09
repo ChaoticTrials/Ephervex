@@ -1590,6 +1590,7 @@ pub fn attach(ui: &AppWindow) -> Controller {
     let import_flow = Rc::new(RefCell::new(ImportFlowState::default()));
     let minecraft = Rc::new(RefCell::new(MinecraftDefaultsModel::new()));
     let browser = Rc::new(ModBrowser::default());
+    let mod_lists = Rc::new(RefCell::new(ModLists::default()));
     register_i18n(ui);
     register_toasts(ui);
     register_callbacks(
@@ -1600,6 +1601,7 @@ pub fn attach(ui: &AppWindow) -> Controller {
         &import_flow,
         &minecraft,
         &browser,
+        &mod_lists,
     );
 
     let weak = ui.as_weak();
@@ -1610,6 +1612,7 @@ pub fn attach(ui: &AppWindow) -> Controller {
     let poll_import_flow = Rc::clone(&import_flow);
     let poll_minecraft = Rc::clone(&minecraft);
     let poll_browser = Rc::clone(&browser);
+    let poll_mod_lists = Rc::clone(&mod_lists);
     let poll_commands = backend.commands.clone();
     let poll_timer = Timer::default();
     poll_timer.start(TimerMode::Repeated, Duration::from_millis(80), move || {
@@ -1640,6 +1643,7 @@ pub fn attach(ui: &AppWindow) -> Controller {
                     &poll_import_flow,
                     &poll_minecraft,
                     &poll_browser,
+                    &poll_mod_lists,
                     &poll_commands,
                 ),
             }
@@ -1834,6 +1838,20 @@ fn register_create_server(
     );
 }
 
+/// Narrowing a mod list to what the user typed.
+///
+/// The full list stays in `mod_lists`, so clearing the box restores it without
+/// asking core for the mods again.
+fn register_mod_filter(ui: &AppWindow, mod_lists: &Rc<RefCell<ModLists>>) {
+    let weak = ui.as_weak();
+    let lists = Rc::clone(mod_lists);
+    ui.on_filter_mods(move |host_kind, _query| {
+        if let Some(ui) = weak.upgrade() {
+            render_mod_list(&ui, &lists.borrow(), host_kind.as_str());
+        }
+    });
+}
+
 /// Choosing, and unchoosing, the archive a server's content comes from.
 ///
 /// Two dialogs can name one, and the pick is asynchronous, so each request says
@@ -1912,8 +1930,10 @@ fn register_callbacks(
     import_flow: &Rc<RefCell<ImportFlowState>>,
     minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
     browser: &Rc<ModBrowser>,
+    mod_lists: &Rc<RefCell<ModLists>>,
 ) {
     register_catalog_actions(ui, commands);
+    register_mod_filter(ui, mod_lists);
     register_client_actions(ui, commands, Rc::clone(creations));
     register_mod_actions(ui, commands, browser);
     register_create_instance_naming(ui, commands);
@@ -2043,6 +2063,84 @@ fn register_create_instance_naming(ui: &AppWindow, commands: &Sender<Command>) {
     });
 
     register_loader_options(ui);
+}
+
+/// Every mod each list has, before the query narrows it.
+///
+/// The lists are kept here rather than in the window because filtering happens
+/// in Rust: only the matching rows become `ModRow`s, so typing into the box
+/// shrinks the number of cards the markup builds instead of hiding cards it
+/// already built.
+#[derive(Debug, Default)]
+struct ModLists {
+    client: Vec<ModRow>,
+    server: Vec<ModRow>,
+    /// Which host each list is currently for, so a query typed against one
+    /// instance is not left filtering the next one's mods.
+    client_host: String,
+    server_host: String,
+}
+
+impl ModLists {
+    fn rows(&self, host_kind: &str) -> &[ModRow] {
+        if host_kind == "server" {
+            &self.server
+        } else {
+            &self.client
+        }
+    }
+
+    /// Replaces one list, answering whether it is now about a different host.
+    fn replace(&mut self, host_kind: &str, host: &str, rows: Vec<ModRow>) -> bool {
+        let (current, target) = if host_kind == "server" {
+            self.server = rows;
+            (&mut self.server_host, host)
+        } else {
+            self.client = rows;
+            (&mut self.client_host, host)
+        };
+        let changed = current != target;
+        if changed {
+            target.clone_into(current);
+        }
+        changed
+    }
+}
+
+/// The rows whose name, file name, or provider contains `query`.
+///
+/// Case-insensitive and substring rather than prefix, because a user looking
+/// for a mod types the part of the name they remember and it is rarely the
+/// start. An empty query matches everything, so clearing the box is what
+/// restores the list.
+fn matching_mods(rows: &[ModRow], query: &str) -> Vec<ModRow> {
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() {
+        return rows.to_vec();
+    }
+    rows.iter()
+        .filter(|row| {
+            [&row.title, &row.file_name, &row.provider, &row.version]
+                .into_iter()
+                .any(|field| field.to_lowercase().contains(&needle))
+        })
+        .cloned()
+        .collect()
+}
+
+/// Redraws one mod list through its current query.
+fn render_mod_list(ui: &AppWindow, lists: &ModLists, host_kind: &str) {
+    let query = if host_kind == "server" {
+        ui.get_server_mods_query()
+    } else {
+        ui.get_managed_mods_query()
+    };
+    let rows = matching_mods(lists.rows(host_kind), query.as_str());
+    if host_kind == "server" {
+        ui.set_server_mods(reconciled(&ui.get_server_mods(), rows));
+    } else {
+        ui.set_managed_mods(reconciled(&ui.get_managed_mods(), rows));
+    }
 }
 
 /// A handle for one additional launch, unique for the life of this process.
@@ -4358,6 +4456,7 @@ fn apply_event(
     import_flow: &Rc<RefCell<ImportFlowState>>,
     minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
     browser: &Rc<ModBrowser>,
+    mod_lists: &Rc<RefCell<ModLists>>,
     commands: &Sender<Command>,
 ) {
     match event {
@@ -4413,17 +4512,20 @@ fn apply_event(
             // instance it is linked to.
             if data.host_kind == "server" {
                 if presentation::result_is_current(&data.host, &ui.get_selected_server_id()) {
-                    ui.set_server_mods(reconciled(
-                        &ui.get_server_mods(),
-                        managed_mod_rows(data.mods),
-                    ));
+                    let mut lists = mod_lists.borrow_mut();
+                    if lists.replace("server", &data.host, managed_mod_rows(data.mods)) {
+                        ui.set_server_mods_query(SharedString::default());
+                    }
+                    render_mod_list(ui, &lists, "server");
                     ui.set_server_mods_notice(data.notice.into());
                 }
             } else if presentation::result_is_current(&data.host, &ui.get_selected_instance_id()) {
-                ui.set_managed_mods(reconciled(
-                    &ui.get_managed_mods(),
-                    managed_mod_rows(data.mods),
-                ));
+                let mut lists = mod_lists.borrow_mut();
+                if lists.replace("client", &data.host, managed_mod_rows(data.mods)) {
+                    ui.set_managed_mods_query(SharedString::default());
+                }
+                render_mod_list(ui, &lists, "client");
+                drop(lists);
                 ui.set_managed_mods_notice(data.notice.into());
                 // What the instance has just changed, and the browser beside
                 // this list says whether each result is already one of them.
@@ -6087,6 +6189,67 @@ mod tests {
         assert_eq!(
             ui.get_create_server_name_suggestion(),
             "Caveopolis 2 Server"
+        );
+    }
+
+    fn mod_row(title: &str, file_name: &str, provider: &str) -> ModRow {
+        ModRow {
+            title: title.into(),
+            file_name: file_name.into(),
+            provider: provider.into(),
+            version: "1.0.0".into(),
+            ..ModRow::default()
+        }
+    }
+
+    /// The box narrows the list by whatever the user remembers of a mod, which
+    /// is rarely the start of its name.
+    #[test]
+    fn the_filter_matches_any_part_of_a_name_or_file_name() {
+        let rows = vec![
+            mod_row("Just Enough Items", "jei-1.21.1.jar", "CurseForge"),
+            mod_row("Sodium", "sodium-fabric.jar", "Modrinth"),
+        ];
+
+        assert_eq!(matching_mods(&rows, "enough").len(), 1);
+        assert_eq!(matching_mods(&rows, "ENOUGH").len(), 1, "case is ignored");
+        assert_eq!(matching_mods(&rows, "jei").len(), 1, "the file name counts");
+        assert_eq!(
+            matching_mods(&rows, "modrinth").len(),
+            1,
+            "so does the catalog a row came from"
+        );
+        assert!(matching_mods(&rows, "nothing here").is_empty());
+    }
+
+    /// Clearing the box restores the list rather than leaving it empty.
+    #[test]
+    fn an_empty_filter_matches_everything() {
+        let rows = vec![
+            mod_row("Just Enough Items", "jei.jar", "CurseForge"),
+            mod_row("Sodium", "sodium.jar", "Modrinth"),
+        ];
+
+        assert_eq!(matching_mods(&rows, "").len(), 2);
+        assert_eq!(
+            matching_mods(&rows, "   ").len(),
+            2,
+            "and so does whitespace"
+        );
+    }
+
+    /// A query typed against one instance must not be left filtering the mods
+    /// of the next one the user opens.
+    #[test]
+    fn changing_host_is_reported_so_the_query_can_be_cleared() {
+        let mut lists = ModLists::default();
+
+        assert!(lists.replace("client", "instance-a", vec![mod_row("A", "a.jar", "")]));
+        assert!(!lists.replace("client", "instance-a", vec![mod_row("A", "a.jar", "")]));
+        assert!(lists.replace("client", "instance-b", Vec::new()));
+        assert!(
+            lists.replace("server", "server-a", Vec::new()),
+            "the two lists track their hosts separately"
         );
     }
 

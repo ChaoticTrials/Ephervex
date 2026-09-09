@@ -2489,6 +2489,12 @@ slint::slint! {
         // linked server borrows the client's own name, a standalone one is
         // named for its exact target the same way a new instance is.
         in-out property <string> create-server-name-suggestion;
+        // What the two mod lists are filtered by. Filtering happens in Rust so
+        // the list a `for` builds is only the rows that match, which is also
+        // what keeps a large pack from laying out every card to show three.
+        in-out property <string> managed-mods-query;
+        in-out property <string> server-mods-query;
+        callback filter-mods(string, string);
         in-out property <string> create-server-minecraft;
         in-out property <string> create-server-loader: "Vanilla";
         in-out property <[string]> create-server-loaders: ["Vanilla", "Forge", "NeoForge"];
@@ -2975,9 +2981,9 @@ slint::slint! {
                             if root.workspace-tab == "Mods" : HorizontalLayout {
                                 spacing: 16px;
                                 Rectangle { width: 46%; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface;
-                                    VerticalLayout { padding: 16px; spacing: 10px; HorizontalLayout { spacing: 8px; cross-axis-alignment: center; Heading { text: GuiI18n.text("gui-managed-mods"); horizontal-stretch: 1; } IconButton { icon: @image-url("../../../assets/icons/refresh.svg"); accessible-name: GuiI18n.text("gui-refresh-mod-details"); clicked => { root.refresh-mods("client", root.selected-instance-id); } } } BodyText { text: GuiI18n.text("gui-managed-mods-detail"); wrap: word-wrap; }
+                                    VerticalLayout { padding: 16px; spacing: 10px; HorizontalLayout { spacing: 8px; cross-axis-alignment: center; Heading { text: GuiI18n.text("gui-managed-mods"); horizontal-stretch: 1; } TextField { text <=> root.managed-mods-query; placeholder: GuiI18n.text("gui-filter-mods"); accessible-label: GuiI18n.text("gui-filter-mods"); input-type: InputType.search; width: 200px; edited(text) => { root.filter-mods("client", text); } } IconButton { icon: @image-url("../../../assets/icons/refresh.svg"); accessible-name: GuiI18n.text("gui-refresh-mod-details"); clicked => { root.refresh-mods("client", root.selected-instance-id); } } } BodyText { text: GuiI18n.text("gui-managed-mods-detail"); wrap: word-wrap; }
                                         if root.managed-mods-notice != "" : BodyText { text: root.managed-mods-notice; color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
-                                        if root.managed-mods.length == 0 : EmptyState { icon: @image-url("../../../assets/icons/semantic-mod.svg"); title: GuiI18n.text("gui-no-managed-mods"); message: GuiI18n.text("gui-no-managed-mods-detail"); }
+                                        if root.managed-mods.length == 0 : EmptyState { icon: @image-url("../../../assets/icons/semantic-mod.svg"); title: root.managed-mods-query != "" ? GuiI18n.text("gui-no-mods-match-title") : GuiI18n.text("gui-no-managed-mods"); message: root.managed-mods-query != "" ? GuiI18n.value("gui-no-mods-match", root.managed-mods-query) : GuiI18n.text("gui-no-managed-mods-detail"); }
                                         ScrollView { viewport-width: self.width; VerticalLayout { spacing: 8px; for mod in root.managed-mods : ModCard { item: mod; manage(path) => { root.open-mod-manager(path); } } } }
                                     }
                                 }
@@ -3169,10 +3175,10 @@ slint::slint! {
                                 }
                             }
                             if root.workspace-tab == "Mods" : VerticalLayout { spacing: 10px;
-                                HorizontalLayout { spacing: 8px; SectionTitle { title: GuiI18n.text("gui-server-mods"); detail: GuiI18n.text("gui-server-mods-detail"); horizontal-stretch: 1; } VerticalLayout { alignment: center; IconButton { icon: @image-url("../../../assets/icons/refresh.svg"); accessible-name: GuiI18n.text("gui-refresh-mod-details"); clicked => { root.refresh-mods("server", root.selected-server-id); } } } }
+                                HorizontalLayout { spacing: 8px; SectionTitle { title: GuiI18n.text("gui-server-mods"); detail: GuiI18n.text("gui-server-mods-detail"); horizontal-stretch: 1; } VerticalLayout { alignment: center; TextField { text <=> root.server-mods-query; placeholder: GuiI18n.text("gui-filter-mods"); accessible-label: GuiI18n.text("gui-filter-mods"); input-type: InputType.search; width: 200px; edited(text) => { root.filter-mods("server", text); } } } VerticalLayout { alignment: center; IconButton { icon: @image-url("../../../assets/icons/refresh.svg"); accessible-name: GuiI18n.text("gui-refresh-mod-details"); clicked => { root.refresh-mods("server", root.selected-server-id); } } } }
                                 if root.crash-report != "" : CrashNotice { report: root.crash-report; failure: root.crash-failure; client-code-on-server: root.crash-client-code-on-server; suggested: root.crash-suggested; beside-the-mods: true; disable-suggested => { root.disable-suggested-mods(root.selected-server-id); } }
                                 if root.server-mods-notice != "" : BodyText { text: root.server-mods-notice; color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
-                                if root.server-mods.length == 0 : EmptyState { icon: @image-url("../../../assets/icons/semantic-mod.svg"); title: GuiI18n.text("gui-no-managed-mods"); message: GuiI18n.text("gui-no-server-mods-detail"); }
+                                if root.server-mods.length == 0 : EmptyState { icon: @image-url("../../../assets/icons/semantic-mod.svg"); title: root.server-mods-query != "" ? GuiI18n.text("gui-no-mods-match-title") : GuiI18n.text("gui-no-managed-mods"); message: root.server-mods-query != "" ? GuiI18n.value("gui-no-mods-match", root.server-mods-query) : GuiI18n.text("gui-no-server-mods-detail"); }
                                 if root.server-mods.length > 0 : ScrollView { viewport-width: self.width; VerticalLayout { spacing: 8px; for mod in root.server-mods : ModCard { item: mod; togglable: true; toggle(path, on) => { root.set-mod-enabled("server", root.selected-server-id, path, on); } } } }
                             }
                             if root.workspace-tab == "Properties" : ScrollView { VerticalLayout { alignment: start; width: min(parent.width, 1100px); spacing: 14px;
