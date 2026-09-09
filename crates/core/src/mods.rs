@@ -33,25 +33,26 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use ephervex_download::{
-    CacheLayout, DomainAllowlist, DownloadManager, DownloaderConfig, OperationReporter,
+    CacheLayout, DomainAllowlist, DownloadManager, DownloaderConfig, OperationReporter, hash_file,
 };
 use ephervex_mod_platform::{
     AnnotatedVersion, InstallSelection, InstalledPolicy, InstalledProject, InstanceTarget,
     ModInstallPlan, ModPlatformError, ModProject, ModProjectDetails, ModProviderApi,
-    ModSearchQuery, ModSearchResults, ModVersionInfo, ModrinthProvider, PlannedMod, SideSupport,
-    annotate, newest_compatible,
+    ModSearchQuery, ModSearchResults, ModVersionInfo, ModrinthProvider, PlannedMod, RecognizedFile,
+    SideSupport, annotate, curseforge_fingerprint, newest_compatible,
 };
 use ephervex_model::{
-    DefaultModCatalog, Hash, ImportSourceKind, InstanceId, ModOrigin, ModProvider, ServerId,
+    DefaultModCatalog, Hash, HashAlgorithm, ImportSourceKind, InstanceId, ModOrigin, ModProvider,
+    ServerId,
 };
 use ephervex_pack::{
-    ArtifactFetch, ManagedMod, ManagedModInstall, ManagedModInstallation, ModIdentity, PackError,
-    PackFileRecipe, PackRecipe, PackSide, ProviderFileIdentity, RecordedMod, SideRequirement,
-    SourceStore,
+    ArtifactFetch, MODS_DIR, ManagedMod, ManagedModInstall, ManagedModInstallation, ModIdentity,
+    PackError, PackFileRecipe, PackRecipe, PackSide, ProviderFileIdentity, RecordedMod,
+    SideRequirement, SourceStore,
 };
 use ephervex_storage::ClientRecord;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, instrument, warn};
+use tracing::{debug, info, instrument, warn};
 
 use crate::app::App;
 use crate::error::{CoreError, CoreResult};
@@ -198,6 +199,142 @@ pub fn disabled_path(path: &Path) -> PathBuf {
     let mut name = path.as_os_str().to_os_string();
     name.push(DISABLED_SUFFIX);
     PathBuf::from(name)
+}
+
+/// Records identified hand-placed jars in the host's own recipe.
+///
+/// Adoption is what makes the answer durable and what lets the jar reach a
+/// server the recipe builds. It is deliberately narrow:
+///
+/// * only jars a catalog actually recognized, so the recipe never gains an
+///   entry the launcher could not describe;
+/// * `server` stays `Unknown`, which is the existing way of saying "nobody has
+///   decided whether this belongs on a server". Creating one then asks, exactly
+///   as it does for a CurseForge pack's files, rather than assuming;
+/// * the origin stays [`ModOrigin::HandPlaced`], so the mod list keeps saying
+///   who put the file there and mutation keeps refusing to touch it.
+///
+/// A refusal from `record_managed` is left alone on purpose: it means this
+/// project is already recorded at another version, which is two jars for one
+/// mod and a thing to tell somebody about rather than to overwrite.
+fn adopt_hand_placed(layout: &ModHostLayout, adopted: &[ManagedModEntry]) {
+    if adopted.is_empty() {
+        return;
+    }
+    let store = SourceStore::new(ephervex_storage::metadata::source_dir(&layout.root));
+    // A host with no recipe has nothing to record into. An instance acquires
+    // one the first time something is installed into it, and finding a jar is
+    // not installing one.
+    let Some(mut recipe) = layout.recipe.clone() else {
+        return;
+    };
+
+    let mut changed = false;
+    for entry in adopted {
+        let (Some(provider), Some(project_id)) =
+            (entry.identity.provider(), entry.identity.project_id())
+        else {
+            continue;
+        };
+        let file = PackFileRecipe {
+            logical_path: entry.logical_path.clone(),
+            hashes: entry.hashes.clone(),
+            downloads: Vec::new(),
+            size: entry.size,
+            client: SideRequirement::Required,
+            server: SideRequirement::Unknown,
+            selected: None,
+            origin: ModOrigin::HandPlaced,
+            identity: Some(ProviderFileIdentity {
+                provider: Some(provider),
+                project_id: Some(project_id.to_owned()),
+                version_id: entry.identity.version_id().map(ToOwned::to_owned),
+                file_id: match &entry.identity {
+                    ModIdentity::Version { file_id, .. } => file_id.clone(),
+                    _ => None,
+                },
+            }),
+        };
+        match recipe.record_managed(file) {
+            Ok(()) => changed = true,
+            Err(error) => {
+                debug!(%error, "a hand-placed jar was not recorded");
+            }
+        }
+    }
+
+    if changed {
+        if let Err(error) = store.write_recipe(&recipe) {
+            warn!(%error, "identified hand-placed mods could not be recorded");
+        }
+    }
+}
+
+/// Every jar in `mods/` that no record accounts for.
+///
+/// The client rule has always been that nothing enumerates `mods/` and a file
+/// with no provenance is left alone. Leaving it alone is still right -- these
+/// entries are never written to a recipe, never updated, and never deleted --
+/// but leaving it *unlisted* meant a jar somebody copied in was loading into
+/// the game while the launcher showed no sign of it.
+///
+/// Both `name.jar` and `name.jar.disabled` are recognized, so a hand-placed jar
+/// that was turned off reads the same way a recorded one does. Symlinks are
+/// ignored rather than followed: nothing legitimate puts one here, and it is
+/// not a file this directory owns.
+fn hand_placed_mods(game_dir: &Path, recorded: &[ManagedModEntry]) -> Vec<ManagedModEntry> {
+    let known: BTreeSet<PathBuf> = recorded
+        .iter()
+        .map(|entry| entry.logical_path.clone())
+        .collect();
+    let dir = game_dir.join(MODS_DIR);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+
+    let mut found = Vec::new();
+    for entry in entries.flatten() {
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let (stem, presence) = match name.strip_suffix(DISABLED_SUFFIX) {
+            Some(stem) => (stem, ModPresence::Disabled),
+            None => (name, ModPresence::Installed),
+        };
+        if !Path::new(stem)
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("jar"))
+        {
+            continue;
+        }
+        let logical_path = Path::new(MODS_DIR).join(stem);
+        if known.contains(&logical_path) {
+            continue;
+        }
+        found.push(ManagedModEntry {
+            logical_path,
+            file_name: stem.to_owned(),
+            origin: ModOrigin::HandPlaced,
+            identity: ModIdentity::Unresolved,
+            // Not hashed here. This runs on every list and must stay a
+            // directory read; the digest is computed when something is
+            // actually going to look the file up.
+            hashes: Vec::new(),
+            size: Some(metadata.len()),
+            client: SideRequirement::Unknown,
+            server: SideRequirement::Unknown,
+            presence,
+            details: None,
+            cached: None,
+            icon: None,
+        });
+    }
+    found
 }
 
 /// How much provider metadata a snapshot carries.
@@ -1070,6 +1207,12 @@ impl App {
             .map(|recorded| ManagedModEntry::from_recorded(recorded, &layout.game_dir))
             .collect();
 
+        // Whatever else is in `mods/`. Nothing here installed these and nothing
+        // recorded them, so they are listed rather than adopted: a folder and a
+        // list that disagree about what will load is what made a hand-copied
+        // jar invisible, and being invisible is worse than being unmanaged.
+        mods.extend(hand_placed_mods(&layout.game_dir, &mods));
+
         // What a provider last said, so the first paint reads as mods rather
         // than as jar file names. Never authoritative: an entry with nothing
         // remembered falls back exactly as it did before. Read once per
@@ -1145,6 +1288,9 @@ impl App {
         if snapshot.mods.is_empty() {
             return Ok(snapshot);
         }
+        // Before metadata, because identifying a hand-placed jar is what gives
+        // it a project to fetch metadata for at all.
+        self.identify_hand_placed(host, &mut snapshot, cancel).await;
 
         match self.mod_details(&snapshot, reporter, cancel).await {
             Ok(details) => {
@@ -1173,6 +1319,160 @@ impl App {
             }
         }
         Ok(snapshot)
+    }
+
+    /// Works out what the jars nobody recorded actually are.
+    ///
+    /// Runs on an explicit refresh rather than on every listing: it hashes
+    /// files and talks to catalogs, and the list itself has to stay a directory
+    /// read.
+    ///
+    /// Modrinth first here, which is the opposite of a server archive. A server
+    /// archive is a CurseForge problem by construction -- it exists because
+    /// CurseForge packs ship one -- while a jar somebody dropped into `mods/`
+    /// came from wherever they were browsing, and Modrinth answers by the SHA-1
+    /// the launcher can compute without reading the file a second time.
+    ///
+    /// Nothing here can fail the listing. An unreachable catalog leaves the jar
+    /// exactly as the directory described it.
+    async fn identify_hand_placed(
+        &self,
+        host: ModHost,
+        snapshot: &mut ManagedModSnapshot,
+        cancel: &CancellationToken,
+    ) {
+        let layout = match self.mod_host_layout(host) {
+            Ok(layout) => layout,
+            Err(error) => {
+                warn!(%error, "could not read this host's layout to identify its mods");
+                return;
+            }
+        };
+
+        // Hashed now, not during the listing. A missing jar has nothing to
+        // hash and a disabled one is read under the name it actually has.
+        let mut candidates: Vec<usize> = Vec::new();
+        for (index, entry) in snapshot.mods.iter_mut().enumerate() {
+            if entry.origin != ModOrigin::HandPlaced || entry.presence == ModPresence::Missing {
+                continue;
+            }
+            let installed = layout.game_dir.join(&entry.logical_path);
+            let path = if entry.presence == ModPresence::Disabled {
+                disabled_path(&installed)
+            } else {
+                installed
+            };
+            match hash_file(&path, HashAlgorithm::Sha1).await {
+                Ok(hash) => {
+                    entry.hashes = vec![hash];
+                    candidates.push(index);
+                }
+                Err(error) => debug!(%error, "a hand-placed jar could not be hashed"),
+            }
+        }
+        if candidates.is_empty() {
+            return;
+        }
+
+        let digests: Vec<Hash> = candidates
+            .iter()
+            .filter_map(|index| snapshot.mods[*index].hashes.first().cloned())
+            .collect();
+        let mut recognized = match self.modrinth_catalog() {
+            Ok(catalog) => catalog
+                .recognize(&digests, cancel)
+                .await
+                .unwrap_or_else(|error| {
+                    debug!(%error, "modrinth did not identify the hand-placed jars");
+                    BTreeMap::new()
+                }),
+            Err(error) => {
+                debug!(%error, "modrinth could not be reached to identify hand-placed jars");
+                BTreeMap::new()
+            }
+        };
+        self.recognize_hand_placed_with_curseforge(
+            &layout,
+            snapshot,
+            &candidates,
+            &mut recognized,
+            cancel,
+        )
+        .await;
+        if recognized.is_empty() {
+            return;
+        }
+
+        let mut adopted = Vec::new();
+        for index in candidates {
+            let entry = &mut snapshot.mods[index];
+            let Some(digest) = entry.hashes.first() else {
+                continue;
+            };
+            let Some(found) = recognized.get(digest.digest()) else {
+                continue;
+            };
+            entry.identity = ModIdentity::Version {
+                provider: found.provider,
+                project_id: found.project_id.clone(),
+                version_id: found.version_id.clone(),
+                file_id: found.file_id.clone(),
+            };
+            adopted.push(entry.clone());
+        }
+        adopt_hand_placed(&layout, &adopted);
+    }
+
+    /// Whatever Modrinth did not recognize, asked of CurseForge by fingerprint.
+    async fn recognize_hand_placed_with_curseforge(
+        &self,
+        layout: &ModHostLayout,
+        snapshot: &ManagedModSnapshot,
+        candidates: &[usize],
+        recognized: &mut BTreeMap<String, RecognizedFile>,
+        cancel: &CancellationToken,
+    ) {
+        let Ok(api) = self.curseforge_api() else {
+            return;
+        };
+        // No key means the request could only be refused, and fingerprinting
+        // every jar for it would be wasted work.
+        if !api.has_credential().unwrap_or(false) {
+            return;
+        }
+
+        let mut wanted = Vec::new();
+        for index in candidates {
+            let entry = &snapshot.mods[*index];
+            let Some(digest) = entry.hashes.first() else {
+                continue;
+            };
+            if recognized.contains_key(digest.digest()) {
+                continue;
+            }
+            let installed = layout.game_dir.join(&entry.logical_path);
+            let path = if entry.presence == ModPresence::Disabled {
+                disabled_path(&installed)
+            } else {
+                installed
+            };
+            let Ok(bytes) = tokio::fs::read(&path).await else {
+                continue;
+            };
+            wanted.push((curseforge_fingerprint(&bytes), digest.clone()));
+        }
+        if wanted.is_empty() {
+            return;
+        }
+
+        let matched = match api.begin_operation() {
+            Ok(operation) => operation.fingerprints(&wanted, cancel).await,
+            Err(error) => Err(error),
+        };
+        match matched {
+            Ok(found) => recognized.extend(found),
+            Err(error) => debug!(%error, "curseforge did not identify the hand-placed jars"),
+        }
     }
 
     /// Looks up the display metadata for everything in a snapshot that has a
@@ -1588,6 +1888,121 @@ mod tests {
     use ephervex_model::{Hash, HashAlgorithm, ModOrigin};
 
     use super::*;
+
+    /// A jar somebody copied into `mods/` loads into the game, so the list has
+    /// to say it is there. Before this it was invisible.
+    #[test]
+    fn a_jar_nobody_recorded_is_listed_as_added_by_hand() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let game_dir = directory.path();
+        std::fs::create_dir_all(game_dir.join(MODS_DIR)).expect("mods");
+        std::fs::write(game_dir.join("mods/dropped-in.jar"), b"jar").expect("jar");
+
+        let found = hand_placed_mods(game_dir, &[]);
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].logical_path, PathBuf::from("mods/dropped-in.jar"));
+        assert_eq!(found[0].origin, ModOrigin::HandPlaced);
+        assert_eq!(found[0].identity, ModIdentity::Unresolved);
+        assert_eq!(found[0].presence, ModPresence::Installed);
+        assert!(
+            found[0].hashes.is_empty(),
+            "listing is a directory read; nothing is hashed until something looks it up"
+        );
+    }
+
+    /// A recorded mod is already in the list. Finding it again would show it
+    /// twice, once as its own mod and once as a stray file.
+    #[test]
+    fn a_recorded_jar_is_not_reported_a_second_time() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let game_dir = directory.path();
+        std::fs::create_dir_all(game_dir.join(MODS_DIR)).expect("mods");
+        std::fs::write(game_dir.join("mods/known.jar"), b"jar").expect("jar");
+        std::fs::write(game_dir.join("mods/stray.jar"), b"jar").expect("jar");
+
+        let recorded = vec![ManagedModEntry::from_recorded(
+            RecordedMod {
+                logical_path: PathBuf::from("mods/known.jar"),
+                file_name: "known.jar".to_owned(),
+                origin: ModOrigin::PackDeclared,
+                identity: ModIdentity::Unresolved,
+                hashes: Vec::new(),
+                size: None,
+                client: SideRequirement::Required,
+                server: SideRequirement::Required,
+            },
+            game_dir,
+        )];
+
+        let found = hand_placed_mods(game_dir, &recorded);
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].logical_path, PathBuf::from("mods/stray.jar"));
+    }
+
+    /// A hand-placed jar that was turned off reads the same way a recorded one
+    /// does, rather than vanishing from the list.
+    #[test]
+    fn a_disabled_hand_placed_jar_is_listed_under_its_real_name() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let game_dir = directory.path();
+        std::fs::create_dir_all(game_dir.join(MODS_DIR)).expect("mods");
+        std::fs::write(game_dir.join("mods/off.jar.disabled"), b"jar").expect("jar");
+
+        let found = hand_placed_mods(game_dir, &[]);
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].logical_path, PathBuf::from("mods/off.jar"));
+        assert_eq!(found[0].presence, ModPresence::Disabled);
+    }
+
+    /// Only jars. A pack's own `mods/` holds READMEs and stray configs, and
+    /// none of them is a mod.
+    #[test]
+    fn only_jars_are_reported() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let game_dir = directory.path();
+        std::fs::create_dir_all(game_dir.join("mods/nested")).expect("mods");
+        std::fs::write(game_dir.join("mods/README.txt"), b"read me").expect("txt");
+        std::fs::write(game_dir.join("mods/nested/deep.jar"), b"jar").expect("nested");
+
+        assert!(hand_placed_mods(game_dir, &[]).is_empty());
+    }
+
+    /// A host with no `mods/` at all is an ordinary state, not a failure.
+    #[test]
+    fn a_missing_mods_directory_reports_nothing() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        assert!(hand_placed_mods(directory.path(), &[]).is_empty());
+    }
+
+    /// Ephervex did not install it, so nothing here may replace or delete it.
+    #[test]
+    fn a_hand_placed_mod_is_never_mutable() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let game_dir = directory.path();
+        std::fs::create_dir_all(game_dir.join(MODS_DIR)).expect("mods");
+        std::fs::write(game_dir.join("mods/dropped-in.jar"), b"jar").expect("jar");
+        let mut entry = hand_placed_mods(game_dir, &[]).remove(0);
+        entry.identity = ModIdentity::Version {
+            provider: ModProvider::Modrinth,
+            project_id: "AANobbMI".to_owned(),
+            version_id: "vvvv".to_owned(),
+            file_id: None,
+        };
+
+        let allowed = crate::mutation::ModMutability::of(&entry);
+
+        assert!(!allowed.can_remove);
+        assert!(!allowed.can_change_version);
+        assert!(!allowed.can_update);
+        assert_eq!(
+            allowed.restriction,
+            Some(crate::mutation::MutationRestriction::HandPlaced),
+            "even once identified, it stays somebody else's file"
+        );
+    }
 
     fn planned(server_side: SideSupport, file_name: &str) -> PlannedMod {
         PlannedMod {
@@ -2260,8 +2675,11 @@ mod tests {
         assert!(snapshot.mods[1].identity.is_fully_resolved());
     }
 
+    /// A jar the user dropped in is listed, because it loads into the game and
+    /// a list that omitted it would disagree with the folder. It is still not
+    /// *adopted*: no record is invented for it, and nothing here may change it.
     #[tokio::test]
-    async fn a_jar_nobody_recorded_is_left_alone_rather_than_adopted() {
+    async fn a_jar_nobody_recorded_is_listed_but_left_alone() {
         let base = tempfile::tempdir().expect("temp dir");
         let (app, instance) = imported_instance(
             base.path(),
@@ -2275,19 +2693,32 @@ mod tests {
 
         let snapshot = app.managed_mod_snapshot(instance).expect("snapshot");
 
+        let dropped = snapshot
+            .mods
+            .iter()
+            .find(|entry| entry.file_name == "local-debug-build.jar")
+            .expect("the jar the user dropped in is shown");
+        assert_eq!(dropped.origin, ModOrigin::HandPlaced);
         assert_eq!(
-            snapshot.len(),
-            2,
-            "a jar the user dropped in is not given an invented record"
+            dropped.identity,
+            ModIdentity::Unresolved,
+            "nothing is invented about a file with no provenance"
         );
+        assert!(!crate::mutation::ModMutability::of(dropped).can_remove);
+
+        let root = app.client(instance).expect("record").root;
+        let recipe = SourceStore::new(ephervex_storage::metadata::source_dir(&root))
+            .read_recipe()
+            .expect("recipe");
         assert!(
-            !snapshot
-                .mods
+            !recipe
+                .files
                 .iter()
-                .any(|entry| entry.file_name == "local-debug-build.jar")
+                .any(|file| file.logical_path.ends_with("local-debug-build.jar")),
+            "listing it must not write it into the instance's desired state"
         );
         assert!(
-            ephervex_storage::metadata::client_game_dir(&app.client(instance).unwrap().root)
+            ephervex_storage::metadata::client_game_dir(&root)
                 .join("mods/local-debug-build.jar")
                 .is_file(),
             "and it is still there"

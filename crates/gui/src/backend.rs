@@ -4980,7 +4980,12 @@ fn managed_mod_data(entry: &ManagedModEntry, review: Option<&CrashReview>) -> Ma
 /// The row accent an origin gets. Three groups rather than four: an optional
 /// dependency and a required one are both "something else asked for this".
 fn origin_kind(origin: ModOrigin) -> &'static str {
-    if origin.is_pack_owned() {
+    if origin == ModOrigin::HandPlaced {
+        // Its own accent: this is the one row the launcher does not own, and
+        // reading as "user" would put it beside mods the user chose in the
+        // browser, which Ephervex installed and can act on.
+        "hand-placed"
+    } else if origin.is_pack_owned() {
         "pack"
     } else if origin.is_dependency() {
         "dependency"

@@ -770,6 +770,7 @@ pack-requirement-unknown = Not stated
 # the difference is what tells a user whether to expect this to change.
 mod-restriction-pack-owned = The imported pack declares this mod. Changing it on its own is not supported yet.
 mod-restriction-dependency = Another mod requires this one, so its release follows what needs it.
+mod-restriction-hand-placed = This jar was added by hand, so Ephervex leaves it alone. Remove it from the mods folder yourself.
 mod-restriction-identity-unresolved = Ephervex cannot tell which project this file is, so it has nothing to look up.
 mod-restriction-version-unknown = Ephervex cannot tell which release is installed, so it will not guess what to replace.
 
@@ -822,6 +823,9 @@ mod-origin-pack-declared = From pack
 mod-origin-user-selected = Added
 mod-origin-required-dependency = Dependency
 mod-origin-selected-optional-dependency = Optional dependency
+# A jar somebody copied into mods/ themselves. Ephervex lists it so the folder
+# and the list agree, and does not manage it.
+mod-origin-hand-placed = Added by hand
 
 error-pack-archive-unreadable = The pack file could not be read.
 .action = Check that { $path } exists and is readable.
@@ -1254,7 +1258,7 @@ gui-open-diagnostics = View Diagnostics
 gui-temporary-lifecycle = Temporary instances remain until the operating system clears its temporary storage. Converting an existing instance in place is not available from the current application service.
 gui-persistent-lifecycle = This instance is stored under the persistent instance root.
 gui-managed-mods = Managed Mods
-gui-managed-mods-detail = Every mod this instance is recorded as having, including the ones its pack brought.
+gui-managed-mods-detail = Every mod in this instance: the ones its pack brought, the ones you installed, and any jar you added to the mods folder yourself.
 # Filters the list of mods an instance or server already has, by name.
 gui-filter-mods = Filter mods...
 gui-no-mods-match-title = No matches
@@ -1265,7 +1269,7 @@ gui-no-managed-mods-detail = Manual JARs are not adopted or modified.
 gui-mod-disabled = Disabled, so the loader skips it
 gui-mod-loads = Load { $value }
 gui-server-mods = Server mods
-gui-server-mods-detail = Everything this server was built with. Turn off a mod to keep it installed while the loader skips it, which is how a client-only mod stops crashing a server.
+gui-server-mods-detail = Everything in this server's mods folder, including jars you added yourself. Turn off a mod to keep it installed while the loader skips it, which is how a client-only mod stops crashing a server.
 gui-no-server-mods-detail = This server was not built from a pack, so nothing here is recorded as belonging to it.
 # Shown when the mod's exact release cannot be proven from what Ephervex
 # recorded. The file is installed; only its version is unknown.

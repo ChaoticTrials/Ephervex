@@ -458,10 +458,22 @@ inputs throughout; no graph is satisfied by changing them.
 
 Mods installed through a provider are entries in the same recipe (ADR 0013), so
 a server built later contains them. A jar the launcher did not install is never
-overwritten, deleted, or adopted into that record: nothing enumerates `mods/`,
-and a file with no provenance stays outside the managed model. Installation
-writes the recipe last; any failure — including a failure to write the recipe —
-removes the files that operation created and leaves everything else untouched.
+overwritten or deleted. Installation writes the recipe last; any failure —
+including a failure to write the recipe — removes the files that operation
+created and leaves everything else untouched.
+
+A jar somebody put in `mods/` themselves is listed rather than hidden: it loads
+into the game, so a list that omitted it disagreed with the folder about what
+runs. It is listed as hand-placed, and that origin refuses every mutation, so
+the launcher still never changes a file it did not install. Identifying one is
+an explicit refresh rather than part of listing, because listing has to stay a
+directory read. Modrinth is asked first there, by the SHA-1 the launcher
+computes, and CurseForge second by fingerprint — the reverse of a server archive
+(ADR 0024), which is a CurseForge problem by construction. A jar a catalog
+recognizes is recorded in the recipe with its identity, `client` required and
+`server` undeclared, so creating a server asks about it in the same way it asks
+about a CurseForge pack's own files rather than assuming. A jar nothing
+recognizes stays listed and unrecorded.
 
 An instance's mods are one list, and each entry carries its ownership and the
 completeness of its provider identity as separate typed facts (ADR 0019). An

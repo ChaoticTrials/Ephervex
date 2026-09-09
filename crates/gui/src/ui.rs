@@ -1209,7 +1209,7 @@ slint::slint! {
         // The tile's edge length. Everything inside is derived from it so a
         // caller changes one number rather than three.
         in property <length> size: 56px;
-        property <color> tone: root.origin-kind == "pack" ? Theme.accent-secondary : root.origin-kind == "dependency" ? Theme.text-muted : Theme.accent;
+        property <color> tone: root.origin-kind == "pack" ? Theme.accent-secondary : root.origin-kind == "dependency" ? Theme.text-muted : root.origin-kind == "hand-placed" ? Theme.warning : Theme.accent;
         width: root.size; height: root.size;
         border-radius: root.size / 7;
         border-width: 1px;
@@ -1258,7 +1258,7 @@ slint::slint! {
                         horizontal-stretch: 1;
                         vertical-alignment: center;
                     }
-                    VerticalLayout { alignment: center; Pill { text: root.item.origin; tone-color: root.item.origin-kind == "pack" ? Theme.accent-secondary : root.item.origin-kind == "dependency" ? Theme.text-muted : Theme.accent; } }
+                    VerticalLayout { alignment: center; Pill { text: root.item.origin; tone-color: root.item.origin-kind == "pack" ? Theme.accent-secondary : root.item.origin-kind == "dependency" ? Theme.text-muted : root.item.origin-kind == "hand-placed" ? Theme.warning : Theme.accent; } }
                     // Which catalog the mod came from, in that catalog's own
                     // color. Absent for an entry with no catalog identity,
                     // where the version line already says so.

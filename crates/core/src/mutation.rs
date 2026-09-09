@@ -92,6 +92,10 @@ pub enum MutationRestriction {
     /// Nothing about this file can be resolved against a catalog. There is no
     /// project to list versions of and no identity to replace.
     IdentityUnresolved,
+    /// Somebody put this jar in `mods/` themselves, so it is theirs rather than
+    /// the launcher's: nothing here installed it, nothing here recorded it, and
+    /// nothing here will replace or delete it.
+    HandPlaced,
     /// The project is known but the installed release is not, so the launcher
     /// cannot tell an update from a no-op or prove what it would be replacing.
     VersionUnknown,
@@ -105,6 +109,7 @@ impl MutationRestriction {
             Self::PackOwned => "mod-restriction-pack-owned",
             Self::Dependency => "mod-restriction-dependency",
             Self::IdentityUnresolved => "mod-restriction-identity-unresolved",
+            Self::HandPlaced => "mod-restriction-hand-placed",
             Self::VersionUnknown => "mod-restriction-version-unknown",
         }
     }
@@ -116,6 +121,7 @@ impl MutationRestriction {
             Self::PackOwned => "pack-owned",
             Self::Dependency => "dependency",
             Self::IdentityUnresolved => "identity-unresolved",
+            Self::HandPlaced => "hand-placed",
             Self::VersionUnknown => "version-unknown",
         }
     }
@@ -163,6 +169,10 @@ impl ModMutability {
         let has_version = entry.identity.is_fully_resolved();
 
         match entry.origin {
+            // Ephervex did not put this file here and does not own it. Listing
+            // it is so the folder and the list agree about what will load;
+            // changing or deleting it would be acting on somebody else's file.
+            ModOrigin::HandPlaced => Self::restricted(MutationRestriction::HandPlaced, has_project),
             ModOrigin::PackDeclared => {
                 Self::restricted(MutationRestriction::PackOwned, has_project)
             }

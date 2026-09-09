@@ -91,3 +91,24 @@ untrusted pack's downloads are held to, plus a size ceiling.
 - Version changes, updates, and removal remain unimplemented. This makes the
   state trustworthy first; those operations mutate it, and mutating a list that
   was not yet honest about what it contained would have been the worse order.
+
+## Amendment: a hand-placed jar is listed, and still not owned
+
+"Nothing enumerates `mods/`" was the wrong half of the rule to keep. A jar
+somebody copies in loads into the game, so a list that leaves it out is a list
+that disagrees with the folder about what is running — which is exactly the
+invisibility this ADR set out to end, arrived at from the other side.
+
+Listing now includes them, under `ModOrigin::HandPlaced`. Everything else the
+rule protected is unchanged and is now enforced by that origin rather than by
+absence: `MutationRestriction::HandPlaced` refuses every mutation, so nothing
+here replaces or deletes a file the launcher did not install.
+
+Identification is separate from listing, because listing has to remain a
+directory read: it hashes and asks catalogs, so it runs only on an explicit
+refresh. A jar a catalog recognizes is then recorded, with its identity, as
+`client` required and `server` undeclared — the existing way of saying nobody
+has decided whether it belongs on a server, which makes creating one ask rather
+than assume. Its origin stays `HandPlaced`, so being recorded does not make it
+the launcher's to change. A jar nothing recognizes is listed and left
+unrecorded, and a later refresh may still identify it.

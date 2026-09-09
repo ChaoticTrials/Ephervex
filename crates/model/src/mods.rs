@@ -153,6 +153,12 @@ pub enum ModOrigin {
     RequiredDependency,
     /// An optional dependency a human explicitly selected.
     SelectedOptionalDependency,
+    /// Found in `mods/` with no record of how it got there.
+    ///
+    /// Somebody copied a jar in themselves, or another launcher did. Ephervex
+    /// did not install it and does not own it: it is listed so the directory
+    /// and the list agree about what will load, and it is left alone otherwise.
+    HandPlaced,
 }
 
 impl ModOrigin {
@@ -164,6 +170,7 @@ impl ModOrigin {
             Self::UserSelected => "user_selected",
             Self::RequiredDependency => "required_dependency",
             Self::SelectedOptionalDependency => "selected_optional_dependency",
+            Self::HandPlaced => "hand_placed",
         }
     }
 
@@ -202,7 +209,18 @@ impl ModOrigin {
             Self::UserSelected => "mod-origin-user-selected",
             Self::RequiredDependency => "mod-origin-required-dependency",
             Self::SelectedOptionalDependency => "mod-origin-selected-optional-dependency",
+            Self::HandPlaced => "mod-origin-hand-placed",
         }
+    }
+
+    /// Whether Ephervex put this file here.
+    ///
+    /// A hand-placed jar is the one origin it did not: nothing recorded it,
+    /// nothing may replace or delete it, and a server built from the recipe
+    /// does not contain it until somebody says it should.
+    #[must_use]
+    pub const fn is_launcher_owned(self) -> bool {
+        !matches!(self, Self::HandPlaced)
     }
 }
 

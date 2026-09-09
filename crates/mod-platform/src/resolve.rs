@@ -345,7 +345,10 @@ const fn stronger_origin(candidate: ModOrigin, current: ModOrigin) -> bool {
 
 const fn origin_rank(origin: ModOrigin) -> u8 {
     match origin {
-        ModOrigin::PackDeclared => 0,
+        // Nothing chose a hand-placed jar through this crate, so it makes the
+        // same weakest claim a pack's own declaration does on a path a
+        // resolution is deciding between.
+        ModOrigin::HandPlaced | ModOrigin::PackDeclared => 0,
         ModOrigin::RequiredDependency => 1,
         ModOrigin::SelectedOptionalDependency => 2,
         ModOrigin::UserSelected => 3,
