@@ -2035,6 +2035,13 @@ fn register_create_instance_naming(ui: &AppWindow, commands: &Sender<Command>) {
         }
     });
 
+    let weak = ui.as_weak();
+    ui.on_recompute_create_server_name(move || {
+        if let Some(ui) = weak.upgrade() {
+            recompute_create_server_name(&ui);
+        }
+    });
+
     register_loader_options(ui);
 }
 
@@ -2516,12 +2523,12 @@ fn register_loader_options(ui: &AppWindow) {
 /// target disagreed.
 fn apply_minecraft_selection(ui: &AppWindow, form: &str, minecraft: &str) {
     apply_loader_options(ui, form, minecraft);
-    if form != "server" {
-        ui.set_create_minecraft_favorite(
-            favorite_versions(ui).iter().any(|kept| kept == minecraft),
-        );
-        recompute_create_name(ui);
+    if form == "server" {
+        recompute_create_server_name(ui);
+        return;
     }
+    ui.set_create_minecraft_favorite(favorite_versions(ui).iter().any(|kept| kept == minecraft));
+    recompute_create_name(ui);
 }
 
 /// Installing a mod straight from the browser.
@@ -4733,6 +4740,35 @@ fn apply_minecraft_releases(ui: &AppWindow, versions: Vec<String>) {
 /// Only the suggestion: it is shown as the field's placeholder, never written
 /// into it, so recomputing is always safe and a name the user typed is never
 /// touched.
+/// The name a new server takes when nobody types one.
+///
+/// A linked server's suggestion is its client's own name and is set when the
+/// dialog opens, so this leaves it alone: there is no exact target on screen to
+/// derive one from, and overwriting it would replace a real name with a version
+/// string.
+fn recompute_create_server_name(ui: &AppWindow) {
+    if !ui.get_create_server_client_id().is_empty() {
+        return;
+    }
+    let loader = loader_kind_of(ui.get_create_server_loader().as_str())
+        .unwrap_or(ephervex_model::LoaderKind::Vanilla);
+    let loader_version = ui.get_create_server_loader_version();
+    let loader_version = (!loader_version.is_empty()).then(|| loader_version.as_str());
+    let target = ephervex_model::default_instance_name(
+        ui.get_create_server_minecraft().as_str(),
+        loader,
+        loader_version,
+    );
+    // An unnamed target suggests nothing rather than the bare word, which would
+    // create a server called "Server".
+    let suggestion = if target.is_empty() {
+        String::new()
+    } else {
+        format!("{target} Server")
+    };
+    ui.set_create_server_name_suggestion(suggestion.into());
+}
+
 fn recompute_create_name(ui: &AppWindow) {
     let loader = loader_kind_of(ui.get_create_loader().as_str())
         .unwrap_or(ephervex_model::LoaderKind::Vanilla);
@@ -4782,6 +4818,7 @@ fn apply_loader_versions(
     if form == "server" {
         ui.set_create_server_loader_versions(rows);
         ui.set_create_server_loader_version(versions.first().cloned().unwrap_or_default().into());
+        recompute_create_server_name(ui);
     } else {
         ui.set_create_loader_versions(rows);
         ui.set_create_loader_version(versions.first().cloned().unwrap_or_default().into());
@@ -5975,6 +6012,82 @@ mod tests {
                 },
             )));
         AppWindow::new().expect("window")
+    }
+
+    /// A standalone server is named for its exact target, the same way a new
+    /// instance is, with "Server" after it.
+    #[test]
+    fn a_standalone_servers_suggested_name_is_the_instance_default_plus_server() {
+        let ui = test_window();
+        ui.set_create_server_client_id(SharedString::default());
+
+        ui.set_create_server_minecraft("1.21.1".into());
+        ui.set_create_server_loader("Vanilla".into());
+        ui.set_create_server_loader_version(SharedString::default());
+        recompute_create_server_name(&ui);
+        assert_eq!(ui.get_create_server_name_suggestion(), "1.21.1 Server");
+
+        ui.set_create_server_loader("NeoForge".into());
+        ui.set_create_server_loader_version("21.1.77".into());
+        recompute_create_server_name(&ui);
+        assert_eq!(
+            ui.get_create_server_name_suggestion(),
+            "1.21.1-NeoForge-21.1.77 Server"
+        );
+    }
+
+    /// The same name a new instance would take, so the two dialogs cannot drift
+    /// apart in what they call the same target.
+    #[test]
+    fn the_server_suggestion_tracks_the_instance_suggestion() {
+        let ui = test_window();
+        ui.set_create_minecraft("1.20.1".into());
+        ui.set_create_loader("Forge".into());
+        ui.set_create_loader_version("47.3.0".into());
+        recompute_create_name(&ui);
+
+        ui.set_create_server_client_id(SharedString::default());
+        ui.set_create_server_minecraft("1.20.1".into());
+        ui.set_create_server_loader("Forge".into());
+        ui.set_create_server_loader_version("47.3.0".into());
+        recompute_create_server_name(&ui);
+
+        assert_eq!(
+            ui.get_create_server_name_suggestion(),
+            format!("{} Server", ui.get_create_name_suggestion())
+        );
+    }
+
+    /// Nothing chosen yet suggests nothing, rather than a server called
+    /// "Server".
+    #[test]
+    fn an_unchosen_target_suggests_no_name_at_all() {
+        let ui = test_window();
+        ui.set_create_server_client_id(SharedString::default());
+        ui.set_create_server_minecraft(SharedString::default());
+        ui.set_create_server_loader("Vanilla".into());
+
+        recompute_create_server_name(&ui);
+
+        assert_eq!(ui.get_create_server_name_suggestion(), "");
+    }
+
+    /// A linked server borrows its client's own name, which the dialog sets
+    /// when it opens. Recomputing must not replace it with a version string.
+    #[test]
+    fn a_linked_servers_suggestion_is_left_to_the_client_that_named_it() {
+        let ui = test_window();
+        ui.set_create_server_client_id("repro-client".into());
+        ui.set_create_server_name_suggestion("Caveopolis 2 Server".into());
+        ui.set_create_server_minecraft("1.21.1".into());
+        ui.set_create_server_loader("NeoForge".into());
+
+        recompute_create_server_name(&ui);
+
+        assert_eq!(
+            ui.get_create_server_name_suggestion(),
+            "Caveopolis 2 Server"
+        );
     }
 
     /// A file dropped on the window carries no cursor position, so what it is

@@ -1735,7 +1735,6 @@ gui-import-create-server-detail = Built from the same pack once the instance is 
 gui-detected-pack-name = Use the detected pack name
 gui-create-linked-server-detail = Create and materialize a server linked to the selected client's retained recipe.
 gui-create-standalone-server-detail = Create and install a standalone exact server.
-gui-server-name-placeholder = Test server
 gui-eula-create-warning = EULA consent is not implied. Starting is blocked until you explicitly review and accept it.
 gui-create-server = Create Server
 gui-mod-plan-compatible = Ephervex core checked compatibility with the selected instance.

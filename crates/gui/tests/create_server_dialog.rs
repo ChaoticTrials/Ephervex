@@ -117,6 +117,51 @@ fn clearing_the_choice_removes_the_archive_from_the_submission() {
     assert_eq!(ui.get_create_server_pack_name(), SharedString::default());
 }
 
+/// An untouched dialog creates the server its placeholder names.
+#[test]
+fn an_untouched_dialog_submits_the_suggested_name() {
+    let ui = window();
+    let submitted: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&submitted);
+    ui.on_submit_create_server(move |name, _, _, _, _, _, _, _, _| {
+        sink.borrow_mut().push(name.to_string());
+    });
+
+    open_create_server(&ui, "repro-client");
+    ui.set_create_server_name(SharedString::default());
+    ui.set_create_server_name_suggestion("Caveopolis 2 Server".into());
+    settle(&ui);
+
+    let create = button(&ui, &lookup("gui-create-server")).expect("the dialog can be submitted");
+    create.invoke_accessible_default_action();
+
+    assert_eq!(
+        submitted.borrow().as_slice(),
+        ["Caveopolis 2 Server".to_owned()]
+    );
+}
+
+/// A typed name still wins over the suggestion behind it.
+#[test]
+fn a_typed_name_is_submitted_instead_of_the_suggestion() {
+    let ui = window();
+    let submitted: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&submitted);
+    ui.on_submit_create_server(move |name, _, _, _, _, _, _, _, _| {
+        sink.borrow_mut().push(name.to_string());
+    });
+
+    open_create_server(&ui, "repro-client");
+    ui.set_create_server_name_suggestion("Caveopolis 2 Server".into());
+    ui.set_create_server_name("Bisect A".into());
+    settle(&ui);
+
+    let create = button(&ui, &lookup("gui-create-server")).expect("the dialog can be submitted");
+    create.invoke_accessible_default_action();
+
+    assert_eq!(submitted.borrow().as_slice(), ["Bisect A".to_owned()]);
+}
+
 /// The import dialog only asks for server files once a server is wanted.
 #[test]
 fn the_import_dialog_offers_an_archive_only_when_it_is_building_a_server() {
@@ -176,6 +221,7 @@ fn open_import(ui: &AppWindow, create_server: bool) {
 fn open_create_server(ui: &AppWindow, client: &str) {
     ui.set_loading(false);
     ui.set_create_server_client_id(client.into());
+    ui.set_create_server_name_suggestion(SharedString::default());
     ui.set_create_server_pack(SharedString::default());
     ui.set_create_server_pack_name(SharedString::default());
     ui.set_modal("create-server".into());
