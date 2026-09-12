@@ -947,6 +947,8 @@ error-mod-already-installed = That mod is already installed at a different versi
 .action = { $project } is installed from { $provider } at { $installed }, not { $requested }. Changing an installed mod's version is not supported yet.
 
 error-mod-managed-identity-missing = That file cannot be recorded as an installed mod.
+error-mod-hand-placed-not-mutable = That jar was added by hand, so Ephervex does not replace or remove it.
+.action = Delete it from the mods list if you no longer want it.
 .action = Ephervex only records mods it can look up again by project and version, so nothing was invented for { $path }.
 
 ## Browsing and resolving mods

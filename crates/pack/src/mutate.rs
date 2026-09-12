@@ -48,7 +48,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use ephervex_model::ModProvider;
+use ephervex_model::{ModOrigin, ModProvider};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument, warn};
 
@@ -273,14 +273,24 @@ fn plan(
 
     // A removal must name something Ephervex installed. Anything else is a jar
     // the user owns, and no provider operation gets to delete one.
+    //
+    // Identity is not ownership: a hand-placed jar a catalog recognized carries
+    // a provider and a project, so it answers `managed_project` exactly as an
+    // installed mod does. Origin is the thing that says whose file it is, so
+    // origin is what is checked.
     for removal in removals {
-        if recipe
-            .managed_project(removal.provider, &removal.project_id)
-            .is_none()
-        {
-            return Err(PackError::ManagedIdentityMissing {
-                path: removal.project_id.clone(),
-            });
+        match recipe.managed_project(removal.provider, &removal.project_id) {
+            None => {
+                return Err(PackError::ManagedIdentityMissing {
+                    path: removal.project_id.clone(),
+                });
+            }
+            Some(entry) if entry.origin == ModOrigin::HandPlaced => {
+                return Err(PackError::HandPlacedNotMutable {
+                    path: entry.logical_path.clone(),
+                });
+            }
+            Some(_) => {}
         }
     }
 
@@ -342,6 +352,14 @@ fn action_for(
             } else {
                 Ok(Action::Repair)
             }
+        }
+        Some(entry) if entry.origin == ModOrigin::HandPlaced => {
+            // Installing this project would retire the user's own jar as
+            // though it were a previous release the launcher had put there.
+            // Adoption recorded what that file is; it did not hand it over.
+            Err(PackError::HandPlacedNotMutable {
+                path: entry.logical_path.clone(),
+            })
         }
         Some(entry) => {
             let entry = entry.clone();

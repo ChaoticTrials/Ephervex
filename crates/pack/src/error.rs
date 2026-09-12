@@ -299,6 +299,16 @@ pub enum PackError {
     #[error("`{path}` cannot be recorded as a managed mod without a provider and project")]
     ManagedIdentityMissing { path: String },
 
+    /// A provider operation named a jar the user put in `mods/` themselves.
+    ///
+    /// Reachable because a hand-placed jar a catalog recognized carries the
+    /// same provider and project id an installed mod does, so it answers a
+    /// lookup by project exactly as one. What separates them is origin, and
+    /// origin is why this refuses: adoption recorded what the file is, it did
+    /// not make the file the launcher's to retire or replace.
+    #[error("`{}` was added by hand, so no provider operation may replace or remove it", path.display())]
+    HandPlacedNotMutable { path: PathBuf },
+
     /// The project is already installed at a different version.
     ///
     /// Changing an installed mod's version is a mod *update*, which this build
@@ -381,6 +391,7 @@ impl PackError {
             Self::RecipeDestinationCollision { .. } => "error-pack-recipe-destination-collision",
             Self::RecipeDestinationOccupied { .. } => "error-pack-recipe-destination-occupied",
             Self::ManagedIdentityMissing { .. } => "error-mod-managed-identity-missing",
+            Self::HandPlacedNotMutable { .. } => "error-mod-hand-placed-not-mutable",
             Self::ManagedVersionConflict { .. } => "error-mod-already-installed",
             Self::DestinationOccupied { .. } => "error-mod-destination-occupied",
             Self::DestinationCollision { .. } => "error-mod-destination-collision",
@@ -409,6 +420,7 @@ impl PackError {
             | Self::RecipeDestinationCollision { path }
             | Self::RecipeDestinationOccupied { path }
             | Self::DestinationOccupied { path }
+            | Self::HandPlacedNotMutable { path }
             | Self::FileUnmeasurable { path, .. } => Some(path.clone()),
             _ => None,
         }

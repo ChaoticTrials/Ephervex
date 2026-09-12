@@ -922,3 +922,83 @@ async fn planning_the_result_agrees_with_carrying_it_out() {
         "a preview that disagrees with the operation is worse than none"
     );
 }
+
+#[tokio::test]
+async fn a_removal_may_not_name_a_jar_that_was_added_by_hand() {
+    // A hand-placed jar a catalog recognized carries the same provider and
+    // project id an installed mod does, so it answers a lookup by project
+    // exactly as one. Origin is what says whose file it is.
+    let server = MockServer::start().await;
+    let instance = Instance::new();
+    let mut recipe = recipe();
+    let adopted = entry(
+        &server,
+        "/adopted.jar",
+        "from-a-forum-post.jar",
+        ROOT_V1,
+        "HANDPROJ",
+        "v1",
+        ModOrigin::HandPlaced,
+    );
+    recipe.record_managed(adopted).expect("record");
+    std::fs::write(instance.jar("from-a-forum-post.jar"), ROOT_V1).expect("jar");
+
+    let error = mutate(
+        &instance,
+        &mut recipe,
+        &[],
+        &[ManagedProject::new(ModProvider::Modrinth, "HANDPROJ")],
+    )
+    .await
+    .expect_err("a provider removal must not reach the user's own jar");
+
+    assert!(
+        matches!(error, PackError::HandPlacedNotMutable { .. }),
+        "unexpected refusal: {error:?}"
+    );
+    assert_eq!(instance.jars(), vec!["from-a-forum-post.jar".to_owned()]);
+}
+
+#[tokio::test]
+async fn installing_a_project_may_not_replace_a_jar_that_was_added_by_hand() {
+    // The same hole from the other side: without the origin check this
+    // retires the user's jar as though it were a previous release.
+    let server = MockServer::start().await;
+    serve(&server, "/v2.jar", ROOT_V2).await;
+    let instance = Instance::new();
+    let mut recipe = recipe();
+    let adopted = entry(
+        &server,
+        "/adopted.jar",
+        "from-a-forum-post.jar",
+        ROOT_V1,
+        "HANDPROJ",
+        "v1",
+        ModOrigin::HandPlaced,
+    );
+    recipe.record_managed(adopted).expect("record");
+    std::fs::write(instance.jar("from-a-forum-post.jar"), ROOT_V1).expect("jar");
+
+    let newer = entry(
+        &server,
+        "/v2.jar",
+        "the-same-mod-2.0.jar",
+        ROOT_V2,
+        "HANDPROJ",
+        "v2",
+        ModOrigin::UserSelected,
+    );
+    let error = mutate(&instance, &mut recipe, &[newer], &[])
+        .await
+        .expect_err("a provider install must not retire the user's own jar");
+
+    assert!(
+        matches!(error, PackError::HandPlacedNotMutable { .. }),
+        "unexpected refusal: {error:?}"
+    );
+    assert_eq!(
+        instance.jars(),
+        vec!["from-a-forum-post.jar".to_owned()],
+        "the user's jar is untouched and the new one was never written"
+    );
+}
