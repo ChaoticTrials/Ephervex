@@ -112,4 +112,6 @@ If a required manual acceptance step cannot run because of an external environme
 - Before finishing a change, check `git status` and report any intentionally uncommitted files.
 - Use Conventional Commit-style subjects where they fit naturally, such as `feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`, or `ci:`.
 - Do not use implementation-stage numbers, planning references, WIP/checkpoint wording, session provenance, or temporary milestone names in commit subjects or bodies.
+- Commit a change as soon as that change is finished, with its tests, its documentation, and the checks relevant to it. Finished work is not carried forward uncommitted to be sorted out later.
+- Do not build several changes at once and divide the result into commits afterwards. A commit assembled that way was never verified on its own, and changes that grew together share lines and cannot be separated cleanly.
 - Preserve meaningful feature boundaries in history. Do not squash unrelated changes together merely to make the history shorter.
