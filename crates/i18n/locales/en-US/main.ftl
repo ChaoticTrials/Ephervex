@@ -1651,6 +1651,7 @@ gui-rename-detail = Only the name changes. Nothing on disk is named after it, so
 gui-renamed = Renamed to { $value }.
 gui-delete = Delete
 gui-delete-mod = Delete { $value }
+gui-remove-mod = Remove { $value }
 gui-modal-delete-mod = Delete Mod
 gui-delete-mod-detail = Delete { $value } from the mods folder?
 gui-delete-mod-note = You added this JAR yourself, so Ephervex cannot fetch it again. The file is removed from disk.

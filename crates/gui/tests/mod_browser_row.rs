@@ -147,6 +147,72 @@ fn a_managed_mod_names_the_catalog_it_came_from() {
     );
 }
 
+/// Where a row's badges and its bin sit relative to each other.
+///
+/// Layout rather than behavior, and asserted because reading the markup does
+/// not tell you: a badge placed in the title row rides on however long the
+/// title is, so it lands in a different column on every card, and the bin then
+/// has nothing above it. Both belong in the row's own trailing column.
+#[test]
+fn a_rows_badges_sit_at_its_trailing_edge_above_the_bin() {
+    let ui = window();
+    mod_browser(&ui, Vec::new());
+    ui.set_managed_mods(ModelRc::new(VecModel::from(vec![hand_placed_mod()])));
+    settle(&ui);
+
+    let badge = ElementHandle::find_by_accessible_label(&ui, "Added by hand")
+        .find(|element| element.size().width > 0.0)
+        .expect("the row says who put the file there");
+    let bin = ElementHandle::find_by_accessible_label(
+        &ui,
+        &lookup_args("gui-delete-mod", [("value", Arg::from("UtilitiX"))]),
+    )
+    .find(|element| element.size().width > 0.0)
+    .expect("a hand-placed row offers the bin");
+
+    assert!(
+        bin.absolute_position().y > badge.absolute_position().y,
+        "the bin belongs under the badge, not beside it"
+    );
+    // Same column, within a badge's own width. This is what tells a stacked
+    // pair apart from a badge left in the title row, where it sits at a
+    // title-dependent offset and the bin is a column further right.
+    let badge_center = badge.absolute_position().x + badge.size().width / 2.0;
+    let bin_center = bin.absolute_position().x + bin.size().width / 2.0;
+    assert!(
+        (badge_center - bin_center).abs() < badge.size().width,
+        "badge center {badge_center} and bin center {bin_center} are not one column"
+    );
+
+    let title = ElementHandle::find_by_accessible_label(&ui, "UtilitiX")
+        .find(|element| element.size().width > 0.0);
+    if let Some(title) = title {
+        assert!(
+            badge.absolute_position().x > title.absolute_position().x,
+            "the badge trails the title rather than preceding it"
+        );
+    }
+}
+
+/// A jar the user put in `mods/` themselves and no catalog has recognized.
+///
+/// One badge rather than two, which is what makes the column testable: with a
+/// catalog badge beside it neither pill is centered on the bin, only the pair
+/// is.
+fn hand_placed_mod() -> ModRow {
+    ModRow {
+        origin: "Added by hand".into(),
+        origin_kind: "hand-placed".into(),
+        provider: lookup("gui-mod-provider-unknown").into(),
+        provider_kind: SharedString::default(),
+        can_delete_file: true,
+        can_remove: false,
+        can_change_version: false,
+        can_update: false,
+        ..managed_mod()
+    }
+}
+
 /// The Install buttons on screen, one handle each.
 ///
 /// Filtered by role because a button's own label and the label of the text
