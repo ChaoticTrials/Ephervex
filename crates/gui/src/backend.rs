@@ -1633,6 +1633,10 @@ fn run_worker(
                     absent_mods,
                 ) {
                     Ok(copy) => {
+                        // Before the toast: the dialog that asked the question
+                        // has its answer, and leaving it open invites the same
+                        // answer again and a second copy nobody asked for.
+                        let _ = events.send(Event::CloseModal);
                         let _ = events.send(Event::Toast {
                             message: localized_value("gui-created-entity", &copy.record.name),
                             error: false,
