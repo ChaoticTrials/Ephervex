@@ -457,15 +457,21 @@ invented project identity. The instance's Minecraft version and loader are
 inputs throughout; no graph is satisfied by changing them.
 
 Mods installed through a provider are entries in the same recipe (ADR 0013), so
-a server built later contains them. A jar the launcher did not install is never
-overwritten or deleted. Installation writes the recipe last; any failure —
+a server built later contains them. No automatic operation overwrites or deletes
+a jar the launcher did not install. Installation writes the recipe last; any failure —
 including a failure to write the recipe — removes the files that operation
 created and leaves everything else untouched.
 
 A jar somebody put in `mods/` themselves is listed rather than hidden: it loads
 into the game, so a list that omitted it disagreed with the folder about what
 runs. It is listed as hand-placed, and that origin refuses every mutation, so
-the launcher still never changes a file it did not install. Identifying one is
+the launcher still never changes a file it did not install. The one thing
+offered for such a jar is deleting it, which only an explicit request from the
+user does; it removes both the enabled and disabled spellings and drops the
+recipe entry identification wrote, so no record outlives the file. Jars dropped
+onto the mod list are copied in on the same terms: staged inside the instance
+and published by a rename, listed as hand-placed, and deliberately unrecorded,
+because nothing about a file handed over says which project it is. Identifying one is
 an explicit refresh rather than part of listing, because listing has to stay a
 directory read. Modrinth is asked first there, by the SHA-1 the launcher
 computes, and CurseForge second by fingerprint — the reverse of a server archive
@@ -483,7 +489,12 @@ address that proves no catalog release leaves the release unknown instead of
 recording a version number as an identifier. Provider titles, compatibility, and
 artwork are enrichment over that state: they are served through the metadata
 cache, and failing to fetch them costs a label rather than a mod. A recorded mod
-whose jar is absent from `mods/` is reported as missing rather than forgotten.
+whose jar is absent from `mods/` is marked absent rather than forgotten: the
+recipe still wants it, so a repair still fetches it and a server built from the
+recipe still contains it, but the mod list leaves it out, because a row for a
+file that is not there names nothing a reader can act on. Anything built out of
+an instance asks what to do with those records instead of deciding: duplicating
+a client offers to keep or drop them, and keeps them unless told otherwise.
 The frontends consume one snapshot from the application service and never read a
 recipe, call a provider, or interpret a file name themselves.
 

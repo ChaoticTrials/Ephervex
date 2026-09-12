@@ -1016,7 +1016,11 @@ mod tests {
         .expect("save");
 
         let copy = app
-            .duplicate_client(source.id, &ephervex_storage::DuplicateClient::named("Copy"))
+            .duplicate_client(
+                source.id,
+                &ephervex_storage::DuplicateClient::named("Copy"),
+                ephervex_model::AbsentModPolicy::Keep,
+            )
             .expect("duplicate");
         assert_eq!(
             options_of(&copy.record).expect("options"),

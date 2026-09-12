@@ -94,7 +94,8 @@ pub enum MutationRestriction {
     IdentityUnresolved,
     /// Somebody put this jar in `mods/` themselves, so it is theirs rather than
     /// the launcher's: nothing here installed it, nothing here recorded it, and
-    /// nothing here will replace or delete it.
+    /// nothing here will replace it or change which release it is. Deleting it
+    /// outright is the user's to ask for and is not a mutation of this kind.
     HandPlaced,
     /// The project is known but the installed release is not, so the launcher
     /// cannot tell an update from a no-op or prove what it would be replacing.
@@ -129,15 +130,29 @@ impl MutationRestriction {
 
 /// What one managed mod may have done to it.
 ///
-/// Four independent permissions rather than one "level": they genuinely do not
+/// Independent permissions rather than one "level": they genuinely do not
 /// order. An optional dependency may be removed and not moved; a pack mod may
-/// have its versions listed and nothing else.
+/// have its versions listed and nothing else; a hand-placed jar may be deleted
+/// and nothing else.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ModMutability {
     pub can_change_version: bool,
     pub can_update: bool,
+    /// Whether this mod may be taken out of the instance's desired state.
+    ///
+    /// A provider operation, addressed by project: it resolves what the mod's
+    /// dependencies leave orphaned and retires the files it removes. Never true
+    /// for a jar the launcher did not install, which has no desired state to be
+    /// taken out of. See [`Self::can_delete_file`] for that.
     pub can_remove: bool,
+    /// Whether the jar itself may simply be deleted.
+    ///
+    /// The one thing that can be done to a hand-placed jar and to nothing else.
+    /// Addressed by path rather than by project, because a jar nothing
+    /// recognizes has no project, and it is the user's file: deleting it
+    /// resolves nothing, retires nothing, and asks no catalog.
+    pub can_delete_file: bool,
     /// Whether the mod's other releases can be listed at all. True for anything
     /// with a project, including mods nothing may mutate: seeing what else
     /// exists is not a mutation.
@@ -147,12 +162,13 @@ pub struct ModMutability {
 }
 
 impl ModMutability {
-    /// Nothing may be done, for this reason.
+    /// No mutation may be done, for this reason.
     const fn restricted(restriction: MutationRestriction, can_list_versions: bool) -> Self {
         Self {
             can_change_version: false,
             can_update: false,
             can_remove: false,
+            can_delete_file: false,
             can_list_versions,
             restriction: Some(restriction),
         }
@@ -169,10 +185,13 @@ impl ModMutability {
         let has_version = entry.identity.is_fully_resolved();
 
         match entry.origin {
-            // Ephervex did not put this file here and does not own it. Listing
-            // it is so the folder and the list agree about what will load;
-            // changing or deleting it would be acting on somebody else's file.
-            ModOrigin::HandPlaced => Self::restricted(MutationRestriction::HandPlaced, has_project),
+            // Ephervex did not put this file here and does not own it, so no
+            // mutation may reach for it. Deleting the jar is the exception:
+            // the user owns it, and the user may throw it away.
+            ModOrigin::HandPlaced => Self {
+                can_delete_file: true,
+                ..Self::restricted(MutationRestriction::HandPlaced, has_project)
+            },
             ModOrigin::PackDeclared => {
                 Self::restricted(MutationRestriction::PackOwned, has_project)
             }
@@ -185,6 +204,7 @@ impl ModMutability {
                 // The one thing an explicit optional choice keeps: the person
                 // who ticked it may untick it.
                 can_remove: true,
+                can_delete_file: false,
                 can_list_versions: true,
                 restriction: Some(MutationRestriction::Dependency),
             },
@@ -192,6 +212,7 @@ impl ModMutability {
                 can_change_version: true,
                 can_update: true,
                 can_remove: true,
+                can_delete_file: false,
                 can_list_versions: true,
                 restriction: None,
             },
@@ -1228,6 +1249,29 @@ mod tests {
             ModMutability::of(&entry(ModOrigin::UserSelected, ModIdentity::Unresolved)).restriction,
             Some(MutationRestriction::IdentityUnresolved)
         );
+    }
+
+    #[test]
+    fn deleting_the_jar_outright_is_offered_for_a_hand_placed_mod_and_no_other() {
+        // The permission is about who owns the file, not about what is known
+        // about it, so an identified hand-placed jar keeps it and a fully
+        // resolved user-selected one never gains it.
+        for identity in [resolved(), project_only(), ModIdentity::Unresolved] {
+            assert!(
+                ModMutability::of(&entry(ModOrigin::HandPlaced, identity.clone())).can_delete_file
+            );
+        }
+        for origin in [
+            ModOrigin::PackDeclared,
+            ModOrigin::UserSelected,
+            ModOrigin::RequiredDependency,
+            ModOrigin::SelectedOptionalDependency,
+        ] {
+            assert!(
+                !ModMutability::of(&entry(origin, resolved())).can_delete_file,
+                "{origin:?}"
+            );
+        }
     }
 
     #[test]

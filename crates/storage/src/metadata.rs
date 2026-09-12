@@ -64,6 +64,14 @@ pub const SOURCE_DIR: &str = "source";
 /// scratch the game must never see, and inside the *instance* because a rename
 /// is only atomic within one filesystem.
 pub const RETIRED_DIR: &str = "retired";
+/// `.launcher/staging/`, where an incoming file waits until it is complete.
+///
+/// Kept apart from [`RETIRED_DIR`], which holds files on their way *out*. A
+/// jar copied in from elsewhere lands here first and is renamed into `mods/`
+/// once every byte is written, so an interrupted copy cannot leave a truncated
+/// jar for the loader to find. Inside the instance for the same reason retiring
+/// is: a rename is only atomic within one filesystem.
+pub const STAGING_DIR: &str = "staging";
 /// The Minecraft game directory inside a client instance root.
 ///
 /// Kept separate from `.launcher/` so that pack extraction, which writes into
@@ -168,6 +176,12 @@ pub fn source_dir(root: &Path) -> PathBuf {
 #[must_use]
 pub fn retired_dir(root: &Path) -> PathBuf {
     metadata_dir(root).join(RETIRED_DIR)
+}
+
+/// `<root>/.launcher/staging/`.
+#[must_use]
+pub fn staging_dir(root: &Path) -> PathBuf {
+    metadata_dir(root).join(STAGING_DIR)
 }
 
 /// `<root>/.launcher/instance.json`.

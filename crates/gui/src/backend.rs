@@ -17,9 +17,10 @@ use ephervex_core::{
     CoreError, CoreResult, CrashReview, DiagnosticKind, DiagnosticRequest, DiagnosticScope,
     ErrorChain, EulaStatus, ImportRequest, LaunchAndConnectObserver, LaunchAndConnectOptions,
     LaunchEvent, LaunchObserver, LaunchOptions, LinkedModOutcome, LinkedModPlan, LinkedModRequest,
-    LinkedTargetPlan, LinkedTargetResult, LinkedTargetState, LoginOptions, ManagedModEntry,
-    ManagedModSnapshot, MetadataAvailability, ModHost, ModInstallPlan, ModMutability, ModMutation,
-    ModMutationPlan, ModSearchQuery, MutationRestriction, NewClient, NewServer, OperationReporter,
+    LinkedTargetPlan, LinkedTargetResult, LinkedTargetState, LocalModOffer, LocalModPlan,
+    LocalModReport, LoginOptions, ManagedModEntry, ManagedModSnapshot, MetadataAvailability,
+    ModHost, ModInstallPlan, ModMutability, ModMutation, ModMutationPlan, ModPresence,
+    ModSearchQuery, MutationRestriction, NewClient, NewServer, OperationReporter,
     OptionalSelection, PackAnalysis, Paths, PlannedOutcome, ProcessMonitor, ProgressSink,
     ProviderFileIdentity, SearchOptions, ServerContentSource, ServerCreateOptions, ServerEvent,
     ServerFolder, ServerNetworkSettings, ServerObserver, SideRequirement, SuspectReason,
@@ -31,8 +32,8 @@ use ephervex_core::{
 };
 use ephervex_i18n::{Arg, lookup, lookup_args, lookup_attribute, lookup_attribute_args};
 use ephervex_model::{
-    InstanceId, LoaderKind, LoaderSelection, ModOrigin, ModProvider, Operation, OperationStatus,
-    ServerId, StorageClass,
+    AbsentModPolicy, InstanceId, LoaderKind, LoaderSelection, ModOrigin, ModProvider, Operation,
+    OperationStatus, ServerId, StorageClass,
 };
 
 use crate::presentation::{
@@ -169,7 +170,12 @@ pub enum Command {
     },
     OpenClientFolder(InstanceId),
     OpenServerFolder(ServerId),
-    DuplicateClient(InstanceId),
+    /// Find out whether duplicating this instance has a question to ask first.
+    PlanDuplicate(InstanceId),
+    DuplicateClient {
+        instance: InstanceId,
+        absent_mods: AbsentModPolicy,
+    },
     DeleteClient {
         id: InstanceId,
         files: bool,
@@ -291,6 +297,38 @@ pub enum Command {
         host: ModHost,
         path: PathBuf,
         enabled: bool,
+    },
+    /// Work out what dropping these files into a host's mods folder would do.
+    ///
+    /// Writes nothing. Its answer is what the name-clash question is asked
+    /// from, so the decision is made by the person who can make it rather than
+    /// by a thread that cannot ask.
+    PlanLocalMods {
+        host: ModHost,
+        sources: Vec<PathBuf>,
+    },
+    /// Copy these files into a host's mods folder and reload the list.
+    ///
+    /// Only what the user agreed to: anything they chose to skip never gets
+    /// here. `skipped` is carried through so the result can say so.
+    AddLocalMods {
+        host: ModHost,
+        sources: Vec<PathBuf>,
+        skipped: usize,
+    },
+    /// Delete one jar the user put in the mods folder themselves.
+    DeleteHandPlacedMod {
+        host: ModHost,
+        path: PathBuf,
+    },
+    /// Change what an instance or a server is called.
+    RenameClient {
+        id: InstanceId,
+        name: String,
+    },
+    RenameServer {
+        id: ServerId,
+        name: String,
     },
     OpenLiveLog(LiveLogSource),
     CloseLiveLog,
@@ -606,8 +644,6 @@ pub struct ManagedModData {
     pub author: String,
     /// A cached icon file, or empty for the fallback glyph.
     pub icon: String,
-    /// The jar the instance is recorded as having is not in `mods/`.
-    pub missing: bool,
     /// Whether the loader will load this mod, as opposed to it sitting in
     /// `mods/` under the suffix that hides it.
     pub enabled: bool,
@@ -618,6 +654,9 @@ pub struct ManagedModData {
     pub can_change_version: bool,
     pub can_update: bool,
     pub can_remove: bool,
+    /// Whether this row offers to delete the jar. True only for one the user
+    /// put in `mods/` themselves.
+    pub can_delete_file: bool,
     /// Why the mutating actions are unavailable, already localized. Empty when
     /// they are available.
     pub restriction: String,
@@ -627,6 +666,50 @@ pub struct ManagedModData {
     /// `high`, `medium`, or `low`, so the row can weight what it says. Empty
     /// when this mod is not a suspect.
     pub suspect_confidence: String,
+}
+
+/// What dropping a set of files onto one host's mod list would do.
+///
+/// The host is carried so a late answer for a list the user has since navigated
+/// away from is discarded rather than asked about, exactly as the mod list's
+/// own results are.
+#[derive(Debug, Clone)]
+pub struct LocalModPlanData {
+    pub host: String,
+    pub host_kind: String,
+    /// Files that can be added with nothing to ask about.
+    pub ready: Vec<PathBuf>,
+    /// Files whose name is already taken, in the order they were dropped.
+    pub clashing: Vec<LocalModClashData>,
+    /// Files that cannot be added, with the reason already localized.
+    pub refused: Vec<LocalModRefusalData>,
+}
+
+/// One dropped file whose name something in the folder already has.
+#[derive(Debug, Clone)]
+pub struct LocalModClashData {
+    pub source: PathBuf,
+    pub file_name: String,
+    /// Whether the jar already there is one the loader is ignoring, which is
+    /// worth saying: replacing it turns the mod back on.
+    pub existing_is_disabled: bool,
+}
+
+/// The recorded mods an instance has no jar for, as a prompt needs them.
+///
+/// Empty means there is nothing to ask, which is the common case and the one
+/// that has to stay a single click.
+#[derive(Debug, Clone)]
+pub struct AbsentModsData {
+    pub instance: String,
+    pub names: Vec<String>,
+}
+
+/// One dropped file that cannot go in, and why, in the words a user reads.
+#[derive(Debug, Clone)]
+pub struct LocalModRefusalData {
+    pub file_name: String,
+    pub reason: String,
 }
 
 /// One thing this launcher is running, as the Running page shows it.
@@ -986,6 +1069,11 @@ pub enum Event {
         versions: Vec<String>,
     },
     ManagedMods(ManagedModsData),
+    /// What a set of dropped files would do, and what has to be asked first.
+    LocalModPlan(LocalModPlanData),
+    /// The mods a copy would inherit without their jars, so the user can say
+    /// whether the copy should carry them.
+    AbsentMods(AbsentModsData),
     CrashNotice(CrashNoticeData),
     Running(Vec<RunningData>),
     ModVersions(ModVersionsData),
@@ -1502,8 +1590,26 @@ fn run_worker(
                         }),
                 );
             }
-            Command::DuplicateClient(instance) => {
-                match app.duplicate_client(instance, &ephervex_core::DuplicateClient::default()) {
+            Command::PlanDuplicate(instance) => {
+                match app.absent_recorded_mods(ModHost::Instance(instance)) {
+                    Ok(absent) => {
+                        let _ = events.send(Event::AbsentMods(AbsentModsData {
+                            instance: instance.to_string(),
+                            names: absent.into_iter().map(|entry| entry.name).collect(),
+                        }));
+                    }
+                    Err(error) => send_error(&events, &error),
+                }
+            }
+            Command::DuplicateClient {
+                instance,
+                absent_mods,
+            } => {
+                match app.duplicate_client(
+                    instance,
+                    &ephervex_core::DuplicateClient::default(),
+                    absent_mods,
+                ) {
                     Ok(copy) => {
                         let _ = events.send(Event::Toast {
                             message: localized_value("gui-created-entity", &copy.record.name),
@@ -2035,6 +2141,69 @@ fn run_worker(
             Command::RefreshMods(host) => {
                 send_host_mods(&app, host, &events, &refreshed_mods, true);
             }
+            Command::PlanLocalMods { host, sources } => match app.plan_local_mods(host, &sources) {
+                Ok(plan) => {
+                    let _ = events.send(Event::LocalModPlan(local_mod_plan_data(host, &plan)));
+                }
+                Err(error) => send_error(&events, &error),
+            },
+            Command::AddLocalMods {
+                host,
+                sources,
+                skipped,
+            } => match app.add_local_mods(host, &sources) {
+                Ok(report) => {
+                    let _ = events.send(Event::Toast {
+                        message: local_mods_added_message(&report, skipped),
+                        error: !report.refused.is_empty(),
+                    });
+                    // What the Refresh button does, so the jars just added are
+                    // identified without the user asking a second time.
+                    send_host_mods(&app, host, &events, &refreshed_mods, true);
+                }
+                Err(error) => send_error(&events, &error),
+            },
+            Command::DeleteHandPlacedMod { host, path } => {
+                match app.delete_hand_placed_mod(host, &path) {
+                    Ok(()) => {
+                        let _ = events.send(Event::CloseModal);
+                        let _ = events.send(Event::Toast {
+                            message: localized_value(
+                                "gui-mod-deleted",
+                                &path
+                                    .file_name()
+                                    .unwrap_or(path.as_os_str())
+                                    .to_string_lossy(),
+                            ),
+                            error: false,
+                        });
+                        send_host_mods(&app, host, &events, &refreshed_mods, false);
+                    }
+                    Err(error) => send_modal_error(&events, &error),
+                }
+            }
+            Command::RenameClient { id, name } => match app.rename_client(id, &name) {
+                Ok(record) => {
+                    let _ = events.send(Event::CloseModal);
+                    let _ = events.send(Event::Toast {
+                        message: localized_value("gui-renamed", &record.name),
+                        error: false,
+                    });
+                    send_snapshot(&app, &events);
+                }
+                Err(error) => send_modal_error(&events, &error),
+            },
+            Command::RenameServer { id, name } => match app.rename_server(id, &name) {
+                Ok(record) => {
+                    let _ = events.send(Event::CloseModal);
+                    let _ = events.send(Event::Toast {
+                        message: localized_value("gui-renamed", &record.name),
+                        error: false,
+                    });
+                    send_snapshot(&app, &events);
+                }
+                Err(error) => send_modal_error(&events, &error),
+            },
             Command::DisableSuggestedMods(server) => {
                 disable_suggested_mods(&app, server, &events, &refreshed_mods);
             }
@@ -4868,6 +5037,69 @@ fn restriction_text(restriction: Option<MutationRestriction>) -> String {
     restriction.map_or_else(String::new, |restriction| lookup(restriction.message_id()))
 }
 
+/// Turns a local-mod plan into what the clash question is asked from.
+fn local_mod_plan_data(host: ModHost, plan: &LocalModPlan) -> LocalModPlanData {
+    let mut ready = Vec::new();
+    let mut clashing = Vec::new();
+    let mut refused = Vec::new();
+    for offer in &plan.offers {
+        match offer {
+            LocalModOffer::Ready { source, .. } => ready.push(source.clone()),
+            LocalModOffer::Clashing {
+                source,
+                file_name,
+                existing_is_disabled,
+            } => clashing.push(LocalModClashData {
+                source: source.clone(),
+                file_name: file_name.clone(),
+                existing_is_disabled: *existing_is_disabled,
+            }),
+            LocalModOffer::Refused { source, reason } => refused.push(LocalModRefusalData {
+                // The file's own name, not the whole path: the user just
+                // dragged it and knows where it came from.
+                file_name: source
+                    .file_name()
+                    .unwrap_or(source.as_os_str())
+                    .to_string_lossy()
+                    .into_owned(),
+                reason: lookup(reason.message_id()),
+            }),
+        }
+    }
+    LocalModPlanData {
+        host: host.id(),
+        host_kind: host.kind().to_owned(),
+        ready,
+        clashing,
+        refused,
+    }
+}
+
+/// What a finished drop has to say for itself.
+///
+/// Everything that did not happen is counted, because a drop of six jars that
+/// added four is not a success the user should have to notice for themselves.
+fn local_mods_added_message(report: &LocalModReport, skipped: usize) -> String {
+    let mut parts = vec![counted("gui-mods-added", report.written())];
+    if skipped > 0 {
+        parts.push(counted("gui-mods-skipped", skipped));
+    }
+    if !report.refused.is_empty() {
+        // Only a file that passed the plan and failed the copy reaches here;
+        // everything refused up front was already reported by name.
+        parts.push(counted("gui-mods-refused", report.refused.len()));
+    }
+    parts.join(" ")
+}
+
+/// One pluralized message about a count of files.
+fn counted(message_id: &str, count: usize) -> String {
+    lookup_args(
+        message_id,
+        [("count", Arg::from(i64::try_from(count).unwrap_or(i64::MAX)))],
+    )
+}
+
 /// Turns the application service's mod view into rows.
 ///
 /// The one place a managed mod becomes display text. Everything it reads is
@@ -4883,6 +5115,10 @@ fn managed_mods_data(
         mods: snapshot
             .mods
             .iter()
+            // A recorded mod whose jar is not in `mods/` is left out. A row for
+            // a file that is not there names nothing the reader can act on, and
+            // the record is kept so a repair still puts the jar back.
+            .filter(|entry| entry.presence != ModPresence::Missing)
             .map(|entry| managed_mod_data(entry, review))
             .collect(),
         notice: match snapshot.metadata {
@@ -4933,6 +5169,7 @@ fn managed_mod_data(entry: &ManagedModEntry, review: Option<&CrashReview>) -> Ma
         can_change_version: mutability.can_change_version,
         can_update: mutability.can_update,
         can_remove: mutability.can_remove,
+        can_delete_file: mutability.can_delete_file,
         restriction: restriction_text(mutability.restriction),
         suspect_reason: suspect
             .map(|found| suspect_reason_text(&found.suspect.reason))
@@ -4971,7 +5208,6 @@ fn managed_mod_data(entry: &ManagedModEntry, review: Option<&CrashReview>) -> Ma
             .as_ref()
             .map(|path| path.to_string_lossy().into_owned())
             .unwrap_or_default(),
-        missing: entry.presence.needs_attention(),
         enabled: entry.presence.is_enabled(),
         pack_owned: entry.is_pack_owned(),
     }

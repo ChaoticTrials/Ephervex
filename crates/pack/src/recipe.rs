@@ -1012,6 +1012,58 @@ impl PackRecipe {
         Ok(())
     }
 
+    /// Drops the record of one hand-placed jar.
+    ///
+    /// The counterpart to the adoption that wrote it: a jar somebody copied in
+    /// is recorded only so its identity survives a restart, and once the file
+    /// is gone that record describes nothing. Leaving it behind is what turns a
+    /// deleted jar into a row for a mod the instance cannot produce.
+    ///
+    /// Deliberately narrow. Only [`ModOrigin::HandPlaced`] is forgettable here,
+    /// because only a hand-placed jar is the user's to delete outright;
+    /// everything else is the launcher's desired state, and taking an entry out
+    /// of that is a mod removal, which resolves dependencies and retires files.
+    /// Returns whether anything was forgotten.
+    pub fn forget_hand_placed(&mut self, logical_path: &Path) -> bool {
+        let before = self.files.len();
+        self.files.retain(|file| {
+            file.logical_path != logical_path || file.origin != ModOrigin::HandPlaced
+        });
+        self.files.len() != before
+    }
+
+    /// Drops the record of every mod whose jar is not in `game_dir`.
+    ///
+    /// For a copy, never for the instance the copy was made from: a recipe
+    /// describes desired state, and a jar deleted while bisecting is a jar the
+    /// instance still wants back (ADR 0013). What is true of the original is
+    /// not automatically true of something built from it, which is the whole
+    /// reason this is a decision somebody makes rather than a rule.
+    ///
+    /// Mods only. A pack's `config/` file is not a mod, and whether it is on
+    /// disk is not this question. Both spellings count as present, so a mod
+    /// the user turned off is kept.
+    ///
+    /// Returns what it forgot, so a caller can say so.
+    pub fn forget_absent_files(&mut self, game_dir: &Path, side: PackSide) -> Vec<PathBuf> {
+        let selection = OptionalSelection::none();
+        let mut forgotten = Vec::new();
+        self.files.retain(|file| {
+            if !file.is_mod_file() || !file.is_installed_on(side, &selection) {
+                return true;
+            }
+            let installed = game_dir.join(&file.logical_path);
+            let mut disabled = installed.clone().into_os_string();
+            disabled.push(crate::managed::DISABLED_SUFFIX);
+            if installed.is_file() || Path::new(&disabled).is_file() {
+                return true;
+            }
+            forgotten.push(file.logical_path.clone());
+            false
+        });
+        forgotten
+    }
+
     /// Whether any file is optional on either side, i.e. whether any optional
     /// step is worth showing at all.
     #[must_use]
@@ -1506,6 +1558,71 @@ mod tests {
                 file_id: None,
             }),
         }
+    }
+
+    /// The same mod as adoption records one: identified, but still the user's.
+    fn adopted_by_hand(project: &str, file_name: &str) -> PackFileRecipe {
+        PackFileRecipe {
+            origin: ModOrigin::HandPlaced,
+            downloads: Vec::new(),
+            ..managed(project, "Orv4ObRj", file_name)
+        }
+    }
+
+    #[test]
+    fn forgetting_a_hand_placed_jar_leaves_every_other_entry_alone() {
+        let mut recipe = PackRecipe::for_manual_instance(
+            "Repro",
+            "1.20.1",
+            LoaderSelection::exact(LoaderKind::NeoForge, "47.1.106"),
+        );
+        recipe
+            .record_managed(managed("u6dRKJwZ", "Orv4ObRj", "library-1.2.3.jar"))
+            .expect("record");
+        recipe
+            .record_managed(adopted_by_hand("P7dR8mSH", "from-a-forum-post.jar"))
+            .expect("record");
+
+        assert!(recipe.forget_hand_placed(Path::new("mods/from-a-forum-post.jar")));
+
+        let remaining: Vec<PathBuf> = recipe
+            .recorded_mods()
+            .into_iter()
+            .map(|entry| entry.logical_path)
+            .collect();
+        assert_eq!(remaining, vec![PathBuf::from("mods/library-1.2.3.jar")]);
+    }
+
+    #[test]
+    fn forgetting_refuses_an_entry_the_launcher_owns() {
+        // Taking a launcher-owned mod out of the desired state is a removal,
+        // which resolves dependencies and retires files. This is neither.
+        let mut recipe = PackRecipe::for_manual_instance(
+            "Repro",
+            "1.20.1",
+            LoaderSelection::exact(LoaderKind::NeoForge, "47.1.106"),
+        );
+        recipe
+            .record_managed(managed("u6dRKJwZ", "Orv4ObRj", "library-1.2.3.jar"))
+            .expect("record");
+
+        assert!(!recipe.forget_hand_placed(Path::new("mods/library-1.2.3.jar")));
+        assert_eq!(recipe.recorded_mods().len(), 1);
+    }
+
+    #[test]
+    fn forgetting_a_path_no_entry_claims_changes_nothing() {
+        let mut recipe = PackRecipe::for_manual_instance(
+            "Repro",
+            "1.20.1",
+            LoaderSelection::exact(LoaderKind::NeoForge, "47.1.106"),
+        );
+        recipe
+            .record_managed(adopted_by_hand("P7dR8mSH", "from-a-forum-post.jar"))
+            .expect("record");
+
+        assert!(!recipe.forget_hand_placed(Path::new("mods/never-here.jar")));
+        assert_eq!(recipe.recorded_mods().len(), 1);
     }
 
     #[test]

@@ -26,19 +26,21 @@ use std::sync::Arc;
 
 use ephervex_download::OperationReporter;
 use ephervex_minecraft::LanguageCatalog;
-use ephervex_model::{InstanceId, ServerId};
+use ephervex_model::{AbsentModPolicy, InstanceId, ServerId};
 use ephervex_options::{
     GlobalMinecraftPreferences, LanguageAvailability, LoadedPreferences, OptionsCompatibility,
     PreferenceApplication, PreferenceKey, PreferenceValue,
 };
+use ephervex_pack::{PackSide, SourceStore};
 use ephervex_storage::{
     ClientFolder, ClientRecord, Config, DuplicateClient, DuplicatedClient, ServerFolder,
+    ServerRecord,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{instrument, warn};
 
 use crate::app::App;
-use crate::error::CoreResult;
+use crate::error::{CoreError, CoreResult};
 
 /// Reads the global Minecraft preferences out of the configuration file's
 /// shape.
@@ -364,7 +366,137 @@ impl App {
             context.language,
         )?)
     }
+}
 
+/// Drops one copy's records of mods whose jars did not come with it.
+///
+/// Best effort: a recipe that cannot be rewritten leaves the copy describing a
+/// mod it does not have, which is exactly the state the original was in and is
+/// not worth failing a duplication over.
+fn forget_absent_mods(root: &Path) {
+    let store = SourceStore::new(ephervex_storage::metadata::source_dir(root));
+    if !store.has_recipe() {
+        return;
+    }
+    let Ok(mut recipe) = store.read_recipe() else {
+        return;
+    };
+    let game_dir = ephervex_storage::metadata::client_game_dir(root);
+    let forgotten = recipe.forget_absent_files(&game_dir, PackSide::Client);
+    if forgotten.is_empty() {
+        return;
+    }
+    if let Err(error) = store.write_recipe(&recipe) {
+        warn!(%error, "a copy kept the records of mods whose jars are gone");
+    }
+}
+
+/// The longest name an instance or a server may carry.
+///
+/// Counted in characters rather than bytes, because the limit exists so a name
+/// stays readable in a list and in a bug report, not to fit a buffer. Generous
+/// enough that no real name meets it.
+pub const MAX_ENTITY_NAME_CHARS: usize = 120;
+
+/// Why a name the user typed was refused.
+///
+/// Typed rather than a message, so the frontend localizes it and the CLI can
+/// print its own wording. Each variant is a thing the user can fix by typing
+/// something else, which is what separates these from a storage failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum NameRefusal {
+    /// Nothing but whitespace. A blank row in the list names nothing.
+    Empty,
+    /// Longer than [`MAX_ENTITY_NAME_CHARS`].
+    TooLong,
+    /// Contains control characters, which do not survive a log line, a
+    /// directory listing, or a bug report intact.
+    ControlCharacters,
+}
+
+impl NameRefusal {
+    /// The `ephervex-i18n` message id explaining this to a user.
+    #[must_use]
+    pub const fn message_id(self) -> &'static str {
+        match self {
+            Self::Empty => "error-name-empty",
+            Self::TooLong => "error-name-too-long",
+            Self::ControlCharacters => "error-name-control-characters",
+        }
+    }
+}
+
+impl std::fmt::Display for NameRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Empty => "it is empty",
+            Self::TooLong => "it is too long",
+            Self::ControlCharacters => "it contains control characters",
+        })
+    }
+}
+
+/// The name to store, or why this one cannot be stored.
+///
+/// Surrounding whitespace is dropped rather than refused: it is invisible, so
+/// refusing it would explain nothing. Everything else is left exactly as typed,
+/// including the interior spacing and the case, because a name is the user's
+/// words and nothing here knows better.
+pub fn validated_entity_name(name: &str) -> CoreResult<String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(CoreError::EntityNameInvalid {
+            reason: NameRefusal::Empty,
+        });
+    }
+    if trimmed.chars().any(char::is_control) {
+        return Err(CoreError::EntityNameInvalid {
+            reason: NameRefusal::ControlCharacters,
+        });
+    }
+    if trimmed.chars().count() > MAX_ENTITY_NAME_CHARS {
+        return Err(CoreError::EntityNameInvalid {
+            reason: NameRefusal::TooLong,
+        });
+    }
+    Ok(trimmed.to_owned())
+}
+
+impl App {
+    // -- renaming ----------------------------------------------------------
+
+    /// Renames a client instance.
+    ///
+    /// Only the record changes. An instance root is named after its
+    /// [`InstanceId`], never after the instance, so nothing on disk moves and
+    /// no path anybody has already opened stops working.
+    ///
+    /// Names are not unique and are not made unique here. Two instances of the
+    /// same pack at the same version genuinely are the same thing to a user,
+    /// and inventing a suffix to tell them apart would name them something
+    /// neither was asked to be called.
+    #[instrument(skip(self))]
+    pub fn rename_client(&self, instance: InstanceId, name: &str) -> CoreResult<ClientRecord> {
+        let name = validated_entity_name(name)?;
+        let mut record = self.client(instance)?;
+        record.name = name;
+        self.registry_for_services().update_client(&mut record)?;
+        Ok(record)
+    }
+
+    /// Renames a dedicated server, on the same terms.
+    #[instrument(skip(self))]
+    pub fn rename_server(&self, server: ServerId, name: &str) -> CoreResult<ServerRecord> {
+        let name = validated_entity_name(name)?;
+        let mut record = self.server(server)?;
+        record.name = name;
+        self.registry_for_services().update_server(&mut record)?;
+        Ok(record)
+    }
+}
+
+impl App {
     // -- duplication -------------------------------------------------------
 
     /// Duplicates a client instance.
@@ -372,15 +504,27 @@ impl App {
     /// Global preferences are deliberately **not** re-applied: the copy keeps
     /// the options file its original had, so duplicating an instance whose
     /// settings were tuned by hand does not quietly reset them.
+    ///
+    /// `absent_mods` decides what the copy does with mods the original records
+    /// but no longer has on disk. The caller has to say, because only the user
+    /// knows which kind of copy this is: one made to carry on bisecting wants
+    /// them gone, one made to get back to a working state wants them.
     #[instrument(skip(self, request))]
     pub fn duplicate_client(
         &self,
         source: InstanceId,
         request: &DuplicateClient,
+        absent_mods: AbsentModPolicy,
     ) -> CoreResult<DuplicatedClient> {
-        Ok(self
+        let copy = self
             .registry_for_services()
-            .duplicate_client(source, request)?)
+            .duplicate_client(source, request)?;
+        if absent_mods.drops_them() {
+            // After the copy and only ever on the copy. The original still
+            // wants those mods, and a duplication is not a decision about it.
+            forget_absent_mods(&copy.record.root);
+        }
+        Ok(copy)
     }
 
     // -- open folder actions  ---------------------------------
@@ -504,6 +648,124 @@ mod tests {
     fn create(app: &App, name: &str, version: &str) -> ClientRecord {
         app.create_client_for_test(NewClient::new(name, version, LoaderSelection::vanilla()))
             .expect("create")
+    }
+
+    #[test]
+    fn renaming_an_instance_changes_the_record_and_moves_no_directory() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let original = create(&app, "Copy of something", "1.20.1");
+
+        let renamed = app
+            .rename_client(original.id, "Chest bug, NeoForge 47")
+            .expect("rename");
+
+        assert_eq!(renamed.name, "Chest bug, NeoForge 47");
+        assert_eq!(renamed.id, original.id);
+        assert_eq!(
+            renamed.root, original.root,
+            "an instance root is named after its id, so nothing moves"
+        );
+        assert!(renamed.root.is_dir());
+        assert_eq!(
+            app.client(original.id).expect("reread").name,
+            "Chest bug, NeoForge 47",
+            "and the change survives a reread rather than living in one record"
+        );
+    }
+
+    #[test]
+    fn a_renamed_instance_keeps_every_other_thing_about_it() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let original = create(&app, "Repro", "1.20.1");
+
+        let renamed = app
+            .rename_client(original.id, "Repro, narrowed")
+            .expect("rename");
+
+        assert_eq!(renamed.minecraft_version, original.minecraft_version);
+        assert_eq!(renamed.loader, original.loader);
+        assert_eq!(renamed.storage, original.storage);
+        assert_eq!(renamed.created_at, original.created_at);
+    }
+
+    #[test]
+    fn surrounding_whitespace_is_dropped_and_the_rest_of_a_name_is_left_alone() {
+        // Invisible, so refusing it would explain nothing. Interior spacing and
+        // case are the user's words and nothing here knows better.
+        assert_eq!(
+            validated_entity_name("  Chest   bug  ").expect("valid"),
+            "Chest   bug"
+        );
+    }
+
+    #[test]
+    fn a_name_that_is_empty_or_only_whitespace_is_refused() {
+        for blank in ["", "   ", "\t\n"] {
+            let error = validated_entity_name(blank).expect_err("blank names name nothing");
+            assert!(
+                matches!(
+                    error,
+                    CoreError::EntityNameInvalid {
+                        reason: NameRefusal::Empty | NameRefusal::ControlCharacters
+                    }
+                ),
+                "{error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_name_carrying_a_control_character_is_refused_rather_than_stripped() {
+        // Stripping would store something other than what was typed. A line
+        // break also does not survive a log line or a directory listing.
+        let error = validated_entity_name("Repro\nsecond line").expect_err("refused");
+        assert!(
+            matches!(
+                error,
+                CoreError::EntityNameInvalid {
+                    reason: NameRefusal::ControlCharacters
+                }
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn the_name_ceiling_counts_characters_rather_than_bytes() {
+        // A byte ceiling would refuse a shorter name in one language than in
+        // another, which is not a rule anybody could predict.
+        let wide = "\u{00e4}".repeat(MAX_ENTITY_NAME_CHARS);
+        assert!(
+            wide.len() > MAX_ENTITY_NAME_CHARS,
+            "two bytes per character"
+        );
+        assert!(validated_entity_name(&wide).is_ok());
+
+        let error = validated_entity_name(&"a".repeat(MAX_ENTITY_NAME_CHARS + 1))
+            .expect_err("one over the ceiling");
+        assert!(
+            matches!(
+                error,
+                CoreError::EntityNameInvalid {
+                    reason: NameRefusal::TooLong
+                }
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_refused_rename_leaves_the_record_exactly_as_it_was() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let original = create(&app, "Repro", "1.20.1");
+
+        app.rename_client(original.id, "   ")
+            .expect_err("a blank name is refused");
+
+        assert_eq!(app.client(original.id).expect("reread").name, "Repro");
     }
 
     #[test]
@@ -695,7 +957,11 @@ mod tests {
         std::fs::write(&path, "guiScale:4\n").expect("write");
 
         let copy = app
-            .duplicate_client(original.id, &DuplicateClient::default())
+            .duplicate_client(
+                original.id,
+                &DuplicateClient::default(),
+                AbsentModPolicy::Keep,
+            )
             .expect("duplicate")
             .record;
 

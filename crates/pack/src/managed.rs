@@ -44,6 +44,26 @@ use crate::store::SourceStore;
 /// directory.
 pub const MODS_DIR: &str = "mods";
 
+/// The suffix a mod carries while it is installed but not loaded.
+///
+/// Both FML and Fabric discover mods by scanning for `.jar`, so a file with any
+/// other extension is present on disk and invisible to the loader. `.disabled`
+/// is the spelling every other launcher uses, which is what makes a directory
+/// disabled by Ephervex readable by one of them and the other way round.
+pub const DISABLED_SUFFIX: &str = ".disabled";
+
+/// Where a jar sits when it is disabled.
+///
+/// Appended to the whole file name rather than replacing the extension, so the
+/// original name is recovered by removing the suffix and nothing has to guess
+/// what it used to be.
+#[must_use]
+pub fn disabled_path(path: &std::path::Path) -> std::path::PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(DISABLED_SUFFIX);
+    std::path::PathBuf::from(name)
+}
+
 /// The directory a pack-declared resource pack is installed into, relative to
 /// the game directory.
 ///

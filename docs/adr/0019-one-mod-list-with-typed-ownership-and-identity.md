@@ -112,3 +112,43 @@ has decided whether it belongs on a server, which makes creating one ask rather
 than assume. Its origin stays `HandPlaced`, so being recorded does not make it
 the launcher's to change. A jar nothing recognizes is listed and left
 unrecorded, and a later refresh may still identify it.
+
+## Amendment: the list shows the folder, and a hand-placed jar is the user's to delete
+
+Two of the decisions above no longer hold, and both changed for the same
+reason: the list is what a user acts on, so a row they cannot act on is worse
+than no row at all.
+
+**A recorded mod whose jar is absent is no longer listed.** The original
+reasoning — the instance still wants the mod, so say so — was right about the
+recipe and wrong about the list. Deleting a jar to bisect a crash is this
+launcher's central workflow, and it left behind a row saying "File missing from
+mods folder" for every jar deleted that way: a warning for the thing the user
+had just deliberately done. The record still says the instance wants the mod, so
+`ModPresence::Missing`, `ManagedModSnapshot::missing()`, repair, and server
+reconstruction are all unchanged. Only the list stops drawing it, and the
+message is gone from the product.
+
+Nothing is lost silently, because the absent records are still readable:
+`App::absent_recorded_mods` names them, and anything built out of the instance
+asks. Duplicating a client offers to keep or drop them, defaulting to keep.
+
+**A hand-placed jar may be deleted, by the user, by name.** Everything that
+made it "not owned" still holds — no automatic operation installs, updates,
+replaces, retires, or collects it — and `MutationRestriction::HandPlaced` still
+refuses every mutation. Deleting the file is not one of those: it resolves no
+dependencies, retires nothing, and asks no catalog. It is a separate permission,
+`ModMutability::can_delete_file`, true for that origin and no other, and it
+takes the adopted recipe entry with it so the record cannot outlive the file.
+
+Ephervex also now writes into `mods/` on request, when a user drops jars onto
+the list. Such a jar is deliberately **not** recorded: nothing about a file
+somebody hands over says what project it is, and recording a guess is what this
+ADR exists to prevent. It is hand-placed however it arrived, and the same
+digest lookup identifies it on the next refresh.
+
+One consequence taken deliberately: pack-declared entries and identified
+hand-placed ones answer a lookup by project identically, because identity is not
+ownership. `ephervex-pack`'s mutation planner now checks origin as well, so a
+provider removal or replacement cannot reach a jar the user placed. That rule
+was stated in its module documentation before and was not enforced.

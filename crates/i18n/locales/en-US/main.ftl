@@ -813,9 +813,25 @@ error-mod-identity-incomplete = One of this instance's mods has no provider iden
 error-mod-file-missing = That mod's file is not installed, so it cannot be enabled or disabled. Repair the instance to fetch it again.
 error-mod-file-not-toggled = That mod's file could not be renamed. Check that the mods folder is writable.
 .action = Mods with no identity have to be managed by hand.
+error-mod-not-hand-placed = Ephervex installed that mod, so it is removed rather than deleted.
+.action = Open the mod and use Remove, which also takes care of what it depended on.
+error-mod-file-not-deleted = That mod's file could not be deleted. Check that the mods folder is writable.
+error-mod-file-not-added = That file could not be copied into the mods folder. Check that there is room and that the folder is writable.
+
+error-name-empty = A name cannot be blank.
+error-name-too-long = That name is too long. Use at most { $limit } characters.
+error-name-control-characters = A name cannot contain control characters.
 
 error-mod-catalog-preference-unrecognized = "{ $catalog }" is not a mod catalog this version of Ephervex knows.
 .action = Choose a catalog in Settings, or name one for this command. The stored value is left alone.
+
+# Why one file the user chose cannot go into a mods folder. Each names
+# something the user can act on rather than describing an internal check.
+local-mod-not-a-file = Not a file.
+local-mod-not-a-jar = Not a JAR. Minecraft mods are .jar files.
+local-mod-unusable-name = Its name cannot be used for a file in the mods folder.
+local-mod-not-an-archive = Not a readable JAR. It may be incomplete or corrupt.
+local-mod-too-large = Too large to be a mod.
 
 # Why a mod belongs to an instance. Kept distinct because they are different
 # things to look at and, later, different things to change.
@@ -1260,24 +1276,23 @@ gui-open-diagnostics = View Diagnostics
 gui-temporary-lifecycle = Temporary instances remain until the operating system clears its temporary storage. Converting an existing instance in place is not available from the current application service.
 gui-persistent-lifecycle = This instance is stored under the persistent instance root.
 gui-managed-mods = Managed Mods
-gui-managed-mods-detail = Every mod in this instance: the ones its pack brought, the ones you installed, and any jar you added to the mods folder yourself.
+gui-managed-mods-detail = Every mod in this instance: the ones its pack brought, the ones you installed, and any jar you added yourself. Drop JARs here to add them.
 # Filters the list of mods an instance or server already has, by name.
 gui-filter-mods = Filter mods...
 gui-no-mods-match-title = No matches
 gui-no-mods-match = No mod in this list matches "{ $value }".
 gui-refresh-mod-details = Refresh mod names and artwork
 gui-no-managed-mods = No managed mods
-gui-no-managed-mods-detail = Manual JARs are not adopted or modified.
+gui-no-managed-mods-detail = Drop JAR files here to add them.
 gui-mod-disabled = Disabled, so the loader skips it
 gui-mod-loads = Load { $value }
 gui-server-mods = Server mods
-gui-server-mods-detail = Everything in this server's mods folder, including jars you added yourself. Turn off a mod to keep it installed while the loader skips it, which is how a client-only mod stops crashing a server.
+gui-server-mods-detail = Everything in this server's mods folder, including jars you added yourself. Drop JARs here to add them. Turn off a mod to keep it installed while the loader skips it, which is how a client-only mod stops crashing a server.
 gui-no-server-mods-detail = This server was not built from a pack, so nothing here is recorded as belonging to it.
 # Shown when the mod's exact release cannot be proven from what Ephervex
 # recorded. The file is installed; only its version is unknown.
 gui-mod-version-unknown = Version not recorded
 gui-mod-provider-unknown = No provider
-gui-mod-file-missing = File missing from mods folder
 gui-mod-metadata-offline = Ephervex could not load live mod metadata. Recorded mod information is still shown.
 gui-modal-change-loader = Change Loader Build
 gui-loader-change-open = Change Build
@@ -1630,6 +1645,46 @@ gui-no-accounts = No accounts
 gui-no-accounts-detail = Add an offline identity for local testing or sign in to launch authenticated Minecraft.
 gui-default = DEFAULT
 gui-make-default = Make Default
+gui-rename = Rename
+gui-modal-rename = Rename
+gui-rename-detail = Only the name changes. Nothing on disk is named after it, so files, logs and links all stay where they are.
+gui-renamed = Renamed to { $value }.
+gui-delete = Delete
+gui-delete-mod = Delete { $value }
+gui-modal-delete-mod = Delete Mod
+gui-delete-mod-detail = Delete { $value } from the mods folder?
+gui-delete-mod-note = You added this JAR yourself, so Ephervex cannot fetch it again. The file is removed from disk.
+gui-mod-deleted = Deleted { $value }.
+gui-modal-mod-clash = Name Already Taken
+gui-mod-clash-detail = The mods folder already has a file called { $value }.
+gui-mod-clash-disabled = The one already there is turned off. Replacing it turns the mod back on.
+gui-mod-clash-progress = { $value } of { $other }
+gui-overwrite = Overwrite
+gui-overwrite-all = Overwrite All
+gui-skip-all = Skip All
+gui-drop-to-add-mods = Drop to add mods
+gui-drop-to-add-mods-detail = The JAR files land in this mods folder and the list reloads. Anything that is not a JAR is left alone.
+gui-modal-absent-mods = Mods Without Files
+gui-absent-mods-note = Keeping them means the copy can fetch them again. Leaving them out makes the copy describe only what it actually has.
+gui-copy-with-them = Keep Them
+gui-copy-without-them = Leave Them Out
+gui-mods-added = { $count ->
+    [0] No mods added.
+    [one] 1 mod added.
+   *[other] { $count } mods added.
+}
+gui-mods-skipped = { $count ->
+    [one] 1 skipped.
+   *[other] { $count } skipped.
+}
+gui-mods-refused = { $count ->
+    [one] 1 could not be added.
+   *[other] { $count } could not be added.
+}
+gui-absent-mods-detail = { $count ->
+    [one] This instance records 1 mod whose JAR is not in its mods folder. Should the copy record it too?
+   *[other] This instance records { $count } mods whose JARs are not in its mods folder. Should the copy record them too?
+}
 gui-remove = Remove...
 gui-provider-detail = Provider configuration remains scoped. Stored secrets are reported only as present or absent.
 gui-preferred-mod-catalog = Mod catalog

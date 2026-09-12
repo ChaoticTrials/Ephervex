@@ -50,6 +50,11 @@ use ephervex_pack::{
     PackError, PackFileRecipe, PackRecipe, PackSide, ProviderFileIdentity, RecordedMod,
     SideRequirement, SourceStore,
 };
+/// Where a disabled jar sits, and the suffix that puts it there.
+///
+/// Owned by `ephervex-pack`, which also has to know it: a recipe decides
+/// whether a recorded mod is on disk, and a jar the user turned off is.
+pub use ephervex_pack::{DISABLED_SUFFIX, disabled_path};
 use ephervex_storage::ClientRecord;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument, warn};
@@ -135,14 +140,6 @@ impl InstalledMods {
 /// something unexpected cannot fill a cache directory.
 const MAX_ARTWORK_BYTES: u64 = 2 * 1024 * 1024;
 
-/// The suffix a mod carries while it is installed but not loaded.
-///
-/// Both FML and Fabric discover mods by scanning for `.jar`, so a file with any
-/// other extension is present on disk and invisible to the loader. `.disabled`
-/// is the spelling every other launcher uses, which is what makes a directory
-/// disabled by Ephervex readable by one of them and the other way round.
-pub const DISABLED_SUFFIX: &str = ".disabled";
-
 /// Whether the jar an entry describes is actually in the game directory, and
 /// whether the loader will look at it.
 ///
@@ -187,18 +184,6 @@ impl ModPresence {
     pub const fn is_enabled(self) -> bool {
         matches!(self, Self::Installed)
     }
-}
-
-/// Where a jar sits when it is disabled.
-///
-/// Appended to the whole file name rather than replacing the extension, so the
-/// original name is recovered by removing the suffix and nothing has to guess
-/// what it used to be.
-#[must_use]
-pub fn disabled_path(path: &Path) -> PathBuf {
-    let mut name = path.as_os_str().to_os_string();
-    name.push(DISABLED_SUFFIX);
-    PathBuf::from(name)
 }
 
 /// Records identified hand-placed jars in the host's own recipe.
@@ -268,6 +253,22 @@ fn adopt_hand_placed(layout: &ModHostLayout, adopted: &[ManagedModEntry]) {
             warn!(%error, "identified hand-placed mods could not be recorded");
         }
     }
+}
+
+/// One recorded mod whose jar is not in the game directory.
+///
+/// What a prompt has to show before something is built out of this instance.
+/// The name is the best one available -- a provider title where one is
+/// remembered, the file's own name otherwise -- and never a name parsed for
+/// meaning.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AbsentRecordedMod {
+    pub logical_path: PathBuf,
+    pub name: String,
+    pub origin: ModOrigin,
+    /// Whether the record still names a project, so a copy that keeps it could
+    /// fetch the jar again rather than inheriting an empty row.
+    pub recoverable: bool,
 }
 
 /// Every jar in `mods/` that no record accounts for.
@@ -1090,7 +1091,7 @@ impl App {
     /// reliably do nothing either: the loader has the file open, and what the
     /// next tick sees is up to the platform. So the rule is the same one every
     /// other mutation follows.
-    fn refuse_running_mod_host(&self, host: ModHost) -> CoreResult<()> {
+    pub(crate) fn refuse_running_mod_host(&self, host: ModHost) -> CoreResult<()> {
         match host {
             ModHost::Instance(id) => {
                 if let Some(state) = self.launch_state(id)? {
@@ -1192,6 +1193,31 @@ impl App {
     #[instrument(skip(self), fields(server = %server))]
     pub fn server_mod_snapshot(&self, server: ServerId) -> CoreResult<ManagedModSnapshot> {
         self.host_mod_snapshot(ModHost::Server(server))
+    }
+
+    /// The mods this host records that have no jar in `mods/`.
+    ///
+    /// The mod list does not show these: a row for a file that is not there is
+    /// a row for nothing the reader can act on. They are still part of what the
+    /// instance is supposed to contain, so anything that builds something new
+    /// out of this one has to put them in front of somebody rather than carry
+    /// them across or drop them on its own.
+    ///
+    /// Reaches no network. The recipe says what is wanted and the directory
+    /// says what is there.
+    pub fn absent_recorded_mods(&self, host: ModHost) -> CoreResult<Vec<AbsentRecordedMod>> {
+        Ok(self
+            .host_mod_snapshot(host)?
+            .missing()
+            .map(|entry| AbsentRecordedMod {
+                logical_path: entry.logical_path.clone(),
+                name: entry.display_name().to_owned(),
+                origin: entry.origin,
+                // A record with no download address cannot be fetched again, so
+                // keeping it means keeping a row rather than getting a file.
+                recoverable: entry.identity.project_id().is_some(),
+            })
+            .collect())
     }
 
     /// Every mod one host has, from durable state alone.
@@ -1979,7 +2005,7 @@ mod tests {
 
     /// Ephervex did not install it, so nothing here may replace or delete it.
     #[test]
-    fn a_hand_placed_mod_is_never_mutable() {
+    fn a_hand_placed_mod_may_be_deleted_and_nothing_else() {
         let directory = tempfile::tempdir().expect("temp dir");
         let game_dir = directory.path();
         std::fs::create_dir_all(game_dir.join(MODS_DIR)).expect("mods");
@@ -1997,6 +2023,10 @@ mod tests {
         assert!(!allowed.can_remove);
         assert!(!allowed.can_change_version);
         assert!(!allowed.can_update);
+        assert!(
+            allowed.can_delete_file,
+            "the user's own file is the user's to throw away"
+        );
         assert_eq!(
             allowed.restriction,
             Some(crate::mutation::MutationRestriction::HandPlaced),

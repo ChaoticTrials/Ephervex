@@ -22,6 +22,7 @@ use ephervex_server::ServerError;
 use ephervex_storage::StorageError;
 
 use crate::ConnectError;
+use crate::instance::NameRefusal;
 
 /// An error together with everything that caused it, for one log line.
 ///
@@ -234,6 +235,39 @@ pub enum CoreError {
         source: std::io::Error,
     },
 
+    /// Asked to delete a jar the launcher installed and records.
+    ///
+    /// Deleting a file is only ever offered for a jar somebody put in `mods/`
+    /// themselves. Taking a launcher-owned mod out of an instance is a removal,
+    /// which resolves what the mod's dependencies leave orphaned and retires
+    /// the files so the change can be undone; deleting the jar underneath that
+    /// record would leave the instance describing a mod it no longer has.
+    #[error("`{}` was installed by Ephervex, so it is not deleted this way", path.display())]
+    ModNotHandPlaced { path: PathBuf },
+
+    /// Deleting a hand-placed jar failed.
+    #[error("`{}` could not be deleted", path.display())]
+    ModFileNotDeleted {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// Copying a jar into `mods/` failed part-way.
+    ///
+    /// The staged copy is discarded, so `mods/` never holds the half of a file
+    /// that was written before this.
+    #[error("`{}` could not be added to the mods folder", path.display())]
+    ModFileNotAdded {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// A name the user typed cannot be stored as it stands.
+    #[error("that name cannot be used: {reason}")]
+    EntityNameInvalid { reason: NameRefusal },
+
     /// Working out which dependencies are still needed requires every root's
     /// project, and one of them has none.
     ///
@@ -312,6 +346,10 @@ impl CoreError {
             }
             Self::ModFileMissing { .. } => "error-mod-file-missing",
             Self::ModFileNotToggled { .. } => "error-mod-file-not-toggled",
+            Self::ModNotHandPlaced { .. } => "error-mod-not-hand-placed",
+            Self::ModFileNotDeleted { .. } => "error-mod-file-not-deleted",
+            Self::ModFileNotAdded { .. } => "error-mod-file-not-added",
+            Self::EntityNameInvalid { reason } => reason.message_id(),
         }
     }
 
@@ -338,6 +376,9 @@ impl CoreError {
                 vec![("catalog", configured.clone())]
             }
             Self::Preference(error) => vec![("syntax", error.syntax.to_owned())],
+            Self::EntityNameInvalid {
+                reason: NameRefusal::TooLong,
+            } => vec![("limit", crate::instance::MAX_ENTITY_NAME_CHARS.to_string())],
             Self::JavaSettingsInvalid {
                 minimum_mib,
                 maximum_mib,
@@ -484,6 +525,10 @@ impl CoreError {
             | Self::ModIdentityIncomplete { .. }
             | Self::ModFileMissing { .. }
             | Self::ModFileNotToggled { .. }
+            | Self::ModNotHandPlaced { .. }
+            | Self::ModFileNotDeleted { .. }
+            | Self::ModFileNotAdded { .. }
+            | Self::EntityNameInvalid { .. }
             | Self::LoaderFamilyFixed { .. }
             | Self::LoaderChangeBlockedByMods { .. }
             | Self::ModCatalogPreferenceUnrecognized { .. }
@@ -525,6 +570,9 @@ impl CoreError {
             | Self::ModMutationRestricted { path, .. }
             | Self::ModFileMissing { path }
             | Self::ModFileNotToggled { path, .. }
+            | Self::ModNotHandPlaced { path }
+            | Self::ModFileNotDeleted { path, .. }
+            | Self::ModFileNotAdded { path, .. }
             | Self::ModIdentityIncomplete { path } => Some(path.clone()),
             Self::ArtifactCache(error) => error.failing_path(),
             Self::Auth(_)
@@ -539,6 +587,7 @@ impl CoreError {
             | Self::LoaderFamilyFixed { .. }
             | Self::LoaderChangeBlockedByMods { .. }
             | Self::ModCatalogPreferenceUnrecognized { .. }
+            | Self::EntityNameInvalid { .. }
             | Self::ArtworkUnusable { .. } => None,
         }
     }

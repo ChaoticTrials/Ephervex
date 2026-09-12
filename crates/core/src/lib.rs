@@ -40,6 +40,7 @@ pub mod launch;
 pub mod linked_mods;
 pub mod live_diagnostics;
 pub mod loader;
+pub mod local_mods;
 pub mod logging;
 pub mod minecraft_preferences;
 mod mod_display_cache;
@@ -78,7 +79,10 @@ pub use health::{
     InstallationHealth, JavaHealth, PlatformIdentity, installation_health,
 };
 pub use import::{ImportRequest, ImportedPack};
-pub use instance::{CreatedClient, PreferenceContext, global_minecraft_preferences};
+pub use instance::{
+    CreatedClient, MAX_ENTITY_NAME_CHARS, NameRefusal, PreferenceContext,
+    global_minecraft_preferences, validated_entity_name,
+};
 pub use launch::{LaunchOptions, LaunchOutcome};
 pub use linked_mods::{
     ClientModOutcome, ClientModPlan, LinkedModOutcome, LinkedModPlan, LinkedModRequest,
@@ -86,6 +90,9 @@ pub use linked_mods::{
     LinkedTargetResult, LinkedTargetState,
 };
 pub use loader::{IncompatibleMod, LoaderVersionChange, LoaderVersionPlan};
+pub use local_mods::{
+    LocalModOffer, LocalModPlan, LocalModRefusal, LocalModReport, MAX_LOCAL_MOD_BYTES,
+};
 pub use logging::{DEFAULT_LOG_DIRECTIVES, init_tracing};
 pub use minecraft_preferences::{
     MinecraftPreferenceEntry, MinecraftPreferencePreview, MinecraftPreferenceSnapshot,

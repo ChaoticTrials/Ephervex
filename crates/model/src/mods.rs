@@ -157,7 +157,9 @@ pub enum ModOrigin {
     ///
     /// Somebody copied a jar in themselves, or another launcher did. Ephervex
     /// did not install it and does not own it: it is listed so the directory
-    /// and the list agree about what will load, and it is left alone otherwise.
+    /// and the list agree about what will load, and no automatic operation
+    /// touches it. An explicit request from the user may still delete it, which
+    /// is the one thing owning a file has never been required for.
     HandPlaced,
 }
 
@@ -216,11 +218,40 @@ impl ModOrigin {
     /// Whether Ephervex put this file here.
     ///
     /// A hand-placed jar is the one origin it did not: nothing recorded it,
-    /// nothing may replace or delete it, and a server built from the recipe
-    /// does not contain it until somebody says it should.
+    /// no automatic operation replaces or deletes it, and a server built from
+    /// the recipe does not contain it until somebody says it should.
     #[must_use]
     pub const fn is_launcher_owned(self) -> bool {
         !matches!(self, Self::HandPlaced)
+    }
+}
+
+/// What a copy does with mods the source records but no longer has on disk.
+///
+/// A recipe describes an instance's desired state, not the contents of its
+/// `mods/` directory, so a jar deleted while bisecting leaves a record behind
+/// on purpose (ADR 0013). That record is worth keeping in the instance it
+/// belongs to and is a question when something new is built from it: a copy
+/// made to carry on bisecting wants those mods gone, and a copy made to get
+/// back to a working state wants them.
+///
+/// Only the user can answer it, so nothing here has a "reasonable" default that
+/// is not [`Self::Keep`]: keeping is what every caller did before this existed,
+/// and dropping loses a decision the recipe was the only record of.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum AbsentModPolicy {
+    /// The copy records them too, exactly as the source does.
+    #[default]
+    Keep,
+    /// The copy does not record them, as though they had been removed.
+    Drop,
+}
+
+impl AbsentModPolicy {
+    /// Whether a copy made under this policy forgets the absent records.
+    #[must_use]
+    pub const fn drops_them(self) -> bool {
+        matches!(self, Self::Drop)
     }
 }
 

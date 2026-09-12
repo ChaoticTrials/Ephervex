@@ -45,8 +45,8 @@ use ephervex_core::{
 };
 use ephervex_i18n::Arg as MessageArg;
 use ephervex_model::{
-    DefaultModCatalog, InstanceId, JavaOverride, JvmSettings, LoaderKind, LoaderSelection,
-    ModProvider, OperationId, ServerId, StorageClass,
+    AbsentModPolicy, DefaultModCatalog, InstanceId, JavaOverride, JvmSettings, LoaderKind,
+    LoaderSelection, ModProvider, OperationId, ServerId, StorageClass,
 };
 
 #[derive(Debug, Parser)]
@@ -605,6 +605,14 @@ enum InstanceCommand {
         name: Option<String>,
         #[command(flatten)]
         storage: DuplicateStorageArgs,
+        /// Leave out mods the original records but no longer has in its mods
+        /// folder.
+        ///
+        /// By default the copy records them too, so repairing it fetches them
+        /// again. Use this when the original is mid-bisection and the copy
+        /// should describe only what it actually has.
+        #[arg(long)]
+        drop_absent_mods: bool,
     },
     /// Show the pack recipe this instance retained when it was imported.
     ///
@@ -1331,14 +1339,24 @@ async fn run_instance_command(
             let record = app.client(*id)?;
             print_instance(app, &record, json)?;
         }
-        InstanceCommand::Duplicate { id, name, storage } => {
+        InstanceCommand::Duplicate {
+            id,
+            name,
+            storage,
+            drop_absent_mods,
+        } => {
             // Both fields default to "the same as the original", which is what
             // `ephervex instance duplicate <id>` with no flags should mean.
             let request = DuplicateClient {
                 name: name.clone(),
                 storage: storage.class(),
             };
-            let copy = app.duplicate_client(*id, &request)?;
+            let absent = if *drop_absent_mods {
+                AbsentModPolicy::Drop
+            } else {
+                AbsentModPolicy::Keep
+            };
+            let copy = app.duplicate_client(*id, &request, absent)?;
             print_instance(app, &copy.record, json)?;
             if !json {
                 eprintln!(

@@ -9,8 +9,9 @@ use std::time::Duration;
 
 use copypasta::{ClipboardContext, ClipboardProvider as _};
 use ephervex_core::live_diagnostics::{LogFilter, LogLevel, RetainedLog};
-use ephervex_core::{OptionalSelection, ProviderFileIdentity, WindowSize};
+use ephervex_core::{ModHost, OptionalSelection, ProviderFileIdentity, WindowSize};
 use ephervex_i18n::{Arg, lookup, lookup_args};
+use ephervex_model::AbsentModPolicy;
 use ephervex_model::ModProvider;
 use slint::{
     ComponentHandle as _, Image, LogicalSize, Model as _, ModelRc, SharedString, Timer, TimerMode,
@@ -32,8 +33,8 @@ use crate::presentation::{
 };
 use crate::ui::{
     AccountRow, ActivityRow, AppWindow, DiagnosticRow, GuiI18n, ImportBlockedRow, ImportOptionRow,
-    InstanceRow, JavaRow, LinkedTargetRow, LogChunk, ModRow, ModSearchRow, ModVersionRow,
-    PendingEntityRow, RunningRow, ServerRow, Theme, WindowSizePreview,
+    InstanceRow, JavaRow, LinkedTargetRow, LocalModClashRow, LogChunk, ModRow, ModSearchRow,
+    ModVersionRow, PendingEntityRow, RunningRow, ServerRow, Theme, WindowSizePreview,
 };
 use crate::window_aspect;
 
@@ -1509,13 +1510,19 @@ impl std::fmt::Debug for Controller {
 /// field the way a click is. What the window is currently asking for decides
 /// instead, and that is legible on screen: a dialog showing an empty archive
 /// slot is asking for that archive.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum DropIntent {
     /// Import it as a pack. The default, and what a drop with nothing open
     /// means.
     Import,
     /// Fill one of the dialogs' server-archive fields.
     ServerPack(ServerPackTarget),
+    /// Add the jars to this host's mods folder.
+    ///
+    /// What an open mods tab is asking for, in the same way an empty archive
+    /// slot asks for an archive. A drop has no cursor position, so the tab
+    /// being open is the whole aim.
+    Mods(ModHost),
     /// Nothing. A file let go over a confirmation the user is in the middle of
     /// is far more likely to be a misplaced gesture than a request to abandon
     /// it.
@@ -1532,18 +1539,40 @@ fn drop_intent(ui: &AppWindow) -> DropIntent {
         "import" if ui.get_import_create_server() => {
             DropIntent::ServerPack(ServerPackTarget::Import)
         }
-        "" | "import" => DropIntent::Import,
+        // Before the import arm below, which is what an empty modal string
+        // otherwise means: a jar let go over a visible mod list is not a pack
+        // somebody wants imported.
+        "" => mods_drop_intent(ui).unwrap_or(DropIntent::Import),
+        "import" => DropIntent::Import,
         _ => DropIntent::Ignored,
     }
 }
 
-/// Routes archives dropped on the window to whatever is asking for one.
+/// The mod host whose list is on screen, if one is.
+fn mods_drop_intent(ui: &AppWindow) -> Option<DropIntent> {
+    if ui.get_workspace_tab() != "Mods" {
+        return None;
+    }
+    let host = match ui.get_workspace().as_str() {
+        "instance" => backend::parse_mod_host("client", &ui.get_selected_instance_id())?,
+        "server" => backend::parse_mod_host("server", &ui.get_selected_server_id())?,
+        _ => return None,
+    };
+    Some(DropIntent::Mods(host))
+}
+
+/// Routes files dropped on the window to whatever is asking for them.
 ///
 /// For an import the drop is the same act as choosing a file, so it takes the
 /// same path: the attempt begins here, synchronously, and the analysis that
 /// follows is checked against it exactly as a dialog's would be. Opening the
 /// dialog is part of accepting the drop, because a drop with nothing on screen
 /// would look like nothing happened.
+///
+/// A drop carries every path of one gesture. Only the mods list has anything to
+/// do with more than one: an archive field holds a single file, so it takes the
+/// first and leaves the rest, which is what dropping a handful of archives onto
+/// one slot can reasonably mean.
 pub fn accept_file_drops(ui: &AppWindow, drops: &FileDrops, controller: &Controller) {
     let weak = ui.as_weak();
     let sender = controller.commands.clone();
@@ -1552,16 +1581,31 @@ pub fn accept_file_drops(ui: &AppWindow, drops: &FileDrops, controller: &Control
         let Some(ui) = weak.upgrade() else { return };
         let intent = drop_intent(&ui);
         match drop {
-            FileDrop::Hovering => ui.set_file_drop_active(intent != DropIntent::Ignored),
+            FileDrop::Hovering => {
+                ui.set_file_drop_active(intent != DropIntent::Ignored);
+                ui.set_file_drop_kind(drop_overlay_kind(&intent).into());
+            }
             FileDrop::Left => ui.set_file_drop_active(false),
-            FileDrop::Dropped(archive) => {
+            FileDrop::Dropped(paths) => {
                 ui.set_file_drop_active(false);
                 match intent {
                     DropIntent::Ignored => {}
+                    DropIntent::Mods(host) => {
+                        send(
+                            &sender,
+                            Command::PlanLocalMods {
+                                host,
+                                sources: paths,
+                            },
+                        );
+                    }
                     DropIntent::ServerPack(target) => {
-                        set_server_pack(&ui, target, Some(&archive));
+                        set_server_pack(&ui, target, paths.first().map(PathBuf::as_path));
                     }
                     DropIntent::Import => {
+                        let Some(archive) = paths.into_iter().next() else {
+                            return;
+                        };
                         let generation = flow.borrow_mut().begin_attempt();
                         set_server_pack(&ui, ServerPackTarget::Import, None);
                         render_import_flow(&ui, &flow.borrow());
@@ -1581,6 +1625,14 @@ pub fn accept_file_drops(ui: &AppWindow, drops: &FileDrops, controller: &Control
     });
 }
 
+/// Which promise the drop overlay should make, for what is on screen.
+const fn drop_overlay_kind(intent: &DropIntent) -> &'static str {
+    match intent {
+        DropIntent::Mods(_) => "mods",
+        _ => "import",
+    }
+}
+
 pub fn attach(ui: &AppWindow) -> Controller {
     let backend = backend::spawn();
     let receiver = Rc::new(RefCell::new(backend.events));
@@ -1591,6 +1643,7 @@ pub fn attach(ui: &AppWindow) -> Controller {
     let minecraft = Rc::new(RefCell::new(MinecraftDefaultsModel::new()));
     let browser = Rc::new(ModBrowser::default());
     let mod_lists = Rc::new(RefCell::new(ModLists::default()));
+    let local_mods = Rc::new(RefCell::new(LocalModDrop::default()));
     register_i18n(ui);
     register_toasts(ui);
     register_callbacks(
@@ -1602,6 +1655,7 @@ pub fn attach(ui: &AppWindow) -> Controller {
         &minecraft,
         &browser,
         &mod_lists,
+        &local_mods,
     );
 
     let weak = ui.as_weak();
@@ -1613,6 +1667,7 @@ pub fn attach(ui: &AppWindow) -> Controller {
     let poll_minecraft = Rc::clone(&minecraft);
     let poll_browser = Rc::clone(&browser);
     let poll_mod_lists = Rc::clone(&mod_lists);
+    let poll_local_mods = Rc::clone(&local_mods);
     let poll_commands = backend.commands.clone();
     let poll_timer = Timer::default();
     poll_timer.start(TimerMode::Repeated, Duration::from_millis(80), move || {
@@ -1644,6 +1699,7 @@ pub fn attach(ui: &AppWindow) -> Controller {
                     &poll_minecraft,
                     &poll_browser,
                     &poll_mod_lists,
+                    &poll_local_mods,
                     &poll_commands,
                 ),
             }
@@ -1931,6 +1987,7 @@ fn register_callbacks(
     minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
     browser: &Rc<ModBrowser>,
     mod_lists: &Rc<RefCell<ModLists>>,
+    local_mods: &Rc<RefCell<LocalModDrop>>,
 ) {
     register_catalog_actions(ui, commands);
     register_mod_filter(ui, mod_lists);
@@ -1945,7 +2002,7 @@ fn register_callbacks(
     ui.on_select_server(move |_| send(&sender, Command::Refresh));
 
     register_server_actions(ui, commands, live_viewer);
-    register_mod_state_actions(ui, commands);
+    register_mod_state_actions(ui, commands, local_mods);
     register_diagnostics(ui, commands);
     register_live_viewer(ui, commands, live_viewer);
     register_settings(ui, commands);
@@ -2063,6 +2120,66 @@ fn register_create_instance_naming(ui: &AppWindow, commands: &Sender<Command>) {
     });
 
     register_loader_options(ui);
+}
+
+/// A drop of jars part-way through being answered for.
+///
+/// Held here rather than in the window because the answers are folded as they
+/// are given: "overwrite all" is not a state the markup has to carry, it is the
+/// rest of the list decided at once.
+#[derive(Debug, Default)]
+struct LocalModDrop {
+    host: Option<ModHost>,
+    /// Files nothing was asked about, plus every clash answered "overwrite".
+    accepted: Vec<PathBuf>,
+    /// The clashes still to answer for, in the order they were dropped.
+    clashing: Vec<backend::LocalModClashData>,
+    /// How far through `clashing` the questions have got.
+    index: usize,
+    /// How many the user waved away, so the result can say so.
+    skipped: usize,
+}
+
+impl LocalModDrop {
+    /// Starts over from one plan, discarding anything half-answered.
+    fn begin(&mut self, host: ModHost, plan: &backend::LocalModPlanData) {
+        self.host = Some(host);
+        self.accepted.clone_from(&plan.ready);
+        self.clashing.clone_from(&plan.clashing);
+        self.index = 0;
+        self.skipped = 0;
+    }
+
+    /// Records one answer and says whether anything is still to ask.
+    fn answer(&mut self, answer: &str) -> bool {
+        match answer {
+            "overwrite" => {
+                if let Some(clash) = self.clashing.get(self.index) {
+                    self.accepted.push(clash.source.clone());
+                }
+                self.index += 1;
+            }
+            "skip" => {
+                self.skipped += 1;
+                self.index += 1;
+            }
+            "overwrite-all" => {
+                self.accepted.extend(
+                    self.clashing[self.index..]
+                        .iter()
+                        .map(|it| it.source.clone()),
+                );
+                self.index = self.clashing.len();
+            }
+            // "skip-all", and anything unrecognized, which must not silently
+            // overwrite a file.
+            _ => {
+                self.skipped += self.clashing.len() - self.index;
+                self.index = self.clashing.len();
+            }
+        }
+        self.index < self.clashing.len()
+    }
 }
 
 /// Every mod each list has, before the query narrows it.
@@ -2275,7 +2392,10 @@ fn register_client_actions(
     let sender = commands.clone();
     ui.on_duplicate_client(move |id| {
         if let Some(id) = backend::parse_instance_id(&id) {
-            send(&sender, Command::DuplicateClient(id));
+            // Asks first whether the copy should carry the mods this instance
+            // records but no longer has. Nothing to ask is the common case, and
+            // the answer comes back as an empty list that copies straight away.
+            send(&sender, Command::PlanDuplicate(id));
         }
     });
 
@@ -2918,7 +3038,13 @@ fn register_instance_selection(
 /// Its own registration rather than part of the server actions: the same two
 /// callbacks serve a client instance's panel and a server's, and neither
 /// belongs to one screen.
-fn register_mod_state_actions(ui: &AppWindow, commands: &Sender<Command>) {
+fn register_mod_state_actions(
+    ui: &AppWindow,
+    commands: &Sender<Command>,
+    drop: &Rc<RefCell<LocalModDrop>>,
+) {
+    register_local_mod_actions(ui, commands, drop);
+
     let sender = commands.clone();
     ui.on_load_server_mods(move |id| {
         if let Some(id) = backend::parse_server_id(&id) {
@@ -2970,6 +3096,92 @@ fn register_mod_state_actions(ui: &AppWindow, commands: &Sender<Command>) {
             },
         );
     });
+}
+
+/// Dropping jars onto a mod list, deleting one, and renaming what holds them.
+fn register_local_mod_actions(
+    ui: &AppWindow,
+    commands: &Sender<Command>,
+    drop: &Rc<RefCell<LocalModDrop>>,
+) {
+    let sender = commands.clone();
+    let pending = Rc::clone(drop);
+    let weak = ui.as_weak();
+    ui.on_resolve_mod_clash(move |answer| {
+        let Some(ui) = weak.upgrade() else { return };
+        let mut pending = pending.borrow_mut();
+        if pending.answer(answer.as_str()) {
+            ui.set_mod_clash_index(i32::try_from(pending.index).unwrap_or(i32::MAX));
+            return;
+        }
+        ui.set_modal(SharedString::default());
+        submit_local_mods(&sender, &pending);
+    });
+
+    let sender = commands.clone();
+    ui.on_delete_hand_placed_mod(move |kind, host, path| {
+        let Some(host) = backend::parse_mod_host(&kind, &host) else {
+            return;
+        };
+        send(
+            &sender,
+            Command::DeleteHandPlacedMod {
+                host,
+                path: PathBuf::from(path.as_str()),
+            },
+        );
+    });
+
+    let sender = commands.clone();
+    ui.on_rename_entity(move |kind, id, name| {
+        let name = name.trim().to_owned();
+        match kind.as_str() {
+            "client" => {
+                if let Some(id) = backend::parse_instance_id(&id) {
+                    send(&sender, Command::RenameClient { id, name });
+                }
+            }
+            "server" => {
+                if let Some(id) = backend::parse_server_id(&id) {
+                    send(&sender, Command::RenameServer { id, name });
+                }
+            }
+            _ => {}
+        }
+    });
+
+    let sender = commands.clone();
+    ui.on_duplicate_client_deciding(move |id, drop_absent| {
+        if let Some(instance) = backend::parse_instance_id(&id) {
+            send(
+                &sender,
+                Command::DuplicateClient {
+                    instance,
+                    absent_mods: if drop_absent {
+                        AbsentModPolicy::Drop
+                    } else {
+                        AbsentModPolicy::Keep
+                    },
+                },
+            );
+        }
+    });
+}
+
+/// Sends whatever a finished drop ended up agreeing to.
+///
+/// A drop that agreed to nothing still reports itself, so waving away every
+/// clash says so rather than looking like a gesture that did not register.
+fn submit_local_mods(sender: &Sender<Command>, pending: &LocalModDrop) {
+    let Some(host) = pending.host else { return };
+    send(
+        sender,
+        Command::AddLocalMods {
+            host,
+            sources: pending.accepted.clone(),
+            skipped: pending.skipped,
+        },
+    );
 }
 
 /// Selects one server and puts its console on screen, following its output.
@@ -4447,6 +4659,98 @@ fn parse_java_memory(minimum: &str, maximum: &str) -> Result<(u32, u32), String>
     }
 }
 
+/// Puts a dropped batch of jars in front of the user, or gets on with it.
+///
+/// Nothing to ask is the common case and stays a single gesture: the files go
+/// straight in. A refusal is reported either way, because a jar that was
+/// dropped and did not arrive has to say why rather than vanish.
+fn apply_local_mod_plan(
+    ui: &AppWindow,
+    plan: &backend::LocalModPlanData,
+    local_mods: &Rc<RefCell<LocalModDrop>>,
+    commands: &Sender<Command>,
+) {
+    let Some(host) = backend::parse_mod_host(&plan.host_kind, &plan.host) else {
+        return;
+    };
+    // The list the user is looking at now, not the one they dropped onto: a
+    // plan that arrives after they have navigated away has nowhere to land.
+    if !mods_drop_intent(ui).is_some_and(|intent| intent == DropIntent::Mods(host)) {
+        return;
+    }
+
+    // Said once, here, rather than folded into the count the copy reports: a
+    // file the user dragged and that did not arrive has to say which one it was
+    // and why, and "one could not be added" does not.
+    render_local_mod_refusals(ui, plan);
+
+    let mut pending = local_mods.borrow_mut();
+    pending.begin(host, plan);
+    if plan.clashing.is_empty() {
+        if !plan.ready.is_empty() {
+            submit_local_mods(commands, &pending);
+        }
+        return;
+    }
+
+    ui.set_mod_clashes(
+        plan.clashing
+            .iter()
+            .map(|clash| LocalModClashRow {
+                source: clash.source.display().to_string().into(),
+                file_name: clash.file_name.clone().into(),
+                existing_is_disabled: clash.existing_is_disabled,
+            })
+            .collect::<Vec<_>>()
+            .as_slice()
+            .into(),
+    );
+    ui.set_mod_clash_index(0);
+    ui.set_modal("mod-clash".into());
+}
+
+/// Says which dropped files were not jars, once, as one line.
+fn render_local_mod_refusals(ui: &AppWindow, plan: &backend::LocalModPlanData) {
+    if plan.refused.is_empty() {
+        return;
+    }
+    let detail = plan
+        .refused
+        .iter()
+        .map(|it| format!("{} - {}", it.file_name, it.reason))
+        .collect::<Vec<_>>()
+        .join("; ");
+    ui.invoke_queue_toast(detail.into(), true);
+}
+
+/// Asks what a copy should do with the mods whose jars are gone, if any are.
+fn apply_absent_mods(ui: &AppWindow, absent: &backend::AbsentModsData, commands: &Sender<Command>) {
+    let Some(instance) = backend::parse_instance_id(&absent.instance) else {
+        return;
+    };
+    if absent.names.is_empty() {
+        send(
+            commands,
+            Command::DuplicateClient {
+                instance,
+                absent_mods: AbsentModPolicy::Keep,
+            },
+        );
+        return;
+    }
+    ui.set_absent_mods(
+        absent
+            .names
+            .iter()
+            .map(|name| SharedString::from(name.as_str()))
+            .collect::<Vec<_>>()
+            .as_slice()
+            .into(),
+    );
+    ui.set_pending_action_id(absent.instance.as_str().into());
+    ui.set_modal("absent-mods".into());
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn apply_event(
     ui: &AppWindow,
@@ -4457,9 +4761,12 @@ fn apply_event(
     minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
     browser: &Rc<ModBrowser>,
     mod_lists: &Rc<RefCell<ModLists>>,
+    local_mods: &Rc<RefCell<LocalModDrop>>,
     commands: &Sender<Command>,
 ) {
     match event {
+        Event::LocalModPlan(plan) => apply_local_mod_plan(ui, &plan, local_mods, commands),
+        Event::AbsentMods(absent) => apply_absent_mods(ui, &absent, commands),
         Event::Snapshot(snapshot) => {
             apply_snapshot_event(ui, *snapshot, creations, minecraft, commands);
         }
@@ -5901,6 +6208,7 @@ fn managed_mod_rows(rows: Vec<ManagedModData>) -> Vec<ModRow> {
             can_change_version: row.can_change_version,
             can_update: row.can_update,
             can_remove: row.can_remove,
+            can_delete_file: row.can_delete_file,
             restriction: row.restriction.into(),
             title: row.title.into(),
             file_name: row.file_name.into(),
@@ -5913,7 +6221,6 @@ fn managed_mod_rows(rows: Vec<ManagedModData>) -> Vec<ModRow> {
             compatibility: row.compatibility.into(),
             author: row.author.into(),
             icon: cached_image(&row.icon),
-            missing: row.missing,
             enabled: row.enabled,
             pack_owned: row.pack_owned,
             suspect_reason: row.suspect_reason.into(),
