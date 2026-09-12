@@ -424,6 +424,35 @@ mod tests {
     }
 
     #[test]
+    fn no_message_id_is_defined_twice() {
+        // Fluent keeps the first definition and writes "Overriding" to stderr
+        // for the second. That is invisible in the GUI and corrupts `--json`,
+        // whose failures share stderr with it, so a duplicate is caught here
+        // rather than by a command that mysteriously stops being parseable.
+        let source = include_str!("../locales/en-US/main.ftl");
+        let mut seen = std::collections::BTreeSet::new();
+        let mut repeated = Vec::new();
+        for line in source.lines() {
+            // A message definition starts in column zero; an attribute line
+            // starts with `.` and a continuation is indented.
+            let Some((id, _)) = line.split_once(" = ") else {
+                continue;
+            };
+            if id.is_empty()
+                || !id
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+            {
+                continue;
+            }
+            if !seen.insert(id) {
+                repeated.push(id);
+            }
+        }
+        assert!(repeated.is_empty(), "defined more than once: {repeated:?}");
+    }
+
+    #[test]
     fn an_unknown_message_id_degrades_visibly_instead_of_panicking() {
         assert!(!has("no-such-message-id"));
         assert!(lookup("no-such-message-id").contains("no-such-message-id"));
