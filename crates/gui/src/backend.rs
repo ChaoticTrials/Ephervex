@@ -379,6 +379,13 @@ pub enum Command {
     OpenCurseForgeKeyHelp,
     SaveStorageRoot(String),
     PickWatchedFolder,
+    /// Choose jars to add to a host's mods folder from a file dialog.
+    ///
+    /// The same act as dropping them, and the way in when a drag cannot be
+    /// made: a Wayland session delivers no file drops at all, and a drag out of
+    /// an application that offers no file path is refused by the windowing
+    /// layer before this process sees it.
+    PickLocalMods(ModHost),
     /// Replaces the whole configured watched-folder list. Sent with the full
     /// list after every add or remove, mirroring the settings screen's other
     /// list-shaped settings rather than diffing one entry at a time.
@@ -1451,6 +1458,21 @@ fn run_worker(
                     .pick_file()
                 {
                     let _ = events.send(Event::ServerPackPicked { target, path });
+                }
+            }
+            Command::PickLocalMods(host) => {
+                if let Some(paths) = rfd::FileDialog::new()
+                    .set_title(lookup("gui-choose-mods"))
+                    .add_filter(lookup("gui-mod-jars"), &["jar"])
+                    .pick_files()
+                {
+                    match app.plan_local_mods(host, &paths) {
+                        Ok(plan) => {
+                            let _ =
+                                events.send(Event::LocalModPlan(local_mod_plan_data(host, &plan)));
+                        }
+                        Err(error) => send_error(&events, &error),
+                    }
                 }
             }
             Command::PickWatchedFolder => {

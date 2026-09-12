@@ -3119,6 +3119,13 @@ fn register_local_mod_actions(
     });
 
     let sender = commands.clone();
+    ui.on_pick_local_mods(move |kind, host| {
+        if let Some(host) = backend::parse_mod_host(&kind, &host) {
+            send(&sender, Command::PickLocalMods(host));
+        }
+    });
+
+    let sender = commands.clone();
     ui.on_delete_hand_placed_mod(move |kind, host, path| {
         let Some(host) = backend::parse_mod_host(&kind, &host) else {
             return;

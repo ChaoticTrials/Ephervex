@@ -2658,6 +2658,7 @@ slint::slint! {
         callback duplicate-client-deciding(string, bool);
         callback rename-entity(string, string, string);
         callback delete-hand-placed-mod(string, string, string);
+        callback pick-local-mods(string, string);
         // "overwrite", "skip", "overwrite-all" or "skip-all".
         callback resolve-mod-clash(string);
         callback delete-client(string, bool);
