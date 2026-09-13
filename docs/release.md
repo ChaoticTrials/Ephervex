@@ -90,21 +90,33 @@ name, so the command-line interface below still works.
 
 ### The command-line interface
 
-The same artifact carries `ephervex`, the command-line interface. It is reached
-by invoking the artifact under that name:
+The package installs `ephervex` into `/usr/bin`, so it is an ordinary command
+with nothing further to do:
 
 ```bash
-ln -s Ephervex-x86_64.AppImage ephervex
-./ephervex --help
-./ephervex doctor
-./ephervex import some-pack.mrpack
+ephervex --help
+ephervex doctor
+ephervex import some-pack.mrpack
 ```
 
-Put the symlink somewhere on `PATH` to use it as an ordinary command. Shell
-completions come from the CLI itself:
+The AppImage carries the same program, but reaches it by the name it was
+invoked under, so it needs a link that is named exactly `ephervex`:
 
 ```bash
-./ephervex completions bash
+ln -s "$PWD/Ephervex-x86_64.AppImage" ~/.local/bin/ephervex
+ephervex --help
+```
+
+Two details matter and are easy to get wrong. The link has to be *named*
+`ephervex`: `ln -s Ephervex-x86_64.AppImage ~/.local/bin/` keeps the source file
+name, and a link named anything else reaches the desktop application instead.
+And the target has to be absolute, because a relative one is resolved against
+the directory the link sits in rather than the directory you created it from.
+
+Shell completions come from the CLI itself:
+
+```bash
+ephervex completions bash
 ```
 
 Ephervex does not modify shell configuration files or install completion scripts

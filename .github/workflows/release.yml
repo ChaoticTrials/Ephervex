@@ -1,10 +1,12 @@
-# Builds the Linux release artifact and publishes it as a GitHub release
+# Builds the Linux release artifacts and publishes them as a GitHub release
 # whenever a version tag (for example v1.0.0) is pushed.
 #
-# The artifact has the same name on every release, Ephervex-x86_64.AppImage, so
-# a download address stays valid. What identifies a release is its tag and what
-# the binaries report for `--version`, which is why the tag and the workspace
-# version have to agree before anything is built.
+# Two artifacts, built from one checkout in one job: the AppImage, whose name is
+# the same on every release so a download address stays valid, and the Debian
+# package, which carries its version in its file name because that is what a
+# package manager and an apt repository read (ADR 0026). What identifies a
+# release is its tag and what the binaries report for `--version`, which is why
+# the tag and the workspace version have to agree before anything is built.
 #
 # `appimagetool` and the AppImage type-2 runtime are host dependencies that
 # build-appimage.sh never downloads. Provisioning them is this workflow's job,
@@ -23,7 +25,7 @@ permissions:
   contents: write
 
 jobs:
-  appimage:
+  artifacts:
     runs-on: ubuntu-latest
     # The runner image is far above the glibc floor packaging/linux-baseline
     # declares, and build-appimage.sh refuses to package binaries that require
@@ -40,6 +42,7 @@ jobs:
           apt-get install -y --no-install-recommends \
             build-essential curl ca-certificates pkg-config git file jq \
             python3 desktop-file-utils binutils coreutils zsync appstream \
+            dpkg-dev \
             libfontconfig-dev libfreetype-dev libssl-dev
 
       - name: Checkout
@@ -127,39 +130,51 @@ jobs:
           cargo fetch --locked
           packaging/build-appimage.sh dist
 
+      - name: Build the Debian package
+        run: |
+          set -eu
+          # The binaries are already built and cached from the step above, so
+          # this is the packaging half rather than a second compile.
+          packaging/build-deb.sh dist
+
       - name: Publish the release
         env:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -eu
 
-          ARTIFACT=Ephervex-x86_64.AppImage
+          VERSION="$(packaging/workspace-version.sh)"
+          APPIMAGE=Ephervex-x86_64.AppImage
+          DEB="ephervex_${VERSION}_amd64.deb"
           cd dist
-          sha256sum "${ARTIFACT}" > "${ARTIFACT}.sha256"
+          for artifact in "${APPIMAGE}" "${DEB}"; do
+            [ -f "${artifact}" ] || { echo "ERROR: ${artifact} was not built." >&2; exit 1; }
+            sha256sum "${artifact}" > "${artifact}.sha256"
+          done
           cd ..
 
           API="${GITHUB_API_URL}"
           REPO="${GITHUB_REPOSITORY}"
           TAG="${GITHUB_REF_NAME}"
           AUTH="Authorization: Bearer ${TOKEN}"
-          VERSION="X-GitHub-Api-Version: 2022-11-28"
+          API_VERSION="X-GitHub-Api-Version: 2022-11-28"
 
           # curl that prints the server's error body rather than just a number,
           # and fails the step on any HTTP >= 400.
           api() {
             method="$1"; path="$2"; shift 2
-            curl -sS --fail-with-body -X "$method" -H "$AUTH" -H "$VERSION" "$@" "${API}${path}"
+            curl -sS --fail-with-body -X "$method" -H "$AUTH" -H "$API_VERSION" "$@" "${API}${path}"
           }
 
           # Reuse an existing release for this tag if there is one, else create it.
-          existing="$(curl -sS -H "$AUTH" -H "$VERSION" "${API}/repos/${REPO}/releases/tags/${TAG}" || true)"
+          existing="$(curl -sS -H "$AUTH" -H "$API_VERSION" "${API}/repos/${REPO}/releases/tags/${TAG}" || true)"
           release="$(echo "$existing" | jq -r '.id // empty')"
 
           if [ -z "$release" ]; then
             echo "Creating release for ${TAG}"
             existing="$(api POST "/repos/${REPO}/releases" \
               -H 'Content-Type: application/json' \
-              -d "{\"tag_name\":\"${TAG}\",\"name\":\"${TAG}\",\"body\":\"Ephervex ${TAG} for Linux x86_64.\"}")"
+              -d "{\"tag_name\":\"${TAG}\",\"name\":\"${TAG}\",\"body\":\"Ephervex ${TAG} for Linux x86_64.\\n\\nThe AppImage runs anywhere; the .deb installs \\\`ephervex\\\` and \\\`ephervex-gui\\\` on PATH for Debian, Ubuntu and derivatives.\"}")"
             release="$(echo "$existing" | jq -r '.id')"
           else
             echo "Reusing existing release for ${TAG}"
@@ -169,22 +184,136 @@ jobs:
           # which it is, so the address is taken from there rather than assumed.
           uploads="$(echo "$existing" | jq -r '.upload_url' | sed 's/{?name,label}//')"
 
-          # Named one by one rather than globbed: build-appimage.sh leaves the
-          # AppDir it assembled in the same output directory, and a glob would
-          # try to upload a directory.
+          # Named one by one rather than globbed: the packaging scripts leave
+          # the AppDir and the package staging tree they assembled in the same
+          # output directory, and a glob would try to upload a directory.
           #
           # Publishing over an existing release replaces its assets rather than
           # adding to them, so a re-run cannot leave two different files under
           # one name.
-          assets="$(curl -sS -H "$AUTH" -H "$VERSION" "${API}/repos/${REPO}/releases/${release}/assets" || echo '[]')"
-          for name in "${ARTIFACT}" "${ARTIFACT}.sha256"; do
+          assets="$(curl -sS -H "$AUTH" -H "$API_VERSION" "${API}/repos/${REPO}/releases/${release}/assets" || echo '[]')"
+          for name in "${APPIMAGE}" "${APPIMAGE}.sha256" "${DEB}" "${DEB}.sha256"; do
             for old in $(echo "$assets" | jq -r --arg n "$name" '.[] | select(.name == $n) | .id'); do
               echo "Removing the existing ${name} (asset ${old})"
               api DELETE "/repos/${REPO}/releases/assets/${old}" >/dev/null
             done
             echo "Uploading ${name}"
-            curl -sS --fail-with-body -X POST -H "$AUTH" -H "$VERSION" \
+            curl -sS --fail-with-body -X POST -H "$AUTH" -H "$API_VERSION" \
               -H 'Content-Type: application/octet-stream' \
               --data-binary "@dist/${name}" \
               "${uploads}?name=${name}" >/dev/null
           done
+
+  # Publishes the package into the shared ChaoticTrials apt repository, so a
+  # user who added that repository gets Ephervex upgrades through their package
+  # manager rather than by downloading a file.
+  #
+  # Separate from the build because it needs different credentials and writes to
+  # a different repository. It runs only after a release exists, and it takes
+  # the package from that release rather than rebuilding it, so what lands in
+  # the repository is byte for byte what the release page offers.
+  apt-repo:
+    needs: artifacts
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout the apt repository
+        uses: actions/checkout@v4
+        with:
+          repository: ChaoticTrials/apt-repo
+          token: ${{ secrets.APT_REPO_TOKEN }}
+          path: apt-repo
+
+      - name: Install aptly
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends aptly gnupg
+
+      - name: Import the signing key
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: |
+          set -eu
+          if [ -z "${GPG_PRIVATE_KEY:-}" ]; then
+            echo "ERROR: the GPG_PRIVATE_KEY secret is empty or not set." >&2
+            echo "An unsigned apt repository is one every user has to override a" >&2
+            echo "security check to use, so this refuses rather than publishing one." >&2
+            exit 1
+          fi
+          mkdir -p ~/.gnupg
+          chmod 700 ~/.gnupg
+          # Loopback pinentry because there is no terminal to prompt on.
+          echo "pinentry-mode loopback" >> ~/.gnupg/gpg.conf
+          echo "allow-loopback-pinentry" >> ~/.gnupg/gpg-agent.conf
+          gpgconf --kill gpg-agent
+          printf '%s' "${GPG_PRIVATE_KEY}" | gpg --batch --import
+
+      - name: Download the package from the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          gh release download "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" --pattern '*.deb' --dir debs
+          # A release that somehow carries no package would otherwise publish an
+          # unchanged repository and report success.
+          ls debs/*.deb >/dev/null
+
+      - name: Add the package and publish the repository
+        env:
+          GPG_KEY_ID: ${{ secrets.GPG_KEY_ID }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          set -eu
+          mkdir -p apt-repo/public
+          cat > ~/.aptly.conf <<EOF
+          {
+            "rootDir": "${GITHUB_WORKSPACE}/apt-repo/.aptly",
+            "FileSystemPublishEndpoints": {
+              "apt-repo": {
+                "rootDir": "${GITHUB_WORKSPACE}/apt-repo/public",
+                "linkMethod": "copy"
+              }
+            }
+          }
+          EOF
+
+          # The repository is shared with the organization's other projects, so
+          # it may already exist and already hold packages. Creating it is the
+          # first-run case rather than the normal one.
+          aptly repo create -distribution=stable -component=main packages 2>/dev/null || true
+          aptly repo add packages debs/*.deb
+
+          # Publishing a distribution that is already published is an update,
+          # not a second publish. Which one applies depends on the state of a
+          # repository this job does not own, so it tries the first and falls
+          # back to the second.
+          aptly publish repo \
+            -gpg-key="${GPG_KEY_ID}" \
+            -passphrase="${GPG_PASSPHRASE}" \
+            -architectures=amd64 \
+            -distribution=stable \
+            packages \
+            filesystem:apt-repo: 2>/dev/null || \
+          aptly publish update \
+            -gpg-key="${GPG_KEY_ID}" \
+            -passphrase="${GPG_PASSPHRASE}" \
+            stable \
+            filesystem:apt-repo:
+
+      - name: Commit the updated repository
+        working-directory: apt-repo
+        run: |
+          set -eu
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          # A re-run of the same tag adds a package the repository already has,
+          # which leaves nothing to commit. That is a success, not a failure.
+          if git diff --cached --quiet; then
+            echo "The apt repository already carries this release."
+            exit 0
+          fi
+          git commit -m "Release ephervex ${GITHUB_REF_NAME}"
+          git push

@@ -1,19 +1,34 @@
-# Builds the Linux release artifact and publishes it as a Forgejo release
+# Builds the Linux release artifacts and publishes them as a Forgejo release
 # whenever a version tag (for example v1.0.0) is pushed.
 #
-# The artifact has the same name on every release, Ephervex-x86_64.AppImage, so
-# a download address stays valid. What identifies a release is its tag, the
+# Two artifacts, built from one checkout in one job: the AppImage, whose name is
+# the same on every release so a download address stays valid, and the Debian
+# package, which carries its version in its file name because that is what a
+# package manager reads (ADR 0026). What identifies a release is its tag, the
 # release page, and what the binaries report for `--version`, which is why the
 # tag and the workspace version have to agree before anything is built.
+#
+# Unlike the GitHub workflow, this one does not publish into the shared apt
+# repository. The package is attached to the release and nothing else.
 #
 # Nothing here is cached: a release runs a few times a year, and a cargo cache
 # for this workspace is gigabytes the runner host keeps between them.
 #
 # The glibc floor in packaging/linux-baseline is enforced against the binaries
-# the job produced rather than against the image that built them:
-# build-appimage.sh reads the highest GLIBC_ symbol version they require and
-# refuses anything above the floor. A runner image too new to reach it fails the
-# build rather than shipping a package that will not start.
+# the job produced rather than against the image that built them: the packaging
+# scripts read the highest GLIBC_ symbol version they require and refuse
+# anything above the floor. A runner image too new to reach it fails the build
+# rather than shipping a package that will not start.
+#
+# The default `docker` label is a node:lts image, which is Debian bookworm and
+# carries glibc 2.36, above the 2.35 floor. That is not a problem in itself:
+# what matters is the highest symbol version the binaries actually reference,
+# and bookworm's glibc does not have the newer symbols a more recent one would
+# offer, so both binaries come out requiring exactly 2.35 and pass. It is a
+# narrow margin held by the check rather than by the image, which is the point.
+# When node:lts moves to a newer Debian, the packaging step is where that shows
+# up, and the answer is to build in an image that reaches the floor rather than
+# to raise the floor.
 #
 # `appimagetool` and the AppImage type-2 runtime are host dependencies that
 # build-appimage.sh never downloads. Provisioning them is this workflow's job,
@@ -34,7 +49,7 @@ on:
       - "v*"
 
 jobs:
-  appimage:
+  artifacts:
     runs-on: docker
     steps:
       - name: Install build dependencies
@@ -48,6 +63,7 @@ jobs:
           apt-get install -y --no-install-recommends \
             build-essential curl ca-certificates pkg-config git file jq \
             python3 desktop-file-utils binutils coreutils zsync appstream \
+            dpkg-dev \
             libfontconfig-dev libfreetype-dev libssl-dev
 
       - name: Checkout
@@ -132,6 +148,13 @@ jobs:
           cargo fetch --locked
           packaging/build-appimage.sh dist
 
+      - name: Build the Debian package
+        run: |
+          set -eu
+          # The binaries are already built from the step above, so this is the
+          # packaging half rather than a second compile.
+          packaging/build-deb.sh dist
+
       - name: Publish the release
         env:
           TOKEN: ${{ secrets.RELEASE_TOKEN }}
@@ -145,9 +168,14 @@ jobs:
             exit 1
           fi
 
-          ARTIFACT=Ephervex-x86_64.AppImage
+          VERSION="$(packaging/workspace-version.sh)"
+          APPIMAGE=Ephervex-x86_64.AppImage
+          DEB="ephervex_${VERSION}_amd64.deb"
           cd dist
-          sha256sum "${ARTIFACT}" > "${ARTIFACT}.sha256"
+          for artifact in "${APPIMAGE}" "${DEB}"; do
+            [ -f "${artifact}" ] || { echo "ERROR: ${artifact} was not built." >&2; exit 1; }
+            sha256sum "${artifact}" > "${artifact}.sha256"
+          done
           cd ..
 
           API="${GITHUB_API_URL}"
@@ -176,9 +204,9 @@ jobs:
             echo "Reusing existing release for ${TAG}"
           fi
 
-          # Named one by one rather than globbed: build-appimage.sh leaves the
-          # AppDir it assembled in the same output directory, and a glob would
-          # try to upload a directory.
+          # Named one by one rather than globbed: the packaging scripts leave
+          # the AppDir and the package staging tree they assembled in the same
+          # output directory, and a glob would try to upload a directory.
           #
           # Publishing over an existing release replaces its assets rather than
           # adding to them. Forgejo accepts a second attachment under a name it
@@ -186,7 +214,7 @@ jobs:
           # different files under one name and a download address unable to say
           # which one it means.
           assets="$(curl -sS -H "$AUTH" "${API}/repos/${REPO}/releases/${rel_id}/assets" || echo '[]')"
-          for name in "${ARTIFACT}" "${ARTIFACT}.sha256"; do
+          for name in "${APPIMAGE}" "${APPIMAGE}.sha256" "${DEB}" "${DEB}.sha256"; do
             for old in $(echo "$assets" | jq -r --arg n "$name" '.[] | select(.name == $n) | .id'); do
               echo "Removing the existing ${name} (asset ${old})"
               api DELETE "/repos/${REPO}/releases/${rel_id}/assets/${old}" >/dev/null
