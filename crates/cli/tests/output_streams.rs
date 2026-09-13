@@ -44,6 +44,47 @@ fn abandoned_midway(args: &[&str]) -> (Option<i32>, String) {
     (status.code(), stderr)
 }
 
+/// The rule that keeps the two tests below true as the command line grows.
+///
+/// Every line of output goes through one writer that survives a closed pipe.
+/// `println!` does not, and writing a new line the obvious way is exactly how
+/// this would come back, so the spelling is checked rather than trusted.
+/// `eprintln!` is deliberately untouched: standard error is a different stream,
+/// and the failure reporter has to keep working when stdout has gone.
+#[test]
+fn no_output_line_is_written_with_a_macro_that_panics_on_a_closed_pipe() {
+    let source = include_str!("../src/main.rs");
+
+    let offenders: Vec<(usize, &str)> = source
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| {
+            // `eprintln!` ends in the same characters, so the match is anchored
+            // on what comes before it.
+            let mut found = false;
+            for macro_name in ["println!", "print!("] {
+                let mut from = 0;
+                while let Some(at) = line[from..].find(macro_name) {
+                    let at = from + at;
+                    let preceded_by = at.checked_sub(1).map(|index| &line[index..at]);
+                    if !matches!(preceded_by, Some("e" | "_")) {
+                        found = true;
+                    }
+                    from = at + macro_name.len();
+                }
+            }
+            found
+        })
+        .map(|(index, line)| (index + 1, line.trim()))
+        .filter(|(_, line)| !line.starts_with("//") && !line.starts_with("///"))
+        .collect();
+
+    assert!(
+        offenders.is_empty(),
+        "these write to stdout with a macro that panics on a closed pipe; use `outln!` or `out!`:\n{offenders:#?}"
+    );
+}
+
 /// The reproducible case: the completion script is far larger than a pipe
 /// buffer, so the write that fails is guaranteed rather than a race.
 #[test]

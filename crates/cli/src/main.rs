@@ -1226,6 +1226,23 @@ impl From<LoaderArg> for LoaderKind {
     }
 }
 
+/// Writes one line to standard output, through the pipe-safe writer.
+///
+/// A drop-in for `outln!`, and the reason there is no `outln!` left in this
+/// file: that macro panics when whoever was reading has gone, which turns
+/// `ephervex ... | head` into a stack trace. One spelling for all of it means a
+/// new output line cannot reintroduce the problem by being written the obvious
+/// way.
+macro_rules! outln {
+    () => { write_out(b"\n") };
+    ($($arg:tt)*) => { write_out(format!("{}\n", format_args!($($arg)*)).as_bytes()) };
+}
+
+/// The same without the newline, for a prompt that waits on the same line.
+macro_rules! out {
+    ($($arg:tt)*) => { write_out(format!("{}", format_args!($($arg)*)).as_bytes()) };
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     if let Command::Completions { shell } = &cli.command {
@@ -1271,7 +1288,7 @@ fn main() -> ExitCode {
 /// `head`, `less` and `grep -q` all stop reading before a long document is
 /// finished, and the kernel answers the next write with `EPIPE`. Rust ignores
 /// `SIGPIPE` at startup, so that error reaches the writer instead of killing
-/// the process, and `println!` turns it into a panic: a stack trace, exit 101,
+/// the process, and `outln!` turns it into a panic: a stack trace, exit 101,
 /// and a build path in the message, for what is an ordinary way to use a
 /// command.
 ///
@@ -1510,7 +1527,7 @@ async fn run_instance_command(
                 if json {
                     print_json(&serde_json::json!({ "recipe": serde_json::Value::Null }));
                 } else {
-                    println!("{}", ephervex_i18n::lookup("pack-recipe-missing"));
+                    outln!("{}", ephervex_i18n::lookup("pack-recipe-missing"));
                 }
                 return Ok(());
             };
@@ -1538,7 +1555,7 @@ async fn run_instance_command(
             };
             app.delete_client(*id, files)?;
             if json {
-                println!(
+                outln!(
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
                         "deleted": id.to_string(),
@@ -1546,7 +1563,7 @@ async fn run_instance_command(
                     }))?
                 );
             } else {
-                println!("deleted {id}");
+                outln!("deleted {id}");
             }
         }
         InstanceCommand::Persist {
@@ -1613,7 +1630,7 @@ fn run_instance_persist(
         return Ok(());
     }
 
-    println!(
+    outln!(
         "{}",
         ephervex_i18n::lookup_args(
             "instance-made-persistent",
@@ -1624,7 +1641,7 @@ fn run_instance_persist(
         )
     );
     for server in &outcome.servers {
-        println!(
+        outln!(
             "  {}",
             ephervex_i18n::lookup_args(
                 "server-made-persistent",
@@ -1725,7 +1742,7 @@ async fn run_server_command(
                 if json {
                     print_json(&serde_json::json!({ "server_id": id, "properties": text }));
                 } else {
-                    print!("{text}");
+                    out!("{text}");
                 }
             }
             ServerPropertiesCommand::Set { id, key, value } => {
@@ -1733,7 +1750,7 @@ async fn run_server_command(
                 if json {
                     print_json(&serde_json::json!({ "server_id": id, "key": key, "value": value }));
                 } else {
-                    println!("set {key}");
+                    outln!("set {key}");
                 }
             }
         },
@@ -1762,8 +1779,8 @@ async fn run_server_command(
                         "EULA acceptance requires an interactive terminal; review {MINECRAFT_EULA_REFERENCE}"
                     );
                 }
-                println!("Review the Minecraft EULA: {MINECRAFT_EULA_REFERENCE}");
-                print!("Type {EULA_CONFIRMATION_PHRASE} to accept: ");
+                outln!("Review the Minecraft EULA: {MINECRAFT_EULA_REFERENCE}");
+                out!("Type {EULA_CONFIRMATION_PHRASE} to accept: ");
                 std::io::stdout().flush()?;
                 let mut phrase = String::new();
                 std::io::stdin().read_line(&mut phrase)?;
@@ -1820,7 +1837,7 @@ async fn run_server_command(
                 if json {
                     print_json(&serde_json::json!({ "server_id": id, "cleared": true }));
                 } else {
-                    println!("cleared proven-stale runtime state for {id}");
+                    outln!("cleared proven-stale runtime state for {id}");
                 }
             }
         },
@@ -1845,7 +1862,7 @@ async fn run_server_command(
                     "files": if *keep_files { "kept" } else { "removed" },
                 }));
             } else {
-                println!("deleted {id}");
+                outln!("deleted {id}");
             }
         }
     }
@@ -1882,7 +1899,7 @@ fn run_logs_command(app: &App, command: &LogsCommand, json: bool) -> anyhow::Res
                 if json {
                     print_json(&serde_json::json!({ "name": name, "path": resolved }));
                 } else {
-                    println!("{}", resolved.display());
+                    outln!("{}", resolved.display());
                 }
                 return Ok(());
             }
@@ -1901,7 +1918,7 @@ fn run_logs_command(app: &App, command: &LogsCommand, json: bool) -> anyhow::Res
                     "text": view.text,
                 }));
             } else {
-                print!("{}", view.text);
+                out!("{}", view.text);
                 std::io::stdout().flush()?;
                 report_window(&view);
             }
@@ -1966,7 +1983,7 @@ fn print_diagnostic_entries(entries: &[DiagnosticEntry], json: bool) {
         return;
     }
     if entries.is_empty() {
-        println!("{}", ephervex_i18n::lookup("diagnostics-nothing-recorded"));
+        outln!("{}", ephervex_i18n::lookup("diagnostics-nothing-recorded"));
         return;
     }
     for entry in entries {
@@ -1976,9 +1993,12 @@ fn print_diagnostic_entries(entries: &[DiagnosticEntry], json: bool) {
             .as_ref()
             .and_then(ephervex_core::CrashSummary::headline)
             .unwrap_or_default();
-        println!(
+        outln!(
             "{}\t{}\t{}\t{}",
-            entry.name, entry.size_bytes, modified, headline
+            entry.name,
+            entry.size_bytes,
+            modified,
+            headline
         );
     }
 }
@@ -2018,7 +2038,7 @@ fn print_diagnostic_search(found: &DiagnosticSearch, json: bool) -> anyhow::Resu
     }
 
     for matched in &found.outcome.matches {
-        println!("{}:{}", matched.line_number, matched.line);
+        outln!("{}:{}", matched.line_number, matched.line);
     }
     std::io::stdout().flush()?;
     if found.outcome.matches.is_empty() {
@@ -2107,7 +2127,7 @@ fn run_preferences_command(
                     "value": stored.to_setting_value(),
                 }));
             } else {
-                println!(
+                outln!(
                     "{}",
                     ephervex_i18n::lookup_args(
                         "preference-set",
@@ -2133,7 +2153,7 @@ fn run_preferences_command(
                     "managed": false,
                 }));
             } else {
-                println!(
+                outln!(
                     "{}",
                     ephervex_i18n::lookup_args(
                         "preference-unmanaged",
@@ -2175,7 +2195,7 @@ fn show_preferences(app: &App, json: bool) {
     }
 
     for key in PreferenceKey::ALL {
-        println!(
+        outln!(
             "{:<20} {:<9} {:<12} {}",
             key.as_str(),
             if preferences.is_managed(*key) {
@@ -2190,9 +2210,9 @@ fn show_preferences(app: &App, json: bool) {
 
     let managed = preferences.managed_keys().len();
     if managed == 0 {
-        println!("{}", ephervex_i18n::lookup("preferences-none-managed"));
+        outln!("{}", ephervex_i18n::lookup("preferences-none-managed"));
     } else {
-        println!(
+        outln!(
             "{}",
             ephervex_i18n::lookup_args(
                 "preferences-managed-count",
@@ -2227,7 +2247,7 @@ fn run_instance_root(
             "overridden": overridden,
         }));
     } else {
-        println!("{}", root.display());
+        outln!("{}", root.display());
         if !overridden {
             eprintln!("the default, under the XDG data directory");
         }
@@ -2485,11 +2505,11 @@ fn print_game_line(line: &OutputLine, json: bool) {
             "message": line.record.message,
         });
         if let Ok(text) = serde_json::to_string(&value) {
-            println!("{text}");
+            outln!("{text}");
         }
     } else {
         // Minecraft's own log text is never translated.
-        println!("{}", line.display());
+        outln!("{}", line.display());
     }
 }
 
@@ -2533,9 +2553,9 @@ fn report_launch(outcome: &LaunchOutcome, json: bool) {
 
     if outcome.exit.is_none() {
         eprintln!("{}", ephervex_i18n::lookup("launch-dry-run"));
-        println!("{}", outcome.command.java.display());
+        outln!("{}", outcome.command.java.display());
         for argument in outcome.command.redacted_arguments() {
-            println!("  {argument}");
+            outln!("  {argument}");
         }
         eprintln!("{}", ephervex_i18n::lookup("launch-command-redacted"));
     }
@@ -2610,13 +2630,13 @@ fn show_info(json: bool) {
         });
         print_json(&info);
     } else {
-        println!(
+        outln!(
             "{} {}",
             ephervex_model::APP_NAME,
             ephervex_model::APP_VERSION
         );
-        println!("app id:     {}", ephervex_model::APP_ID);
-        println!("user agent: {}", ephervex_model::user_agent());
+        outln!("app id:     {}", ephervex_model::APP_ID);
+        outln!("user agent: {}", ephervex_model::user_agent());
     }
 }
 
@@ -2638,16 +2658,16 @@ fn show_paths(paths: &Paths, json: bool) {
         });
         print_json(&value);
     } else {
-        println!("config:               {}", paths.config_dir().display());
-        println!("data:                 {}", paths.data_dir().display());
-        println!("cache:                {}", paths.cache_dir().display());
-        println!("state:                {}", paths.state_dir().display());
-        println!("database:             {}", paths.database_file().display());
-        println!(
+        outln!("config:               {}", paths.config_dir().display());
+        outln!("data:                 {}", paths.data_dir().display());
+        outln!("cache:                {}", paths.cache_dir().display());
+        outln!("state:                {}", paths.state_dir().display());
+        outln!("database:             {}", paths.database_file().display());
+        outln!(
             "temporary instances:  {}",
             paths.temporary_instances_dir().display()
         );
-        println!(
+        outln!(
             "persistent instances: {}{}",
             paths.persistent_instances_dir().display(),
             if paths.persistent_instance_root_is_overridden() {
@@ -2671,20 +2691,21 @@ fn show_health(health: &InstallationHealth, json: bool) {
         return;
     }
 
-    println!("{} {}", health.application.name, health.application.version);
-    println!("app id:     {}", health.application.app_id);
-    println!(
+    outln!("{} {}", health.application.name, health.application.version);
+    outln!("app id:     {}", health.application.app_id);
+    outln!(
         "platform:   {}-{}",
-        health.platform.os, health.platform.arch
+        health.platform.os,
+        health.platform.arch
     );
-    println!("language:   {}", health.application.language);
+    outln!("language:   {}", health.application.language);
 
     show_health_directories(health);
     show_health_configuration(health.configuration.as_ref());
     show_health_credentials(&health.credential_storage);
 
-    println!();
-    println!("bundled data");
+    outln!();
+    outln!("bundled data");
     show_bundled_document(
         "options compatibility",
         &health.bundled_data.options_dataset,
@@ -2698,9 +2719,9 @@ fn show_health(health: &InstallationHealth, json: bool) {
     show_health_java(health.java.as_ref());
 
     if let Some(error) = &health.storage_error {
-        println!();
-        println!("storage");
-        println!("  could not be opened: {error}");
+        outln!();
+        outln!("storage");
+        outln!("  could not be opened: {error}");
     }
 }
 
@@ -2741,10 +2762,10 @@ fn run_doctor(json: bool) -> ExitCode {
 }
 
 fn show_health_directories(health: &InstallationHealth) {
-    println!();
-    println!("directories");
+    outln!();
+    outln!("directories");
     if let Some(error) = &health.paths_error {
-        println!("  could not be resolved: {error}");
+        outln!("  could not be resolved: {error}");
     }
     for directory in &health.directories {
         let state = match &directory.state {
@@ -2753,7 +2774,7 @@ fn show_health_directories(health: &InstallationHealth) {
             DirectoryState::NotWritable { detail } => format!("NOT WRITABLE: {detail}"),
             DirectoryState::Unusable { detail } => format!("UNUSABLE: {detail}"),
         };
-        println!(
+        outln!(
             "  {:<21} {}  [{state}]",
             directory.purpose,
             directory.path.display()
@@ -2762,54 +2783,54 @@ fn show_health_directories(health: &InstallationHealth) {
 }
 
 fn show_health_configuration(configuration: Option<&ConfigurationHealth>) {
-    println!();
-    println!("configuration");
+    outln!();
+    outln!("configuration");
     let Some(configuration) = configuration else {
-        println!("  could not be located: the storage directories did not resolve");
+        outln!("  could not be located: the storage directories did not resolve");
         return;
     };
     match configuration {
         ConfigurationHealth::Absent { path } => {
-            println!("  {}  [not written yet]", path.display());
+            outln!("  {}  [not written yet]", path.display());
         }
         ConfigurationHealth::Loaded {
             path,
             schema_version,
         } => {
-            println!("  {}  [schema {schema_version}]", path.display());
+            outln!("  {}  [schema {schema_version}]", path.display());
         }
         ConfigurationHealth::Unusable {
             path,
             message_id,
             detail,
         } => {
-            println!("  {}  [UNUSABLE]", path.display());
-            println!("  {}", ephervex_i18n::lookup(message_id));
-            println!("  {detail}");
+            outln!("  {}  [UNUSABLE]", path.display());
+            outln!("  {}", ephervex_i18n::lookup(message_id));
+            outln!("  {detail}");
         }
     }
 }
 
 fn show_health_credentials(credentials: &CredentialBackendHealth) {
-    println!();
-    println!("credential storage");
+    outln!();
+    outln!("credential storage");
     if credentials.available {
-        println!("  {}  [available]", credentials.backend);
+        outln!("  {}  [available]", credentials.backend);
     } else {
-        println!("  unavailable; sign-in is session-only for this run");
+        outln!("  unavailable; sign-in is session-only for this run");
         if let Some(detail) = &credentials.detail {
-            println!("  {detail}");
+            outln!("  {detail}");
         }
     }
 }
 
 fn show_health_artifact_cache(cache: Option<&ArtifactCacheHealth>) {
-    println!();
-    println!("artifact cache");
+    outln!();
+    outln!("artifact cache");
     match cache {
-        None => println!("  not measured; storage could not be opened"),
+        None => outln!("  not measured; storage could not be opened"),
         Some(ArtifactCacheHealth::Unavailable { detail }) => {
-            println!("  not measured: {detail}");
+            outln!("  not measured: {detail}");
         }
         Some(ArtifactCacheHealth::Measured {
             used_bytes,
@@ -2818,37 +2839,37 @@ fn show_health_artifact_cache(cache: Option<&ArtifactCacheHealth>) {
             limit,
             over_budget,
         }) => {
-            println!("  {entries} entries, {used_bytes} bytes, budget {limit}");
+            outln!("  {entries} entries, {used_bytes} bytes, budget {limit}");
             if !complete {
-                println!("  the cache was in use; part of it was not measured");
+                outln!("  the cache was in use; part of it was not measured");
             }
             if *over_budget {
-                println!("  over budget; collection runs after the next cache operation");
+                outln!("  over budget; collection runs after the next cache operation");
             }
         }
     }
 }
 
 fn show_health_java(java: Option<&JavaHealth>) {
-    println!();
-    println!("java");
+    outln!();
+    outln!("java");
     match java {
-        None => println!("  not measured: storage could not be opened"),
+        None => outln!("  not measured: storage could not be opened"),
         Some(JavaHealth::Unavailable { detail }) => {
             // Never "no runtimes found": the scan did not finish, which is a
             // different thing to tell somebody than that they have no JDK.
-            println!("  not measured: {detail}");
+            outln!("  not measured: {detail}");
         }
         Some(JavaHealth::Discovered {
             discovered,
             managed,
             major_versions,
         }) => {
-            println!("  {discovered} runtimes ({managed} managed)");
+            outln!("  {discovered} runtimes ({managed} managed)");
             if !major_versions.is_empty() {
                 let versions: Vec<String> =
                     major_versions.iter().map(ToString::to_string).collect();
-                println!("  major versions: {}", versions.join(", "));
+                outln!("  major versions: {}", versions.join(", "));
             }
         }
     }
@@ -2857,11 +2878,11 @@ fn show_health_java(java: Option<&JavaHealth>) {
 fn show_bundled_document(label: &str, document: &BundledDocumentHealth) {
     match document {
         BundledDocumentHealth::Loaded { entries, revision } => match revision {
-            Some(revision) => println!("  {label:<22} {entries} entries, revision {revision}"),
-            None => println!("  {label:<22} {entries} entries"),
+            Some(revision) => outln!("  {label:<22} {entries} entries, revision {revision}"),
+            None => outln!("  {label:<22} {entries} entries"),
         },
         BundledDocumentHealth::Unusable { detail } => {
-            println!("  {label:<22} UNUSABLE: {detail}");
+            outln!("  {label:<22} UNUSABLE: {detail}");
         }
     }
 }
@@ -2990,11 +3011,11 @@ fn show_config(config: &Config, paths: &Paths, json: bool) -> anyhow::Result<()>
             "persistent_instance_root": config.persistent_instance_root,
         }));
     } else {
-        println!("# {}", paths.config_file().display());
+        outln!("# {}", paths.config_file().display());
         // The serializer refuses to emit a credential-looking key, so this
         // cannot print a secret even if one somehow reached the struct
         // (ADR 0004).
-        print!("{}", config.to_toml_string()?);
+        out!("{}", config.to_toml_string()?);
     }
     Ok(())
 }
@@ -3012,14 +3033,14 @@ fn list_instances(app: &App, json: bool) -> anyhow::Result<()> {
     }
 
     if records.is_empty() {
-        println!("{}", ephervex_i18n::lookup("instances-list-empty"));
+        outln!("{}", ephervex_i18n::lookup("instances-list-empty"));
         return Ok(());
     }
 
     for record in &records {
         // The summary message already carries the name, so there is no separate
         // name column: one source of that string, not two.
-        println!(
+        outln!(
             "{}  {:<11} {}{}",
             record.id,
             record.storage.to_string(),
@@ -3031,7 +3052,7 @@ fn list_instances(app: &App, json: bool) -> anyhow::Result<()> {
             }
         );
     }
-    println!(
+    outln!(
         "{}",
         ephervex_i18n::lookup_args(
             "instances-list-count",
@@ -3054,12 +3075,12 @@ fn list_servers(app: &App, json: bool) -> anyhow::Result<()> {
     }
 
     if records.is_empty() {
-        println!("{}", ephervex_i18n::lookup("servers-list-empty"));
+        outln!("{}", ephervex_i18n::lookup("servers-list-empty"));
         return Ok(());
     }
 
     for record in &records {
-        println!(
+        outln!(
             "{}  {:<11} {}",
             record.id,
             record.storage.to_string(),
@@ -3076,7 +3097,7 @@ fn list_servers(app: &App, json: bool) -> anyhow::Result<()> {
             )
         );
     }
-    println!(
+    outln!(
         "{}",
         ephervex_i18n::lookup_args(
             "servers-list-count",
@@ -3172,7 +3193,7 @@ fn print_mod_state(presence: ModPresence, path: &Path, json: bool) {
         }));
         return;
     }
-    println!("{}  {}", presence.as_str(), path.display());
+    outln!("{}  {}", presence.as_str(), path.display());
 }
 
 /// Shows or records which catalog mod commands use when none is named.
@@ -3202,8 +3223,8 @@ fn run_mod_catalog(
         }));
     } else {
         match effective {
-            Some(provider) => println!("{}", provider.as_str()),
-            None => println!("{}", preference.stored()),
+            Some(provider) => outln!("{}", provider.as_str()),
+            None => outln!("{}", preference.stored()),
         }
         if !preference.is_chosen() {
             eprintln!(
@@ -3290,26 +3311,26 @@ fn print_mod_search(results: &ModSearchResults, json: bool) {
     }
 
     if results.hits.is_empty() {
-        println!("{}", ephervex_i18n::lookup("mod-search-empty"));
+        outln!("{}", ephervex_i18n::lookup("mod-search-empty"));
         if let Some(action) = ephervex_i18n::lookup_attribute("mod-search-empty", "action") {
-            println!("  {action}");
+            outln!("  {action}");
         }
         return;
     }
 
     for hit in &results.hits {
-        println!("{}  {}", hit.project.id, hit.project.title);
-        println!("  {}", hit.project.description);
+        outln!("{}  {}", hit.project.id, hit.project.title);
+        outln!("  {}", hit.project.description);
         match &hit.best_version {
-            Some(version) => println!("  version: {} ({})", version.version_number, version.id),
+            Some(version) => outln!("  version: {} ({})", version.version_number, version.id),
             None => {
                 for reason in hit.compatibility.reasons() {
-                    println!("  {}", incompatibility_text(reason));
+                    outln!("  {}", incompatibility_text(reason));
                 }
             }
         }
     }
-    println!(
+    outln!(
         "{}",
         ephervex_i18n::lookup_args(
             "mod-search-count",
@@ -3344,11 +3365,12 @@ fn print_mod_project(details: &ModProjectDetails, json: bool) {
         return;
     }
 
-    println!("{}  {}", details.project.id, details.project.title);
-    println!("  {}", details.project.description);
-    println!(
+    outln!("{}  {}", details.project.id, details.project.title);
+    outln!("  {}", details.project.description);
+    outln!(
         "  client: {}  server: {}",
-        details.project.client_side, details.project.server_side
+        details.project.client_side,
+        details.project.server_side
     );
     for entry in &details.versions {
         let marker = if Some(&entry.version.id) == details.default_version.as_ref() {
@@ -3356,12 +3378,14 @@ fn print_mod_project(details: &ModProjectDetails, json: bool) {
         } else {
             " "
         };
-        println!(
+        outln!(
             "{marker} {}  {}  ({})",
-            entry.version.id, entry.version.version_number, entry.version.file.file_name
+            entry.version.id,
+            entry.version.version_number,
+            entry.version.file.file_name
         );
         for reason in entry.compatibility.reasons() {
-            println!("    {}", incompatibility_text(reason));
+            outln!("    {}", incompatibility_text(reason));
         }
     }
 }
@@ -3431,25 +3455,29 @@ fn print_mod_plan(plan: &ModInstallPlan, json: bool) {
         return;
     }
 
-    println!(
+    outln!(
         "{}  {}  ({})",
-        plan.root.version.project_id, plan.root.project.title, plan.root.version.version_number
+        plan.root.version.project_id,
+        plan.root.project.title,
+        plan.root.version.version_number
     );
     for planned in &plan.dependencies {
-        println!(
+        outln!(
             "  + {}  {}  ({})",
-            planned.version.project_id, planned.project.title, planned.version.version_number
+            planned.version.project_id,
+            planned.project.title,
+            planned.version.version_number
         );
     }
     for candidate in &plan.optional {
         // Unchecked by default, and shown as such rather than hidden.
-        println!("  [ ] {} (optional)", candidate.project_id);
+        outln!("  [ ] {} (optional)", candidate.project_id);
     }
     for external in &plan.external {
-        println!("  ? {} ({})", external.file_name, external.kind.as_str());
+        outln!("  ? {} ({})", external.file_name, external.kind.as_str());
     }
     for installed in &plan.already_installed {
-        println!("  = {} (already installed)", installed.project_id);
+        outln!("  = {} (already installed)", installed.project_id);
     }
     for warning in &plan.warnings {
         eprintln!("{}", warning_text(warning));
@@ -3473,7 +3501,7 @@ fn print_installed_mods(installed: &InstalledMods, json: bool) {
     }
 
     if installed.installation.changed_anything() {
-        println!(
+        outln!(
             "{}",
             ephervex_i18n::lookup_args(
                 "mod-install-completed",
@@ -3484,10 +3512,10 @@ fn print_installed_mods(installed: &InstalledMods, json: bool) {
             )
         );
         for path in &installed.installation.installed {
-            println!("  {}", path.display());
+            outln!("  {}", path.display());
         }
     } else {
-        println!("{}", ephervex_i18n::lookup("mod-install-nothing-to-do"));
+        outln!("{}", ephervex_i18n::lookup("mod-install-nothing-to-do"));
     }
     for warning in &installed.plan.warnings {
         eprintln!("{}", warning_text(warning));
@@ -3519,18 +3547,18 @@ fn print_host_mods(snapshot: &ManagedModSnapshot, json: bool) {
     }
 
     if snapshot.is_empty() {
-        println!("{}", ephervex_i18n::lookup("mod-list-empty"));
+        outln!("{}", ephervex_i18n::lookup("mod-list-empty"));
         return;
     }
     for entry in &snapshot.mods {
-        println!(
+        outln!(
             "{}  {}  ({})",
             entry.presence.as_str(),
             entry.display_name(),
             entry.logical_path.display()
         );
     }
-    println!(
+    outln!(
         "{}",
         ephervex_i18n::lookup_args(
             "mod-installed-count",
@@ -3549,7 +3577,7 @@ fn print_crash_review(review: Option<&CrashReview>, json: bool) {
         if json {
             print_json(&serde_json::json!({ "crash": serde_json::Value::Null }));
         } else {
-            println!("{}", ephervex_i18n::lookup("crash-none"));
+            outln!("{}", ephervex_i18n::lookup("crash-none"));
         }
         return;
     };
@@ -3580,15 +3608,15 @@ fn print_crash_review(review: Option<&CrashReview>, json: bool) {
         return;
     }
 
-    println!("{}", review.report_name);
+    outln!("{}", review.report_name);
     if let Some(failure) = &review.analysis.failure {
-        println!("  {failure}");
+        outln!("  {failure}");
     }
     if review.analysis.client_code_on_server {
-        println!("  {}", ephervex_i18n::lookup("crash-client-code-on-server"));
+        outln!("  {}", ephervex_i18n::lookup("crash-client-code-on-server"));
     }
     if review.mods.is_empty() {
-        println!("{}", ephervex_i18n::lookup("crash-no-suspects"));
+        outln!("{}", ephervex_i18n::lookup("crash-no-suspects"));
         return;
     }
     for entry in &review.mods {
@@ -3602,14 +3630,14 @@ fn print_crash_review(review: Option<&CrashReview>, json: bool) {
                 [("mod", MessageArg::from(triggered_by.as_str()))],
             ),
         };
-        println!(
+        outln!(
             "{}  {}  {reason}",
             entry.suspect.confidence().as_str(),
             entry.suspect.label()
         );
         match &entry.logical_path {
-            Some(path) => println!("    {}", path.display()),
-            None => println!("    {}", ephervex_i18n::lookup("crash-not-in-mod-list")),
+            Some(path) => outln!("    {}", path.display()),
+            None => outln!("    {}", ephervex_i18n::lookup("crash-not-in-mod-list")),
         }
     }
 }
@@ -3630,17 +3658,20 @@ fn print_managed_mods(mods: &[ManagedMod], json: bool) {
     }
 
     if mods.is_empty() {
-        println!("{}", ephervex_i18n::lookup("mod-list-empty"));
+        outln!("{}", ephervex_i18n::lookup("mod-list-empty"));
         return;
     }
     for managed in mods {
-        println!(
+        outln!(
             "{}  {}  {}  ({})",
-            managed.provider, managed.project_id, managed.version_id, managed.file_name
+            managed.provider,
+            managed.project_id,
+            managed.version_id,
+            managed.file_name
         );
-        println!("  {}  {}", managed.origin.as_str(), managed.file_name);
+        outln!("  {}  {}", managed.origin.as_str(), managed.file_name);
     }
-    println!(
+    outln!(
         "{}",
         ephervex_i18n::lookup_args(
             "mod-installed-count",
@@ -3758,9 +3789,9 @@ async fn run_account_command(
             if json {
                 print_json(&session_json(session));
             } else {
-                println!("{signed_in}");
-                println!("uuid:     {}", session.account.id);
-                println!(
+                outln!("{signed_in}");
+                outln!("uuid:     {}", session.account.id);
+                outln!(
                     "storage:  {}",
                     session.storage().map_or_else(
                         || ephervex_i18n::lookup("auth-storage-none-needed"),
@@ -3783,7 +3814,7 @@ async fn run_account_command(
             if json {
                 print_json(&session_json(session));
             } else {
-                println!(
+                outln!(
                     "{}",
                     ephervex_i18n::lookup_args(
                         "auth-signed-in",
@@ -3791,7 +3822,7 @@ async fn run_account_command(
                     )
                 );
                 if let Some(expires) = session.expires_at() {
-                    println!("expires:  {}", expires.to_rfc3339());
+                    outln!("expires:  {}", expires.to_rfc3339());
                 }
             }
         }
@@ -3805,7 +3836,7 @@ async fn run_account_command(
             if json {
                 print_json(&serde_json::json!({"signed_out": removed}));
             } else {
-                println!("{}", ephervex_i18n::lookup(message));
+                outln!("{}", ephervex_i18n::lookup(message));
             }
         }
     }
@@ -3832,16 +3863,16 @@ fn run_account_management(
             if json {
                 print_json(&account_json(&account));
             } else {
-                println!(
+                outln!(
                     "{}",
                     ephervex_i18n::lookup_args(
                         "account-added-offline",
                         [("name", MessageArg::from(account.name.as_str()))]
                     )
                 );
-                println!("uuid:     {}", account.id);
+                outln!("uuid:     {}", account.id);
                 if account.is_default {
-                    println!("default:  yes");
+                    outln!("default:  yes");
                 }
             }
         }
@@ -3850,7 +3881,7 @@ fn run_account_management(
             if json {
                 print_json(&account_json(&account));
             } else {
-                println!(
+                outln!(
                     "{}",
                     ephervex_i18n::lookup_args(
                         "account-default-set",
@@ -3871,7 +3902,7 @@ fn run_account_management(
                     "default": remaining.as_ref().map(account_json),
                 }));
             } else {
-                println!(
+                outln!(
                     "{}",
                     ephervex_i18n::lookup_args(
                         if removed.kind.has_stored_credential() {
@@ -3883,14 +3914,14 @@ fn run_account_management(
                     )
                 );
                 match &remaining {
-                    Some(account) => println!(
+                    Some(account) => outln!(
                         "{}",
                         ephervex_i18n::lookup_args(
                             "account-default-set",
                             [("name", MessageArg::from(account.name.as_str()))]
                         )
                     ),
-                    None => println!("{}", ephervex_i18n::lookup("auth-signed-out")),
+                    None => outln!("{}", ephervex_i18n::lookup("auth-signed-out")),
                 }
             }
         }
@@ -3962,7 +3993,7 @@ fn show_account_status(status: &AccountStatus, json: bool) {
     }
 
     let Some(active) = &status.active else {
-        println!("{}", ephervex_i18n::lookup("auth-signed-out"));
+        outln!("{}", ephervex_i18n::lookup("auth-signed-out"));
         // Said here rather than only when a login fails: a user on a machine
         // with no keyring should find that out before they try. Offline
         // accounts still work, which is why this is a note and not an error
@@ -3975,7 +4006,7 @@ fn show_account_status(status: &AccountStatus, json: bool) {
         return;
     };
 
-    println!(
+    outln!(
         "{}",
         ephervex_i18n::lookup_args(
             if active.is_authenticated() {
@@ -3986,19 +4017,19 @@ fn show_account_status(status: &AccountStatus, json: bool) {
             [("name", MessageArg::from(active.name.as_str()))]
         )
     );
-    println!("uuid:      {}", active.id);
-    println!(
+    outln!("uuid:      {}", active.id);
+    outln!(
         "kind:      {}",
         ephervex_i18n::lookup(active.kind.message_id())
     );
     if !active.last_authenticated_at.is_empty() {
-        println!("last auth: {}", active.last_authenticated_at);
+        outln!("last auth: {}", active.last_authenticated_at);
     }
-    println!(
+    outln!(
         "storage:   {}",
         account_storage_label(active, status.credential_storage)
     );
-    println!(
+    outln!(
         "session:   {}",
         if status.session_active {
             "active"
@@ -4007,7 +4038,7 @@ fn show_account_status(status: &AccountStatus, json: bool) {
         }
     );
     if status.accounts.len() > 1 {
-        println!(
+        outln!(
             "accounts:  {} (see `ephervex account list`)",
             status.accounts.len()
         );
@@ -4023,14 +4054,14 @@ fn show_accounts(status: &AccountStatus, json: bool) {
     }
 
     if status.accounts.is_empty() {
-        println!("{}", ephervex_i18n::lookup("accounts-list-empty"));
+        outln!("{}", ephervex_i18n::lookup("accounts-list-empty"));
         return;
     }
 
     for account in &status.accounts {
         // The marker matters more than it looks: with several accounts, which
         // one a launch uses is the single thing the user is checking for.
-        println!(
+        outln!(
             "{} {}  {:<9} {:<26} {}",
             if account.is_default { "*" } else { " " },
             account.id,
@@ -4039,7 +4070,7 @@ fn show_accounts(status: &AccountStatus, json: bool) {
             account_storage_label(account, status.credential_storage)
         );
     }
-    println!(
+    outln!(
         "{}",
         ephervex_i18n::lookup_args(
             "accounts-list-count",
@@ -4116,11 +4147,11 @@ fn run_api_command(app: &mut App, command: &ApiCommand, json: bool) -> anyhow::R
             std::io::Read::read_to_string(&mut std::io::stdin(), &mut key)?;
             app.set_curseforge_api_key(&SecretString::new(key))?;
             // Never echo it back, not even truncated.
-            println!("stored the CurseForge API key in the system keyring");
+            outln!("stored the CurseForge API key in the system keyring");
         }
         ApiCommand::ClearCurseforgeKey => {
             app.clear_curseforge_api_key()?;
-            println!("removed the CurseForge API key from the system keyring");
+            outln!("removed the CurseForge API key from the system keyring");
         }
     }
     Ok(())
@@ -4141,7 +4172,7 @@ fn show_api_settings(settings: &ApiSettings, json: bool) {
 
     // The Client ID is printed in full because it is not a secret: Ephervex is
     // a public/native client, which has no client secret and cannot have one
-    println!(
+    outln!(
         "microsoft client id:  {}{}",
         settings.effective_microsoft_client_id,
         if settings.microsoft_client_id_is_custom {
@@ -4150,7 +4181,7 @@ fn show_api_settings(settings: &ApiSettings, json: bool) {
             "  (this build's default)"
         }
     );
-    println!(
+    outln!(
         "user agent:           {}{}",
         settings.effective_user_agent,
         if settings.user_agent.is_empty() {
@@ -4160,7 +4191,7 @@ fn show_api_settings(settings: &ApiSettings, json: bool) {
         }
     );
     // Presence, never the value.
-    println!(
+    outln!(
         "curseforge api key:   {}",
         if settings.curseforge_api_key_present {
             "stored in the system keyring"
@@ -4171,12 +4202,12 @@ fn show_api_settings(settings: &ApiSettings, json: bool) {
     if !settings.curseforge_api_key_present {
         // The address a user needs at exactly the moment they discover they
         // have no key. Not the Upload API, which is a different credential.
-        println!(
+        outln!(
             "  apply for one:      {}",
             ephervex_core::CURSEFORGE_API_KEY_HELP
         );
     }
-    println!(
+    outln!(
         "credential storage:   {}",
         settings.credential_storage.map_or_else(
             || ephervex_i18n::lookup("error-auth-secret-storage-unavailable"),
@@ -4206,10 +4237,10 @@ fn show_runtimes(inventory: &RuntimeInventory, json: bool) {
     }
 
     if inventory.runtimes.is_empty() {
-        println!("{}", ephervex_i18n::lookup("java-runtimes-list-empty"));
+        outln!("{}", ephervex_i18n::lookup("java-runtimes-list-empty"));
     } else {
         for runtime in &inventory.runtimes {
-            println!(
+            outln!(
                 "{:<4} {:<12} {:<8} {:<14} {}",
                 runtime.version.major,
                 runtime.version_string,
@@ -4217,9 +4248,9 @@ fn show_runtimes(inventory: &RuntimeInventory, json: bool) {
                 runtime.primary_source().as_str(),
                 runtime.executable.display()
             );
-            println!("     {}", runtime.vendor);
+            outln!("     {}", runtime.vendor);
         }
-        println!(
+        outln!(
             "{}",
             ephervex_i18n::lookup_args(
                 "java-runtimes-list-count",
@@ -4250,19 +4281,20 @@ fn show_runtime_detail(runtime: &JavaRuntime, json: bool) {
         print_json(&runtime_json(runtime));
         return;
     }
-    println!("path:     {}", runtime.executable.display());
-    println!(
+    outln!("path:     {}", runtime.executable.display());
+    outln!(
         "java:     {} (major {})",
-        runtime.version_string, runtime.version.major
+        runtime.version_string,
+        runtime.version.major
     );
-    println!("runtime:  {}", runtime.runtime_version);
-    println!("vendor:   {}", runtime.vendor);
-    println!("arch:     {}", runtime.arch);
+    outln!("runtime:  {}", runtime.runtime_version);
+    outln!("vendor:   {}", runtime.vendor);
+    outln!("arch:     {}", runtime.arch);
     if let Some(home) = &runtime.home {
-        println!("home:     {}", home.display());
+        outln!("home:     {}", home.display());
     }
     for origin in &runtime.origins {
-        println!("found:    {} via {}", origin.path.display(), origin.kind);
+        outln!("found:    {} via {}", origin.path.display(), origin.kind);
     }
 }
 
@@ -4305,28 +4337,28 @@ fn show_java_plan(plan: &JavaPlan, json: bool) {
         return;
     }
 
-    println!("minecraft: {}", plan.minecraft_version);
+    outln!("minecraft: {}", plan.minecraft_version);
     match &plan.required.basis {
-        RequirementBasis::Metadata { component } => println!(
+        RequirementBasis::Metadata { component } => outln!(
             "requires:  java {} (Mojang runtime {component})",
             plan.required.major
         ),
         // Saying which of the two answered matters: one is Mojang's statement,
         // the other is this build's table.
-        RequirementBasis::FallbackTable => println!(
+        RequirementBasis::FallbackTable => outln!(
             "requires:  java {} (compatibility table; the metadata declares none)",
             plan.required.major
         ),
     }
     match &plan.choice {
-        JavaPathChoice::Pinned { path, source } => println!(
+        JavaPathChoice::Pinned { path, source } => outln!(
             "selected:  {} (pinned by {})",
             path.display(),
             source.as_str()
         ),
-        JavaPathChoice::Automatic => println!("selected:  {}", plan.runtime.executable.display()),
+        JavaPathChoice::Automatic => outln!("selected:  {}", plan.runtime.executable.display()),
     }
-    println!(
+    outln!(
         "runtime:   {} {} ({}, {})",
         plan.runtime.version_string,
         plan.runtime.arch,
@@ -4334,9 +4366,9 @@ fn show_java_plan(plan: &JavaPlan, json: bool) {
         plan.runtime.primary_source().as_str()
     );
     if plan.installed_now {
-        println!("installed: downloaded during this command");
+        outln!("installed: downloaded during this command");
     }
-    println!(
+    outln!(
         "memory:    {} MiB – {} MiB{}",
         plan.jvm.min_memory_mib,
         plan.jvm.max_memory_mib,
@@ -4347,10 +4379,10 @@ fn show_java_plan(plan: &JavaPlan, json: bool) {
         }
     );
     if !plan.jvm.jvm_args.is_empty() {
-        println!("jvm args:  {}", plan.jvm.jvm_args.join(" "));
+        outln!("jvm args:  {}", plan.jvm.jvm_args.join(" "));
     }
     for rejected in &plan.rejected {
-        println!(
+        outln!(
             "rejected:  {} — {}",
             rejected.executable.display(),
             rejected.rejection
@@ -4370,10 +4402,10 @@ fn show_managed_install(installed: &ManagedInstallation, json: bool) {
         }));
         return;
     }
-    println!("release:   {}", installed.release.release_name);
-    println!("directory: {}", installed.directory.display());
-    println!("java:      {}", installed.runtime.executable.display());
-    println!(
+    outln!("release:   {}", installed.release.release_name);
+    outln!("directory: {}", installed.directory.display());
+    outln!("java:      {}", installed.runtime.executable.display());
+    outln!(
         "status:    {}",
         if installed.newly_installed {
             "downloaded and installed"
@@ -4438,12 +4470,12 @@ fn show_releases(listing: &ReleaseListing, limit: Option<usize>, json: bool) {
     }
 
     if listing.releases.is_empty() {
-        println!("{}", ephervex_i18n::lookup("minecraft-versions-list-empty"));
+        outln!("{}", ephervex_i18n::lookup("minecraft-versions-list-empty"));
         return;
     }
 
     for record in releases {
-        println!(
+        outln!(
             "{:<10} {}{}",
             record.id,
             record.release_time.format("%Y-%m-%d"),
@@ -4454,7 +4486,7 @@ fn show_releases(listing: &ReleaseListing, limit: Option<usize>, json: bool) {
             }
         );
     }
-    println!(
+    outln!(
         "{}",
         ephervex_i18n::lookup_args(
             "minecraft-versions-list-count",
@@ -4537,19 +4569,20 @@ fn print_version_json(version: &VersionMetadata, client: &Artifact, assets: &Ass
 }
 
 fn print_version_text(version: &VersionMetadata, client: &Artifact, assets: &AssetIndexRef) {
-    println!("id:         {}", version.id);
-    println!("type:       {}", version.release_type);
-    println!("released:   {}", version.release_time.format("%Y-%m-%d"));
-    println!("main class: {}", version.main_class);
+    outln!("id:         {}", version.id);
+    outln!("type:       {}", version.release_type);
+    outln!("released:   {}", version.release_time.format("%Y-%m-%d"));
+    outln!("main class: {}", version.main_class);
     match &version.java_version {
         // Metadata records the requirement; Java selection resolves it.
-        Some(java) => println!(
+        Some(java) => outln!(
             "java:       {} (Mojang runtime {})",
-            java.major_version, java.component
+            java.major_version,
+            java.component
         ),
-        None => println!("java:       not declared"),
+        None => outln!("java:       not declared"),
     }
-    println!(
+    outln!(
         "arguments:  {} form",
         argument_form_label(version.arguments.form())
     );
@@ -4558,12 +4591,12 @@ fn print_version_text(version: &VersionMetadata, client: &Artifact, assets: &Ass
             .iter()
             .filter(|entry| !entry.is_unconditional())
             .count();
-        println!(
+        outln!(
             "  {group:<17} {} entries, {conditional} conditional",
             entries.len()
         );
     }
-    println!(
+    outln!(
         "libraries:  {} ({} rule-gated, {} with a legacy natives map)",
         version.libraries.len(),
         version
@@ -4577,19 +4610,19 @@ fn print_version_text(version: &VersionMetadata, client: &Artifact, assets: &Ass
             .filter(|library| library.is_legacy_natives())
             .count()
     );
-    println!(
+    outln!(
         "client jar: {} bytes, sha1 {}",
         client.size,
         client.sha1.digest()
     );
-    println!(
+    outln!(
         "assets:     index {} ({} bytes of objects)",
         assets.id,
         assets
             .total_size
             .map_or_else(|| "unknown".to_owned(), |size| size.to_string())
     );
-    println!(
+    outln!(
         "downloads:  {}",
         version
             .downloads
@@ -4599,10 +4632,10 @@ fn print_version_text(version: &VersionMetadata, client: &Artifact, assets: &Ass
             .join(", ")
     );
     if let Some(logging) = &version.logging {
-        println!("logging:    {}", logging.id);
+        outln!("logging:    {}", logging.id);
     }
     if let Some(parent) = version.inherits_from() {
-        println!("inherits:   {parent}  (merging lands with loader support)");
+        outln!("inherits:   {parent}  (merging lands with loader support)");
     }
 }
 
@@ -4647,35 +4680,35 @@ fn show_reconciliation(report: &ReconciliationReport, json: bool) {
     }
 
     if report.is_empty() {
-        println!("{}", ephervex_i18n::messages::nothing_to_reconcile());
+        outln!("{}", ephervex_i18n::messages::nothing_to_reconcile());
         return;
     }
 
     if !report.removed_stale_temporary.is_empty() {
-        println!(
+        outln!(
             "{}",
             ephervex_i18n::messages::removed_stale_temporary(report.removed_stale_temporary.len())
         );
     }
     if !report.reindexed.is_empty() {
-        println!(
+        outln!(
             "{}",
             ephervex_i18n::messages::reindexed(report.reindexed.len())
         );
     }
     if !report.relocated.is_empty() {
-        println!(
+        outln!(
             "{}",
             ephervex_i18n::messages::relocated(report.relocated.len())
         );
     }
     if !report.missing_persistent.is_empty() {
-        println!(
+        outln!(
             "{}",
             ephervex_i18n::messages::missing_persistent(report.missing_persistent.len())
         );
         for entry in &report.missing_persistent {
-            println!(
+            outln!(
                 "  {}",
                 ephervex_i18n::lookup_args(
                     "reconcile-persistent-root-missing-detail",
@@ -4686,15 +4719,15 @@ fn show_reconciliation(report: &ReconciliationReport, json: bool) {
                 )
             );
         }
-        println!("{}", ephervex_i18n::messages::missing_persistent_action());
+        outln!("{}", ephervex_i18n::messages::missing_persistent_action());
     }
     if !report.unfinished_instances.is_empty() {
-        println!(
+        outln!(
             "{}",
             ephervex_i18n::messages::unfinished_instances(report.unfinished_instances.len())
         );
         for entry in &report.unfinished_instances {
-            println!(
+            outln!(
                 "  {}",
                 ephervex_i18n::lookup_args(
                     "reconcile-unfinished-instance-detail",
@@ -4705,7 +4738,7 @@ fn show_reconciliation(report: &ReconciliationReport, json: bool) {
                 )
             );
         }
-        println!("{}", ephervex_i18n::messages::unfinished_instances_action());
+        outln!("{}", ephervex_i18n::messages::unfinished_instances_action());
     }
 }
 
@@ -4741,7 +4774,7 @@ fn run_pack_hosts_command(forget: &[String], forget_all: bool, json: bool) -> an
     }
 
     for host in &forgotten {
-        println!("forgot {host}");
+        outln!("forgot {host}");
     }
     // Named rather than passed over: asking to forget a site that was never
     // trusted usually means a typo, and silence would look like success.
@@ -4749,11 +4782,11 @@ fn run_pack_hosts_command(forget: &[String], forget_all: bool, json: bool) -> an
         eprintln!("{host} was not on the list");
     }
     if remaining.is_empty() {
-        println!("No sites are trusted to serve modpacks.");
+        outln!("No sites are trusted to serve modpacks.");
     } else {
-        println!("Trusted to serve modpacks:");
+        outln!("Trusted to serve modpacks:");
         for host in remaining {
-            println!("  {host}");
+            outln!("  {host}");
         }
     }
     Ok(())
@@ -4770,9 +4803,9 @@ fn run_url_handler_command(command: &UrlHandlerCommand, json: bool) -> anyhow::R
             if json {
                 print_json(&serde_json::json!({ "registered": false, "removed": removed }));
             } else if removed {
-                println!("Ephervex no longer opens ephervex:// links.");
+                outln!("Ephervex no longer opens ephervex:// links.");
             } else {
-                println!("Ephervex was not opening ephervex:// links.");
+                outln!("Ephervex was not opening ephervex:// links.");
             }
             return Ok(());
         }
@@ -4795,19 +4828,19 @@ fn print_url_handler(status: &ephervex_core::UrlHandlerStatus, json: bool) {
     }
 
     if !status.registered {
-        println!("Ephervex does not open ephervex:// links.");
-        println!("Run `ephervex url-handler register` to change that.");
+        outln!("Ephervex does not open ephervex:// links.");
+        outln!("Run `ephervex url-handler register` to change that.");
         return;
     }
-    println!("Ephervex opens ephervex:// links.");
-    println!("entry:   {}", status.entry.display());
+    outln!("Ephervex opens ephervex:// links.");
+    outln!("entry:   {}", status.entry.display());
     if let Some(command) = &status.command {
-        println!("runs:    {command}");
+        outln!("runs:    {command}");
     }
     // A registration pointing at a moved artifact resolves, is run, and does
     // nothing. Saying so is more use than reporting it as registered.
     if !status.command_exists() {
-        println!(
+        outln!(
             "warning: that path no longer exists. Run `ephervex url-handler register` again from where Ephervex is now."
         );
     }
@@ -4926,9 +4959,9 @@ fn resolve_host_consent(
         );
     }
 
-    println!("Ephervex would download a pack from:");
-    println!("  {}", source.display());
-    print!(
+    outln!("Ephervex would download a pack from:");
+    outln!("  {}", source.display());
+    out!(
         "Download from {} and remember it? [y/N/once] ",
         source.host()
     );
@@ -4949,17 +4982,17 @@ fn print_analysis(analysis: &PackAnalysis, json: bool) {
         return;
     }
 
-    println!("pack:      {}", analysis.name());
+    outln!("pack:      {}", analysis.name());
     if let Some(version) = &analysis.recipe.original_version {
-        println!("version:   {version}");
+        outln!("version:   {version}");
     }
     if let Some(author) = analysis.author() {
-        println!("author:    {author}");
+        outln!("author:    {author}");
     }
-    println!("source:    {}", analysis.format);
-    println!("minecraft: {}", analysis.minecraft_version());
-    println!("loader:    {}", analysis.loader());
-    println!(
+    outln!("source:    {}", analysis.format);
+    outln!("minecraft: {}", analysis.minecraft_version());
+    outln!("loader:    {}", analysis.loader());
+    outln!(
         "files:     {} required, {} optional",
         analysis.required_file_count(PackSide::Client),
         analysis.optional_file_count(PackSide::Client)
@@ -4968,13 +5001,13 @@ fn print_analysis(analysis: &PackAnalysis, json: bool) {
         // The counts above come from the pack's own manifest. Which files they
         // are is a question only the provider can answer, and answering it
         // needs the key.
-        println!(
+        outln!(
             "blocked:   a {} API key is required before these files can be listed",
             analysis.format
         );
     }
     for component in analysis.optional_components(PackSide::Client) {
-        println!(
+        outln!(
             "optional:  {} [{}]",
             component.display_name(),
             if component.starts_selected() {
@@ -4985,7 +5018,7 @@ fn print_analysis(analysis: &PackAnalysis, json: bool) {
         );
     }
     for layer in analysis.layers() {
-        println!("layer:     {}", layer.as_str());
+        outln!("layer:     {}", layer.as_str());
     }
     if analysis.has_files_for(PackSide::Server) {
         eprintln!(
@@ -5023,12 +5056,12 @@ fn print_imported(app: &App, imported: &ImportedPack, json: bool) -> anyhow::Res
     }
 
     print_instance(app, &imported.record, json)?;
-    println!("pack:      {}", imported.analysis.name());
-    println!(
+    outln!("pack:      {}", imported.analysis.name());
+    outln!(
         "installed: {} files",
         imported.materialized.files.installed.len()
     );
-    println!("recipe:    {}", imported.materialized.recipe_path.display());
+    outln!("recipe:    {}", imported.materialized.recipe_path.display());
 
     // A client import preserves the server side rather than installing it;
     // saying nothing would look like the files went missing.
@@ -5085,21 +5118,21 @@ fn print_recipe(recipe: &PackRecipe, side: PackSide, selection: &OptionalSelecti
         return;
     }
 
-    println!("pack:      {}", recipe.original_name);
-    println!("source:    {}", recipe.source_kind);
-    println!("side:      {}", side.as_str());
-    println!("minecraft: {}", plan.minecraft_version);
-    println!("loader:    {}", plan.loader);
+    outln!("pack:      {}", recipe.original_name);
+    outln!("source:    {}", recipe.source_kind);
+    outln!("side:      {}", side.as_str());
+    outln!("minecraft: {}", plan.minecraft_version);
+    outln!("loader:    {}", plan.loader);
     for file in &plan.files {
-        println!("file:      {}", file.display_name());
+        outln!("file:      {}", file.display_name());
     }
     for file in &recipe.files {
         if file.requirement(side) == SideRequirement::Unsupported {
-            println!("excluded:  {}", file.display_name());
+            outln!("excluded:  {}", file.display_name());
         }
     }
     for layer in &plan.layers {
-        println!(
+        outln!(
             "layer:     {} ({} files, {})",
             layer.scope.as_str(),
             layer.files,
@@ -5171,20 +5204,20 @@ fn print_instance(app: &App, record: &ClientRecord, json: bool) -> anyhow::Resul
     if json {
         print_json(&instance_json(app, record)?);
     } else {
-        println!("id:        {}", record.id);
-        println!("name:      {}", record.name);
-        println!("storage:   {}", record.storage);
-        println!("minecraft: {}", record.minecraft_version);
-        println!("loader:    {}", record.loader);
-        println!("root:      {}", record.root.display());
+        outln!("id:        {}", record.id);
+        outln!("name:      {}", record.name);
+        outln!("storage:   {}", record.storage);
+        outln!("minecraft: {}", record.minecraft_version);
+        outln!("loader:    {}", record.loader);
+        outln!("root:      {}", record.root.display());
         if let Some(state) = app.launch_state(record.id)? {
-            println!("running:   {}", describe_running(&state));
+            outln!("running:   {}", describe_running(&state));
         }
         for id in app.linked_server_ids(record.id)? {
-            println!("server:    {id}");
+            outln!("server:    {id}");
         }
         for reason in &record.attention {
-            println!("attention: {reason:?}");
+            outln!("attention: {reason:?}");
         }
     }
     Ok(())
@@ -5367,19 +5400,19 @@ fn print_instance_runtime(record: &ClientRecord, json: bool) {
         return;
     }
     let global = "follows the global setting";
-    println!("java:       {}", java.as_deref().unwrap_or(global));
-    println!(
+    outln!("java:       {}", java.as_deref().unwrap_or(global));
+    outln!(
         "min memory: {}",
         jvm.and_then(|jvm| jvm.min_memory_mib)
             .map_or_else(|| global.to_owned(), |mib| format!("{mib} MiB"))
     );
-    println!(
+    outln!(
         "max memory: {}",
         jvm.and_then(|jvm| jvm.max_memory_mib)
             .map_or_else(|| global.to_owned(), |mib| format!("{mib} MiB"))
     );
     let args = jvm.map(|jvm| jvm.jvm_args.as_slice()).unwrap_or_default();
-    println!(
+    outln!(
         "jvm args:   {}",
         if args.is_empty() {
             global.to_owned()
@@ -5394,7 +5427,7 @@ fn print_folder(path: Option<&Path>, folder: &str, json: bool) -> anyhow::Result
         if json {
             print_json(&serde_json::json!({ "folder": folder, "path": path }));
         } else {
-            println!("{}", path.display());
+            outln!("{}", path.display());
         }
         return Ok(());
     }
@@ -5439,17 +5472,17 @@ fn print_server(record: &ServerRecord, json: bool) {
     if json {
         print_json(&server_json(record));
     } else {
-        println!("id:        {}", record.id);
-        println!("name:      {}", record.name);
-        println!("storage:   {}", record.storage);
-        println!("minecraft: {}", record.minecraft_version);
-        println!("loader:    {}", record.loader);
-        println!("root:      {}", record.root.display());
-        println!("installed: {}", record.installation.is_installed());
+        outln!("id:        {}", record.id);
+        outln!("name:      {}", record.name);
+        outln!("storage:   {}", record.storage);
+        outln!("minecraft: {}", record.minecraft_version);
+        outln!("loader:    {}", record.loader);
+        outln!("root:      {}", record.root.display());
+        outln!("installed: {}", record.installation.is_installed());
         if record.source.kind == ephervex_model::ImportSourceKind::ServerPack {
             match record.source.reference.as_deref() {
-                Some(archive) => println!("content:   server files from {archive}"),
-                None => println!("content:   server files from an archive"),
+                Some(archive) => outln!("content:   server files from {archive}"),
+                None => outln!("content:   server files from an archive"),
             }
         }
         for reason in &record.attention {
@@ -5555,9 +5588,9 @@ async fn run_server_foreground(
     let exit = outcome?;
     if !json {
         match (exit.code, exit.signal) {
-            (Some(code), _) => println!("server exited with code {code}"),
-            (_, Some(signal)) => println!("server exited from signal {signal}"),
-            _ => println!("server exited"),
+            (Some(code), _) => outln!("server exited with code {code}"),
+            (_, Some(signal)) => outln!("server exited from signal {signal}"),
+            _ => outln!("server exited"),
         }
     }
     Ok(())
@@ -5607,13 +5640,13 @@ fn print_server_status(app: &App, id: ServerId, json: bool) -> anyhow::Result<()
         print_json(&server_status_json_from_parts(&status, &capture));
     } else {
         print_server(&status.record, false);
-        println!("persistence: {persistence}");
-        println!("runtime:     {runtime}");
-        println!("capture:     {}", capture_health_name(&capture.health));
+        outln!("persistence: {persistence}");
+        outln!("runtime:     {runtime}");
+        outln!("capture:     {}", capture_health_name(&capture.health));
         if let RuntimeClassification::Orphaned { child } = &status.runtime {
-            println!("orphan pid:  {}", child.pid);
-            println!("executable:  {}", child.executable.display());
-            println!("action:      terminate this process with explicit operating-system tools");
+            outln!("orphan pid:  {}", child.pid);
+            outln!("executable:  {}", child.executable.display());
+            outln!("action:      terminate this process with explicit operating-system tools");
         }
     }
     Ok(())
@@ -5681,7 +5714,7 @@ fn print_eula_status(status: &EulaStatus, json: bool) {
                     &serde_json::json!({ "status": "not_accepted", "reference": MINECRAFT_EULA_REFERENCE }),
                 );
             } else {
-                println!("not accepted ({MINECRAFT_EULA_REFERENCE})");
+                outln!("not accepted ({MINECRAFT_EULA_REFERENCE})");
             }
         }
         EulaStatus::Accepted {
@@ -5695,14 +5728,14 @@ fn print_eula_status(status: &EulaStatus, json: bool) {
                     "reference": reference,
                 }));
             } else {
-                println!("accepted at {accepted_at} ({reference})");
+                outln!("accepted at {accepted_at} ({reference})");
             }
         }
         EulaStatus::Malformed => {
             if json {
                 print_json(&serde_json::json!({ "status": "malformed" }));
             } else {
-                println!("malformed; revoke or accept again interactively");
+                outln!("malformed; revoke or accept again interactively");
             }
         }
     }
@@ -5716,11 +5749,11 @@ fn print_control_response(response: ControlResponse, json: bool) {
         );
     } else {
         match response {
-            ControlResponse::Running => println!("running"),
-            ControlResponse::Accepted => println!("accepted"),
-            ControlResponse::Exited(exit) => println!("exited: {exit:?}"),
-            ControlResponse::Restarted { pid } => println!("restarted as pid {pid}"),
-            ControlResponse::Refused(detail) => println!("refused: {detail}"),
+            ControlResponse::Running => outln!("running"),
+            ControlResponse::Accepted => outln!("accepted"),
+            ControlResponse::Exited(exit) => outln!("exited: {exit:?}"),
+            ControlResponse::Restarted { pid } => outln!("restarted as pid {pid}"),
+            ControlResponse::Refused(detail) => outln!("refused: {detail}"),
         }
     }
 }
@@ -5769,7 +5802,7 @@ fn captured_line_json(line: &CapturedLine) -> serde_json::Value {
 
 fn print_captured_line(line: &CapturedLine) {
     if line.truncated {
-        println!(
+        outln!(
             "{} [{}] {} [truncated; {} bytes omitted]",
             line.timestamp,
             serde_json::to_value(line.stream)
@@ -5780,7 +5813,7 @@ fn print_captured_line(line: &CapturedLine) {
             line.omitted_bytes
         );
     } else {
-        println!("{} {}", line.timestamp, line.text);
+        outln!("{} {}", line.timestamp, line.text);
     }
 }
 
@@ -5865,21 +5898,21 @@ fn print_running(app: &App, json: bool) -> anyhow::Result<()> {
     }
 
     if running.is_empty() {
-        println!("{}", ephervex_i18n::lookup("running-nothing"));
+        outln!("{}", ephervex_i18n::lookup("running-nothing"));
         return Ok(());
     }
     for process in &running {
         let pid = process
             .pid
             .map_or_else(|| "-".to_owned(), |pid| pid.to_string());
-        println!(
+        outln!(
             "{}  {}  pid {pid}  {}",
             process.host.kind(),
             process.name,
             format_uptime(process.uptime_seconds())
         );
         if let Some(line) = &process.last_line {
-            println!("    {line}");
+            outln!("    {line}");
         }
     }
     Ok(())
