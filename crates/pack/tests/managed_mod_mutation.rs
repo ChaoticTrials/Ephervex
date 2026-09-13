@@ -602,6 +602,123 @@ async fn the_recorded_version_is_put_back_when_its_jar_has_gone_missing() {
     assert_eq!(version_of(&recipe, "ROOTPROJ").as_deref(), Some("ROOTV1"));
 }
 
+// -- mods the user turned off ---------------------------------------------
+
+#[tokio::test]
+async fn a_mod_turned_off_stays_off_when_its_version_changes() {
+    let server = MockServer::start().await;
+    let instance = Instance::new();
+    let mut recipe = installed(&server, &instance).await;
+    std::fs::rename(
+        instance.jar("root-1.0.jar"),
+        instance.jar("root-1.0.jar.disabled"),
+    )
+    .expect("turn the mod off");
+    serve(&server, "/root-2.jar", ROOT_V2).await;
+
+    let report = mutate(
+        &instance,
+        &mut recipe,
+        &[entry(
+            &server,
+            "/root-2.jar",
+            "root-2.0.jar",
+            ROOT_V2,
+            "ROOTPROJ",
+            "ROOTV2",
+            ModOrigin::UserSelected,
+        )],
+        &[],
+    )
+    .await
+    .expect("upgrade");
+
+    assert_eq!(report.replaced.len(), 1);
+    assert_eq!(
+        instance.jars(),
+        vec!["library-2.0.jar", "root-2.0.jar.disabled"],
+        "the old jar is retired and the new build arrives just as turned off"
+    );
+    let stored = instance.store.read_recipe().expect("recipe on disk");
+    assert_eq!(version_of(&stored, "ROOTPROJ").as_deref(), Some("ROOTV2"));
+    assert_eq!(
+        path_of(&stored, "ROOTPROJ"),
+        Some(PathBuf::from("mods/root-2.0.jar")),
+        "the recipe records the enabled name whichever way round the file is"
+    );
+}
+
+#[tokio::test]
+async fn requesting_the_installed_version_of_a_disabled_mod_leaves_it_off() {
+    let server = MockServer::start().await;
+    let instance = Instance::new();
+    let mut recipe = installed(&server, &instance).await;
+    std::fs::rename(
+        instance.jar("root-1.0.jar"),
+        instance.jar("root-1.0.jar.disabled"),
+    )
+    .expect("turn the mod off");
+    let before = instance.store.read_recipe().expect("recipe");
+
+    let report = mutate(
+        &instance,
+        &mut recipe,
+        &[entry(
+            &server,
+            "/root-1.jar",
+            "root-1.0.jar",
+            ROOT_V1,
+            "ROOTPROJ",
+            "ROOTV1",
+            ModOrigin::UserSelected,
+        )],
+        &[],
+    )
+    .await
+    .expect("no-op");
+
+    assert!(
+        !report.changed_anything(),
+        "a mod that is present but turned off is not a jar to put back"
+    );
+    assert_eq!(report.unchanged.len(), 1);
+    assert_eq!(
+        instance.jars(),
+        vec!["library-2.0.jar", "root-1.0.jar.disabled"]
+    );
+    assert_eq!(instance.store.read_recipe().expect("recipe"), before);
+}
+
+#[tokio::test]
+async fn removing_a_disabled_mod_takes_its_file_with_it() {
+    let server = MockServer::start().await;
+    let instance = Instance::new();
+    let mut recipe = installed(&server, &instance).await;
+    std::fs::rename(
+        instance.jar("root-1.0.jar"),
+        instance.jar("root-1.0.jar.disabled"),
+    )
+    .expect("turn the mod off");
+
+    let report = mutate(
+        &instance,
+        &mut recipe,
+        &[],
+        &[ManagedProject::new(ModProvider::Modrinth, "ROOTPROJ")],
+    )
+    .await
+    .expect("removal");
+
+    assert_eq!(report.removed, vec![PathBuf::from("mods/root-1.0.jar")]);
+    assert_eq!(
+        instance.jars(),
+        vec!["library-2.0.jar"],
+        "no orphan is left for the mod list to show as somebody else's jar"
+    );
+    let stored = instance.store.read_recipe().expect("recipe");
+    assert_eq!(path_of(&stored, "ROOTPROJ"), None);
+}
+
 // -- removal ---------------------------------------------------------------
 
 #[tokio::test]

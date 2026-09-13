@@ -635,10 +635,12 @@ impl App {
             // The recorded release is already the right one. Whether that is a
             // no-op depends on the game directory, not on the recipe: a jar the
             // user deleted while bisecting is a repair, not "nothing to do".
-            if context.entry.presence == crate::mods::ModPresence::Installed {
-                PlannedOutcome::AlreadyCurrent
-            } else {
+            // A jar they turned off is neither — it is there, and putting it
+            // back would turn it on again.
+            if context.entry.presence == crate::mods::ModPresence::Missing {
                 PlannedOutcome::Repair
+            } else {
+                PlannedOutcome::AlreadyCurrent
             }
         } else {
             PlannedOutcome::ChangeVersion {

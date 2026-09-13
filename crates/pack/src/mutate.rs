@@ -54,6 +54,7 @@ use tracing::{info, instrument, warn};
 
 use crate::error::{PackError, PackResult};
 use crate::install::{ArtifactFetch, copy_into_instance, fetch_all};
+use crate::managed::disabled_path;
 use crate::recipe::{PackFileRecipe, PackRecipe, ProviderFileIdentity};
 use crate::store::SourceStore;
 
@@ -182,7 +183,17 @@ pub async fn mutate_managed(request: ManagedMutation<'_>) -> PackResult<ManagedM
     // reachable: every destination safe, every removal something Ephervex
     // actually installed.
     let actions = plan(recipe, upserts, removals, game_dir)?;
-    let retirements = retirements(recipe, upserts, &actions, removals);
+    let retirements = retirements(recipe, upserts, &actions, removals, game_dir);
+    // The replacements whose predecessor was turned off, so the new build can
+    // be written the same way round.
+    let stay_disabled: BTreeSet<PathBuf> = retirements
+        .iter()
+        .filter(|retirement| retirement.disabled)
+        .filter_map(|retirement| match &retirement.reason {
+            RetirementReason::Replaced { new_path, .. } => Some(new_path.clone()),
+            RetirementReason::Removed => None,
+        })
+        .collect();
 
     let mut report = ManagedMutationReport::default();
     let pending: Vec<(&PackFileRecipe, &Action)> = upserts
@@ -218,6 +229,7 @@ pub async fn mutate_managed(request: ManagedMutation<'_>) -> PackResult<ManagedM
                 &pending,
                 &fetched,
                 game_dir,
+                &stay_disabled,
                 cancel,
                 &mut journal,
                 &mut report,
@@ -339,15 +351,15 @@ fn action_for(
         });
     };
 
-    let destination = game_dir.join(&file.logical_path);
     let existing = recipe.managed_project(provider, project_id);
 
     match existing {
         Some(entry) if version_of(entry) == version_of(file) => {
-            // The same mod at the same version. Present is a no-op; absent is a
-            // repair, which puts the recorded jar back without changing what is
-            // recorded.
-            if destination.is_file() {
+            // The same mod at the same version. Present is a no-op — including
+            // present but turned off, which is a state to leave alone rather
+            // than a jar to put back. Absent is a repair, which restores the
+            // recorded jar without changing what is recorded.
+            if installed_jar(game_dir, &file.logical_path).is_some() {
                 Ok(Action::Unchanged)
             } else {
                 Ok(Action::Repair)
@@ -366,16 +378,20 @@ fn action_for(
             // The new jar's own destination has to be free by the time it is
             // written. It is free if nothing is there, or if this mutation is
             // about to vacate it.
-            if destination.exists() && !freed.contains(&file.logical_path) {
-                return Err(PackError::DestinationOccupied { path: destination });
+            if let Some(path) = occupied_by(game_dir, &file.logical_path)
+                && !freed.contains(&file.logical_path)
+            {
+                return Err(PackError::DestinationOccupied { path });
             }
             Ok(Action::Replace(Box::new(entry)))
         }
         None => {
-            if destination.exists() && !freed.contains(&file.logical_path) {
+            if let Some(path) = occupied_by(game_dir, &file.logical_path)
+                && !freed.contains(&file.logical_path)
+            {
                 // A jar Ephervex did not put there. Almost always the local
                 // build the instance exists to test.
-                return Err(PackError::DestinationOccupied { path: destination });
+                return Err(PackError::DestinationOccupied { path });
             }
             Ok(Action::Install)
         }
@@ -386,6 +402,10 @@ fn action_for(
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Retirement {
     logical_path: PathBuf,
+    /// Whether the outgoing jar is at its disabled spelling, so that the file
+    /// is found where it actually is and its replacement lands the same way
+    /// round.
+    disabled: bool,
     /// What the report should call this: a removal, or the old half of a
     /// replacement.
     reason: RetirementReason,
@@ -407,12 +427,14 @@ fn retirements(
     upserts: &[PackFileRecipe],
     actions: &[Action],
     removals: &[ManagedProject],
+    game_dir: &Path,
 ) -> Vec<Retirement> {
     let mut retirements = Vec::new();
     for (file, action) in upserts.iter().zip(actions) {
         if let Action::Replace(previous) = action {
             retirements.push(Retirement {
                 logical_path: previous.logical_path.clone(),
+                disabled: is_disabled(game_dir, &previous.logical_path),
                 reason: RetirementReason::Replaced {
                     new_path: file.logical_path.clone(),
                     previous_version: version_of(previous).map(ToOwned::to_owned),
@@ -425,6 +447,7 @@ fn retirements(
         if let Some(entry) = recipe.managed_project(removal.provider, &removal.project_id) {
             retirements.push(Retirement {
                 logical_path: entry.logical_path.clone(),
+                disabled: is_disabled(game_dir, &entry.logical_path),
                 reason: RetirementReason::Removed,
             });
         }
@@ -493,6 +516,7 @@ fn write_new_files(
     pending: &[(&PackFileRecipe, &Action)],
     fetched: &[ephervex_download::DownloadOutcome],
     game_dir: &Path,
+    stay_disabled: &BTreeSet<PathBuf>,
     cancel: &CancellationToken,
     journal: &mut Journal,
     report: &mut ManagedMutationReport,
@@ -501,7 +525,14 @@ fn write_new_files(
         if cancel.is_cancelled() {
             return Err(PackError::Canceled);
         }
-        let destination = game_dir.join(&file.logical_path);
+        let enabled = game_dir.join(&file.logical_path);
+        // A mod the user turned off stays off across a version change. The
+        // recipe records the enabled name either way, so only the file moves.
+        let destination = if stay_disabled.contains(&file.logical_path) {
+            disabled_path(&enabled)
+        } else {
+            enabled
+        };
         copy_into_instance(&outcome.path, &destination)?;
         journal.created.push(destination);
 
@@ -541,7 +572,12 @@ fn retire(
     })?;
 
     for retirement in retirements {
-        let from = game_dir.join(&retirement.logical_path);
+        let enabled = game_dir.join(&retirement.logical_path);
+        let from = if retirement.disabled {
+            disabled_path(&enabled)
+        } else {
+            enabled
+        };
         if !from.exists() {
             // The jar is already gone — deleted by hand while bisecting, most
             // likely. Removing the record is still the operation, and there is
@@ -648,6 +684,37 @@ fn publish(
 }
 
 /// The provider and project an entry names, if it names both.
+/// The jar a recorded mod actually has in the game directory, if it has one.
+///
+/// A mod somebody turned off sits at `<name>.jar.disabled`, so looking only at
+/// the enabled spelling would read it as deleted.
+fn installed_jar(game_dir: &Path, logical_path: &Path) -> Option<PathBuf> {
+    let enabled = game_dir.join(logical_path);
+    if enabled.is_file() {
+        return Some(enabled);
+    }
+    let disabled = disabled_path(&enabled);
+    disabled.is_file().then_some(disabled)
+}
+
+/// Whether a recorded mod's jar is currently turned off.
+fn is_disabled(game_dir: &Path, logical_path: &Path) -> bool {
+    !game_dir.join(logical_path).is_file() && disabled_path(&game_dir.join(logical_path)).is_file()
+}
+
+/// Whatever already stands where a new jar would go, under either spelling.
+///
+/// `exists` rather than `is_file`: a directory sitting on the destination is
+/// not a jar to leave alone, but it still blocks the write.
+fn occupied_by(game_dir: &Path, logical_path: &Path) -> Option<PathBuf> {
+    let enabled = game_dir.join(logical_path);
+    if enabled.exists() {
+        return Some(enabled);
+    }
+    let disabled = disabled_path(&enabled);
+    disabled.exists().then_some(disabled)
+}
+
 fn project_of(file: &PackFileRecipe) -> Option<(ModProvider, &str)> {
     file.identity
         .as_ref()
