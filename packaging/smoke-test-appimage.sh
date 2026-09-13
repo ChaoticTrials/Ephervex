@@ -29,6 +29,8 @@ ARTIFACT=$(cd -- "$(dirname -- "$1")" && printf '%s/%s' "$(pwd)" "$(basename -- 
 REPO_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 # shellcheck source=packaging/linux-baseline
 source "${REPO_ROOT}/packaging/linux-baseline"
+# shellcheck source=packaging/linux-release-artifact
+source "${REPO_ROOT}/packaging/linux-release-artifact"
 
 WORKSPACE=$(mktemp -d)
 cleanup() { rm -rf "${WORKSPACE}"; }
@@ -70,18 +72,7 @@ done < <(find "${ROOT}" \
 note "no repository, fixture, tooling, or configuration content"
 
 # --- no build-machine paths --------------------------------------------------
-# A path out of the build machine's home directory in a shipped binary is both
-# a privacy leak and a sign something is read from outside the package.
-# `/root/.` rather than `/root/`, because the release container builds as root
-# and its toolchain lives in `/root/.cargo` and `/root/.rustup`, while unrelated
-# libraries legitimately carry `/root/`-prefixed D-Bus object paths.
-for binary in "${ROOT}/usr/bin/ephervex" "${ROOT}/usr/bin/ephervex-gui"; do
-    if strings -a "${binary}" 2>/dev/null | grep -qE "(^|[^A-Za-z0-9_])/home/[A-Za-z0-9._-]+/|(^|[^A-Za-z0-9_])/root/\."; then
-        strings -a "${binary}" |
-            grep -oE '(/home/[A-Za-z0-9._-]+|/root)/[A-Za-z0-9._/-]+' | sort -u | head -n 5 >&2
-        fail "$(basename "${binary}") embeds a build-machine home path"
-    fi
-done
+enforce_no_build_paths "${ROOT}/usr/bin/ephervex" "${ROOT}/usr/bin/ephervex-gui"
 note "no build-machine home paths are embedded"
 
 # --- glibc floor -------------------------------------------------------------

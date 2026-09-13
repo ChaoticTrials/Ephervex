@@ -344,7 +344,12 @@ release build cannot modify the repository it is built from.
 
 `build-appimage.sh` builds the release binaries with `--locked`, so the artifact
 carries the dependency versions in the committed `Cargo.lock` and not whatever a
-warm registry happens to hold. It then enforces the declared glibc baseline
+warm registry happens to hold. It builds them with `--remap-path-prefix` for
+`$CARGO_HOME`, `$RUSTUP_HOME`, and the source tree, because Rust records the
+source path of every panic location and every debug line: without it a release
+embeds the build account's home directory several hundred times over, which is
+both a privacy leak and something a user sees in a panic message. The smoke test
+refuses a binary that still carries one. It then enforces the declared glibc baseline
 against every ELF that ships, including the supplied runtime; checks the direct
 `DT_NEEDED` entries against
 [`packaging/linux-shared-libraries`](../packaging/linux-shared-libraries);

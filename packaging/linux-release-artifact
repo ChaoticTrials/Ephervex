@@ -1,0 +1,164 @@
+# How a Linux release binary is built, and what it is held to afterwards.
+#
+# Sourced by the packaging scripts rather than copied into each of them. Every
+# artifact makes the same promises about the machines it runs on (ADR 0023), and
+# two implementations of a promise is one implementation and one thing that
+# drifts.
+#
+# Everything is checked against the *built binaries*, never against the host
+# that built them, so a newer build machine produces a hard failure instead of
+# quietly raising the floor for everyone. There is deliberately no flag that
+# skips any of it.
+#
+# A caller sources this after `packaging/linux-baseline`, and defines `fail` and
+# `note`. It reads and updates `REQUIRED_GLIBC`, the highest floor seen so far.
+
+# Builds the two release binaries.
+#
+# `--locked` because the artifact's dependency set is part of what a release
+# claims to be. Without it a warm registry and a stale `Cargo.lock` silently
+# ship versions that are not the committed ones.
+#
+# The `--remap-path-prefix` flags are why a shipped binary carries no path out
+# of the build machine. Rust records the source path of every panic location and
+# every debug line, so without them a release embeds the build account's home
+# directory: hundreds of `$CARGO_HOME/registry/src/...` strings for dependency
+# crates and `$RUSTUP_HOME/toolchains/...` for the standard library. Those are
+# both a privacy leak and something a user sees in a panic message, and
+# `enforce_no_build_paths` below refuses a binary that still has any.
+#
+# The replacements are stable names rather than the real directories, so two
+# builds of the same source on two different machines produce the same bytes.
+build_release_binaries() {
+    local repo_root=$1
+    local cargo_home=${CARGO_HOME:-${HOME}/.cargo}
+    local rustup_home=${RUSTUP_HOME:-${HOME}/.rustup}
+
+    RUSTFLAGS="${RUSTFLAGS:-} \
+        --remap-path-prefix=${cargo_home}=/cargo \
+        --remap-path-prefix=${rustup_home}=/rustup \
+        --remap-path-prefix=${repo_root}=/build" \
+        cargo build --locked --release --manifest-path "${repo_root}/Cargo.toml" \
+        -p ephervex-gui -p ephervex-cli
+}
+
+# The highest `GLIBC_` symbol version an ELF requires, or nothing when it
+# requires none.
+highest_glibc() {
+    readelf --version-info "$1" 2>/dev/null |
+        grep -o 'GLIBC_[0-9][0-9.]*' |
+        sed 's/^GLIBC_//' |
+        sort -u -V |
+        tail -n 1
+}
+
+version_gt() { [[ $(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n 1) == "$1" && $1 != "$2" ]]; }
+
+# Pass `static-ok` for a file that may legitimately require no glibc symbol
+# versions at all. That is the good case for the AppImage runtime, which is
+# normally statically linked; for our own binaries an empty reading means the
+# check did not work and must not be mistaken for a clean result.
+enforce_glibc_baseline() {
+    local binary=$1
+    local empty_is_ok=${2:-}
+    local found symbol symbol_version
+    # `|| true` because the pipeline inside `highest_glibc` exits non-zero when
+    # it matches nothing, and under `pipefail` that would end the script here
+    # with no message instead of reaching the one written for it.
+    found=$(highest_glibc "${binary}" || true)
+    if [[ -z ${found} ]]; then
+        [[ ${empty_is_ok} == "static-ok" ]] ||
+            fail "could not read the glibc requirements of ${binary}"
+        note "$(basename "${binary}") requires no glibc symbol versions"
+        return
+    fi
+    if version_gt "${found}" "${REQUIRED_GLIBC}"; then REQUIRED_GLIBC=${found}; fi
+    version_gt "${found}" "${EPHERVEX_BASELINE_GLIBC}" || return 0
+    printf '%s requires glibc %s, above the declared baseline %s\n' \
+        "$(basename "${binary}")" "${found}" "${EPHERVEX_BASELINE_GLIBC}" >&2
+    printf 'the symbols responsible:\n' >&2
+    # `-W` keeps long symbol names whole; readelf abbreviates them to
+    # `[...]` at its default width, which is useless in a diagnostic.
+    readelf -W --dyn-syms "${binary}" 2>/dev/null |
+        grep -oE '[A-Za-z_][A-Za-z0-9_]*@GLIBC_[0-9][0-9.]*' |
+        sort -u |
+        while read -r symbol; do
+            symbol_version=${symbol#*@GLIBC_}
+            if version_gt "${symbol_version}" "${EPHERVEX_BASELINE_GLIBC}"; then
+                printf '  %s\n' "${symbol}" >&2
+            fi
+        done
+    fail "build inside the baseline environment (${EPHERVEX_BASELINE_IMAGE:-see packaging/linux-baseline}); see docs/release.md"
+}
+
+# The other half of "will it start on the baseline": which libraries have to be
+# on the host at all. Nothing is bundled, so every direct `DT_NEEDED` entry is a
+# promise about the user's machine and has to be one the allowlist makes.
+enforce_shared_library_allowlist() {
+    local packaging_dir=$1
+    shift
+    local allowed=() line binary needed soname listed entry
+
+    while IFS= read -r line; do
+        line=${line%%#*}
+        line=${line//[[:space:]]/}
+        [[ -n ${line} ]] && allowed+=("${line}")
+    done <"${packaging_dir}/linux-shared-libraries"
+    [[ ${#allowed[@]} -gt 0 ]] ||
+        fail "packaging/linux-shared-libraries lists no libraries"
+
+    for binary in "$@"; do
+        needed=$(readelf -d "${binary}" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p') ||
+            fail "could not read the library requirements of ${binary}"
+        # Every dynamically linked binary needs at least the C runtime, so
+        # nothing at all means the reading failed rather than that there is
+        # nothing to check.
+        [[ -n ${needed} ]] || fail "could not read the library requirements of ${binary}"
+        while IFS= read -r soname; do
+            listed=no
+            for entry in "${allowed[@]}"; do
+                if [[ ${soname} == "${entry}" ]]; then
+                    listed=yes
+                    break
+                fi
+            done
+            [[ ${listed} == "yes" ]] || fail \
+                "$(basename "${binary}") needs ${soname}, which packaging/linux-shared-libraries does not list.
+Nothing is bundled, so that is a new requirement on every user's machine. If it
+is intended, add it there and to the runtime requirements in docs/release.md."
+        done <<<"${needed}"
+    done
+}
+
+# Every build-machine home path an ELF carries, one per line, or nothing.
+#
+# Read into a value rather than tested with `grep -q`: `grep -q` exits at its
+# first match, which sends SIGPIPE to `strings`, and under `set -o pipefail` the
+# pipeline then reports 141. An `if` around that is false *precisely when there
+# is something to find*, so the check passes on exactly the binaries it exists
+# to catch.
+#
+# `/root/.` rather than `/root/`, because the release container builds as root
+# and its toolchain lives in `/root/.cargo` and `/root/.rustup`, while unrelated
+# libraries legitimately carry `/root/`-prefixed D-Bus object paths.
+embedded_build_paths() {
+    strings -a "$1" 2>/dev/null |
+        grep -oE "(^|[^A-Za-z0-9_])(/home/[A-Za-z0-9._-]+/|/root/\.)[A-Za-z0-9._/-]*" |
+        sed 's/^[^/]*//' |
+        sort -u ||
+        true
+}
+
+# A path out of the build machine's home directory in a shipped binary is both
+# a privacy leak and a sign something is read from outside the package.
+enforce_no_build_paths() {
+    local binary found
+    for binary in "$@"; do
+        found=$(embedded_build_paths "${binary}")
+        if [[ -n ${found} ]]; then
+            printf '%s\n' "${found}" | head -n 5 >&2 || true
+            fail "$(basename "${binary}") embeds a build-machine home path.
+Release builds remap them; see the RUSTFLAGS in docs/release.md."
+        fi
+    done
+}

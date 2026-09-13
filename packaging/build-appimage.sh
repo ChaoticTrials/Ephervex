@@ -37,6 +37,11 @@ source "${PACKAGING_DIR}/linux-baseline"
 : "${EPHERVEX_BASELINE_GLIBC:?the baseline file must declare a glibc version}"
 : "${EPHERVEX_BASELINE_ARCH:?the baseline file must declare an architecture}"
 
+# How a release binary is built, and the checks every artifact is held to. One
+# implementation, shared with build-deb.sh.
+# shellcheck source=packaging/linux-release-artifact
+source "${PACKAGING_DIR}/linux-release-artifact"
+
 HOST_ARCH=$(uname -m)
 [[ ${HOST_ARCH} == "${EPHERVEX_BASELINE_ARCH}" ]] ||
     fail "this host is ${HOST_ARCH}; releases are built for ${EPHERVEX_BASELINE_ARCH}"
@@ -77,11 +82,7 @@ RUNTIME_DESCRIPTION="${APPIMAGE_RUNTIME_FILE} (sha256 $(sha256sum "${APPIMAGE_RU
 
 # --- build -------------------------------------------------------------------
 note "building the release binaries"
-# `--locked` because the artifact's dependency set is part of what a release
-# claims to be. Without it a warm registry and a stale Cargo.lock silently ship
-# versions that are not the committed ones.
-cargo build --locked --release --manifest-path "${REPO_ROOT}/Cargo.toml" \
-    -p ephervex-gui -p ephervex-cli
+build_release_binaries "${REPO_ROOT}"
 
 # `CARGO_TARGET_DIR` is how a build inside the baseline container keeps its
 # output off a read-only source mount, so the binaries to package are wherever
@@ -93,56 +94,6 @@ CLI_BINARY="${RELEASE_DIR}/ephervex"
 [[ -x ${CLI_BINARY} ]] || fail "missing ${CLI_BINARY}"
 
 # --- the declared baseline, enforced against the artifact --------------------
-# Checked on the binaries rather than on the host, so a newer build machine
-# cannot raise the supported floor by accident. There is deliberately no flag
-# that skips this: a package that does not meet the baseline is not a release.
-highest_glibc() {
-    readelf --version-info "$1" 2>/dev/null |
-        grep -o 'GLIBC_[0-9][0-9.]*' |
-        sed 's/^GLIBC_//' |
-        sort -u -V |
-        tail -n 1
-}
-
-version_gt() { [[ $(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n 1) == "$1" && $1 != "$2" ]]; }
-
-# Pass `static-ok` for a file that may legitimately require no glibc symbol
-# versions at all. That is the good case for the AppImage runtime, which is
-# normally statically linked; for our own binaries an empty reading means the
-# check did not work and must not be mistaken for a clean result.
-enforce_glibc_baseline() {
-    local binary=$1
-    local empty_is_ok=${2:-}
-    local found symbol symbol_version
-    # `|| true` because the pipeline inside `highest_glibc` exits non-zero when
-    # it matches nothing, and under `pipefail` that would end the script here
-    # with no message instead of reaching the one written for it.
-    found=$(highest_glibc "${binary}" || true)
-    if [[ -z ${found} ]]; then
-        [[ ${empty_is_ok} == "static-ok" ]] ||
-            fail "could not read the glibc requirements of ${binary}"
-        note "$(basename "${binary}") requires no glibc symbol versions"
-        return
-    fi
-    if version_gt "${found}" "${REQUIRED_GLIBC}"; then REQUIRED_GLIBC=${found}; fi
-    version_gt "${found}" "${EPHERVEX_BASELINE_GLIBC}" || return 0
-    printf 'build-appimage: %s requires glibc %s, above the declared baseline %s\n' \
-        "$(basename "${binary}")" "${found}" "${EPHERVEX_BASELINE_GLIBC}" >&2
-    printf 'the symbols responsible:\n' >&2
-    # `-W` keeps long symbol names whole; readelf abbreviates them to
-    # `[...]` at its default width, which is useless in a diagnostic.
-    readelf -W --dyn-syms "${binary}" 2>/dev/null |
-        grep -oE '[A-Za-z_][A-Za-z0-9_]*@GLIBC_[0-9][0-9.]*' |
-        sort -u |
-        while read -r symbol; do
-            symbol_version=${symbol#*@GLIBC_}
-            if version_gt "${symbol_version}" "${EPHERVEX_BASELINE_GLIBC}"; then
-                printf '  %s\n' "${symbol}" >&2
-            fi
-        done
-    fail "build inside the baseline environment (${EPHERVEX_BASELINE_IMAGE:-see packaging/linux-baseline}); see docs/release.md"
-}
-
 REQUIRED_GLIBC=0
 enforce_glibc_baseline "${GUI_BINARY}"
 enforce_glibc_baseline "${CLI_BINARY}"
@@ -153,39 +104,7 @@ enforce_glibc_baseline "${CLI_BINARY}"
 enforce_glibc_baseline "${APPIMAGE_RUNTIME_FILE}" static-ok
 note "glibc floor ${REQUIRED_GLIBC}, at or below the declared baseline ${EPHERVEX_BASELINE_GLIBC}"
 
-# --- the declared shared libraries, enforced against the artifact ------------
-# The other half of "will it start on the baseline": nothing is bundled, so
-# every library a binary needs is one the host has to provide. A dependency
-# that arrives with a crate change fails here rather than on somebody's machine.
-ALLOWED_LIBRARIES=()
-while IFS= read -r line; do
-    line=${line%%#*}
-    line=${line//[[:space:]]/}
-    [[ -n ${line} ]] && ALLOWED_LIBRARIES+=("${line}")
-done <"${PACKAGING_DIR}/linux-shared-libraries"
-[[ ${#ALLOWED_LIBRARIES[@]} -gt 0 ]] ||
-    fail "packaging/linux-shared-libraries lists no libraries"
-
-for binary in "${GUI_BINARY}" "${CLI_BINARY}"; do
-    needed=$(readelf -d "${binary}" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p') ||
-        fail "could not read the library requirements of ${binary}"
-    # Every dynamically linked binary needs at least the C runtime, so nothing
-    # at all means the reading failed rather than that there is nothing to check.
-    [[ -n ${needed} ]] || fail "could not read the library requirements of ${binary}"
-    while IFS= read -r soname; do
-        listed=no
-        for allowed in "${ALLOWED_LIBRARIES[@]}"; do
-            if [[ ${soname} == "${allowed}" ]]; then
-                listed=yes
-                break
-            fi
-        done
-        [[ ${listed} == "yes" ]] || fail \
-            "$(basename "${binary}") needs ${soname}, which packaging/linux-shared-libraries does not list.
-Nothing is bundled, so that is a new requirement on every user's machine. If it
-is intended, add it there and to the runtime requirements in docs/release.md."
-    done <<<"${needed}"
-done
+enforce_shared_library_allowlist "${PACKAGING_DIR}" "${GUI_BINARY}" "${CLI_BINARY}"
 note "shared libraries are the declared set"
 
 # --- assemble ----------------------------------------------------------------
