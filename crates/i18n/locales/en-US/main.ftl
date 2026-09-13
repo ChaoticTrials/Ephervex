@@ -834,6 +834,8 @@ error-mod-not-managed = That mod is no longer part of this instance.
 error-mod-identity-incomplete = One of this instance's mods has no provider identity, so its dependencies cannot be worked out.
 # $value is a URL with its query and fragment removed, because a confirmation
 # prompt is not the place to print an identifier or a token.
+error-single-instance-unavailable = Ephervex could not reach the launcher that is already running.
+.action = The link was not handed over. Close the other Ephervex window and try again.
 error-url-handler-unavailable = Ephervex could not change which application opens its links.
 .action = Check that your home directory is writable.
 error-launcher-url-not-one = That is not an Ephervex link.

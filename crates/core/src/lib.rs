@@ -52,6 +52,7 @@ pub mod promotion;
 pub mod running;
 pub mod server;
 pub mod server_pack;
+pub mod single_instance;
 pub mod url_handler;
 
 pub use account::{AccountStatus, AccountSummary, ApiSettings, LoginOptions, TOKEN_REFRESH_MARGIN};
@@ -119,6 +120,7 @@ pub use promotion::{
 pub use running::{ProcessMonitor, ProcessUsage, RunningProcess};
 pub use server::{CaptureSnapshot, ServerCreateOptions, ServerPersistenceHealth, ServerStatus};
 pub use server_pack::{IdentificationOutcome, ServerContentSource, ServerPackOutcome};
+pub use single_instance::{PrimaryInstance, Startup as SingleInstanceStartup};
 pub use url_handler::{URL_HANDLER_ENTRY, UrlHandlerStatus, scheme_mime_type};
 
 /// Cancellation, re-exported because the services take one.

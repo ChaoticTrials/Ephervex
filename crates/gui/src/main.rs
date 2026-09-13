@@ -74,6 +74,29 @@ fn main() -> Result<(), slint::PlatformError> {
         std::process::exit(2);
     }
 
+    // Before the window, because there may be no window to open: a launcher is
+    // already running, this process hands it the link, and exits. A scheme
+    // handler starts a fresh process for every click, so without this a second
+    // link means a second launcher sharing one set of instances.
+    let link = match &startup {
+        Startup::Link(ephervex_core::LauncherUrl::Import { url }) => Some(url.as_str()),
+        _ => None,
+    };
+    let primary = match ephervex_core::single_instance::start(link) {
+        Ok(ephervex_core::SingleInstanceStartup::HandedOff) => {
+            tracing::info!("handed over to the launcher that is already running");
+            return Ok(());
+        }
+        Ok(ephervex_core::SingleInstanceStartup::Primary(primary)) => Some(primary),
+        // Not fatal. Failing to reach a socket is a reason to be a second
+        // window, not a reason to refuse to start: the user asked for a
+        // launcher and should get one.
+        Err(error) => {
+            tracing::warn!(%error, "starting without single-instance handover");
+            None
+        }
+    };
+
     let ui = ephervex_gui::ui::AppWindow::new()?;
     // Before anything is drawn, because the console and every other technical
     // view asks for this family on its first frame.
@@ -90,9 +113,27 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.set_license_text(include_str!("../../../LICENSE").into());
     let controller = ephervex_gui::controller::attach(&ui);
     ephervex_gui::controller::accept_file_drops(&ui, &drops, &controller);
-    if let Startup::Link(ephervex_core::LauncherUrl::Import { url }) = &startup {
+    if let Some(url) = link {
         tracing::info!("opening a modpack a link named");
-        ephervex_gui::controller::open_pack_link(&controller, url);
+        ephervex_gui::controller::open_pack_link(&ui, url);
+    }
+    if let Some(primary) = primary {
+        // Delivered onto the event loop: the listener runs on a thread of its
+        // own, and a frontend does not touch widgets from one.
+        let weak = ui.as_weak();
+        primary.listen(move |message| {
+            let weak = weak.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = weak.upgrade() {
+                    ephervex_gui::controller::raise(&ui);
+                    if let Ok(ephervex_core::LauncherUrl::Import { url }) =
+                        ephervex_core::LauncherUrl::parse(&message)
+                    {
+                        ephervex_gui::controller::open_pack_link(&ui, &url);
+                    }
+                }
+            });
+        });
     }
 
     tracing::info!(

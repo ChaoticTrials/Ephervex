@@ -3124,6 +3124,17 @@ fn register_mod_state_actions(
 /// submitting reads them straight back rather than tracking them alongside.
 fn register_pack_link_actions(ui: &AppWindow, commands: &Sender<Command>) {
     let sender = commands.clone();
+    ui.on_deliver_pack_link(move |url| {
+        send(
+            &sender,
+            Command::OpenPackUrl {
+                url: url.to_string(),
+                consent: None,
+            },
+        );
+    });
+
+    let sender = commands.clone();
     ui.on_open_pack_link(move |url, remember| {
         let consent = if remember {
             ephervex_core::HostConsent::Remember
@@ -3140,20 +3151,28 @@ fn register_pack_link_actions(ui: &AppWindow, commands: &Sender<Command>) {
     });
 }
 
-/// Hands the application a modpack link, as a desktop scheme handler delivers
-/// one.
+/// Hands the window a modpack link, as a desktop scheme handler delivers one.
 ///
-/// Separate from the callbacks above because the caller is `main`, not the
-/// window: a link is what the process was started for, and it arrives before
-/// anything is on screen.
-pub fn open_pack_link(controller: &Controller, url: &str) {
-    send(
-        &controller.commands,
-        Command::OpenPackUrl {
-            url: url.to_owned(),
-            consent: None,
-        },
-    );
+/// Takes the window rather than the controller because both callers have one:
+/// `main` for the link this process was started for, and the single-instance
+/// listener for a link a later launch handed over.
+pub fn open_pack_link(ui: &AppWindow, url: &str) {
+    ui.invoke_deliver_pack_link(url.into());
+}
+
+/// Brings the window forward, for a link that arrived at a launcher already
+/// running.
+///
+/// Best effort by nature. Whether a window may raise itself is the display
+/// server's decision and not every one allows it, so this asks and does not
+/// check: a link that opens the import dialog behind another window is still
+/// better than a second launcher.
+pub fn raise(ui: &AppWindow) {
+    let window = ui.window();
+    window.set_minimized(false);
+    window.show().unwrap_or_else(|error| {
+        tracing::debug!(%error, "could not bring the window forward");
+    });
 }
 
 fn register_promotion_actions(ui: &AppWindow, commands: &Sender<Command>) {

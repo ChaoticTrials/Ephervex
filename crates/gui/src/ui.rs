@@ -2707,6 +2707,9 @@ slint::slint! {
         in-out property <string> pack-link-display;
         in-out property <bool> pack-link-remember: true;
         callback open-pack-link(string, bool);
+        // A link this process was started for, or one a later launch handed
+        // over. Asking is still the backend's decision, not this call's.
+        callback deliver-pack-link(string);
         callback open-make-persistent(string);
         callback submit-make-persistent(string);
         callback duplicate-client(string);

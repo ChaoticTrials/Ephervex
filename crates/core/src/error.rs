@@ -219,6 +219,10 @@ pub enum CoreError {
     #[error("`{configured}` is not a mod catalog this version of Ephervex knows")]
     ModCatalogPreferenceUnrecognized { configured: String },
 
+    /// The one-launcher-per-user socket could not be claimed or reached.
+    #[error("another launcher could not be reached: {detail}")]
+    SingleInstanceUnavailable { detail: String },
+
     /// The desktop link handler could not be registered or removed.
     #[error("the link handler could not be changed: {detail}")]
     UrlHandlerUnavailable { detail: String },
@@ -387,6 +391,7 @@ impl CoreError {
                 "error-mod-catalog-preference-unrecognized"
             }
             Self::UrlHandlerUnavailable { .. } => "error-url-handler-unavailable",
+            Self::SingleInstanceUnavailable { .. } => "error-single-instance-unavailable",
             Self::PackUrlInvalid { .. } => "error-pack-url-invalid",
             Self::PackHostNotTrusted { .. } => "error-pack-host-not-trusted",
             Self::PackDownloadFailed { .. } => "error-pack-archive-download-failed",
@@ -579,6 +584,7 @@ impl CoreError {
             | Self::PackHostNotTrusted { .. }
             | Self::PackDownloadFailed { .. }
             | Self::UrlHandlerUnavailable { .. }
+            | Self::SingleInstanceUnavailable { .. }
             | Self::ModNotHandPlaced { .. }
             | Self::ModFileNotDeleted { .. }
             | Self::ModFileNotAdded { .. }
@@ -647,6 +653,7 @@ impl CoreError {
             | Self::PackHostNotTrusted { .. }
             | Self::PackDownloadFailed { .. }
             | Self::UrlHandlerUnavailable { .. }
+            | Self::SingleInstanceUnavailable { .. }
             | Self::EntityNameInvalid { .. }
             | Self::ArtworkUnusable { .. } => None,
         }

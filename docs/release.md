@@ -150,6 +150,12 @@ the same site is one click; the answer is recorded under `[import]` in
 archive and nothing else: the pack's own file downloads stay restricted to the
 hosts they always were (ADR 0027).
 
+Clicking a second link while Ephervex is open reuses the window it already has
+rather than starting another launcher. The running one is found through a socket
+in `$XDG_RUNTIME_DIR`, so it lasts as long as your session does; a socket left
+behind by a crash is taken over rather than reported. If it cannot be reached at
+all, the link still opens, in a second window.
+
 The same thing works without a browser:
 
 ```bash

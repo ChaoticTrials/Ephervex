@@ -508,6 +508,14 @@ a temporary input removed once the import that wanted it is finished. The
 application service refuses the download unless the host is agreed to, so a
 frontend cannot reach it by forgetting to ask.
 
+A desktop scheme handler starts a fresh process for every link, so the launcher
+claims one name per user through a Unix socket under `$XDG_RUNTIME_DIR`. Binding
+succeeds exactly when nobody else holds it, which makes claiming the name and
+finding the running instance one operation that cannot disagree with itself; a
+socket nobody answers is a stale name to take over rather than an error. A
+second launch hands its link across and exits, and the running window opens the
+same import dialog a dropped file would.
+
 Which catalog to browse is a preference, not desired state. The settings file
 records a preferred catalog under `[mods]`; the mod browser opens on it, and the
 CLI reads it wherever `--provider` is left off. It decides how a future choice is
