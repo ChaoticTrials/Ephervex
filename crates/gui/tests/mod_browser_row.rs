@@ -8,7 +8,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use ephervex_gui::ui::{AppWindow, GuiI18n, ModRow, ModSearchRow};
+use ephervex_gui::ui::{AppWindow, GuiI18n, InstanceRow, ModRow, ModSearchRow};
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use i_slint_backend_testing::{
     AccessibleRole, ElementHandle, TestingBackend, TestingBackendOptions,
@@ -191,6 +191,116 @@ fn a_rows_badges_sit_at_its_trailing_edge_above_the_bin() {
             badge.absolute_position().x > title.absolute_position().x,
             "the badge trails the title rather than preceding it"
         );
+    }
+}
+
+/// Turning a mod off to see whether the crash goes away is why this launcher
+/// exists, and for a long time only a server's list offered it.
+#[test]
+fn an_instances_mod_row_offers_the_switch_its_servers_row_already_has() {
+    let ui = window();
+    let flipped = record_toggles(&ui);
+    instance_mods(&ui, idle_instance());
+
+    switch(&ui)
+        .expect("the row offers the switch")
+        .mock_single_click(PointerEventButton::Left);
+
+    assert_eq!(
+        flipped.borrow().as_slice(),
+        [(
+            "client".to_owned(),
+            "mods/utilitix-1.21.1-1.13.2.jar".to_owned(),
+            false
+        )],
+        "the switch has to reach the instance's own mods, not a server's"
+    );
+}
+
+/// Renaming a jar underneath a running loader does not unload it, and the core
+/// refuses it. The row says so before the click rather than after it.
+#[test]
+fn the_mod_switch_is_unavailable_while_the_instance_is_running() {
+    let ui = window();
+    let flipped = record_toggles(&ui);
+    instance_mods(
+        &ui,
+        InstanceRow {
+            can_kill: true,
+            can_launch: false,
+            state: "Running".into(),
+            state_kind: "running".into(),
+            ..idle_instance()
+        },
+    );
+
+    switch(&ui)
+        .expect("the switch is still shown, so its state stays readable")
+        .mock_single_click(PointerEventButton::Left);
+
+    assert!(
+        flipped.borrow().is_empty(),
+        "a press while the game is running must not reach the backend"
+    );
+    assert!(
+        ElementHandle::find_by_accessible_label(&ui, &lookup("gui-mods-locked-while-running"))
+            .any(|element| element.size().width > 0.0),
+        "an unavailable switch has to say why"
+    );
+}
+
+/// The one mod row's own switch.
+fn switch(ui: &AppWindow) -> Option<ElementHandle> {
+    ElementHandle::find_by_accessible_label(
+        ui,
+        &lookup_args("gui-mod-loads", [("value", Arg::from("UtilitiX"))]),
+    )
+    .find(|element| element.size().width > 0.0)
+}
+
+fn record_toggles(ui: &AppWindow) -> Rc<RefCell<Vec<(String, String, bool)>>> {
+    let flipped: Rc<RefCell<Vec<(String, String, bool)>>> = Rc::default();
+    let recorded = Rc::clone(&flipped);
+    ui.on_set_mod_enabled(move |kind, _host, path, enabled| {
+        recorded
+            .borrow_mut()
+            .push((kind.to_string(), path.to_string(), enabled));
+    });
+    flipped
+}
+
+/// The instance workspace's Mods tab, showing one managed mod.
+fn instance_mods(ui: &AppWindow, instance: InstanceRow) {
+    mod_browser(ui, Vec::new());
+    ui.set_instances(ModelRc::new(VecModel::from(vec![instance])));
+    ui.set_selected_instance_index(0);
+    ui.set_managed_mods(ModelRc::new(VecModel::from(vec![managed_mod()])));
+    settle(ui);
+}
+
+/// An instance sitting there with nothing running.
+fn idle_instance() -> InstanceRow {
+    InstanceRow {
+        id: "repro-client".into(),
+        name: "Repro".into(),
+        minecraft: "1.21.1".into(),
+        loader: "NeoForge 21.1.72".into(),
+        loader_kind: "neoforge".into(),
+        storage: lookup("gui-temporary").into(),
+        storage_kind: "temporary".into(),
+        source: "Created here".into(),
+        path: "/tmp/ephervex/instances/repro".into(),
+        updated: "just now".into(),
+        linked_servers: 0,
+        mods: 1,
+        needs_attention: false,
+        state: "Idle".into(),
+        state_kind: "idle".into(),
+        can_launch: true,
+        can_kill: false,
+        connect_server_id: SharedString::default(),
+        connect_server_name: SharedString::default(),
+        can_connect: false,
     }
 }
 

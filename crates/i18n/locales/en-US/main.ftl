@@ -1286,6 +1286,9 @@ gui-no-managed-mods = No managed mods
 gui-no-managed-mods-detail = Drop JAR files here to add them.
 gui-mod-disabled = Disabled, so the loader skips it
 gui-mod-loads = Load { $value }
+# Renaming a jar underneath a running loader does not unload it, so the switches
+# wait until the game or the server has stopped.
+gui-mods-locked-while-running = Stop this first to turn mods on and off.
 gui-server-mods = Server mods
 gui-server-mods-detail = Everything in this server's mods folder, including jars you added yourself. Drop JARs here to add them. Turn off a mod to keep it installed while the loader skips it, which is how a client-only mod stops crashing a server.
 gui-no-server-mods-detail = This server was not built from a pack, so nothing here is recorded as belonging to it.
