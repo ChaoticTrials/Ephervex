@@ -3124,6 +3124,12 @@ fn register_mod_state_actions(
 /// submitting reads them straight back rather than tracking them alongside.
 fn register_pack_link_actions(ui: &AppWindow, commands: &Sender<Command>) {
     let sender = commands.clone();
+    ui.on_set_url_handler(move |wanted| send(&sender, Command::SetUrlHandler(wanted)));
+
+    // Read once at startup, so the switch shows what is true rather than off.
+    send(commands, Command::LoadUrlHandler);
+
+    let sender = commands.clone();
     ui.on_deliver_pack_link(move |url| {
         send(
             &sender,
@@ -4910,6 +4916,11 @@ fn apply_event(
             ui.set_modal("open-pack-link".into());
         }
         Event::PackDownloaded { archive } => begin_import(ui, import_flow, commands, archive),
+        Event::UrlHandler(handler) => {
+            ui.set_url_handler_registered(handler.registered);
+            ui.set_url_handler_command(handler.command.as_str().into());
+            ui.set_url_handler_command_missing(handler.command_missing);
+        }
         Event::Snapshot(snapshot) => {
             apply_snapshot_event(ui, *snapshot, creations, minecraft, commands);
         }

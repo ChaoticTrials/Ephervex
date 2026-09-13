@@ -178,6 +178,10 @@ pub enum Command {
         url: String,
         consent: Option<ephervex_core::HostConsent>,
     },
+    /// Read whether this copy opens ephervex:// links.
+    LoadUrlHandler,
+    /// Start or stop opening them.
+    SetUrlHandler(bool),
     /// Find out where making this instance persistent would put it, and which
     /// of its linked servers could come along.
     PlanPromotion(InstanceId),
@@ -725,6 +729,26 @@ pub struct AbsentModsData {
     pub names: Vec<String>,
 }
 
+/// Whether Ephervex opens its own links, as the settings page needs it.
+#[derive(Debug, Clone)]
+pub struct UrlHandlerData {
+    pub registered: bool,
+    pub command: String,
+    /// Whether the recorded path is gone, which is what a moved AppImage looks
+    /// like and the one failure worth showing rather than hiding.
+    pub command_missing: bool,
+}
+
+impl UrlHandlerData {
+    fn of(status: &ephervex_core::UrlHandlerStatus) -> Self {
+        Self {
+            registered: status.registered,
+            command: status.command.clone().unwrap_or_default(),
+            command_missing: status.registered && !status.command_exists(),
+        }
+    }
+}
+
 /// What making one instance persistent would move, as the prompt needs it.
 #[derive(Debug, Clone)]
 pub struct PromotionPlanData {
@@ -1119,6 +1143,8 @@ pub enum Event {
     PackDownloaded {
         archive: PathBuf,
     },
+    /// Whether this copy opens ephervex:// links, and what it would run.
+    UrlHandler(UrlHandlerData),
     CrashNotice(CrashNoticeData),
     Running(Vec<RunningData>),
     ModVersions(ModVersionsData),
@@ -1659,6 +1685,34 @@ fn run_worker(
                         }));
                     }
                     Err(error) => send_error(&events, &error),
+                }
+            }
+            Command::LoadUrlHandler => {
+                let _ = events.send(Event::UrlHandler(UrlHandlerData::of(
+                    &app.url_handler_status(),
+                )));
+            }
+            Command::SetUrlHandler(wanted) => {
+                let outcome = if wanted {
+                    app.register_url_handler()
+                        .map(|status| UrlHandlerData::of(&status))
+                } else {
+                    app.unregister_url_handler()
+                        .map(|_| UrlHandlerData::of(&app.url_handler_status()))
+                };
+                match outcome {
+                    Ok(data) => {
+                        let _ = events.send(Event::UrlHandler(data));
+                    }
+                    // The toggle is re-read either way, so a refusal leaves the
+                    // switch showing what is actually true rather than what was
+                    // asked for.
+                    Err(error) => {
+                        send_error(&events, &error);
+                        let _ = events.send(Event::UrlHandler(UrlHandlerData::of(
+                            &app.url_handler_status(),
+                        )));
+                    }
                 }
             }
             Command::OpenPackUrl { url, consent } => {

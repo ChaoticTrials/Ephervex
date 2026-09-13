@@ -1286,6 +1286,12 @@ gui-open-folder = Open Folder
 gui-duplicate-instance = Duplicate
 gui-make-persistent = Make Persistent
 gui-takes-no-arguments = The Ephervex desktop application takes no arguments. Use the ephervex command for the command line.
+gui-link-handling = Modpack links
+gui-link-handling-detail = Let a web page hand a modpack straight to Ephervex. Ephervex still shows you the address and asks before it downloads anything.
+gui-open-ephervex-links = Open ephervex:// links with this copy
+# $value is a filesystem path.
+gui-link-handling-runs = Links open { $value }
+gui-link-handling-moved = That path no longer exists. Turn this off and on again from where Ephervex is now.
 gui-open-pack-link = Open a modpack
 # $value is the address with its query and fragment removed, so a link's
 # identifiers and tokens are not printed in a prompt.

@@ -2710,6 +2710,13 @@ slint::slint! {
         // A link this process was started for, or one a later launch handed
         // over. Asking is still the backend's decision, not this call's.
         callback deliver-pack-link(string);
+        // Whether this copy of Ephervex opens ephervex:// links, and what the
+        // desktop entry records it would run. The path is shown because the
+        // way this breaks is an AppImage that moved.
+        in-out property <bool> url-handler-registered;
+        in-out property <string> url-handler-command;
+        in-out property <bool> url-handler-command-missing;
+        callback set-url-handler(bool);
         callback open-make-persistent(string);
         callback submit-make-persistent(string);
         callback duplicate-client(string);
@@ -3373,6 +3380,10 @@ slint::slint! {
                                 LabeledToggle { width: min(parent.width, 520px); label: GuiI18n.text("gui-default-account-operator"); checked <=> root.make-default-account-operator; }
                                 HorizontalLayout { spacing: 12px; cross-axis-alignment: center; VerticalLayout { FieldLabel { text: GuiI18n.text("gui-default-operator-level"); } BodyText { text: GuiI18n.text("gui-default-operator-level-detail"); color: Theme.text-muted; } } Rectangle { horizontal-stretch: 1; } ComboBox { accessible-label: GuiI18n.text("gui-default-operator-level"); width: 220px; model: [GuiI18n.text("gui-operator-level-1"), GuiI18n.text("gui-operator-level-2"), GuiI18n.text("gui-operator-level-3"), GuiI18n.text("gui-operator-level-4")]; current-index: root.operator-permission-level - 1; selected(value) => { root.operator-permission-level = value == GuiI18n.text("gui-operator-level-1") ? 1 : value == GuiI18n.text("gui-operator-level-2") ? 2 : value == GuiI18n.text("gui-operator-level-3") ? 3 : 4; } } }
                                 ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-save-server-defaults"); tone: "primary"; clicked => { root.save-linked-server-settings(root.show-linked-servers, root.make-default-account-operator, root.operator-permission-level); } } }
+                                SectionTitle { title: GuiI18n.text("gui-link-handling"); detail: GuiI18n.text("gui-link-handling-detail"); }
+                                LabeledToggle { width: min(parent.width, 520px); label: GuiI18n.text("gui-open-ephervex-links"); checked: root.url-handler-registered; toggled(on) => { root.set-url-handler(on); } }
+                                if root.url-handler-registered && root.url-handler-command != "" : BodyText { text: GuiI18n.value("gui-link-handling-runs", root.url-handler-command); color: root.url-handler-command-missing ? Theme.warning : Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
+                                if root.url-handler-command-missing : BodyText { text: GuiI18n.text("gui-link-handling-moved"); color: Theme.warning; font-size: Theme.caption-size; wrap: word-wrap; }
                                 SectionTitle { title: GuiI18n.text("gui-favorite-versions"); detail: GuiI18n.text("gui-favorite-versions-detail"); }
                                 if root.favorite-minecraft-versions.length == 0 : Rectangle { height: max(46px, no-favorites.preferred-height + 22px); border-radius: 6px; border-width: 1px; border-color: Theme.border; background: Theme.surface;
                                     no-favorites := BodyText { x: 12px; width: parent.width - 24px; text: GuiI18n.text("gui-no-favorite-versions"); color: Theme.text-muted; wrap: word-wrap; }
