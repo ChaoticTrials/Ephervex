@@ -432,6 +432,14 @@ slint::slint! {
 
     component AppButton inherits Rectangle {
         in property <string> text;
+        // Why this button cannot be pressed, shown on hover while it is
+        // disabled.
+        //
+        // A disabled control that says nothing is a question the user cannot
+        // answer: the reason is always known here and is almost never guessable
+        // from the screen. Only shown while disabled, because a button that
+        // works needs no explanation.
+        in property <string> hint;
         // What assistive technology hears, when the visible label is too short
         // to be unambiguous on its own. Two "Browse..." buttons in one dialog
         // read identically otherwise.
@@ -458,9 +466,32 @@ slint::slint! {
             horizontal-alignment: center;
             vertical-alignment: center;
         }
+        // Always enabled, so a disabled button still reports hover and can
+        // explain itself. The press is gated on `enabled` instead.
         area := TouchArea {
-            enabled: root.enabled;
-            clicked => { root.clicked(); }
+            mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.not-allowed;
+            clicked => { if root.enabled { root.clicked(); } }
+        }
+        // Above the button rather than below it, because a button in an action
+        // row usually has the window's edge under it and nothing above.
+        if !root.enabled && root.hint != "" && area.has-hover : Rectangle {
+            x: 0;
+            y: -self.height - 6px;
+            width: max(root.width, min(320px, hint-label.preferred-width + 20px));
+            height: hint-label.preferred-height + 14px;
+            border-radius: 6px;
+            border-width: 1px;
+            border-color: Theme.border;
+            background: Theme.elevated;
+            hint-label := Text {
+                x: 10px;
+                y: 7px;
+                width: parent.width - 20px;
+                text: root.hint;
+                color: Theme.text-secondary;
+                font-size: Theme.caption-size;
+                wrap: word-wrap;
+            }
         }
     }
 
@@ -2027,7 +2058,9 @@ slint::slint! {
                 MenuItem { title: GuiI18n.text("gui-rename"); activated => { root.rename(item.id, item.name); } }
                 // Only a temporary instance has anywhere to go, and only a
                 // stopped one can be moved out from under itself.
-                if item.storage-kind == "temporary" : MenuItem { title: GuiI18n.text("gui-make-persistent"); enabled: !item.can-kill; activated => { root.make-persistent(item.id); } }
+                // A menu entry has nowhere to put a hint, so a disabled one
+                // says why in its own title rather than greying out silently.
+                if item.storage-kind == "temporary" : MenuItem { title: item.can-kill ? GuiI18n.text("gui-make-persistent-while-running") : GuiI18n.text("gui-make-persistent"); enabled: !item.can-kill; activated => { root.make-persistent(item.id); } }
                 MenuItem { title: GuiI18n.text("gui-duplicate-instance"); activated => { root.duplicate(item.id); } }
                 MenuItem { title: GuiI18n.text("gui-delete-instance"); activated => { root.delete(item.id, item.name); } }
             }
@@ -3088,7 +3121,7 @@ slint::slint! {
                                         if root.instances[root.selected-instance-index].loader-kind != "vanilla" : BodyText { text: GuiI18n.value("gui-loader-change-summary", root.instances[root.selected-instance-index].loader); color: Theme.text-secondary; vertical-alignment: center; }
                                         Rectangle { horizontal-stretch: 1; }
                                         AppButton { text: GuiI18n.text("gui-open-folder"); clicked => { root.open-client-folder(root.selected-instance-id); } }
-                                        if root.instances[root.selected-instance-index].storage-kind == "temporary" : AppButton { text: GuiI18n.text("gui-make-persistent"); enabled: !root.instances[root.selected-instance-index].can-kill; clicked => { root.open-make-persistent(root.selected-instance-id); } }
+                                        if root.instances[root.selected-instance-index].storage-kind == "temporary" : AppButton { text: GuiI18n.text("gui-make-persistent"); enabled: !root.instances[root.selected-instance-index].can-kill; hint: GuiI18n.text("gui-make-persistent-while-running"); clicked => { root.open-make-persistent(root.selected-instance-id); } }
                                         if root.instances[root.selected-instance-index].loader-kind != "vanilla" : AppButton { text: GuiI18n.text("gui-loader-change-open"); clicked => { root.open-loader-change(); } }
                                     }
                                     BodyText { text: root.instances[root.selected-instance-index].storage-kind == "temporary" ? GuiI18n.text("gui-temporary-lifecycle") : GuiI18n.text("gui-persistent-lifecycle"); color: Theme.text-muted; wrap: word-wrap; }

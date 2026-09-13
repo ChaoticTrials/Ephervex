@@ -13,6 +13,7 @@ use std::rc::Rc;
 use ephervex_gui::ui::{AppWindow, GuiI18n, InstanceRow, PromoteServerRow};
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use i_slint_backend_testing::{ElementHandle, TestingBackend, TestingBackendOptions};
+use slint::platform::PointerEventButton;
 use slint::{ComponentHandle, Model, ModelRc, PhysicalSize, SharedString, VecModel};
 
 #[test]
@@ -73,6 +74,51 @@ fn a_running_instance_cannot_be_moved_out_from_under_itself() {
         asked.borrow().is_empty(),
         "a press while the game is running must not reach the backend"
     );
+}
+
+/// A disabled control that says nothing is a question the user cannot answer.
+/// The reason is always known here and is not guessable from the screen.
+#[test]
+fn a_running_instance_says_why_it_cannot_be_made_persistent() {
+    let ui = window();
+    client_workspace_with(
+        &ui,
+        InstanceRow {
+            can_kill: true,
+            can_launch: false,
+            state: "Running".into(),
+            state_kind: "running".into(),
+            ..temporary_instance()
+        },
+    );
+
+    let button = widest(&ui, &lookup("gui-make-persistent")).expect("the button is there");
+    assert_eq!(
+        button.accessible_enabled(),
+        Some(false),
+        "it has to read as unavailable, not merely look it"
+    );
+    assert!(
+        !reason_is_on_screen(&ui),
+        "the explanation belongs to the hover, not to the resting screen"
+    );
+
+    // The pointer is moved onto the button before the press, which is what
+    // puts it under the cursor. The press itself is refused; the explanation
+    // is what the user gets instead.
+    button.mock_single_click(PointerEventButton::Left);
+    settle(&ui);
+
+    assert!(
+        reason_is_on_screen(&ui),
+        "a disabled button that says nothing is a question the user cannot answer"
+    );
+}
+
+/// Whether the reason the button cannot be pressed is currently drawn.
+fn reason_is_on_screen(ui: &AppWindow) -> bool {
+    ElementHandle::find_by_accessible_label(ui, &lookup("gui-make-persistent-while-running"))
+        .any(|element| element.size().width > 0.0)
 }
 
 /// Every offered server starts on. A persistent instance whose server vanishes

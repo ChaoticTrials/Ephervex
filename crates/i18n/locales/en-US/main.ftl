@@ -1286,6 +1286,10 @@ gui-create-linked-server = Create Linked Server
 gui-open-folder = Open Folder
 gui-duplicate-instance = Duplicate
 gui-make-persistent = Make Persistent
+# Shown in place of the action while the game is running, and as the hover
+# explanation on the button. Moving an instance underneath a running game would
+# pull the directory out from under it.
+gui-make-persistent-while-running = Make Persistent (stop the game first)
 gui-takes-no-arguments = The Ephervex desktop application takes no arguments. Use the ephervex command for the command line.
 gui-link-handling = Modpack links
 gui-link-handling-detail = Let a web page hand a modpack straight to Ephervex. Ephervex still shows you the address and asks before it downloads anything.
@@ -1347,7 +1351,7 @@ gui-reproduction-environment = Reproduction Environment
 gui-reproduction-environment-detail = Exact target, retained source details, and safe actions for this client instance.
 gui-target-summary = Minecraft { $first } | { $second }
 gui-open-diagnostics = View Diagnostics
-gui-temporary-lifecycle = Temporary instances remain until the operating system clears its temporary storage. Converting an existing instance in place is not available from the current application service.
+gui-temporary-lifecycle = Temporary instances remain until the operating system clears its temporary storage. Make Persistent moves this one out of it, keeping its name, its mods and its linked servers.
 gui-persistent-lifecycle = This instance is stored under the persistent instance root.
 gui-managed-mods = Managed Mods
 gui-managed-mods-detail = Every mod in this instance: the ones its pack brought, the ones you installed, and any jar you added yourself. Drop JARs here to add them.
