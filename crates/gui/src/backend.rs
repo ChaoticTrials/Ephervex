@@ -336,6 +336,11 @@ pub enum Command {
         skipped: usize,
     },
     /// Delete one jar the user put in the mods folder themselves.
+    /// Put a deleted mod's jar back from what the recipe already declares.
+    RestoreModFile {
+        host: ModHost,
+        path: PathBuf,
+    },
     DeleteHandPlacedMod {
         host: ModHost,
         path: PathBuf,
@@ -646,6 +651,8 @@ pub struct EulaData {
 #[derive(Debug, Clone)]
 pub struct ManagedModData {
     pub project_id: String,
+    /// Whether the jar is gone while the instance still wants the mod.
+    pub deleted: bool,
     /// Where the mod lives inside the game directory. The durable, provider-
     /// neutral key every mutation is addressed by, and the one thing that names
     /// an entry with no catalog identity at all.
@@ -2311,25 +2318,42 @@ fn run_worker(
                 }
                 Err(error) => send_error(&events, &error),
             },
-            Command::DeleteHandPlacedMod { host, path } => {
-                match app.delete_hand_placed_mod(host, &path) {
+            Command::RestoreModFile { host, path } => {
+                let reporter = OperationReporter::silent("operation-restoring-mod");
+                let restored = runtime.block_on(app.restore_mod_file(
+                    host,
+                    &path,
+                    &reporter,
+                    &CancellationToken::new(),
+                ));
+                match restored {
                     Ok(()) => {
-                        let _ = events.send(Event::CloseModal);
                         let _ = events.send(Event::Toast {
-                            message: localized_value(
-                                "gui-mod-deleted",
-                                &path
-                                    .file_name()
-                                    .unwrap_or(path.as_os_str())
-                                    .to_string_lossy(),
-                            ),
+                            message: lookup("gui-mod-restored"),
                             error: false,
                         });
                         send_host_mods(&app, host, &events, &refreshed_mods, false);
                     }
-                    Err(error) => send_modal_error(&events, &error),
+                    Err(error) => send_error(&events, &error),
                 }
             }
+            Command::DeleteHandPlacedMod { host, path } => match app.delete_mod_file(host, &path) {
+                Ok(()) => {
+                    let _ = events.send(Event::CloseModal);
+                    let _ = events.send(Event::Toast {
+                        message: localized_value(
+                            "gui-mod-deleted",
+                            &path
+                                .file_name()
+                                .unwrap_or(path.as_os_str())
+                                .to_string_lossy(),
+                        ),
+                        error: false,
+                    });
+                    send_host_mods(&app, host, &events, &refreshed_mods, false);
+                }
+                Err(error) => send_modal_error(&events, &error),
+            },
             Command::RenameClient { id, name } => match app.rename_client(id, &name) {
                 Ok(record) => {
                     let _ = events.send(Event::CloseModal);
@@ -5360,10 +5384,14 @@ fn managed_mods_data(
         mods: snapshot
             .mods
             .iter()
-            // A recorded mod whose jar is not in `mods/` is left out. A row for
-            // a file that is not there names nothing the reader can act on, and
-            // the record is kept so a repair still puts the jar back.
-            .filter(|entry| entry.presence != ModPresence::Missing)
+            // A recorded mod whose jar is not in `mods/` is left out, because a
+            // row for a file that is not there names nothing the reader can act
+            // on. The exception is one this list offered to delete: it can put
+            // that back, so the row stays and says so, and the bin is not a
+            // one-way door (ADR 0019).
+            .filter(|entry| {
+                entry.presence != ModPresence::Missing || ModMutability::of(entry).can_delete_file
+            })
             .map(|entry| managed_mod_data(entry, review))
             .collect(),
         notice: match snapshot.metadata {
@@ -5454,6 +5482,9 @@ fn managed_mod_data(entry: &ManagedModEntry, review: Option<&CrashReview>) -> Ma
             .map(|path| path.to_string_lossy().into_owned())
             .unwrap_or_default(),
         enabled: entry.presence.is_enabled(),
+        // Deleted, and the recipe still declares it, so the row stays and
+        // offers to put it back rather than vanishing.
+        deleted: entry.presence == ModPresence::Missing,
         pack_owned: entry.is_pack_owned(),
     }
 }

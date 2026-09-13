@@ -3101,6 +3101,20 @@ fn register_mod_state_actions(
     });
 
     let sender = commands.clone();
+    ui.on_restore_mod_file(move |kind, host, path| {
+        let Some(host) = backend::parse_mod_host(&kind, &host) else {
+            return;
+        };
+        send(
+            &sender,
+            Command::RestoreModFile {
+                host,
+                path: PathBuf::from(path.as_str()),
+            },
+        );
+    });
+
+    let sender = commands.clone();
     ui.on_set_mod_enabled(move |kind, host, path, enabled| {
         let Some(host) = backend::parse_mod_host(&kind, &host) else {
             return;
@@ -6391,6 +6405,7 @@ fn managed_mod_rows(rows: Vec<ManagedModData>) -> Vec<ModRow> {
             author: row.author.into(),
             icon: cached_image(&row.icon),
             enabled: row.enabled,
+            deleted: row.deleted,
             pack_owned: row.pack_owned,
             suspect_reason: row.suspect_reason.into(),
             suspect_confidence: row.suspect_confidence.into(),

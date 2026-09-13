@@ -173,6 +173,34 @@ pub async fn install_files(request: FileInstall<'_>) -> PackResult<MaterializedF
     install_selected_files(&recipe.files, &wanted, game_dir, fetch).await
 }
 
+/// Puts one recorded file back where the recipe says it belongs.
+///
+/// For a file the recipe declares and the game directory no longer has: a mod
+/// somebody deleted to bisect a crash, and now wants back. Nothing about the
+/// recipe changes, because nothing about what the instance is supposed to
+/// contain changed; only the directory is brought back into line with it.
+///
+/// Deliberately not a mutation. A mutation decides what an instance should
+/// contain and needs a provider identity to resolve; this needs neither,
+/// which is what makes it work for a pack file served from a mirror that no
+/// catalog can name.
+#[instrument(skip_all, fields(path = %logical_path.display()))]
+pub async fn restore_file(
+    recipe: &PackRecipe,
+    logical_path: &Path,
+    game_dir: &Path,
+    fetch: ArtifactFetch<'_>,
+) -> PackResult<MaterializedFiles> {
+    let wanted = recipe
+        .files
+        .iter()
+        .find(|file| file.logical_path == logical_path)
+        .ok_or_else(|| PackError::ManagedIdentityMissing {
+            path: logical_path.display().to_string(),
+        })?;
+    install_selected_files(&recipe.files, &[wanted], game_dir, fetch).await
+}
+
 /// Reconstructs server-applicable content without reading the source archive
 /// or the mutable client game directory.
 ///

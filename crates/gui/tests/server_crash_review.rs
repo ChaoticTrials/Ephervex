@@ -214,6 +214,7 @@ fn ordinary_mod() -> ModRow {
         author: "MelanX".into(),
         icon: slint::Image::default(),
         enabled: true,
+        deleted: false,
         pack_owned: true,
         can_manage: true,
         can_change_version: true,

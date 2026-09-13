@@ -25,9 +25,13 @@
 
 use std::path::{Path, PathBuf};
 
+use ephervex_download::{CacheLayout, OperationReporter};
 use ephervex_model::ModOrigin;
-use ephervex_pack::{ExtractionLimits, MODS_DIR, PackArchive, SourceStore, safe_file_name};
-use tracing::{info, warn};
+use ephervex_pack::{
+    ArtifactFetch, ExtractionLimits, MODS_DIR, PackArchive, SourceStore, safe_file_name,
+};
+use tokio_util::sync::CancellationToken;
+use tracing::{info, instrument, warn};
 
 use crate::app::App;
 use crate::error::{CoreError, CoreResult};
@@ -340,24 +344,29 @@ impl App {
         Ok(report)
     }
 
-    /// Deletes a jar somebody put in `mods/` themselves.
+    /// Deletes one mod's jar, leaving the instance's desired state alone.
     ///
-    /// The one destructive thing offered for a file the launcher does not own,
-    /// and offered precisely because it does not own it: there is no catalog to
-    /// fetch it from again and no record to repair it from, so nothing but the
-    /// user can decide the file has served its purpose.
+    /// Offered for the two kinds of file where taking the jar away is not a
+    /// claim about what the instance should contain:
     ///
-    /// Refuses anything the launcher installed. Taking one of those out of an
+    /// * **a jar somebody put in `mods/` themselves**, which the launcher does
+    ///   not own. There is no catalog to fetch it from and no record to repair
+    ///   it from, so nothing but the user can decide it has served its purpose,
+    ///   and the adopted recipe entry goes with it. That entry exists only to
+    ///   remember what a digest lookup found out about a jar, so once the jar
+    ///   is gone it describes nothing.
+    /// * **a file the imported pack declares.** The declaration stays exactly
+    ///   as imported, so the mod is restorable rather than gone
+    ///   ([`Self::restore_mod_file`]) and a server built from the recipe still
+    ///   contains it. Putting a pack's mod aside to find which one crashes is
+    ///   the workflow this launcher exists for (ADR 0019).
+    ///
+    /// Refuses everything else. Taking a mod the launcher chose out of an
     /// instance is a removal, which resolves what its dependencies leave
     /// orphaned and retires the files so the change can be undone; deleting the
     /// jar underneath that record would leave the instance describing a mod it
-    /// does not have.
-    ///
-    /// The adopted recipe entry goes with the file. That entry exists only to
-    /// remember what a digest lookup found out about a jar, so once the jar is
-    /// gone it describes nothing and would otherwise leave the list showing a
-    /// mod the instance cannot produce.
-    pub fn delete_hand_placed_mod(&self, host: ModHost, logical_path: &Path) -> CoreResult<()> {
+    /// does not have and nothing to say why.
+    pub fn delete_mod_file(&self, host: ModHost, logical_path: &Path) -> CoreResult<()> {
         self.refuse_running_mod_host(host)?;
         let snapshot = self.host_mod_snapshot(host)?;
         let entry = snapshot
@@ -367,7 +376,8 @@ impl App {
             .ok_or_else(|| CoreError::ModNotManaged {
                 path: logical_path.to_path_buf(),
             })?;
-        if entry.origin != ModOrigin::HandPlaced {
+        let origin = entry.origin;
+        if !crate::mutation::ModMutability::of(entry).can_delete_file {
             return Err(CoreError::ModNotHandPlaced {
                 path: logical_path.to_path_buf(),
             });
@@ -392,11 +402,75 @@ impl App {
             }
         }
 
-        forget_adopted_record(&layout, logical_path);
+        // Only for a jar nothing else describes. A pack's declaration is what
+        // makes its file restorable, so removing it here would turn a reversible
+        // deletion into a permanent one.
+        if origin == ModOrigin::HandPlaced {
+            forget_adopted_record(&layout, logical_path);
+        }
         info!(
             host = %host.id(),
             path = %logical_path.display(),
-            "deleted a jar that was added by hand"
+            ?origin,
+            "deleted a mod's jar"
+        );
+        Ok(())
+    }
+
+    /// Puts a deleted mod's jar back, exactly as the recipe describes it.
+    ///
+    /// The other half of [`Self::delete_mod_file`] for a file the recipe still
+    /// declares. Nothing about the instance's desired state changes, because
+    /// nothing about it changed when the jar was deleted; only the directory is
+    /// brought back into line with what the recipe already said.
+    ///
+    /// Deliberately not a mutation. It resolves no dependencies, asks no
+    /// catalog and needs no provider identity, which is what lets it work for a
+    /// pack file served from a mirror no catalog can name.
+    #[instrument(skip(self, reporter, cancel), fields(host = %host.id()))]
+    pub async fn restore_mod_file(
+        &self,
+        host: ModHost,
+        logical_path: &Path,
+        reporter: &OperationReporter,
+        cancel: &CancellationToken,
+    ) -> CoreResult<()> {
+        self.refuse_running_mod_host(host)?;
+        let layout = self.mod_host_layout(host)?;
+        let recipe = layout
+            .recipe
+            .as_ref()
+            .ok_or_else(|| CoreError::ModNotManaged {
+                path: logical_path.to_path_buf(),
+            })?;
+
+        self.with_artifact_cache(Box::pin(async {
+            let manager = self.artifact_manager()?;
+            let cache = CacheLayout::new(self.paths().cache_dir());
+            ephervex_pack::restore_file(
+                recipe,
+                logical_path,
+                &layout.game_dir,
+                ArtifactFetch {
+                    manager: &manager,
+                    cache: &cache,
+                    // Asked from the file's own provider identity, exactly as a
+                    // mutation asks, so a restore offers a secret only to the
+                    // artifact it belongs to.
+                    credentials: &self.provider_credentials(),
+                    reporter,
+                    cancel,
+                },
+            )
+            .await?;
+            Ok(())
+        }))
+        .await?;
+
+        info!(
+            host = %host.id(),
+            path = %logical_path.display(),
+            "restored a mod's jar from the retained recipe"
         );
         Ok(())
     }
@@ -701,7 +775,7 @@ mod tests {
         assert_eq!(snapshot.mods[0].presence, ModPresence::Disabled);
 
         host.app
-            .delete_hand_placed_mod(host.host, Path::new("mods/dropped-in.jar"))
+            .delete_mod_file(host.host, Path::new("mods/dropped-in.jar"))
             .expect("delete");
 
         assert!(names_in(&host.mods_dir).is_empty());
@@ -760,7 +834,7 @@ mod tests {
 
         let error = host
             .app
-            .delete_hand_placed_mod(host.host, Path::new("mods/nothing-here.jar"))
+            .delete_mod_file(host.host, Path::new("mods/nothing-here.jar"))
             .expect_err("a path nothing claims is refused");
         assert!(
             matches!(error, CoreError::ModNotManaged { .. }),
@@ -821,7 +895,7 @@ mod tests {
 
         let error = host
             .app
-            .delete_hand_placed_mod(host.host, Path::new("mods/installed.jar"))
+            .delete_mod_file(host.host, Path::new("mods/installed.jar"))
             .expect_err("a launcher-owned mod is not deleted this way");
 
         assert!(
@@ -829,6 +903,31 @@ mod tests {
             "{error:?}"
         );
         assert_eq!(names_in(&host.mods_dir), vec!["installed.jar"]);
+    }
+
+    /// A pack's own file is the other side of that rule. The declaration is
+    /// what makes the deletion reversible, so it has to survive it.
+    #[test]
+    fn deleting_a_pack_declared_jar_keeps_the_declaration_that_can_restore_it() {
+        let host = fixture();
+        std::fs::write(host.mods_dir.join("from-pack.jar"), b"jar").expect("jar");
+        record_mod(&host, "from-pack.jar", ModOrigin::PackDeclared);
+
+        host.app
+            .delete_mod_file(host.host, Path::new("mods/from-pack.jar"))
+            .expect("a pack's mod may be put aside");
+
+        assert!(names_in(&host.mods_dir).is_empty(), "the jar is gone");
+        let layout = host.app.mod_host_layout(host.host).expect("layout");
+        assert!(
+            layout
+                .recipe
+                .expect("the recipe survives")
+                .files
+                .iter()
+                .any(|file| file.logical_path == Path::new("mods/from-pack.jar")),
+            "the pack still declares the mod, which is what makes this undoable"
+        );
     }
 
     #[test]
@@ -844,7 +943,7 @@ mod tests {
         assert_eq!(before.mods.len(), 1, "recorded, and its jar is there");
 
         host.app
-            .delete_hand_placed_mod(host.host, Path::new("mods/identified.jar"))
+            .delete_mod_file(host.host, Path::new("mods/identified.jar"))
             .expect("delete");
 
         let layout = host.app.mod_host_layout(host.host).expect("layout");

@@ -152,3 +152,36 @@ hand-placed ones answer a lookup by project identically, because identity is not
 ownership. `ephervex-pack`'s mutation planner now checks origin as well, so a
 provider removal or replacement cannot reach a jar the user placed. That rule
 was stated in its module documentation before and was not enforced.
+
+## Amendment: a pack's mod can be put aside, and put back
+
+Two rules above were drawn tighter than the reasoning behind them justified.
+
+**`can_delete_file` is no longer "that origin and no other".** The permission is
+about whether taking the jar away makes a claim the launcher cannot support, and
+for a pack's own file it does not. Deleting it resolves no dependencies, retires
+nothing, asks no catalog, and leaves the pack's declaration exactly as imported.
+`MutationRestriction::PackOwned` still refuses every mutation, so nothing here
+lets a provider operation reach a pack file or lets the recipe claim a release
+the pack never shipped. What it allows is putting one mod aside to find which
+one crashes, which is the workflow this launcher exists for and which the pack's
+own mods were excluded from.
+
+The two origins differ in what goes with the file. A hand-placed jar takes its
+adopted record with it, because that record only ever remembered what a digest
+lookup found and describes nothing once the jar is gone. A pack file keeps its
+declaration, because that declaration is what makes the deletion reversible.
+
+**A recorded mod whose jar is absent is listed again when this list is what
+deleted it.** The earlier amendment removed those rows because a row saying
+"File missing from mods folder" was a warning for something the user had just
+deliberately done, by hand, outside the application. A mod deleted *through the
+list* is not that: the list offered the action, so it owes the user a way back.
+Such a row stays, says it was deleted and that the pack still lists it, and
+offers to restore it. Everything else is unchanged: a jar deleted outside
+Ephervex still leaves no row, because nothing here can promise to restore what
+it did not remove.
+
+Restoring is deliberately not a mutation. It resolves nothing and asks no
+catalog; it writes the file the recipe already describes, which is what lets it
+work for a pack file served from a mirror no catalog can name.

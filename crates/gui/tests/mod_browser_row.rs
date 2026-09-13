@@ -304,6 +304,87 @@ fn idle_instance() -> InstanceRow {
     }
 }
 
+/// Both controls sit on one line under the badges, so a reader looks in one
+/// place for the two things a row can have done to it. The switch used to ride
+/// on the title, where it landed in a different column on every card.
+#[test]
+fn the_switch_and_the_bin_share_the_rows_trailing_column() {
+    let ui = window();
+    mod_browser(&ui, Vec::new());
+    ui.set_managed_mods(ModelRc::new(VecModel::from(vec![hand_placed_mod()])));
+    settle(&ui);
+
+    let switch = ElementHandle::find_by_accessible_label(
+        &ui,
+        &lookup_args("gui-mod-loads", [("value", Arg::from("UtilitiX"))]),
+    )
+    .find(|element| element.size().width > 0.0)
+    .expect("the row offers the switch");
+    let bin = ElementHandle::find_by_accessible_label(
+        &ui,
+        &lookup_args("gui-delete-mod", [("value", Arg::from("UtilitiX"))]),
+    )
+    .find(|element| element.size().width > 0.0)
+    .expect("a hand-placed row offers the bin");
+    let badge = ElementHandle::find_by_accessible_label(&ui, "Added by hand")
+        .find(|element| element.size().width > 0.0)
+        .expect("the row says who put the file there");
+
+    // Same line: their centers agree vertically within half a control.
+    let switch_middle = switch.absolute_position().y + switch.size().height / 2.0;
+    let bin_middle = bin.absolute_position().y + bin.size().height / 2.0;
+    assert!(
+        (switch_middle - bin_middle).abs() < bin.size().height / 2.0,
+        "switch center {switch_middle} and bin center {bin_middle} are not one line"
+    );
+    assert!(
+        switch.absolute_position().x < bin.absolute_position().x,
+        "the switch sits before the bin"
+    );
+    assert!(
+        switch.absolute_position().y > badge.absolute_position().y,
+        "both controls belong under the badges, not in the title row"
+    );
+}
+
+/// A pack's mod can be put aside, and the row stays so it can come back. That
+/// is what keeps the bin from being a one-way door.
+#[test]
+fn a_deleted_pack_mod_keeps_its_row_and_offers_to_come_back() {
+    let ui = window();
+    let restored: Rc<RefCell<Vec<String>>> = Rc::default();
+    let sink = Rc::clone(&restored);
+    ui.on_restore_mod_file(move |_kind, _host, path| sink.borrow_mut().push(path.to_string()));
+
+    mod_browser(&ui, Vec::new());
+    ui.set_managed_mods(ModelRc::new(VecModel::from(vec![ModRow {
+        origin: "From pack".into(),
+        origin_kind: "pack".into(),
+        deleted: true,
+        can_delete_file: true,
+        can_remove: false,
+        ..managed_mod()
+    }])));
+    settle(&ui);
+
+    assert!(
+        ElementHandle::find_by_accessible_label(&ui, &lookup("gui-mod-file-deleted"))
+            .any(|element| element.size().width > 0.0),
+        "a deleted mod has to say so rather than look installed"
+    );
+
+    ElementHandle::find_by_accessible_label(&ui, &lookup("gui-restore-mod"))
+        .find(|element| element.size().width > 0.0)
+        .expect("a deleted pack mod offers to come back")
+        .invoke_accessible_default_action();
+    settle(&ui);
+
+    assert_eq!(
+        restored.borrow().as_slice(),
+        ["mods/utilitix-1.21.1-1.13.2.jar".to_owned()]
+    );
+}
+
 /// A jar the user put in `mods/` themselves and no catalog has recognized.
 ///
 /// One badge rather than two, which is what makes the column testable: with a
@@ -386,6 +467,7 @@ fn managed_mod() -> ModRow {
         author: "MelanX".into(),
         icon: Image::default(),
         enabled: true,
+        deleted: false,
         pack_owned: false,
         can_manage: true,
         can_change_version: true,

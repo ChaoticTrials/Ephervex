@@ -148,10 +148,11 @@ pub struct ModMutability {
     pub can_remove: bool,
     /// Whether the jar itself may simply be deleted.
     ///
-    /// The one thing that can be done to a hand-placed jar and to nothing else.
     /// Addressed by path rather than by project, because a jar nothing
-    /// recognizes has no project, and it is the user's file: deleting it
-    /// resolves nothing, retires nothing, and asks no catalog.
+    /// recognizes has no project. It resolves nothing, retires nothing, and
+    /// asks no catalog, which is what makes it available where a provider
+    /// operation is not: a hand-placed jar, which is the user's to throw away,
+    /// and a pack file, which the recipe still declares and can put back.
     pub can_delete_file: bool,
     /// Whether the mod's other releases can be listed at all. True for anything
     /// with a project, including mods nothing may mutate: seeing what else
@@ -192,9 +193,16 @@ impl ModMutability {
                 can_delete_file: true,
                 ..Self::restricted(MutationRestriction::HandPlaced, has_project)
             },
-            ModOrigin::PackDeclared => {
-                Self::restricted(MutationRestriction::PackOwned, has_project)
-            }
+            // The pack's declaration is a historical record and stays one, so
+            // no provider operation may reach a pack file. Deleting the jar is
+            // not one of those: it resolves nothing, retires nothing, and asks
+            // no catalog, and putting a pack mod aside to find which one
+            // crashes is what this launcher is for. The recipe still declares
+            // it, so it is restored rather than gone (ADR 0019).
+            ModOrigin::PackDeclared => Self {
+                can_delete_file: true,
+                ..Self::restricted(MutationRestriction::PackOwned, has_project)
+            },
             ModOrigin::RequiredDependency => {
                 Self::restricted(MutationRestriction::Dependency, has_project)
             }
@@ -1254,17 +1262,28 @@ mod tests {
     }
 
     #[test]
-    fn deleting_the_jar_outright_is_offered_for_a_hand_placed_mod_and_no_other() {
+    fn deleting_the_jar_outright_is_offered_where_deleting_it_is_recoverable_or_the_users_own() {
         // The permission is about who owns the file, not about what is known
-        // about it, so an identified hand-placed jar keeps it and a fully
-        // resolved user-selected one never gains it.
+        // about it, so an identified hand-placed jar keeps it whatever its
+        // identity says.
         for identity in [resolved(), project_only(), ModIdentity::Unresolved] {
             assert!(
                 ModMutability::of(&entry(ModOrigin::HandPlaced, identity.clone())).can_delete_file
             );
         }
+        // A pack file too: the recipe still declares it, so the jar can come
+        // back, and putting one aside is how a pack's crash gets bisected.
+        assert!(ModMutability::of(&entry(ModOrigin::PackDeclared, resolved())).can_delete_file);
+        assert_eq!(
+            ModMutability::of(&entry(ModOrigin::PackDeclared, resolved())).restriction,
+            Some(MutationRestriction::PackOwned),
+            "deleting the file is not permission to mutate the pack's declaration"
+        );
+
+        // A dependency's file is not the user's to throw away: something else
+        // asked for it, and a user-selected mod is removed rather than deleted,
+        // which resolves what it leaves orphaned.
         for origin in [
-            ModOrigin::PackDeclared,
             ModOrigin::UserSelected,
             ModOrigin::RequiredDependency,
             ModOrigin::SelectedOptionalDependency,

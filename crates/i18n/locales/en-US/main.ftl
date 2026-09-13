@@ -672,6 +672,7 @@ operation-installing-mods = Installing mods
 operation-creating-server = Creating server
 operation-promoting-instance = Making the instance persistent
 operation-downloading-pack = Downloading the pack
+operation-restoring-mod = Putting the mod back
 operation-creating-instance = Creating instance
 
 # $operation identifies one background task. It is shown so a user can find the
@@ -1358,6 +1359,10 @@ gui-refresh-mod-details = Refresh mod names and artwork
 gui-no-managed-mods = No managed mods
 gui-no-managed-mods-detail = Drop JAR files here to add them.
 gui-mod-disabled = Disabled, so the loader skips it
+# The jar was deleted here, and the pack still declares it, so it can come back.
+gui-mod-file-deleted = Deleted. The pack still lists it, so it can be put back.
+gui-restore-mod = Restore
+gui-mod-restored = Put the mod back.
 gui-mod-loads = Load { $value }
 # Renaming a jar underneath a running loader does not unload it, so the switches
 # wait until the game or the server has stopped.

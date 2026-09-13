@@ -140,6 +140,9 @@ slint::slint! {
         // Whether the loader will load this mod. A disabled mod is installed
         // and recorded; it is simply renamed out of the loader's way.
         enabled: bool,
+        // The jar is gone and the instance still wants it, so the row offers to
+        // put it back instead of offering to delete it again.
+        deleted: bool,
         pack-owned: bool,
         can-manage: bool,
         can-change-version: bool,
@@ -1265,6 +1268,7 @@ slint::slint! {
         callback manage(string);
         callback toggle(string, bool);
         callback delete-file(string, string);
+        callback restore-file(string);
         height: 86px;
         border-radius: 6px;
         border-width: 1px;
@@ -1291,10 +1295,6 @@ slint::slint! {
                         horizontal-stretch: 1;
                         vertical-alignment: center;
                     }
-                    // Declared after the card's own touch area, so it takes its
-                    // own clicks rather than opening the mod manager.
-                    if root.togglable : VerticalLayout { alignment: center; Toggle { checked: root.item.enabled; enabled: root.toggle-enabled; accessible-name: GuiI18n.value("gui-mod-loads", root.item.title); toggled(on) => { root.toggle(root.item.logical-path, on); } } }
-                    VerticalLayout { alignment: center; Text { text: root.item.can-manage ? "›" : ""; color: touch.has-hover ? Theme.accent : Theme.text-muted; font-size: Theme.section-size; width: 10px; } }
                 }
                 Text {
                     text: root.item.provider-kind == "" ? root.item.version + " | " + root.item.provider : root.item.version;
@@ -1305,7 +1305,7 @@ slint::slint! {
                 Text {
                     // What the crash says outranks the descriptive line: a
                     // reader looking at a crashed server is looking for this.
-                    text: root.item.suspect-reason != "" ? root.item.suspect-reason : !root.item.enabled ? GuiI18n.text("gui-mod-disabled") : root.item.compatibility != "" ? root.item.compatibility : root.item.file-name;
+                    text: root.item.suspect-reason != "" ? root.item.suspect-reason : root.item.deleted ? GuiI18n.text("gui-mod-file-deleted") : !root.item.enabled ? GuiI18n.text("gui-mod-disabled") : root.item.compatibility != "" ? root.item.compatibility : root.item.file-name;
                     color: root.item.suspect-confidence == "high" ? Theme.danger : root.item.suspect-confidence != "" ? Theme.warning : Theme.text-muted;
                     font-size: Theme.caption-size;
                     overflow: elide;
@@ -1327,11 +1327,20 @@ slint::slint! {
                     // where the version line already says so.
                     if root.item.provider-kind != "" : Pill { text: root.item.provider; tone-color: root.item.provider-kind == "curseforge" ? Theme.curseforge : Theme.modrinth; }
                 }
-                // Declared after the card's own touch area so it takes its own
-                // clicks instead of opening the mod manager behind it.
-                if root.item.can-delete-file || (root.removable && root.item.can-remove) : HorizontalLayout {
+                // Both controls on one line under the badges, because they are
+                // the two things a reader does to a row and looking for them in
+                // two places is worse than either position.
+                //
+                // Declared after the card's own touch area so they take their
+                // own clicks instead of opening the mod manager behind them.
+                if root.togglable || root.item.can-delete-file || (root.removable && root.item.can-remove) : HorizontalLayout {
                     alignment: end;
-                    IconButton {
+                    spacing: 8px;
+                    // Nothing to turn on or throw away while the jar is gone.
+                    // The one thing left is putting it back.
+                    if root.item.deleted : AppButton { text: GuiI18n.text("gui-restore-mod"); clicked => { root.restore-file(root.item.logical-path); } }
+                    if !root.item.deleted && root.togglable : VerticalLayout { alignment: center; Toggle { checked: root.item.enabled; enabled: root.toggle-enabled; accessible-name: GuiI18n.value("gui-mod-loads", root.item.title); toggled(on) => { root.toggle(root.item.logical-path, on); } } }
+                    if !root.item.deleted && (root.item.can-delete-file || (root.removable && root.item.can-remove)) : IconButton {
                         icon: @image-url("../../../assets/icons/trash.svg");
                         accessible-name: GuiI18n.value(root.item.can-delete-file ? "gui-delete-mod" : "gui-remove-mod", root.item.title);
                         clicked => { root.delete-file(root.item.logical-path, root.item.title); }
@@ -2307,6 +2316,7 @@ slint::slint! {
         callback open-mod-manager(string);
         // (host kind, host id, the mod's path, whether the loader loads it)
         callback set-mod-enabled(string, string, string, bool);
+        callback restore-mod-file(string, string, string);
         callback change-mod-version(string, string, string);
         callback plan-mod-removal(string, string);
         // Works out what a change or an update would do here and on every
@@ -3108,7 +3118,7 @@ slint::slint! {
                                         if root.managed-mods-notice != "" : BodyText { text: root.managed-mods-notice; color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
                                         if root.instances[root.selected-instance-index].can-kill : BodyText { text: GuiI18n.text("gui-mods-locked-while-running"); color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
                                         if root.managed-mods.length == 0 : EmptyState { icon: @image-url("../../../assets/icons/semantic-mod.svg"); title: root.managed-mods-query != "" ? GuiI18n.text("gui-no-mods-match-title") : GuiI18n.text("gui-no-managed-mods"); message: root.managed-mods-query != "" ? GuiI18n.value("gui-no-mods-match", root.managed-mods-query) : GuiI18n.text("gui-no-managed-mods-detail"); }
-                                        ScrollView { viewport-width: self.width; VerticalLayout { spacing: 8px; for mod in root.managed-mods : ModCard { item: mod; removable: true; togglable: true; toggle-enabled: !root.instances[root.selected-instance-index].can-kill; toggle(path, on) => { root.set-mod-enabled("client", root.selected-instance-id, path, on); } manage(path) => { root.open-mod-manager(path); } delete-file(path, title) => { root.pending-action-kind = "client"; root.pending-action-id = root.selected-instance-id; root.pending-action-name = title; root.mod-action-path = path; root.mod-action-name = title; root.modal-error = ""; if mod.can-delete-file { root.modal = "delete-mod"; } else { root.plan-mod-removal(root.selected-instance-id, path); } } } } }
+                                        ScrollView { viewport-width: self.width; VerticalLayout { spacing: 8px; for mod in root.managed-mods : ModCard { item: mod; removable: true; togglable: true; restore-file(path) => { root.restore-mod-file("client", root.selected-instance-id, path); } toggle-enabled: !root.instances[root.selected-instance-index].can-kill; toggle(path, on) => { root.set-mod-enabled("client", root.selected-instance-id, path, on); } manage(path) => { root.open-mod-manager(path); } delete-file(path, title) => { root.pending-action-kind = "client"; root.pending-action-id = root.selected-instance-id; root.pending-action-name = title; root.mod-action-path = path; root.mod-action-name = title; root.modal-error = ""; if mod.can-delete-file { root.modal = "delete-mod"; } else { root.plan-mod-removal(root.selected-instance-id, path); } } } } }
                                     }
                                 }
                                 Rectangle { horizontal-stretch: 1; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface;
@@ -3303,7 +3313,7 @@ slint::slint! {
                                 if root.crash-report != "" : CrashNotice { report: root.crash-report; failure: root.crash-failure; client-code-on-server: root.crash-client-code-on-server; suggested: root.crash-suggested; beside-the-mods: true; disable-suggested => { root.disable-suggested-mods(root.selected-server-id); } }
                                 if root.server-mods-notice != "" : BodyText { text: root.server-mods-notice; color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
                                 if root.server-mods.length == 0 : EmptyState { icon: @image-url("../../../assets/icons/semantic-mod.svg"); title: root.server-mods-query != "" ? GuiI18n.text("gui-no-mods-match-title") : GuiI18n.text("gui-no-managed-mods"); message: root.server-mods-query != "" ? GuiI18n.value("gui-no-mods-match", root.server-mods-query) : GuiI18n.text("gui-no-server-mods-detail"); }
-                                if root.server-mods.length > 0 : ScrollView { viewport-width: self.width; VerticalLayout { spacing: 8px; for mod in root.server-mods : ModCard { item: mod; togglable: true; toggle-enabled: !root.servers[root.selected-server-index].can-stop; toggle(path, on) => { root.set-mod-enabled("server", root.selected-server-id, path, on); } delete-file(path, title) => { root.pending-action-kind = "server"; root.pending-action-id = root.selected-server-id; root.pending-action-name = title; root.mod-action-path = path; root.mod-action-name = title; root.modal-error = ""; root.modal = "delete-mod"; } } } }
+                                if root.server-mods.length > 0 : ScrollView { viewport-width: self.width; VerticalLayout { spacing: 8px; for mod in root.server-mods : ModCard { item: mod; togglable: true; restore-file(path) => { root.restore-mod-file("server", root.selected-server-id, path); } toggle-enabled: !root.servers[root.selected-server-index].can-stop; toggle(path, on) => { root.set-mod-enabled("server", root.selected-server-id, path, on); } delete-file(path, title) => { root.pending-action-kind = "server"; root.pending-action-id = root.selected-server-id; root.pending-action-name = title; root.mod-action-path = path; root.mod-action-name = title; root.modal-error = ""; root.modal = "delete-mod"; } } } }
                             }
                             if root.workspace-tab == "Properties" : ScrollView { VerticalLayout { alignment: start; width: min(parent.width, 1100px); spacing: 14px;
                                 Heading { text: GuiI18n.text("gui-network"); } BodyText { text: GuiI18n.text("gui-network-detail"); wrap: word-wrap; }
