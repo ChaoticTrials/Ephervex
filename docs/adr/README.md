@@ -32,3 +32,4 @@ so the reasoning trail survives.
 | [0024](0024-published-server-files-are-a-complete-installation.md) | Published server files are installed as a complete server, and the loader stays the launcher's | Accepted |
 | [0025](0025-storage-class-is-promoted-in-place.md) | An instance becomes persistent by moving, not by being copied | Accepted |
 | [0026](0026-a-debian-package-alongside-the-appimage.md) | A Debian package alongside the AppImage | Accepted |
+| [0027](0027-a-pack-address-is-a-second-trust-category.md) | A pack address the user activated is a second trust category | Accepted |

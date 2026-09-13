@@ -498,6 +498,16 @@ a client offers to keep or drop them, and keeps them unless told otherwise.
 The frontends consume one snapshot from the application service and never read a
 recipe, call a provider, or interpret a file name themselves.
 
+A pack can also be named by an address rather than by a path. That address is a
+second trust category, not an addition to the download allowlists: it arrives
+from a link a person activated, is shown to them with its query removed and
+agreed to before anything is fetched, and buys one permission, to serve an
+archive (ADR 0027). A pack's own `files[].downloads` stay on the existing list,
+the archive itself is size-bounded while it streams, and the downloaded file is
+a temporary input removed once the import that wanted it is finished. The
+application service refuses the download unless the host is agreed to, so a
+frontend cannot reach it by forgetting to ask.
+
 Which catalog to browse is a preference, not desired state. The settings file
 records a preferred catalog under `[mods]`; the mod browser opens on it, and the
 CLI reads it wherever `--provider` is left off. It decides how a future choice is

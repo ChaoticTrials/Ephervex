@@ -143,7 +143,7 @@ enum Command {
         #[command(subcommand)]
         command: LogsCommand,
     },
-    /// Import a modpack archive into a client instance.
+    /// Import a modpack into a client instance, from a file or an address.
     Import(ImportArgs),
     /// Install and launch a client instance, streaming its log to the terminal.
     Launch(LaunchArgs),
@@ -201,9 +201,13 @@ struct LaunchArgs {
 
 #[derive(Debug, Args)]
 struct ImportArgs {
-    /// The pack archive. The format is detected from its contents, not its
-    /// name: a `.mrpack` renamed to `.zip` still imports.
-    archive: PathBuf,
+    /// The pack archive, as a file or as an https address.
+    ///
+    /// The format is detected from its contents, not its name: a `.mrpack`
+    /// renamed to `.zip` still imports. An address is downloaded first, and
+    /// Ephervex asks before it downloads from a host for the first time.
+    #[arg(value_name = "ARCHIVE_OR_URL")]
+    archive: String,
     /// The instance's name. Defaults to the pack's own name.
     #[arg(long)]
     name: Option<String>,
@@ -223,6 +227,32 @@ struct ImportArgs {
     /// Take every optional file the pack offers.
     #[arg(long, conflicts_with = "optional")]
     all_optional: bool,
+    /// Agree to download from this address without being asked.
+    ///
+    /// Only meaningful when the pack is named by an address. Without it, an
+    /// address whose host has not been agreed to before prompts, and refuses
+    /// when there is no terminal to prompt on.
+    #[arg(long, value_enum, value_name = "SCOPE")]
+    trust: Option<TrustArg>,
+}
+
+/// How far an answer about a download address goes.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum TrustArg {
+    /// Download from it this once, and ask again next time.
+    Once,
+    /// Download from it and remember the host, so the next import from the
+    /// same site asks nothing.
+    Always,
+}
+
+impl TrustArg {
+    const fn consent(self) -> ephervex_core::HostConsent {
+        match self {
+            Self::Once => ephervex_core::HostConsent::JustOnce,
+            Self::Always => ephervex_core::HostConsent::Remember,
+        }
+    }
 }
 
 /// Which mod catalog a command reads.
@@ -1292,15 +1322,14 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
             run_logs_command(&app, command, cli.json)
         }
         Command::Import(args) => {
-            let app = open_app()?;
-            if args.inspect {
-                // Analysis touches nothing and needs no executor.
-                return run_inspect(&app, args, cli.json);
-            }
-            // Downloading a pack's files needs one, for the same reason the
-            // Minecraft commands do.
+            let mut app = open_app()?;
+            // Both paths may download: an address is fetched before it can be
+            // inspected, so both need an executor.
             let runtime = tokio::runtime::Runtime::new()?;
-            runtime.block_on(run_import(&app, args, cli.json))
+            if args.inspect {
+                return runtime.block_on(run_inspect(&mut app, args, cli.json));
+            }
+            runtime.block_on(run_import(&mut app, args, cli.json))
         }
         Command::Launch(args) => {
             let mut app = open_app()?;
@@ -4602,21 +4631,40 @@ fn show_reconciliation(report: &ReconciliationReport, json: bool) {
 
 // -------------------------------------------------------------------- output
 
-/// Implements `ephervex import <file> --inspect` without writing an instance.
-fn run_inspect(app: &App, args: &ImportArgs, json: bool) -> anyhow::Result<()> {
-    let analysis = app.analyze_pack(&args.archive)?;
+/// Implements `ephervex import <archive-or-url> --inspect` without writing an
+/// instance.
+///
+/// An address is downloaded first and asked about exactly as it would be for a
+/// real import. Inspecting is the safer of the two operations, but it is the
+/// download that reaches somebody's machine, and that is the part consent is
+/// about.
+async fn run_inspect(app: &mut App, args: &ImportArgs, json: bool) -> anyhow::Result<()> {
+    let downloaded = fetch_if_address(app, args, json).await?;
+    let archive = downloaded.as_ref().map_or_else(
+        || PathBuf::from(&args.archive),
+        |pack| pack.path().to_path_buf(),
+    );
+    let analysis = app.analyze_pack(&archive)?;
     print_analysis(&analysis, json);
     Ok(())
 }
 
 /// `ephervex import <file>`.
-async fn run_import(app: &App, args: &ImportArgs, json: bool) -> anyhow::Result<()> {
+async fn run_import(app: &mut App, args: &ImportArgs, json: bool) -> anyhow::Result<()> {
+    // Downloaded before anything else, and held for the whole import: dropping
+    // it removes the archive, so a failed import leaves no file behind.
+    let downloaded = fetch_if_address(app, args, json).await?;
+    let archive = downloaded.as_ref().map_or_else(
+        || PathBuf::from(&args.archive),
+        |pack| pack.path().to_path_buf(),
+    );
+
     let selection = if args.all_optional {
         OptionalSelection::all()
     } else {
         OptionalSelection::of(args.optional.clone())
     };
-    let mut request = ImportRequest::new(&args.archive)
+    let mut request = ImportRequest::new(&archive)
         .with_storage(args.storage.class())
         .selecting(selection);
     if let Some(name) = &args.name {
@@ -4630,6 +4678,86 @@ async fn run_import(app: &App, args: &ImportArgs, json: bool) -> anyhow::Result<
         .import_pack(&request, &reporter, &CancellationToken::new())
         .await?;
     print_imported(app, &imported, json)
+}
+
+/// Downloads the pack when the argument is an address, or does nothing.
+///
+/// A file path and a URL are told apart by the argument parsing as an absolute
+/// `http`/`https` address, which no local path does. Anything else is a path,
+/// including one that does not exist: reporting "no such file" is more use than
+/// guessing that a typo was meant to be a link.
+async fn fetch_if_address(
+    app: &mut App,
+    args: &ImportArgs,
+    json: bool,
+) -> anyhow::Result<Option<ephervex_core::StagedPack>> {
+    if !looks_like_an_address(&args.archive) {
+        return Ok(None);
+    }
+
+    let source = app.pack_source(&args.archive)?;
+    let consent = resolve_host_consent(app, &source, args, json)?;
+    let reporter = ephervex_core::OperationReporter::silent("operation-downloading-pack");
+    let staged = app
+        .fetch_pack(&source, consent, &reporter, &CancellationToken::new())
+        .await?;
+    if !json {
+        eprintln!(
+            "{}",
+            ephervex_i18n::lookup_args(
+                "import-downloaded-pack",
+                [("value", MessageArg::from(source.display()))]
+            )
+        );
+    }
+    Ok(Some(staged))
+}
+
+fn looks_like_an_address(argument: &str) -> bool {
+    let trimmed = argument.trim();
+    trimmed.starts_with("http://") || trimmed.starts_with("https://")
+}
+
+/// Whether this address may be downloaded from, and whether to remember it.
+///
+/// `None` means the host is already agreed to and the application service will
+/// find that for itself. A flag answers without asking; otherwise an
+/// interactive terminal is prompted and anything else is refused, because
+/// downloading from a host a web page chose is not a decision to make on a
+/// user's behalf (ADR 0027).
+fn resolve_host_consent(
+    app: &App,
+    source: &ephervex_core::PackSource,
+    args: &ImportArgs,
+    json: bool,
+) -> anyhow::Result<Option<ephervex_core::HostConsent>> {
+    if let Some(trust) = args.trust {
+        return Ok(Some(trust.consent()));
+    }
+    if app.pack_host_is_trusted(source) {
+        return Ok(None);
+    }
+    if json || !std::io::stdin().is_terminal() {
+        anyhow::bail!(
+            "downloading a pack from {} has not been agreed to; pass --trust always to allow it and remember the host, or --trust once for this import only",
+            source.display()
+        );
+    }
+
+    println!("Ephervex would download a pack from:");
+    println!("  {}", source.display());
+    print!(
+        "Download from {} and remember it? [y/N/once] ",
+        source.host()
+    );
+    std::io::stdout().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    match answer.trim().to_ascii_lowercase().as_str() {
+        "y" | "yes" => Ok(Some(ephervex_core::HostConsent::Remember)),
+        "once" | "o" => Ok(Some(ephervex_core::HostConsent::JustOnce)),
+        _ => anyhow::bail!("the download was not agreed to"),
+    }
 }
 
 /// Prints what a pack is, without importing it.

@@ -47,6 +47,7 @@ mod mod_display_cache;
 pub mod mods;
 pub mod mutation;
 pub mod open_files;
+pub mod pack_url;
 pub mod promotion;
 pub mod running;
 pub mod server;
@@ -107,6 +108,7 @@ pub use mutation::{
     ModMutability, ModMutation, ModMutationPlan, ModVersionChoice, ModVersionChoices,
     MutationRestriction, PlannedFile, PlannedOutcome,
 };
+pub use pack_url::{HostConsent, MAX_PACK_ARCHIVE_BYTES, PackSource, StagedPack};
 pub use promotion::{
     PromotableServer, PromotionOutcome, PromotionPlan, PromotionRequest, PromotionWarning,
 };

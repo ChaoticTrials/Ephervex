@@ -219,6 +219,26 @@ pub enum CoreError {
     #[error("`{configured}` is not a mod catalog this version of Ephervex knows")]
     ModCatalogPreferenceUnrecognized { configured: String },
 
+    /// A pack address that is not one Ephervex will follow.
+    ///
+    /// The address itself is wrong: not absolute, not HTTPS, no host, or
+    /// carrying credentials in its authority. Distinct from
+    /// [`Self::PackHostNotTrusted`], which is about consent rather than shape.
+    #[error("{url} is not an address a pack can be fetched from: {detail}")]
+    PackUrlInvalid { url: String, detail: String },
+
+    /// A well-formed pack address nobody has agreed to fetch from.
+    ///
+    /// Not a failure of the address. Downloading from a host a web page chose
+    /// is something the user says yes to first, and this is what refusing to
+    /// guess on their behalf looks like (ADR 0027).
+    #[error("nobody has agreed to download packs from {host}")]
+    PackHostNotTrusted { url: String, host: String },
+
+    /// The pack archive could not be downloaded.
+    #[error("the pack at {url} could not be downloaded: {detail}")]
+    PackDownloadFailed { url: String, detail: String },
+
     /// Asked to make an instance persistent that already is.
     ///
     /// A refusal rather than a silent success, so a frontend that offered the
@@ -362,6 +382,9 @@ impl CoreError {
             Self::ModCatalogPreferenceUnrecognized { .. } => {
                 "error-mod-catalog-preference-unrecognized"
             }
+            Self::PackUrlInvalid { .. } => "error-pack-url-invalid",
+            Self::PackHostNotTrusted { .. } => "error-pack-host-not-trusted",
+            Self::PackDownloadFailed { .. } => "error-pack-archive-download-failed",
             Self::InstanceAlreadyPersistent { .. } => "error-instance-already-persistent",
             Self::ServerNotLinkedToInstance { .. } => "error-server-not-linked",
             Self::ModFileMissing { .. } => "error-mod-file-missing",
@@ -547,6 +570,9 @@ impl CoreError {
             | Self::ModFileNotToggled { .. }
             | Self::InstanceAlreadyPersistent { .. }
             | Self::ServerNotLinkedToInstance { .. }
+            | Self::PackUrlInvalid { .. }
+            | Self::PackHostNotTrusted { .. }
+            | Self::PackDownloadFailed { .. }
             | Self::ModNotHandPlaced { .. }
             | Self::ModFileNotDeleted { .. }
             | Self::ModFileNotAdded { .. }
@@ -611,6 +637,9 @@ impl CoreError {
             | Self::ModCatalogPreferenceUnrecognized { .. }
             | Self::InstanceAlreadyPersistent { .. }
             | Self::ServerNotLinkedToInstance { .. }
+            | Self::PackUrlInvalid { .. }
+            | Self::PackHostNotTrusted { .. }
+            | Self::PackDownloadFailed { .. }
             | Self::EntityNameInvalid { .. }
             | Self::ArtworkUnusable { .. } => None,
         }

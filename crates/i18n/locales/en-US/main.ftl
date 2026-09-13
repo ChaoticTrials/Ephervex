@@ -208,6 +208,9 @@ error-registry-root-missing = That instance's files are no longer on disk.
 
 instance-duplicated = Duplicated as { $name }.
 
+# $value is a URL with its query and fragment removed.
+import-downloaded-pack = Downloaded the pack from { $value }.
+
 # $name is user-authored, $path is a filesystem path. Untranslated.
 # Moving preserves the instance, so there is no counterpart to
 # instance-duplicate-skipped-links below: a move keeps a linked folder as a
@@ -668,6 +671,7 @@ operation-importing-pack = Importing modpack
 operation-installing-mods = Installing mods
 operation-creating-server = Creating server
 operation-promoting-instance = Making the instance persistent
+operation-downloading-pack = Downloading the pack
 operation-creating-instance = Creating instance
 
 # $operation identifies one background task. It is shown so a user can find the
@@ -828,6 +832,14 @@ error-loader-change-blocked-by-mods = { $count ->
 error-mod-not-managed = That mod is no longer part of this instance.
 .action = Reopen the instance to see its current mods.
 error-mod-identity-incomplete = One of this instance's mods has no provider identity, so its dependencies cannot be worked out.
+# $value is a URL with its query and fragment removed, because a confirmation
+# prompt is not the place to print an identifier or a token.
+error-pack-url-invalid = That link does not name a pack Ephervex can download.
+.action = A pack address has to be an absolute https address with no username or password in it.
+error-pack-host-not-trusted = Ephervex has not been told it may download packs from that address.
+.action = Open the link again and confirm the address, or import it once with `ephervex import <address> --trust always`.
+error-pack-archive-download-failed = The pack could not be downloaded.
+.action = Check that the address is still valid and that the machine serving it is reachable.
 error-instance-already-persistent = That instance is already stored permanently.
 .action = Only a temporary instance can be made persistent. Delete it when you no longer need it.
 error-server-not-linked = That server does not belong to this instance.

@@ -46,8 +46,8 @@ mod test_support;
 pub use config::{
     AccountConfig, AccountLookup, ApiConfig, ApplicationDisplayConfig, ApplicationTextScale,
     ArtifactCacheLimitMode, CONFIG_SCHEMA_VERSION, CacheConfig, Config, ConfigError, EulaConfig,
-    JavaConfig, ModsConfig, NetworkAccess, PreferenceSetting, SECRET_KEY_MARKERS, ServerDefaults,
-    TechnicalTextSize,
+    ImportConfig, JavaConfig, ModsConfig, NetworkAccess, PreferenceSetting, SECRET_KEY_MARKERS,
+    ServerDefaults, TechnicalTextSize,
 };
 pub use diagnostics::{
     CrashSummary, DEFAULT_VIEW_BYTES, DiagnosticEntry, DiagnosticError, DiagnosticKind,

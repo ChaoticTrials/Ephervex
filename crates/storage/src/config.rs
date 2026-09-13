@@ -313,6 +313,66 @@ pub struct ModsConfig {
     pub unknown: toml::Table,
 }
 
+/// Which hosts the user has agreed Ephervex may fetch a pack archive from.
+///
+/// A different trust category from the download allowlists in
+/// `ephervex-download`. Those decide where an address *taken out of an
+/// untrusted archive* may point, and are a fixed, audited list precisely
+/// because nobody consented to them. A host here got in because a human
+/// activated a link and then confirmed the address they were shown, so the
+/// answer is theirs to give and theirs to take back (ADR 0027).
+///
+/// Remembering it only removes the second prompt. It never widens where a
+/// pack's own `files[].downloads` may point, and it is not a credential store:
+/// a host name is not a secret and this file is one users attach to bug
+/// reports.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ImportConfig {
+    /// Hosts a pack archive may be downloaded from without asking again, as
+    /// lowercase host names with no scheme, port, or path.
+    pub trusted_pack_hosts: Vec<String>,
+    /// Keys this build does not know about. See [`Config::unknown`].
+    #[serde(flatten)]
+    pub unknown: toml::Table,
+}
+
+impl ImportConfig {
+    /// Whether this host has already been agreed to.
+    ///
+    /// Compared after lowercasing on both sides, because a host name is
+    /// case-insensitive and a user who typed one in a browser did not choose
+    /// its spelling.
+    #[must_use]
+    pub fn trusts(&self, host: &str) -> bool {
+        let host = host.trim().to_ascii_lowercase();
+        !host.is_empty()
+            && self
+                .trusted_pack_hosts
+                .iter()
+                .any(|trusted| trusted.trim().to_ascii_lowercase() == host)
+    }
+
+    /// Remembers a host. Idempotent, so confirming twice records one entry.
+    pub fn trust(&mut self, host: &str) {
+        let host = host.trim().to_ascii_lowercase();
+        if host.is_empty() || self.trusts(&host) {
+            return;
+        }
+        self.trusted_pack_hosts.push(host);
+        self.trusted_pack_hosts.sort();
+    }
+
+    /// Withdraws a host. Returns whether anything was recorded for it.
+    pub fn withdraw(&mut self, host: &str) -> bool {
+        let host = host.trim().to_ascii_lowercase();
+        let before = self.trusted_pack_hosts.len();
+        self.trusted_pack_hosts
+            .retain(|trusted| trusted.trim().to_ascii_lowercase() != host);
+        self.trusted_pack_hosts.len() != before
+    }
+}
+
 impl ModsConfig {
     /// The recorded catalog policy.
     #[must_use]
@@ -615,6 +675,8 @@ pub struct Config {
     pub minecraft_preferences: BTreeMap<String, PreferenceSetting>,
     /// Policy for browsing mod catalogs. Which catalog, never how to reach one.
     pub mods: ModsConfig,
+    /// Which hosts the user has agreed a pack may be downloaded from.
+    pub import: ImportConfig,
     pub server_defaults: ServerDefaults,
     pub eula: EulaConfig,
     pub api: ApiConfig,
@@ -651,6 +713,7 @@ impl Default for Config {
             favorite_minecraft_versions: Vec::new(),
             minecraft_preferences: BTreeMap::new(),
             mods: ModsConfig::default(),
+            import: ImportConfig::default(),
             server_defaults: ServerDefaults::default(),
             eula: EulaConfig::default(),
             api: ApiConfig::default(),
