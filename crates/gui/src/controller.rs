@@ -34,7 +34,8 @@ use crate::presentation::{
 use crate::ui::{
     AccountRow, ActivityRow, AppWindow, DiagnosticRow, GuiI18n, ImportBlockedRow, ImportOptionRow,
     InstanceRow, JavaRow, LinkedTargetRow, LocalModClashRow, LogChunk, ModRow, ModSearchRow,
-    ModVersionRow, PendingEntityRow, RunningRow, ServerRow, Theme, WindowSizePreview,
+    ModVersionRow, PendingEntityRow, PromoteServerRow, RunningRow, ServerRow, Theme,
+    WindowSizePreview,
 };
 use crate::window_aspect;
 
@@ -2319,6 +2320,7 @@ fn register_client_actions(
     commands: &Sender<Command>,
     creations: Rc<RefCell<CreationTracker>>,
 ) {
+    register_promotion_actions(ui, commands);
     let sender = commands.clone();
     let weak = ui.as_weak();
     let submit_creations = Rc::clone(&creations);
@@ -3095,6 +3097,39 @@ fn register_mod_state_actions(
                 enabled,
             },
         );
+    });
+}
+
+/// Making a temporary instance permanent.
+///
+/// Two steps rather than one: the plan says where the instance would go and
+/// which linked servers could come along, and the dialog it opens is where each
+/// of those is answered. The answers live in the model the dialog renders, so
+/// submitting reads them straight back rather than tracking them alongside.
+fn register_promotion_actions(ui: &AppWindow, commands: &Sender<Command>) {
+    let sender = commands.clone();
+    ui.on_open_make_persistent(move |id| {
+        if let Some(id) = backend::parse_instance_id(&id) {
+            send(&sender, Command::PlanPromotion(id));
+        }
+    });
+
+    let sender = commands.clone();
+    let weak = ui.as_weak();
+    ui.on_submit_make_persistent(move |id| {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        let Some(instance) = backend::parse_instance_id(&id) else {
+            return;
+        };
+        let servers = ui
+            .get_promote_servers()
+            .iter()
+            .filter(|server| server.selected)
+            .filter_map(|server| backend::parse_server_id(&server.id))
+            .collect();
+        send(&sender, Command::PromoteInstance { instance, servers });
     });
 }
 
@@ -4758,6 +4793,29 @@ fn apply_absent_mods(ui: &AppWindow, absent: &backend::AbsentModsData, commands:
     ui.set_modal("absent-mods".into());
 }
 
+/// Opens the dialog that asks what to bring along.
+///
+/// Every offered server starts selected: a persistent instance whose server
+/// disappears on the next reboot is the surprise this dialog exists to prevent,
+/// so the safe answer is the default and unticking one is deliberate.
+fn apply_promotion_plan(ui: &AppWindow, plan: &backend::PromotionPlanData) {
+    ui.set_promote_instance_name(plan.name.as_str().into());
+    ui.set_promote_destination(plan.destination.as_str().into());
+    ui.set_promote_servers(ModelRc::new(VecModel::from(
+        plan.servers
+            .iter()
+            .map(|(id, name)| PromoteServerRow {
+                id: id.as_str().into(),
+                display: name.as_str().into(),
+                selected: true,
+            })
+            .collect::<Vec<_>>(),
+    )));
+    ui.set_pending_action_id(plan.instance.as_str().into());
+    ui.set_modal_error(SharedString::default());
+    ui.set_modal("make-persistent".into());
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn apply_event(
     ui: &AppWindow,
@@ -4774,6 +4832,7 @@ fn apply_event(
     match event {
         Event::LocalModPlan(plan) => apply_local_mod_plan(ui, &plan, local_mods, commands),
         Event::AbsentMods(absent) => apply_absent_mods(ui, &absent, commands),
+        Event::PromotionPlan(plan) => apply_promotion_plan(ui, &plan),
         Event::Snapshot(snapshot) => {
             apply_snapshot_event(ui, *snapshot, creations, minecraft, commands);
         }

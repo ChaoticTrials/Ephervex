@@ -172,6 +172,13 @@ pub enum Command {
     OpenServerFolder(ServerId),
     /// Find out whether duplicating this instance has a question to ask first.
     PlanDuplicate(InstanceId),
+    /// Find out where making this instance persistent would put it, and which
+    /// of its linked servers could come along.
+    PlanPromotion(InstanceId),
+    PromoteInstance {
+        instance: InstanceId,
+        servers: Vec<ServerId>,
+    },
     DuplicateClient {
         instance: InstanceId,
         absent_mods: AbsentModPolicy,
@@ -712,6 +719,17 @@ pub struct AbsentModsData {
     pub names: Vec<String>,
 }
 
+/// What making one instance persistent would move, as the prompt needs it.
+#[derive(Debug, Clone)]
+pub struct PromotionPlanData {
+    pub instance: String,
+    pub name: String,
+    pub destination: String,
+    /// Every temporary linked server, by id and display name. Each is offered
+    /// with its own answer rather than the set being one yes or no.
+    pub servers: Vec<(String, String)>,
+}
+
 /// One dropped file that cannot go in, and why, in the words a user reads.
 #[derive(Debug, Clone)]
 pub struct LocalModRefusalData {
@@ -1081,6 +1099,9 @@ pub enum Event {
     /// The mods a copy would inherit without their jars, so the user can say
     /// whether the copy should carry them.
     AbsentMods(AbsentModsData),
+    /// Where making an instance persistent would put it, and which servers the
+    /// user can bring along.
+    PromotionPlan(PromotionPlanData),
     CrashNotice(CrashNoticeData),
     Running(Vec<RunningData>),
     ModVersions(ModVersionsData),
@@ -1622,6 +1643,24 @@ fn run_worker(
                     }
                     Err(error) => send_error(&events, &error),
                 }
+            }
+            Command::PlanPromotion(instance) => match app.plan_instance_promotion(instance) {
+                Ok(plan) => {
+                    let _ = events.send(Event::PromotionPlan(PromotionPlanData {
+                        instance: plan.instance.to_string(),
+                        name: plan.name,
+                        destination: plan.destination.display().to_string(),
+                        servers: plan
+                            .servers
+                            .into_iter()
+                            .map(|server| (server.id.to_string(), server.name))
+                            .collect(),
+                    }));
+                }
+                Err(error) => send_error(&events, &error),
+            },
+            Command::PromoteInstance { instance, servers } => {
+                promote_instance(&app, instance, servers, &events);
             }
             Command::DuplicateClient {
                 instance,
@@ -2980,6 +3019,47 @@ fn send_host_mods(
 
 /// Turns off the mods the newest crash report stated, and says how many.
 ///
+/// Moves one instance, and the servers the user ticked, into persistent storage.
+///
+/// A server that could not be moved is a toast of its own rather than a failed
+/// operation: the instance is already persistent by then, and saying so is more
+/// use than reporting the whole thing as broken.
+fn promote_instance(
+    app: &App,
+    instance: InstanceId,
+    servers: Vec<ServerId>,
+    events: &Sender<Event>,
+) {
+    let request = ephervex_core::PromotionRequest { servers };
+    let reporter = OperationReporter::silent("operation-promoting-instance");
+    match app.promote_instance(instance, &request, &reporter) {
+        Ok(outcome) => {
+            // Before the toast, so the dialog that asked cannot be answered a
+            // second time while the first answer is still being applied.
+            let _ = events.send(Event::CloseModal);
+            let _ = events.send(Event::Toast {
+                message: localized_value(
+                    "gui-made-persistent",
+                    &outcome.instance.root.display().to_string(),
+                ),
+                error: false,
+            });
+            for warning in &outcome.warnings {
+                let _ = events.send(Event::Toast {
+                    message: localized_values(
+                        "gui-server-not-made-persistent",
+                        &warning.name,
+                        &warning.error.to_string(),
+                    ),
+                    error: true,
+                });
+            }
+            send_snapshot(app, events);
+        }
+        Err(error) => send_modal_error(events, &error),
+    }
+}
+
 /// Only what the report stated: a compat trigger is an inference and stays a
 /// choice the user makes one row at a time. Only mods that are still enabled,
 /// so pressing this twice does nothing the second time.

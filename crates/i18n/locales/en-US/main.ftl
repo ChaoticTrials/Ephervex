@@ -1263,6 +1263,18 @@ gui-open-workspace = Open Workspace
 gui-create-linked-server = Create Linked Server
 gui-open-folder = Open Folder
 gui-duplicate-instance = Duplicate
+gui-make-persistent = Make Persistent
+gui-make-persistent-confirm = Move it
+# $value is the instance name, user-authored.
+gui-make-persistent-detail = { $value } lives in temporary storage, which the operating system clears whenever it likes. Moving it keeps everything it has, including its mods, saves, logs and linked servers.
+gui-make-persistent-servers = { $count ->
+        [one] { $count } linked server is temporary too. Bring it along:
+       *[other] { $count } linked servers are temporary too. Bring them along:
+    }
+# $value is a filesystem path.
+gui-made-persistent = Moved to { $value }.
+# $first is a server name, $second is the reason it did not move.
+gui-server-not-made-persistent = { $first } could not be moved and is still temporary: { $second }
 gui-delete-instance = Delete Instance...
 gui-delete-server = Delete Server...
 gui-delete-instance-detail = Remove "{ $value }" from Ephervex?
