@@ -172,6 +172,12 @@ pub enum Command {
     OpenServerFolder(ServerId),
     /// Find out whether duplicating this instance has a question to ask first.
     PlanDuplicate(InstanceId),
+    /// A modpack address a link carried. Asks before it downloads, unless the
+    /// host has been agreed to before or `consent` carries the answer.
+    OpenPackUrl {
+        url: String,
+        consent: Option<ephervex_core::HostConsent>,
+    },
     /// Find out where making this instance persistent would put it, and which
     /// of its linked servers could come along.
     PlanPromotion(InstanceId),
@@ -1102,6 +1108,17 @@ pub enum Event {
     /// Where making an instance persistent would put it, and which servers the
     /// user can bring along.
     PromotionPlan(PromotionPlanData),
+    /// A link wants a modpack downloaded from a host nobody has agreed to yet.
+    PackUrlConsent {
+        url: String,
+        display: String,
+    },
+    /// A modpack that arrived over a link, ready for the import dialog.
+    ///
+    /// The archive is under the temporary root and is the import's to consume.
+    PackDownloaded {
+        archive: PathBuf,
+    },
     CrashNotice(CrashNoticeData),
     Running(Vec<RunningData>),
     ModVersions(ModVersionsData),
@@ -1643,6 +1660,9 @@ fn run_worker(
                     }
                     Err(error) => send_error(&events, &error),
                 }
+            }
+            Command::OpenPackUrl { url, consent } => {
+                runtime.block_on(open_pack_url(&mut app, &url, consent, &events));
             }
             Command::PlanPromotion(instance) => match app.plan_instance_promotion(instance) {
                 Ok(plan) => {
@@ -3055,6 +3075,51 @@ fn promote_instance(
                 });
             }
             send_snapshot(app, events);
+        }
+        Err(error) => send_modal_error(events, &error),
+    }
+}
+
+/// Turns an address a link carried into an archive the import dialog can open.
+///
+/// Asks first whenever the host has not been agreed to before. The question is
+/// the whole point of the feature's safety story, so it is asked here rather
+/// than assumed by the caller: a frontend that forgot would otherwise download
+/// from whatever a web page named (ADR 0027).
+async fn open_pack_url(
+    app: &mut App,
+    url: &str,
+    consent: Option<ephervex_core::HostConsent>,
+    events: &Sender<Event>,
+) {
+    let source = match app.pack_source(url) {
+        Ok(source) => source,
+        Err(error) => {
+            send_modal_error(events, &error);
+            return;
+        }
+    };
+
+    if consent.is_none() && !app.pack_host_is_trusted(&source) {
+        let _ = events.send(Event::PackUrlConsent {
+            url: url.to_owned(),
+            display: source.display().to_owned(),
+        });
+        return;
+    }
+
+    let reporter = OperationReporter::silent("operation-downloading-pack");
+    match app
+        .fetch_pack(&source, consent, &reporter, &CancellationToken::new())
+        .await
+    {
+        // `keep` because the import that follows owns the file now: it runs as
+        // a separate command, so tying the archive's life to this scope would
+        // delete it before anything read it.
+        Ok(staged) => {
+            let _ = events.send(Event::PackDownloaded {
+                archive: staged.keep(),
+            });
         }
         Err(error) => send_modal_error(events, &error),
     }

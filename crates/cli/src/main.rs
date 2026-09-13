@@ -143,6 +143,19 @@ enum Command {
         #[command(subcommand)]
         command: LogsCommand,
     },
+    /// Make Ephervex open ephervex:// links from your browser, or stop it.
+    ///
+    /// Writes a desktop entry of Ephervex's own into your applications folder
+    /// and asks your desktop to prefer it for the scheme. Nothing else is
+    /// touched: the entry Ephervex ships is left alone, and removing this one
+    /// undoes the whole thing.
+    ///
+    /// Only run this when you want it. Claiming a link scheme is not something
+    /// Ephervex does on its own.
+    UrlHandler {
+        #[command(subcommand)]
+        command: UrlHandlerCommand,
+    },
     /// Import a modpack into a client instance, from a file or an address.
     Import(ImportArgs),
     /// Install and launch a client instance, streaming its log to the terminal.
@@ -725,6 +738,19 @@ enum InstanceCommand {
         #[arg(long)]
         no_servers: bool,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum UrlHandlerCommand {
+    /// Show whether Ephervex currently opens its own links.
+    Status,
+    /// Open ephervex:// links with this copy of Ephervex.
+    ///
+    /// Run it again after moving the AppImage: the entry records where the
+    /// launcher was, and a moved one leaves a link that resolves to nothing.
+    Register,
+    /// Stop opening ephervex:// links.
+    Unregister,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1321,6 +1347,7 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
             let app = open_app()?;
             run_logs_command(&app, command, cli.json)
         }
+        Command::UrlHandler { command } => run_url_handler_command(command, cli.json),
         Command::Import(args) => {
             let mut app = open_app()?;
             // Both paths may download: an address is fetched before it can be
@@ -4630,6 +4657,60 @@ fn show_reconciliation(report: &ReconciliationReport, json: bool) {
 }
 
 // -------------------------------------------------------------------- output
+
+/// `ephervex url-handler <status|register|unregister>`.
+fn run_url_handler_command(command: &UrlHandlerCommand, json: bool) -> anyhow::Result<()> {
+    let app = open_app()?;
+    let status = match command {
+        UrlHandlerCommand::Status => app.url_handler_status(),
+        UrlHandlerCommand::Register => app.register_url_handler()?,
+        UrlHandlerCommand::Unregister => {
+            let removed = app.unregister_url_handler()?;
+            if json {
+                print_json(&serde_json::json!({ "registered": false, "removed": removed }));
+            } else if removed {
+                println!("Ephervex no longer opens ephervex:// links.");
+            } else {
+                println!("Ephervex was not opening ephervex:// links.");
+            }
+            return Ok(());
+        }
+    };
+    print_url_handler(&status, json);
+    Ok(())
+}
+
+/// Reports whether Ephervex opens its own links, and what it would run.
+fn print_url_handler(status: &ephervex_core::UrlHandlerStatus, json: bool) {
+    if json {
+        print_json(&serde_json::json!({
+            "registered": status.registered,
+            "entry": status.entry.to_string_lossy(),
+            "command": status.command,
+            "command_exists": status.command_exists(),
+            "scheme": ephervex_core::scheme_mime_type(),
+        }));
+        return;
+    }
+
+    if !status.registered {
+        println!("Ephervex does not open ephervex:// links.");
+        println!("Run `ephervex url-handler register` to change that.");
+        return;
+    }
+    println!("Ephervex opens ephervex:// links.");
+    println!("entry:   {}", status.entry.display());
+    if let Some(command) = &status.command {
+        println!("runs:    {command}");
+    }
+    // A registration pointing at a moved artifact resolves, is run, and does
+    // nothing. Saying so is more use than reporting it as registered.
+    if !status.command_exists() {
+        println!(
+            "warning: that path no longer exists. Run `ephervex url-handler register` again from where Ephervex is now."
+        );
+    }
+}
 
 /// Implements `ephervex import <archive-or-url> --inspect` without writing an
 /// instance.

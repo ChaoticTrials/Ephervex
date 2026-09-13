@@ -119,6 +119,43 @@ Shell completions come from the CLI itself:
 ephervex completions bash
 ```
 
+### Opening a modpack from a web page
+
+A site that hosts packs can offer a link that hands one straight to Ephervex:
+
+```text
+ephervex://import?url=<percent-encoded https address of the pack>
+```
+
+Ephervex does not claim that link scheme on its own. Turn it on when you want
+it, and off again whenever:
+
+```bash
+ephervex url-handler register
+ephervex url-handler status
+ephervex url-handler unregister
+```
+
+Registering writes `ephervex-url-handler.desktop` into
+`$XDG_DATA_HOME/applications` and asks your desktop to prefer it. It is a
+separate entry from the one Ephervex ships, so registering never overwrites a
+file your package manager owns. The entry records where the launcher is, so run
+`register` again after moving an AppImage; `status` says when the recorded path
+no longer exists.
+
+The first time a link points at a site, Ephervex shows you the address and asks
+before downloading anything. Agreeing remembers the host, so the next pack from
+the same site is one click; the answer is recorded under `[import]` in
+`config.toml` and can be taken back. Agreeing to a host lets it serve an
+archive and nothing else: the pack's own file downloads stay restricted to the
+hosts they always were (ADR 0027).
+
+The same thing works without a browser:
+
+```bash
+ephervex import 'https://example.com/some/pack?platform=modrinth'
+```
+
 Ephervex does not modify shell configuration files or install completion scripts
 for you.
 

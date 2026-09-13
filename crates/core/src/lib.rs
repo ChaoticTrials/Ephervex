@@ -52,6 +52,7 @@ pub mod promotion;
 pub mod running;
 pub mod server;
 pub mod server_pack;
+pub mod url_handler;
 
 pub use account::{AccountStatus, AccountSummary, ApiSettings, LoginOptions, TOKEN_REFRESH_MARGIN};
 pub use app::{
@@ -108,13 +109,17 @@ pub use mutation::{
     ModMutability, ModMutation, ModMutationPlan, ModVersionChoice, ModVersionChoices,
     MutationRestriction, PlannedFile, PlannedOutcome,
 };
-pub use pack_url::{HostConsent, MAX_PACK_ARCHIVE_BYTES, PackSource, StagedPack};
+pub use pack_url::{
+    HostConsent, LAUNCHER_URL_SCHEME, LauncherUrl, LauncherUrlError, MAX_LAUNCHER_URL_BYTES,
+    MAX_PACK_ARCHIVE_BYTES, PackSource, StagedPack,
+};
 pub use promotion::{
     PromotableServer, PromotionOutcome, PromotionPlan, PromotionRequest, PromotionWarning,
 };
 pub use running::{ProcessMonitor, ProcessUsage, RunningProcess};
 pub use server::{CaptureSnapshot, ServerCreateOptions, ServerPersistenceHealth, ServerStatus};
 pub use server_pack::{IdentificationOutcome, ServerContentSource, ServerPackOutcome};
+pub use url_handler::{URL_HANDLER_ENTRY, UrlHandlerStatus, scheme_mime_type};
 
 /// Cancellation, re-exported because the services take one.
 ///

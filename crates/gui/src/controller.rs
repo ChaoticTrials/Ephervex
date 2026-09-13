@@ -1607,23 +1607,38 @@ pub fn accept_file_drops(ui: &AppWindow, drops: &FileDrops, controller: &Control
                         let Some(archive) = paths.into_iter().next() else {
                             return;
                         };
-                        let generation = flow.borrow_mut().begin_attempt();
-                        set_server_pack(&ui, ServerPackTarget::Import, None);
-                        render_import_flow(&ui, &flow.borrow());
-                        ui.set_modal_error(SharedString::default());
-                        ui.set_modal("import".into());
-                        send(
-                            &sender,
-                            Command::AnalyzeImport {
-                                generation,
-                                archive,
-                            },
-                        );
+                        begin_import(&ui, &flow, &sender, archive);
                     }
                 }
             }
         }
     });
+}
+
+/// Opens the import dialog on one archive and starts reading it.
+///
+/// The same sequence however the archive arrived: let go over the window, or
+/// downloaded because a web page offered a link. A link-initiated import is a
+/// drop with a download in front of it, so its progress belongs in the dialog
+/// the user already knows rather than in one of its own.
+fn begin_import(
+    ui: &AppWindow,
+    flow: &Rc<RefCell<ImportFlowState>>,
+    commands: &Sender<Command>,
+    archive: PathBuf,
+) {
+    let generation = flow.borrow_mut().begin_attempt();
+    set_server_pack(ui, ServerPackTarget::Import, None);
+    render_import_flow(ui, &flow.borrow());
+    ui.set_modal_error(SharedString::default());
+    ui.set_modal("import".into());
+    send(
+        commands,
+        Command::AnalyzeImport {
+            generation,
+            archive,
+        },
+    );
 }
 
 /// Which promise the drop overlay should make, for what is on screen.
@@ -2321,6 +2336,7 @@ fn register_client_actions(
     creations: Rc<RefCell<CreationTracker>>,
 ) {
     register_promotion_actions(ui, commands);
+    register_pack_link_actions(ui, commands);
     let sender = commands.clone();
     let weak = ui.as_weak();
     let submit_creations = Rc::clone(&creations);
@@ -3106,6 +3122,40 @@ fn register_mod_state_actions(
 /// which linked servers could come along, and the dialog it opens is where each
 /// of those is answered. The answers live in the model the dialog renders, so
 /// submitting reads them straight back rather than tracking them alongside.
+fn register_pack_link_actions(ui: &AppWindow, commands: &Sender<Command>) {
+    let sender = commands.clone();
+    ui.on_open_pack_link(move |url, remember| {
+        let consent = if remember {
+            ephervex_core::HostConsent::Remember
+        } else {
+            ephervex_core::HostConsent::JustOnce
+        };
+        send(
+            &sender,
+            Command::OpenPackUrl {
+                url: url.to_string(),
+                consent: Some(consent),
+            },
+        );
+    });
+}
+
+/// Hands the application a modpack link, as a desktop scheme handler delivers
+/// one.
+///
+/// Separate from the callbacks above because the caller is `main`, not the
+/// window: a link is what the process was started for, and it arrives before
+/// anything is on screen.
+pub fn open_pack_link(controller: &Controller, url: &str) {
+    send(
+        &controller.commands,
+        Command::OpenPackUrl {
+            url: url.to_owned(),
+            consent: None,
+        },
+    );
+}
+
 fn register_promotion_actions(ui: &AppWindow, commands: &Sender<Command>) {
     let sender = commands.clone();
     ui.on_open_make_persistent(move |id| {
@@ -4833,6 +4883,14 @@ fn apply_event(
         Event::LocalModPlan(plan) => apply_local_mod_plan(ui, &plan, local_mods, commands),
         Event::AbsentMods(absent) => apply_absent_mods(ui, &absent, commands),
         Event::PromotionPlan(plan) => apply_promotion_plan(ui, &plan),
+        Event::PackUrlConsent { url, display } => {
+            ui.set_pack_link_url(url.as_str().into());
+            ui.set_pack_link_display(display.as_str().into());
+            ui.set_pack_link_remember(true);
+            ui.set_modal_error(SharedString::default());
+            ui.set_modal("open-pack-link".into());
+        }
+        Event::PackDownloaded { archive } => begin_import(ui, import_flow, commands, archive),
         Event::Snapshot(snapshot) => {
             apply_snapshot_event(ui, *snapshot, creations, minecraft, commands);
         }

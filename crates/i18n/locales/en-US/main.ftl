@@ -834,6 +834,13 @@ error-mod-not-managed = That mod is no longer part of this instance.
 error-mod-identity-incomplete = One of this instance's mods has no provider identity, so its dependencies cannot be worked out.
 # $value is a URL with its query and fragment removed, because a confirmation
 # prompt is not the place to print an identifier or a token.
+error-url-handler-unavailable = Ephervex could not change which application opens its links.
+.action = Check that your home directory is writable.
+error-launcher-url-not-one = That is not an Ephervex link.
+error-launcher-url-too-long = That link is far longer than any address Ephervex reads.
+error-launcher-url-unknown-action = That link asks for something this version of Ephervex does not do.
+.action = Updating Ephervex may add it.
+error-launcher-url-no-single-pack = That link does not name exactly one pack to import.
 error-pack-url-invalid = That link does not name a pack Ephervex can download.
 .action = A pack address has to be an absolute https address with no username or password in it.
 error-pack-host-not-trusted = Ephervex has not been told it may download packs from that address.
@@ -1276,6 +1283,14 @@ gui-create-linked-server = Create Linked Server
 gui-open-folder = Open Folder
 gui-duplicate-instance = Duplicate
 gui-make-persistent = Make Persistent
+gui-takes-no-arguments = The Ephervex desktop application takes no arguments. Use the ephervex command for the command line.
+gui-open-pack-link = Open a modpack
+# $value is the address with its query and fragment removed, so a link's
+# identifiers and tokens are not printed in a prompt.
+gui-open-pack-link-detail = A link asked Ephervex to download a modpack from:
+gui-open-pack-link-remember = Do not ask again for this site
+gui-open-pack-link-confirm = Download it
+gui-downloading-pack = Downloading the modpack...
 gui-make-persistent-confirm = Move it
 # $value is the instance name, user-authored.
 gui-make-persistent-detail = { $value } lives in temporary storage, which the operating system clears whenever it likes. Moving it keeps everything it has, including its mods, saves, logs and linked servers.

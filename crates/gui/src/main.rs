@@ -5,6 +5,35 @@
 
 use slint::ComponentHandle as _;
 
+/// What this process was started for, beyond showing a window.
+///
+/// The desktop application takes no options and never has. The one argument it
+/// accepts is a link a scheme handler delivered, and anything else is a
+/// mistake worth naming rather than ignoring: a launcher that silently
+/// discarded its command line is what made `ephervex-gui pack.mrpack` look
+/// like it did nothing.
+enum Startup {
+    /// Open the window and wait.
+    Window,
+    /// Open the window and act on this link.
+    Link(ephervex_core::LauncherUrl),
+    /// Refuse, with something to print.
+    Refused(String),
+}
+
+fn startup_from(arguments: &[String]) -> Startup {
+    match arguments {
+        [] => Startup::Window,
+        [argument] if ephervex_core::LauncherUrl::looks_like_one(argument) => {
+            match ephervex_core::LauncherUrl::parse(argument) {
+                Ok(link) => Startup::Link(link),
+                Err(error) => Startup::Refused(ephervex_i18n::lookup(error.message_id())),
+            }
+        }
+        _ => Startup::Refused(ephervex_i18n::lookup("gui-takes-no-arguments")),
+    }
+}
+
 fn main() -> Result<(), slint::PlatformError> {
     let launcher_logs = ephervex_core::Paths::from_environment()
         .ok()
@@ -36,6 +65,15 @@ fn main() -> Result<(), slint::PlatformError> {
         tracing::info!(%error, "dropping a modpack onto the window is unavailable here");
     }
 
+    // Read before the window exists: a refusal should cost a line on stderr
+    // rather than a window that opens and then explains itself.
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    let startup = startup_from(&arguments);
+    if let Startup::Refused(message) = &startup {
+        eprintln!("{message}");
+        std::process::exit(2);
+    }
+
     let ui = ephervex_gui::ui::AppWindow::new()?;
     // Before anything is drawn, because the console and every other technical
     // view asks for this family on its first frame.
@@ -52,6 +90,10 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.set_license_text(include_str!("../../../LICENSE").into());
     let controller = ephervex_gui::controller::attach(&ui);
     ephervex_gui::controller::accept_file_drops(&ui, &drops, &controller);
+    if let Startup::Link(ephervex_core::LauncherUrl::Import { url }) = &startup {
+        tracing::info!("opening a modpack a link named");
+        ephervex_gui::controller::open_pack_link(&controller, url);
+    }
 
     tracing::info!(
         "starting {} {} desktop interface",

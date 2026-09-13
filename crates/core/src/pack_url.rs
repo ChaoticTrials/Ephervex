@@ -138,6 +138,114 @@ impl Drop for StagedPack {
     }
 }
 
+/// The scheme a launcher link uses.
+pub const LAUNCHER_URL_SCHEME: &str = "ephervex";
+
+/// The longest launcher link Ephervex will look at.
+///
+/// A link is a command-line argument that arrives from a web page, so it is
+/// bounded before it is parsed rather than after. An address long enough to
+/// matter here is not one anybody typed.
+pub const MAX_LAUNCHER_URL_BYTES: usize = 8 * 1024;
+
+/// A link a web page offered, already checked.
+///
+/// Parsing is strict and total: an argument either is a launcher link naming an
+/// action this build performs, or it is refused. Nothing is inferred from a
+/// partial match, because the argument comes from outside and the cost of
+/// guessing is acting on somebody else's intent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LauncherUrl {
+    /// `ephervex://import?url=<percent-encoded https address>`.
+    Import { url: String },
+}
+
+impl LauncherUrl {
+    /// Reads one command-line argument as a launcher link.
+    ///
+    /// The address inside is *not* checked here: that is
+    /// [`App::pack_source`]'s job, and doing it in one place is what keeps the
+    /// transport rules from having a second implementation that drifts.
+    pub fn parse(argument: &str) -> Result<Self, LauncherUrlError> {
+        let trimmed = argument.trim();
+        if trimmed.len() > MAX_LAUNCHER_URL_BYTES {
+            return Err(LauncherUrlError::TooLong {
+                bytes: trimmed.len(),
+            });
+        }
+        let parsed = Url::parse(trimmed).map_err(|_| LauncherUrlError::NotALauncherUrl)?;
+        if parsed.scheme() != LAUNCHER_URL_SCHEME {
+            return Err(LauncherUrlError::NotALauncherUrl);
+        }
+
+        // `ephervex://import?...` parses with `import` as the *host*, while
+        // `ephervex:import?...` puts it in the path. A link written either way
+        // means the same thing to a reader, so both are read the same way.
+        let action = match parsed.host_str() {
+            Some(host) if !host.is_empty() => host.to_ascii_lowercase(),
+            _ => parsed.path().trim_matches('/').to_ascii_lowercase(),
+        };
+        if action != "import" {
+            return Err(LauncherUrlError::UnknownAction { action });
+        }
+
+        let mut addresses = parsed
+            .query_pairs()
+            .filter(|(key, _)| key == "url")
+            .map(|(_, value)| value.into_owned());
+        let url = addresses.next().ok_or(LauncherUrlError::MissingUrl)?;
+        if addresses.next().is_some() {
+            // Two addresses is not a link with a spare: it is ambiguous about
+            // which machine to talk to, and picking one would be a guess.
+            return Err(LauncherUrlError::SeveralUrls);
+        }
+        if url.trim().is_empty() {
+            return Err(LauncherUrlError::MissingUrl);
+        }
+        Ok(Self::Import { url })
+    }
+
+    /// Whether this argument is even meant for us.
+    ///
+    /// Lets a frontend tell "somebody passed us a link we cannot read", which
+    /// is worth reporting, from "this is not a link at all", which is not.
+    #[must_use]
+    pub fn looks_like_one(argument: &str) -> bool {
+        argument
+            .trim()
+            .to_ascii_lowercase()
+            .starts_with(&format!("{LAUNCHER_URL_SCHEME}:"))
+    }
+}
+
+/// Why an argument is not a launcher link this build acts on.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum LauncherUrlError {
+    #[error("not an {LAUNCHER_URL_SCHEME} link")]
+    NotALauncherUrl,
+    #[error("a launcher link of {bytes} bytes is longer than anything Ephervex reads")]
+    TooLong { bytes: usize },
+    #[error("`{action}` is not something this version of Ephervex does")]
+    UnknownAction { action: String },
+    #[error("the link names no pack to import")]
+    MissingUrl,
+    #[error("the link names more than one pack")]
+    SeveralUrls,
+}
+
+impl LauncherUrlError {
+    /// The `ephervex-i18n` message id explaining this to a user.
+    #[must_use]
+    pub const fn message_id(&self) -> &'static str {
+        match self {
+            Self::NotALauncherUrl => "error-launcher-url-not-one",
+            Self::TooLong { .. } => "error-launcher-url-too-long",
+            Self::UnknownAction { .. } => "error-launcher-url-unknown-action",
+            Self::MissingUrl | Self::SeveralUrls => "error-launcher-url-no-single-pack",
+        }
+    }
+}
+
 impl App {
     /// Reads an address a pack could be fetched from.
     ///
@@ -327,6 +435,112 @@ mod tests {
             .mount(&server)
             .await;
         server
+    }
+
+    /// The link DumpViewer's button produces, read exactly as sent.
+    #[test]
+    fn the_link_a_web_page_offers_names_the_pack_it_carries() {
+        let link = "ephervex://import?url=https%3A%2F%2Fdumps.chaotictrials.de%2Fapi%2Fdump%2F5ca16367-3824-486f-a39e-d0c4bffe8922%2Fmodpack%3Fplatform%3Dmodrinth";
+
+        let parsed = LauncherUrl::parse(link).expect("a link this build acts on");
+
+        assert_eq!(
+            parsed,
+            LauncherUrl::Import {
+                url: "https://dumps.chaotictrials.de/api/dump/5ca16367-3824-486f-a39e-d0c4bffe8922/modpack?platform=modrinth".to_owned()
+            },
+            "the address has to come back with its own query intact"
+        );
+    }
+
+    /// `ephervex:import?...` and `ephervex://import?...` mean the same thing to
+    /// a reader, so they mean the same thing here.
+    #[test]
+    fn an_action_is_read_whether_it_is_written_as_a_host_or_a_path() {
+        let expected = LauncherUrl::Import {
+            url: "https://example.com/pack.mrpack".to_owned(),
+        };
+        for link in [
+            "ephervex://import?url=https%3A%2F%2Fexample.com%2Fpack.mrpack",
+            "ephervex:import?url=https%3A%2F%2Fexample.com%2Fpack.mrpack",
+            "EPHERVEX://IMPORT?url=https%3A%2F%2Fexample.com%2Fpack.mrpack",
+        ] {
+            assert_eq!(LauncherUrl::parse(link).expect(link), expected, "{link}");
+        }
+    }
+
+    #[test]
+    fn a_link_this_build_cannot_act_on_is_refused_rather_than_guessed_at() {
+        use LauncherUrlError as E;
+
+        let cases: [(&str, E); 6] = [
+            ("https://example.com/pack.mrpack", E::NotALauncherUrl),
+            ("not a link at all", E::NotALauncherUrl),
+            (
+                "ephervex://launch?url=https%3A%2F%2Fexample.com",
+                E::UnknownAction {
+                    action: "launch".to_owned(),
+                },
+            ),
+            ("ephervex://import", E::MissingUrl),
+            ("ephervex://import?url=", E::MissingUrl),
+            (
+                "ephervex://import?url=https%3A%2F%2Fa.example&url=https%3A%2F%2Fb.example",
+                E::SeveralUrls,
+            ),
+        ];
+
+        for (link, expected) in cases {
+            assert_eq!(
+                LauncherUrl::parse(link).expect_err(link),
+                expected,
+                "{link}"
+            );
+        }
+    }
+
+    /// The argument arrives from a web page, so it is bounded before it is
+    /// parsed rather than after.
+    #[test]
+    fn an_absurdly_long_link_is_refused_before_it_is_parsed() {
+        let link = format!(
+            "ephervex://import?url=https%3A%2F%2Fexample.com%2F{}",
+            "a".repeat(MAX_LAUNCHER_URL_BYTES)
+        );
+
+        assert!(matches!(
+            LauncherUrl::parse(&link).expect_err("too long"),
+            LauncherUrlError::TooLong { .. }
+        ));
+    }
+
+    /// Telling "a link we cannot read", which is worth reporting, from "not a
+    /// link", which is not.
+    #[test]
+    fn an_argument_meant_for_us_is_recognized_even_when_it_cannot_be_acted_on() {
+        assert!(LauncherUrl::looks_like_one("ephervex://import?url=x"));
+        assert!(LauncherUrl::looks_like_one("ephervex://nonsense"));
+        assert!(!LauncherUrl::looks_like_one("/home/melanx/pack.mrpack"));
+        assert!(!LauncherUrl::looks_like_one(
+            "https://example.com/pack.mrpack"
+        ));
+    }
+
+    /// The address inside a link is not trusted for being inside one: it goes
+    /// through the same transport rules as any other.
+    #[test]
+    fn an_address_smuggled_inside_a_link_is_still_checked() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = App::open_at(Paths::rooted_at(base.path())).expect("app opens");
+        let LauncherUrl::Import { url } =
+            LauncherUrl::parse("ephervex://import?url=file%3A%2F%2F%2Fetc%2Fpasswd")
+                .expect("a well-formed link");
+
+        let error = app
+            .pack_source(&url)
+            .expect_err("a link does not make a file address fetchable");
+
+        assert!(matches!(error, CoreError::PackUrlInvalid { .. }));
     }
 
     #[test]

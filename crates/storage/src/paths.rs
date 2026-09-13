@@ -207,6 +207,21 @@ impl Paths {
         &self.temp
     }
 
+    /// The XDG applications directory, where desktop entries live.
+    ///
+    /// A *sibling* of Ephervex's own data directory rather than a child of it:
+    /// [`Self::data_dir`] is `$XDG_DATA_HOME/ephervex`, and the place
+    /// `update-desktop-database` and `xdg-mime` read is
+    /// `$XDG_DATA_HOME/applications`. An entry written under the application's
+    /// own directory is one the desktop never finds.
+    #[must_use]
+    pub fn desktop_entries_dir(&self) -> PathBuf {
+        self.data
+            .parent()
+            .unwrap_or(self.data.as_path())
+            .join("applications")
+    }
+
     /// Where persistent client instances live.
     ///
     /// The configured override if there is one, otherwise

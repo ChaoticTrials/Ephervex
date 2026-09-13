@@ -219,6 +219,10 @@ pub enum CoreError {
     #[error("`{configured}` is not a mod catalog this version of Ephervex knows")]
     ModCatalogPreferenceUnrecognized { configured: String },
 
+    /// The desktop link handler could not be registered or removed.
+    #[error("the link handler could not be changed: {detail}")]
+    UrlHandlerUnavailable { detail: String },
+
     /// A pack address that is not one Ephervex will follow.
     ///
     /// The address itself is wrong: not absolute, not HTTPS, no host, or
@@ -382,6 +386,7 @@ impl CoreError {
             Self::ModCatalogPreferenceUnrecognized { .. } => {
                 "error-mod-catalog-preference-unrecognized"
             }
+            Self::UrlHandlerUnavailable { .. } => "error-url-handler-unavailable",
             Self::PackUrlInvalid { .. } => "error-pack-url-invalid",
             Self::PackHostNotTrusted { .. } => "error-pack-host-not-trusted",
             Self::PackDownloadFailed { .. } => "error-pack-archive-download-failed",
@@ -573,6 +578,7 @@ impl CoreError {
             | Self::PackUrlInvalid { .. }
             | Self::PackHostNotTrusted { .. }
             | Self::PackDownloadFailed { .. }
+            | Self::UrlHandlerUnavailable { .. }
             | Self::ModNotHandPlaced { .. }
             | Self::ModFileNotDeleted { .. }
             | Self::ModFileNotAdded { .. }
@@ -640,6 +646,7 @@ impl CoreError {
             | Self::PackUrlInvalid { .. }
             | Self::PackHostNotTrusted { .. }
             | Self::PackDownloadFailed { .. }
+            | Self::UrlHandlerUnavailable { .. }
             | Self::EntityNameInvalid { .. }
             | Self::ArtworkUnusable { .. } => None,
         }
