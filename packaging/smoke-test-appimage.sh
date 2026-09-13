@@ -138,6 +138,37 @@ run_cli --help >/dev/null || fail "\`ephervex --help\` failed"
 run_cli --version >/dev/null || fail "\`ephervex --version\` failed"
 note "the command-line interface answers --help and --version"
 
+# --- dispatch under a name that is not `ephervex` ----------------------------
+# The common case, and the one that used to fail silently: `ln -s <artifact>
+# ~/.local/bin/` keeps the artifact's own name, so every such link reached the
+# desktop application and discarded the command line (ADR 0023's amendment).
+UNDER_OTHER_NAME=$(sandboxed ARGV0=Ephervex-x86_64.AppImage "${ROOT}/AppRun" --version) ||
+    fail "the artifact does not answer --version under its own file name"
+printf '%s' "${UNDER_OTHER_NAME}" | grep -qi 'ephervex' ||
+    fail "--version under a non-ephervex name did not reach the command line"
+note "arguments reach the command line whatever the artifact is named"
+
+# A launcher link is the desktop application's one argument, so it must *not*
+# be answered by the command line however the artifact is named (ADR 0027).
+#
+# Deliberately a link this build cannot act on: the desktop application refuses
+# that before it builds a window, so this can never open one or hang here. A
+# link it *could* act on would do both.
+LINK_REFUSAL=$(sandboxed ARGV0=Ephervex-x86_64.AppImage "${ROOT}/AppRun" \
+    'ephervex://something-this-build-does-not-do' 2>&1 || true)
+printf '%s' "${LINK_REFUSAL}" | grep -qi 'usage' &&
+    fail "a launcher link was handed to the command line instead of the application"
+[ -n "${LINK_REFUSAL}" ] ||
+    fail "a launcher link this build cannot act on was discarded silently"
+note "a launcher link reaches the desktop application, which names what it cannot do"
+
+# --- no mount path is exported ------------------------------------------------
+# A `/tmp/.mount_*` directory ceases to exist when the launcher exits, and
+# anything the launcher started would have inherited it on PATH.
+grep -q 'export PATH' "${ROOT}/AppRun" &&
+    fail "AppRun exports a PATH entry that outlives nothing"
+note "no vanishing mount directory is put on PATH"
+
 INFO=$(run_cli --json info) || fail "\`ephervex info\` failed"
 printf '%s' "${INFO}" | grep -q '"app_id"' || fail "\`info --json\` is not the expected JSON"
 note "info reports its build identity"

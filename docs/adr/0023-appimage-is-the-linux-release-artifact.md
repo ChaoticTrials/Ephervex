@@ -52,6 +52,34 @@ project already gives its binaries, and an existing AppImage convention, rather
 than inventing an Ephervex-specific argument that shell completions and the CLI
 documentation would then both be wrong about.
 
+> **Amended: the name selects the default, and arguments select the command
+> line.** Dispatching on the name alone was right about the default and wrong
+> about everything else. The usual way to put something on `PATH` is
+> `ln -s <artifact> ~/.local/bin/`, which keeps the artifact's own file name, so
+> the overwhelmingly common link opened a launcher window and silently discarded
+> the whole command line. Only a link named exactly `ephervex` worked, which is
+> not what anybody types.
+>
+> An invocation under any other name now runs the command-line interface when it
+> was given arguments, and the desktop application when it was not. The AppImage
+> runtime consumes its own `--appimage-*` options before `AppRun` sees them, and
+> a double-click and the desktop entry both pass none, so the default is
+> unchanged and nothing that worked before stops working.
+>
+> The one exception is a launcher link. A scheme handler runs the artifact with
+> an `ephervex://` argument, and that argument belongs to the desktop
+> application (ADR 0027), so a single argument naming that scheme goes to the
+> window rather than to the command line.
+>
+> The desktop application also refuses arguments it cannot act on instead of
+> ignoring them, so this cannot regress into silence again from the other side.
+
+> **Amended: `AppRun` no longer puts the artifact's `usr/bin` on `PATH`.** For a
+> mounted artifact that is a `/tmp/.mount_*` path which ceases to exist the
+> moment the launcher exits, and it was inherited by every process the launcher
+> started, Minecraft included. Nothing needed it: both binaries are executed by
+> absolute path, and nothing in the workspace runs either of them by bare name.
+
 ### A declared glibc baseline, enforced against the artifact
 
 The supported minimum is **glibc 2.35**, recorded in `packaging/linux-baseline`.

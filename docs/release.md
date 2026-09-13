@@ -83,10 +83,9 @@ That unpacks the artifact to a temporary directory for each run. It is slower to
 start and it works everywhere, including in a container.
 
 Prefer it over extracting by hand. A manual `--appimage-extract` produces a
-`squashfs-root` whose `AppRun` always starts the desktop application, because
-the name the artifact was invoked under is what selects between the two
-binaries and nothing supplies it there. `APPIMAGE_EXTRACT_AND_RUN=1` keeps that
-name, so the command-line interface below still works.
+`squashfs-root` whose `AppRun` has no invoked name to read, so it falls back to
+the rule below: arguments reach the command-line interface and a bare run opens
+the window. `APPIMAGE_EXTRACT_AND_RUN=1` keeps the name, so either works.
 
 ### The command-line interface
 
@@ -99,19 +98,25 @@ ephervex doctor
 ephervex import some-pack.mrpack
 ```
 
-The AppImage carries the same program, but reaches it by the name it was
-invoked under, so it needs a link that is named exactly `ephervex`:
+The AppImage carries the same program. The name it is invoked under selects the
+default, and arguments select the command line, so it answers either way:
 
 ```bash
+./Ephervex-x86_64.AppImage --help          # the command line
+./Ephervex-x86_64.AppImage                 # the window
 ln -s "$PWD/Ephervex-x86_64.AppImage" ~/.local/bin/ephervex
 ephervex --help
 ```
 
-Two details matter and are easy to get wrong. The link has to be *named*
-`ephervex`: `ln -s Ephervex-x86_64.AppImage ~/.local/bin/` keeps the source file
-name, and a link named anything else reaches the desktop application instead.
-And the target has to be absolute, because a relative one is resolved against
-the directory the link sits in rather than the directory you created it from.
+A link named exactly `ephervex` reaches the command line even with no
+arguments, which is what makes it feel like an ordinary command. A link under
+any other name is equally usable; it opens the window only when you give it
+nothing to do.
+
+One detail is still easy to get wrong: the link target has to be absolute. A
+relative one is resolved against the directory the link sits in rather than the
+directory you created it from, so `ln -s Ephervex-x86_64.AppImage
+~/.local/bin/ephervex` produces a link that dangles.
 
 Shell completions come from the CLI itself:
 
@@ -473,7 +478,7 @@ actually requires, and the versions of the two host tools that produced it.
 
 ```text
 Ephervex.AppDir/
-  AppRun                                            dispatches on $ARGV0
+  AppRun                                            name selects, arguments decide
   ephervex.desktop
   ephervex.png                                      256x256
   usr/bin/ephervex                                  command-line interface

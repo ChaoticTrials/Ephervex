@@ -2,25 +2,49 @@
 # Ephervex AppImage entry point.
 #
 # The package holds the two binaries Ephervex already ships under the two names
-# it already gives them, so dispatch is on the name the artifact was invoked
-# under rather than on an argument this launcher would otherwise have to
-# invent:
+# it already gives them, so the name the artifact was invoked under selects the
+# default rather than an argument this launcher would otherwise have to invent:
 #
 #   ./Ephervex-x86_64.AppImage          the desktop application
 #   ln -s ... ephervex && ./ephervex    the command-line interface
 #
-# Anything not named `ephervex` starts the desktop application, which is what a
-# double-click and the desktop entry both do.
+# The name selects the default; arguments select the command-line interface.
+# That second half matters because the first is easy to get wrong: the usual way
+# to put something on PATH is `ln -s <artifact> ~/.local/bin/`, which keeps the
+# artifact's own file name. Without it, every such link opened a launcher window
+# and silently discarded the whole command line.
+#
+# The one exception is a launcher link. A desktop scheme handler runs this
+# artifact with an `ephervex://` argument, and that argument belongs to the
+# desktop application (ADR 0027), not to the command line.
+#
+# The AppImage runtime consumes its own `--appimage-*` options before this
+# script sees them, so "there are arguments" is a sound signal. A double-click
+# and the desktop entry both pass none and keep reaching the window.
 set -eu
 
 HERE=$(dirname "$(readlink -f "$0")")
-export PATH="${HERE}/usr/bin:${PATH}"
 
 # `$ARGV0` is what the AppImage runtime was invoked as; `$0` is the extracted
 # AppRun, which is why the runtime provides the former at all.
 invoked=$(basename "${ARGV0:-$0}")
 
-case "${invoked}" in
-    ephervex) exec "${HERE}/usr/bin/ephervex" "$@" ;;
-    *) exec "${HERE}/usr/bin/ephervex-gui" "$@" ;;
-esac
+if [ "${invoked}" = "ephervex" ]; then
+    exec "${HERE}/usr/bin/ephervex" "$@"
+fi
+
+# A launcher link is the desktop application's one argument. Matched after
+# lowercasing, because a URL scheme is case-insensitive and the link was
+# written by whatever web page offered it.
+if [ "$#" -eq 1 ]; then
+    scheme=$(printf '%s' "$1" | cut -c1-9 | tr '[:upper:]' '[:lower:]')
+    if [ "${scheme}" = "ephervex:" ]; then
+        exec "${HERE}/usr/bin/ephervex-gui" "$@"
+    fi
+fi
+
+if [ "$#" -eq 0 ]; then
+    exec "${HERE}/usr/bin/ephervex-gui"
+fi
+
+exec "${HERE}/usr/bin/ephervex" "$@"

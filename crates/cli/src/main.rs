@@ -1266,10 +1266,46 @@ fn main() -> ExitCode {
     }
 }
 
+/// Writes bytes to standard output, treating a closed consumer as a normal end.
+///
+/// `head`, `less` and `grep -q` all stop reading before a long document is
+/// finished, and the kernel answers the next write with `EPIPE`. Rust ignores
+/// `SIGPIPE` at startup, so that error reaches the writer instead of killing
+/// the process, and `println!` turns it into a panic: a stack trace, exit 101,
+/// and a build path in the message, for what is an ordinary way to use a
+/// command.
+///
+/// Nothing here restores the signal's default, because that needs an `unsafe`
+/// call and this workspace denies unsafe code in handwritten Rust. Handling the
+/// error where the writing happens costs one function and does not weaken that
+/// rule.
+fn write_out(data: &[u8]) {
+    use std::io::Write as _;
+
+    let stdout = std::io::stdout();
+    let mut handle = stdout.lock();
+    match handle.write_all(data).and_then(|()| handle.flush()) {
+        Ok(()) => {}
+        // Whoever was reading has gone. There is nobody left to report to, and
+        // the work this command was asked for is done as far as anyone can
+        // tell.
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => std::process::exit(0),
+        Err(error) => {
+            tracing::error!(%error, "could not write to standard output");
+            std::process::exit(1);
+        }
+    }
+}
+
 fn generate_completions(shell: Shell) {
     let mut command = Cli::command();
     let binary_name = command.get_name().to_owned();
-    clap_complete::generate(shell, &mut command, binary_name, &mut std::io::stdout());
+    // Rendered into memory first: `clap_complete` writes straight to the sink
+    // it is handed and panics on any error, so handing it standard output means
+    // `ephervex completions bash | head` dies with a stack trace.
+    let mut script = Vec::new();
+    clap_complete::generate(shell, &mut command, binary_name, &mut script);
+    write_out(&script);
 }
 
 fn run(cli: &Cli) -> anyhow::Result<()> {
@@ -5885,7 +5921,9 @@ fn reconciled_json(records: &[ephervex_core::ReconciledRecord]) -> serde_json::V
 /// wins here, unlike the launcher's own stored JSON, which stays compact.
 fn print_json(value: &serde_json::Value) {
     match serde_json::to_string_pretty(value) {
-        Ok(text) => println!("{text}"),
+        // Through `write_out`, because a machine-readable listing is exactly
+        // what gets piped into something that stops reading early.
+        Ok(text) => write_out(format!("{text}\n").as_bytes()),
         // Serializing a `serde_json::Value` cannot fail in practice, and a
         // half-written document would be worse than a message on stderr.
         Err(error) => tracing::error!(%error, "could not format JSON output"),
