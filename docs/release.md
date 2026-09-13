@@ -612,8 +612,11 @@ git push origin v0.1.0
 
 The job runs on the runner's own image, refuses to continue when the tag and the
 `[workspace.package]` version disagree, runs the gate above, fetches the two
-host tools and checks them against `packaging/host-tools`, then builds, packages,
-and uploads `Ephervex-x86_64.AppImage` with a `.sha256` beside it. Nothing pins
+host tools and checks them against `packaging/host-tools`, then builds and
+packages both artifacts and uploads them with a `.sha256` beside each:
+`Ephervex-x86_64.AppImage` and `ephervex_<version>_amd64.deb`. The GitHub job
+then publishes the package into the shared apt repository as a second job, which
+takes it from the release rather than rebuilding it; the Forgejo job does not. Nothing pins
 that image to the baseline distribution, so the glibc floor is held by the check
 `build-appimage.sh` runs against the binaries it produced: a runner too new to
 reach the floor fails the release instead of publishing a package that will not
