@@ -9,13 +9,13 @@
 //!         ?architecture=x64&image_type=jdk&os=linux&vendor=eclipse
 //! ```
 //!
-//! returns a JSON **array**, each element carrying one `binary` — singular —
+//! returns a JSON **array**, each element carrying one `binary` - singular -
 //! whose `package` holds `link`, `name`, `size`, and `checksum`. The checksum
 //! is a hex **SHA-256**; the API does not say so anywhere in the payload, and
 //! guessing SHA-1 from its presence would fail verification on every download.
 //!
 //! The sibling `/v3/assets/feature_releases/{major}/{type}` endpoint returns
-//! `binaries` — plural — instead. Both are live; this uses `latest` because
+//! `binaries` - plural - instead. Both are live; this uses `latest` because
 //! "the newest GA build of this major" is exactly the question being asked, and
 //! answering it with a paged release list would mean re-implementing Adoptium's
 //! own ordering.
@@ -26,7 +26,7 @@
 //! # Architecture names do not match Java's
 //!
 //! A JVM reports `os.arch = amd64`. Adoptium calls that architecture `x64`, and
-//! a query that passes `amd64` through asks for something that does not exist —
+//! a query that passes `amd64` through asks for something that does not exist -
 //! it returns an empty array rather than an error, so the failure arrives as
 //! "no release found" and looks like Adoptium's fault. [`AdoptiumArchitecture`]
 //! is the translation, and it is a hard boundary: the JVM's spelling never
@@ -112,7 +112,7 @@ pub struct ManagedRelease {
     pub vendor: String,
     pub url: Url,
     /// The archive's file name as Adoptium publishes it. Used for display and
-    /// for nothing else — never to choose a path.
+    /// for nothing else - never to choose a path.
     pub filename: String,
     pub checksum: Hash,
     pub size: u64,
@@ -140,7 +140,7 @@ impl ManagedRelease {
                 }
             })
             .collect();
-        // `.` has to survive — every release name contains one — so `..` is
+        // `.` has to survive - every release name contains one - so `..` is
         // collapsed separately rather than by the character filter.
         while cleaned.contains("..") {
             cleaned = cleaned.replace("..", "-");

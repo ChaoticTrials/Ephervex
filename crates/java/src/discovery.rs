@@ -13,7 +13,7 @@
 //! So candidates are **canonicalized before they are probed**, and the paths
 //! that collapsed onto one executable are kept as that runtime's origins. Three
 //! of those twelve entries (`openjdk-17`, `openjdk-21`, `openjdk-25`) contain
-//! no `bin/java` at all — they are the JDK's non-executable bits — and a
+//! no `bin/java` at all - they are the JDK's non-executable bits - and a
 //! candidate that yields no executable is skipped at `trace` level rather than
 //! reported as a failure. Nothing is wrong; the directory was simply never a
 //! runtime.
@@ -30,7 +30,7 @@
 //! Probing forks a JVM per runtime, so an inventory is a thing to compute once
 //! and hand out, not something to recompute on every repaint. This module
 //! returns an inventory with the time it was taken; holding onto it and
-//! offering a Refresh is the caller's job — `ephervex-core` does it for both
+//! offering a Refresh is the caller's job - `ephervex-core` does it for both
 //! frontends.
 
 use std::collections::BTreeMap;
@@ -67,7 +67,7 @@ pub enum JavaSourceKind {
     System,
     /// Found under SDKMAN's candidates directory.
     Sdkman,
-    /// Handed to the launcher directly — a settings field, an override, or
+    /// Handed to the launcher directly - a settings field, an override, or
     /// `ephervex java test`. Never trusted until probed.
     UserSupplied,
 }
@@ -95,8 +95,8 @@ impl std::fmt::Display for JavaSourceKind {
 
 /// One place a runtime was found, and the path that led there.
 ///
-/// The path is the *uncanonicalized* candidate — `/usr/lib/jvm/default-java/bin/java`
-/// rather than what it resolves to — because that is the string the user
+/// The path is the *uncanonicalized* candidate - `/usr/lib/jvm/default-java/bin/java`
+/// rather than what it resolves to - because that is the string the user
 /// recognizes when they ask why a particular runtime was chosen.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct JavaOrigin {
@@ -415,8 +415,8 @@ fn children(directory: &Path) -> Vec<PathBuf> {
 
 /// Resolves a candidate to a canonical executable, or `None` if it is not one.
 ///
-/// `None` covers the ordinary cases — a `PATH` entry with no `java`, a
-/// `/usr/lib/jvm` entry that holds only resources — and they are all silence,
+/// `None` covers the ordinary cases - a `PATH` entry with no `java`, a
+/// `/usr/lib/jvm` entry that holds only resources - and they are all silence,
 /// not failure.
 fn canonical_executable(path: &Path) -> Option<PathBuf> {
     let canonical = std::fs::canonicalize(path).ok()?;
@@ -442,7 +442,7 @@ mod tests {
 
     /// A fake JDK home whose `bin/java` prints the properties block of a real
     /// one. Discovery only ever asks a candidate to describe itself, so a shell
-    /// script is a faithful stand-in — and unlike the host's JDKs it makes the
+    /// script is a faithful stand-in - and unlike the host's JDKs it makes the
     /// test say the same thing on every machine.
     fn fake_jdk(root: &Path, name: &str, version: &str, runtime: &str, vendor: &str) -> PathBuf {
         let home = root.join(name);

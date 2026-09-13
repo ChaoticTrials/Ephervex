@@ -12,7 +12,7 @@
 //! distinction it draws survives all the way down here. `None` means the
 //! checkbox is ticked and the instance follows the global settings wherever
 //! they go. `Some(JvmSettings { max_memory_mib: Some(4096),.. })` means the
-//! user pinned 4096 MiB — which stays 4096 even after the global maximum
+//! user pinned 4096 MiB - which stays 4096 even after the global maximum
 //! changes, and which is a different thing from "currently agrees with the
 //! global value". The same reasoning applies field by field inside
 //! `JvmSettings`, which is why every field is itself optional.
@@ -55,8 +55,8 @@ pub struct JvmSettings {
 impl JvmSettings {
     /// Whether this override actually pins anything.
     ///
-    /// A `Some(JvmSettings::default())` is a real state — the user disabled
-    /// "use global settings" but has not yet changed a value — and it is worth
+    /// A `Some(JvmSettings::default())` is a real state - the user disabled
+    /// "use global settings" but has not yet changed a value - and it is worth
     /// being able to name rather than collapsing it into `None`.
     #[must_use]
     pub fn pins_nothing(&self) -> bool {

@@ -3,7 +3,7 @@
 //! Everything Ephervex fetches goes through here: Mojang assets and libraries,
 //! loader installers, Modrinth and CurseForge pack files, managed JDK
 //! archives. One implementation means one place where atomicity, hash
-//! verification, retry, cancellation, and progress are correct — rather than
+//! verification, retry, cancellation, and progress are correct - rather than
 //! six places where five of them are.
 //!
 //! # The atomicity invariant
@@ -47,8 +47,8 @@ use crate::verify::{HashVerifier, file_matches_hashes};
 /// The longest filename Ephervex generates for its own scratch files.
 ///
 /// Deliberately well below the 255 bytes a plain Linux filesystem allows. An
-/// encrypted home directory — eCryptfs with filename encryption, which is what
-/// an "encrypt my home directory" installer option sets up — accepts 143, and
+/// encrypted home directory - eCryptfs with filename encryption, which is what
+/// an "encrypt my home directory" installer option sets up - accepts 143, and
 /// the cache lives under `$XDG_CACHE_HOME`. A SHA-512 content path is already
 /// 132 characters, so a temporary sibling has to be *bounded* rather than
 /// derived by appending to it. The remaining margin is deliberate: it costs
@@ -88,7 +88,7 @@ pub struct DownloadOutcome {
 /// host the caller has explicitly vouched for.
 ///
 /// Redirects are the other half of that containment, and they are decided
-/// inside an HTTP client rather than per header — so the client that enforces
+/// inside an HTTP client rather than per header - so the client that enforces
 /// them is built here and owned here. Two properties follow, and both are
 /// required once one operation can fetch artifacts from several providers:
 ///
@@ -206,8 +206,8 @@ pub struct DownloadRequest {
 impl DownloadRequest {
     /// Creates a request.
     ///
-    /// The destination is supplied by the caller — normally from
-    /// [`crate::CacheLayout`] — and is never derived from the URL's last path
+    /// The destination is supplied by the caller - normally from
+    /// [`crate::CacheLayout`] - and is never derived from the URL's last path
     /// segment or from a `Content-Disposition` header. A remote server does not
     /// get to choose where a file lands.
     #[must_use]
@@ -425,13 +425,13 @@ impl ResumeState {
 ///    (`W/"…"`) are explicitly not usable with `If-Range` (RFC 9110 section 13.1.3):
 ///    they permit semantically equivalent but byte-different representations,
 ///    which is precisely what must not be spliced. `Last-Modified` is also not
-///    used — its one-second granularity makes it a strong validator only under
+///    used - its one-second granularity makes it a strong validator only under
 ///    conditions the client cannot verify.
 /// 2. The request carries `If-Range: <that etag>` alongside `Range`, so the
 ///    *server* decides: `206` only if the representation is unchanged, and a
 ///    full `200` otherwise, which this code treats as "start over".
 /// 3. The interrupted response advertised `Accept-Ranges: bytes` and delivered
-///    its body verbatim rather than transparently decoded — see
+///    its body verbatim rather than transparently decoded - see
 ///    [`byte_offsets_are_meaningful`], because a `Range` counts octets of the
 ///    encoded representation while the `.part` file holds decoded ones.
 /// 4. The returned `Content-Range` starts at exactly the offset that was asked
@@ -623,7 +623,7 @@ impl DownloadManager {
             // more. `FuturesUnordered` polls every future it holds before any
             // of them completes, so a label announced from inside a future's
             // body announces all of them at once, in a burst, before a single
-            // byte has arrived — leaving whichever was polled last on screen
+            // byte has arrived - leaving whichever was polled last on screen
             // for the whole batch. Published on completion, the name and the
             // count are the same fact stated twice and always agree.
             done += 1;
@@ -751,8 +751,8 @@ impl DownloadManager {
 
 /// One HTTP attempt at one artifact.
 ///
-/// Exists as a type rather than as a long function so that the four steps —
-/// decide whether resuming is provable, send, stream, finalize — are separately
+/// Exists as a type rather than as a long function so that the four steps -
+/// decide whether resuming is provable, send, stream, finalize - are separately
 /// readable, and so none of them has to be handed six borrowed parameters.
 struct Transfer<'a, 'c> {
     manager: &'a DownloadManager,
@@ -958,7 +958,7 @@ impl Transfer<'_, '_> {
                 .await
                 .map_err(|source| DownloadError::io(ArtifactStep::WriteBody, self.part, source))?;
             // Hashed only after the write succeeds, so the verifier state always
-            // describes exactly the first `state.offset` bytes of the file —
+            // describes exactly the first `state.offset` bytes of the file -
             // which is what makes resuming without re-reading them sound.
             self.state.verifier.update(&chunk);
             self.state.offset = written;
@@ -1093,7 +1093,7 @@ async fn already_cached(
 /// The one definition of "this cache entry can be trusted": the file exists, it
 /// is a regular file, its length is the declared size, and every published
 /// digest matches. Anything else is removed, because a cache path whose contents
-/// do not match the request is worse than an empty one — the atomicity invariant
+/// do not match the request is worse than an empty one - the atomicity invariant
 /// entitles the rest of the launcher to treat presence as proof.
 async fn revalidate_cached(
     request: &DownloadRequest,

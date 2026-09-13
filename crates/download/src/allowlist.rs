@@ -2,7 +2,7 @@
 //!
 //! A `.mrpack` is untrusted input taken straight out of a bug report: its
 //! `files[].downloads` array is attacker-controlled text. Fetching whatever it
-//! names would turn the launcher into a confused deputy — an SSRF probe against
+//! names would turn the launcher into a confused deputy - an SSRF probe against
 //! the reporter's own network, or a `file://` read of their home directory.
 //!
 //! Modrinth's pack format therefore asks implementers to define an explicit set
@@ -29,7 +29,7 @@ use reqwest::Url;
 /// the set of hosts an untrusted bug-report archive can make the launcher talk
 /// to, so an entry belongs here only if Modrinth itself accepts it, or if a
 /// deliberate product decision (recorded in an ADR) says otherwise. Wildcards
-/// are intentionally not supported — `*.example.com` is a subdomain-takeover
+/// are intentionally not supported - `*.example.com` is a subdomain-takeover
 /// surface, and none of the entries below need one.
 pub const MODRINTH_PACK_HOSTS: &[&str] = &[
     "cdn.modrinth.com",
@@ -43,7 +43,7 @@ pub const MODRINTH_PACK_HOSTS: &[&str] = &[
 /// A CurseForge export manifest names no download address: the address comes
 /// back from the third-party API as a `downloadUrl`. That is provider data
 /// rather than pack data, but it is still remote input that decides which
-/// machine the launcher connects to — and, because a CurseForge artifact
+/// machine the launcher connects to - and, because a CurseForge artifact
 /// request is the one download that may carry a credential, which machine could
 /// be handed one. So it is checked against this list like any other.
 ///
@@ -218,7 +218,7 @@ impl DomainAllowlist {
         self
     }
 
-    /// The permitted hosts, sorted — suitable for rendering in a settings
+    /// The permitted hosts, sorted - suitable for rendering in a settings
     /// screen or a `--json` dump so a user can see what the launcher will talk
     /// to.
     pub fn hosts(&self) -> impl ExactSizeIterator<Item = &str> {

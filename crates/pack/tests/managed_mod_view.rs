@@ -2,7 +2,7 @@
 //!
 //! Everything here is offline. A `.mrpack` index is a document, so parsing one
 //! contacts nothing, and the recipe it produces is written to and read back
-//! from a temporary directory — which is exactly what a restart does.
+//! from a temporary directory - which is exactly what a restart does.
 //!
 //! The invariant these tests exist to hold is that a pack's mods are ordinary
 //! members of the instance's mod list, told apart from later installations by

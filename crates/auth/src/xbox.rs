@@ -2,8 +2,8 @@
 //!
 //! # Verified against the Minecraft Wiki's protocol page on 2026-08-08
 //!
-//! Microsoft publishes no protocol reference for this half of the chain — it is
-//! an internal Xbox service that Minecraft happens to sit behind — so the shape
+//! Microsoft publishes no protocol reference for this half of the chain - it is
+//! an internal Xbox service that Minecraft happens to sit behind - so the shape
 //! below was taken from the community protocol documentation and cross-checked
 //! against a second independent implementation. Both agree on every field name.
 //!
@@ -35,7 +35,7 @@
 //! **A 401 from XSTS is usually about the account, not the request.** It
 //! carries an `XErr` saying whether there is no Xbox profile, whether the
 //! account is a child account, or whether Xbox Live is unavailable in that
-//! country — each of which needs the user to go and do something different.
+//! country - each of which needs the user to go and do something different.
 //! Reporting them all as "authorization failed" wastes an afternoon, so
 //! [`crate::error::XstsDenial`] decodes them.
 

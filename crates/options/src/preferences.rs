@@ -27,7 +27,7 @@
 //!
 //! [`Managed`] expresses whether Ephervex applies a global preference to new
 //! instances. A preference the launcher does not manage must be
-//! left *entirely alone* in the instance's file — which is a different outcome
+//! left *entirely alone* in the instance's file - which is a different outcome
 //! from managing it and happening to agree with what is already there. Without
 //! the flag, a pack that ships `renderDistance:32` for a reason would be
 //! silently overwritten by a default nobody chose.
@@ -517,7 +517,7 @@ impl GlobalMinecraftPreferences {
     /// Builds the model from stored `(name, enabled, value)` settings.
     ///
     /// Takes the settings table's shape rather than the type, so this crate
-    /// keeps no opinion about TOML or about where preferences are persisted —
+    /// keeps no opinion about TOML or about where preferences are persisted -
     /// the same split that keeps `ephervex-java` free of `JavaConfig`.
     ///
     /// A value this build cannot parse does **not** fail the load: it is

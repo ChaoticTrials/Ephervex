@@ -17,7 +17,7 @@
 //!
 //! # Per artifact, not per operation
 //!
-//! An instance's desired state can name files from several providers at once —
+//! An instance's desired state can name files from several providers at once -
 //! a CurseForge pack whose owner later installed a Modrinth mod is the ordinary
 //! case. So the question this trait answers is asked of one file's
 //! [`ProviderFileIdentity`] and not of the operation, which is what keeps one
@@ -81,8 +81,8 @@ pub trait ArtifactCredentials: fmt::Debug {
     /// The credential this file's provider requires, if it requires one.
     ///
     /// The identity is the durable provider fact recorded on the recipe entry.
-    /// Nothing else — not the address, not the filename, not the format the
-    /// pack was imported from — may be used to decide this.
+    /// Nothing else - not the address, not the filename, not the format the
+    /// pack was imported from - may be used to decide this.
     fn credential_for(
         &self,
         identity: Option<&ProviderFileIdentity>,
@@ -93,8 +93,8 @@ pub trait ArtifactCredentials: fmt::Debug {
     ///
     /// A provider that serves its artifacts only to a credential also refuses a
     /// wrong one, and it does so with an HTTP status rather than with anything
-    /// this crate could recognize. The status alone proves nothing — a `403` is
-    /// a perfectly ordinary answer from a CDN that never saw a credential — so
+    /// this crate could recognize. The status alone proves nothing - a `403` is
+    /// a perfectly ordinary answer from a CDN that never saw a credential - so
     /// this is asked only when all of the following held for the failed request:
     /// the file's identity named a provider, [`Self::credential_for`] issued a
     /// credential for it, and the address was one that credential was actually

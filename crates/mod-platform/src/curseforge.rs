@@ -16,11 +16,11 @@
 //! themselves, through CurseForge/Overwolf, who decide whether to grant it.
 //! Ephervex ships no key of its own. The key is a secret: it lives in the
 //! desktop keyring and nowhere else, and this module never learns which keyring
-//! or which entry — it asks a [`CurseForgeCredentialSource`] for an opaque
+//! or which entry - it asks a [`CurseForgeCredentialSource`] for an opaque
 //! [`SecretString`](ephervex_model::SecretString) and puts it in one header.
 //!
 //! That boundary is what makes the eventual replacement of the credential
-//! *source* — an approved application-owned credential, say — a different
+//! *source* - an approved application-owned credential, say - a different
 //! implementation of one trait rather than a change to the transport.
 //!
 //! # Nothing here is written down
@@ -62,7 +62,7 @@ pub use dto::{CurseForgeAuthor, CurseForgeGame, CurseForgeLogo, CurseForgeProjec
 /// the article is the stable address, it explains the approval process, and it
 /// keeps working when CurseForge moves the form. A named constant rather than a
 /// literal in a sentence, for the same reason every other external address in
-/// this workspace is one — it is untranslated technical text that a frontend
+/// this workspace is one - it is untranslated technical text that a frontend
 /// turns into a link.
 ///
 /// This is the key for the third-party *API*. The CurseForge Upload API's

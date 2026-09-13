@@ -3,7 +3,7 @@
 //!
 //! Minecraft metadata support built the metadata half: discovering which Minecraft releases
 //! Ephervex offers, and resolving one release's complete description. Vanilla launch support
-//! built the pipeline that acts on it — downloading the client jar, assets,
+//! built the pipeline that acts on it - downloading the client jar, assets,
 //! libraries and natives, constructing a launch, and supervising the game.
 //!
 //! # Installation pipeline
@@ -38,17 +38,17 @@
 //!
 //! | Module | Holds |
 //! |---|---|
-//! | [`version_id`] | [`MinecraftVersionId`] — parsing and ordering both published schemes |
+//! | [`version_id`] | [`MinecraftVersionId`] - parsing and ordering both published schemes |
 //! | [`manifest`] | `version_manifest_v2.json` and the release filter |
 //! | [`version`] | one version's JSON: downloads, assets, Java requirement, `inheritsFrom` |
 //! | [`library`] | libraries, artifacts, and both eras of natives |
 //! | [`arguments`] | the legacy string and the modern rule-bearing object, unified |
 //! | [`rules`] | OS/architecture/feature conditions, and their evaluation against a launch |
-//! | [`catalog`] | [`VersionCatalog`] — fetching and caching, on top of `ephervex-download` |
+//! | [`catalog`] | [`VersionCatalog`] - fetching and caching, on top of `ephervex-download` |
 //! | [`platform`] | the OS, architecture, and OS version a launch targets, in Mojang's spelling |
 //! | [`assets`] | the asset index, and the objects it names |
 //! | [`language`] | per-release language catalogs, from Mojang's own asset metadata |
-//! | [`install`] | [`InstallationPlan`] — every path and artifact — and fetching them |
+//! | [`install`] | [`InstallationPlan`] - every path and artifact - and fetching them |
 //! | [`natives`] | unpacking pre-1.19 classifier jars within extraction limits |
 //! | [`launch`] | classpath, argument rules, and placeholder substitution |
 //! | [`process`] | spawning the game, streaming its output, tracking its exit |
@@ -65,7 +65,7 @@
 //!   are carried through for `ephervex-java`; this crate takes
 //!   the chosen executable as an input.
 //! * **The session is an input, not a chain.** [`launch::PlayerIdentity`] is
-//!   six strings, so nothing here depends on `ephervex-auth` — and both account
+//!   six strings, so nothing here depends on `ephervex-auth` - and both account
 //!   kinds are converted explicitly by `ephervex-core` rather than being
 //!   inferred from whether a token is present.
 

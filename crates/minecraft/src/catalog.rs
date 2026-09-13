@@ -12,7 +12,7 @@
 //! published version document. So it is written straight to a
 //! content-addressed path under the metadata store and verified against that
 //! digest on the way in. There is no TTL because there is nothing to expire,
-//! and a second resolve of the same version does no network I/O at all — the
+//! and a second resolve of the same version does no network I/O at all - the
 //! download manager's own "already at the destination" check short-circuits it,
 //! which it may do safely because a partial file can never appear at a cache
 //! path.
@@ -23,7 +23,7 @@
 //!
 //! # Everything goes through the download manager
 //!
-//! There is no second HTTP path here — no bare `reqwest` call, no separate
+//! There is no second HTTP path here - no bare `reqwest` call, no separate
 //! client. Retry policy, redirect bounds, the `User-Agent`, atomic writes, and
 //! hash verification are all properties of `ephervex-download`, and a metadata
 //! fetch that bypassed it would quietly opt out of every one of them
@@ -31,7 +31,7 @@
 //! # Destinations never come from the URL
 //!
 //! The manifest is remote input. Its `url` fields decide *what* is fetched;
-//! [`CacheLayout`] decides *where* it lands — from the digest, never from a URL
+//! [`CacheLayout`] decides *where* it lands - from the digest, never from a URL
 //! segment or a filename.
 
 use chrono::{DateTime, Utc};

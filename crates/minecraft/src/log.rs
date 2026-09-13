@@ -2,7 +2,7 @@
 //!
 //! Ephervex passes the log4j configuration each release ships, because for the
 //! older half of the supported range that file *is* Mojang's Log4Shell
-//! mitigation — its pattern is `%msg{nolookups}`, and launching 1.12.2 without
+//! mitigation - its pattern is `%msg{nolookups}`, and launching 1.12.2 without
 //! it means launching the vulnerable configuration. The side effect is that the
 //! console appender it installs is a `LegacyXMLLayout`, so the game's stdout is
 //! not lines of text but a stream of XML records:
@@ -23,7 +23,7 @@
 //!
 //! The input is one program's output in one fixed layout, not a document from
 //! anywhere. A parser would have to be fed a stream, tolerate a stack trace
-//! inside CDATA, and survive the process being killed mid-record — and it would
+//! inside CDATA, and survive the process being killed mid-record - and it would
 //! pull in a dependency to do less. Anything that does not look like a record
 //! is passed through untouched, which is the behavior that matters: a JVM
 //! crash message, a `Segmentation fault`, or a launch that failed before log4j

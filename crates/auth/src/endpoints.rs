@@ -53,7 +53,7 @@ pub const TENANT: &str = "consumers";
 /// `XboxLive.signin` is what makes the resulting token usable as an Xbox Live
 /// RPS ticket; without it the Xbox leg fails unhelpfully. `offline_access` is
 /// what makes Microsoft issue a refresh token at all, and without it "app
-/// restart preserves login" — a account and authentication support required behavior — is impossible.
+/// restart preserves login" - a account and authentication support required behavior - is impossible.
 pub const SCOPE: &str = "XboxLive.signin offline_access";
 
 /// The relying party the XSTS token is minted for.
@@ -158,7 +158,7 @@ impl Endpoints {
 }
 
 /// Builds `<base>/<path>` without letting `Url::join`'s relative-reference
-/// rules eat a segment when the base has no trailing slash — which is exactly
+/// rules eat a segment when the base has no trailing slash - which is exactly
 /// the shape `wiremock` hands out.
 fn absolute(base: &str, path: &str) -> Result<Url, AuthError> {
     let joined = format!("{}/{path}", base.trim_end_matches('/'));

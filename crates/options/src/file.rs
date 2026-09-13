@@ -11,7 +11,7 @@
 //! So this is a *line-preserving* model rather than a map. Every line the file
 //! had comes back out in the order it went in, byte for byte, unless a
 //! preference explicitly rewrote it. A key this build does not know is not
-//! "unknown data to be dropped" — it is simply a line nobody edited.
+//! "unknown data to be dropped" - it is simply a line nobody edited.
 //!
 //! # How Minecraft itself reads the file
 //!
@@ -37,8 +37,8 @@ pub const VERSION_KEY: &str = "version";
 
 /// One line of an `options.txt`.
 ///
-/// Anything that is not a `key:value` assignment — a blank line, a comment
-/// somebody added, a truncated line left by a crash — is kept verbatim rather
+/// Anything that is not a `key:value` assignment - a blank line, a comment
+/// somebody added, a truncated line left by a crash - is kept verbatim rather
 /// than normalized or dropped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Line {
@@ -98,7 +98,7 @@ impl ParsedOptions {
                         value: value.to_owned(),
                     },
                     // Everything else is kept exactly as it was: a blank line,
-                    // a comment somebody added, a truncated line — and a
+                    // a comment somebody added, a truncated line - and a
                     // leading-colon line, which has no key at all and which the
                     // game would read as an empty one.
                     Some(_) | None => Line::Verbatim(raw.to_owned()),
@@ -261,7 +261,7 @@ mod tests {
     #[test]
     fn an_unknown_key_is_preserved_rather_than_dropped() {
         // Keys written by a newer Minecraft, or by a mod, are not this build's
-        // to understand — only to leave alone.
+        // to understand - only to leave alone.
         let mut options =
             ParsedOptions::parse("aKeyFromTheFuture:17\nguiScale:0\nsomeModSetting:{\"a\":1}\n");
         options.set("guiScale", "2");

@@ -21,7 +21,7 @@
 //!
 //! Validation happens before anything is created, so a pack requiring Fabric
 //! never reaches the point of having a directory. If materialization
-//! fails afterwards — a download that will not verify, a full disk — the
+//! fails afterwards - a download that will not verify, a full disk - the
 //! half-imported instance is removed rather than left looking importable. A
 //! directory containing three of a pack's forty mods is not a reproduction of
 //! anything, and the launcher should not offer to launch one.
@@ -112,7 +112,7 @@ pub struct ImportedPack {
     /// The analysis the import ran on, including any refused download address.
     pub analysis: PackAnalysis,
     /// The one-time global preference application, or `None` if
-    /// it failed — reported, never fatal: an instance that exists with a pack's
+    /// it failed - reported, never fatal: an instance that exists with a pack's
     /// own settings is a far better outcome than an import undone over a GUI
     /// scale.
     pub preferences: Option<PreferenceApplication>,
@@ -147,8 +147,8 @@ impl App {
     /// Reads a pack archive and reports what importing it would do (pack analysis).
     ///
     /// Writes nothing, contacts nobody, and refuses a pack this launcher cannot
-    /// reproduce — an unsupported loader, an ambiguous one, a Minecraft release
-    /// below the supported floor — before the user commits to anything.
+    /// reproduce - an unsupported loader, an ambiguous one, a Minecraft release
+    /// below the supported floor - before the user commits to anything.
     #[instrument(skip(self), fields(archive = %archive.display()))]
     pub fn analyze_pack(&self, archive: &Path) -> CoreResult<PackAnalysis> {
         let (_, analysis) = Self::open_pack(archive)?;
@@ -282,7 +282,7 @@ impl App {
     /// The pack recipe an instance retained at import time.
     ///
     /// Read from the instance's own `.launcher/source/`, never from the
-    /// original archive and never inferred from the current `mods/` folder —
+    /// original archive and never inferred from the current `mods/` folder -
     /// which is the whole point of retaining it.
     pub fn pack_recipe(&self, instance: InstanceId) -> CoreResult<Option<PackRecipe>> {
         let record = self.client(instance)?;
@@ -353,7 +353,7 @@ impl App {
 /// Deliberately decided from the version id alone rather than by asking Mojang:
 /// an import should fail on a 1.7.10 pack in a second and without a network,
 /// and a version id in a numbering scheme this build does not recognize is left
-/// to the launch path — which resolves it against the manifest and refuses it
+/// to the launch path - which resolves it against the manifest and refuses it
 /// there if it is not a real release.
 fn check_supported_release(version: &str) -> CoreResult<()> {
     let id = MinecraftVersionId::parse(version);
@@ -519,7 +519,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_pack_requiring_fabric_is_refused_and_leaves_no_instance_behind() {
-        // "Pack requires Fabric — reject as unsupported loader."
+        // "Pack requires Fabric - reject as unsupported loader."
         let dir = tempfile::tempdir().expect("temp dir");
         let archive = dir.path().join("fabric.mrpack");
         zip_file(

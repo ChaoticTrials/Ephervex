@@ -2,7 +2,7 @@
 //!
 //! These cover the paths that unit tests over a fixture string cannot: what
 //! happens when Mojang is slow, wrong, or gone. Nothing here touches a live
-//! service — the fixtures are embedded at compile time and the "provider" is a
+//! service - the fixtures are embedded at compile time and the "provider" is a
 //! `wiremock` server on localhost, so `cargo test --offline` passes with the
 //! network unplugged.
 //!

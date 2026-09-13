@@ -12,8 +12,8 @@
 //! and the one a mutated client directory could not provide.
 //!
 //! Nothing here reaches a live service. The pack's download addresses name
-//! `cdn.modrinth.com` — the host the allowlist accepts, and what a real pack
-//! contains — and the harness rewrites only their origin to a `wiremock`
+//! `cdn.modrinth.com` - the host the allowlist accepts, and what a real pack
+//! contains - and the harness rewrites only their origin to a `wiremock`
 //! server, asserting the original host first. `fixtures/modrinth/SOURCES.md`
 //! records that transformation.
 

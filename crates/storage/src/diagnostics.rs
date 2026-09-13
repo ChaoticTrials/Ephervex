@@ -17,13 +17,13 @@
 //!   component, an entry that is a symlink, or a directory that resolves outside
 //!   the instance root is refused rather than followed.
 //! * **Nothing is interpreted.** Text is returned as text. No line is executed,
-//!   no path inside a log is opened, and no content is rewritten — a crash
+//!   no path inside a log is opened, and no content is rewritten - a crash
 //!   report that has been "cleaned up" is a crash report that lost the detail
 //!   somebody needed.
 //!
 //! Summaries are best-effort by design. Minecraft's crash-report header is a
 //! convention, not a specification, and a report whose shape is unfamiliar must
-//! still be listed, opened, and searched — so [`summarize_crash_report`] returns
+//! still be listed, opened, and searched - so [`summarize_crash_report`] returns
 //! what it recognized and an excerpt of the file either way, and can fail to
 //! recognize everything without failing.
 
@@ -74,7 +74,7 @@ pub enum DiagnosticError {
         #[source]
         source: std::io::Error,
     },
-    /// The file was there when it was listed and is not there now — a log that
+    /// The file was there when it was listed and is not there now - a log that
     /// rotated, or a crash report a user deleted between refreshes.
     #[error("{path} is no longer there")]
     Missing { path: PathBuf },
@@ -116,8 +116,8 @@ impl DiagnosticError {
 
 /// Why an entry was refused.
 ///
-/// One user-facing message covers all of them — "this is not a file Ephervex
-/// will open" is the whole story a user needs — while the specific reason stays
+/// One user-facing message covers all of them - "this is not a file Ephervex
+/// will open" is the whole story a user needs - while the specific reason stays
 /// available as untranslated technical detail for the log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {
@@ -234,7 +234,7 @@ pub struct DiagnosticEntry {
 ///
 /// Every field is optional because the format is a convention: a report written
 /// by an old version, a fork, or a mod's own handler must still be listed and
-/// opened. [`CrashSummary::excerpt`] is what makes that true — it is filled from
+/// opened. [`CrashSummary::excerpt`] is what makes that true - it is filled from
 /// the first useful lines whether or not anything else was recognized.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CrashSummary {
@@ -277,7 +277,7 @@ impl CrashSummary {
 /// Which end of a file a read window is taken from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TextAnchor {
-    /// The end of the file — what a log is normally inspected for.
+    /// The end of the file - what a log is normally inspected for.
     #[default]
     Tail,
     /// The beginning of the file.
@@ -416,7 +416,7 @@ impl OwnedDirectory {
     /// normal state to render, not an error to report.
     ///
     /// Entries that are not regular files, and entries that are symlinks, are
-    /// skipped — see the module docs for why following one is refused.
+    /// skipped - see the module docs for why following one is refused.
     pub fn entries(&self) -> Result<Vec<DiagnosticEntry>, DiagnosticError> {
         let Some(directory) = self.resolved_directory()? else {
             return Ok(Vec::new());
@@ -566,8 +566,8 @@ impl OwnedDirectory {
 
 /// Reads a bounded window of a file's text.
 ///
-/// `budget` is clamped to [`MAX_VIEW_BYTES`], so no caller — including a future
-/// frontend that passes a number straight from a text field — can ask for a
+/// `budget` is clamped to [`MAX_VIEW_BYTES`], so no caller - including a future
+/// frontend that passes a number straight from a text field - can ask for a
 /// file to be loaded whole.
 ///
 /// A tail window starts at the first line boundary inside it, so the first line
@@ -708,8 +708,8 @@ pub fn summarize_crash_file(path: &Path) -> CrashSummary {
 
 /// Extracts what a crash report's opening lines say.
 ///
-/// Recognizes the headers Minecraft writes — the `// ...` comment, `Time:`, and
-/// `Description:` — and takes the failure line to be the first line that is not
+/// Recognizes the headers Minecraft writes - the `// ...` comment, `Time:`, and
+/// `Description:` - and takes the failure line to be the first line that is not
 /// a banner, a header, a comment, or a stack frame. Anything unrecognized is
 /// left as `None`; the excerpt is filled regardless, which is what keeps an
 /// unfamiliar report inspectable instead of blank.
@@ -741,9 +741,9 @@ pub fn summarize_crash_report(text: &str) -> CrashSummary {
 
 /// Newest first, with the file name as a stable tie-break.
 ///
-/// Modification times collide routinely — a crash and the log line that
+/// Modification times collide routinely - a crash and the log line that
 /// describes it are written in the same second, and some filesystems report
-/// whole seconds — so an ordering that stops there is not reproducible between
+/// whole seconds - so an ordering that stops there is not reproducible between
 /// two listings of the same directory. Names descend because Minecraft's own
 /// names lead with a timestamp, which makes the tie-break agree with the
 /// primary key rather than fight it.
@@ -762,7 +762,7 @@ fn has_extension(path: &Path, extension: &str) -> bool {
 /// Whether a name refers to one entry of a directory and nothing else.
 ///
 /// Rejects `..`, `.`, an empty name, an absolute path, and anything containing a
-/// separator — the four shapes that turn "open this log" into "open any file".
+/// separator - the four shapes that turn "open this log" into "open any file".
 fn is_single_component(name: &str) -> bool {
     let mut components = Path::new(name).components();
     let Some(Component::Normal(single)) = components.next() else {

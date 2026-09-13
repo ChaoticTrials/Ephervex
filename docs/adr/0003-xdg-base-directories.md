@@ -1,4 +1,4 @@
-# ADR 0003 — XDG base directories
+# ADR 0003 - XDG base directories
 
 **Status:** Accepted
 
@@ -26,7 +26,7 @@ Resolve all four roots through the `directories` crate, keyed on the single
 | Temporary instances | `std::env::temp_dir()/ephervex-<uid>/instances/<uuid>/` |
 
 The temporary root comes from `std::env::temp_dir()`, never from a hardcoded
-`/tmp` — that respects `TMPDIR` and keeps the code honest about what it depends
+`/tmp` - that respects `TMPDIR` and keeps the code honest about what it depends
 on. The user-scoped application directory and its instance/server children are
 real directories owned by the current user with mode `0700`; symlinks and roots
 owned by another user are refused.

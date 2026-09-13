@@ -97,8 +97,8 @@ still being present.
 CurseForge modpack exports import into that same recipe. A CurseForge manifest
 names its files by project and file id, so importing one needs the official
 third-party API and an API key you apply for yourself; Ephervex stores it in the
-system keyring and never in its configuration. Reading what an export *says* —
-its name, its exact Minecraft version and loader build, how many files it has —
+system keyring and never in its configuration. Reading what an export *says* -
+its name, its exact Minecraft version and loader build, how many files it has -
 needs no key at all. CurseForge mod browsing is planned but not yet
 implemented. See [`docs/curseforge-api-key.md`](docs/curseforge-api-key.md).
 

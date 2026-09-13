@@ -1,7 +1,7 @@
 //! Retry policy for transient failures.
 //!
-//! Ephervex is used while services are flaky — that is close to its reason for
-//! existing — so a single 503 from a CDN must not abort a pack import. What it
+//! Ephervex is used while services are flaky - that is close to its reason for
+//! existing - so a single 503 from a CDN must not abort a pack import. What it
 //! must *not* do is retry things that cannot improve: a 404, a 403, or a hash
 //! mismatch means asking again is pure noise for the upstream service and pure
 //! delay for the user. Classification lives in

@@ -1256,7 +1256,7 @@ slint::slint! {
 
     // A mod's artwork, or the same shape without it. The rectangle is drawn
     // whether or not an icon arrived, so a list whose images are still loading
-    // — or that will never get any — has the same layout as one whose images
+    // - or that will never get any - has the same layout as one whose images
     // are all present.
     component ModArtwork inherits Rectangle {
         in property <image> icon;
@@ -1278,7 +1278,7 @@ slint::slint! {
     // One row of the Managed Mods list.
     //
     // Two lines of text and one badge. The provenance badge is the only badge:
-    // everything else that distinguishes a row — an unknown version, a missing
+    // everything else that distinguishes a row - an unknown version, a missing
     // file, the artwork's tone — is said in the place it belongs rather than
     // added as another chip.
     component ModCard inherits Rectangle {

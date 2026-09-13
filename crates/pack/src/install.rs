@@ -12,8 +12,8 @@
 //! ```
 //!
 //! Each step overwrites the one before it. The last
-//! step is deliberately *not* here — applying global preferences needs the
-//! configuration file, which lives above this crate — but the ordering
+//! step is deliberately *not* here - applying global preferences needs the
+//! configuration file, which lives above this crate - but the ordering
 //! constraint it creates is: this module must finish before the preferences are
 //! applied, or a managed GUI scale would be overwritten by the pack's own
 //! `options.txt`.
@@ -25,7 +25,7 @@
 //! reasons, both of which matter for a launcher whose defining default is a
 //! disposable instance:
 //!
-//! * importing the same pack twice — which is what bisecting a bug looks like —
+//! * importing the same pack twice - which is what bisecting a bug looks like -
 //!   costs no network at all the second time;
 //! * the download manager's atomicity invariant means a file at a cache path
 //!   has already been verified, so the copy into the instance is a copy of
@@ -47,7 +47,7 @@
 //! the cache budget has since collected needs that provider's credential back
 //! before it can be fetched again. The two halves stay separate here: the cache
 //! is probed first, a hit is installed with no credential and no request, and
-//! only a genuine fetch asks [`ArtifactCredentials`] — per file, from the
+//! only a genuine fetch asks [`ArtifactCredentials`] - per file, from the
 //! provider identity that file's own entry records.
 //!
 //! A cache that cannot be *read* belongs to neither half. It is a local storage
@@ -260,7 +260,7 @@ pub async fn materialize_server_recipe(
 /// The two differ wherever a side needed a decision. A file the client took
 /// because it is `optional` there may be `unknown` on the server, and an
 /// undeclared server side is only installed when this reconstruction confirmed
-/// it — so carrying the client's answer across would leave the server's own
+/// it - so carrying the client's answer across would leave the server's own
 /// record claiming a jar that was never written. Recording what this
 /// reconstruction actually installed is what lets a later managed-mod operation
 /// read the file and know what the server has.
@@ -410,8 +410,8 @@ pub(crate) async fn fetch_all(
         if fetch.cancel.is_cancelled() {
             return Err(PackError::Canceled);
         }
-        // A file with no declared address at all — a provider refused to
-        // serve it, and nothing has fetched it over the network — can still
+        // A file with no declared address at all - a provider refused to
+        // serve it, and nothing has fetched it over the network - can still
         // install if a verified copy is already in the shared cache (an
         // earlier import, or a folder a watcher is minding, put it there).
         // There is no `DownloadRequest` to build without a URL, so this asks
@@ -435,7 +435,7 @@ pub(crate) async fn fetch_all(
             // The cache could not be read, which is not the same thing and must
             // not be recovered from by fetching. A local storage fault says
             // nothing about whether the network is needed, and treating it as a
-            // miss would go on to ask a provider for a credential — turning an
+            // miss would go on to ask a provider for a credential - turning an
             // unreadable cache path into "your API key is missing", for an
             // artifact no request was ever going to be made for.
             Err(source) => {
@@ -499,8 +499,8 @@ async fn fetch_missing(
 /// The credential this file's provider requires to serve it, if any.
 ///
 /// Decided from the durable provider identity the recipe records and from
-/// nothing else — not the address, not the filename, not the format the pack was
-/// imported from — so a mixed desired state offers each provider's secret only
+/// nothing else - not the address, not the filename, not the format the pack was
+/// imported from - so a mixed desired state offers each provider's secret only
 /// to its own artifacts.
 fn credential_for(
     file: &PackFileRecipe,
@@ -636,8 +636,8 @@ fn strongest_hash(file: &PackFileRecipe) -> PackResult<&Hash> {
 /// The cache filename's extension, taken from the *logical* path.
 ///
 /// `None` when the path has no extension or one that is not a plain suffix. The
-/// extension is cosmetic — it exists so a human browsing the cache can tell a
-/// `.jar` from a `.zip` — so an unusable one is dropped rather than fatal.
+/// extension is cosmetic - it exists so a human browsing the cache can tell a
+/// `.jar` from a `.zip` - so an unusable one is dropped rather than fatal.
 fn extension_of(file: &PackFileRecipe) -> Option<FileExtension> {
     file.logical_path
         .extension()
@@ -691,8 +691,8 @@ async fn fetch_one_by_one(
         }
         match (fetched, last_failure) {
             (Some(outcome), _) => outcomes.push(outcome),
-            // The loop ran at least once — an empty address list was refused
-            // above — so a file that was not fetched has a failure to report.
+            // The loop ran at least once - an empty address list was refused
+            // above - so a file that was not fetched has a failure to report.
             (None, Some((error, authenticated))) => {
                 return Err(download_failure(file, fetch, authenticated, error));
             }
@@ -711,7 +711,7 @@ async fn fetch_one_by_one(
 /// Almost always a download failure, and deliberately so: a refusal from an
 /// address is normally about the address. The exception is a request that
 /// carried a provider's credential and came back with a status that provider
-/// uses to refuse one — there the actionable fact is the credential, not the
+/// uses to refuse one - there the actionable fact is the credential, not the
 /// download, and only the layer that issued it can say so. See
 /// [`ArtifactCredentials::rejected`].
 fn download_failure(
@@ -737,8 +737,8 @@ fn download_failure(
 
 /// The HTTP status a transfer ended on, seen through the retry wrapper.
 ///
-/// `None` for everything that is not a status at all — a transport fault, a
-/// cancellation, a local write — because none of those is a provider saying
+/// `None` for everything that is not a status at all - a transport fault, a
+/// cancellation, a local write - because none of those is a provider saying
 /// anything about a credential.
 fn refused_with(error: &DownloadError) -> Option<u16> {
     match error {

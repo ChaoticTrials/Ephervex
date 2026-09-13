@@ -72,7 +72,7 @@ and one import reads it once rather than once per file.
 
 Once a pack is installed, the instance owns its own copy of every file and needs
 nothing from CurseForge to run. Building a linked server from it, or repairing a
-mod, reads the instance's retained recipe rather than the API — but the files
+mod, reads the instance's retained recipe rather than the API - but the files
 those operations install come out of the shared artifact cache, and if the cache
 budget has since collected one, the bytes have to come back from CurseForge. That
 download needs the key, and Ephervex reports a missing, unreadable, or refused

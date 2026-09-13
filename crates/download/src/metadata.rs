@@ -1,7 +1,7 @@
 //! The timestamped provider-metadata cache.
 //!
 //! Mojang's version manifest, Modrinth's project index, CurseForge's search
-//! results — all of them are *mutable* documents that the launcher re-reads
+//! results - all of them are *mutable* documents that the launcher re-reads
 //! constantly and that it must survive not being able to reach. A
 //! bug-reproduction launcher is used precisely when things are on fire, and a
 //! flaky provider must not stop it listing versions it already knows about.
@@ -169,13 +169,13 @@ impl MetadataKey {
     /// For documents whose identity is a request rather than a name: a project
     /// reference, a search, a list of ids. Those values arrive from users and
     /// from providers, they have no length anyone controls, and a name derived
-    /// from one is a name a filesystem may refuse — an encrypted home directory
+    /// from one is a name a filesystem may refuse - an encrypted home directory
     /// accepts 143 bytes for a filename, and a slug alone can exceed that. So
     /// the canonical key is hashed and the digest is the name: 64 lowercase hex
     /// characters, whatever went in.
     ///
     /// `canonical_key` is the caller's stable, unambiguous rendering of the
-    /// request it identifies, and it is the caller's job to keep it stable —
+    /// request it identifies, and it is the caller's job to keep it stable -
     /// changing it changes every address derived from it, which is why callers
     /// carry a schema version inside it. `namespace` is the provider directory
     /// the entry lands in, so two providers cannot collide even if they ever
@@ -419,7 +419,7 @@ impl MetadataCache {
     /// Reads whatever is cached, however old, without touching the network.
     ///
     /// Returns `None` when nothing is cached or when what is cached cannot be
-    /// understood — an unreadable cache entry is a cache miss, never an error,
+    /// understood - an unreadable cache entry is a cache miss, never an error,
     /// because the correct response to both is the same: fetch it again.
     pub async fn peek(&self, key: &MetadataKey) -> Option<CachedMetadata> {
         let path = self.path(key);
@@ -485,7 +485,7 @@ impl MetadataCache {
                     Ok(entry.with_freshness(Freshness::Stale))
                 }
                 // Only now is "no cached copy" true, so only now may the error
-                // say so. `refresh` cannot know it — it has not looked.
+                // say so. `refresh` cannot know it - it has not looked.
                 None => Err(error.into_unavailable()),
             },
         }
@@ -613,9 +613,9 @@ impl MetadataCache {
 
     /// Writes a document into the cache, stamped with the current time.
     ///
-    /// Exposed so a caller that obtained a document some other way — a test, or
+    /// Exposed so a caller that obtained a document some other way - a test, or
     /// a provider whose response has to be post-processed before it is worth
-    /// caching — can still record it with provenance.
+    /// caching - can still record it with provenance.
     pub async fn store(
         &self,
         key: &MetadataKey,
@@ -1011,7 +1011,7 @@ mod tests {
 
     /// The stale path logs why the refresh failed, and that reason is read by
     /// somebody debugging an outage. It must not say "no cached copy" while a
-    /// cached copy is being served — only `fetch` knows whether one exists.
+    /// cached copy is being served - only `fetch` knows whether one exists.
     #[tokio::test]
     async fn a_failed_refresh_over_a_cached_copy_does_not_claim_there_is_none() {
         let base = tempfile::tempdir().expect("temp dir");

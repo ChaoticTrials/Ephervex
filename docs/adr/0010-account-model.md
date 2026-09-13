@@ -1,4 +1,4 @@
-# ADR 0010 — Several accounts, two kinds, one default
+# ADR 0010 - Several accounts, two kinds, one default
 
 **Status:** Accepted
 
@@ -21,7 +21,7 @@ More importantly, a *session* carries `Credentials`, which is also an enum:
 `Microsoft { token, expires_at, entitlements, storage }` or `Offline`. The
 rejected alternative was an `Option<SecretString>` token on a flat `Session`.
 That fails for a specific reason: it makes "no token" mean two different things
-— *offline* and *expired* — and the launch pipeline must never confuse them. One
+- *offline* and *expired* - and the launch pipeline must never confuse them. One
 of them wants a refresh, the other wants a different command line.
 
 Because `Credentials` is an enum, the launch pipeline must handle both arms.
@@ -52,7 +52,7 @@ well-formed, deterministic, version-3, and entirely wrong answer.
 `offline.rs` pins published name/UUID pairs and asserts inequality against every
 standard namespace.
 
-### Offline accounts have no secret — they do not get a laxer store
+### Offline accounts have no secret - they do not get a laxer store
 
 ADR 0004 is unchanged and unweakened. An offline account has no credential of
 any kind, so secret-storage policy has nothing to persist. Concretely:
@@ -87,7 +87,7 @@ account cannot reach another's entry.
 The **ordering** is the guarantee: the keyring entry goes first, and a failure
 there aborts the whole operation. The reverse order would let a failed deletion
 leave a secret in the keyring with nothing in `config.toml` recording that it
-exists — an orphan nobody could find to remove later. This way the worst case is
+exists - an orphan nobody could find to remove later. This way the worst case is
 an account still listed, which can simply be removed again.
 
 ## Consequences

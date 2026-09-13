@@ -161,7 +161,7 @@ impl CurseForgeApi {
     /// Small and cheap, and the reason it exists is explicit: it is the
     /// smallest authenticated call that proves a configured key is accepted.
     /// Asking for [`MINECRAFT_GAME_ID`] is a credential check, not the start of
-    /// a catalog — nothing it returns is kept.
+    /// a catalog - nothing it returns is kept.
     pub async fn game(
         &self,
         game_id: u32,
@@ -196,7 +196,7 @@ impl CurseForgeApi {
     /// A pack import asks for hundreds of files, and reading the secret store
     /// once per request would mean hundreds of keyring round trips over D-Bus
     /// for one import. The scope reads it once and drops it when the operation
-    /// ends — deliberately not longer: the credential's lifetime is the
+    /// ends - deliberately not longer: the credential's lifetime is the
     /// operation's, and holding one on the client so a later operation could
     /// reuse it is exactly the extension this avoids.
     ///
@@ -212,7 +212,7 @@ impl CurseForgeApi {
     /// Builds an endpoint URL from path segments.
     ///
     /// Every segment goes through `Url`'s own escaping. Nothing a user typed
-    /// reaches one today — both endpoints take a number — and routing them
+    /// reaches one today - both endpoints take a number - and routing them
     /// through here is what keeps that true when one takes a slug.
     fn endpoint(&self, segments: &[&str]) -> ModPlatformResult<Url> {
         let mut url = self.base.clone();
@@ -345,8 +345,8 @@ impl CurseForgeApi {
 ///
 /// Exists for two reasons, both about the credential. It is read once and lives
 /// exactly as long as the operation that needs it, and it is available to
-/// whatever else that operation authenticates — an artifact download, for
-/// instance — without a second trip to the secret store.
+/// whatever else that operation authenticates - an artifact download, for
+/// instance - without a second trip to the secret store.
 ///
 /// Nothing it fetches is written down. See [`super`] for why that is a
 /// requirement rather than an omission.
@@ -358,7 +358,7 @@ pub struct CurseForgeOperation<'a> {
 impl fmt::Debug for CurseForgeOperation<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Names what this is and never what it holds. A derived implementation
-        // would render the secret's own `Debug`, which is redacted — but the
+        // would render the secret's own `Debug`, which is redacted - but the
         // guarantee should not depend on that staying true.
         formatter.write_str("CurseForgeOperation")
     }
@@ -452,7 +452,7 @@ impl CurseForgeOperation<'_> {
 
     /// One exact file of one exact project.
     ///
-    /// `GET /v1/mods/{modId}/files/{fileId}` — the endpoint that answers about
+    /// `GET /v1/mods/{modId}/files/{fileId}` - the endpoint that answers about
     /// the file that was asked for. Deliberately not a version listing filtered
     /// down afterwards: a pack declares one file id, and anything that picks
     /// from a list can pick a newer one.
@@ -1089,7 +1089,7 @@ impl CurseForgeProjectClass {
 ///
 /// The provider's wire shape stops here: everything above works from
 /// [`ModFile`], the two ids that name it, and this exact file's own
-/// client/server declaration — read from its `gameVersions`, not guessed at
+/// client/server declaration - read from its `gameVersions`, not guessed at
 /// from the project it belongs to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CurseForgeFileRelease {
@@ -1198,7 +1198,7 @@ pub(super) fn supported_hashes(published: &[CurseForgeFileHash]) -> Vec<Hash> {
 /// is a status about the request.
 ///
 /// Public because the API is not the only thing that sends the key. An artifact
-/// download carries it too, and it refuses a bad one with the same statuses —
+/// download carries it too, and it refuses a bad one with the same statuses -
 /// so the decision of what those statuses mean is made once, here, rather than
 /// once per caller that has to make it.
 #[must_use]
@@ -1213,8 +1213,8 @@ pub fn credential_refusal(status: u16) -> Option<ModPlatformError> {
 
 /// Turns a non-success status into the failure it means.
 ///
-/// Everything a [`credential_refusal`] does not claim — including the `3xx` that
-/// a refused cross-origin redirect leaves behind — is a status this launcher
+/// Everything a [`credential_refusal`] does not claim - including the `3xx` that
+/// a refused cross-origin redirect leaves behind - is a status this launcher
 /// cannot use.
 fn classify(status: StatusCode) -> ModPlatformResult<()> {
     if status.is_success() {

@@ -3,14 +3,14 @@
 //! Everything here is a pure function of the metadata, the installation plan,
 //! the account, and the settings. Nothing reads the network, nothing touches
 //! the filesystem beyond creating the game directory, and nothing spawns a
-//! process — [`crate::process`] does that. The split is what lets the whole of
+//! process - [`crate::process`] does that. The split is what lets the whole of
 //! argument selection, rule evaluation, classpath order, and placeholder
 //! substitution be tested against real Mojang metadata without a JVM
 //!
 //! # The placeholder set is closed, and an unknown one is a failure
 //!
 //! Verified against every `type == "release"` document at or above 1.12.2 on
-//! **2026-08-08** — 51 versions — the templates name exactly twenty-one
+//! **2026-08-08** - 51 versions - the templates name exactly twenty-one
 //! placeholders and no others. That is what makes [`LaunchError::
 //! UnresolvedPlaceholder`](crate::error::LaunchError::UnresolvedPlaceholder)
 //! the right answer for anything else. Leaving a `${…}` in place sends the
@@ -25,7 +25,7 @@
 //! heap and garbage-collector flags. Ephervex gives the *user* the memory
 //! settings and a JVM-arguments box, so:
 //!
-//! * heap flags from the group are always dropped — the user's Minimum and
+//! * heap flags from the group are always dropped - the user's Minimum and
 //!   Maximum RAM are what a launcher's memory settings mean;
 //! * the remaining flags are included only when the user has supplied no JVM
 //!   arguments of their own, because the custom JVM argument box replaces rather than
@@ -39,7 +39,7 @@
 //! The legacy form is a bare `minecraftArguments` string: no `-cp`, no
 //! `-Djava.library.path`, no launcher brand. A launcher is expected to know
 //! them, so [`LEGACY_JVM_ARGUMENTS`] supplies exactly the set 1.13 later wrote
-//! down — which is how the two eras end up producing the same shape of command
+//! down - which is how the two eras end up producing the same shape of command
 //! line rather than two subtly different ones.
 
 use std::collections::BTreeMap;
@@ -58,7 +58,7 @@ use crate::version::VersionMetadata;
 /// The JVM arguments a pre-1.13 version does not declare and still needs.
 ///
 /// Written as templates rather than as resolved strings so they go through
-/// exactly the same substitution as the modern `jvm` group — one code path, one
+/// exactly the same substitution as the modern `jvm` group - one code path, one
 /// set of placeholders, one place a mistake can be made. These are the four
 /// 1.13 turned into metadata, minus the ones only newer LWJGL reads.
 pub const LEGACY_JVM_ARGUMENTS: &[&str] = &[
@@ -90,7 +90,7 @@ pub struct PlayerIdentity {
     /// The Minecraft access token, or [`OFFLINE_ACCESS_TOKEN`] for an offline
     /// account.
     pub access_token: String,
-    /// `msa` or `legacy` — see [`Self::microsoft`] and [`Self::offline`].
+    /// `msa` or `legacy` - see [`Self::microsoft`] and [`Self::offline`].
     pub user_type: String,
     /// The Xbox user id, when one is known. Empty otherwise.
     pub xuid: String,
@@ -111,7 +111,7 @@ impl PlayerIdentity {
     /// An identity backed by a real Minecraft session.
     ///
     /// `user_type` is `msa`, which is what Mojang's own launcher passes for
-    /// every version in the supported range — including 1.12.2, whose
+    /// every version in the supported range - including 1.12.2, whose
     /// `Session.Type` predates the name.
     #[must_use]
     pub fn microsoft(
@@ -170,7 +170,7 @@ impl std::fmt::Debug for PlayerIdentity {
 /// The launcher features a launch has turned on, and the values they need.
 ///
 /// A map rather than a struct of `bool`s because Mojang adds feature flags
-/// without warning — the quick-play family arrived in 1.20 — and because the
+/// without warning - the quick-play family arrived in 1.20 - and because the
 /// same values have to answer both a rule and a placeholder.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LaunchFeatures {
@@ -543,8 +543,8 @@ fn substitute(template: &str, values: &BTreeMap<&str, String>) -> LaunchResult<S
 /// Wraps a resolved value, marking it sensitive when it contains a credential.
 ///
 /// Checked against the value rather than against the template, so an argument
-/// that merely *embeds* the token — `--accessToken=<token>`, which some loader
-/// metadata writes — is caught too.
+/// that merely *embeds* the token - `--accessToken=<token>`, which some loader
+/// metadata writes - is caught too.
 fn argument(value: &str, values: &BTreeMap<&str, String>) -> Argument {
     let token = values.get("auth_access_token").map(String::as_str);
     let sensitive = token.is_some_and(|token| {
@@ -600,7 +600,7 @@ fn adapt_classpath_filename_argument(value: &str, plan: &InstallationPlan) -> St
 /// Builds a command around an arbitrary executable, for the process tests.
 ///
 /// Ephervex does not allow a test that depends on Minecraft actually starting, and
-/// [`crate::process`] is about spawning, streaming, and exit codes — none of
+/// [`crate::process`] is about spawning, streaming, and exit codes - none of
 /// which care what is on the other end. Going through [`build_command`] there
 /// would make a process test depend on the whole metadata pipeline as well.
 #[cfg(test)]

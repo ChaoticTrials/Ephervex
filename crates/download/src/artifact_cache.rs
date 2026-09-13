@@ -8,8 +8,8 @@
 //! verified content hash, both are written only by the download manager's
 //! verify-then-rename publication, and everything in them can be fetched again
 //! from the address it came from. Nothing installed depends on an entry staying
-//! there — a pack file is copied into the instance, a managed JDK archive is
-//! unpacked into the data root, a loader installer has already run — so removing
+//! there - a pack file is copied into the instance, a managed JDK archive is
+//! unpacked into the data root, a loader installer has already run - so removing
 //! one costs a re-download and nothing else.
 //!
 //! Every other cache store is out of scope and stays out. `libraries/` is what a
@@ -25,7 +25,7 @@
 //! budget. The limit decides what is worth *keeping*, which is a question that
 //! only has an answer once the operation that wanted the artifact is finished.
 //! An operation therefore holds a shared lease for as long as it may still need
-//! a cache path, and collection needs the lock exclusively — so a cache can sit
+//! a cache path, and collection needs the lock exclusively - so a cache can sit
 //! over budget for a while, and that is the correct outcome rather than a bug.
 //!
 //! # Why a lease and not a "small enough" window
@@ -210,7 +210,7 @@ pub struct ArtifactCacheUsage {
 
 /// A held shared lease on the reusable artifact cache.
 ///
-/// While one exists — in this process or any other — collection and manual
+/// While one exists - in this process or any other - collection and manual
 /// clearing cannot start. Released on drop, and released by the kernel if the
 /// process dies, so there is no such thing as a stale lease.
 ///
@@ -251,8 +251,8 @@ impl ArtifactCache {
 
     /// Takes a shared lease for an operation that may still need a cache path.
     ///
-    /// Blocks while a collection is in progress, which is bounded work — a scan
-    /// and some unlinking — and then proceeds. Waiting is the right behavior
+    /// Blocks while a collection is in progress, which is bounded work - a scan
+    /// and some unlinking - and then proceeds. Waiting is the right behavior
     /// here: the alternative is either failing an installation because the cache
     /// was being tidied, or proceeding without protection, and neither is worth
     /// having.
@@ -289,7 +289,7 @@ impl ArtifactCache {
 
     /// Enforces a budget, evicting oldest-first until the low-water mark is met.
     ///
-    /// Does nothing at all for [`ArtifactCacheLimit::Unlimited`] — not even a
+    /// Does nothing at all for [`ArtifactCacheLimit::Unlimited`] - not even a
     /// scan, so an unlimited cache costs nothing after every operation. For a
     /// limited budget the pass is: take the lock exclusively, measure, stop if
     /// usage is within the high-water mark, otherwise remove eligible entries in
@@ -427,7 +427,7 @@ struct Survey {
 /// Oldest **publication** first, where publication time is the entry's
 /// modification time. This is not LRU and is not described as such anywhere: the
 /// cache is content-addressed, so a hit opens the file and changes nothing about
-/// it, and there is no access record to sort by. `atime` is not an alternative —
+/// it, and there is no access record to sort by. `atime` is not an alternative -
 /// Linux desktops mount with `relatime` or `noatime`, so it is either coarse or
 /// frozen, and a collector that trusted it would evict essentially at random.
 /// Writing an access record on every hit was the other option and is worse: it
@@ -444,7 +444,7 @@ struct Survey {
 /// One entry per distinct file: recognized by [`CacheLayout::recognize_content`],
 /// confirmed a regular file by `symlink_metadata`, and deduplicated by
 /// filesystem identity so a hard link cannot be counted twice. Nothing else in
-/// the store contributes — not a directory, not a symlink, not a transfer in
+/// the store contributes - not a directory, not a symlink, not a transfer in
 /// flight, and not a name this build does not recognize. Unrecognized names are
 /// left strictly alone: guessing that an unknown file is an artifact is how a
 /// collector deletes something that mattered.
@@ -685,7 +685,7 @@ fn note_entry_failure(
 
 /// The filesystem identity of a file, where the platform exposes one.
 ///
-/// `None` means "cannot tell", and a caller treats that as a distinct file —
+/// `None` means "cannot tell", and a caller treats that as a distinct file -
 /// counting a shared inode twice overstates usage, which is the harmless
 /// direction compared with silently dropping an entry.
 #[cfg(unix)]

@@ -1,4 +1,4 @@
-# ADR 0012 — Provider-neutral recipes are the pack import boundary
+# ADR 0012 - Provider-neutral recipes are the pack import boundary
 
 **Status:** Accepted
 

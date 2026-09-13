@@ -17,7 +17,7 @@
 //! two candidate signals. They disagree, and the disagreement is the whole
 //! point:
 //!
-//! * `/entitlements/mcstore` lists what the account is entitled to —
+//! * `/entitlements/mcstore` lists what the account is entitled to -
 //!   `product_minecraft` and `game_minecraft` for a purchase,
 //!   `product_game_pass_pc` or `product_game_pass_ultimate` for a subscription.
 //! * `/minecraft/profile` answers `404` with `"error": "NOT_FOUND"` when there
@@ -35,7 +35,7 @@
 //!
 //! `069a79f4-44e9-4726-a5be-fca90e38aaf5` is published as
 //! `069a79f444e94726a5befca90e38aaf5`. `Uuid::parse_str` accepts both, so this
-//! is only a trap for hand-rolled parsing — but the value that reaches the
+//! is only a trap for hand-rolled parsing - but the value that reaches the
 //! launch arguments has to be the hyphenated form.
 
 use serde::Deserialize;
@@ -112,7 +112,7 @@ pub struct MinecraftProfile {
 /// The status Minecraft Services returns when the calling Azure application has
 /// not been approved for the API.
 ///
-/// Not a rejection of the user, the account, or the identity token — a
+/// Not a rejection of the user, the account, or the identity token - a
 /// rejection of the *application registration*. See
 /// [`AuthError::MinecraftApiNotApproved`].
 const NOT_APPROVED: u16 = 403;
@@ -264,7 +264,7 @@ impl MinecraftServicesClient {
 
 /// Attaches the bearer token.
 ///
-/// One place, so no request can be built that forgets it — and, more to the
+/// One place, so no request can be built that forgets it - and, more to the
 /// point, so the header is never assembled somewhere that also logs.
 fn authorized(request: reqwest::RequestBuilder, token: &SecretString) -> reqwest::RequestBuilder {
     request

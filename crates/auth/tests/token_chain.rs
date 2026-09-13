@@ -2,7 +2,7 @@
 //!
 //! Nothing here touches Microsoft, Xbox Live, or Minecraft Services. CI that
 //! depends on a third party's uptime fails for reasons that have nothing to do
-//! with the change under test — and CI that depends on a *real Microsoft
+//! with the change under test - and CI that depends on a *real Microsoft
 //! account* cannot exist at all, because there is no way to hold one without
 //! committing a credential (ADR 0004).
 //!
@@ -17,7 +17,7 @@
 //!
 //! account and authentication support's regression coverage are written against a real owned account, and
 //! an automated suite cannot have one. What it *can* do is pin every decision
-//! the chain makes given a response — which leg ran, in which order, with which
+//! the chain makes given a response - which leg ran, in which order, with which
 //! body, and what each failure turns into. The residue that genuinely needs a
 //! human is listed in `docs/architecture.md`.
 
@@ -226,7 +226,7 @@ async fn the_browser_flow_completes_the_whole_chain_and_stores_the_refresh_token
     );
     assert!(session.is_usable(chrono::TimeDelta::hours(1)));
 
-    // The refresh token — and only the refresh token — was persisted.
+    // The refresh token - and only the refresh token - was persisted.
     let stored = store
         .load(&CredentialKey::MicrosoftRefreshToken(account()))
         .expect("load")
@@ -429,7 +429,7 @@ async fn the_device_code_flow_polls_until_the_user_finishes() {
 
     // Two pending answers, then success. `authorization_pending` arrives with a
     // 400 status, so a client that treated any 4xx as fatal would give up on
-    // the first poll — which is the bug this ordering exists to catch.
+    // the first poll - which is the bug this ordering exists to catch.
     Mock::given(method("POST"))
         .and(path("/consumers/oauth2/v2.0/token"))
         .respond_with(ResponseTemplate::new(400).set_body_string(PENDING))
@@ -806,8 +806,8 @@ async fn a_403_and_a_503_from_minecraft_services_do_not_share_a_message() {
 
 #[tokio::test]
 async fn a_403_reaches_the_same_conclusion_from_the_profile_endpoint() {
-    // If approval ever lands part-way — or a future endpoint is gated
-    // separately — the profile call must reach the same conclusion rather than
+    // If approval ever lands part-way - or a future endpoint is gated
+    // separately - the profile call must reach the same conclusion rather than
     // reporting a profile problem.
     let server = MockServer::start().await;
     mount_token(&server, 200, TOKEN).await;

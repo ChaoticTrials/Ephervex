@@ -13,7 +13,7 @@
 //!
 //! So [`App::create_client`] applies them and nothing else does. There is
 //! deliberately no service anywhere in this crate that pushes the global
-//! preferences into an instance that already exists — not because it would be
+//! preferences into an instance that already exists - not because it would be
 //! hard, but because a launcher that reverts a setting the user changed inside
 //! the game is a launcher fighting its user.
 //!
@@ -92,7 +92,7 @@ impl PreferenceContext {
 pub struct CreatedClient {
     pub record: ClientRecord,
     /// What the one-time global preference application did, or
-    /// `None` if it failed — which is reported but never fatal: an instance
+    /// `None` if it failed - which is reported but never fatal: an instance
     /// that exists with unapplied preferences is a far better outcome than a
     /// creation that failed over a GUI scale.
     pub preferences: Option<PreferenceApplication>,
@@ -333,9 +333,9 @@ impl App {
     /// Applies the global preferences to one instance's `options.txt`.
     ///
     /// Called once, from [`Self::create_client`]. Public because Modrinth pack import's
-    /// importer needs to call it at a *different* point in the same creation —
+    /// importer needs to call it at a *different* point in the same creation -
     /// after the pack's own overrides have been laid down, preserving the required
-    /// ordering — and not because an instance's preferences are ever refreshed.
+    /// ordering - and not because an instance's preferences are ever refreshed.
     #[instrument(skip(self, record, context), fields(instance = %record.id))]
     pub fn apply_global_preferences(
         &self,

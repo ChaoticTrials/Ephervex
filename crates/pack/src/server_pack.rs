@@ -3,7 +3,7 @@
 //! A pack author who publishes server files has already decided what the
 //! server contains. There is nothing to resolve, no side to plan, and no
 //! optional file to ask about: the archive is the answer. So this module is
-//! deliberately much smaller than [`crate::install`] — it extracts, and it
+//! deliberately much smaller than [`crate::install`] - it extracts, and it
 //! reports what it extracted.
 //!
 //! # What the archive is not allowed to decide

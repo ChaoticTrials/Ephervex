@@ -1,12 +1,12 @@
-# ADR 0008 — Features excluded from the first complete version
+# ADR 0008 - Features excluded from the first complete version
 
 **Status:** Accepted
 
 ## Context
 
 The specification lists a large required scope and an equally deliberate list of
-exclusions. Recording the exclusions as a decision — rather than leaving them as
-a section someone skims — is what stops them being quietly re-litigated by
+exclusions. Recording the exclusions as a decision - rather than leaving them as
+a section someone skims - is what stops them being quietly re-litigated by
 short-term implementation pressure.
 
 ## Decision
@@ -36,6 +36,6 @@ automatic public server hosting.
   guessed loader. An imported launch customization is refused or marked "needs
   attention" rather than presented as faithfully runnable.
 - The 1.12.2 floor and release-only filter are enforced from Mojang's metadata
-  `type` field, not from filename patterns — so the calendar-style versioning
+  `type` field, not from filename patterns - so the calendar-style versioning
   Minecraft has moved to does not break the filter.
 - Expanding this scope requires a new or superseding ADR.

@@ -1,8 +1,8 @@
 //! Modrinth's wire shapes, as its API documentation describes them.
 //!
 //! Declarative on purpose: these types name fields and nothing else. Every
-//! judgment about what a field *means* — which file to install, whether an
-//! undeclared side is a yes, what an unrecognized relation implies — lives in
+//! judgment about what a field *means* - which file to install, whether an
+//! undeclared side is a yes, what an unrecognized relation implies - lives in
 //! [`super::mapping`], so the shape of the API and this launcher's reading of
 //! it can be reviewed separately.
 //!
@@ -11,7 +11,7 @@
 //!
 //! * [`RawSide`] accepts an unrecognized value as `Unknown`, because the API
 //!   already has `unknown` as a value an author may leave in place; a fifth
-//!   spelling means the same thing — nothing was declared.
+//!   spelling means the same thing - nothing was declared.
 //! * [`RawDependencyKind`] refuses one. An unrecognized relation is a claim
 //!   this build does not understand, and there is no safe direction to lean.
 

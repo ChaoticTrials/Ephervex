@@ -5,7 +5,7 @@
 //!
 //! 1. **A vanished temporary root is expected.** It means the operating system
 //!    cleared its temporary directory, which is precisely the lifecycle the
-//!    product delegates to it. The index entry is dropped silently — no
+//!    product delegates to it. The index entry is dropped silently - no
 //!    warning, no "needs attention", nothing for the user to dismiss.
 //! 2. **A vanished persistent root is not.** The record is kept and marked
 //!    [`AttentionReason::MissingRoot`] so an unmounted disk or a moved

@@ -18,7 +18,7 @@
 //!
 //! # Why the third number matters
 //!
-//! Old Forge does not merely need "a Java 8" — it needs a Java 8 below some
+//! Old Forge does not merely need "a Java 8" - it needs a Java 8 below some
 //! update, because later 8u releases changed behavior it depends on. The parsed
 //! form therefore keeps the quarterly-update number, which
 //! is `_492` in the legacy scheme and the third dotted component in the modern
@@ -28,10 +28,10 @@
 //! # Ordering
 //!
 //! [`JavaVersion`] is a plain ordered tuple: major, then minor, then the
-//! quarterly number, then the build. The raw text is deliberately *not* a field
-//! — two spellings of the same version must compare equal, and a `raw` field
-//! would make `Ord` disagree with `PartialEq`. Callers that want to show what
-//! the JVM actually printed keep the string beside the parsed value.
+//! quarterly number, then the build. The raw text is deliberately *not* a
+//! field - two spellings of the same version must compare equal, and a `raw`
+//! field would make `Ord` disagree with `PartialEq`. Callers that want to show
+//! what the JVM actually printed keep the string beside the parsed value.
 
 use std::fmt;
 

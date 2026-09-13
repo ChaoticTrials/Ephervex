@@ -1,7 +1,7 @@
 //! Compile-time-checked accessors for the messages storage and registry support needs.
 //!
 //! `i18n-embed-fl`'s [`fl!`] macro validates the message id *and* its argument
-//! names against the fallback resource while the crate is being compiled — a
+//! names against the fallback resource while the crate is being compiled - a
 //! typo is a build failure rather than a placeholder string a user eventually
 //! reports. The catch is that the macro reads the `i18n.toml` of whichever
 //! crate invokes it, so only this crate can use it.

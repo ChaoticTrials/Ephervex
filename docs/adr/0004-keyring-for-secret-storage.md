@@ -1,4 +1,4 @@
-# ADR 0004 — Keyring for secret storage, with no plaintext fallback
+# ADR 0004 - Keyring for secret storage, with no plaintext fallback
 
 **Status:** Accepted
 

@@ -31,8 +31,8 @@ pub struct HashMismatch {
 
 /// Computes every algorithm a set of expected hashes asks for, once.
 ///
-/// Providers disagree about which digest they publish — Mojang gives SHA-1,
-/// Modrinth gives SHA-1 and SHA-512 — so the verifier is driven by whatever
+/// Providers disagree about which digest they publish - Mojang gives SHA-1,
+/// Modrinth gives SHA-1 and SHA-512 - so the verifier is driven by whatever
 /// metadata supplied instead of by a fixed algorithm. If metadata supplies
 /// nothing, verification is a no-op and the download is accepted on transport
 /// integrity alone; hashes are required only when the source supplies them.
@@ -139,7 +139,7 @@ impl HashVerifier {
 /// Whether a file already on disk matches every expected hash.
 ///
 /// Reads the whole file once, in bounded chunks, computing exactly the
-/// algorithms `expected` names — the same work [`HashVerifier`] does while a
+/// algorithms `expected` names - the same work [`HashVerifier`] does while a
 /// download streams past, done here for bytes that arrived some other way (a
 /// cache entry being revalidated, a file a folder watcher just found). An
 /// empty `expected` is vacuously true, the same rule [`HashVerifier`] applies

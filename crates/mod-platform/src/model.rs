@@ -1,7 +1,7 @@
 //! The provider-neutral mod model.
 //!
 //! Modrinth's vocabulary stops at [`crate::modrinth`]. Everything above this
-//! module — the resolver, the services layer, both frontends — is written
+//! module - the resolver, the services layer, both frontends - is written
 //! against the types here, so a second provider is a new translation rather
 //! than a second everything.
 //!
@@ -11,7 +11,7 @@
 //! staring at a mod that is obviously the right one and no explanation for why
 //! it is not offered. [`Compatibility`] therefore carries *why*, and an
 //! incompatible version is something a caller can display and refuse to
-//! install — rather than something it silently never sees.
+//! install - rather than something it silently never sees.
 
 use std::fmt;
 
@@ -75,7 +75,7 @@ pub struct ModProject {
     pub icon_url: Option<String>,
 }
 
-/// One file belonging to a version — the one this launcher would install.
+/// One file belonging to a version - the one this launcher would install.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModFile {
     /// The provider's own file name. Untrusted input: it is validated as a safe
@@ -287,8 +287,8 @@ pub struct ModSearchQuery {
 
 /// The largest page this launcher asks a provider for.
 ///
-/// A search costs one version-list request per hit — compatibility cannot be
-/// decided from search output alone — so the page size is also a request
+/// A search costs one version-list request per hit - compatibility cannot be
+/// decided from search output alone - so the page size is also a request
 /// budget. Twenty-five keeps one search comfortably inside a provider's rate
 /// limit while still filling a screen.
 pub const MAX_SEARCH_LIMIT: u8 = 25;

@@ -1,4 +1,4 @@
-# ADR 0013 — Mods installed through a provider are recipe entries
+# ADR 0013 - Mods installed through a provider are recipe entries
 
 **Status:** Accepted
 
@@ -12,14 +12,14 @@ Installing a mod through the mod browser breaks that framing. Such a mod was
 never in any archive, but it is unquestionably part of what the instance is
 supposed to contain: a user who adds a library to reproduce a crash and then
 creates a server expects the server to have it. Deriving that from the client's
-current `mods/` directory is exactly what ADR 0012 rejected — the directory also
+current `mods/` directory is exactly what ADR 0012 rejected - the directory also
 contains jars the user dropped in by hand, and no longer contains the ones they
 deleted while bisecting.
 
 The obvious alternative is a second file beside the recipe holding installed-mod
 records. That produces two descriptions of one `mods/` directory which can
-disagree about the same jar, and forces every consumer — side planning, server
-creation, the instance UI — to read and merge both.
+disagree about the same jar, and forces every consumer - side planning, server
+creation, the instance UI - to read and merge both.
 
 There is also a question the launcher cannot answer for itself. A Modrinth
 project declares `client_side` and `server_side`, and one of the values those
@@ -52,7 +52,7 @@ Two things are deliberately excluded.
 no provenance is left alone rather than hashed and given an invented record: a
 fabricated entry would claim a project nothing can look up, and would put that
 jar into a reconstructed server on the strength of a guess. `ModProvider` has no
-`Unknown` variant for the same reason — absence of an identity already says
+`Unknown` variant for the same reason - absence of an identity already says
 "nothing trustworthy is known", and saying nothing is the honest answer.
 
 **Changing an installed mod's version.** `PackRecipe::record_managed` is

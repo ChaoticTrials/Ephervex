@@ -23,7 +23,7 @@
 //! # Redaction is structural
 //!
 //! [`post_json`] and friends take already-built request builders and never log
-//! a body, a header, or a response payload — only the stage, the status, and
+//! a body, a header, or a response payload - only the stage, the status, and
 //! the URL with its query string removed via `ephervex_download::redacted`.
 //! Bodies here contain tokens by definition, so "do not log the body" is a rule
 //! this module enforces rather than one each call site has to remember
@@ -57,7 +57,7 @@ pub fn build_client(config: &HttpConfig) -> AuthResult<Client> {
 /// A response the caller still has to interpret: the status plus the raw body.
 ///
 /// Deliberately *not* pre-classified into success and failure. Three legs of
-/// this chain use documented non-2xx statuses as ordinary control flow — the
+/// this chain use documented non-2xx statuses as ordinary control flow - the
 /// device-code poll answers `400 authorization_pending` until the user is done,
 /// XSTS answers `401` with an `XErr` explaining the account, and the profile
 /// endpoint answers `404` to say the account does not own the game. A helper

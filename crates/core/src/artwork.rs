@@ -4,8 +4,8 @@
 //!
 //! A mod catalog serves whatever image format it likes. Modrinth serves a good
 //! deal of WebP. The desktop's image decoder is built with PNG and JPEG only,
-//! so an artwork cache that stored what arrived — under the source address's own
-//! extension, which is what it used to do — produced entries the frontend could
+//! so an artwork cache that stored what arrived - under the source address's own
+//! extension, which is what it used to do - produced entries the frontend could
 //! never open:
 //!
 //! ```text
@@ -19,7 +19,7 @@
 //! The fix is to make the cache promise something: everything in it is PNG.
 //! What a provider sent is decoded once, re-encoded, and published under a name
 //! that says nothing about where it came from. A frontend then does what a
-//! frontend should — load a local file, and fall back if it cannot.
+//! frontend should - load a local file, and fall back if it cannot.
 //!
 //! Adding a WebP decoder to *this* crate happens to give the desktop one too,
 //! because Cargo unifies features across a build and the frontend depends on

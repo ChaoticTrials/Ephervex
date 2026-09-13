@@ -15,7 +15,7 @@
 //!
 //! The split is along the question each file answers. `api` knows how to ask
 //! Modrinth something; `dto` knows what comes back; `mapping` knows how to read
-//! it; and this file knows which of those to do in what order — including the
+//! it; and this file knows which of those to do in what order - including the
 //! one thing none of them can decide alone, that compatibility comes from a
 //! concrete version rather than from anything a search response says.
 

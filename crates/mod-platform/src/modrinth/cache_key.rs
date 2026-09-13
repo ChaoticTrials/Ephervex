@@ -7,7 +7,7 @@
 //!
 //! # Why not the URL
 //!
-//! A URL carries things that are not identity — the API root, which differs
+//! A URL carries things that are not identity - the API root, which differs
 //! between production and a loopback test server; parameter order; percent
 //! encoding. Two requests for the same thing would address two entries, and a
 //! future change to how a request is assembled would silently orphan every
@@ -68,7 +68,7 @@ pub(super) enum ModrinthRequest<'a> {
         limit: u8,
         offset: u32,
         /// The compatibility narrowing, absent when the caller asked to see
-        /// incompatible projects too — that search sends no such filter, and a
+        /// incompatible projects too - that search sends no such filter, and a
         /// key that pretended otherwise would split one answer across every
         /// instance that asked for it.
         filter: Option<CompatibilityFilter<'a>>,
@@ -156,7 +156,7 @@ fn field(key: &mut String, name: &str, value: &str) {
 ///
 /// Sorted, because the endpoint answers with a set: asking for `[b, a]` and
 /// asking for `[a, b]` is asking the same question, and only the caller's
-/// iteration order differs. Repeats are kept rather than collapsed — a list
+/// iteration order differs. Repeats are kept rather than collapsed - a list
 /// that names a project twice is a different list, and guessing otherwise would
 /// be inventing an equivalence the API does not document.
 fn id_list(key: &mut String, ids: &[String]) {

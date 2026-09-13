@@ -11,8 +11,8 @@ would put a working Microsoft refresh token, an Xbox Live JWT, and a Minecraft
 access token into the repository. ADR 0004 forbids that disclosure; a committed
 bearer token is unsafe regardless of which account supplied it.
 
-So each file below reproduces the documented **structure** — every field name,
-every nesting level, every type — with the secret-bearing values replaced by
+So each file below reproduces the documented **structure** - every field name,
+every nesting level, every type - with the secret-bearing values replaced by
 obvious placeholders. That is all the parsers under test read: `ephervex-auth`
 never validates a signature, never decodes a JWT, and never inspects a token
 beyond passing it to the next leg. A transcribed fixture is therefore exactly as
@@ -47,8 +47,8 @@ looks like a token is the string `FAKE-…` or a documentation placeholder.
 * **Every token value.** Microsoft access tokens, refresh tokens, device codes,
   Xbox Live and XSTS JWTs, and Minecraft access tokens are all placeholders.
 * **Entitlement signatures.** The live document carries a JWT per item plus a
-  document-level one. Ephervex reads only `items[].name` — it neither validates
-  nor stores the signatures — so they are reduced to a marker.
+  document-level one. Ephervex reads only `items[].name` - it neither validates
+  nor stores the signatures - so they are reduced to a marker.
 * **Correlation and trace ids** from the Microsoft error documents. They
   identify one request to Microsoft support and mean nothing here.
 * **`skins` and `capes`** from the profile, along with their CDN URLs. Ephervex

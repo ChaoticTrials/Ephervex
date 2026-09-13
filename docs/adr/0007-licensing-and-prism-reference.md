@@ -1,4 +1,4 @@
-# ADR 0007 — Licensing deferred; Prism is behavioral reference only
+# ADR 0007 - Licensing deferred; Prism is behavioral reference only
 
 **Status:** Superseded by ADR 0018
 

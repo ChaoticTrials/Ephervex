@@ -1,7 +1,7 @@
 # Architecture Decision Records
 
 One file per decision, numbered and immutable once accepted. A decision that
-turns out wrong gets a new ADR that supersedes the old one — the original stays
+turns out wrong gets a new ADR that supersedes the old one - the original stays
 so the reasoning trail survives.
 
 | ADR | Decision | Status |

@@ -1,4 +1,4 @@
-# ADR 0002 — SQLite index with per-instance metadata
+# ADR 0002 - SQLite index with per-instance metadata
 
 **Status:** Accepted
 
@@ -7,7 +7,7 @@
 The launcher needs to list instances and servers quickly, filter them, and
 record launch history. A database is the natural fit. But a database is also a
 single file that can be lost, corrupted, or left behind when a user copies an
-instance directory to another machine — and instances are the thing users
+instance directory to another machine - and instances are the thing users
 actually care about.
 
 ## Decision

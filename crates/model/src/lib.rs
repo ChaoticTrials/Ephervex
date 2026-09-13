@@ -2,7 +2,7 @@
 //!
 //! This crate is the root of the dependency graph: it depends on no other
 //! workspace crate, and every other crate may depend on it. It holds types
-//! only — no networking, no filesystem access, no business logic.
+//! only - no networking, no filesystem access, no business logic.
 
 pub mod account;
 pub mod app;

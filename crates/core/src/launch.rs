@@ -4,7 +4,7 @@
 //!
 //! The Minecraft crate knows how to install a version and build a command line.
 //! It deliberately knows nothing about instances, accounts, Java runtimes, or
-//! configuration files — those are application questions, and answering them
+//! configuration files - those are application questions, and answering them
 //! here is what keeps each provider replaceable (ADR 0005).
 //!
 //! This module sequences authentication, Java selection, installation, and process
@@ -84,7 +84,7 @@ pub struct LaunchOptions {
     ///
     /// Everything means everything: the version is installed, the runtime is
     /// selected, and the session is established, because the point of a dry run
-    /// is to show the command that *would* run — and a command whose classpath
+    /// is to show the command that *would* run - and a command whose classpath
     /// names files that were never downloaded shows something else.
     pub dry_run: bool,
 }
@@ -143,8 +143,8 @@ impl ProgressSink for DownloadProgress {
 impl App {
     /// Installs and launches a client instance, streaming what happens
     ///
-    /// Emits [`LaunchEvent`]s through `observer` — the same events the GUI will
-    /// consume in the GUI — and returns once the game has exited. Canceling
+    /// Emits [`LaunchEvent`]s through `observer` - the same events the GUI will
+    /// consume in the GUI - and returns once the game has exited. Canceling
     /// stops the launch, and stops the game if it has already started.
     ///
     /// Failures are typed. `CoreError::requires_interactive_login()` is the
@@ -305,8 +305,8 @@ impl App {
         let process = GameProcess::start(&outcome.command, observer)?;
         lock.record_game_pid(process.pid())?;
 
-        // Recorded before the wait, so a launch that never returns — a game
-        // that hangs, a machine that loses power — still shows as having been
+        // Recorded before the wait, so a launch that never returns - a game
+        // that hangs, a machine that loses power - still shows as having been
         // launched.
         record.last_launched_at = Some(chrono::Utc::now());
         if let Err(error) = self.update_client_record(&mut record) {
@@ -338,8 +338,8 @@ impl App {
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<InstalledClient> {
-        // The installer sets the step as it works — the version and stage it is
-        // fetching — and those labels are technical values rather than message
+        // The installer sets the step as it works - the version and stage it is
+        // fetching - and those labels are technical values rather than message
         // ids, so nothing is set here that would be shown untranslated.
         let context = options.features.rule_context(Platform::host());
         Ok(self
@@ -361,7 +361,7 @@ impl App {
     ///
     /// Matches on [`Credentials`] rather than asking whether a token is
     /// present, because "no token" would otherwise mean both *offline* and
-    /// *expired* — and those want opposite things (`ephervex-auth`'s
+    /// *expired* - and those want opposite things (`ephervex-auth`'s
     /// `Credentials` exists to force this distinction).
     async fn launch_identity(
         &mut self,
@@ -389,7 +389,7 @@ impl App {
     ///
     /// Reads the instance's own lock file rather than an in-process set, so it
     /// is true across the GUI, the CLI, and a second terminal. A lock whose
-    /// owner is gone reports `None` — a permanently "running" instance is worse
+    /// owner is gone reports `None` - a permanently "running" instance is worse
     /// than none at all.
     pub fn launch_state(&self, instance: InstanceId) -> CoreResult<Option<LaunchState>> {
         Ok(ephervex_storage::running_state(

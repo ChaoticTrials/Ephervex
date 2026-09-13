@@ -1,4 +1,4 @@
-# ADR 0024 — Published server files are a complete installation
+# ADR 0024 - Published server files are a complete installation
 
 **Status:** Accepted
 

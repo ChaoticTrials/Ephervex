@@ -38,7 +38,7 @@ pub(crate) struct CopyReport {
 ///
 /// `destination` is created if it does not exist. Existing files are
 /// overwritten, which only matters to callers that copy into a non-empty
-/// directory — the registry does not.
+/// directory - the registry does not.
 pub(crate) fn copy_tree(
     source: &Path,
     destination: &Path,
@@ -99,7 +99,7 @@ fn copy_into(
             std::fs::copy(&from, &to)?;
             report.files += 1;
         }
-        // Anything else — a socket, a fifo, a device node — has no business in
+        // Anything else - a socket, a fifo, a device node - has no business in
         // an instance directory and is not something to reproduce.
     }
     Ok(())

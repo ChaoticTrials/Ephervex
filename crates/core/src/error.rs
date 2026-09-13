@@ -1,7 +1,7 @@
 //! The error type frontends see.
 //!
 //! Frontends must not have to match on `ephervex-storage`'s error enums, or
-//! `ephervex-download`'s, or any other provider's — that would make the layer
+//! `ephervex-download`'s, or any other provider's - that would make the layer
 //! below `core` part of the frontend's compile-time surface, which is exactly
 //! what the dependency direction exists to prevent.
 //!
@@ -135,8 +135,8 @@ pub enum CoreError {
     ///
     /// The typed `LaunchError::AuthenticationRequired` and `MissingJava` states are
     /// deliberately *not* in here: they arrive as [`Self::Auth`] and
-    /// [`Self::Java`], and the predicates below —
-    /// [`Self::requires_interactive_login`], [`Self::required_java_major`] —
+    /// [`Self::Java`], and the predicates below -
+    /// [`Self::requires_interactive_login`], [`Self::required_java_major`] -
     /// are what a frontend asks instead. One definition of "the user must sign
     /// in" rather than two that can drift.
     #[error(transparent)]
@@ -152,7 +152,7 @@ pub enum CoreError {
 
     /// Measuring, collecting, or clearing the reusable artifact cache.
     ///
-    /// Reaches a frontend only for the operations a user asked for directly —
+    /// Reaches a frontend only for the operations a user asked for directly -
     /// reading the cache's size, clearing it, changing its budget. Automatic
     /// maintenance never surfaces here: see `App::maintain_artifact_cache` for
     /// why a housekeeping failure must not become an installation failure.
@@ -194,8 +194,8 @@ pub enum CoreError {
     /// The instance has no loader family to stay inside, so there is no version
     /// of one to change.
     ///
-    /// Turning a vanilla instance into a modded one — or one loader into
-    /// another — changes what the instance is and invalidates every mod in it.
+    /// Turning a vanilla instance into a modded one - or one loader into
+    /// another - changes what the instance is and invalidates every mod in it.
     /// That is a different operation from moving between builds of one loader,
     /// and this refuses rather than quietly becoming it.
     #[error("`{loader}` instances have no loader build to change")]
@@ -332,7 +332,7 @@ pub enum CoreError {
 /// `ephervex-pack` cannot name that provider's error type, so it carries the
 /// original through and this is where it is taken back out. What reaches a
 /// frontend is therefore the same typed credential failure a provider request
-/// would have produced — absent key, unreadable key, refused key — rather than a
+/// would have produced - absent key, unreadable key, refused key - rather than a
 /// download failure it could only report as "something went wrong".
 impl From<PackError> for CoreError {
     fn from(error: PackError) -> Self {
@@ -484,7 +484,7 @@ impl CoreError {
     /// application registration is approved for the Minecraft Services API.
     ///
     /// Worth a predicate of its own because it is the one authentication
-    /// failure no user action inside the launcher can resolve — not signing in
+    /// failure no user action inside the launcher can resolve - not signing in
     /// again, not waiting, not switching accounts. A frontend showing a
     /// "Sign in" button for it would be offering a button that cannot work.
     #[must_use]
@@ -507,7 +507,7 @@ impl CoreError {
     }
 
     /// The value the user has to supply at [`Self::help_url`], where the
-    /// failure names one — for the approval form, the Client ID.
+    /// failure names one - for the approval form, the Client ID.
     #[must_use]
     pub fn help_subject(&self) -> Option<&str> {
         match self {
@@ -535,8 +535,8 @@ impl CoreError {
     /// support.
     ///
     /// Exists for the same reason as [`Self::required_java_major`]: a frontend
-    /// that wants to say *which* loader was refused — and to record it as an
-    /// attention reason — must not have to match on `PackError` to find the
+    /// that wants to say *which* loader was refused - and to record it as an
+    /// attention reason - must not have to match on `PackError` to find the
     /// name.
     #[must_use]
     pub fn unsupported_loader(&self) -> Option<&str> {

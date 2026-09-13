@@ -46,7 +46,7 @@ pub enum OptionCodec {
     Text,
     /// A Minecraft language code. Writing one additionally requires the target
     /// release's language catalog to contain it, which options.txt itself
-    /// cannot express — see [`crate::LanguageAvailability`].
+    /// cannot express - see [`crate::LanguageAvailability`].
     LanguageCode,
     /// The pre-1.13 numeric key code.
     KeyCodeLwjgl2,

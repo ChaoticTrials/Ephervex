@@ -1,4 +1,4 @@
-# 0017 — options.txt compatibility is generated data, distributed separately from the application
+# 0017 - options.txt compatibility is generated data, distributed separately from the application
 
 Status: Accepted
 
@@ -8,13 +8,13 @@ Ephervex applies a small set of normalized global preferences to every newly
 created or imported client instance. Doing that correctly requires knowing, for
 one exact Minecraft release, what the game actually stores:
 
-- the key, which is not always the preference's name — a window size is
+- the key, which is not always the preference's name - a window size is
   `overrideWidth` and `overrideHeight`;
-- the encoding, which changes across releases — the field of view is
+- the encoding, which changes across releases - the field of view is
   `(degrees - 70) / 40` through 1.18.2 and the degrees themselves from 1.19;
-- the domain, which also changes — the simulation-distance value set narrowed in
+- the domain, which also changes - the simulation-distance value set narrowed in
   1.21.9;
-- whether the key existed at all — simulation distance arrived with 1.18;
+- whether the key existed at all - simulation distance arrived with 1.18;
 - and, for the language, whether that release's own catalog contains the code,
   which is not a property of `options.txt` at all.
 
@@ -24,7 +24,7 @@ look at what the client actually compiles.
 
 The first implementation encoded three eras as hand-written adapters in Rust.
 That had two failure modes that were only going to get worse. It was **wrong in
-places** — it asserted that 1.13 removed the window-size keys, which the client
+places** - it asserted that 1.13 removed the window-size keys, which the client
 JARs disprove: the keys are still in the persistence path in 26.2. And it made a
 **new Minecraft release an Ephervex release**: a launcher whose job is
 reproducing bugs on the version that just broke cannot ship a build to learn
@@ -69,9 +69,9 @@ JARs, committed as data, and distributed separately from the application**.
 
 5. **Codecs are a closed set, never expressions.** The feed is untrusted network
    input that decides how values are written into a file the game reads. It may
-   only select among typed codec variants the binary implements — boolean,
+   only select among typed codec variants the binary implements - boolean,
    bounded integer, bounded decimal, an affine transform, enum id, enum token,
-   the two key-code eras, text, and language code — with validated parameters. A
+   the two key-code eras, text, and language code - with validated parameters. A
    formula the generator cannot recognise as one of those becomes *unknown* at
    generation time. Nothing evaluates anything at run time.
 

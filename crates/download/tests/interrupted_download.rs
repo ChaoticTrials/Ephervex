@@ -4,7 +4,7 @@
 //! express the case that matters most here: a server that announces a
 //! `Content-Length`, sends part of the body, and then drops the connection.
 //! These tests therefore drive a hand-rolled loopback TCP server, which is
-//! still entirely offline — no test here contacts a real host.
+//! still entirely offline - no test here contacts a real host.
 //!
 //! The two behaviors under test enforce "resume only when
 //! server semantics make it safe":

@@ -55,7 +55,7 @@
 //! Microsoft, Xbox Live, and XSTS legs all succeed; the chain gets as far as
 //! `login_with_xbox` and only then receives a `403` from a host that has
 //! answered nothing else yet. It looks exactly like a Minecraft outage, and
-//! reporting it as one — "try again in a few minutes" — sends the user into a
+//! reporting it as one - "try again in a few minutes" - sends the user into a
 //! retry loop that cannot terminate. Hence
 //! [`AuthError::MinecraftApiNotApproved`], which is a distinct variant with a
 //! distinct message, no retry advice, and the Client ID the form asks for.
@@ -64,7 +64,7 @@
 //!
 //! | Module | Holds |
 //! |---|---|
-//! | [`secret`] | [`SecretString`] — the type that makes a token unloggable |
+//! | [`secret`] | [`SecretString`] - the type that makes a token unloggable |
 //! | [`error`] | the typed errors, and which of them a re-login would fix |
 //! | [`stage`] | which leg of the chain a message or failure is about |
 //! | [`endpoints`] | every URL, and the scopes and relying parties |
@@ -160,7 +160,7 @@ pub use store::{CredentialKey, CredentialStorage, CredentialStore, KeyringStore,
 /// to users, so anything compiled into it is public by definition. The Client
 /// ID identifies the application to Microsoft; it authenticates nothing, and
 /// possessing it grants nobody anything. That is precisely why PKCE is not
-/// optional here — see [`pkce`].
+/// optional here - see [`pkce`].
 ///
 /// It is *not* Prism Launcher's, or any other launcher's. Ephervex does not allow
 /// reusing another project's credentials, and doing so would put this

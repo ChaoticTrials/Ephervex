@@ -10,7 +10,7 @@
 //! the next launch is a launcher fighting its user.
 //!
 //! The one exception is an import, which applies preferences after the pack's
-//! own overrides have been laid down — still once, just later in the same
+//! own overrides have been laid down - still once, just later in the same
 //! creation.
 //!
 //! # Only what was proven gets written
@@ -230,9 +230,9 @@ impl PreferencePlan {
 /// What applying global preferences to one instance did.
 ///
 /// Reported rather than logged and forgotten, because "why is my GUI scale not
-/// set" has a small number of answers — the preference is not managed, this
+/// set" has a small number of answers - the preference is not managed, this
 /// release has no such setting, nobody has established what this release does,
-/// or the value does not fit what the release accepts — and all of them are
+/// or the value does not fit what the release accepts - and all of them are
 /// here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreferenceApplication {

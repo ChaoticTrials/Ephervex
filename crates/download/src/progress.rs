@@ -244,7 +244,7 @@ impl OperationReporter {
 ///
 /// Files in a batch complete out of order, so per-file percentages cannot be
 /// composed into a batch percentage. Summing bytes can, provided every file
-/// contributes exactly once — hence [`ByteTally::adjust`], which takes a file's
+/// contributes exactly once - hence [`ByteTally::adjust`], which takes a file's
 /// new absolute contribution rather than a delta, so a restarted attempt
 /// correctly *removes* the bytes it had previously claimed.
 #[derive(Debug, Default)]

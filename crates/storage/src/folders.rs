@@ -2,7 +2,7 @@
 //!
 //! # Why this is not a list of strings in the frontend
 //!
-//! Two reasons. The layout is this crate's — `<root>/minecraft/` and
+//! Two reasons. The layout is this crate's - `<root>/minecraft/` and
 //! `<root>/server/` are decided in [`crate::metadata`], and a frontend that
 //! joined `"minecraft/mods"` itself would have to be found and changed the day
 //! that layout moves. Handling a *missing* folder is a decision, not
@@ -39,7 +39,7 @@ pub enum MissingFolder {
 pub enum ClientFolder {
     /// The instance root, which also holds `.launcher/`.
     Root,
-    /// `<root>/minecraft/` — the game directory itself.
+    /// `<root>/minecraft/` - the game directory itself.
     Minecraft,
     Mods,
     Config,
@@ -140,7 +140,7 @@ impl fmt::Display for ClientFolder {
 pub enum ServerFolder {
     /// The server root, which also holds `.launcher/`.
     Root,
-    /// `<root>/server/` — where the server actually runs.
+    /// `<root>/server/` - where the server actually runs.
     Server,
     Mods,
     Config,

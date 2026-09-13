@@ -2,7 +2,7 @@
 //!
 //! # The whole flow
 //!
-//! The user types a name. That is it — no network, no Microsoft, no keyring
+//! The user types a name. That is it - no network, no Microsoft, no keyring
 //! entry, because there is no secret to store. Security is not weakened
 //! here; it simply has nothing to apply to, which is a stronger position than a
 //! laxer store would be.
@@ -11,7 +11,7 @@
 //!
 //! A Minecraft server running `online-mode=false` does not ask Mojang who a
 //! connecting player is. It computes their UUID itself, with
-//! `UUID.nameUUIDFromBytes(("OfflinePlayer:" + name).getBytes(UTF_8))` — an MD5
+//! `UUID.nameUUIDFromBytes(("OfflinePlayer:" + name).getBytes(UTF_8))` - an MD5
 //! digest stamped as a version-3, RFC 4122 UUID.
 //!
 //! Ephervex must reproduce that byte for byte. Local reproduction servers
@@ -20,7 +20,7 @@
 //! linked test server* disagree about who the player is. The visible damage is
 //! not an error message: it is the player's inventory, position, advancements,
 //! ender chest, and op status silently belonging to a different identity than
-//! the one the world already has — which, in a tool built for reproducing bugs,
+//! the one the world already has - which, in a tool built for reproducing bugs,
 //! would corrupt the reproduction rather than fail it.
 //!
 //! Verified 2026-08-08 against current community documentation of the server
@@ -134,8 +134,8 @@ mod tests {
     fn the_derived_uuid_matches_what_a_server_computes() {
         // The load-bearing test in this module. These pairs are what
         // `UUID.nameUUIDFromBytes(("OfflinePlayer:" + name).getBytes(UTF_8))`
-        // returns, and every offline-mode server — vanilla, CraftBukkit,
-        // Spigot, Paper, and the forks — calls that method.
+        // returns, and every offline-mode server - vanilla, CraftBukkit,
+        // Spigot, Paper, and the forks - calls that method.
         //
         // If this test ever fails, a client and its own linked test server stop
         // agreeing about who the player is, and the symptom is a silently wrong
@@ -182,7 +182,7 @@ mod tests {
         // The trap this test exists for: RFC 4122's version 3 prepends a
         // namespace, Java's `nameUUIDFromBytes` does not, and both produce a
         // well-formed version-3 UUID. Reaching for the standard helper is the
-        // natural thing to do and is silently wrong — every server would
+        // natural thing to do and is silently wrong - every server would
         // disagree with the result, and nothing about it looks incorrect.
         let ours = offline_uuid("Notch");
         for namespace in [

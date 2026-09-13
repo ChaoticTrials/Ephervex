@@ -2,7 +2,7 @@
 //!
 //! # Two forms, one representation
 //!
-//! 1.12.2 — and everything before it — carries a single
+//! 1.12.2 - and everything before it - carries a single
 //! `"minecraftArguments"` **string**: a whitespace-separated template with no
 //! conditions and no JVM half at all.
 //!
@@ -17,14 +17,14 @@
 //! Both become [`Arguments`]: a set of named groups, each a list of
 //! [`ArgumentEntry`] carrying its values and its (possibly empty) rules. The
 //! form itself is preserved in [`Arguments::form`], because the difference is
-//! not merely cosmetic — see the legacy note below.
+//! not merely cosmetic - see the legacy note below.
 //!
 //! # Groups are open-ended on purpose
 //!
 //! The 26.x releases introduced a third group, `default-user-jvm`, holding
 //! Mojang's own recommended heap and GC flags. the project's 2026 snapshot does not
 //! mention it, and an enum closed over `game` and `jvm` would have silently
-//! dropped it — which is exactly the kind of quiet approximation Ephervex does not allow.
+//! dropped it - which is exactly the kind of quiet approximation Ephervex does not allow.
 //! [`ArgumentGroup::Other`] means the next such addition arrives as data rather
 //! than as a parse failure or a hole.
 //!
@@ -109,7 +109,7 @@ impl std::fmt::Display for ArgumentGroup {
 /// One entry of an argument group: the tokens it contributes, and the
 /// conditions under which it contributes them.
 ///
-/// The values are templates — `${auth_player_name}`, `${classpath}` — and are
+/// The values are templates - `${auth_player_name}`, `${classpath}` - and are
 /// left unsubstituted. Substitution needs an account, a classpath, and a game
 /// directory, none of which exist while metadata is being read.
 #[derive(Debug, Clone, PartialEq, Eq)]

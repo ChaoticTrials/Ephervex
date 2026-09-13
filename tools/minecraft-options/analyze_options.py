@@ -2831,7 +2831,7 @@ def report(inventory: list[dict[str, Any]], latest: dict[str, Any] | None,
     if changes:
         for era in changes["keybinding_eras"]:
             span = era["from"] if era["from"] == era["through"] else f"{era['from']}–{era['through']}"
-            lines.append(f"- **{span}** — code space `{era['code_space']}`, {era['binding_count']} bindings, "
+            lines.append(f"- **{span}** - code space `{era['code_space']}`, {era['binding_count']} bindings, "
                          f"encoding: {'; '.join(era['file_encodings'])}.")
     if crosscheck and crosscheck.get("status") == "derived":
         lines += ["",
@@ -2849,7 +2849,7 @@ def report(inventory: list[dict[str, Any]], latest: dict[str, Any] | None,
         for era in changes["fov_eras"]:
             span = era["from"] if era["from"] == era["through"] else f"{era['from']}–{era['through']}"
             if era["type"] is None:
-                lines.append(f"- **{span}** — `fov` not present in the extracted persistence path.")
+                lines.append(f"- **{span}** - `fov` not present in the extracted persistence path.")
                 continue
             transform = era.get("value_to_storage") or "none (stored directly)"
             numeric, ui = era.get("numeric"), era.get("ui_domain")
@@ -2860,7 +2860,7 @@ def report(inventory: list[dict[str, Any]], latest: dict[str, Any] | None,
                           "degree slider through the storage transform)")
             else:
                 domain = "unresolved"
-            lines.append(f"- **{span}** — type `{era['type']}`, encoding {era['file_encoding']}, "
+            lines.append(f"- **{span}** - type `{era['type']}`, encoding {era['file_encoding']}, "
                          f"stored value = {transform}, in-file domain {domain}, "
                          f"default {era['default']!r}.")
 
@@ -2878,14 +2878,14 @@ def report(inventory: list[dict[str, Any]], latest: dict[str, Any] | None,
                                 if row["versions"].get(v["minecraft_version"], {}).get("status") == "unsupported"]
             note = ("provably absent up to and including " + unsupported_from[-1]) if unsupported_from else ""
             lines.append(f"| `{row['canonical_id']}` | `{row['canonical_key']}` | "
-                         f"{safe[0] if safe else '—'} | {note} |")
+                         f"{safe[0] if safe else '-'} | {note} |")
 
     lines += ["", "## 11. Settings Ephervex should not manage", ""]
     if latest:
         for s in latest["settings"]:
             if not s.get("ephervex_manageable", True):
                 reason = s["notes"][0] if s["notes"] else "special serialisation"
-                lines.append(f"- `{s['persisted_key']}` — {reason}")
+                lines.append(f"- `{s['persisted_key']}` - {reason}")
         lines += ["",
                   "In addition, any options.txt key that the analyzer did not resolve for a target release "
                   "must be left byte-identical, as must every key Ephervex does not know about (mod-added "
@@ -2962,12 +2962,12 @@ def report(inventory: list[dict[str, Any]], latest: dict[str, Any] | None,
     norm_by_id = {n["jar_id"]: n for n in normalized}
     for x in inventory:
         analysis = x.get("options_analysis", {})
-        roots = ", ".join(analysis.get("roots", [])) or "—"
+        roots = ", ".join(analysis.get("roots", [])) or "-"
         norm = norm_by_id.get(x["jar_id"])
         keys = len(analysis.get("options") or {})
         binds = len(analysis.get("keybinds") or [])
         lines.append(f"| `{x['path']}` | {x.get('detected_version') or 'unresolved'} | "
-                     f"{analysis.get('persistence_era') or '—'} | {keys} | {binds} | "
+                     f"{analysis.get('persistence_era') or '-'} | {keys} | {binds} | "
                      f"`{x['sha256'][:16]}…` | `{roots}` |")
 
     lines += ["", "## Re-run", "", "```bash", command, "```", ""]

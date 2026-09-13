@@ -1,4 +1,4 @@
-# ADR 0015 — Linked client direct connection uses canonical lifecycle services
+# ADR 0015 - Linked client direct connection uses canonical lifecycle services
 
 **Status:** Accepted
 

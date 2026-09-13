@@ -1,4 +1,4 @@
-# ADR 0005 — Provider abstractions for loaders, mod platforms, and accounts
+# ADR 0005 - Provider abstractions for loaders, mod platforms, and accounts
 
 **Status:** Accepted
 
@@ -21,11 +21,11 @@ rewrite instead of an addition.
 Each gets a trait boundary, and the core depends on the trait rather than on a
 concrete implementation:
 
-- `LoaderProvider` — version discovery, client install, server install, Java
+- `LoaderProvider` - version discovery, client install, server install, Java
   validation.
-- Mod platform provider — search, project metadata, versions, dependency
+- Mod platform provider - search, project metadata, versions, dependency
   mapping into one shared dependency graph.
-- `AccountProvider` — the whole Minecraft-specific authentication chain behind
+- `AccountProvider` - the whole Minecraft-specific authentication chain behind
   one interface.
 
 Provider-specific metadata stays in provider-specific structures. It does not
@@ -34,7 +34,7 @@ leak into the common model.
 ## Consequences
 
 - Adding Fabric later is a new `LoaderProvider` implementation plus a
-  `LoaderKind` variant — not a change to the launch pipeline.
+  `LoaderKind` variant - not a change to the launch pipeline.
 - Each provider is independently testable against fixtures, which is what lets
   CI avoid live services entirely.
 - The traits must not be shaped around one provider's quirks. Concretely:

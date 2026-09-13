@@ -1,4 +1,4 @@
-# ADR 0020 — Mod mutation is one undoable transaction, and ownership decides what may be mutated
+# ADR 0020 - Mod mutation is one undoable transaction, and ownership decides what may be mutated
 
 **Status:** Accepted
 
@@ -40,7 +40,7 @@ have and which projects it must not; nothing states an order. The operation runs
 are *moved* into `.launcher/retired/` inside the same instance rather than
 deleted. That makes every step before the recipe is published exactly undoable:
 new files are removed, retired files are moved back. Retirement precedes writing,
-which is what makes a same-file-name replacement safe — nothing is lost by the
+which is what makes a same-file-name replacement safe - nothing is lost by the
 earlier move, because by then every replacement artifact is verified in the
 shared cache. "Ready" means verified, not written.
 
@@ -54,8 +54,8 @@ recorded versions, and it keeps the ownership already recorded rather than
 whatever the caller supplied. An update must not promote a dependency into a
 root.
 
-**Orphans are proven, not assumed.** After a change, the instance's roots — mods
-a human chose by name, plus optional dependencies they ticked — are re-resolved,
+**Orphans are proven, not assumed.** After a change, the instance's roots - mods
+a human chose by name, plus optional dependencies they ticked - are re-resolved,
 each pinned to the release it is actually at, and the union of what they reach is
 what the instance still requires. An automatic dependency outside that union has
 no remaining owner and may go. A catalog that cannot answer means nothing is
@@ -81,7 +81,7 @@ replacements separately so a caller knows what to retire.
 An optional dependency sits where it does because both halves of its name are
 true: the resolver picks its version, so moving it independently could break what
 asked for it; a human ticked it, so unticking it is theirs and nothing else may
-collect it. Anything whose exact installed release is unproven is refused too —
+collect it. Anything whose exact installed release is unproven is refused too -
 without it there is no way to tell an update from a no-op, or to know what is
 being replaced.
 

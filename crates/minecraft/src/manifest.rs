@@ -31,7 +31,7 @@
 //! Selection follows Mojang's own ordering and release dates rather than
 //! arithmetic on version strings. So when the id is unreadable, the
 //! floor is decided by comparing `releaseTime` against the `releaseTime` of the
-//! 1.12.2 entry **in the same manifest** — no hardcoded date, no guess. A
+//! 1.12.2 entry **in the same manifest** - no hardcoded date, no guess. A
 //! future scheme therefore appears in the list on the strength of being newer
 //! than 1.12.2, which is exactly the claim the manifest is making.
 
@@ -92,7 +92,7 @@ impl VersionRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VersionManifest {
     pub latest: LatestVersions,
-    /// Every entry, in Mojang's own order — newest first.
+    /// Every entry, in Mojang's own order - newest first.
     pub versions: Vec<VersionRecord>,
 }
 
@@ -162,7 +162,7 @@ impl VersionManifest {
 
     /// Why an entry is offered, or `None` if it is not.
     ///
-    /// Separate from [`Self::supported_releases`] so a caller — or a test — can
+    /// Separate from [`Self::supported_releases`] so a caller - or a test - can
     /// ask *how* a version qualified without re-deriving the rule.
     #[must_use]
     pub fn support_basis(&self, record: &VersionRecord) -> Option<SupportBasis> {
@@ -207,7 +207,7 @@ fn supports(
             None
         }
         None => {
-            // No 1.12.2 entry to compare against — a manifest shape nobody
+            // No 1.12.2 entry to compare against - a manifest shape nobody
             // has seen. Refusing is the honest answer: offering a version
             // whose age is unknown could put a user on an unsupported
             // release.

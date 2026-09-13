@@ -9,7 +9,7 @@
 //! a user can be told why their setting won.
 //!
 //! Keeping them apart matters because a pinned runtime still has to be checked
-//! against the rules — pinning means "use this one", not "stop caring whether
+//! against the rules - pinning means "use this one", not "stop caring whether
 //! it works". A pinned runtime that fails the rules is a clear failure, never a
 //! quiet substitution.
 //!
@@ -75,7 +75,7 @@ impl Default for GlobalJavaSettings {
 /// Which layer supplied the pinned path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PinSource {
-    /// A path passed to this specific operation — a CLI argument, a "test this
+    /// A path passed to this specific operation - a CLI argument, a "test this
     /// runtime" action.
     ExplicitRequest,
     /// The instance's own [`JavaOverride`].
@@ -241,7 +241,7 @@ fn major_rule(required: &RequiredJava) -> crate::rules::VersionBound {
 /// Picks the best runtime satisfying the requirement and every rule.
 ///
 /// Ranking among the survivors is newest-first, with a managed runtime
-/// preferred over a system one at equal version — Ephervex installed the
+/// preferred over a system one at equal version - Ephervex installed the
 /// managed one for exactly this purpose, and preferring it makes the launcher's
 /// behavior reproducible across machines whose distributions patch differently.
 ///

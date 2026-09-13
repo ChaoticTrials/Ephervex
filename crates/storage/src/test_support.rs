@@ -1,6 +1,6 @@
 //! A disposable application environment for this crate's own tests.
 //!
-//! Every root — config, data, cache, state, and the *temporary* one — lives
+//! Every root - config, data, cache, state, and the *temporary* one - lives
 //! inside a [`tempfile::TempDir`]. That matters twice over: a test can delete
 //! the temporary instance root to simulate the OS clearing `/tmp` without
 //! touching the real one, and no test can ever write into the developer's

@@ -17,7 +17,7 @@ workspace = true
 
 [dependencies]
 # A frontend depends on `ephervex-core` and nothing below it.
-# No provider crate — storage, download, minecraft, loaders, … — belongs in
+# No provider crate - storage, download, minecraft, loaders, … - belongs in
 # this list. If a command needs something core does not expose, the fix is to
 # add a service to core, not a dependency here.
 ephervex-core.workspace = true

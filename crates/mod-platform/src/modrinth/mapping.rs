@@ -3,7 +3,7 @@
 //! This is where every judgment about what an upstream value *means* lives, and
 //! it is the last place Modrinth's vocabulary appears: everything returned from
 //! here is a [`crate::model`] type. Keeping the judgments together rather than
-//! scattered through the request code is what makes them reviewable as a set —
+//! scattered through the request code is what makes them reviewable as a set -
 //! most of them are refusals, and each one is a case where guessing would
 //! install the wrong thing.
 //!

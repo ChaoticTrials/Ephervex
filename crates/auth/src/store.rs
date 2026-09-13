@@ -20,7 +20,7 @@
 //! back silently. That is three separate requirements and this module supplies
 //! the first ([`CredentialStorage::probe`] reports the failure with the
 //! platform's own words) and the second ([`MemoryStore`]). The third is
-//! structural — the caller has to *ask* for the memory store by name, so
+//! structural - the caller has to *ask* for the memory store by name, so
 //! degrading cannot happen by accident.
 
 use std::collections::HashMap;
@@ -250,8 +250,8 @@ impl MemoryStore {
     }
 
     /// A poisoned lock means another thread panicked while holding it. The map
-    /// itself is still consistent — nothing here can panic part-way through a
-    /// mutation — so recovering beats refusing to log a user in.
+    /// itself is still consistent - nothing here can panic part-way through a
+    /// mutation - so recovering beats refusing to log a user in.
     fn entries(&self) -> std::sync::MutexGuard<'_, HashMap<CredentialKey, SecretString>> {
         self.entries.lock().unwrap_or_else(PoisonError::into_inner)
     }

@@ -2,8 +2,8 @@
 //!
 //! This is the application-service seam: the GUI and CLI depend on
 //! `ephervex-core` and nothing below it, so provider crates can be reshaped
-//! without either frontend noticing. Anything a frontend needs to *do* — as
-//! opposed to merely display — belongs here.
+//! without either frontend noticing. Anything a frontend needs to *do* - as
+//! opposed to merely display - belongs here.
 //!
 //! Keeping it honest matters more than it looks. A frontend that reaches past
 //! this layer into a provider crate compiles perfectly well; the boundary is
@@ -46,7 +46,7 @@ use crate::error::CoreResult;
 
 /// What a caller wants a Java plan for, beyond the Minecraft version.
 ///
-/// The default — no instance, no explicit path, no installing — is "what would
+/// The default - no instance, no explicit path, no installing - is "what would
 /// happen if I launched this right now", which is the question a `--dry-run`
 /// and a settings screen both ask.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -230,7 +230,7 @@ pub struct App {
     /// in twenty-four hours and the refresh token in the keyring can mint
     /// another, so persisting it would put a second credential at risk for no
     /// benefit. A plain field rather than a lock because the
-    /// operations that set it already take `&mut self` — see
+    /// operations that set it already take `&mut self` - see
     /// [`crate::account`].
     pub(crate) session: Option<ephervex_auth::Session>,
     /// Whether this application may talk plaintext HTTP.
@@ -239,7 +239,7 @@ pub struct App {
     /// reach the relaxed transport at all: the strict production default is not
     /// a setting anything can change, it is the only behavior compiled in. Set
     /// by [`Self::use_loopback_catalog`] so an integration test can drive the
-    /// whole stack — catalog, downloads, verification, publication — against a
+    /// whole stack - catalog, downloads, verification, publication - against a
     /// local server instead of a production one.
     #[cfg(test)]
     pub(crate) loopback_http: bool,
@@ -269,7 +269,7 @@ impl App {
 
     /// Opens the application against explicit roots.
     ///
-    /// Exists so tests — and, later, a `--data-dir` style override — can point
+    /// Exists so tests - and, later, a `--data-dir` style override - can point
     /// the whole application at a temporary directory instead of the
     /// developer's real home.
     pub fn open_at(paths: Paths) -> CoreResult<Self> {
@@ -416,7 +416,7 @@ impl App {
 
     /// Brings the index back in line with what is actually on disk.
     ///
-    /// A vanished temporary root is removed silently — that is what an OS temp
+    /// A vanished temporary root is removed silently - that is what an OS temp
     /// cleanup looks like, not an error. A vanished persistent root keeps its
     /// record and raises a warning instead (ADR 0006).
     #[instrument(skip(self))]
@@ -442,7 +442,7 @@ impl App {
     /// A failure to write `options.txt` is reported and **not** propagated: the
     /// instance exists, is launchable, and the game will write its own defaults
     /// on first run. Undoing a successful creation over a GUI scale would be a
-    /// far worse trade — and leaving it half-created would be worse still.
+    /// far worse trade - and leaving it half-created would be worse still.
     #[instrument(skip(self, request))]
     pub async fn create_client_reporting(&self, request: NewClient) -> CoreResult<CreatedClient> {
         let validation = self.validate_client_target(&request).await;
@@ -829,7 +829,7 @@ impl App {
     ///
     /// The first call scans; later calls return what it found. Scanning forks a
     /// JVM per distinct runtime, so a frontend may call this as often as it
-    /// likes — which is the point of caching it here rather than asking every
+    /// likes - which is the point of caching it here rather than asking every
     /// caller to remember.
     #[instrument(skip(self))]
     pub async fn java_runtimes(&self) -> CoreResult<Arc<RuntimeInventory>> {

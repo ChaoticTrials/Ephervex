@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Fabric, Quilt, LiteLoader, and Rift are deliberately absent. Adding one is a
 /// new `LoaderProvider` implementation in `ephervex-loaders` plus a variant
-/// here — never a rewrite of the launcher core.
+/// here - never a rewrite of the launcher core.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LoaderKind {

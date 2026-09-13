@@ -4,7 +4,7 @@
 //!
 //! Minecraft version strings have never been SemVer and, as of the 26.x
 //! releases, are not even the historical `1.major.minor` scheme any more. A
-//! SemVer parser rejects `26.1` outright — it has two components, not three —
+//! SemVer parser rejects `26.1` outright - it has two components, not three -
 //! and reading `1.21.11` as SemVer implies precedence rules (pre-release
 //! ordering, build metadata, caret compatibility) that Mojang has never
 //! promised. The workspace declares `semver` "only where a real semantic
@@ -29,8 +29,8 @@
 //! 59 for Minecraft 26.2, not a Minecraft version with a fourth component, and
 //! `1.20.1-forge-47.4.10` is two identifiers joined by a hyphen. A caller
 //! holding a loader-derived version-manifest id has to reach the Minecraft
-//! release it extends — [`crate::VersionMetadata::minecraft_version`] carries
-//! it — rather than hand the loader id to this parser.
+//! release it extends - [`crate::VersionMetadata::minecraft_version`] carries
+//! it - rather than hand the loader id to this parser.
 //!
 //! # Degrading on an id it cannot parse
 //!
@@ -38,7 +38,7 @@
 //! assume it will meet a form it does not know. An unparseable id becomes
 //! [`MinecraftVersionId::Unrecognized`], which:
 //!
-//! * is never an error and never a panic — the id is kept verbatim and still
+//! * is never an error and never a panic - the id is kept verbatim and still
 //!   displays and round-trips;
 //! * orders **above** every id that did parse, on the reasoning that a scheme
 //!   this code has not been taught is far more likely to be a future one than
@@ -46,7 +46,7 @@
 //! * is reported by [`Self::is_recognized`] so callers can log it and show it
 //!   as unusual, rather than dropping it where nobody would notice.
 //!
-//! The support filter never decides the floor from an unrecognized id — it
+//! The support filter never decides the floor from an unrecognized id - it
 //! falls back to the manifest's `releaseTime`. See
 //! [`crate::manifest::VersionManifest::supported_releases`].
 
@@ -63,8 +63,8 @@ pub const MINIMUM_SUPPORTED_VERSION: &str = "1.12.2";
 
 /// A parsed Minecraft version id.
 ///
-/// Both released schemes are dotted runs of non-negative integers — `1.12.2`,
-/// `1.21`, `26.1` — so one representation covers them, and the calendar scheme
+/// Both released schemes are dotted runs of non-negative integers - `1.12.2`,
+/// `1.21`, `26.1` - so one representation covers them, and the calendar scheme
 /// happens to order correctly against the old one for free (`26` > `1`).
 ///
 /// `PartialEq`, `Hash`, and `Ord` are implemented by hand rather than derived,
@@ -97,7 +97,7 @@ impl MinecraftVersionId {
         let mut components = Vec::new();
         for part in raw.split('.') {
             // Rejecting non-ASCII-digit runs also rejects `1.12.2-pre1`,
-            // `1.RV-Pre1`, `b1.7.3`, and `+1` — all real ids Mojang has
+            // `1.RV-Pre1`, `b1.7.3`, and `+1` - all real ids Mojang has
             // published, none of which are releases.
             if part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()) {
                 return Self::Unrecognized(raw.to_owned());
@@ -122,8 +122,8 @@ impl MinecraftVersionId {
 
     /// Whether the id parsed into a form this build can reason about.
     ///
-    /// A `false` here is a signal to *say something* — log it, mark it in the
-    /// UI — not a signal to hide the version.
+    /// A `false` here is a signal to *say something* - log it, mark it in the
+    /// UI - not a signal to hide the version.
     #[must_use]
     pub const fn is_recognized(&self) -> bool {
         matches!(self, Self::Numbered { .. })
@@ -170,8 +170,8 @@ impl MinecraftVersionId {
 
 /// Compares two component runs, treating an absent component as zero.
 ///
-/// `1.21` and `1.21.0` therefore compare equal — Mojang publishes one or the
-/// other, never both — while `1.21` still sorts below `1.21.1`.
+/// `1.21` and `1.21.0` therefore compare equal - Mojang publishes one or the
+/// other, never both - while `1.21` still sorts below `1.21.1`.
 fn compare_components(left: &[u32], right: &[u32]) -> Ordering {
     let width = left.len().max(right.len());
     (0..width)
@@ -185,7 +185,7 @@ fn compare_components(left: &[u32], right: &[u32]) -> Ordering {
 }
 
 /// Drops trailing zero components, so that the canonical form of `1.21.0` and
-/// of `1.21` is the same slice — which is what keeps `Hash` in step with `Eq`.
+/// of `1.21` is the same slice - which is what keeps `Hash` in step with `Eq`.
 fn significant(components: &[u32]) -> &[u32] {
     let end = components
         .iter()

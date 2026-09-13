@@ -14,7 +14,7 @@
 //! The SQLite index is a cache of authority, not the authority. A user who
 //! copies an instance directory to another machine, or who loses
 //! `launcher.sqlite` to a bad shutdown, still has everything needed to
-//! reconstruct the record — because it is sitting in the directory they care
+//! reconstruct the record - because it is sitting in the directory they care
 //! about.
 //!
 //! # Write order
@@ -202,13 +202,13 @@ pub fn warnings_path(root: &Path) -> PathBuf {
     metadata_dir(root).join(WARNINGS_FILE)
 }
 
-/// `<root>/minecraft/` — where the game actually runs.
+/// `<root>/minecraft/` - where the game actually runs.
 #[must_use]
 pub fn client_game_dir(root: &Path) -> PathBuf {
     root.join(CLIENT_GAME_DIR)
 }
 
-/// `<root>/server/` — where the server actually runs.
+/// `<root>/server/` - where the server actually runs.
 #[must_use]
 pub fn server_game_dir(root: &Path) -> PathBuf {
     root.join(SERVER_GAME_DIR)

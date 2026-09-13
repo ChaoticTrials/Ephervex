@@ -5,8 +5,8 @@
 //! [`InstallationPlan::resolve`] is pure: metadata plus a [`RuleContext`] in,
 //! every path and every artifact out, no I/O and no network. [`install`] then
 //! fetches what the plan named. Splitting them is what makes the interesting
-//! half testable — which libraries survive their rules, in which order the
-//! classpath is built, which era's natives handling applies — without a
+//! half testable - which libraries survive their rules, in which order the
+//! classpath is built, which era's natives handling applies - without a
 //! download, a temporary directory, or a JVM.
 //!
 //! It also gives `--dry-run` and "explain this launch" a real answer rather
@@ -18,7 +18,7 @@
 //! libraries store holds every library of every version the launcher has ever
 //! touched.
 //! The classpath is built from *this version's* `libraries` array, filtered by
-//! its rules, in the order Mojang published — with the client jar last, where
+//! its rules, in the order Mojang published - with the client jar last, where
 //! Mojang's own launcher puts it.
 //!
 //! # Where things land
@@ -33,7 +33,7 @@
 //! | unpacked natives | `natives/<version>/<platform>/` | derived, not downloaded |
 //!
 //! Every one of them is launcher-level. An instance directory holds saves,
-//! options, logs, and crash reports and nothing that could be re-downloaded —
+//! options, logs, and crash reports and nothing that could be re-downloaded -
 //! which is what makes a temporary instance cost kilobytes instead of gigabytes
 //!
 //! The client jar is content-addressed rather than filed under a synthetic
@@ -299,7 +299,7 @@ impl InstallationPlan {
     }
 
     /// Every artifact that has to be fetched before the game can start, except
-    /// the assets — those are named by the index, which is one of these.
+    /// the assets - those are named by the index, which is one of these.
     fn required_artifacts(&self) -> Vec<&PlannedArtifact> {
         let mut artifacts = vec![&self.client_jar, &self.asset_index];
         artifacts.extend(self.libraries.iter());
@@ -389,7 +389,7 @@ impl VanillaInstaller {
     /// Points the asset endpoint somewhere else.
     ///
     /// For the loopback tests, which need the constructed URL to reach a mock
-    /// server — the same reason `VersionCatalog::new` takes a manifest URL. Not
+    /// server - the same reason `VersionCatalog::new` takes a manifest URL. Not
     /// a user setting: redirecting it would make every asset digest meaningless.
     #[must_use]
     pub fn with_assets_base(mut self, base: &str) -> Self {
@@ -586,7 +586,7 @@ fn request_for(planned: &PlannedArtifact) -> LaunchResult<DownloadRequest> {
 /// Deliberately `DownloadRequest::new` rather than `::parse`: the transport
 /// policy belongs to the download manager, which applies it from its
 /// `HttpConfig` on every attempt. Checking it a second time here would only
-/// mean the offline tests could not point the pipeline at a loopback server —
+/// mean the offline tests could not point the pipeline at a loopback server -
 /// which is exactly the trade `VersionCatalog` already makes.
 fn url(value: &str) -> Result<reqwest::Url, UrlPolicyError> {
     reqwest::Url::parse(value).map_err(|_| UrlPolicyError::Malformed {

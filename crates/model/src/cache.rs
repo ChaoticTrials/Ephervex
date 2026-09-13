@@ -3,7 +3,7 @@
 //! The cache is a disposable optimization, never a source of truth: an
 //! installed instance or a retained server owns its own files, so removing a
 //! reusable cache entry costs a re-download and nothing else. That is what
-//! makes a budget expressible at all, and it is why the budget is *soft* — a
+//! makes a budget expressible at all, and it is why the budget is *soft* - a
 //! required artifact is fetched whatever its size, and the limit only decides
 //! what is worth keeping afterwards.
 //!
@@ -244,8 +244,8 @@ impl ArtifactCacheLimit {
     ///
     /// Writing the product first would overflow for any limit above a fifth of
     /// `u64::MAX`, which is well inside the representable range. Dividing before
-    /// multiplying and adding the remainder's share back is exact —
-    /// `b = 100q + r` gives `80q + floor(80r/100)` — and every term stays below
+    /// multiplying and adding the remainder's share back is exact -
+    /// `b = 100q + r` gives `80q + floor(80r/100)` - and every term stays below
     /// `b`.
     #[must_use]
     pub const fn cleanup_target(self) -> Option<u64> {
@@ -293,7 +293,7 @@ impl fmt::Display for ArtifactCacheLimit {
 /// lose their decimal entirely: a limit the user set as `10 GiB` should read back
 /// as `10 GiB`, not as `10.0 GiB`.
 ///
-/// The units above a tebibyte exist for one value — the representable ceiling —
+/// The units above a tebibyte exist for one value - the representable ceiling -
 /// and never appear in a real usage figure.
 #[must_use]
 pub fn format_binary_bytes(bytes: u64) -> String {

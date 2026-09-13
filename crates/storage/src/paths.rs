@@ -148,7 +148,7 @@ impl Paths {
     /// The OS temporary root for this user and application.
     ///
     /// Always derived from [`std::env::temp_dir`], never from a hardcoded
-    /// `/tmp` — that is what makes `TMPDIR` work, and it keeps the code honest
+    /// `/tmp` - that is what makes `TMPDIR` work, and it keeps the code honest
     /// about what it depends on (ADR 0003).
     #[must_use]
     pub fn os_temp_root() -> PathBuf {
@@ -396,7 +396,7 @@ impl Paths {
     /// Creates the directories the launcher expects to exist.
     ///
     /// Called once at startup. Temporary roots are included because the OS may
-    /// have removed them since the last run — that is the whole premise of
+    /// have removed them since the last run - that is the whole premise of
     /// ADR 0006.
     pub fn ensure_base_directories(&self) -> Result<(), PathError> {
         for directory in [

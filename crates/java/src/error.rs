@@ -211,7 +211,7 @@ impl JavaError {
 
     /// Whether offering a managed download is a sensible next step.
     ///
-    /// False once the managed provider itself is the thing that failed —
+    /// False once the managed provider itself is the thing that failed -
     /// suggesting a download that has just failed is worse than saying nothing.
     #[must_use]
     pub const fn managed_download_would_help(&self) -> bool {

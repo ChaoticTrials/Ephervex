@@ -9,7 +9,7 @@
 //! Search takes facets, and it is tempting to treat a facet-filtered result as
 //! a list of compatible projects. It is not. A project satisfies
 //! `versions:1.20.1` if *any* of its versions does, and `categories:neoforge`
-//! if *any* of them does — which can be two different versions.
+//! if *any* of them does - which can be two different versions.
 //!
 //! So the facets are a way to ask for fewer candidates, never a verdict. That
 //! is also why the two search modes differ: when the caller wants to see
@@ -28,8 +28,8 @@
 //!
 //! # Where a cached document lands
 //!
-//! Every request that touches the cache — including the uncached ones, which
-//! still stage a download and drop the entry afterwards — is addressed by the
+//! Every request that touches the cache - including the uncached ones, which
+//! still stage a download and drop the entry afterwards - is addressed by the
 //! digest of a canonical key built in [`super::cache_key`]. Nothing a user
 //! typed and nothing a provider named reaches a path, which is what keeps the
 //! filename a fixed length no matter how long a slug or a search query is.

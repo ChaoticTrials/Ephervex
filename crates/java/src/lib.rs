@@ -13,7 +13,7 @@
 //!
 //! | Module | Holds |
 //! |---|---|
-//! | [`version`] | [`JavaVersion`] — parsing both of Java's numbering schemes |
+//! | [`version`] | [`JavaVersion`] - parsing both of Java's numbering schemes |
 //! | [`probe`] | asking one JVM what it is |
 //! | [`discovery`] | finding candidates, deduplicating them, and probing them |
 //! | [`requirement`] | the Java major a Minecraft version needs |
@@ -46,7 +46,7 @@
 //!   [`selection::EffectiveJvmSettings`] is the memory and argument half of
 //!   the selected requirement resolved and waiting for it.
 //! * **It does not persist the inventory.** Probing is cached in memory by the
-//!   caller — `ephervex-core` holds one inventory per process and exposes a
+//!   caller - `ephervex-core` holds one inventory per process and exposes a
 //!   Refresh. Nothing is written to disk, so a stale cache can
 //!   never outlive the process that made it.
 //!
@@ -54,7 +54,7 @@
 //!
 //! [`archive`] implements the security rules for one archive shape rather than using
 //! the shared hardened extractor, which is Modrinth pack import's. When that exists this
-//! module should call it instead of standing alongside it — two extractors mean
+//! module should call it instead of standing alongside it - two extractors mean
 //! two sets of rules to keep in step.
 
 pub mod adoptium;

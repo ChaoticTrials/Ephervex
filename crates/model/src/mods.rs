@@ -8,8 +8,8 @@
 //! `Unknown` so every jar has a record.
 //!
 //! That would be a record the launcher invented. It would claim a project it
-//! cannot re-resolve, carry hashes of whatever happened to be on disk, and —
-//! because a recorded mod is part of an instance's desired state — put that jar
+//! cannot re-resolve, carry hashes of whatever happened to be on disk, and -
+//! because a recorded mod is part of an instance's desired state - put that jar
 //! into a reconstructed server on the strength of a guess. The absence of a
 //! provider identity already says "nothing trustworthy is known about this
 //! file", and saying nothing is the honest answer.
@@ -31,8 +31,8 @@ pub enum ModProvider {
     Modrinth,
     /// CurseForge, reached through its official third-party API.
     ///
-    /// Present so that everything the CurseForge transport reports — an absent
-    /// API key, a rejected one, a response that could not be read — names the
+    /// Present so that everything the CurseForge transport reports - an absent
+    /// API key, a rejected one, a response that could not be read - names the
     /// catalog it came from, and so a pack imported from a CurseForge export
     /// records the catalog its files came from.
     CurseForge,
@@ -76,7 +76,7 @@ impl fmt::Display for ModProvider {
 ///
 /// A typed wrapper rather than a bare integer because a CurseForge project id
 /// and a CurseForge file id are both small numbers that appear side by side in
-/// an export manifest, in an API path, and in a recipe entry — and swapping
+/// an export manifest, in an API path, and in a recipe entry - and swapping
 /// them resolves perfectly well against the wrong thing. Zero is not a valid
 /// id, so it cannot be constructed: a manifest that declares `0` is refused at
 /// the parser rather than turning into a lookup that can only fail.
@@ -137,8 +137,8 @@ curseforge_id!(CurseForgeFileId);
 ///
 /// The distinction the mod browser needs and the pack importer does not: a
 /// dependency pulled in automatically, an optional one a human ticked, and a
-/// mod someone chose by name are three different things to show, and — once mod
-/// removal exists — three different things to do when the mod that wanted them
+/// mod someone chose by name are three different things to show, and - once mod
+/// removal exists - three different things to do when the mod that wanted them
 /// goes away.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -350,7 +350,7 @@ mod tests {
 
     #[test]
     fn a_provider_this_build_does_not_know_is_refused_rather_than_guessed_at() {
-        // The alternative — folding it into a placeholder — is how a recipe
+        // The alternative - folding it into a placeholder - is how a recipe
         // ends up naming a project nothing can resolve.
         assert_eq!(ModProvider::parse("technic"), None);
         assert_eq!(ModProvider::parse(""), None);

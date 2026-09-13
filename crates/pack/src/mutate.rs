@@ -3,7 +3,7 @@
 //! # The problem this module exists to solve
 //!
 //! Installing a mod only ever adds. Changing one's version, or removing it,
-//! also *takes something away* — and the moment an operation deletes, the
+//! also *takes something away* - and the moment an operation deletes, the
 //! failure modes get worse than "nothing happened". The states worth naming:
 //!
 //! * both the old jar and the new one are in `mods/`, so the loader sees two
@@ -23,15 +23,15 @@
 //! Retiring is a *move*, not a delete: the old jar goes to `.launcher/retired/`
 //! inside the same instance, which is a rename on one filesystem and therefore
 //! atomic and instant. That is the whole trick. Every step before the recipe is
-//! published can be undone exactly — new files are removed, retired files are
-//! moved back — so a failure anywhere leaves the instance as it was, with its
+//! published can be undone exactly - new files are removed, retired files are
+//! moved back - so a failure anywhere leaves the instance as it was, with its
 //! old jars present and its recipe describing them.
 //!
 //! Retiring comes *before* writing, which matters for the case that looks
 //! easiest: a project that keeps one file name across releases. Writing first
 //! would overwrite the old jar, and there would be nothing left to restore if a
 //! later step failed. Nothing is lost by the earlier move, because by then
-//! every replacement artifact is downloaded and verified in the shared cache —
+//! every replacement artifact is downloaded and verified in the shared cache -
 //! "ready" means verified, not written.
 //!
 //! Only after the recipe is on disk are the retired files deleted, and that
@@ -42,7 +42,7 @@
 //!
 //! A jar Ephervex did not install. Retirement moves exactly the files the
 //! recipe records, so a local debug build sitting in `mods/` is not something
-//! any mutation can reach — the same rule the installer applies to
+//! any mutation can reach - the same rule the installer applies to
 //! destinations, applied to removals.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -355,7 +355,7 @@ fn action_for(
 
     match existing {
         Some(entry) if version_of(entry) == version_of(file) => {
-            // The same mod at the same version. Present is a no-op — including
+            // The same mod at the same version. Present is a no-op - including
             // present but turned off, which is a state to leave alone rather
             // than a jar to put back. Absent is a repair, which restores the
             // recorded jar without changing what is recorded.
@@ -579,7 +579,7 @@ fn retire(
             enabled
         };
         if !from.exists() {
-            // The jar is already gone — deleted by hand while bisecting, most
+            // The jar is already gone - deleted by hand while bisecting, most
             // likely. Removing the record is still the operation, and there is
             // nothing here to move.
             continue;

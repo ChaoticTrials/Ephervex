@@ -12,8 +12,8 @@
 //! [`analyze`] is the half that touches nothing: it opens the archive, reads
 //! the manifest, and answers "what is this, and what would importing it do".
 //! the import workflow shows that before the user commits, the CLI prints it for
-//! `--inspect`, and — because it is also the half that refuses an unsupported
-//! loader — nothing gets created for a pack that cannot be reproduced.
+//! `--inspect`, and - because it is also the half that refuses an unsupported
+//! loader - nothing gets created for a pack that cannot be reproduced.
 //!
 //! [`materialize`] is the half that writes, and it writes in the required order. It
 //! stops short of applying the global Minecraft preferences: those need the
@@ -62,7 +62,7 @@ pub struct PackAnalysis {
     ///
     /// Empty for a format whose manifest carries names, hashes, and addresses.
     /// A CurseForge export names its files by catalog id only, so they wait
-    /// here until the provider has been asked — which is what lets an archive
+    /// here until the provider has been asked - which is what lets an archive
     /// be identified, described, and counted with no credential and no network.
     pub pending: Vec<PendingProviderFile>,
     /// Download addresses the URL policy refused, for files that had another
@@ -74,7 +74,7 @@ pub struct PackAnalysis {
     /// said what to do about them; see [`crate::error::PackError::ProviderFilesBlocked`].
     pub blocked: Vec<BlockedProviderFile>,
     /// Attention reasons accumulated while resolving this pack, before it
-    /// becomes an instance — currently only a skipped provider file's
+    /// becomes an instance - currently only a skipped provider file's
     /// [`AttentionReason::ManualDownloadRequired`].
     pub attention: Vec<AttentionReason>,
 }
@@ -192,7 +192,7 @@ impl PackAnalysis {
 /// Opens an archive and works out what it is, writing nothing.
 ///
 /// The archive is returned alongside the analysis so a caller that goes on to
-/// import does not re-open the file — which would let it be swapped between the
+/// import does not re-open the file - which would let it be swapped between the
 /// decision and the extraction.
 #[instrument(skip(policy), fields(archive = %path.display()))]
 pub fn analyze(path: &Path, policy: &PackPolicy) -> PackResult<(PackArchive, PackAnalysis)> {
@@ -267,7 +267,7 @@ pub fn parse_with(
 /// The second dispatch point, and it exists for the same reason as
 /// [`parse_with`]: only a provider's own module knows what its metadata proves.
 /// A recipe written before pack files carried an identity is not re-imported
-/// and is not rewritten — it is completed on the way in, deterministically,
+/// and is not rewritten - it is completed on the way in, deterministically,
 /// from the addresses it already holds. Recorded identities are left alone.
 ///
 /// A recipe whose source is not a provider pack has nothing to reconstruct: a

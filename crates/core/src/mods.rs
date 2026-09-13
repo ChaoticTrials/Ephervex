@@ -374,7 +374,7 @@ pub struct ModDetails {
     pub title: String,
     pub slug: Option<String>,
     /// Attribution as the provider reports it. Modrinth's project endpoint
-    /// reports a team rather than a person, so this is often absent — and
+    /// reports a team rather than a person, so this is often absent - and
     /// absent rather than filled in from somewhere else.
     pub author: Option<String>,
     pub description: String,
@@ -935,9 +935,9 @@ impl App {
 
     /// Works out what installing a mod would involve, without writing anything.
     ///
-    /// Every refusal an installation can hit — a conflicting pin, an
+    /// Every refusal an installation can hit - a conflicting pin, an
     /// incompatible relation, a required dependency that names no project, a
-    /// project already installed at another version — happens here, before the
+    /// project already installed at another version - happens here, before the
     /// instance is touched.
     #[instrument(skip(self, request), fields(instance = %instance, project = %request.project))]
     pub async fn plan_mod_installation(

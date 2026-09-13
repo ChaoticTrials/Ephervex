@@ -1,4 +1,4 @@
-# ADR 0009 — Session-only login is a second credential store, not a fallback
+# ADR 0009 - Session-only login is a second credential store, not a fallback
 
 **Status:** Accepted
 
@@ -21,7 +21,7 @@ and the obvious implementations are all bad:
   default on any machine with a locked keyring.
 
 There is also a second consumer of the same question. The test suite must not
-require a working Secret Service — CI has none — so something has to stand in
+require a working Secret Service - CI has none - so something has to stand in
 for the keyring there too.
 
 ## Decision
@@ -34,7 +34,7 @@ for the keyring there too.
 | `MemoryStore` | a map that dies with the process | `SessionOnly` |
 
 Session-only login is `MemoryStore`. It is not a degraded mode of the keyring
-store, not a flag, and not an absence — it is the same interface backed by
+store, not a flag, and not an absence - it is the same interface backed by
 somewhere else, so every operation above it is written once.
 
 Three consequences follow deliberately:

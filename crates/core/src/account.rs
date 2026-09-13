@@ -4,7 +4,7 @@
 //!
 //! The auth crate knows how to run the token chain. It deliberately knows
 //! nothing about configuration files, keyrings-versus-settings, or which
-//! account is "the" account — those are application questions, and answering
+//! account is "the" account - those are application questions, and answering
 //! them here is what keeps the provider replaceable (ADR 0005).
 //!
 //! Concretely this module owns four things:
@@ -21,8 +21,8 @@
 //!
 //! # Why `&mut self`
 //!
-//! Logging in changes persistent state — the active account, its name, when it
-//! last authenticated — so these take `&mut self` while the read-only services
+//! Logging in changes persistent state - the active account, its name, when it
+//! last authenticated - so these take `&mut self` while the read-only services
 //! elsewhere in [`crate::App`] take `&self`. That is the honest signature for
 //! an operation that writes the configuration file, and it costs nothing today:
 //! the CLI owns its `App` outright, and the GUI owns one inside
@@ -91,7 +91,7 @@ pub struct AccountSummary {
     pub last_authenticated_at: String,
     /// Whether a credential exists that would survive a restart.
     ///
-    /// Always false for an offline account, which has no credential to store —
+    /// Always false for an offline account, which has no credential to store -
     /// not a missing one.
     pub has_stored_credential: bool,
 }
@@ -114,7 +114,7 @@ pub struct AccountStatus {
     /// Whether this process currently holds a usable session.
     pub session_active: bool,
     /// Where credentials are kept, when that could be determined. `None` means
-    /// no Secret Service — which blocks a *Microsoft* login but not an offline
+    /// no Secret Service - which blocks a *Microsoft* login but not an offline
     /// account, since the latter has nothing to store.
     pub credential_storage: Option<CredentialStorage>,
 }
@@ -209,7 +209,7 @@ impl App {
     /// Removes the stored CurseForge API key.
     ///
     /// A separate operation from setting one, so that removal cannot happen by
-    /// submitting an empty field — and so that it never needs the existing
+    /// submitting an empty field - and so that it never needs the existing
     /// value.
     pub fn clear_curseforge_api_key(&self) -> CoreResult<()> {
         let store = credential_store()?;

@@ -11,7 +11,7 @@
 //! entries whose Maven coordinate already carries the classifier
 //! (`org.lwjgl:lwjgl-glfw:3.3.3:natives-linux`) and whose applicability is
 //! decided by an ordinary OS rule. There is no `natives` map, no `classifiers`
-//! object, and — importantly — no extraction step: they go on the classpath.
+//! object, and - importantly - no extraction step: they go on the classpath.
 //!
 //! Both forms are parsed here and neither is normalized into the other, because
 //! they genuinely behave differently at launch. [`Library::natives_classifier`]
@@ -87,7 +87,7 @@ pub struct LibraryDownloads {
 /// Paths excluded when a natives jar is unpacked.
 ///
 /// Universally `["META-INF/"]`, but honored from the metadata rather than
-/// hardcoded — and note this is a *filter*, not a substitute for the path
+/// hardcoded - and note this is a *filter*, not a substitute for the path
 /// checks extraction itself must do.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct ExtractRules {
@@ -100,7 +100,7 @@ pub struct ExtractRules {
 pub struct Library {
     /// The Maven coordinate as published.
     pub name: String,
-    /// The same coordinate, validated — and therefore usable to build a path
+    /// The same coordinate, validated - and therefore usable to build a path
     /// under the shared libraries store.
     pub coordinate: MavenCoordinate,
     pub downloads: LibraryDownloads,
@@ -120,7 +120,7 @@ impl Library {
     /// pre-1.19 form.
     ///
     /// `None` means either "this library has no natives" or "this library *is*
-    /// a native, in the post-1.18 style" — [`Self::is_legacy_natives`]
+    /// a native, in the post-1.18 style" - [`Self::is_legacy_natives`]
     /// separates them.
     #[must_use]
     pub fn natives_classifier(&self, os: &str) -> Option<&str> {

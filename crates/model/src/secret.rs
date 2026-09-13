@@ -1,6 +1,6 @@
 //! A string that cannot be logged by accident.
 //!
-//! Every credential the launcher holds is a [`SecretString`] — the Microsoft
+//! Every credential the launcher holds is a [`SecretString`] - the Microsoft
 //! refresh token, the authorization code, the CurseForge API key. That is not
 //! decoration: the codebase logs liberally with `tracing`, `#[instrument]`
 //! derives fields from function arguments, and `{error:?}` is the normal way to
@@ -8,13 +8,13 @@
 //! line in a file that users routinely paste into bug reports.
 //!
 //! It lives in the model rather than beside one of its consumers because more
-//! than one provider crate holds a credential, and a second wrapper — or a raw
+//! than one provider crate holds a credential, and a second wrapper - or a raw
 //! `String` threaded through a provider that did not want to depend on
-//! authentication — is exactly the leak this type exists to prevent.
+//! authentication - is exactly the leak this type exists to prevent.
 //!
 //! So the type refuses to render itself. `Debug` prints a redaction marker,
 //! there is no `Display`, and reading the value requires calling
-//! [`SecretString::expose`] — a name chosen so that the eight or so call sites
+//! [`SecretString::expose`] - a name chosen so that the eight or so call sites
 //! that legitimately need the bytes are greppable, and so that writing one by
 //! accident is difficult.
 //!
@@ -22,7 +22,7 @@
 //!
 //! It does not zero its memory on drop. Doing that properly needs a crate like
 //! `zeroize` plus care about every move the optimizer is allowed to make, and a
-//! half-measure — overwriting one copy while the allocator holds three others —
+//! half-measure - overwriting one copy while the allocator holds three others -
 //! would buy the appearance of protection rather than the fact of it. The
 //! threat this type is built against is *disclosure through logs*, which is the
 //! one that actually happens to launchers, and against that it is complete.

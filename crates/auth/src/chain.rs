@@ -64,7 +64,7 @@ impl MicrosoftAccountProvider {
 
     /// Builds a provider against explicit endpoints.
     ///
-    /// The offline test suite's entry point. Not a configuration knob —
+    /// The offline test suite's entry point. Not a configuration knob -
     /// see [`crate::endpoints`].
     pub fn with_endpoints(
         client_id: &str,

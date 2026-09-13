@@ -5,7 +5,7 @@
 //! wording of a final error message:
 //!
 //! * a credential is requested only for an artifact that is genuinely going to
-//!   be fetched — never for one the shared cache already holds, and never
+//!   be fetched - never for one the shared cache already holds, and never
 //!   because reading the cache went wrong;
 //! * a refusal is attributed to the credential only when the request actually
 //!   carried one, so an ordinary `403` from a host that was never offered a
@@ -201,7 +201,7 @@ async fn serve_guarded(server: &MockServer, route: &str) {
 #[tokio::test]
 async fn a_cache_that_cannot_be_read_fails_locally_without_asking_for_a_credential() {
     // A cache path whose shard is a regular file: reading it is an I/O error
-    // rather than "nothing is there". That distinction is the whole test — a
+    // rather than "nothing is there". That distinction is the whole test - a
     // local storage fault says nothing about whether a fetch is needed, so
     // recovering from it by fetching would ask for a credential, and a launcher
     // with none configured would be told its API key is missing when no request

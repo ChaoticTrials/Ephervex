@@ -10,7 +10,7 @@
 //! pinned to an exact version. If A is expanded first, B is resolved to its
 //! newest compatible release and marked visited; when C's requirement arrives,
 //! the guard skips it. The install then silently ignores an explicit version
-//! choice — the launcher substituting a release nobody asked for, which is the
+//! choice - the launcher substituting a release nobody asked for, which is the
 //! one thing it must never do.
 //!
 //! So a project is not "visited"; it carries a *constraint*, and the resolver
@@ -27,9 +27,9 @@
 //!
 //! # Nothing here writes
 //!
-//! Resolution produces a [`ModInstallPlan`] and touches no disk. Every refusal
-//! — a conflicting pin, an incompatible relation, a required dependency that
-//! names no project — happens before an installer is handed anything.
+//! Resolution produces a [`ModInstallPlan`] and touches no disk. Every
+//! refusal - a conflicting pin, an incompatible relation, a required dependency
+//! that names no project - happens before an installer is handed anything.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -47,8 +47,8 @@ use crate::provider::ModProviderApi;
 /// How many resolution rounds are allowed before the resolver declares its own
 /// invariant broken.
 ///
-/// A project's pin can only move from "unstated" to "pinned" — a second,
-/// different pin is a hard failure — so each project is resolved at most twice
+/// A project's pin can only move from "unstated" to "pinned" - a second,
+/// different pin is a hard failure - so each project is resolved at most twice
 /// and this ceiling is unreachable. It exists so that a bug in that reasoning
 /// surfaces as a refused install rather than as a launcher that never finishes.
 const MAX_RESOLUTION_ROUNDS: usize = 512;
@@ -65,7 +65,7 @@ pub struct InstallSelection {
     /// "the newest that fits".
     pub version_id: Option<String>,
     /// Optional dependencies the user ticked, by project id. Anything not named
-    /// here stays unselected — the product default.
+    /// here stays unselected - the product default.
     pub optional: BTreeSet<String>,
 }
 
@@ -108,7 +108,7 @@ pub struct InstalledProject {
 /// different version.
 ///
 /// The two answers are opposite and both are right for their own operation.
-/// Installing a new mod must not quietly move a mod that is already there — the
+/// Installing a new mod must not quietly move a mod that is already there - the
 /// user asked for one thing and would get two. Changing a mod's version is a
 /// request to do exactly that, and refusing it would refuse the operation.
 ///
@@ -529,7 +529,7 @@ impl<'a> Resolver<'a> {
     /// The smallest project id that still needs resolving.
     ///
     /// "Needs resolving" is either never resolved, or resolved under a weaker
-    /// constraint than it now carries — which is precisely the case a `visited`
+    /// constraint than it now carries - which is precisely the case a `visited`
     /// set gets wrong.
     fn next_dirty(&self) -> Option<String> {
         self.constraints
@@ -559,7 +559,7 @@ impl<'a> Resolver<'a> {
                 });
             }
             // An explicitly chosen version that does not fit is a refusal. The
-            // alternative — quietly taking a neighbouring release — is the
+            // alternative - quietly taking a neighbouring release - is the
             // substitution this launcher exists not to do.
             if !version
                 .compatibility(target, self.request.loader_name)
@@ -758,7 +758,7 @@ impl<'a> Resolver<'a> {
     /// Describes an optional dependency the user has not taken.
     ///
     /// Its version is resolved so the offer can say what would be installed and
-    /// whether it would even fit — but a failure to resolve is not fatal: an
+    /// whether it would even fit - but a failure to resolve is not fatal: an
     /// optional extra that has no compatible release is a fact to display, not
     /// a reason to refuse the install the user actually asked for.
     async fn record_optional(

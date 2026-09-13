@@ -20,7 +20,7 @@
 //!
 //! That last check is worth being precise about. A provider states which loader
 //! *families* a release supports, not which builds, so a within-family move
-//! cannot make a mod incompatible as far as Modrinth is concerned — and this
+//! cannot make a mod incompatible as far as Modrinth is concerned - and this
 //! reports exactly that rather than implying it verified more than it did.
 //! What it does report honestly is how many mods it could not check at all:
 //! a mod with no proven release is not evidence of anything, and saying "all

@@ -18,7 +18,7 @@
 //!
 //! * **Fabric and Quilt.** They are unsupported and must not be silently
 //!   ignored. The error names the loader
-//!   so the instance can carry `Needs attention — <loader> is not supported`
+//!   so the instance can carry `Needs attention - <loader> is not supported`
 //!   rather than a generic failure.
 //! * **A pack declaring both Forge and NeoForge.** This is ambiguous: the two
 //!   are different loaders with different install semantics, and
@@ -313,7 +313,7 @@ fn normalize_file(
 /// its artifacts out as
 /// `https://cdn.modrinth.com/data/<project>/versions/<version>/<file>`, and the
 /// pack tooling writes those addresses from the catalog entries it resolved.
-/// Reading the ids back out is therefore reconstruction, not inference — unlike
+/// Reading the ids back out is therefore reconstruction, not inference - unlike
 /// a file name, which proves nothing and is never consulted here.
 ///
 /// Two restrictions keep it that way:
@@ -375,7 +375,7 @@ fn catalog_id(segment: &str) -> Option<&str> {
 /// Fills in the provider identity of a recipe read back from disk.
 ///
 /// A recipe written before pack files carried an identity records the same
-/// authoritative download addresses, so the same reconstruction applies to it —
+/// authoritative download addresses, so the same reconstruction applies to it -
 /// which is what lets an instance imported by an earlier build show its pack's
 /// mods without being re-imported, and without a destructive migration.
 ///
@@ -412,8 +412,8 @@ fn normalize_hashes(raw: &BTreeMap<String, String>) -> Vec<Hash> {
 
 /// A refused address with anything secret-shaped removed.
 ///
-/// A rejected address is still reported — a pack pointing at an unlisted mirror
-/// is a fact worth showing — but a CDN URL routinely carries a signed token in
+/// A rejected address is still reported - a pack pointing at an unlisted mirror
+/// is a fact worth showing - but a CDN URL routinely carries a signed token in
 /// its query string, and this text can end up in a log a user pastes into a bug
 /// report. An address that does not even parse has no structure to strip, so
 /// only its query and fragment are dropped.

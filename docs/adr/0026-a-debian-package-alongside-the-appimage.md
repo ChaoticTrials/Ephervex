@@ -1,4 +1,4 @@
-# ADR 0026 — A Debian package alongside the AppImage
+# ADR 0026 - A Debian package alongside the AppImage
 
 **Status:** Accepted
 

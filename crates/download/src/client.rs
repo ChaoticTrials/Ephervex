@@ -8,7 +8,7 @@
 //!
 //! TLS is rustls. The workspace declares `reqwest` with
 //! `default-features = false` and the `rustls` feature precisely so that
-//! nothing in the dependency graph links OpenSSL — a launcher that has to build
+//! nothing in the dependency graph links OpenSSL - a launcher that has to build
 //! and run on arbitrary Linux distributions cannot afford a system-OpenSSL
 //! ABI dependency.
 
@@ -95,7 +95,7 @@ pub fn build_client(config: &HttpConfig) -> Result<Client, DownloadError> {
 ///
 /// For the one situation the ordinary client cannot serve safely: a caller that
 /// attaches a credential to every request it makes. `reqwest` strips the
-/// headers it *knows* are sensitive — `Authorization`, `Cookie` — when a
+/// headers it *knows* are sensitive - `Authorization`, `Cookie` - when a
 /// redirect crosses hosts, but a provider's own credential header is a header
 /// like any other, and following a `302` to somewhere else would hand the
 /// secret to whoever the response named.

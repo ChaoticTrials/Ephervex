@@ -4,7 +4,7 @@
 //! Nothing here touches Adoptium. CI that depends on a third party's uptime
 //! fails for reasons that have nothing to do with the change under test, so the
 //! API response is a fixture served by `wiremock` and the
-//! "JDK" is a tarball this file builds — including one built specifically to
+//! "JDK" is a tarball this file builds - including one built specifically to
 //! escape its extraction directory.
 //!
 //! The synthetic JDK's `bin/java` is a shell script that prints the same
@@ -108,7 +108,7 @@ fn temurin_archive() -> Vec<u8> {
 /// A tarball that tries to write outside wherever it is extracted.
 ///
 /// `tar::Builder` refuses to *write* a `..` path, so the header's name field is
-/// filled in directly — a hostile archive was not built with this crate.
+/// filled in directly - a hostile archive was not built with this crate.
 fn escaping_archive() -> Vec<u8> {
     let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
         Vec::new(),

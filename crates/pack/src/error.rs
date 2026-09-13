@@ -173,7 +173,7 @@ pub enum PackError {
     ///
     /// Distinct from [`Self::ProviderFilesUnresolved`]: those files were never
     /// asked about at all, while these were asked about and refused. Neither
-    /// is laid down silently — a caller resolves a refusal by finding a
+    /// is laid down silently - a caller resolves a refusal by finding a
     /// verified copy in the shared cache or by an explicit skip, and reaching
     /// here means neither happened for every one of them.
     #[error("{remaining} of the pack's files are not available for automatic download")]
@@ -312,7 +312,7 @@ pub enum PackError {
     /// The project is already installed at a different version.
     ///
     /// Changing an installed mod's version is a mod *update*, which this build
-    /// does not implement — so this refuses rather than replacing a jar the
+    /// does not implement - so this refuses rather than replacing a jar the
     /// user did not ask about.
     #[error(
         "`{project_id}` is already installed from {provider} at version `{installed}`, not `{requested}`"

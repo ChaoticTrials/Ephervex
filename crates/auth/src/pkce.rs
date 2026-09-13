@@ -14,7 +14,7 @@
 //! which never leaves this process. Whoever intercepts the code gets a value
 //! the token endpoint will refuse.
 //!
-//! `state` solves a different problem — it proves the redirect that arrived is
+//! `state` solves a different problem - it proves the redirect that arrived is
 //! the one this process asked for, rather than a cross-site forgery or a stale
 //! tab from an earlier attempt. Both are needed; neither substitutes for the
 //! other.
@@ -55,7 +55,7 @@ impl Pkce {
     /// Generates fresh material from the operating system's entropy source.
     ///
     /// Returns `None` if the OS refuses to provide randomness. That is not a
-    /// situation to paper over with a fallback — a predictable verifier is
+    /// situation to paper over with a fallback - a predictable verifier is
     /// worse than no login at all.
     #[must_use]
     pub fn generate() -> Option<Self> {
@@ -74,7 +74,7 @@ impl Pkce {
         &self.challenge
     }
 
-    /// Always `S256`. `plain` is permitted by the RFC and pointless here — it
+    /// Always `S256`. `plain` is permitted by the RFC and pointless here - it
     /// sends the verifier itself through the browser, which is the leak the
     /// mechanism exists to prevent.
     #[must_use]
@@ -141,7 +141,7 @@ mod tests {
     fn the_challenge_matches_rfc_7636s_own_worked_example() {
         // Appendix B of RFC 7636. Checking against a published vector is the
         // only way to catch encoding the digest as hex, or padding the base64,
-        // or hashing the wrong string — all of which produce a plausible-looking
+        // or hashing the wrong string - all of which produce a plausible-looking
         // value that Microsoft rejects at the very end of the flow.
         let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
         let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));

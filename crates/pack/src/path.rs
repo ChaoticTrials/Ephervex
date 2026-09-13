@@ -3,8 +3,8 @@
 //! # Why these live here rather than beside each archive reader
 //!
 //! An archive entry name is attacker-controlled text. The rules for turning one
-//! into a path — refuse absolute paths, refuse `..`, refuse Windows drive
-//! prefixes, refuse NUL, refuse anything that escapes the extraction root — are
+//! into a path - refuse absolute paths, refuse `..`, refuse Windows drive
+//! prefixes, refuse NUL, refuse anything that escapes the extraction root - are
 //! the same whether the archive is a Modrinth `.mrpack`, a CurseForge ZIP,
 //! another provider's archive, or the JDK tarball `ephervex-java` unpacks.
 //! Written once per reader they would be four sets of rules to keep in step,
@@ -79,7 +79,7 @@ pub fn safe_relative_path(raw: &[u8], strip_components: usize) -> Option<PathBuf
 /// archive *path*, which legitimately has directories in it; this validates a
 /// name a remote catalog published for one file, which never should. A
 /// `filename` of `nested/mod.jar` is not something to helpfully create a
-/// directory for — it is a provider saying something this launcher does not
+/// directory for - it is a provider saying something this launcher does not
 /// expect, and the safe response is to refuse rather than to guess at an
 /// intention.
 ///
@@ -100,7 +100,7 @@ pub fn safe_file_name(raw: &str) -> Option<PathBuf> {
 /// Whether a validated relative path would write into launcher-owned metadata.
 ///
 /// Checked on the *validated* path rather than on the raw name so that
-/// `foo/../.launcher/instance.json` cannot slip past a string comparison — by
+/// `foo/../.launcher/instance.json` cannot slip past a string comparison - by
 /// the time a path reaches here it has no `..` left to hide behind.
 #[must_use]
 pub fn is_reserved(relative: &Path) -> bool {
@@ -124,7 +124,7 @@ pub fn is_reserved(relative: &Path) -> bool {
 /// rather than a ban: a real Temurin JDK archive contains a couple of hundred
 /// links that climb out of their own directory with `..` and land back inside
 /// the runtime. The target is therefore walked lexically from the link's
-/// directory — `..` pops a component, and popping past the root is the escape.
+/// directory - `..` pops a component, and popping past the root is the escape.
 ///
 /// Returns the target to create, spelled exactly as the archive spelled it, so
 /// the extracted tree stays relocatable.

@@ -1,8 +1,8 @@
 //! The rules an import is run under.
 //!
 //! Bundled into one value rather than threaded through as three arguments,
-//! because they are all answers to the same question — how far does the
-//! launcher trust this file — and because a caller that has to assemble them
+//! because they are all answers to the same question - how far does the
+//! launcher trust this file - and because a caller that has to assemble them
 //! individually is a caller that can quietly assemble a weaker set.
 //!
 //! Every field has a production default. The reason they are settable at all is
@@ -41,8 +41,8 @@ impl PackPolicy {
 
     /// The policy for a CurseForge export.
     ///
-    /// A CurseForge manifest names no download address at all — the addresses
-    /// come back from the API — so this list is what the *API's* answers are
+    /// A CurseForge manifest names no download address at all - the addresses
+    /// come back from the API - so this list is what the *API's* answers are
     /// checked against. It is deliberately not Modrinth's: an address is
     /// permitted here because CurseForge delivers its own files from it, not
     /// because some other provider vouches for the host.

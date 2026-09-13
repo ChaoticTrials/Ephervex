@@ -1,4 +1,4 @@
-# ADR 0006 — The OS owns temporary-instance cleanup
+# ADR 0006 - The OS owns temporary-instance cleanup
 
 **Status:** Accepted
 
@@ -26,7 +26,7 @@ Specifically:
   startup reconciliation.
 
 If a user's system does not clear its temp directory on reboot, that is
-acceptable — the instance simply persists until it does.
+acceptable - the instance simply persists until it does.
 
 ## Consequences
 

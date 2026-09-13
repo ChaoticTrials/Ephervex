@@ -1,8 +1,8 @@
 //! Discovery, ordering, containment, and bounded reading of diagnostic files.
 //!
 //! Everything here runs against real directories in a temporary root: the
-//! properties under test — what a listing skips, what a symlink does, what a
-//! window contains when the file changed underneath it — are properties of the
+//! properties under test - what a listing skips, what a symlink does, what a
+//! window contains when the file changed underneath it - are properties of the
 //! filesystem, and a fake one would prove nothing about them.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]

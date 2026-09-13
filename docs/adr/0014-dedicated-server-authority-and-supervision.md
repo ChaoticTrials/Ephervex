@@ -1,4 +1,4 @@
-# ADR 0014 — Dedicated server authority and conservative supervision
+# ADR 0014 - Dedicated server authority and conservative supervision
 
 **Status:** Accepted
 

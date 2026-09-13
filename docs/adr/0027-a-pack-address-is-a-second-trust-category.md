@@ -1,4 +1,4 @@
-# ADR 0027 — A pack address the user activated is a second trust category
+# ADR 0027 - A pack address the user activated is a second trust category
 
 **Status:** Accepted
 

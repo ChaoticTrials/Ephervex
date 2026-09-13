@@ -1,4 +1,4 @@
-# 0016 — Diagnostics are bounded, read-only windows over launcher-owned roots
+# 0016 - Diagnostics are bounded, read-only windows over launcher-owned roots
 
 Status: Accepted
 
@@ -6,7 +6,7 @@ Status: Accepted
 
 Logs and crash reports are the reason this product exists: a user reproducing a
 bug needs the game's `latest.log`, its `debug.log`, the newest crash report, the
-server's equivalents, and the launcher's own record of what it did — without
+server's equivalents, and the launcher's own record of what it did - without
 navigating the filesystem to find any of them.
 
 Every one of those files is untrusted and hostile to naive handling:
@@ -22,7 +22,7 @@ Every one of those files is untrusted and hostile to naive handling:
   symbolic link to anywhere on the machine.
 
 A frontend also needs to open these files, and the frontend must not construct
-filesystem paths — the layout belongs to `ephervex-storage` (ADR 0002, ADR 0003)
+filesystem paths - the layout belongs to `ephervex-storage` (ADR 0002, ADR 0003)
 and a GUI that joined `"minecraft/logs"` itself would have to be found and
 changed the day that layout moves.
 
@@ -38,8 +38,8 @@ within a launcher-owned directory**.
    rather than reported as invalid data.
 
 2. **Name-addressed, not path-addressed.** A listing yields entry *names*. Every
-   subsequent operation — open, refresh, search, copy path, open containing
-   folder — takes a scope (client instance, server, or the launcher) plus a
+   subsequent operation - open, refresh, search, copy path, open containing
+   folder - takes a scope (client instance, server, or the launcher) plus a
    name. The name must be a single path component; the entry must be a regular
    file; a symbolic link is refused rather than followed; and the directory
    itself must still resolve inside the root that owns it. Containment is
@@ -48,7 +48,7 @@ within a launcher-owned directory**.
 
 3. **Nothing is interpreted or rewritten.** Text is returned as text. No line is
    executed, no path found inside a log is opened, and content is never
-   normalized — a crash report that has been "cleaned up" has lost the detail
+   normalized - a crash report that has been "cleaned up" has lost the detail
    somebody needed. Search operates on the text already read and never touches
    the file.
 
@@ -73,8 +73,8 @@ within a launcher-owned directory**.
 
 ## Consequences
 
-A frontend can build a complete log browser — list, open, refresh, search, copy
-text, copy path, open folder — without naming a directory, and the same code
+A frontend can build a complete log browser - list, open, refresh, search, copy
+text, copy path, open folder - without naming a directory, and the same code
 serves clients, servers, and the launcher itself.
 
 Reading a rotating file is inherently a sample: a window taken at one moment

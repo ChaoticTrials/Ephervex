@@ -4,15 +4,15 @@
 //! # Verified against Microsoft Learn on 2026-08-08
 //!
 //! * `POST {base}/consumers/oauth2/v2.0/devicecode` takes **`client_id` and
-//!   `scope` only** — no `redirect_uri`, which is what makes the device flow
+//!   `scope` only** - no `redirect_uri`, which is what makes the device flow
 //!   work on a machine with no browser at all. It answers with `device_code`,
 //!   `user_code`, `verification_uri`, `expires_in`, `interval`, and a
 //!   human-readable `message`. `verification_uri_complete` is documented as
 //!   *not* supported by Microsoft, so nothing here may depend on it.
 //! * Polling is `grant_type=urn:ietf:params:oauth:grant-type:device_code` at the
-//!   ordinary `/token` endpoint, and its four documented errors —
+//!   ordinary `/token` endpoint, and its four documented errors -
 //!   `authorization_pending`, `authorization_declined`, `bad_verification_code`,
-//!   `expired_token` — are the flow's normal control path rather than
+//!   `expired_token` - are the flow's normal control path rather than
 //!   exceptions.
 //! * The authorization request carries `code_challenge` and
 //!   `code_challenge_method`; redemption carries `code_verifier`. A public
@@ -66,7 +66,7 @@ const MAX_POLL_INTERVAL: Duration = Duration::from_secs(30);
 /// A Microsoft token pair.
 ///
 /// `refresh` is optional because Microsoft only issues one when
-/// `offline_access` was granted — which Ephervex always requests, but a
+/// `offline_access` was granted - which Ephervex always requests, but a
 /// response is not a place to assume.
 #[derive(Debug)]
 pub struct MicrosoftTokens {

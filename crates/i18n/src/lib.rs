@@ -3,7 +3,7 @@
 //! English is the only bundled locale. The localization boundary keeps
 //! user-facing strings out of business logic.
 //! Provider names, technical ids, paths, versions, and Minecraft log text stay
-//! untranslated — they travel through this layer as *arguments*, never as part
+//! untranslated - they travel through this layer as *arguments*, never as part
 //! of a translatable message.
 //!
 //! # How the rest of the workspace uses this
@@ -18,12 +18,12 @@
 //!
 //! # Two lookup paths, deliberately
 //!
-//! * [`fl!`](i18n_embed_fl::fl) — used *inside this crate*. The macro reads the
+//! * [`fl!`](i18n_embed_fl::fl) - used *inside this crate*. The macro reads the
 //!   fallback resource at compile time, so a typo in a message id or a missing
 //!   argument is a build failure. It can only be used by a crate that owns an
 //!   `i18n.toml`, which is why the ids storage and registry support needs get wrapped in the
 //!   [`messages`] module rather than being called from `ephervex-storage`.
-//! * [`lookup`] / [`lookup_args`] — the runtime path, used by every other
+//! * [`lookup`] / [`lookup_args`] - the runtime path, used by every other
 //!   crate. Ids come from error types and are checked by the tests in this
 //!   crate rather than by the compiler.
 
@@ -60,7 +60,7 @@ pub static LANGUAGE_LOADER: LazyLock<FluentLanguageLoader> = LazyLock::new(|| {
 
     // Load English eagerly. Without this, any lookup made before the frontend
     // gets around to selecting a language would return the loader's
-    // `No localization for id` placeholder — which is exactly what happens on
+    // `No localization for id` placeholder - which is exactly what happens on
     // the error paths that run before configuration has been read.
     if let Err(error) = loader.load_fallback_language(&Localizations) {
         // Tracing may not be initialized this early, and there is no
@@ -188,7 +188,7 @@ where
 /// Looks up a message with no arguments.
 ///
 /// An unknown id yields a visible placeholder and a logged error rather than a
-/// panic — a missing string is a translation bug, not a reason to abort a
+/// panic - a missing string is a translation bug, not a reason to abort a
 /// launch the user is in the middle of.
 #[must_use]
 pub fn lookup(message_id: &str) -> String {
@@ -347,7 +347,7 @@ mod tests {
                 ("loader", Arg::from("NeoForge 47.4.0")),
             ],
         );
-        assert_eq!(text, "Crash repro — Minecraft 1.20.1, NeoForge 47.4.0");
+        assert_eq!(text, "Crash repro - Minecraft 1.20.1, NeoForge 47.4.0");
     }
 
     #[test]

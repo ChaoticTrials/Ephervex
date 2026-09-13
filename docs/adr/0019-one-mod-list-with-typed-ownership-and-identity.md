@@ -1,4 +1,4 @@
-# ADR 0019 — An instance has one mod list, with ownership and identity as separate typed facts
+# ADR 0019 - An instance has one mod list, with ownership and identity as separate typed facts
 
 **Status:** Accepted
 
@@ -18,7 +18,7 @@ instance's mods. An instance built from a two-hundred-mod pack showed none of
 them, and any mod added afterwards appeared to be the only one there.
 
 Two bad repairs suggest themselves. Enumerating `mods/` and hashing what is
-found would produce records for jars the launcher did not install — the thing
+found would produce records for jars the launcher did not install - the thing
 ADR 0012 and ADR 0013 both exist to prevent. Widening "managed mod" to cover
 entries with partial identity would let a mod with no provable release be
 handled by code that assumes one, and the first such assumption to reach the
@@ -27,7 +27,7 @@ recipe would write a version nothing can look up.
 There is also a question about what a pack's download addresses prove. Modrinth
 serves its artifacts from `cdn.modrinth.com/data/<project>/versions/<version>/`,
 and the pack tooling writes those addresses from the catalog entries it
-resolved. The ids in them are catalog data, not a naming convention — but the
+resolved. The ids in them are catalog data, not a naming convention - but the
 same URL position held a human version number in packs built by older tooling,
 and a file may legitimately be served from one of the other permitted hosts.
 
@@ -59,8 +59,8 @@ read, so an instance imported before identities were recorded gains them
 deterministically without being re-imported and without a destructive migration;
 it fills gaps and never overwrites an identity an installation recorded.
 
-Provider display metadata — titles, attribution, declared compatibility,
-artwork — is decoration applied over durable state by an explicit enrichment
+Provider display metadata - titles, attribution, declared compatibility,
+artwork - is decoration applied over durable state by an explicit enrichment
 step. It is served through the provider metadata cache, so opening the list
 repeatedly makes no request and an earlier response is still shown when the
 provider is unreachable. Nothing in the launcher's behavior reads it, no failure
@@ -84,7 +84,7 @@ untrusted pack's downloads are held to, plus a size ceiling.
 - A frontend consumes one snapshot from the application service. It does not
   read recipes, call a provider, or decide what a file name implies.
 - A mod the instance is recorded as having but whose jar is absent is reported
-  as such rather than dropped — deleting a jar to bisect a crash is the workflow
+  as such rather than dropped - deleting a jar to bisect a crash is the workflow
   this launcher exists for, and the instance still wants the mod.
 - Nothing enumerates `mods/`. A jar with no provenance is still left alone,
   still not adopted, and still not deleted.
@@ -96,7 +96,7 @@ untrusted pack's downloads are held to, plus a size ceiling.
 
 "Nothing enumerates `mods/`" was the wrong half of the rule to keep. A jar
 somebody copies in loads into the game, so a list that leaves it out is a list
-that disagrees with the folder about what is running — which is exactly the
+that disagrees with the folder about what is running - which is exactly the
 invisibility this ADR set out to end, arrived at from the other side.
 
 Listing now includes them, under `ModOrigin::HandPlaced`. Everything else the
@@ -107,7 +107,7 @@ here replaces or deletes a file the launcher did not install.
 Identification is separate from listing, because listing has to remain a
 directory read: it hashes and asks catalogs, so it runs only on an explicit
 refresh. A jar a catalog recognizes is then recorded, with its identity, as
-`client` required and `server` undeclared — the existing way of saying nobody
+`client` required and `server` undeclared - the existing way of saying nobody
 has decided whether it belongs on a server, which makes creating one ask rather
 than assume. Its origin stays `HandPlaced`, so being recorded does not make it
 the launcher's to change. A jar nothing recognizes is listed and left
@@ -120,7 +120,7 @@ reason: the list is what a user acts on, so a row they cannot act on is worse
 than no row at all.
 
 **A recorded mod whose jar is absent is no longer listed.** The original
-reasoning — the instance still wants the mod, so say so — was right about the
+reasoning - the instance still wants the mod, so say so - was right about the
 recipe and wrong about the list. Deleting a jar to bisect a crash is this
 launcher's central workflow, and it left behind a row saying "File missing from
 mods folder" for every jar deleted that way: a warning for the thing the user
@@ -134,8 +134,8 @@ Nothing is lost silently, because the absent records are still readable:
 asks. Duplicating a client offers to keep or drop them, defaulting to keep.
 
 **A hand-placed jar may be deleted, by the user, by name.** Everything that
-made it "not owned" still holds — no automatic operation installs, updates,
-replaces, retires, or collects it — and `MutationRestriction::HandPlaced` still
+made it "not owned" still holds - no automatic operation installs, updates,
+replaces, retires, or collects it - and `MutationRestriction::HandPlaced` still
 refuses every mutation. Deleting the file is not one of those: it resolves no
 dependencies, retires nothing, and asks no catalog. It is a separate permission,
 `ModMutability::can_delete_file`, true for that origin and no other, and it

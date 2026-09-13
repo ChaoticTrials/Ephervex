@@ -2,7 +2,7 @@
 //!
 //! Up to 1.18.x a library carries a `natives` classifier map, and the named
 //! classifier is a jar of shared objects that has to be on disk before the JVM
-//! starts — `-Djava.library.path` cannot read inside an archive. From 1.19
+//! starts - `-Djava.library.path` cannot read inside an archive. From 1.19
 //! onward there is nothing to unpack: natives are ordinary classpath jars and
 //! LWJGL extracts what it needs itself. This module therefore only ever runs
 //! for the older half of the supported range, and [`crate::library::Library`]
@@ -22,7 +22,7 @@
 //!   natives directory,
 //! * absolute paths, `..`, and drive-letter-looking components are refused,
 //!   rather than sanitized into something that merely looks safe,
-//! * directory entries and symlinks are skipped — a natives jar contains
+//! * directory entries and symlinks are skipped - a natives jar contains
 //!   neither, and honoring one would reintroduce the link-through-link problem
 //!   `ephervex-java::archive` documents,
 //! * `extract.exclude` from the metadata is applied as a *filter* on top, never
@@ -113,7 +113,7 @@ pub struct NativesReport {
 
 /// Unpacks one natives jar into `destination`.
 ///
-/// `exclude` is the metadata's `extract.exclude` — universally `["META-INF/"]`,
+/// `exclude` is the metadata's `extract.exclude` - universally `["META-INF/"]`,
 /// honored from the document rather than hardcoded. A prefix match, which is
 /// what the trailing slash in Mojang's own value means.
 pub fn extract(
@@ -152,7 +152,7 @@ pub fn extract(
             })?;
 
         // `name` is attacker-controlled in the general case, so the raw string
-        // is what gets checked — never a value derived from it.
+        // is what gets checked - never a value derived from it.
         let name = entry.name().to_owned();
         if entry.is_dir() {
             continue;
@@ -184,7 +184,7 @@ pub fn extract(
         }
 
         // Natives are flat in every jar Mojang publishes, but a nested entry is
-        // written where it says rather than flattened — flattening would let
+        // written where it says rather than flattened - flattening would let
         // two entries collide silently.
         let target = destination.join(&relative);
         if let Some(parent) = target.parent() {

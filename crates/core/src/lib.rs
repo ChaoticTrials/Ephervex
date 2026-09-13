@@ -2,13 +2,13 @@
 //!
 //! This is the only crate either frontend depends on. Networking, archive
 //! parsing, loader installation, authentication, and filesystem business logic
-//! all live below this line — never in a frontend.
+//! all live below this line - never in a frontend.
 //!
 //! # What a frontend gets
 //!
-//! * [`App`] — the services themselves: open the application, reconcile, and
+//! * [`App`] - the services themselves: open the application, reconcile, and
 //!   manage client instances and servers.
-//! * [`CoreError`] — one error type, carrying a stable message id that the
+//! * [`CoreError`] - one error type, carrying a stable message id that the
 //!   frontend resolves through `ephervex-i18n`.
 //! * The record and request types those services take and return, re-exported
 //!   below so a frontend never names a provider crate.
@@ -19,7 +19,7 @@
 //! layer whenever something is momentarily easier that way, and the boundary
 //! quietly stops being real. Re-exporting the data types keeps the frontends'
 //! manifests down to `ephervex-core`, `ephervex-model`, and `ephervex-i18n`,
-//! so taking a shortcut means editing a manifest — a visible act someone has
+//! so taking a shortcut means editing a manifest - a visible act someone has
 //! to justify in review.
 
 pub mod account;
@@ -132,9 +132,9 @@ pub use tokio_util::sync::CancellationToken;
 
 /// Hands a URL to the desktop.
 ///
-/// Here rather than in a frontend because both of them need it — the CLI for
+/// Here rather than in a frontend because both of them need it - the CLI for
 /// the sign-in address, the GUI for the same plus the project's open-folder
-/// actions — and because `ephervex-auth` deliberately must not do it: a
+/// actions - and because `ephervex-auth` deliberately must not do it: a
 /// headless machine has no desktop to hand anything to, so the crate that runs
 /// the login emits the URL and the frontend decides what to do with it.
 ///
@@ -154,7 +154,7 @@ pub fn open_in_browser(url: &str) -> bool {
 ///
 /// These are plain records and requests, not services: a frontend needs to
 /// render a `ClientRecord` and build a `NewClient`, but it never needs the
-/// `Registry` that produced one — nor the `VersionCatalog` that produced a
+/// `Registry` that produced one - nor the `VersionCatalog` that produced a
 /// `ReleaseListing`.
 pub use ephervex_auth::{
     Account, AuthError, AuthEvent, AuthObserver, AuthStage, CredentialStorage,

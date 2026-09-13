@@ -1,14 +1,14 @@
 //! The vanilla installation pipeline, end to end against a loopback server
 //!
 //! Unit tests cover which artifacts a plan names; this covers what happens when
-//! they are actually fetched — that every one of them is verified against the
+//! they are actually fetched - that every one of them is verified against the
 //! digest Mojang published, that the natives jars are unpacked into the shared
 //! natives store, that assets are fetched by hash into Mojang's own layout, and
 //! that a corrupted artifact fails the launch rather than reaching the game.
 //!
 //! The version documents are **built here** rather than taken from the era
 //! fixtures, because these tests need artifacts whose bytes and digests agree
-//! with what the mock server serves — and a fixture cannot carry the SHA-1 of a
+//! with what the mock server serves - and a fixture cannot carry the SHA-1 of a
 //! jar that is generated at test time. The *shapes* they exercise (both natives
 //! eras, both argument forms) are the ones the fixtures pinned down; nothing
 //! here reaches a live service, and `cargo test --offline` passes with the

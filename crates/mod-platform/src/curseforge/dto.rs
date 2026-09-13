@@ -72,8 +72,8 @@ pub struct CurseForgeGame {
 /// One project, as `GET /v1/mods/{modId}` describes it.
 ///
 /// Deliberately *not* mapped into [`crate::model::ModProject`] yet. That
-/// translation belongs with the catalog behavior that needs it — side support,
-/// compatibility, and version lists — and inventing half of it here would mean
+/// translation belongs with the catalog behavior that needs it - side support,
+/// compatibility, and version lists - and inventing half of it here would mean
 /// a neutral model carrying values nothing had determined.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -184,8 +184,8 @@ pub(super) struct CurseForgeCategoryClass {
 ///
 /// Exactly the members a pack import needs to fetch and verify one artifact:
 /// which file this is, whether it can be downloaded, where from, how big it is,
-/// and what it hashes to. The response carries dozens more — dependencies,
-/// sortable game versions, module fingerprints, download counts — and none of
+/// and what it hashes to. The response carries dozens more - dependencies,
+/// sortable game versions, module fingerprints, download counts - and none of
 /// them is read, because a field declared "for later" is one more thing every
 /// response has to satisfy for no current benefit.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]

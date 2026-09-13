@@ -454,8 +454,8 @@ async fn a_second_instance_reuses_the_verified_shared_cache() {
         .expect("first install");
     assert_eq!(report.reused_from_cache, 0, "nothing was cached yet");
 
-    // A second instance sharing one cache — bisecting a bug looks exactly like
-    // this — pays no network cost.
+    // A second instance sharing one cache - bisecting a bug looks exactly like
+    // this - pays no network cost.
     let second = Instance {
         _base: tempfile::tempdir().expect("temp dir"),
         game_dir: first

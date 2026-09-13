@@ -221,7 +221,7 @@ impl OptionsCompatibility {
     ///
     /// The remote document is adopted only when it is strictly newer. Equal
     /// revisions mean the same content, and an older revision means the feed
-    /// has been rolled back — neither is a reason to move off what shipped.
+    /// has been rolled back - neither is a reason to move off what shipped.
     #[must_use]
     pub fn resolve(remote: Option<OptionsDataset>) -> Self {
         let bundled = OptionsDataset::bundled();

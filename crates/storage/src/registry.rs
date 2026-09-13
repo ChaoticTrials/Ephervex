@@ -1,7 +1,7 @@
 //! Create, read, list, update, and delete instances and servers.
 //!
 //! The registry is the only thing in the workspace that writes to both halves
-//! of ADR 0002 — the `.launcher/*.json` metadata and the SQLite index — and it
+//! of ADR 0002 - the `.launcher/*.json` metadata and the SQLite index - and it
 //! always writes them in that order. A crash between the two leaves a directory
 //! that [`crate::reconcile`] will pick up and re-index on the next start; the
 //! reverse order would leave an index row pointing at a directory that was
@@ -81,7 +81,7 @@ pub enum RegistryError {
     /// The instance is indexed but its files are gone.
     ///
     /// Distinct from [`Self::InstanceUnknown`] on purpose: the record is right
-    /// there, and the user needs to hear that the *directory* vanished — the
+    /// there, and the user needs to hear that the *directory* vanished - the
     /// state reconciliation deliberately preserves rather than deletes
     #[error("the instance directory {path} no longer exists")]
     RootMissing { path: PathBuf },
@@ -137,7 +137,7 @@ pub struct Registry {
 impl Registry {
     /// Opens the registry against the database named by `paths`.
     ///
-    /// Migrations run here. Startup reconciliation does not — that is a
+    /// Migrations run here. Startup reconciliation does not - that is a
     /// separate, explicitly invoked step so that a caller which only wants to
     /// read cannot accidentally mutate the index (see [`crate::reconcile`]).
     pub fn open(paths: Paths) -> Result<Self, RegistryError> {
@@ -268,7 +268,7 @@ impl Registry {
     /// Adds an already-existing instance directory to the index.
     ///
     /// Used by reconciliation when a `.launcher/instance.json` is found that
-    /// the database does not know about — the recovery path ADR 0002 exists
+    /// the database does not know about - the recovery path ADR 0002 exists
     /// for. The metadata file is left exactly as found.
     pub fn index_existing_client(&self, record: &ClientRecord) -> Result<(), RegistryError> {
         self.insert_client_row(record)
@@ -416,8 +416,8 @@ impl Registry {
     ///
     /// The copy is a *new instance that happens to contain the same files*: it
     /// gets its own id, its own root, its own creation time, and no launch
-    /// history. Everything that describes what the instance **is** — Minecraft
-    /// version, loader, import source, Java and JVM overrides, warnings — is
+    /// history. Everything that describes what the instance **is** - Minecraft
+    /// version, loader, import source, Java and JVM overrides, warnings - is
     /// preserved, because a duplicate that reproduces something different from
     /// its original is not a duplicate.
     ///
@@ -425,7 +425,7 @@ impl Registry {
     ///
     /// * **the launch lock**, which describes a running process;
     /// * **`last_launched_at`**, for the same reason;
-    /// * **linked servers** — a server is its own entity with its own world
+    /// * **linked servers** - a server is its own entity with its own world
     ///   and its own process, and silently forking one because a client
     ///   was copied would be a surprising amount of disk to spend;
     /// * **global preferences**, which are *not* re-applied. Ephervex is explicit:
@@ -545,7 +545,7 @@ impl Registry {
     ///
     /// `updated_at` is stamped here rather than by the caller so it cannot be
     /// forgotten. The metadata file is refreshed only when the root still
-    /// exists — a persistent instance whose directory vanished keeps its index
+    /// exists - a persistent instance whose directory vanished keeps its index
     /// row and its warning, and must not fail the update that records that
     /// warning.
     pub fn update_client(&self, record: &mut ClientRecord) -> Result<(), RegistryError> {
@@ -953,7 +953,7 @@ impl Registry {
 //
 // Rows come back as `Result<Result<Record, IndexError>, rusqlite::Error>`: the
 // outer error is SQLite's, the inner one is ours for a row SQLite handed over
-// happily but this build cannot interpret — an enum name from a newer version,
+// happily but this build cannot interpret - an enum name from a newer version,
 // say. Collapsing the two would mean reporting "database error" for what is
 // really "this row was written by a different Ephervex".
 

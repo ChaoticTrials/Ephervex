@@ -1384,7 +1384,7 @@ impl ImportFlowState {
     /// A folder watcher found and verified a copy of `identity`'s file.
     /// `false` means it was discarded: either `generation` no longer names
     /// the attempt this flow is tracking, or the row was already gone (a
-    /// stale or duplicate event) — either way there is nothing new to
+    /// stale or duplicate event) - either way there is nothing new to
     /// render.
     fn blocked_file_matched(&mut self, generation: u64, identity: &ProviderFileIdentity) -> bool {
         if self.tracked_generation != Some(generation) {
@@ -5639,7 +5639,7 @@ fn register_artifact_cache(ui: &AppWindow, commands: &Sender<Command>) {
             &sender,
             Command::SaveArtifactCacheLimit {
                 // A negative index can only mean the view has no entry selected,
-                // which the typed resolution treats as a custom size — so the
+                // which the typed resolution treats as a custom size - so the
                 // fields beside it decide, rather than a preset nobody picked.
                 selection: usize::try_from(selection).unwrap_or(usize::MAX),
                 custom_value: custom_value.into(),

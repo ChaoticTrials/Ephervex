@@ -1248,8 +1248,8 @@ pub enum Event {
     ///
     /// A receiver must discard this unless `generation` still names the
     /// attempt it is tracking, exactly like [`Event::ImportResolved`]. Does
-    /// not by itself change what final import will do — that re-checks the
-    /// shared cache independently — it only clears the row from the modal's
+    /// not by itself change what final import will do - that re-checks the
+    /// shared cache independently - it only clears the row from the modal's
     /// own blocked-file list.
     BlockedFileMatched {
         generation: u64,
@@ -4554,7 +4554,7 @@ fn spawn_import_resolution(
 
             // A blocked file may still turn up in a watched folder while the
             // modal stays open on it. This keeps rescanning until every
-            // target is matched or `cancel` fires — the same cancellation a
+            // target is matched or `cancel` fires - the same cancellation a
             // new archive pick or closing the modal already triggers, so
             // nothing further needs to stop this loop on its own.
             if !analysis.blocked.is_empty() {

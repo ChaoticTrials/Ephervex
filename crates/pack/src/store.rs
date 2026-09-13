@@ -22,7 +22,7 @@
 //! The common and server layers are copied here, because a server created later
 //! needs them and the `.mrpack` will be long gone. The client layer is not:
 //! It is already present in the game
-//! directory, and a modpack's overrides are the bulk of its bytes — duplicating
+//! directory, and a modpack's overrides are the bulk of its bytes - duplicating
 //! them would double the size of every imported instance to preserve something
 //! nothing reads. The recipe records the decision per layer
 //! ([`crate::recipe::OverrideLayer::retained_at`]) rather than leaving a caller
@@ -100,7 +100,7 @@ impl SourceStore {
     /// Turns a path recorded in the recipe into an absolute one.
     ///
     /// Recipe paths are stored relative to this directory so that copying an
-    /// instance — or copying its recipe into a server — does not invalidate
+    /// instance - or copying its recipe into a server - does not invalidate
     /// them.
     #[must_use]
     pub fn resolve(&self, relative: &Path) -> PathBuf {

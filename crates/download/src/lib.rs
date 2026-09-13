@@ -1,7 +1,7 @@
 //! The reusable download subsystem: bounded concurrency, atomic writes, hash
 //! verification, retries, and cancellation.
 //!
-//! Every artifact Ephervex fetches comes through this crate — Mojang assets and
+//! Every artifact Ephervex fetches comes through this crate - Mojang assets and
 //! libraries, loader installers, Modrinth and CurseForge pack files, managed
 //! JDK archives. There is one implementation because there is one set of rules
 //! that must hold for all of them:
@@ -14,7 +14,7 @@
 //!   provider metadata supplies them, as is the declared size. A mismatch
 //!   deletes the artifact and fails without retrying.
 //! - **Paths are never taken from remote input.** Destinations come from
-//!   [`CacheLayout`], derived from a content hash or a validated logical key —
+//!   [`CacheLayout`], derived from a content hash or a validated logical key -
 //!   never from a URL segment, a filename in a pack manifest, or a
 //!   `Content-Disposition` header.
 //! - **Untrusted URLs are filtered.** [`DomainAllowlist`] is the explicit,
@@ -95,7 +95,7 @@ pub use progress::{ByteTally, ChannelSink, OperationReporter, ProgressSink};
 /// [`redacted`] and [`check_transport`] are part of this crate's public surface
 /// and both take one, so a caller that wants to redact an address before
 /// logging it must be able to name the type without adding `reqwest` to its own
-/// manifest — which would put an HTTP client on the compile-time surface of a
+/// manifest - which would put an HTTP client on the compile-time surface of a
 /// crate that only parses text.
 pub use reqwest::Url;
 pub use retry::{RetryPolicy, retry_after, status_is_transient};

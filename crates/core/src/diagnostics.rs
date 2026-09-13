@@ -5,7 +5,7 @@
 //! A log browser is a list, a text pane, a search box, and two buttons. None of
 //! those needs to know that a client's logs are in `<root>/minecraft/logs`, that
 //! a server's are in `<root>/server/logs`, or that the launcher's are under the
-//! XDG state root — and a frontend that *did* know would be a frontend that
+//! XDG state root - and a frontend that *did* know would be a frontend that
 //! constructs filesystem paths, which is the one thing the boundary exists to
 //! prevent (see [`crate`]).
 //!
@@ -13,8 +13,8 @@
 //!
 //! * [`App::diagnostics`] lists what exists, newest first, for a
 //!   [`DiagnosticScope`] named by id.
-//! * Everything afterwards — open, refresh, search, copy the path, open the
-//!   containing folder — takes that scope plus the entry's *name*. A name is
+//! * Everything afterwards - open, refresh, search, copy the path, open the
+//!   containing folder - takes that scope plus the entry's *name*. A name is
 //!   resolved against the launcher-owned directory and refused if it is
 //!   anything other than one file inside it.
 //!
@@ -24,8 +24,8 @@
 //!
 //! # What this layer adds over `ephervex-storage`
 //!
-//! The storage crate owns the reading rules — bounded windows, path
-//! containment, best-effort summaries — because it owns the layout those rules
+//! The storage crate owns the reading rules - bounded windows, path
+//! containment, best-effort summaries - because it owns the layout those rules
 //! protect. This layer answers the questions storage cannot: *which* directory
 //! belongs to this instance, whether the folder action for it should be offered
 //! at all, and which folder-opening path is shared with the rest of the
@@ -88,7 +88,7 @@ impl DiagnosticScope {
 pub struct DiagnosticSection {
     pub kind: DiagnosticKind,
     /// The folder holding these files, or `None` when the folder action is
-    /// unavailable — the directory does not exist and creating it would claim
+    /// unavailable - the directory does not exist and creating it would claim
     /// the game produced something it has not.
     pub folder: Option<PathBuf>,
     /// Newest first, with the file name as a stable tie-break.
@@ -153,7 +153,7 @@ pub struct DiagnosticRequest<'a> {
     pub kind: DiagnosticKind,
     /// The entry name a listing gave out. Never a path.
     pub name: &'a str,
-    /// Which end of the file to read, or `None` for the kind's natural end —
+    /// Which end of the file to read, or `None` for the kind's natural end -
     /// the end of a log, the beginning of a crash report.
     pub anchor: Option<TextAnchor>,
     /// How many bytes to read, bounded by `MAX_VIEW_BYTES` however large it is.

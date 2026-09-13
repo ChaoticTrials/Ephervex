@@ -18,8 +18,8 @@
 //! # Nothing here holds a token
 //!
 //! Not the access token, not the refresh token, not the authorization code, not
-//! the `identityToken` header. Error values end up in logs by construction —
-//! `{error:?}`, `#[instrument]`, `error.chain()` in the CLI — so a variant that
+//! the `identityToken` header. Error values end up in logs by construction -
+//! `{error:?}`, `#[instrument]`, `error.chain()` in the CLI - so a variant that
 //! carried a credential would be a leak with extra steps.
 
 use ephervex_download::status_is_transient;
@@ -142,7 +142,7 @@ pub enum AuthError {
 
     /// Minecraft Services refused the Xbox identity token.
     ///
-    /// Everything except `403`, which is a different problem entirely — see
+    /// Everything except `403`, which is a different problem entirely - see
     /// [`Self::MinecraftApiNotApproved`].
     #[error("minecraft services rejected the xbox identity (http {status})")]
     MinecraftLoginRejected { status: u16 },
@@ -153,7 +153,7 @@ pub enum AuthError {
     /// This is a property of the *application registration*, not of the user or
     /// their account, and no amount of signing in again will change it. It is
     /// separated from [`Self::MinecraftLoginRejected`] because the advice that
-    /// fits a rejected identity — try again, check the account — sends a user
+    /// fits a rejected identity - try again, check the account - sends a user
     /// hitting this one into a retry loop that can never terminate
     ///
     /// `client_id` is carried because the approval form asks for it, so the
@@ -254,15 +254,15 @@ pub enum AuthError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum XstsDenial {
-    /// `2148916227` — the account was banned from Xbox Live.
+    /// `2148916227` - the account was banned from Xbox Live.
     AccountBanned,
-    /// `2148916233` — the Microsoft account has no Xbox Live profile.
+    /// `2148916233` - the Microsoft account has no Xbox Live profile.
     NoXboxAccount,
-    /// `2148916235` — Xbox Live is not available in this account's country.
+    /// `2148916235` - Xbox Live is not available in this account's country.
     CountryUnavailable,
-    /// `2148916236` / `2148916237` — proof of age is required.
+    /// `2148916236` / `2148916237` - proof of age is required.
     AdultVerificationRequired,
-    /// `2148916238` — a child account must be added to a Family.
+    /// `2148916238` - a child account must be added to a Family.
     ChildAccount,
     /// An `XErr` this build does not recognize, or none at all.
     Unknown,
@@ -412,7 +412,7 @@ impl AuthError {
     /// Dug out here rather than in the frontend for the same reason as
     /// [`Self::message_id`]: the URL is untranslated technical text that
     /// travels into a message as an argument, and a frontend must
-    /// be able to render it — or turn it into a link — without matching on this
+    /// be able to render it - or turn it into a link - without matching on this
     /// enum.
     #[must_use]
     pub const fn help_url(&self) -> Option<&'static str> {
@@ -436,8 +436,8 @@ impl AuthError {
     /// application registration is approved.
     ///
     /// Distinct from every other failure in one specific way: no user action
-    /// inside this launcher — not signing in again, not waiting, not switching
-    /// accounts — can change the outcome. Vanilla launch support's launch gating needs to tell
+    /// inside this launcher - not signing in again, not waiting, not switching
+    /// accounts - can change the outcome. Vanilla launch support's launch gating needs to tell
     /// that apart from "the credential expired", because the two lead to
     /// completely different screens.
     #[must_use]

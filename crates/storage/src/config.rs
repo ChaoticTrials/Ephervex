@@ -10,7 +10,7 @@
 //! **It never holds a secret.** ADR 0004: the Microsoft refresh token and the
 //! CurseForge API key live in the desktop keyring. This is a *bug reproduction*
 //! tool whose users routinely attach their configuration to bug reports, so
-//! that rule is enforced here rather than merely documented — [`Config::save`]
+//! that rule is enforced here rather than merely documented - [`Config::save`]
 //! refuses to write a key whose name looks like a credential.
 
 use std::collections::BTreeMap;
@@ -439,7 +439,7 @@ impl Default for ServerDefaults {
 ///
 /// Three user-configurable integration settings are grouped under "APIs": the Microsoft Client ID, the
 /// CurseForge API Key, and an advanced custom User-Agent. Two of them are here.
-/// The API key is not, and its absence is the point — it is a credential, so it
+/// The API key is not, and its absence is the point - it is a credential, so it
 /// lives in the desktop keyring under `CredentialKey::CurseForgeApiKey` and
 /// this struct has no field it could be written to (ADR 0004).
 ///
@@ -486,7 +486,7 @@ impl ApiConfig {
 ///
 /// Every field here is explicitly permitted in configuration: the profile id,
 /// the display name, and timestamps. The refresh token that makes the account
-/// usable is in the keyring and is not represented here at all — not even as a
+/// usable is in the keyring and is not represented here at all - not even as a
 /// copy, and not even as a length.
 // No `Eq`: the open `unknown` table holds `toml::Value`, which has no total
 // equality because it can carry a float.
@@ -499,7 +499,7 @@ pub struct AccountConfig {
     /// Microsoft or offline.
     ///
     /// Absent in a file written before offline accounts existed, and
-    /// [`AccountKind::default`] reads that as Microsoft — which is what such a
+    /// [`AccountKind::default`] reads that as Microsoft - which is what such a
     /// row is.
     pub kind: AccountKind,
     /// RFC 3339 timestamp of when this account was first added.
@@ -572,7 +572,7 @@ impl Default for CacheConfig {
 impl CacheConfig {
     /// The typed budget this table describes.
     ///
-    /// A byte count the type refuses — a hand-edited zero, say — degrades to the
+    /// A byte count the type refuses - a hand-edited zero, say - degrades to the
     /// default rather than failing the whole configuration load, for the same
     /// reason [`Config::active_account`] does: one implausible value in a file
     /// full of deliberate settings should cost the user that value, not all of
@@ -680,7 +680,7 @@ pub struct Config {
     pub server_defaults: ServerDefaults,
     pub eula: EulaConfig,
     pub api: ApiConfig,
-    /// Budgets for the disposable caches. Never cache *contents* — those are
+    /// Budgets for the disposable caches. Never cache *contents* - those are
     /// files under the cache root, and configuration is not where a launcher
     /// records what it happens to have downloaded.
     pub cache: CacheConfig,
@@ -728,7 +728,7 @@ impl Config {
     /// Loads the configuration, falling back to defaults when the file does not
     /// exist yet.
     ///
-    /// A missing file is a first run, not an error, and nothing is written —
+    /// A missing file is a first run, not an error, and nothing is written -
     /// the file appears when the user first changes a setting.
     pub fn load_or_default(paths: &Paths) -> Result<Self, ConfigError> {
         Self::load_from(&paths.config_file())
@@ -960,12 +960,12 @@ impl Config {
     /// The promotion rule is **the most recently used account that remains**,
     /// with the id as a tie-break so the outcome is deterministic rather than
     /// dependent on map ordering. That is the account the user was working with
-    /// before this one, which is the least surprising thing to fall back to —
+    /// before this one, which is the least surprising thing to fall back to -
     /// and it beats leaving no default at all, which would make the next launch
     /// fail for a user who still has a perfectly good account.
     ///
     /// The stored credential is removed separately, by whoever owns the keyring
-    /// — this crate has no business touching it (ADR 0004).
+    /// - this crate has no business touching it (ADR 0004).
     pub fn forget_account(&mut self, id: &str) {
         self.accounts.remove(id);
         if self.active_account != id {
@@ -988,7 +988,7 @@ impl Config {
     /// Names are matched case-insensitively because the user typed them, and
     /// an id is tried first because it is unambiguous by construction. A name
     /// held by more than one account resolves to nothing rather than to an
-    /// arbitrary one — removing the wrong account is not recoverable.
+    /// arbitrary one - removing the wrong account is not recoverable.
     pub fn find_account(&self, reference: &str) -> Result<&str, AccountLookup> {
         let reference = reference.trim();
         if self.accounts.contains_key(reference) {

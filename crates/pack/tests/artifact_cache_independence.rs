@@ -3,8 +3,8 @@
 //! The artifact-cache budget only makes sense if evicting an entry costs a
 //! re-download and nothing else. That is a property of the *materialization*
 //! mechanism, not of the collector, so these tests exercise the real production
-//! paths — `install_files` for a client instance and `materialize_server_recipe`
-//! for a server — and then run the real collector against the same cache root.
+//! paths - `install_files` for a client instance and `materialize_server_recipe`
+//! for a server - and then run the real collector against the same cache root.
 //!
 //! Offline throughout. Every artifact is placed at its content-addressed cache
 //! path first, which is the cache-hit path a second import of the same pack

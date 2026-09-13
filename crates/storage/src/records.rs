@@ -31,7 +31,7 @@ pub use ephervex_model::{JavaOverride, JvmSettings};
 
 /// Where an instance came from, and enough of a reference to say so in the UI.
 ///
-/// The reference is an untranslated technical string — a file name, a pack
+/// The reference is an untranslated technical string - a file name, a pack
 /// slug, a version id.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImportSource {

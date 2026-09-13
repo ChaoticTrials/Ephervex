@@ -1,4 +1,4 @@
--- Migration 1 — instance and server index (ADR 0002).
+-- Migration 1 - instance and server index (ADR 0002).
 --
 -- This table is an *index*, not the source of truth. Everything here is also
 -- written to the instance's own `.launcher/*.json`, which is what makes a lost

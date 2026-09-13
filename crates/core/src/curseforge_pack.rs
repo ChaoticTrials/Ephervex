@@ -12,7 +12,7 @@
 //! neither should learn the other.
 //!
 //! A frontend never orchestrates this. It analyzes an archive, asks core to
-//! resolve it, and gets back an analysis it can display and import — the same
+//! resolve it, and gets back an analysis it can display and import - the same
 //! two steps a Modrinth pack takes, where the second happens to have nothing to
 //! do.
 //!
@@ -33,7 +33,7 @@
 //!
 //! An import is not the only operation that needs one. Retained desired state
 //! records everything needed to identify and verify an artifact, so nothing
-//! rebuilt from a recipe asks the API what an instance contains — but the bytes
+//! rebuilt from a recipe asks the API what an instance contains - but the bytes
 //! still come from CurseForge, which serves them only to an authenticated
 //! request. So an artifact whose verified copy is still in the shared store is
 //! installed with no credential at all, and one the cache budget has collected
@@ -44,7 +44,7 @@
 //!
 //! What survives an import is the normalized recipe: the exact project and file
 //! ids the *user's own manifest* declared, plus the minimum the launcher's own
-//! model needs to install and verify an artifact — a name, a size, a digest,
+//! model needs to install and verify an artifact - a name, a size, a digest,
 //! and the address it came from. The response itself is parsed, used, and
 //! dropped. See ADR 0022.
 
@@ -212,7 +212,7 @@ impl App {
     /// path is exactly the proof an ordinary completed download leaves behind,
     /// so a file a folder watcher (or an earlier import) already placed there
     /// needs no download address at all. `None` for a file with no usable name
-    /// or no published hash, not just a genuine cache miss — either one means
+    /// or no published hash, not just a genuine cache miss - either one means
     /// there is nothing this launcher could have verified a hand-placed copy
     /// against.
     async fn recipe_from_cache(
@@ -351,7 +351,7 @@ impl App {
 /// # Why retained desired state can still need one
 ///
 /// A recipe entry records the exact addresses, digests, and size of its
-/// artifact, and that is all the launcher needs to *identify and verify* it —
+/// artifact, and that is all the launcher needs to *identify and verify* it -
 /// forever, offline, and without asking any provider anything. What it does not
 /// change is who serves the bytes. One provider serves its artifacts only to a
 /// request carrying an API key, so re-fetching such a file after its verified
@@ -361,7 +361,7 @@ impl App {
 /// The consequences are worth stating in both directions:
 ///
 /// * a verified artifact still in the shared cache is installed without any
-///   credential, any provider request, or any configuration at all — which is
+///   credential, any provider request, or any configuration at all - which is
 ///   what keeps an installed instance working on a machine that has configured
 ///   nothing;
 /// * an artifact that has to come back over the network is subject to whatever
@@ -370,7 +370,7 @@ impl App {
 /// # One credential per provider, chosen per file
 ///
 /// The decision is made from [`ProviderFileIdentity::provider`], the durable
-/// fact the recipe records, and from nothing else — never from an address, a
+/// fact the recipe records, and from nothing else - never from an address, a
 /// filename, a digest, or the format the pack was originally imported from. A
 /// desired state naming files from several providers therefore offers each
 /// secret only to its own artifacts.
@@ -423,7 +423,7 @@ impl ProviderCredentials<'_> {
             .curseforge_api()
             .map_err(|error| CredentialUnavailable::new(unavailable(&error)))?;
         // Reads the secret store, and fails with
-        // `ModPlatformError::CredentialMissing` when nothing is configured —
+        // `ModPlatformError::CredentialMissing` when nothing is configured -
         // before any request is made, and without degrading into an
         // unauthenticated attempt the provider could only refuse.
         let key = api
@@ -478,8 +478,8 @@ impl ArtifactCredentials for ProviderCredentials<'_> {
 /// Reports a credential this launcher could not assemble as a provider
 /// credential failure rather than as whatever it was underneath.
 ///
-/// The user-facing outcome is the same either way — CurseForge cannot be used
-/// until something is fixed — and keeping one shape means a frontend has one
+/// The user-facing outcome is the same either way - CurseForge cannot be used
+/// until something is fixed - and keeping one shape means a frontend has one
 /// place to route from.
 fn unavailable(error: &crate::error::CoreError) -> ModPlatformError {
     ModPlatformError::CredentialUnreadable {
@@ -994,7 +994,7 @@ mod tests {
     }
 
     /// The same document [`file_document`] serves, but declaring an
-    /// environment (`Client` and/or `Server`) in `gameVersions` — the one
+    /// environment (`Client` and/or `Server`) in `gameVersions` - the one
     /// piece of the wire shape that decides a resolved file's own server-side
     /// requirement, as opposed to the pack's `required` flag, which decides
     /// only the client side.
@@ -3386,8 +3386,8 @@ mod tests {
         let server = MockServer::start().await;
         serve_pack_guarded(&server).await;
         // The other catalog's artifact, redirected once to a host the CurseForge
-        // allowlist does not contain. Following it is correct — this request
-        // carries no CurseForge secret — and proves that one provider's redirect
+        // allowlist does not contain. Following it is correct - this request
+        // carries no CurseForge secret - and proves that one provider's redirect
         // containment did not become everybody's.
         let elsewhere = format!(
             "http://localhost:{}/relocated/from-modrinth.jar",
@@ -3594,7 +3594,7 @@ mod tests {
     async fn the_production_api_resolves_and_delivers_one_exact_declared_file() {
         // Runs against the real credential store and the real API, into a
         // temporary root of its own: no instance the user owns is touched, and
-        // the key is never read by this test — only by the transport, which
+        // the key is never read by this test - only by the transport, which
         // puts it in one header.
         let dir = tempfile::tempdir().expect("temp dir");
         let archive = dir.path().join("live.zip");

@@ -460,7 +460,7 @@ fn a_launch_reports_an_operation_id_that_is_findable_in_the_launcher_log() {
     ]);
     let id = record["id"].as_str().expect("an id");
 
-    // Nobody is signed in, so this fails early — which is exactly the case
+    // Nobody is signed in, so this fails early - which is exactly the case
     // where an operation id has to have been reported already.
     let attempt = sandbox.run_with_log_level(&["launch", id], "info");
     assert!(!attempt.status.success());

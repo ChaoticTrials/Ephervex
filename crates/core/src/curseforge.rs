@@ -99,7 +99,7 @@ impl App {
     /// listing instances has no business paying for one.
     ///
     /// Building it does *not* read the credential, and using it does not
-    /// require one to exist — a request without a key fails with
+    /// require one to exist - a request without a key fails with
     /// [`ModPlatformError::CredentialMissing`] before anything is sent. So this
     /// is safe to call on a machine that has never configured CurseForge.
     pub fn curseforge_api(&self) -> CoreResult<&CurseForgeApi> {

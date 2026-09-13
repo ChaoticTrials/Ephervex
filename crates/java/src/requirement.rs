@@ -13,7 +13,7 @@
 //! It is deliberately small, and it is bounded *below* rather than above: the
 //! entries say "from this Minecraft version onward, this Java major", and the
 //! last entry is not a ceiling. Hardcoding 21 as the newest requirement was
-//! already wrong by the time this was written — 26.x asks for Java 25 — and
+//! already wrong by the time this was written - 26.x asks for Java 25 - and
 //! writing the table as an upper bound is how a launcher acquires an artificial
 //! one.
 //!
@@ -57,7 +57,7 @@ impl RequiredJava {
     /// the table's otherwise.
     ///
     /// The table is keyed on the *Minecraft* release, which the metadata
-    /// already carries. A loader document's own id is not one — asking the
+    /// already carries. A loader document's own id is not one - asking the
     /// table about `neoforge-26.2.0.59` would get Java 8 for a release that
     /// needs 25, because an id the table cannot rank falls back to its oldest
     /// entry.
@@ -72,7 +72,7 @@ impl RequiredJava {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequirementBasis {
     /// Mojang's own `javaVersion` block. `component` is the Mojang runtime
-    /// name — `jre-legacy`, `java-runtime-delta` — which is untranslated
+    /// name - `jre-legacy`, `java-runtime-delta` - which is untranslated
     /// technical text.
     Metadata { component: String },
     /// [`fallback_major`], because the document declared nothing.
@@ -93,17 +93,17 @@ impl RequirementBasis {
 /// The Java major each era of Minecraft needs, as `(from this version, major)`.
 ///
 /// Ordered oldest first and read from the end, so the last entry a version is
-/// at or above wins. Adding a future era is one line and no restructuring —
+/// at or above wins. Adding a future era is one line and no restructuring -
 /// which is the property The test suite covers.
 ///
 /// The boundaries:
 ///
-/// * **1.12.2 – 1.16.5** — Java 8. Nothing before 1.17 carries `javaVersion`,
+/// * **1.12.2 – 1.16.5** - Java 8. Nothing before 1.17 carries `javaVersion`,
 ///   so every entry the table actually gets consulted for lives in this band.
-/// * **1.17** — Java 16, the one release that asked for it.
-/// * **1.18 – 1.20.4** — Java 17.
-/// * **1.20.5 onward** — Java 21.
-/// * **26.1 onward** — Java 25. The calendar scheme orders above `1.x` for
+/// * **1.17** - Java 16, the one release that asked for it.
+/// * **1.18 – 1.20.4** - Java 17.
+/// * **1.20.5 onward** - Java 21.
+/// * **26.1 onward** - Java 25. The calendar scheme orders above `1.x` for
 ///   free, because `26 > 1`.
 ///
 /// Everything from 1.17 up is redundant with the metadata in practice; it is
@@ -122,7 +122,7 @@ const FALLBACK_TABLE: &[(&str, u32)] = &[
 /// An id in a scheme this build cannot parse gets the oldest entry, because the
 /// table cannot rank it and an unparseable id is far more likely to be an
 /// oddity from Minecraft's past than something from its future. Callers that
-/// can do better — by resolving the metadata — should.
+/// can do better - by resolving the metadata - should.
 #[must_use]
 pub fn fallback_major(id: &MinecraftVersionId) -> u32 {
     let oldest = FALLBACK_TABLE.first().map_or(8, |(_, major)| *major);

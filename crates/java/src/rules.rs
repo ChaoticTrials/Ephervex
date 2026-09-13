@@ -2,12 +2,12 @@
 //!
 //! # Why "the major matches" is not enough
 //!
-//! Forge for 1.12.2 needs Java 8 — and so does Forge for 1.16.5 — but they are
+//! Forge for 1.12.2 needs Java 8 - and so does Forge for 1.16.5 - but they are
 //! not interchangeable requirements. Old Forge is known to break on *late* Java
 //! 8 updates while later Java-8 Forge is fine on them, and a selector that only
 //! compares majors cannot tell those two apart. It would hand 1.12.2 the
 //! newest 8u on the machine and produce a crash the user then has to
-//! diagnose — which is the silent approximation Ephervex does not allow.
+//! diagnose - which is the silent approximation Ephervex does not allow.
 //!
 //! So a rule constrains the *whole* version, quarterly update included. That is
 //! the entire reason [`crate::version::JavaVersion`] keeps the update number.
@@ -73,7 +73,7 @@ pub enum RejectionReason {
         found: JavaVersion,
     },
     /// Right major, but the runtime is a later update than the loader tolerates
-    /// — the Forge 1.12.2 case.
+    /// - the Forge 1.12.2 case.
     TooNew {
         maximum: JavaVersion,
         found: JavaVersion,
@@ -254,7 +254,7 @@ mod tests {
             .at_most(JavaVersion::new(8, 0, LEGACY_FORGE_MAX_JAVA_8_UPDATE))
     }
 
-    /// What it will register for a later Java-8 Forge release — 1.16.5, the
+    /// What it will register for a later Java-8 Forge release - 1.16.5, the
     /// last Minecraft version on Java 8. Same major, no update ceiling.
     fn forge_1_16_5() -> VersionBound {
         VersionBound::new("forge-java8").major(8)

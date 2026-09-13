@@ -2,7 +2,7 @@
 //!
 //! # Where the rules live
 //!
-//! This module reads one archive shape — a gzipped tar from Adoptium — but the
+//! This module reads one archive shape - a gzipped tar from Adoptium - but the
 //! rules it applies to an entry name are not its own. [`safe_relative_path`]
 //! and [`safe_link_target`] come from `ephervex-pack`'s `path` module, which
 //! every importer and extractor in the workspace shares. Keeping one lexical
@@ -20,8 +20,8 @@
 //! else that is not a file, a directory, or a symlink.
 //!
 //! **Symlinks are resolved, not banned.** The Temurin 16 archive contains 208
-//! symlinks — `legal/jdk.naming.rmi/LICENSE` and its siblings point at
-//! `../java.base/LICENSE` — so a blanket ban rejects valid upstream archives.
+//! symlinks - `legal/jdk.naming.rmi/LICENSE` and its siblings point at
+//! `../java.base/LICENSE` - so a blanket ban rejects valid upstream archives.
 //! [`safe_link_target`] enforces the narrower security rule:
 //! resolve the target lexically from the link's own directory and refuse it
 //! only if it climbs out of the extraction root.
@@ -34,7 +34,7 @@
 //! # Limits
 //!
 //! Entry count and total uncompressed size are bounded. The defaults are
-//! generous — a JDK is roughly 25 000 files and 350 MB unpacked — because this
+//! generous - a JDK is roughly 25 000 files and 350 MB unpacked - because this
 //! is a developer tool, but "generous" is not "absent": without them a gzip
 //! bomb is a full disk.
 //!
@@ -216,7 +216,7 @@ pub fn extract_tar_gz(
         }
 
         let Some(resolved) = resolve_entry(&entry, &root, strip_components)? else {
-            // Entirely consumed by `strip_components` — the wrapper directory
+            // Entirely consumed by `strip_components` - the wrapper directory
             // itself. Nothing to create.
             continue;
         };
@@ -557,9 +557,9 @@ fn write_file(target: &Path, source: &mut impl Read, mode: u32) -> Result<u64, A
 const fn forbidden_entry_type(kind: EntryType) -> Option<&'static str> {
     match kind {
         // Files and directories are the whole of a JDK tarball. GNU/PAX
-        // metadata entries carry no content of their own — the `tar` crate
+        // metadata entries carry no content of their own - the `tar` crate
         // applies them to the entries that follow, which is what lets a long
-        // filename work — so they pass through and never become files.
+        // filename work - so they pass through and never become files.
         EntryType::Regular
         | EntryType::Directory
         | EntryType::Continuous
@@ -573,7 +573,7 @@ const fn forbidden_entry_type(kind: EntryType) -> Option<&'static str> {
         | EntryType::XHeader => None,
         // Still refused. A tar hard link names an earlier entry by path, so
         // honoring one means resolving that path and calling `fs::hard_link`
-        // — a second containment problem for a feature no JDK archive uses.
+        // - a second containment problem for a feature no JDK archive uses.
         EntryType::Link => Some("hard link"),
         EntryType::Char | EntryType::Block => Some("device node"),
         EntryType::Fifo => Some("fifo"),
@@ -633,7 +633,7 @@ mod tests {
     /// A tarball holding one ordinary file plus one link entry.
     ///
     /// The file is there so that a refusal is provably a refusal rather than
-    /// [`ArchiveError::Empty`] — an archive with nothing extractable in it
+    /// [`ArchiveError::Empty`] - an archive with nothing extractable in it
     /// would fail either way and prove nothing.
     fn tar_gz_with_link(path: &Path, name: &str, target: &str, kind: EntryType) {
         let file = File::create(path).expect("create archive");
@@ -702,7 +702,7 @@ mod tests {
         let archive = base.path().join("chain.tar.gz");
         let root = base.path().join("root");
         let outside = base.path().join("outside");
-        // The directory the chain aims at already exists — a hostile archive
+        // The directory the chain aims at already exists - a hostile archive
         // targets somewhere real, like a config or autostart directory. Without
         // it the escape only fails because a dangling link is unwritable, which
         // proves nothing about the containment check.

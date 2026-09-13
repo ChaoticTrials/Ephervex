@@ -27,25 +27,25 @@ the smallest one that retains at least one distinct parser or launch behavior:
 |---|---|---|---|
 | `1.12.2` | 8 | legacy `minecraftArguments` string | the `natives` classifier map, `downloads.classifiers`, `extract.exclude`, a library with classifiers but **no** `artifact`, and an `allow`-then-`disallow` rule pair |
 | `1.20.1` | 17 | modern `arguments` object | natives shipped as ordinary rule-gated library artifacts, `os.arch` rules, `client_mappings`/`server_mappings` download keys |
-| `1.21.1` | 21 | modern `arguments` object | the same shapes one Java generation on — a regression canary for "modern" drifting |
+| `1.21.1` | 21 | modern `arguments` object | the same shapes one Java generation on - a regression canary for "modern" drifting |
 | `26.1` | 25 | modern `arguments` object | the `default-user-jvm` argument group and `os.versionRange { min, max }` used by calendar-versioned releases |
 
 The manifest fixture keeps the 14 entries that matter for filtering: releases
 above and below the 1.12.2 floor, an `old_beta` and an `old_alpha`, and a
-release candidate plus a pre-release — both of which Mojang types as
+release candidate plus a pre-release - both of which Mojang types as
 `"snapshot"` rather than as types of their own. That is why filtering on
 `type == "release"` alone is sufficient and no extra exclusion rules exist.
 
 ## What was removed
 
-* **Manifest** — 891 of the 905 version entries. The 14 that remain are
+* **Manifest** - 891 of the 905 version entries. The 14 that remain are
   verbatim, in Mojang's own newest-first order.
-* **Version JSONs** — most `libraries` entries (39–107 down to 5–8, chosen to
+* **Version JSONs** - most `libraries` entries (39–107 down to 5–8, chosen to
   cover every distinct shape).
 
-Everything else — the complete `arguments` object or `minecraftArguments`
+Everything else - the complete `arguments` object or `minecraftArguments`
 string, `javaVersion`, `assetIndex`, `downloads`, `logging`, `mainClass`,
-`assets`, `complianceLevel`, `minimumLauncherVersion`, and the timestamps — is
+`assets`, `complianceLevel`, `minimumLauncherVersion`, and the timestamps - is
 preserved verbatim.
 
 ### Launch-sensitive content retained

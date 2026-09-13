@@ -243,8 +243,8 @@ pub enum ModPlatformError {
 
     /// Resolution did not settle within its iteration budget.
     ///
-    /// Should be unreachable — a pin strengthens at most once per project and a
-    /// second distinct pin is a hard failure — so reaching it means an
+    /// Should be unreachable - a pin strengthens at most once per project and a
+    /// second distinct pin is a hard failure - so reaching it means an
     /// invariant is wrong. Failing loudly beats spinning forever inside a
     /// launcher.
     #[error("dependency resolution did not settle after {iterations} rounds")]
@@ -299,7 +299,7 @@ impl ModPlatformError {
 
     /// The values this failure's message and its next step take as arguments.
     ///
-    /// All untranslated technical text — project ids, version ids, file names,
+    /// All untranslated technical text - project ids, version ids, file names,
     /// provider and loader names. Returned as one list rather than through an
     /// accessor per field so that a new variant carries its arguments beside
     /// its message id, and a frontend never has to know which placeholders a
@@ -672,7 +672,7 @@ mod tests {
     #[test]
     fn every_message_and_next_step_renders_with_the_arguments_its_error_supplies() {
         // A message that names a value its error does not supply renders a
-        // literal `{$…}` in the user's face — or, worse, is dropped entirely,
+        // literal `{$…}` in the user's face - or, worse, is dropped entirely,
         // costing the user the one sentence telling them what to do next.
         for error in every_variant() {
             let args = error.message_args();

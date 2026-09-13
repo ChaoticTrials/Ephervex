@@ -12,7 +12,7 @@
 //! The launcher already serves a cached document without touching the network
 //! while it is within its freshness window, so nothing here is a special mode:
 //! the sandbox is simply started with the same cache a launcher that had
-//! already asked once would have. That is also what makes it honest coverage —
+//! already asked once would have. That is also what makes it honest coverage -
 //! the code under test takes its ordinary cached path rather than a test-only
 //! one.
 //!

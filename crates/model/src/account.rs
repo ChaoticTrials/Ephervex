@@ -15,7 +15,7 @@
 //! It has two consumers that cannot see each other: `ephervex-storage` records
 //! it in `config.toml`, and `ephervex-auth` decides what a session made from it
 //! can do. Storage must not depend on the authentication crate, so the shared
-//! vocabulary belongs here — the same argument that moved `JavaOverride` and
+//! vocabulary belongs here - the same argument that moved `JavaOverride` and
 //! `JvmSettings` here in Java runtime support.
 //!
 //! The *derivation* of an offline account's UUID does not live here. That is

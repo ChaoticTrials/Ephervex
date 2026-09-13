@@ -3,8 +3,8 @@
 //! # Why this is not just "download and copy"
 //!
 //! `mods/` belongs to the user. It holds jars Ephervex installed, jars the user
-//! dropped in from a forum thread, and — for the developer this launcher is
-//! built for — the local build being debugged. An installer that writes into
+//! dropped in from a forum thread, and - for the developer this launcher is
+//! built for - the local build being debugged. An installer that writes into
 //! that directory optimistically can destroy the one file the instance existed
 //! to test.
 //!
@@ -21,7 +21,7 @@
 //! # An install either happens or leaves nothing new behind
 //!
 //! Every jar this operation creates is tracked, and any failure after the first
-//! copy removes exactly those — including a failure to write the recipe, which
+//! copy removes exactly those - including a failure to write the recipe, which
 //! is as much an installation failure as a download that would not verify: an
 //! instance whose mods are not recorded cannot rebuild its server. Rollback
 //! touches only files this operation created. Anything that was already there,
@@ -130,8 +130,8 @@ enum Disposition {
 /// Installs mods and records them in the recipe.
 ///
 /// The recipe is written last and only once every file is in place, so a
-/// recipe on disk never names a mod that is not there. The reverse ordering —
-/// recording first — would make "Create Server" build something that never
+/// recipe on disk never names a mod that is not there. The reverse ordering -
+/// recording first - would make "Create Server" build something that never
 /// existed.
 #[instrument(skip_all, fields(game_dir = %request.game_dir.display(), mods = request.additions.len()))]
 pub async fn install_managed(request: ManagedModInstall<'_>) -> PackResult<ManagedModInstallation> {
@@ -167,7 +167,7 @@ pub async fn install_managed(request: ManagedModInstall<'_>) -> PackResult<Manag
     let outcomes = fetch_all(&wanted, fetch).await?;
 
     // Everything from here on can leave a file behind, so it is undone on
-    // failure. `created` is the exact set this operation wrote — never a guess
+    // failure. `created` is the exact set this operation wrote - never a guess
     // derived from the plan, which would include files that were already there.
     let mut created: Vec<PathBuf> = Vec::with_capacity(pending.len());
     let outcome = copy_all(
@@ -247,8 +247,8 @@ fn disposition_for(
     }
 }
 
-/// Whether the recipe already records this exact mod — same project *and* same
-/// version — at this exact path.
+/// Whether the recipe already records this exact mod - same project *and* same
+/// version - at this exact path.
 ///
 /// A different version at the same path is deliberately not "recorded": it is
 /// refused earlier, during planning, because changing it is an update.

@@ -2,11 +2,12 @@
 //!
 //! # No root, ever
 //!
-//! Everything lands under `$XDG_DATA_HOME/ephervex/java/<major>/<vendor-build>/`
-//! — the user's own data directory. There is no package manager, no `sudo`, and
-//! no write outside that tree. That is not a convenience: a bug-reproduction
-//! tool that needs administrator rights to try a different Java is a tool
-//! nobody will use twice.
+//! Everything lands under
+//! `$XDG_DATA_HOME/ephervex/java/<major>/<vendor-build>/` - the user's own data
+//! directory. There is no package manager, no `sudo`, and no write outside that
+//! tree. That is not a convenience: a bug-reproduction tool that needs
+//! administrator rights to try a different Java is a tool nobody will use
+//! twice.
 //!
 //! # The four steps, and why each is where it is
 //!
@@ -15,7 +16,7 @@
 //! 2. **Download** the archive through `ephervex-download`, giving it the
 //!    SHA-256 Adoptium published. Atomic finalization and hash verification are
 //!    properties of the download manager, so a partial or wrong archive can
-//!    never be sitting at the cache path — which is what makes step 3 safe to
+//!    never be sitting at the cache path - which is what makes step 3 safe to
 //!    skip when the file is already there.
 //! 3. **Extract** through [`crate::archive`], which enforces the security rules. The
 //!    archive is remote input; the fact that it came from Adoptium over HTTPS
@@ -68,7 +69,7 @@ pub struct ManagedJavaProvider {
 }
 
 impl ManagedJavaProvider {
-    /// Builds a provider installing into `java_dir` — `Paths::java_dir()`.
+    /// Builds a provider installing into `java_dir` - `Paths::java_dir()`.
     pub fn new(
         manager: DownloadManager,
         layout: CacheLayout,

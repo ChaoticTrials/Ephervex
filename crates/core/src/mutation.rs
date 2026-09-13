@@ -3,7 +3,7 @@
 //! # Why this is not "install, but backwards"
 //!
 //! Installing answers one question: what does this mod need? Mutating answers a
-//! second one the installer never has to — *what did the old state own that the
+//! second one the installer never has to - *what did the old state own that the
 //! new one does not?* A mod dragged in as a dependency two operations ago has no
 //! record of who wanted it; the recipe says it is a `RequiredDependency` and
 //! nothing more. So "is this still needed" cannot be looked up, only recomputed.
@@ -19,8 +19,8 @@
 //! * **A provider that cannot be reached means nothing is removed.** An
 //!   unprovable orphan is kept. Deleting a jar another mod needs breaks the
 //!   instance; keeping one nothing needs wastes a megabyte.
-//! * **Only automatic dependencies are ever collected.** A mod the user chose —
-//!   including an optional dependency they explicitly ticked — is a root. Roots
+//! * **Only automatic dependencies are ever collected.** A mod the user chose -
+//!   including an optional dependency they explicitly ticked - is a root. Roots
 //!   are removed when a human asks, never as a side effect.
 //!
 //! # What ownership decides
@@ -643,7 +643,7 @@ impl App {
             // The recorded release is already the right one. Whether that is a
             // no-op depends on the game directory, not on the recipe: a jar the
             // user deleted while bisecting is a repair, not "nothing to do".
-            // A jar they turned off is neither — it is there, and putting it
+            // A jar they turned off is neither - it is there, and putting it
             // back would turn it on again.
             if context.entry.presence == crate::mods::ModPresence::Missing {
                 PlannedOutcome::Repair

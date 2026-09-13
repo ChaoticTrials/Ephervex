@@ -61,7 +61,7 @@ impl Hash {
     /// Creates a hash, normalizing the digest to lowercase.
     ///
     /// Returns `None` if the digest is not valid hex of the right length for
-    /// the algorithm — malformed provider metadata should be rejected at the
+    /// the algorithm - malformed provider metadata should be rejected at the
     /// parsing boundary rather than failing later during verification.
     #[must_use]
     pub fn new(algorithm: HashAlgorithm, digest: &str) -> Option<Self> {

@@ -1,4 +1,4 @@
-# ADR 0023 — AppImage is the Linux release artifact, on a declared glibc baseline
+# ADR 0023 - AppImage is the Linux release artifact, on a declared glibc baseline
 
 Status: Accepted
 

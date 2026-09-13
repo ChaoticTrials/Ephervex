@@ -1,4 +1,4 @@
-# ADR 0025 — An instance becomes persistent by moving, not by being copied
+# ADR 0025 - An instance becomes persistent by moving, not by being copied
 
 **Status:** Accepted
 

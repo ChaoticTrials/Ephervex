@@ -4,7 +4,7 @@
 //! # What this crate is for
 //!
 //! Turning an untrusted archive out of a bug report into an instance that
-//! reproduces what the reporter had — and into a *record* of what the pack said,
+//! reproduces what the reporter had - and into a *record* of what the pack said,
 //! so the same import can produce a matching server months later without the
 //! archive.
 //!
@@ -18,7 +18,7 @@
 //!
 //! Exactly one module knows which provider produced an archive
 //! ([`import::parse_with`], which dispatches on [`detect::PackFormat`]).
-//! Everything downstream — [`recipe::PackRecipe`], [`install`], [`store`] — is
+//! Everything downstream - [`recipe::PackRecipe`], [`install`], [`store`] - is
 //! provider-neutral because provider-specific formats are not the shape of the
 //! problem. [`modrinth`] and [`curseforge`] are the two arms of that dispatch,
 //! and adding the second changed neither the recipe, the installer, the

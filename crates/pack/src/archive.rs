@@ -42,8 +42,8 @@ use crate::path::{contained_join, is_reserved, safe_relative_path};
 /// Bounds on what an archive may expand into.
 ///
 /// "For local developer use, limits can be generous, but they must exist." The
-/// defaults are sized for a large real-world modpack — a few thousand files and
-/// a couple of gigabytes once resource packs are counted — and are configurable
+/// defaults are sized for a large real-world modpack - a few thousand files and
+/// a couple of gigabytes once resource packs are counted - and are configurable
 /// so a caller with a bigger archive can raise them deliberately rather than
 /// discovering there was never a ceiling at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,8 +168,8 @@ impl PackArchive {
 
     /// Whether the archive contains anything beneath a directory prefix.
     ///
-    /// Directory entries are optional in a ZIP — plenty of writers emit only
-    /// file entries — so this asks about *contents* rather than about the
+    /// Directory entries are optional in a ZIP - plenty of writers emit only
+    /// file entries - so this asks about *contents* rather than about the
     /// directory entry itself.
     #[must_use]
     pub fn contains_prefix(&self, prefix: &str) -> bool {
@@ -253,7 +253,7 @@ impl PackArchive {
     ///
     /// The prefix is stripped, so `overrides/config/a.toml` lands at
     /// `<destination>/config/a.toml`. Extracting a prefix that does not exist is
-    /// not an error — a pack with no `server-overrides/` is perfectly normal —
+    /// not an error - a pack with no `server-overrides/` is perfectly normal -
     /// and returns an empty report.
     ///
     /// Later layers overwrite earlier ones, which is why entries are visited in
@@ -447,7 +447,7 @@ impl PackArchive {
 /// `None` when the entry is not under the prefix.
 ///
 /// A free function rather than a method so it can run while an entry borrowed
-/// from the archive is still alive — and because it is pure: an entry name and
+/// from the archive is still alive - and because it is pure: an entry name and
 /// a prefix in, a decision out.
 fn entry_under(raw: &[u8], prefix: &str) -> PackResult<Option<PathBuf>> {
     let name = String::from_utf8_lossy(raw).into_owned();

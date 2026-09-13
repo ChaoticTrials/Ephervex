@@ -9,7 +9,7 @@
 //!
 //! # Why this is hand-written rather than an HTTP server crate
 //!
-//! It has to handle exactly one request shape — a `GET` with a query string —
+//! It has to handle exactly one request shape - a `GET` with a query string -
 //! and then stop. A server framework would bring routing, keep-alive, chunked
 //! encoding, and a middleware stack to answer a single request, and every one
 //! of those is attack surface bound to a socket that a hostile local process
@@ -51,7 +51,7 @@ use crate::secret::SecretString;
 /// From *Redirect URI (reply URL) best practices and limitations*, re-read
 /// 2026-08-08:
 ///
-/// * The port is ignored when matching **only** for `localhost` — *"This is
+/// * The port is ignored when matching **only** for `localhost` - *"This is
 ///   only true for localhost redirect URIs. In all other cases, the port
 ///   component is not ignored when matching redirect URIs."* An ephemeral port
 ///   is therefore only viable under `localhost`; under `127.0.0.1` every
@@ -92,7 +92,7 @@ pub const DEFAULT_LOGIN_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 #[derive(Debug)]
 pub enum Redirect {
     /// The authorization code, which is a bearer credential until it is
-    /// redeemed — hence [`SecretString`].
+    /// redeemed - hence [`SecretString`].
     Code(SecretString),
     /// Microsoft refused, or the user did.
     Error { code: String, description: String },
@@ -115,7 +115,7 @@ pub struct LoopbackReceiver {
     /// run this flow at all.
     ipv4: TcpListener,
     /// `[::1]`, when the machine has IPv6 at all. `None` is not a degraded
-    /// state — if IPv6 is disabled, `localhost` cannot resolve to `::1` either,
+    /// state - if IPv6 is disabled, `localhost` cannot resolve to `::1` either,
     /// so there is nothing left for it to catch.
     ipv6: Option<TcpListener>,
     redirect_uri: String,
@@ -175,7 +175,7 @@ impl LoopbackReceiver {
         Self {
             ipv4,
             ipv6,
-            // `localhost`, never the IP literal — see `REDIRECT_HOST`.
+            // `localhost`, never the IP literal - see `REDIRECT_HOST`.
             redirect_uri: format!("http://{REDIRECT_HOST}:{port}"),
         }
     }
@@ -192,7 +192,7 @@ impl LoopbackReceiver {
     }
 
     /// The `redirect_uri` to send to Microsoft, and to send again when
-    /// redeeming the code — the two must match exactly or the exchange fails.
+    /// redeeming the code - the two must match exactly or the exchange fails.
     #[must_use]
     pub fn redirect_uri(&self) -> &str {
         &self.redirect_uri
@@ -201,7 +201,7 @@ impl LoopbackReceiver {
     /// Waits for the redirect, checking `state` before returning anything.
     ///
     /// Returns [`AuthError::StateMismatch`] for a redirect whose `state` is not
-    /// the one this request sent — a forged or stale redirect, whose code is
+    /// the one this request sent - a forged or stale redirect, whose code is
     /// not ours to redeem.
     pub async fn wait(
         self,
@@ -330,7 +330,7 @@ fn request_target(line: &str) -> Option<String> {
 
 /// Interprets `/?code=…&state=…` or `/?error=…`.
 ///
-/// Returns `Ok(None)` for a request that is not the redirect at all — the
+/// Returns `Ok(None)` for a request that is not the redirect at all - the
 /// favicon probe every browser makes.
 fn parse_redirect(target: &str, expected_state: &str) -> AuthResult<Option<Redirect>> {
     // A base is needed only because the request target is relative; the host is

@@ -11,7 +11,7 @@ game emits them.
 | `options-1.12.2.txt` | 1.12.x | `overrideWidth`/`overrideHeight` exist and are the only place a window size can be expressed; `renderClouds` is a bare boolean and `chatVisibility` an integer |
 | `options-1.16.5.txt` | 1.13–1.17.x | the window-size keys are gone and `simulationDistance` does not exist yet, while enum values are still written bare: this release's save path prints `renderClouds:true` from a literal, so quoting is not an era it belongs to |
 | `options-1.20.1.txt` | 1.18+ | `simulationDistance` is split out from `renderDistance`; a mod's key (`jei:configVersion:2`) carries a second colon that a naive split would corrupt |
-| `options-26.1.txt` | calendar-versioned releases | the same era one scheme change later, plus `aKeyThisBuildHasNeverSeen` — a key Ephervex must preserve without understanding |
+| `options-26.1.txt` | calendar-versioned releases | the same era one scheme change later, plus `aKeyThisBuildHasNeverSeen` - a key Ephervex must preserve without understanding |
 
 ## What the tests use them for
 
@@ -22,7 +22,7 @@ game emits them.
   line, including mod keys and unknown keys, exactly where it was;
 * the release's own `version:` marker is preserved and never replaced with
   another release's;
-* no key from a neighboring era leaks in — no `overrideWidth` in a modern
+* no key from a neighboring era leaks in - no `overrideWidth` in a modern
   file, no `simulationDistance` in a 1.12.2 one.
 
 ## About the `version:` values
@@ -44,11 +44,11 @@ bytecode or against a file the game itself wrote, it says so:
 
 * the field of view reads `fov:0.0` in every era because every release stores
   `(degrees - 70) / 40`, so the seventy-degree default is zero rather than
-  `70.0` — confirmed against real files from 26.1.2 and 26.2, which store
+  `70.0` - confirmed against real files from 26.1.2 and 26.2, which store
   `fov:0.5` for ninety degrees;
 * 1.16.5 writes enum values bare, confirmed from its save path, which prints
   `renderClouds:true` from a string literal;
 * releases that keep their options in `OptionInstance` encode each one with its
   codec and print the resulting JSON, so a value whose JSON form is a string
-  arrives quoted — `renderClouds:"true"`, `mainHand:"right"` — confirmed
+  arrives quoted - `renderClouds:"true"`, `mainHand:"right"` - confirmed
   against real 26.1.2 and 26.2 files.

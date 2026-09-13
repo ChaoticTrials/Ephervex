@@ -170,8 +170,8 @@ impl Index {
         connection.execute_batch("PRAGMA foreign_keys = ON; PRAGMA synchronous = NORMAL;")?;
 
         // Write-ahead logging keeps a long-running launch from blocking the
-        // instance list. It reports the resulting mode as a row — which is
-        // "memory" for an in-memory database — so it cannot go through
+        // instance list. It reports the resulting mode as a row - which is
+        // "memory" for an in-memory database - so it cannot go through
         // `execute_batch`.
         let _mode: String =
             connection.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
@@ -213,7 +213,7 @@ impl Index {
 /// Each migration runs inside its own transaction together with the
 /// `user_version` bump, so an interrupted upgrade leaves the database at a
 /// version whose schema is actually present. A database newer than the supplied
-/// list is refused rather than downgraded — guessing at a schema we do not know
+/// list is refused rather than downgraded - guessing at a schema we do not know
 /// is how data gets lost.
 pub fn apply_migrations(
     connection: &mut Connection,

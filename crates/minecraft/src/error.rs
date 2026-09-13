@@ -24,7 +24,7 @@ use crate::version_id::MINIMUM_SUPPORTED_VERSION;
 #[non_exhaustive]
 pub enum MinecraftError {
     /// The version list could not be refreshed and nothing was cached. The
-    /// genuinely offline case — distinct from being served a stale list, which
+    /// genuinely offline case - distinct from being served a stale list, which
     /// is a success.
     #[error("the minecraft version list is unavailable")]
     ManifestUnavailable {
@@ -48,7 +48,7 @@ pub enum MinecraftError {
     #[error("minecraft `{id}` predates the supported minimum {minimum}")]
     VersionUnsupported { id: String, minimum: &'static str },
 
-    /// The version exists but is not on the release channel — a snapshot, a
+    /// The version exists but is not on the release channel - a snapshot, a
     /// pre-release, or a release candidate. A different thing to tell a user
     /// than "too old", so it gets a different message rather than being folded
     /// into one vague refusal.
@@ -174,7 +174,7 @@ pub type MinecraftResult<T> = Result<T, MinecraftError>;
 /// `LaunchError` includes `AuthenticationRequired` and `MissingJava`
 /// alongside these. Both are produced *above* this crate: the session comes
 /// from `ephervex-auth` and the runtime from `ephervex-java`, and both already
-/// carry typed errors with the predicates a frontend needs —
+/// carry typed errors with the predicates a frontend needs -
 /// `CoreError::requires_interactive_login()` is the typed `AuthenticationRequired` state,
 /// and `CoreError::required_java_major()` with
 /// `CoreError::managed_java_would_help()` is its `MissingJava`. Re-expressing
@@ -183,7 +183,7 @@ pub type MinecraftResult<T> = Result<T, MinecraftError>;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum LaunchError {
-    /// The version's metadata does not describe something launchable — a field
+    /// The version's metadata does not describe something launchable - a field
     /// a launch needs is missing, or the document is a loader child that has
     /// not been merged with its parent.
     #[error("the metadata for minecraft `{version}` cannot describe a launch")]

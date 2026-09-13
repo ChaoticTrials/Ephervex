@@ -114,8 +114,8 @@ pub struct Storage {
 /// Opens the application's storage: paths, configuration, and registry.
 ///
 /// This is the startup path both frontends take. It reads the configuration,
-/// applies the configured persistent-instance-root override to the resolver —
-/// the one place those two meet — creates the directories, and opens the index.
+/// applies the configured persistent-instance-root override to the resolver -
+/// the one place those two meet - creates the directories, and opens the index.
 ///
 /// A configuration file that exists but cannot be parsed is a hard error rather
 /// than a silent fall back to defaults. Quietly ignoring settings a user

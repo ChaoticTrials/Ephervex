@@ -9,9 +9,9 @@
 //!
 //! Every service that fetches or consumes reusable artifacts runs inside
 //! [`App::with_artifact_cache`]. That takes a shared lease before the work
-//! starts, holds it until the work is completely finished — including the copy
+//! starts, holds it until the work is completely finished - including the copy
 //! into an instance, the unpack into a runtime, the spawn of a JVM whose
-//! classpath names cache paths — and only then lets maintenance try to run.
+//! classpath names cache paths - and only then lets maintenance try to run.
 //! Because the lease is a kernel advisory lock on a file under the cache root,
 //! it holds against a second Ephervex process as much as against a second task
 //! in this one.

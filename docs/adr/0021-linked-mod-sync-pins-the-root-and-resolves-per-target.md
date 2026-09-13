@@ -1,4 +1,4 @@
-# ADR 0021 — Linked mod synchronization pins the root release and resolves dependencies per target
+# ADR 0021 - Linked mod synchronization pins the root release and resolves dependencies per target
 
 **Status:** Accepted
 
@@ -18,7 +18,7 @@ sounds like it means running the same operation against each of them. It does
 not: running "the newest release that fits" once per target can produce client
 v5, server A v4, and server B v6 from a single click, which is three different
 builds of the mod the user is bisecting. Nor can the client's answer simply be
-assumed to fit — Ephervex already supports changing a linked server's exact
+assumed to fit - Ephervex already supports changing a linked server's exact
 loader build independently, so a linked server may be on another Minecraft
 release or another loader build than the client it came from.
 
@@ -28,8 +28,8 @@ synced months after reconstruction was never in that pack, and writing it in as
 though it were would make the launcher claim a release the pack never shipped.
 
 The third is atomicity. ADR 0020 made one instance's mutation one undoable
-transaction. Several instances cannot be one transaction — there is no
-cross-instance filesystem transaction to have — and imitating one by undoing the
+transaction. Several instances cannot be one transaction - there is no
+cross-instance filesystem transaction to have - and imitating one by undoing the
 targets that succeeded would destroy working state to make a report look tidier.
 
 The fourth is what a server is allowed to be told about a mod at all. A project
@@ -40,9 +40,9 @@ on the strength of a value that says the opposite of certainty.
 ## Decision
 
 **The root release is exact and shared; dependencies are not.** The client
-operation settles on one exact provider release — the one the user picked, or the
+operation settles on one exact provider release - the one the user picked, or the
 one an update resolved against the *client's* exact Minecraft version and loader
-— and that release is what every selected linked server is evaluated for. No
+- and that release is what every selected linked server is evaluated for. No
 server runs its own newest-compatible search. Dependencies are the opposite: each
 target resolves its own graph against its own release, loader, and installed set,
 with the root pinned. A server legitimately needs things a client does not, and
@@ -59,7 +59,7 @@ The client's compatibility result is never taken as proof for a server.
 
 **Synced mods are recipe entries with their own ownership.** A server keeps the
 recipe reconstruction left it, and a synced root is added to it as
-`UserSelected`, its dependencies as `RequiredDependency` — the same
+`UserSelected`, its dependencies as `RequiredDependency` - the same
 provider-neutral ownership a client uses (ADR 0019). Pack-declared entries are
 never rewritten, so pack history, later synced roots, and their dependencies stay
 three distinguishable things in one list. Ownership is read back from that file,
@@ -73,8 +73,8 @@ installed only when a creation confirms it, so inheriting the client's answer
 would leave the server's own record claiming a jar it never received.
 
 **Each target is one transaction; the operation is not.** Per target, the ADR
-0020 ordering runs unchanged — plan, fetch and verify, retire, write, publish,
-discard — against that server's own game directory, scratch, and recipe. A failed
+0020 ordering runs unchanged - plan, fetch and verify, retire, write, publish,
+discard - against that server's own game directory, scratch, and recipe. A failed
 target keeps the state it had. Across targets there is no transaction and none is
 claimed: results are typed and per target, keyed by stable server id, and a
 partial outcome is reported as a partial outcome. Targets that succeeded stay
@@ -108,8 +108,8 @@ target reports that the server must be stopped, and the user retries.
 ## Consequences
 
 One user action can leave the client and a subset of its servers changed, and
-that is reported as exactly what it is. The alternative — refusing the whole
-operation because one server is running — would make the common case hostage to
+that is reported as exactly what it is. The alternative - refusing the whole
+operation because one server is running - would make the common case hostage to
 the rare one.
 
 A linked server can drift from its client, and this feature does not hide the

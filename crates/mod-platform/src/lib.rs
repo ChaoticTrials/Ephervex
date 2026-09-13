@@ -10,8 +10,8 @@
 //! # The boundary this crate is built around
 //!
 //! One module per catalog: [`modrinth`] knows what Modrinth is, [`curseforge`]
-//! knows what CurseForge is. Everything downstream — [`model`], [`resolve`],
-//! and every caller above this crate — is provider-neutral, because a second
+//! knows what CurseForge is. Everything downstream - [`model`], [`resolve`],
+//! and every caller above this crate - is provider-neutral, because a second
 //! catalog is a translation problem and not a second launcher. Neither module
 //! changes the resolver, the plan, or anything the services layer calls.
 //!

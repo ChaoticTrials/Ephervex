@@ -2431,7 +2431,7 @@ fn report_connected_launch(outcome: &LaunchAndConnectOutcome, json: bool) {
 ///
 /// The *step* is deliberately not what resets the counter: inside a batch the
 /// step is the file currently being fetched, so resetting on it would print a
-/// line per asset — four and a half thousand of them on a modern release. A
+/// line per asset - four and a half thousand of them on a modern release. A
 /// fraction that goes *backwards* is what marks a new batch.
 #[derive(Debug, Default)]
 struct LaunchProgressPrinter {
@@ -3845,7 +3845,7 @@ async fn run_account_command(
 
 /// The account-management commands: everything that does not talk to Microsoft.
 ///
-/// Split out from [`run_account_command`] because none of it is async — adding
+/// Split out from [`run_account_command`] because none of it is async - adding
 /// an offline account, choosing a default, and removing one all touch only
 /// `config.toml` and, for a Microsoft account, one keyring entry.
 fn run_account_management(

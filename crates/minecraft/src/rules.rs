@@ -9,7 +9,7 @@
 //! `has_custom_resolution`, the quick-play family) depend on how the *user*
 //! launches, which is not known while metadata is being parsed. And a
 //! reproduction launcher is expected to explain why an argument is or is not
-//! present in a launch it produced — which needs the condition, not just its
+//! present in a launch it produced - which needs the condition, not just its
 //! result. So the conditions survive into Vanilla launch support, which evaluates them against
 //! a concrete launch context.
 //!
@@ -21,9 +21,9 @@
 //!
 //! | Era | Shape |
 //! |---|---|
-//! | 1.13 – 1.19.x | `"version": "^10\\."` — a regex against the OS version |
+//! | 1.13 – 1.19.x | `"version": "^10\\."` - a regex against the OS version |
 //! | 1.20 – 1.21.x | absent |
-//! | 26.x | `"versionRange": { "min": "10.0.17134" }` — an inclusive bound |
+//! | 26.x | `"versionRange": { "min": "10.0.17134" }` - an inclusive bound |
 //!
 //! Neither form is interpreted at parse time. The regex is never compiled (that
 //! would drag a regex engine in for a condition that only ever matters on
@@ -34,7 +34,7 @@
 //!
 //! [`RuleContext`] is the concrete answer Vanilla launch support supplies: which platform, and
 //! which launcher features the user turned on. [`rules_allow`] applies Mojang's
-//! own semantics to it — an empty rule list allows, and otherwise the *last*
+//! own semantics to it - an empty rule list allows, and otherwise the *last*
 //! matching rule decides, which is how `allow` followed by
 //! `disallow os=osx` says "everywhere except macOS".
 
@@ -143,7 +143,7 @@ impl OsVersionCondition {
 /// Components that are not numbers compare as text, and a missing component
 /// counts as zero, so `10.0` and `10.0.0` are equal. That is enough for the
 /// only shape Mojang has published and does not pretend to be a general version
-/// algebra — Minecraft's own ids get [`crate::MinecraftVersionId`], which is a
+/// algebra - Minecraft's own ids get [`crate::MinecraftVersionId`], which is a
 /// separate problem with separate rules.
 fn compare_versions(left: &str, right: &str) -> std::cmp::Ordering {
     let mut left = left.split('.');
@@ -205,8 +205,8 @@ impl OsCondition {
 /// The concrete launch a rule is evaluated against.
 ///
 /// Features are a map rather than a struct for the same reason [`Rule`]'s are:
-/// Mojang adds feature flags without warning — the quick-play family arrived in
-/// 1.20 — and a struct would turn each addition into a code change in a place
+/// Mojang adds feature flags without warning - the quick-play family arrived in
+/// 1.20 - and a struct would turn each addition into a code change in a place
 /// that has no opinion about what the flag means.
 #[derive(Debug, Clone, Default)]
 pub struct RuleContext {

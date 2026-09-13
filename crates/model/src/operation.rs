@@ -14,7 +14,7 @@ use crate::ids::OperationId;
 /// Progress towards completion.
 ///
 /// Total is optional because some stages genuinely cannot know their size in
-/// advance — a chunked response without `Content-Length`, or a dependency graph
+/// advance - a chunked response without `Content-Length`, or a dependency graph
 /// still being walked. Those render as indeterminate rather than as a fake
 /// percentage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]

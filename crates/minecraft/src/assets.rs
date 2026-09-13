@@ -4,11 +4,11 @@
 //! one document mapping logical names (`minecraft/sounds/mob/pig/say3.ogg`) to
 //! a SHA-1 and a size. The game locates each file by that hash under
 //! `<assets>/objects/<first two hex characters>/<hash>`, which is why
-//! `CacheLayout::asset_object` mirrors the layout exactly — any other one would
+//! `CacheLayout::asset_object` mirrors the layout exactly - any other one would
 //! need a translation step that could only introduce bugs.
 //!
 //! Several versions share one index: 1.20.1 and 1.20.2 both use index `5`. That
-//! is the whole reason assets are a launcher-level store  — the
+//! is the whole reason assets are a launcher-level store  - the
 //! 1.12 index alone is 1 305 objects and 129 MB, and copying it into every
 //! disposable instance would make temporary instances anything but cheap.
 //!
@@ -17,7 +17,7 @@
 //! Indexes before 1.7.3 set `virtual: true`, and 1.6 sets
 //! `map_to_resources: true`; both mean the objects have to be materialized
 //! under their logical names instead of by hash. Ephervex's floor is 1.12.2, so
-//! neither can occur — and rather than carry an unexercised code path, an index
+//! neither can occur - and rather than carry an unexercised code path, an index
 //! that declares either is reported as unsupported. That is the honest failure
 //! The test suite covers: silently laying the files out by hash would produce
 //! a game with no sounds and no obvious reason why.
@@ -125,8 +125,8 @@ impl AssetIndex {
 
     /// The distinct objects, deduplicated by digest.
     ///
-    /// Several logical names legitimately share one file — the same texture
-    /// under two paths — and they share one cache entry too, because the store
+    /// Several logical names legitimately share one file - the same texture
+    /// under two paths - and they share one cache entry too, because the store
     /// is content-addressed. Downloading it once instead of once per name is
     /// the difference between 4 750 requests and rather fewer.
     #[must_use]

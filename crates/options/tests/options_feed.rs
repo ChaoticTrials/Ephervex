@@ -3,7 +3,7 @@
 //! These cover what a unit test over a fixture string cannot: what happens when
 //! the feed host is gone, truncates a response, serves something that is not a
 //! dataset, or publishes a document from a format this build has never seen.
-//! Nothing here touches a live service — the "host" is a `wiremock` server on
+//! Nothing here touches a live service - the "host" is a `wiremock` server on
 //! localhost, so `cargo test --offline` passes with the network unplugged.
 //!
 //! The invariant every one of them defends is the same: a bad publish must

@@ -86,18 +86,18 @@ impl fmt::Display for PackFormat {
     }
 }
 
-/// `modrinth.index.json` — the Modrinth modpack format's manifest.
+/// `modrinth.index.json` - the Modrinth modpack format's manifest.
 pub const MODRINTH_INDEX: &str = "modrinth.index.json";
-/// `manifest.json` — the CurseForge export's manifest.
+/// `manifest.json` - the CurseForge export's manifest.
 pub const CURSEFORGE_MANIFEST: &str = "manifest.json";
-/// `mmc-pack.json` — the component list in a Prism-compatible export.
+/// `mmc-pack.json` - the component list in a Prism-compatible export.
 pub const PRISM_PACK: &str = "mmc-pack.json";
 
 /// Identifies an archive from the entry names it contains.
 ///
 /// Takes names rather than an archive so it can be unit-tested against a list
 /// and reused by any reader. Matching is exact on the archive root first, then
-/// on one level of wrapper directory — Prism exports habitually wrap everything
+/// on one level of wrapper directory - Prism exports habitually wrap everything
 /// in a directory named after the instance, and a user who re-zipped a folder
 /// produces the same shape for the other two.
 #[must_use]
@@ -133,7 +133,7 @@ fn format_of(name: &str) -> Option<PackFormat> {
 
 /// Whether a filename carries the Modrinth pack extension.
 ///
-/// Advisory only — the archive's contents decide (see [`identify`]) — but the
+/// Advisory only - the archive's contents decide (see [`identify`]) - but the
 /// extension is what a file chooser filters on, so it is worth naming once.
 #[must_use]
 pub fn has_mrpack_extension(path: &Path) -> bool {

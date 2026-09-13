@@ -9,7 +9,7 @@
 //!
 //! A candidate is recognized purely by hash, the same proof an ordinary
 //! completed download leaves behind. A match is adopted into the shared
-//! cache so materialization needs no download address for it at all — it is
+//! cache so materialization needs no download address for it at all - it is
 //! installed from the cache exactly the way an already-downloaded artifact
 //! always is.
 
@@ -26,7 +26,7 @@ use crate::app::App;
 #[derive(Debug, Clone)]
 pub struct WatchTarget {
     pub identity: ProviderFileIdentity,
-    /// The provider's own file name, read only for its cosmetic extension —
+    /// The provider's own file name, read only for its cosmetic extension -
     /// never trusted to name a destination path. See
     /// [`ephervex_pack::safe_file_name`] for the actual destination that is
     /// built once a match is resolved back into a recipe entry.
@@ -162,7 +162,7 @@ impl DownloadWatcher {
 /// temporary sibling first, then renamed into place, so a reader can never
 /// observe a partially copied file at the final path.
 ///
-/// The candidate itself is left exactly where the user put it — this adopts
+/// The candidate itself is left exactly where the user put it - this adopts
 /// a copy, never a move, so a folder the user is still watching in a file
 /// manager does not lose the file it just found.
 async fn adopt_into_cache(

@@ -590,7 +590,7 @@ fn invalid(message: &str) -> ValidationResult {
 /// requested for the instance whose workspace is open, arrives after a provider
 /// round trip, and by then the user may have gone back and opened a different
 /// one. Applying it anyway would put one instance's mods under another
-/// instance's name — a wrong answer, not a slow one.
+/// instance's name - a wrong answer, not a slow one.
 ///
 /// Discarding the late result is the whole remedy. Nothing is cancelled and no
 /// navigation waits on a request: opening a workspace has already shown that
@@ -1148,7 +1148,7 @@ mod tests {
 /// One entry in the artifact-cache limit selector.
 ///
 /// The list is the mapping. A selector reports the index it is on, and this is
-/// what that index means, so nothing has to parse a label — and in particular
+/// what that index means, so nothing has to parse a label - and in particular
 /// nothing has to parse a *localized* label, which is how a settings screen ends
 /// up behaving differently in another language.
 #[derive(Debug, Clone, PartialEq, Eq)]

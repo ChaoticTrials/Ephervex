@@ -115,7 +115,7 @@ loader installer has already run by the time its jar is cacheable.
 That is what makes a byte budget expressible, and it also bounds what the budget
 governs. Only the two stores addressed purely by verified content hash are in
 scope: `downloads/` and `installer-cache/`. Every other store under the cache
-root is excluded, for reasons of ownership rather than size — `libraries/` is
+root is excluded, for reasons of ownership rather than size - `libraries/` is
 what a retained server's own `libraries` link resolves through, `assets/` is the
 directory a running game is handed, `natives/` is unpacked rather than
 downloaded, `metadata/` holds provider documents and their freshness envelopes,
@@ -157,7 +157,7 @@ Maintenance is a housekeeping policy, not an installation precondition. It runs
 after a cache-changing operation has released its lease and when the budget is
 lowered. If it cannot run, or cannot remove a particular entry, the operation's
 own result stands, the trouble is reported through the launcher's warning path,
-and the cache stays over budget — leaving files behind is always preferable to
+and the cache stays over budget - leaving files behind is always preferable to
 removing ones whose status is uncertain. A pass reports what it measured, what
 it freed, and what it could not, so a partial clear is never presented as an
 empty cache.
@@ -398,7 +398,7 @@ recipe. A CurseForge export names each file by project id and file id only, so
 parsing produces a recipe plus a list of entries the provider still has to
 describe; `ephervex-core` resolves each against the endpoint that answers about
 that exact file and turns the result into ordinary recipe entries. Recognizing
-and describing the archive stays local either way — only the resolution step
+and describing the archive stays local either way - only the resolution step
 needs a credential, and analysis reports that as a blocker rather than failing
 to identify the file (ADR 0022).
 
@@ -409,7 +409,7 @@ separate question. Materialization probes the shared artifact cache first, and a
 verified entry is installed with no credential and no request, which is why an
 installed instance and its linked servers keep working with no provider
 configured. Only an artifact the cache no longer holds is fetched, and only then
-is a credential asked for — per file, from the provider identity that file's own
+is a credential asked for - per file, from the provider identity that file's own
 recipe entry records, so a desired state naming several catalogs offers each
 secret only to its own artifacts. A refusal is attributed to the credential only
 when the request actually carried one and the provider uses that status to refuse
@@ -458,8 +458,8 @@ inputs throughout; no graph is satisfied by changing them.
 
 Mods installed through a provider are entries in the same recipe (ADR 0013), so
 a server built later contains them. No automatic operation overwrites or deletes
-a jar the launcher did not install. Installation writes the recipe last; any failure —
-including a failure to write the recipe — removes the files that operation
+a jar the launcher did not install. Installation writes the recipe last; any failure -
+including a failure to write the recipe - removes the files that operation
 created and leaves everything else untouched.
 
 A jar somebody put in `mods/` themselves is listed rather than hidden: it loads
@@ -474,7 +474,7 @@ and published by a rename, listed as hand-placed, and deliberately unrecorded,
 because nothing about a file handed over says which project it is. Identifying one is
 an explicit refresh rather than part of listing, because listing has to stay a
 directory read. Modrinth is asked first there, by the SHA-1 the launcher
-computes, and CurseForge second by fingerprint — the reverse of a server archive
+computes, and CurseForge second by fingerprint - the reverse of a server archive
 (ADR 0024), which is a CurseForge problem by construction. A jar a catalog
 recognizes is recorded in the recipe with its identity, `client` required and
 `server` undeclared, so creating a server asks about it in the same way it asks
@@ -645,8 +645,8 @@ and a directory that resolves outside the root that owns it.
 
 The launcher appends its own `tracing` events to a plain-text file per day under
 the state root, bounded by segment size and retained-file count, and browsable
-through the same surface. Long-running operations — launching, starting a
-server, importing a pack, installing mods — carry an operation id in their span
+through the same surface. Long-running operations - launching, starting a
+server, importing a pack, installing mods - carry an operation id in their span
 and report it to the user, which is how a run is located in that file. A
 dedicated server's captured process output remains separate (ADR 0014): it is a
 live console history, not a file the server wrote.

@@ -34,8 +34,8 @@ The four files in `files/` are the pack's downloadable content:
 | `server-only.jar` | unsupported | required | **not** installed into the client, but preserved in the recipe |
 | `optional.jar` | optional | optional | default unchecked; installed only when explicitly selected |
 
-They are minimal deterministic JARs — one `META-INF/MANIFEST.MF` entry, fixed
-timestamp — so the SHA-1 and SHA-512 digests written into
+They are minimal deterministic JARs - one `META-INF/MANIFEST.MF` entry, fixed
+timestamp - so the SHA-1 and SHA-512 digests written into
 `layered-client-server/modrinth.index.json` are stable on every machine. If a file here is
 regenerated, both digests in the index have to be regenerated with it, or the
 import fails with a hash mismatch.
@@ -44,12 +44,12 @@ import fails with a hash mismatch.
 
 The index's `downloads` addresses name `cdn.modrinth.com`, because that is what
 a real pack contains and because it is what the download allowlist accepts.
-A test cannot reach that host — and must not try — so the
+A test cannot reach that host - and must not try - so the
 harness rewrites each address's **origin** to its own loopback server and
 asserts that the original host was the allowlisted one before doing so. Paths,
 hashes, sizes, environments, and everything else are used exactly as written.
 
-## `invalid/` — packs that must be refused
+## `invalid/` - packs that must be refused
 
 One document per refusal, so a regression names the rule it broke rather than
 "the parser accepted something".
@@ -81,19 +81,19 @@ They are written rather than captured for the same reason the `.mrpack`
 fixtures are: a real capture would carry a real project's metadata and CDN
 addresses, which belong to whoever published them, and would drift the moment
 that project published a new version. What the parsers under test read is the
-*shape* — field names, nesting, and the enumerated values — and a transcribed
+*shape* - field names, nesting, and the enumerated values - and a transcribed
 fixture exercises that exactly as well.
 
 | File | What only this file proves |
 |---|---|
 | `search-mods.json` | three hits with different verdicts, including one whose project-wide `versions` and `categories` arrays both look compatible |
-| `versions-fits.json` | a newest compatible version, an older compatible one, and a newer one for the wrong release — so "newest" cannot be read as "last published" |
+| `versions-fits.json` | a newest compatible version, an older compatible one, and a newer one for the wrong release - so "newest" cannot be read as "last published" |
 | `versions-old.json` | a project published only for another Minecraft release |
 | `versions-split.json` | the case search facets get wrong: one version supports this release, another supports this loader, and neither supports both |
 | `versions-library.json` | a required dependency that resolves cleanly |
 | `versions-optional-extra.json` | an optional dependency, which must stay unselected |
 | `versions-primary-files.json` | exactly one file marked `primary` alongside a `sources-jar`, and a version with none marked, whose first entry is the documented fallback |
-| `project-undeclared-sides.json` | `server_side: "unknown"` — an upstream value an author can leave in place, which Ephervex records rather than resolves |
+| `project-undeclared-sides.json` | `server_side: "unknown"` - an upstream value an author can leave in place, which Ephervex records rather than resolves |
 
 The digests are well-formed placeholders. Nothing in these files is downloaded:
 the fixtures drive catalog parsing and dependency resolution, and the tests that

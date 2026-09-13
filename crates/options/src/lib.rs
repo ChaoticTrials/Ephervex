@@ -57,7 +57,7 @@
 //! # What this crate deliberately does not do
 //!
 //! It does not know where instances live, what a `ClientRecord` is, or when
-//! creation happens — [`apply_to_game_directory`] takes a directory and a
+//! creation happens - [`apply_to_game_directory`] takes a directory and a
 //! version string. Sequencing it into instance creation is `ephervex-core`'s
 //! job, reading the settings out of `config.toml` is `ephervex-storage`'s shape
 //! to describe, and resolving a release's language catalog belongs to

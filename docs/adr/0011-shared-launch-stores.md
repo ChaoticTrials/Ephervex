@@ -1,4 +1,4 @@
-# ADR 0011 — Everything a launch can re-download is launcher-level, including natives
+# ADR 0011 - Everything a launch can re-download is launcher-level, including natives
 
 **Status:** Accepted
 
@@ -25,8 +25,8 @@ Two facts decided against it:
   free, and "free" stops being true once every one of them unpacks its own copy
   of LWJGL and OpenAL.
 
-From 1.19 onward there is nothing to unpack — natives became ordinary rule-gated
-classpath jars — but the *directory* is still needed: it is what
+From 1.19 onward there is nothing to unpack - natives became ordinary rule-gated
+classpath jars - but the *directory* is still needed: it is what
 `-Djava.library.path`, `org.lwjgl.system.SharedLibraryExtractPath`,
 `jna.tmpdir`, and `io.netty.native.workdir` are pointed at, and the 26.x
 releases point each of them at a different subdirectory of it.
@@ -48,8 +48,8 @@ launch produces from a remote artifact is written into an instance.
 
 `natives/` is a store under the cache root. `CacheLayout::natives` is fallible
 because both of its components are
-logical keys rather than digests — a Minecraft version id arrives from Mojang's
-manifest — and the project's "never trust a name to choose a destination path"
+logical keys rather than digests - a Minecraft version id arrives from Mojang's
+manifest - and the project's "never trust a name to choose a destination path"
 has to hold for the one store whose path is not derived from a hash.
 
 The asset-index launch view is a small atomic copy of the verified canonical
@@ -90,7 +90,7 @@ the canonical client jar.
 - One version's natives directory is shared by every instance of that version,
   which is what Mojang's own launcher does (`versions/<id>/natives`). For 1.19
   and later the directory is scratch space rather than content, and the three
-  libraries that write into it — LWJGL, JNA, and Netty — each create and manage
+  libraries that write into it - LWJGL, JNA, and Netty - each create and manage
   their own subdirectory, so concurrent instances of one version do not collide.
 - Unpacking is idempotent and overwrites in place, so a natives directory is
   never deleted while a game might have its contents `dlopen`ed.

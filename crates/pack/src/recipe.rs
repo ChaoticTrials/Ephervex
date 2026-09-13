@@ -7,9 +7,9 @@
 //! An imported client is a directory a user then edits: they delete a mod to
 //! bisect a crash, drop a debug build in, and change a config. Reconstructing
 //! the server from that directory later reconstructs their debugging session
-//! rather than the pack. So an import records what the *pack* said — every
+//! rather than the pack. So an import records what the *pack* said - every
 //! file, its hashes, its download addresses, and its client **and** server
-//! environment — and a server materialized months later is built from that
+//! environment - and a server materialized months later is built from that
 //! record without the original archive being present.
 //!
 //! # Why this model has no Modrinth in it
@@ -18,7 +18,7 @@
 //! files by logical path and supplies download addresses, while CurseForge
 //! names files by project and file id and resolves their addresses through an
 //! API. Both have to land in the same normalized structure, because
-//! everything downstream — the installer, "Create Server", the instance UI —
+//! everything downstream - the installer, "Create Server", the instance UI -
 //! is written against this type and must not learn a provider's vocabulary.
 //!
 //! Provider-specific state therefore lives in exactly two places, both of them
@@ -56,7 +56,7 @@ use crate::error::{PackError, PackResult};
 /// server when one is created from a client, so it travels independently of the
 /// record that referenced it.
 ///
-/// Version 2 added managed-mod entries — [`PackFileRecipe::origin`],
+/// Version 2 added managed-mod entries - [`PackFileRecipe::origin`],
 /// [`ProviderFileIdentity::provider`], and [`SideRequirement::Unknown`]. The
 /// bump is deliberate rather than a silent additive change: a version 1 build
 /// reading one of these files would drop every browser-installed mod without
@@ -78,7 +78,7 @@ const MOD_EXTENSION: &str = "jar";
 /// Whether one side of the game needs a file.
 ///
 /// Four states rather than a boolean. "Optional" is a genuine third answer that
-/// the UI has to offer and the recipe has to remember — collapsing it either
+/// the UI has to offer and the recipe has to remember - collapsing it either
 /// way silently changes what gets installed.
 ///
 /// [`Unknown`](Self::Unknown) is the fourth, and it is not a synonym for any of
@@ -87,7 +87,7 @@ const MOD_EXTENSION: &str = "jar";
 /// an *omitted* `env` object is defined to mean required on both sides. A
 /// Modrinth project can, because its `client_side`/`server_side` fields have an
 /// `unknown` value an author may leave in place. Reading that as `Required`
-/// would assert something the author declined to assert — and would put the mod
+/// would assert something the author declined to assert - and would put the mod
 /// into a reconstructed server on that assertion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -197,7 +197,7 @@ pub struct ProviderFileIdentity {
     /// Which catalog the ids below belong to.
     ///
     /// `None` for a file whose identity came from a pack manifest that names no
-    /// catalog — a Modrinth pack index gives a path and hashes and nothing to
+    /// catalog - a Modrinth pack index gives a path and hashes and nothing to
     /// resolve a project against. Absence is the honest answer there, and it is
     /// what keeps such a file from being mistaken for a managed mod.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -332,7 +332,7 @@ impl ModIdentity {
 /// Some pack formats name a file by catalog id and nothing else: a CurseForge
 /// export declares a project id and a file id, and the file's name, size,
 /// hashes, and download address exist only in that provider's API. Such an
-/// entry cannot be a [`PackFileRecipe`] yet — a recipe entry names a
+/// entry cannot be a [`PackFileRecipe`] yet - a recipe entry names a
 /// destination and carries the hashes its download is verified against, and
 /// inventing either from an id would be inventing a fact.
 ///
@@ -383,7 +383,7 @@ impl PendingProviderFile {
 ///
 /// Not an error: a pack import that meets one of these does not abort. It
 /// stays here for a caller to display, offer a manual-download link for, or
-/// let the user explicitly skip. Nothing in this type is invented — every
+/// let the user explicitly skip. Nothing in this type is invented - every
 /// field is either the pack's own declaration or something the provider said
 /// about the exact file it refused, which is why `project_name`, `file_name`,
 /// and `browser_url` are all optional rather than defaulted to a raw id.
@@ -455,7 +455,7 @@ impl PackFileRecipe {
     /// Whether this file is installed on a side, given a selection.
     ///
     /// `required` installs, `unsupported` never installs, and both `optional`
-    /// and `unknown` install only if something explicitly selected them — the
+    /// and `unknown` install only if something explicitly selected them - the
     /// default for an unanswered one is off. An undeclared side is treated as
     /// needing a decision for the same reason an optional one is: nothing here
     /// justifies installing it on its own.
@@ -555,7 +555,7 @@ impl PackFileRecipe {
 /// The difference from [`ManagedMod`] is deliberate. `ManagedMod` answers "what
 /// can the mod browser re-resolve", so it exists only for a fully identified
 /// mod. This answers "what mods does this instance have", which has to include
-/// the ones whose provider identity is partial or absent — a pack's own files,
+/// the ones whose provider identity is partial or absent - a pack's own files,
 /// and anything imported before identity was recorded. Leaving those out is
 /// what made imported pack mods invisible.
 ///
@@ -910,7 +910,7 @@ impl PackRecipe {
     ///
     /// The list a mod view is built from. It covers the pack's own mods and
     /// the ones installed later through the browser alike, because they are the
-    /// same thing to a user looking at `mods/` — what tells them apart is
+    /// same thing to a user looking at `mods/` - what tells them apart is
     /// [`RecordedMod::origin`], not whether they appear at all.
     ///
     /// A mod the pack declares but that this client did not take is left out:
@@ -967,7 +967,7 @@ impl PackRecipe {
     /// **Insert-only, on purpose.** If the project is already recorded at a
     /// different version this refuses rather than replacing. An upsert would
     /// have to decide what happens to the old, differently-named jar, and the
-    /// honest answer — delete it — is a mod *update*, which this build does not
+    /// honest answer - delete it - is a mod *update*, which this build does not
     /// implement. Enforcing that here rather than only at the call site means
     /// the "two jars for one project" state cannot be reached at all, including
     /// by a future caller who has forgotten the rule.
@@ -1169,7 +1169,7 @@ pub struct OptionalSelection {
 }
 
 impl OptionalSelection {
-    /// Nothing selected — the product default.
+    /// Nothing selected - the product default.
     #[must_use]
     pub fn none() -> Self {
         Self::default()
@@ -1273,7 +1273,7 @@ impl SidePlan<'_> {
     /// archive.
     ///
     /// False means a server can still be created, but one of its override
-    /// layers would be missing — which is something to say out loud rather than
+    /// layers would be missing - which is something to say out loud rather than
     /// to discover as an absent config file.
     #[must_use]
     pub fn layers_are_retained(&self) -> bool {

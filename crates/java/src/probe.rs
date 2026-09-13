@@ -3,7 +3,7 @@
 //! # Why not `java -version`
 //!
 //! Runtime discovery has to run `java -version`, and that is what the banner
-//! *is* — but the banner is prose. It is free-form, it differs between vendors,
+//! *is* - but the banner is prose. It is free-form, it differs between vendors,
 //! and it does not report the architecture at all. `-XshowSettings:properties` makes
 //! the same JVM print its own system properties as `key = value` lines, which
 //! is the difference between parsing a sentence and reading a table:
@@ -15,8 +15,8 @@
 //!     os.arch = amd64
 //! ```
 //!
-//! Both go to **stderr**, not stdout — a JVM treats `-version` as diagnostic
-//! output — so both streams are read and concatenated. The banner remains the
+//! Both go to **stderr**, not stdout - a JVM treats `-version` as diagnostic
+//! output - so both streams are read and concatenated. The banner remains the
 //! fallback for a JVM that does not understand the flag.
 //!
 //! # A probe is a process
@@ -64,7 +64,7 @@ pub struct ProbeReport {
     /// distributions report `Private Build`, and refusing an unrecognized
     /// vendor would refuse a working runtime.
     pub vendor: String,
-    /// `os.arch` in the JVM's own spelling — `amd64`, not `x86_64`, and not
+    /// `os.arch` in the JVM's own spelling - `amd64`, not `x86_64`, and not
     /// Adoptium's `x64`. Translation happens at the API boundary that needs it.
     pub arch: String,
     /// Whether the properties flag worked, or the banner had to be parsed.

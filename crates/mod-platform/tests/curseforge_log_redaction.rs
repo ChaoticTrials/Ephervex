@@ -6,7 +6,7 @@
 //! `tracing` caches each callsite's *interest* the first time it is evaluated.
 //! In a binary where some tests run before a subscriber exists, those callsites
 //! can be recorded as permanently uninteresting, and a thread-local subscriber
-//! installed later then captures nothing — a capture that silently records zero
+//! installed later then captures nothing - a capture that silently records zero
 //! events would make this test pass while proving nothing at all.
 //!
 //! Cargo gives each file under `tests/` its own process, so this one installs a

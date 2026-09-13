@@ -19,8 +19,8 @@ unreachable_pub = "warn"
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 # Pedantic lints that fight the domain rather than help it.
-# doc_markdown flags every product name written in prose — NeoForge,
-# CurseForge, LiteLoader, OpenJDK — which this codebase is necessarily full of.
+# doc_markdown flags every product name written in prose - NeoForge,
+# CurseForge, LiteLoader, OpenJDK - which this codebase is necessarily full of.
 doc_markdown = "allow"
 module_name_repetitions = "allow"
 missing_errors_doc = "allow"

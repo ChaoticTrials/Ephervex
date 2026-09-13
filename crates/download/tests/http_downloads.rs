@@ -610,7 +610,7 @@ async fn a_corrupt_cache_entry_is_reverified_and_replaced() {
 #[tokio::test]
 async fn the_cache_probe_answers_from_disk_alone_and_agrees_with_a_download() {
     // The probe exists so a caller can find out whether a fetch is going to
-    // happen *before* paying whatever a fetch costs it — reading a provider
+    // happen *before* paying whatever a fetch costs it - reading a provider
     // credential, most of all. It must therefore reach nobody, and it must
     // apply the same revalidation a download would.
     let server = MockServer::start().await;

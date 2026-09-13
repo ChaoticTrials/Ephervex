@@ -9,7 +9,7 @@
 //!
 //! Forge and NeoForge publish version JSONs in the *same* format, but as
 //! *children*: they carry `inheritsFrom`, their own libraries and arguments,
-//! and nothing else — no `assets`, no `downloads`, no `javaVersion`. Fields a
+//! and nothing else - no `assets`, no `downloads`, no `javaVersion`. Fields a
 //! child may legitimately omit are therefore `Option` here, and the ones a
 //! vanilla launch genuinely requires are reached through accessors that fail
 //! with a typed error naming the missing field
@@ -118,7 +118,7 @@ pub struct LoggingConfig {
 #[non_exhaustive]
 pub enum VersionMetadataError {
     /// A field a vanilla launch requires is absent. On a loader child document
-    /// this is expected and means the parent has to be merged in first — which
+    /// this is expected and means the parent has to be merged in first - which
     /// loader support does.
     #[error("version `{id}` declares no `{field}`")]
     Incomplete { id: String, field: &'static str },
@@ -175,7 +175,7 @@ pub struct VersionMetadata {
     /// because a child document may name it without carrying the index itself.
     pub assets: Option<String>,
     pub asset_index: Option<AssetIndexRef>,
-    /// `client`, `server`, and — on 1.20/1.21 but not on 26.x —
+    /// `client`, `server`, and - on 1.20/1.21 but not on 26.x -
     /// `client_mappings` and `server_mappings`.
     ///
     /// Left as a map rather than a struct because the set of keys is not
@@ -293,7 +293,7 @@ impl VersionMetadata {
             id: child.id.clone(),
             // The merged document keeps the child's loader id but *is* the
             // parent's Minecraft release, and `inherits_from` is cleared below
-            // — so the canonical version has to be carried here rather than
+            // - so the canonical version has to be carried here rather than
             // recovered from either field afterwards.
             minecraft_version: parent.minecraft_version.clone(),
             release_type: child.release_type.clone(),
@@ -432,7 +432,7 @@ impl RawVersion {
         let mut downloads = BTreeMap::new();
         for (key, raw) in self.downloads {
             // The key is Mojang's, not a path, and the destination comes from
-            // the digest — so an unrecognized key such as a future
+            // the digest - so an unrecognized key such as a future
             // `*_mappings` is carried rather than dropped.
             let artifact =
                 raw.into_artifact()
@@ -485,7 +485,7 @@ impl RawVersion {
             })?;
 
         // A document carrying both forms has never been published. If one ever
-        // is, the modern form wins because it is the richer one — and the fact
+        // is, the modern form wins because it is the richer one - and the fact
         // is worth a log line rather than a silent choice.
         let arguments = match (self.arguments, self.minecraft_arguments) {
             (Some(modern), legacy) => {
@@ -774,7 +774,7 @@ mod tests {
             lwjgl.extract.as_ref().expect("extract rules").exclude,
             ["META-INF/"]
         );
-        // `allow` then `disallow os=osx` — the pair form, both halves kept.
+        // `allow` then `disallow os=osx` - the pair form, both halves kept.
         assert_eq!(lwjgl.rules.len(), 2);
         assert_eq!(lwjgl.rules[0].action, RuleAction::Allow);
         assert_eq!(lwjgl.rules[1].action, RuleAction::Disallow);
@@ -957,7 +957,7 @@ mod tests {
     #[test]
     fn merging_a_loader_child_keeps_the_parents_minecraft_release() {
         // `inherit` clears `inheritsFrom` and keeps the child's loader id, so
-        // after the merge neither field can still be reparsed for the release —
+        // after the merge neither field can still be reparsed for the release -
         // the answer has to have been carried across.
         let parent = parse("1.20.1.json");
         let child = child(include_str!(

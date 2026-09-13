@@ -2,15 +2,15 @@
 //!
 //! Logs carry operation ids, instance ids, and process exit codes. They must
 //! never carry refresh tokens, access tokens, the CurseForge API key, or
-//! authorization headers — redaction is the responsibility of the crate
+//! authorization headers - redaction is the responsibility of the crate
 //! producing the event, since only it knows which fields are secret.
 //!
 //! # Why the launcher writes its own log file
 //!
 //! Everything here also goes to stderr, which is enough while a developer is
 //! watching a terminal and useless afterwards: a GUI has no terminal, and the
-//! question a bug report actually asks — "what did the launcher do during the
-//! import that failed an hour ago" — cannot be answered by output nobody kept.
+//! question a bug report actually asks - "what did the launcher do during the
+//! import that failed an hour ago" - cannot be answered by output nobody kept.
 //! So a second layer appends the same events to a file under
 //! [`ephervex_storage::Paths::launcher_logs_dir`], where
 //! [`crate::diagnostics`] can list it and a user can open it without knowing
@@ -59,7 +59,7 @@ pub const LAUNCHER_LOG_SEGMENT_BYTES: u64 = 8 * 1024 * 1024;
 ///
 /// Bounded because this directory is written to on every run and nothing else
 /// prunes it. With one file per day, ten of them cover a fortnight of ordinary
-/// use — long enough to still hold the run a bug report is about — while a
+/// use - long enough to still hold the run a bug report is about - while a
 /// machine that crash-loops overnight is capped by the segment size instead.
 pub const RETAINED_LAUNCHER_LOGS: usize = 10;
 
@@ -120,7 +120,7 @@ pub fn init_tracing(default_directives: &str, launcher_logs: Option<&Path>) {
 ///
 /// A distinct *type* from the console layer's, deliberately: a span's formatted
 /// fields are cached per formatter type, so two layers sharing one type also
-/// share one cached string — and the file would inherit the terminal's color
+/// share one cached string - and the file would inherit the terminal's color
 /// escapes, in a file whose whole purpose is to be pasted into a bug report.
 #[derive(Debug, Default)]
 struct PlainFields(fmt::format::DefaultFields);

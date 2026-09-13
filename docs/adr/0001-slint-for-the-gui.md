@@ -1,4 +1,4 @@
-# ADR 0001 — Slint for the GUI
+# ADR 0001 - Slint for the GUI
 
 **Status:** Accepted
 

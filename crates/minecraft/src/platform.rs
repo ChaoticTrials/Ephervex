@@ -4,7 +4,7 @@
 //! Rust's: `osx` rather than `macos`, `x86_64` rather than `x86_64` only by
 //! coincidence, and `arm64` where Rust says `aarch64`. Translating once, here,
 //! is what keeps `x86` from being compared against `x86_64` somewhere in the
-//! middle of rule evaluation — the same argument that made Java runtime support translate
+//! middle of rule evaluation - the same argument that made Java runtime support translate
 //! `amd64` to Adoptium's `x64` at the API boundary rather than passing the
 //! JVM's spelling through.
 //!
@@ -28,7 +28,7 @@ pub struct Platform {
     ///
     /// Only ever consulted by an `os.version` condition, and every such
     /// condition Mojang has published in the supported range also names
-    /// Windows — so on Linux this value decides nothing. It is carried anyway
+    /// Windows - so on Linux this value decides nothing. It is carried anyway
     /// because a rule that *could* be evaluated should be, and because a
     /// condition silently ignored is a condition nobody notices going wrong.
     pub os_version: String,
@@ -78,8 +78,8 @@ impl Platform {
 
     /// The value a pre-1.19 natives classifier's `${arch}` placeholder takes.
     ///
-    /// Mojang used this on exactly one library — `com.mojang:text2speech`,
-    /// whose Windows classifier is `natives-windows-${arch}` — and the values
+    /// Mojang used this on exactly one library - `com.mojang:text2speech`,
+    /// whose Windows classifier is `natives-windows-${arch}` - and the values
     /// it published are `32` and `64`. It never applies on Linux, and it is
     /// implemented rather than ignored because an unsubstituted `${arch}` would
     /// silently look up a classifier that does not exist.

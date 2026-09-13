@@ -4,7 +4,7 @@
 //!
 //! A client JAR embeds exactly one translation: `en_us`. The catalog the game's
 //! own language screen shows is built from the `language` section of the
-//! resource pack metadata — the `pack.mcmeta` object named by that release's
+//! resource pack metadata - the `pack.mcmeta` object named by that release's
 //! asset index. Each entry carries a native name, a region, and a
 //! bidirectional flag, which is precisely what a launcher needs to show
 //! "Deutschland - Deutsch" while storing `de_de`.
@@ -24,7 +24,7 @@
 //! Offline with nothing cached, the honest answer is "unknown", and the caller
 //! must not write a language into that release's `options.txt`. Inventing
 //! support would set a code the game silently falls back from, which looks
-//! exactly like Ephervex having done nothing — except that the file now claims
+//! exactly like Ephervex having done nothing - except that the file now claims
 //! otherwise.
 
 use std::collections::BTreeMap;

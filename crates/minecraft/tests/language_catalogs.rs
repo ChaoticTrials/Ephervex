@@ -6,7 +6,7 @@
 //! happens when the last one is missing, truncated, or served by a host that
 //! has since gone away.
 //!
-//! Nothing here touches a live service — the "provider" is a `wiremock` server
+//! Nothing here touches a live service - the "provider" is a `wiremock` server
 //! on localhost, so `cargo test --offline` passes with the network unplugged.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]

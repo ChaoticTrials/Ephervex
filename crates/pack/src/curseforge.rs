@@ -17,7 +17,7 @@
 //! rather than [`PackFileRecipe`] ones. A recipe entry names a destination path
 //! and carries the hashes its download is verified against; inventing either
 //! from a project id would be inventing a fact. So the archive is identified,
-//! described, and counted offline — which is what lets the launcher say "this
+//! described, and counted offline - which is what lets the launcher say "this
 //! is a CurseForge pack for Minecraft 1.20.1 with 42 required files, and it
 //! needs an API key before those files can be resolved" instead of failing to
 //! recognize the archive at all.
@@ -26,8 +26,8 @@
 //!
 //! A CurseForge manifest's `required` flag says whether a file is part of the
 //! pack as installed, and says nothing whatsoever about servers. It therefore
-//! maps onto the *client* side — `required` files are the client's desired
-//! state, `required: false` files are an optional pack choice — while the
+//! maps onto the *client* side - `required` files are the client's desired
+//! state, `required: false` files are an optional pack choice - while the
 //! server side stays [`SideRequirement::Unknown`] for every entry, because the
 //! format states nothing about it. Reading `required: true` as "required on the
 //! server" would put a client-only mod into a reconstructed server on the
@@ -245,7 +245,7 @@ fn resolve_loader(loaders: &[RawModLoader]) -> PackResult<LoaderSelection> {
 /// The single override layer a CurseForge export carries.
 ///
 /// The format has one overrides directory and no side-specific counterpart, so
-/// it becomes the common layer — the same scope Modrinth's own `overrides`
+/// it becomes the common layer - the same scope Modrinth's own `overrides`
 /// takes. Reading it as client-only would drop the pack's configs out of a
 /// server reconstructed later; reading a side out of the paths inside it
 /// (`config/`, `mods/`, `defaultconfigs/`) would be a guess.

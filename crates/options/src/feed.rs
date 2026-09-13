@@ -3,7 +3,7 @@
 //! # Why there is a feed at all
 //!
 //! A Minecraft release must not require an Ephervex release. Mojang publishes
-//! 26.3, the manifest refresh finds it, the launcher installs and launches it —
+//! 26.3, the manifest refresh finds it, the launcher installs and launches it -
 //! and the only thing missing is the proof of how that release stores a
 //! setting. Publishing that proof is a data update, so it is one.
 //!
@@ -309,7 +309,7 @@ impl OptionsFeed {
         !entry.freshness().is_stale()
     }
 
-    /// Fetches, validates, and — only then — caches the published dataset.
+    /// Fetches, validates, and - only then - caches the published dataset.
     ///
     /// The order is the point. A corrupt, truncated, incompatible, or
     /// semantically invalid document fails before the cache is touched, so the

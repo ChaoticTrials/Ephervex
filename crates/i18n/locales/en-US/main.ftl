@@ -1,4 +1,4 @@
-# Ephervex — English (United States) source resource.
+# Ephervex - English (United States) source resource.
 #
 # This file is the fallback language: every message id used anywhere in the
 # application must exist here, and `fl!()` checks that at compile time.
@@ -48,7 +48,7 @@ servers-list-count = { $count ->
 
 # $name is user-authored and $version is a Minecraft version string; neither is
 # translated.
-instance-summary = { $name } — Minecraft { $version }, { $loader }
+instance-summary = { $name } - Minecraft { $version }, { $loader }
 
 ## Startup reconciliation (ADR 0006)
 #
@@ -518,7 +518,7 @@ error-auth-minecraft-login-rejected = Minecraft would not accept the Xbox sign-i
 error-auth-minecraft-unavailable = Minecraft's sign-in service is temporarily unavailable.
 .action = Try again in a few minutes.
 
-# Not a problem with the user, the account, or the sign-in — a property of the
+# Not a problem with the user, the account, or the sign-in - a property of the
 # Azure application registration. No amount of signing in again changes it, so
 # the next step is the approval form and nothing else. $url and $client_id are
 # technical values shown verbatim.
@@ -599,12 +599,12 @@ account-added-offline = Added the offline account { $name }.
 account-default-set = { $name } is now the default account.
 
 # An offline account is not "signed in" to anything, and saying so would imply
-# it can do things it cannot — such as join an online-mode server.
+# it can do things it cannot - such as join an online-mode server.
 account-active-offline = Using the offline account { $name }.
 account-removed = Removed the account { $name }.
 account-removed-with-credential = Removed the account { $name } and deleted its saved credential.
 
-# An offline account has no credential at all — this is not a missing or
+# An offline account has no credential at all - this is not a missing or
 # degraded one. Offline accounts have no credential material to store.
 auth-storage-none-needed = No credential needed
 auth-storage-not-saved = Not saved
@@ -756,7 +756,7 @@ error-launch-canceled = The launch was canceled.
 # Pack names, file paths inside a pack, loader ids, and provider names are all
 # untranslated technical text passed in as arguments.
 
-pack-analysis-summary = { $name } — Minecraft { $version }, { $loader }, from { $provider }.
+pack-analysis-summary = { $name } - Minecraft { $version }, { $loader }, from { $provider }.
 pack-analysis-file-count = { $count ->
         [one] { $count } file is installed automatically.
        *[other] { $count } files are installed automatically.

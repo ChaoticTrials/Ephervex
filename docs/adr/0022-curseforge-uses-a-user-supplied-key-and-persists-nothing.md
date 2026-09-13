@@ -1,4 +1,4 @@
-# ADR 0022 — CurseForge uses a user-supplied API key, and its responses are never persisted
+# ADR 0022 - CurseForge uses a user-supplied API key, and its responses are never persisted
 
 **Status:** Accepted
 
@@ -8,9 +8,9 @@ CurseForge is reached through its official third-party API. Two of its
 properties are unlike every other source Ephervex reads.
 
 First, the API requires a key, and a key is granted to an applicant by
-CurseForge/Overwolf rather than obtained programmatically. Alternatives exist —
+CurseForge/Overwolf rather than obtained programmatically. Alternatives exist -
 unofficial proxies, third-party mirrors, an application-owned key embedded in
-the binary — and all of them either route a user's traffic through a party
+the binary - and all of them either route a user's traffic through a party
 neither the user nor the project controls, or ship a shared credential that
 cannot be revoked per user and would be extracted from the first release
 tarball.
@@ -30,8 +30,8 @@ implements no proxy, and does not read the CurseForge Upload API's separate
 token.
 
 The transport obtains the key through a `CurseForgeCredentialSource`, which
-yields an opaque secret and nothing else. Replacing the *source* later — with an
-approved application-owned credential, say — is a second implementation of that
+yields an opaque secret and nothing else. Replacing the *source* later - with an
+approved application-owned credential, say - is a second implementation of that
 trait, not a change to the transport.
 
 **Nothing the API returns is written down.** The CurseForge client uses no
@@ -44,8 +44,8 @@ will not follow a redirect that leaves the API origin. An artifact download
 carries the key only to CurseForge's own explicitly listed delivery hosts, and
 is made through a client whose redirects cannot leave that list, so no response
 can direct the launcher to hand its key to another host. `x-api-key` is attached
-per request rather than installed as a default header, so no unrelated request —
-Mojang's, Modrinth's, a managed JDK's — can inherit it by sharing a client.
+per request rather than installed as a default header, so no unrelated request -
+Mojang's, Modrinth's, a managed JDK's - can inherit it by sharing a client.
 
 ## Importing a CurseForge pack
 
@@ -58,13 +58,13 @@ resolves `project P, file F` against the endpoint that answers about exactly
 that file, and checks the answer against the question before using it. Nothing
 lists a project's versions and picks from the list; a declared file that no
 longer exists fails the import rather than being replaced by a newer one. The
-durable record is the pair the *manifest* declared — CurseForge's release
+durable record is the pair the *manifest* declared - CurseForge's release
 identifier is its file id, so the provider-neutral `version_id` carries it
 rather than a version parsed out of a display name.
 
 **Pack inclusion is not side support.** A manifest's `required` flag says
-whether a file is part of the pack as installed. It maps onto the client side —
-`required: false` becomes an optional pack choice — while the server side of
+whether a file is part of the pack as installed. It maps onto the client side -
+`required: false` becomes an optional pack choice - while the server side of
 every entry stays `unknown`, because the export format states nothing about
 servers. Reading `required: true` as "required on the server" would put a
 client-only mod into a reconstructed server on the strength of a flag that never
@@ -75,7 +75,7 @@ meant that, and the existing reconstruction path already knows how to ask about
 survives an import is the provider-neutral `PackRecipe` plus the user's own
 manifest, retained verbatim under `.launcher/source/` like every other
 provider's. The recipe carries the exact ids and the minimum the launcher's own
-model needs to install and verify an artifact — a name, a size, a digest, and
+model needs to install and verify an artifact - a name, a size, a digest, and
 the address it was fetched from. The response document itself is parsed, used,
 and dropped, exactly as this ADR requires of every other CurseForge request.
 
@@ -92,7 +92,7 @@ in the shared store is installed with no credential, no request, and no
 configuration, which is what keeps an installed instance and its linked servers
 working on a machine that has never configured CurseForge. A copy the cache
 budget has since collected has to come back from the address the recipe records,
-and CurseForge serves that address only to an authenticated request — so the key
+and CurseForge serves that address only to an authenticated request - so the key
 is required again at that point. A missing, unreadable, or refused key is
 reported as the same actionable setting a first import reports; a delivery host
 answering `401` or `403` to a request that carried the key is read exactly as the

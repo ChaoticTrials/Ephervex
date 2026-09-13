@@ -2,7 +2,7 @@
 //!
 //! One instance directory may be launched once at a time. Two Minecraft
 //! processes sharing a game directory corrupt each other's `saves/`,
-//! `options.txt`, and `logs/latest.log`, and the damage is silent — which is
+//! `options.txt`, and `logs/latest.log`, and the damage is silent - which is
 //! precisely the failure a bug-reproduction launcher must not produce.
 //!
 //! # Why a file rather than an in-memory set
@@ -24,8 +24,8 @@
 //! exactly as long as a lock file needs to mean anything.
 //!
 //! Where `/proc` is not available the lock is treated as held. That is the
-//! conservative direction — refusing a launch is recoverable, corrupting a
-//! world is not — and Ephervex targets Linux (ADR 0003).
+//! conservative direction - refusing a launch is recoverable, corrupting a
+//! world is not - and Ephervex targets Linux (ADR 0003).
 
 use std::path::{Path, PathBuf};
 
@@ -133,7 +133,7 @@ impl LockError {
 /// the schema can gain fields without invalidating existing files.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LaunchState {
-    /// The launcher process that owns the launch — not the game.
+    /// The launcher process that owns the launch - not the game.
     ///
     /// The lock is taken before anything is downloaded, so at that moment there
     /// is no game process to name. What holds the instance is the launcher run
@@ -560,7 +560,7 @@ fn proc_filesystem_available() -> bool {
 ///
 /// The fields are counted from **after** the closing parenthesis of field 2,
 /// because that field is the executable's name and may itself contain spaces
-/// and parentheses — splitting the whole line on whitespace is the classic way
+/// and parentheses - splitting the whole line on whitespace is the classic way
 /// to read the wrong number.
 fn process_start_ticks(pid: u32) -> Option<u64> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;

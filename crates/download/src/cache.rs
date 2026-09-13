@@ -67,7 +67,7 @@ pub enum ContentStore {
     /// Launcher-level rather than instance-local because the contents are a
     /// pure function of (version, platform): copying them into every disposable
     /// instance would duplicate content that belongs in the shared store. Unlike
-    /// the other stores this one is *derived*, not downloaded — see
+    /// the other stores this one is *derived*, not downloaded - see
     /// [`CacheLayout::natives`].
     Natives,
 }
@@ -461,7 +461,7 @@ impl CacheLayout {
     /// # Why the name says nothing about where the image came from
     ///
     /// The extension is [`ARTWORK_FORMAT`] and never the source address's own.
-    /// A provider serves whatever it likes — WebP, GIF, JPEG — and the one
+    /// A provider serves whatever it likes - WebP, GIF, JPEG - and the one
     /// thing the cache promises is that what is *in* here can be displayed.
     /// Naming an entry after its origin made that promise unkeepable: a
     /// `.webp` entry is a file the desktop's decoder refuses, and it stays

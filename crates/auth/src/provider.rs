@@ -111,8 +111,8 @@ impl Account {
 /// # Why this is an enum rather than an optional token
 ///
 /// An offline session is not a Microsoft session with the token missing, and
-/// modeling it that way would make "no token" mean two different things —
-/// "offline" and "expired" — which the launch pipeline must never confuse.
+/// modeling it that way would make "no token" mean two different things -
+/// "offline" and "expired" - which the launch pipeline must never confuse.
 /// Vanilla launch support has to build a command line for both, and the two differ in more
 /// than one argument, so it is made to match rather than allowed to unwrap.
 ///
@@ -123,7 +123,7 @@ impl Account {
 pub enum Credentials {
     /// A real Minecraft session.
     ///
-    /// The access token lives here and only here — in memory, for the life of
+    /// The access token lives here and only here - in memory, for the life of
     /// the process. Persist it only when unavoidable; it is
     /// not: it expires in twenty-four hours and the refresh token can mint
     /// another, so writing it anywhere would add a second credential at risk
@@ -234,7 +234,7 @@ impl Session {
 pub enum AuthEvent {
     /// Open this URL in a browser. The browser flow's one interactive step.
     ///
-    /// The URL is not a secret — it is a public authorization request — but it
+    /// The URL is not a secret - it is a public authorization request - but it
     /// carries the `state` value, so it is emitted rather than logged.
     OpenBrowser { url: String },
     /// Show this code and address. The device flow's one interactive step.
@@ -270,7 +270,7 @@ impl AuthObserver {
     }
 
     /// An observer that discards everything, for callers that only want the
-    /// result — a refresh before launch, or a test.
+    /// result - a refresh before launch, or a test.
     #[must_use]
     pub const fn silent() -> Self {
         Self { sender: None }
@@ -429,7 +429,7 @@ mod tests {
         assert!(session.entitlements().is_none());
         assert!(session.storage().is_none(), "nothing was stored anywhere");
 
-        // It is usable for launching, immediately and indefinitely — that is
+        // It is usable for launching, immediately and indefinitely - that is
         // the whole point of it.
         assert!(session.is_usable(chrono::TimeDelta::days(3650)));
     }

@@ -35,7 +35,7 @@ deliberately a NeoForge *build* number that looks like a Minecraft version. The
 parser must keep the two apart, and this fixture is what fails if it stops.
 
 Field spelling is the provider's: `manifestType`, `manifestVersion`,
-`modLoaders`, and — in the manifests declared inline by the tests — `projectID`
+`modLoaders`, and - in the manifests declared inline by the tests - `projectID`
 and `fileID` with their upstream capitalization. None of it is normalized for
 aesthetics, and the pretty-printing here is deliberate: this is a human-facing
 fixture, not machine-owned storage Ephervex writes.

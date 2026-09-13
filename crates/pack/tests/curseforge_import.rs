@@ -1,8 +1,8 @@
 //! A CurseForge export through the shared archive and materialization path.
 //!
 //! Everything here is offline. A CurseForge pack that declares no files needs
-//! no provider at all, which is what lets the *archive* half of the import —
-//! overrides, path safety, source retention — be exercised without a key, a
+//! no provider at all, which is what lets the *archive* half of the import -
+//! overrides, path safety, source retention - be exercised without a key, a
 //! network, or a mock API. The provider half is covered where it lives, in
 //! `ephervex-core`.
 //!
@@ -58,7 +58,7 @@ fn read_fixture(relative: &str) -> Vec<u8> {
         .unwrap_or_else(|error| panic!("fixture {relative} is readable: {error}"))
 }
 
-/// The fixture export's manifest, which declares no files — so the whole import
+/// The fixture export's manifest, which declares no files - so the whole import
 /// is local.
 fn manifest() -> Vec<u8> {
     read_fixture("manifest.json")
