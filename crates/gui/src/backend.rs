@@ -182,6 +182,8 @@ pub enum Command {
     LoadUrlHandler,
     /// Start or stop opening them.
     SetUrlHandler(bool),
+    /// Stop trusting one site to serve modpacks.
+    ForgetPackHost(String),
     /// Find out where making this instance persistent would put it, and which
     /// of its linked servers could come along.
     PlanPromotion(InstanceId),
@@ -733,18 +735,25 @@ pub struct AbsentModsData {
 #[derive(Debug, Clone)]
 pub struct UrlHandlerData {
     pub registered: bool,
+    /// Whether this is a registration Ephervex may undo. False when a package
+    /// manager installed it.
+    pub removable: bool,
     pub command: String,
     /// Whether the recorded path is gone, which is what a moved AppImage looks
     /// like and the one failure worth showing rather than hiding.
     pub command_missing: bool,
+    /// The sites agreed to serve modpacks.
+    pub trusted_hosts: Vec<String>,
 }
 
 impl UrlHandlerData {
     fn of(status: &ephervex_core::UrlHandlerStatus) -> Self {
         Self {
             registered: status.registered,
+            removable: status.removable(),
             command: status.command.clone().unwrap_or_default(),
             command_missing: status.registered && !status.command_exists(),
+            trusted_hosts: Vec::new(),
         }
     }
 }
@@ -1688,10 +1697,12 @@ fn run_worker(
                 }
             }
             Command::LoadUrlHandler => {
-                let _ = events.send(Event::UrlHandler(UrlHandlerData::of(
-                    &app.url_handler_status(),
-                )));
+                send_link_settings(&app, &events);
             }
+            Command::ForgetPackHost(host) => match app.withdraw_pack_host(&host) {
+                Ok(_) => send_link_settings(&app, &events),
+                Err(error) => send_error(&events, &error),
+            },
             Command::SetUrlHandler(wanted) => {
                 let outcome = if wanted {
                     app.register_url_handler()
@@ -1701,9 +1712,7 @@ fn run_worker(
                         .map(|_| UrlHandlerData::of(&app.url_handler_status()))
                 };
                 match outcome {
-                    Ok(data) => {
-                        let _ = events.send(Event::UrlHandler(data));
-                    }
+                    Ok(_) => send_link_settings(&app, &events),
                     // The toggle is re-read either way, so a refusal leaves the
                     // switch showing what is actually true rather than what was
                     // asked for.
@@ -3132,6 +3141,17 @@ fn promote_instance(
         }
         Err(error) => send_modal_error(events, &error),
     }
+}
+
+/// Publishes everything the link settings section shows.
+///
+/// One event rather than two, because the switch and the trusted sites are read
+/// together and a frontend that applied one without the other would draw a
+/// half-updated section.
+fn send_link_settings(app: &App, events: &Sender<Event>) {
+    let mut data = UrlHandlerData::of(&app.url_handler_status());
+    data.trusted_hosts = app.trusted_pack_hosts().to_vec();
+    let _ = events.send(Event::UrlHandler(data));
 }
 
 /// Turns an address a link carried into an archive the import dialog can open.

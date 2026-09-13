@@ -566,6 +566,20 @@ enum ConfigCommand {
         #[arg(long, conflicts_with = "path")]
         clear: bool,
     },
+    /// Show or forget the sites you have agreed to download modpacks from.
+    ///
+    /// A site gets on this list when you confirm the address a link named.
+    /// Being on it means Ephervex may download an archive from that site
+    /// without asking again, and nothing else: a pack's own file downloads are
+    /// restricted to the same hosts they always were.
+    PackHosts {
+        /// Stop trusting this site. Repeatable.
+        #[arg(long = "forget", value_name = "HOST")]
+        forget: Vec<String>,
+        /// Stop trusting every site on the list.
+        #[arg(long, conflicts_with = "forget")]
+        forget_all: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1276,6 +1290,9 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
             Some(ConfigCommand::InstanceRoot { path, clear }) => {
                 let mut app = open_app()?;
                 run_instance_root(&mut app, path.as_deref(), *clear, cli.json)
+            }
+            Some(ConfigCommand::PackHosts { forget, forget_all }) => {
+                run_pack_hosts_command(forget, *forget_all, cli.json)
             }
         },
         Command::Preferences { command } => {
@@ -4657,6 +4674,54 @@ fn show_reconciliation(report: &ReconciliationReport, json: bool) {
 }
 
 // -------------------------------------------------------------------- output
+
+/// `ephervex config pack-hosts [--forget HOST] [--forget-all]`.
+fn run_pack_hosts_command(forget: &[String], forget_all: bool, json: bool) -> anyhow::Result<()> {
+    let mut app = open_app()?;
+
+    let mut forgotten = Vec::new();
+    let mut unknown = Vec::new();
+    let targets: Vec<String> = if forget_all {
+        app.trusted_pack_hosts().to_vec()
+    } else {
+        forget.to_vec()
+    };
+    for host in targets {
+        if app.withdraw_pack_host(&host)? {
+            forgotten.push(host);
+        } else {
+            unknown.push(host);
+        }
+    }
+
+    let remaining = app.trusted_pack_hosts();
+    if json {
+        print_json(&serde_json::json!({
+            "trusted": remaining,
+            "forgotten": forgotten,
+            "not_trusted": unknown,
+        }));
+        return Ok(());
+    }
+
+    for host in &forgotten {
+        println!("forgot {host}");
+    }
+    // Named rather than passed over: asking to forget a site that was never
+    // trusted usually means a typo, and silence would look like success.
+    for host in &unknown {
+        eprintln!("{host} was not on the list");
+    }
+    if remaining.is_empty() {
+        println!("No sites are trusted to serve modpacks.");
+    } else {
+        println!("Trusted to serve modpacks:");
+        for host in remaining {
+            println!("  {host}");
+        }
+    }
+    Ok(())
+}
 
 /// `ephervex url-handler <status|register|unregister>`.
 fn run_url_handler_command(command: &UrlHandlerCommand, json: bool) -> anyhow::Result<()> {

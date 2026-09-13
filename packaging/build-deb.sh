@@ -106,6 +106,10 @@ install -m 0755 "${GUI_BINARY}" "${STAGE}/usr/bin/ephervex-gui"
 install -m 0755 "${CLI_BINARY}" "${STAGE}/usr/bin/ephervex"
 install -m 0644 "${PACKAGING_DIR}/ephervex.desktop" \
     "${STAGE}/usr/share/applications/ephervex.desktop"
+# Only the package installs this one. An AppImage registers its link handler on
+# request instead, because it has no install step to make the choice at.
+install -m 0644 "${PACKAGING_DIR}/ephervex-url-handler.desktop" \
+    "${STAGE}/usr/share/applications/ephervex-url-handler.desktop"
 install -m 0644 "${PACKAGING_DIR}/ephervex.metainfo.xml" \
     "${STAGE}/usr/share/metainfo/ephervex.metainfo.xml"
 install -m 0644 "${REPO_ROOT}/LICENSE" "${STAGE}/usr/share/doc/ephervex/copyright"
@@ -119,8 +123,10 @@ for size in 16x16 24x24 32x32 48x48 64x64 128x128 256x256 512x512; do
 done
 
 if command -v desktop-file-validate >/dev/null; then
-    desktop-file-validate "${STAGE}/usr/share/applications/ephervex.desktop" ||
-        fail "the desktop entry is not valid"
+    for entry in "${STAGE}/usr/share/applications/"*.desktop; do
+        desktop-file-validate "${entry}" ||
+            fail "$(basename "${entry}") is not a valid desktop entry"
+    done
 fi
 if command -v appstreamcli >/dev/null; then
     appstreamcli validate --no-net \

@@ -2716,7 +2716,14 @@ slint::slint! {
         in-out property <bool> url-handler-registered;
         in-out property <string> url-handler-command;
         in-out property <bool> url-handler-command-missing;
+        // False when a package manager installed the handler, which Ephervex
+        // reports but must not offer to delete.
+        in-out property <bool> url-handler-removable: true;
         callback set-url-handler(bool);
+        // The sites agreed to serve modpacks. Granting happens in the link
+        // dialog; this is where it is seen and taken back.
+        in-out property <[string]> trusted-pack-hosts;
+        callback forget-pack-host(string);
         callback open-make-persistent(string);
         callback submit-make-persistent(string);
         callback duplicate-client(string);
@@ -3360,7 +3367,7 @@ slint::slint! {
                                 title: root.workspace-tab == "General" ? GuiI18n.text("gui-settings-general") : root.workspace-tab == "Minecraft" ? GuiI18n.text("gui-settings-minecraft") : root.workspace-tab == "Java" ? GuiI18n.text("gui-settings-java") : root.workspace-tab == "Accounts" ? GuiI18n.text("gui-settings-accounts") : root.workspace-tab == "Providers & APIs" ? GuiI18n.text("gui-settings-providers") : root.workspace-tab == "Storage" ? GuiI18n.text("gui-settings-storage") : GuiI18n.text("gui-settings-about");
                                 subtitle: root.workspace-tab == "Minecraft" ? GuiI18n.text("gui-minecraft-defaults-detail") : root.workspace-tab == "Java" ? GuiI18n.text("gui-java-detail") : root.workspace-tab == "Accounts" ? GuiI18n.text("gui-accounts-detail") : root.workspace-tab == "Providers & APIs" ? GuiI18n.text("gui-provider-detail") : root.workspace-tab == "Storage" ? GuiI18n.text("gui-storage-detail") : root.workspace-tab == "About & Licenses" ? GuiI18n.text("gui-tagline") : GuiI18n.text("gui-settings-detail");
                             }
-                            if root.workspace-tab == "General" : VerticalLayout { spacing: 14px;
+                            if root.workspace-tab == "General" : VerticalLayout { alignment: start; spacing: 14px;
                                 SectionTitle { title: GuiI18n.text("gui-application-display"); detail: GuiI18n.text("gui-application-display-detail"); }
                                 Rectangle { height: root.application-text-scale >= 125 ? 124px : root.application-text-scale >= 110 ? 112px : 104px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface;
                                     HorizontalLayout { padding: 16px; spacing: 20px; cross-axis-alignment: center;
@@ -3381,9 +3388,54 @@ slint::slint! {
                                 HorizontalLayout { spacing: 12px; cross-axis-alignment: center; VerticalLayout { FieldLabel { text: GuiI18n.text("gui-default-operator-level"); } BodyText { text: GuiI18n.text("gui-default-operator-level-detail"); color: Theme.text-muted; } } Rectangle { horizontal-stretch: 1; } ComboBox { accessible-label: GuiI18n.text("gui-default-operator-level"); width: 220px; model: [GuiI18n.text("gui-operator-level-1"), GuiI18n.text("gui-operator-level-2"), GuiI18n.text("gui-operator-level-3"), GuiI18n.text("gui-operator-level-4")]; current-index: root.operator-permission-level - 1; selected(value) => { root.operator-permission-level = value == GuiI18n.text("gui-operator-level-1") ? 1 : value == GuiI18n.text("gui-operator-level-2") ? 2 : value == GuiI18n.text("gui-operator-level-3") ? 3 : 4; } } }
                                 ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-save-server-defaults"); tone: "primary"; clicked => { root.save-linked-server-settings(root.show-linked-servers, root.make-default-account-operator, root.operator-permission-level); } } }
                                 SectionTitle { title: GuiI18n.text("gui-link-handling"); detail: GuiI18n.text("gui-link-handling-detail"); }
-                                LabeledToggle { width: min(parent.width, 520px); label: GuiI18n.text("gui-open-ephervex-links"); checked: root.url-handler-registered; toggled(on) => { root.set-url-handler(on); } }
-                                if root.url-handler-registered && root.url-handler-command != "" : BodyText { text: GuiI18n.value("gui-link-handling-runs", root.url-handler-command); color: root.url-handler-command-missing ? Theme.warning : Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
-                                if root.url-handler-command-missing : BodyText { text: GuiI18n.text("gui-link-handling-moved"); color: Theme.warning; font-size: Theme.caption-size; wrap: word-wrap; }
+                                // The switch and what it currently means, grouped tightly so
+                                // the path reads as this control's answer rather than as a
+                                // stray line between two sections.
+                                VerticalLayout {
+                                    // `start` and no stretch, or the page hands this group
+                                    // its share of the spare height and the caption drifts
+                                    // away from the switch it belongs to.
+                                    alignment: start;
+                                    vertical-stretch: 0;
+                                    spacing: 5px;
+                                    LabeledToggle { width: min(parent.width, 520px); label: GuiI18n.text("gui-open-ephervex-links"); checked: root.url-handler-registered; enabled: root.url-handler-removable || !root.url-handler-registered; toggled(on) => { root.set-url-handler(on); } }
+                                    // A path, so it is set in the same face the rest of the
+                                    // application uses for one, and elided rather than
+                                    // wrapped: which binary it is matters, and the middle of
+                                    // a long path does not.
+                                    if root.url-handler-registered && root.url-handler-command != "" : BodyText { width: min(parent.width, 520px); text: GuiI18n.value("gui-link-handling-runs", root.url-handler-command); color: root.url-handler-command-missing ? Theme.warning : Theme.text-muted; font-family: Theme.mono-family; font-size: Theme.caption-size; overflow: elide; }
+                                    if root.url-handler-command-missing : BodyText { width: min(parent.width, 520px); text: GuiI18n.text("gui-link-handling-moved"); color: Theme.warning; font-size: Theme.caption-size; wrap: word-wrap; }
+                                    if root.url-handler-registered && !root.url-handler-removable : BodyText { width: min(parent.width, 520px); text: GuiI18n.text("gui-link-handling-system"); color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
+                                }
+                                // A heading of its own rather than a bold line: this is a
+                                // separate thing to manage from whether links open at all,
+                                // and the page's other sections are introduced this way.
+                                SectionTitle { title: GuiI18n.text("gui-trusted-pack-hosts"); detail: GuiI18n.text("gui-trusted-pack-hosts-detail"); }
+                                if root.trusted-pack-hosts.length == 0 : Rectangle {
+                                    width: min(parent.width, 520px);
+                                    height: max(46px, no-trusted-hosts.preferred-height + 22px);
+                                    border-radius: 6px;
+                                    border-width: 1px;
+                                    border-color: Theme.border;
+                                    background: Theme.surface;
+                                    no-trusted-hosts := BodyText { x: 14px; width: parent.width - 28px; text: GuiI18n.text("gui-no-trusted-pack-hosts"); color: Theme.text-muted; wrap: word-wrap; }
+                                }
+                                // The same row the favorite versions below use, because it
+                                // is the same thing: one remembered value and one way to
+                                // take it back.
+                                for host in root.trusted-pack-hosts : Rectangle {
+                                    width: min(parent.width, 520px);
+                                    height: 48px;
+                                    border-radius: 6px;
+                                    border-width: 1px;
+                                    border-color: Theme.border;
+                                    background: Theme.surface;
+                                    HorizontalLayout {
+                                        padding-left: 14px; padding-right: 8px; padding-top: 6px; padding-bottom: 6px; spacing: 10px;
+                                        BodyText { text: host; color: Theme.text; horizontal-stretch: 1; vertical-alignment: center; overflow: elide; }
+                                        VerticalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-forget-pack-host"); clicked => { root.forget-pack-host(host); } } }
+                                    }
+                                }
                                 SectionTitle { title: GuiI18n.text("gui-favorite-versions"); detail: GuiI18n.text("gui-favorite-versions-detail"); }
                                 if root.favorite-minecraft-versions.length == 0 : Rectangle { height: max(46px, no-favorites.preferred-height + 22px); border-radius: 6px; border-width: 1px; border-color: Theme.border; background: Theme.surface;
                                     no-favorites := BodyText { x: 12px; width: parent.width - 24px; text: GuiI18n.text("gui-no-favorite-versions"); color: Theme.text-muted; wrap: word-wrap; }

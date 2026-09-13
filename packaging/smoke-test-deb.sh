@@ -75,6 +75,7 @@ for entry in "${PAYLOAD[@]}"; do
     case "${entry}" in
     usr/bin/ephervex | usr/bin/ephervex-gui) ;;
     usr/share/applications/ephervex.desktop) ;;
+    usr/share/applications/ephervex-url-handler.desktop) ;;
     usr/share/metainfo/ephervex.metainfo.xml) ;;
     usr/share/doc/ephervex/copyright) ;;
     usr/share/icons/hicolor/*/apps/ephervex.png) ;;
@@ -110,6 +111,27 @@ if command -v desktop-file-validate >/dev/null; then
     desktop-file-validate "${DESKTOP}" || fail "the desktop entry is not valid"
 fi
 note "the desktop entry runs a binary the package installs"
+
+# --- the package claims the link scheme --------------------------------------
+# Installing the package is what makes this acceptable, and it is the whole
+# reason a link from a web page reaches Ephervex without a further step
+# (ADR 0027). An entry that claimed the scheme but named no `%u` would be
+# handed nothing, which looks exactly like a link that does not work.
+HANDLER="${ROOT}/usr/share/applications/ephervex-url-handler.desktop"
+[[ -f ${HANDLER} ]] || fail "the package installs no link handler"
+grep -q '^MimeType=x-scheme-handler/ephervex;$' "${HANDLER}" ||
+    fail "the link handler does not claim the ephervex scheme"
+grep -q '^Exec=.* %u$' "${HANDLER}" || fail "the link handler is never handed the link"
+grep -q '^NoDisplay=true$' "${HANDLER}" ||
+    fail "the link handler would appear as a second Ephervex in the menu"
+HANDLER_EXEC=$(sed -n 's/^Exec=//p' "${HANDLER}" | head -n 1)
+[[ -x "${ROOT}/usr/bin/${HANDLER_EXEC%% *}" ]] ||
+    fail "the link handler runs ${HANDLER_EXEC}, which this package does not install"
+# The application's own entry must stay out of it: it takes no arguments, and
+# claiming a scheme there would hand a URL to something that ignores it.
+grep -q '^MimeType=' "${DESKTOP}" &&
+    fail "the application entry must not claim a scheme; the handler entry does"
+note "the package claims ephervex:// and is handed the link"
 
 # --- the declared baseline, on what actually shipped -------------------------
 REQUIRED_GLIBC=0

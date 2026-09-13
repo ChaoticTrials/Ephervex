@@ -55,10 +55,20 @@ expands into; nothing bounded the archive. An unbounded fetch of an address a
 web page chose is a disk-exhaustion primitive, so a ceiling is enforced while
 the body streams and an oversized one is abandoned as it crosses the line.
 
-**The scheme is registered only when asked.** Claiming a system-wide URL scheme
-is not something a launcher should do quietly on first run, and an AppImage is
-not installed, so nothing registers it on the user's behalf either way.
-Registration is an explicit action, and it is reversible.
+**The scheme is registered when installing said so, and not before.** Claiming a
+system-wide URL scheme is not something a launcher should do quietly on first
+run. Installing a package is not that: `apt install` is an explicit act, and a
+package that registers a handler and removes it again on uninstall is ordinary
+Debian behavior. So the package ships a second desktop entry that claims the
+scheme, and the AppImage does not: it is not installed, has no moment to make
+the choice at, and is a file the user may move or delete, which would leave an
+entry naming a path that no longer exists. For that artifact registration stays
+an explicit action, from the command line or the settings switch.
+
+A registration the package owns is reported honestly and is not the
+application's to undo: the switch shows that links work and says the package
+manager put it there, rather than offering to delete a file `dpkg` believes it
+still owns.
 
 ## Consequences
 
@@ -71,6 +81,8 @@ Registration is an explicit action, and it is reversible.
 - The downloaded archive is a temporary input, not something the launcher keeps.
   It lives under the temporary root and is removed when the import that wanted
   it is done, whether that import succeeded or not.
+- The two artifacts differ in one visible way, and it is the right way round:
+  installing the package makes links work, while the AppImage asks first.
 - Plaintext HTTP stays refused in production. Development against a local
   DumpViewer uses the loopback escape hatch `ephervex-download` already
   documents for tests, so the production default is unchanged.

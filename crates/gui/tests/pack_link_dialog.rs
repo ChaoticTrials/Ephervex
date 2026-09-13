@@ -145,6 +145,88 @@ fn a_registration_pointing_at_a_path_that_is_gone_says_so() {
     );
 }
 
+/// Granting happens in the link dialog, so settings is the only place an answer
+/// can be seen and taken back.
+#[test]
+fn settings_lists_each_trusted_site_and_offers_to_forget_it() {
+    let ui = window();
+    let forgotten: Rc<RefCell<Vec<String>>> = Rc::default();
+    let sink = Rc::clone(&forgotten);
+    ui.on_forget_pack_host(move |host| sink.borrow_mut().push(host.to_string()));
+
+    general_settings(&ui);
+    ui.set_trusted_pack_hosts(
+        ["dumps.chaotictrials.de", "packs.example.com"]
+            .map(slint::SharedString::from)
+            .as_slice()
+            .into(),
+    );
+    settle(&ui);
+
+    let buttons: Vec<ElementHandle> =
+        ElementHandle::find_by_accessible_label(&ui, &lookup("gui-forget-pack-host"))
+            .filter(|element| {
+                element.size().width > 0.0
+                    && element.accessible_role() == Some(AccessibleRole::Button)
+            })
+            .collect();
+    assert_eq!(buttons.len(), 2, "one way to forget each site");
+
+    buttons[0].invoke_accessible_default_action();
+    settle(&ui);
+
+    assert_eq!(
+        forgotten.borrow().as_slice(),
+        ["dumps.chaotictrials.de".to_owned()],
+        "forgetting has to name the site that was pressed"
+    );
+}
+
+#[test]
+fn settings_says_so_when_no_site_has_been_agreed_to() {
+    let ui = window();
+    general_settings(&ui);
+    ui.set_trusted_pack_hosts(slint::ModelRc::default());
+    settle(&ui);
+
+    assert!(
+        ElementHandle::find_by_accessible_label(&ui, &lookup("gui-no-trusted-pack-hosts"))
+            .any(|element| element.size().width > 0.0),
+        "an empty list has to explain itself rather than look broken"
+    );
+}
+
+/// A package manager's registration is reported, but is not Ephervex's to
+/// delete: turning it off means removing the package.
+#[test]
+fn a_package_owned_registration_cannot_be_switched_off_here() {
+    let ui = window();
+    let asked: Rc<RefCell<Vec<bool>>> = Rc::default();
+    let sink = Rc::clone(&asked);
+    ui.on_set_url_handler(move |wanted| sink.borrow_mut().push(wanted));
+
+    general_settings(&ui);
+    ui.set_url_handler_registered(true);
+    ui.set_url_handler_removable(false);
+    ui.set_url_handler_command("/usr/bin/ephervex-gui".into());
+    settle(&ui);
+
+    link_switch(&ui)
+        .expect("the switch still reports that links work")
+        .invoke_accessible_default_action();
+    settle(&ui);
+
+    assert!(
+        asked.borrow().is_empty(),
+        "a package manager's file must not be deleted from here"
+    );
+    assert!(
+        ElementHandle::find_by_accessible_label(&ui, &lookup("gui-link-handling-system"))
+            .any(|element| element.size().width > 0.0),
+        "and the reason has to be on screen"
+    );
+}
+
 fn general_settings(ui: &AppWindow) {
     ui.set_loading(false);
     ui.set_page(4);

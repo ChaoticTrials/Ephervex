@@ -3126,6 +3126,11 @@ fn register_pack_link_actions(ui: &AppWindow, commands: &Sender<Command>) {
     let sender = commands.clone();
     ui.on_set_url_handler(move |wanted| send(&sender, Command::SetUrlHandler(wanted)));
 
+    let sender = commands.clone();
+    ui.on_forget_pack_host(move |host| {
+        send(&sender, Command::ForgetPackHost(host.to_string()));
+    });
+
     // Read once at startup, so the switch shows what is true rather than off.
     send(commands, Command::LoadUrlHandler);
 
@@ -4918,8 +4923,18 @@ fn apply_event(
         Event::PackDownloaded { archive } => begin_import(ui, import_flow, commands, archive),
         Event::UrlHandler(handler) => {
             ui.set_url_handler_registered(handler.registered);
+            ui.set_url_handler_removable(handler.removable);
             ui.set_url_handler_command(handler.command.as_str().into());
             ui.set_url_handler_command_missing(handler.command_missing);
+            ui.set_trusted_pack_hosts(
+                handler
+                    .trusted_hosts
+                    .iter()
+                    .map(|host| SharedString::from(host.as_str()))
+                    .collect::<Vec<_>>()
+                    .as_slice()
+                    .into(),
+            );
         }
         Event::Snapshot(snapshot) => {
             apply_snapshot_event(ui, *snapshot, creations, minecraft, commands);

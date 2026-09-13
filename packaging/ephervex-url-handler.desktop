@@ -1,0 +1,17 @@
+[Desktop Entry]
+Type=Application
+Name=Ephervex link handler
+# A second entry, installed only by the Debian package. Installing a package is
+# the explicit act that makes claiming a scheme acceptable, which an AppImage
+# has no equivalent of: it is a file the user may move or delete, and an entry
+# naming a path that no longer exists is worse than no entry (ADR 0027).
+#
+# Separate from ephervex.desktop because the two want opposite things. That one
+# launches the application and deliberately takes no arguments; this one exists
+# to be handed a URL and must not appear in the application menu as a second
+# Ephervex.
+Exec=ephervex-gui %u
+Icon=ephervex
+Terminal=false
+NoDisplay=true
+MimeType=x-scheme-handler/ephervex;

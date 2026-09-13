@@ -42,10 +42,25 @@ pub fn scheme_mime_type() -> String {
     format!("x-scheme-handler/{LAUNCHER_URL_SCHEME}")
 }
 
+/// Who put the link handler in place, if anybody did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UrlHandlerSource {
+    /// Nothing handles the scheme.
+    None,
+    /// Ephervex wrote the entry into this user's own applications directory,
+    /// which is also the only one it may remove.
+    User,
+    /// A package manager installed it system-wide. Turning it off means
+    /// removing the package, not deleting somebody else's file.
+    System,
+}
+
 /// Whether Ephervex currently handles its own links, and what it would run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UrlHandlerStatus {
-    /// Whether an entry written by Ephervex is in place.
+    /// Where the entry in force came from.
+    pub source: UrlHandlerSource,
+    /// Whether anything at all handles the scheme.
     pub registered: bool,
     /// The entry's path, whether or not it exists.
     pub entry: PathBuf,
@@ -58,6 +73,16 @@ pub struct UrlHandlerStatus {
 }
 
 impl UrlHandlerStatus {
+    /// Whether this registration is one Ephervex may remove.
+    ///
+    /// A frontend shows the switch either way, because what it reports is
+    /// whether links work. Only a user-owned entry may be turned off from
+    /// inside the application.
+    #[must_use]
+    pub const fn removable(&self) -> bool {
+        matches!(self.source, UrlHandlerSource::User)
+    }
+
     /// Whether the entry names something that is still on disk.
     ///
     /// A registration that points at a moved or deleted artifact is worse than
@@ -70,6 +95,73 @@ impl UrlHandlerStatus {
             .map(PathBuf::from)
             .is_some_and(|path| path.exists())
     }
+}
+
+/// What a desktop entry runs, without its URL placeholder.
+fn read_exec(entry: &std::path::Path) -> Option<String> {
+    let text = std::fs::read_to_string(entry).ok()?;
+    text.lines()
+        .find_map(|line| line.strip_prefix("Exec="))
+        .map(|exec| exec.trim_end_matches(" %u").to_owned())
+}
+
+/// Which registration is in force, given what was found.
+///
+/// The user's own entry wins, because that is what `xdg-mime default` records
+/// and what a desktop then prefers. Only when there is none does a
+/// package-installed one decide whether links work.
+///
+/// Separate from the lookups so the decision can be tested for what it is: the
+/// alternative is mutating `$XDG_DATA_DIRS`, which is process-wide and, since
+/// Rust 1.80, unsafe. This workspace denies unsafe code and that rule is not
+/// worth bending for a test.
+fn status_from(user: PathBuf, system: Option<(PathBuf, String)>) -> UrlHandlerStatus {
+    if let Some(command) = read_exec(&user) {
+        return UrlHandlerStatus {
+            source: UrlHandlerSource::User,
+            registered: true,
+            entry: user,
+            command: Some(command),
+        };
+    }
+    if let Some((entry, command)) = system {
+        return UrlHandlerStatus {
+            source: UrlHandlerSource::System,
+            registered: true,
+            entry,
+            command: Some(command),
+        };
+    }
+    UrlHandlerStatus {
+        source: UrlHandlerSource::None,
+        registered: false,
+        entry: user,
+        command: None,
+    }
+}
+
+/// A package-installed link handler, if one is present.
+fn system_entry() -> Option<(PathBuf, String)> {
+    let dirs = std::env::var("XDG_DATA_DIRS")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "/usr/local/share:/usr/share".to_owned());
+    system_entry_in(&dirs)
+}
+
+/// The first link handler found across a `$XDG_DATA_DIRS`-shaped list.
+///
+/// The default is the one the XDG base directory specification names, so an
+/// unset variable is a normal system rather than a reason to report nothing.
+fn system_entry_in(dirs: &str) -> Option<(PathBuf, String)> {
+    dirs.split(':')
+        .filter(|directory| !directory.is_empty())
+        .map(|directory| {
+            PathBuf::from(directory)
+                .join("applications")
+                .join(URL_HANDLER_ENTRY)
+        })
+        .find_map(|entry| read_exec(&entry).map(|command| (entry, command)))
 }
 
 /// Where the launcher is, for a desktop entry that has to outlive this process.
@@ -134,17 +226,7 @@ impl crate::app::App {
     /// Whether Ephervex is currently registered to handle its own links.
     #[must_use]
     pub fn url_handler_status(&self) -> UrlHandlerStatus {
-        let entry = entry_path(self.paths());
-        let command = std::fs::read_to_string(&entry).ok().and_then(|text| {
-            text.lines()
-                .find_map(|line| line.strip_prefix("Exec="))
-                .map(|exec| exec.trim_end_matches(" %u").to_owned())
-        });
-        UrlHandlerStatus {
-            registered: entry.is_file(),
-            entry,
-            command,
-        }
+        status_from(entry_path(self.paths()), system_entry())
     }
 
     /// Makes Ephervex the handler for `ephervex://` links.
@@ -195,6 +277,9 @@ impl crate::app::App {
     /// longer resolves, and leaving a stale entry claiming a scheme nothing
     /// answers is the state this exists to avoid.
     pub fn unregister_url_handler(&self) -> CoreResult<bool> {
+        // Only this user's own entry. A package manager's file is not
+        // Ephervex's to delete, and removing it would leave the package
+        // believing it still owns a file that is gone.
         let entry = entry_path(self.paths());
         match std::fs::remove_file(&entry) {
             Ok(()) => {}
@@ -364,6 +449,63 @@ mod tests {
             "{} is inside Ephervex's data directory",
             status.entry.display()
         );
+    }
+
+    /// The Debian package installs its own entry, so links work without anybody
+    /// asking. The switch has to report that truthfully, and must not offer to
+    /// delete a file a package manager owns.
+    #[test]
+    fn a_package_installed_handler_is_reported_but_is_not_ours_to_remove() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let share = base.path().join("usr/share");
+        let applications = share.join("applications");
+        std::fs::create_dir_all(&applications).expect("mkdir");
+        std::fs::write(
+            applications.join(URL_HANDLER_ENTRY),
+            "[Desktop Entry]\nExec=/usr/bin/ephervex-gui %u\n",
+        )
+        .expect("entry");
+
+        let found = system_entry_in(&share.to_string_lossy()).expect("the package entry is found");
+        let status = status_from(base.path().join("never-written.desktop"), Some(found));
+
+        assert!(status.registered, "links work, so the switch says so");
+        assert_eq!(status.source, UrlHandlerSource::System);
+        assert!(
+            !status.removable(),
+            "a package manager's file is not Ephervex's to delete"
+        );
+        assert_eq!(status.command.as_deref(), Some("/usr/bin/ephervex-gui"));
+    }
+
+    /// Registering for this user takes precedence, because that is what
+    /// `xdg-mime default` records and what the desktop then prefers.
+    #[test]
+    fn a_users_own_registration_wins_over_a_package_installed_one() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let user = app.register_url_handler().expect("register").entry;
+
+        let status = status_from(
+            user,
+            Some((
+                PathBuf::from("/usr/share/applications").join(URL_HANDLER_ENTRY),
+                "/usr/bin/ephervex-gui".to_owned(),
+            )),
+        );
+
+        assert_eq!(status.source, UrlHandlerSource::User);
+        assert!(status.removable());
+    }
+
+    #[test]
+    fn nothing_installed_anywhere_is_reported_as_nothing() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let status = status_from(base.path().join("never-written.desktop"), None);
+
+        assert!(!status.registered);
+        assert_eq!(status.source, UrlHandlerSource::None);
+        assert!(!status.removable());
     }
 
     #[test]

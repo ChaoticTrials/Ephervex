@@ -121,7 +121,7 @@ pub use running::{ProcessMonitor, ProcessUsage, RunningProcess};
 pub use server::{CaptureSnapshot, ServerCreateOptions, ServerPersistenceHealth, ServerStatus};
 pub use server_pack::{IdentificationOutcome, ServerContentSource, ServerPackOutcome};
 pub use single_instance::{PrimaryInstance, Startup as SingleInstanceStartup};
-pub use url_handler::{URL_HANDLER_ENTRY, UrlHandlerStatus, scheme_mime_type};
+pub use url_handler::{URL_HANDLER_ENTRY, UrlHandlerSource, UrlHandlerStatus, scheme_mime_type};
 
 /// Cancellation, re-exported because the services take one.
 ///
