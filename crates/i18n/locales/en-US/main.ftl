@@ -204,9 +204,17 @@ error-registry-root-occupied = That instance directory already contains files.
 error-registry-root-missing = That instance's files are no longer on disk.
 .action = Ephervex expected them at { $path } and has kept the record. Restore the directory, or delete the instance to remove the record too.
 
-## Instance duplication and folders 
+## Instance duplication, storage, and folders 
 
 instance-duplicated = Duplicated as { $name }.
+
+# $name is user-authored, $path is a filesystem path. Untranslated.
+# Moving preserves the instance, so there is no counterpart to
+# instance-duplicate-skipped-links below: a move keeps a linked folder as a
+# link rather than copying what it points at.
+instance-made-persistent = { $name } is now stored permanently at { $path }.
+server-made-persistent = { $name } moved with it, to { $path }.
+server-not-made-persistent = { $name } could not be moved and is still temporary: { $value }
 # Following a symlinked folder could copy a shared mods directory, or walk out
 # of the instance entirely, so the copy skips it and says so.
 instance-duplicate-skipped-links = { $count ->
@@ -655,9 +663,11 @@ operation-stage-applying-settings = Applying settings
 operation-stage-publishing = Finishing up
 operation-stage-installing-server = Installing the linked server
 operation-stage-installing-server-pack = Installing the server files
+operation-stage-relocating-files = Moving the files
 operation-importing-pack = Importing modpack
 operation-installing-mods = Installing mods
 operation-creating-server = Creating server
+operation-promoting-instance = Making the instance persistent
 operation-creating-instance = Creating instance
 
 # $operation identifies one background task. It is shown so a user can find the
@@ -818,6 +828,9 @@ error-loader-change-blocked-by-mods = { $count ->
 error-mod-not-managed = That mod is no longer part of this instance.
 .action = Reopen the instance to see its current mods.
 error-mod-identity-incomplete = One of this instance's mods has no provider identity, so its dependencies cannot be worked out.
+error-instance-already-persistent = That instance is already stored permanently.
+.action = Only a temporary instance can be made persistent. Delete it when you no longer need it.
+error-server-not-linked = That server does not belong to this instance.
 error-mod-file-missing = That mod's file is not installed, so it cannot be enabled or disabled. Repair the instance to fetch it again.
 error-mod-file-not-toggled = That mod's file could not be renamed. Check that the mods folder is writable.
 .action = Mods with no identity have to be managed by hand.

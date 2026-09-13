@@ -36,12 +36,12 @@ use ephervex_core::{
     ModSearchQuery, ModSearchResults, NetworkAccess, NewClient, NewServer, OperationReporter,
     OptionalSelection, OutputLine, PackAnalysis, PackRecipe, PackSide, Paths, PlanWarning,
     PlannedMod, PreferenceApplication, PreferenceId, PreferenceKey, ProcessMonitor,
-    ReconciliationReport, ReleaseListing, RequirementBasis, RuntimeClassification,
-    RuntimeInventory, SearchOptions, SecretString, ServerCommitWarning, ServerContentSource,
-    ServerCreateOptions, ServerEvent, ServerFolder, ServerNetworkSettings, ServerObserver,
-    ServerPersistenceHealth, ServerRecord, ServerWarning, Session, SideRequirement, SkipReason,
-    SuspectConfidence, SuspectReason, TextAnchor, TextView, UnknownServerFiles, VersionMetadata,
-    VersionRecord,
+    PromotionRequest, ReconciliationReport, ReleaseListing, RequirementBasis,
+    RuntimeClassification, RuntimeInventory, SearchOptions, SecretString, ServerCommitWarning,
+    ServerContentSource, ServerCreateOptions, ServerEvent, ServerFolder, ServerNetworkSettings,
+    ServerObserver, ServerPersistenceHealth, ServerRecord, ServerWarning, Session, SideRequirement,
+    SkipReason, SuspectConfidence, SuspectReason, TextAnchor, TextView, UnknownServerFiles,
+    VersionMetadata, VersionRecord,
 };
 use ephervex_i18n::Arg as MessageArg;
 use ephervex_model::{
@@ -672,6 +672,28 @@ enum InstanceCommand {
         /// Leave the instance directory on disk.
         #[arg(long)]
         keep_files: bool,
+    },
+    /// Keep a temporary instance for good, by moving it out of temporary
+    /// storage.
+    ///
+    /// The instance keeps its name, its mods, its saves, its logs and its
+    /// linked servers. Only its location changes, from the system temporary
+    /// directory, which the operating system clears whenever it likes, to your
+    /// persistent instance folder. This is not the same as duplicating it into
+    /// that folder, which would leave the original behind.
+    ///
+    /// Every temporary server linked to the instance moves with it unless you
+    /// say otherwise. This cannot be undone by running it in reverse: delete
+    /// the instance when you no longer want to keep it.
+    Persist {
+        id: InstanceId,
+        /// Move only this linked server. Repeatable, and naming any server at
+        /// all leaves every server you did not name where it is.
+        #[arg(long = "server", value_name = "SERVER", conflicts_with = "no_servers")]
+        servers: Vec<ServerId>,
+        /// Move the instance alone and leave its linked servers temporary.
+        #[arg(long)]
+        no_servers: bool,
     },
 }
 
@@ -1418,6 +1440,103 @@ async fn run_instance_command(
                 println!("deleted {id}");
             }
         }
+        InstanceCommand::Persist {
+            id,
+            servers,
+            no_servers,
+        } => run_instance_persist(app, *id, servers, *no_servers, json)?,
+    }
+    Ok(())
+}
+
+/// Moves a temporary instance into the persistent instance folder.
+///
+/// The plan is read first so that naming no servers can mean "all of them"
+/// without the caller having to list ids it would have to look up. A server the
+/// plan did not offer is already persistent, and naming one is refused by the
+/// application service rather than skipped here.
+fn run_instance_persist(
+    app: &App,
+    id: InstanceId,
+    servers: &[ServerId],
+    no_servers: bool,
+    json: bool,
+) -> anyhow::Result<()> {
+    let plan = app.plan_instance_promotion(id)?;
+    let request = if no_servers {
+        PromotionRequest::client_only()
+    } else if servers.is_empty() {
+        PromotionRequest::all_of(&plan)
+    } else {
+        PromotionRequest {
+            servers: servers.to_vec(),
+        }
+    };
+
+    let outcome = app.promote_instance(
+        id,
+        &request,
+        &OperationReporter::silent("operation-promoting-instance"),
+    )?;
+
+    if json {
+        print_json(&serde_json::json!({
+            "instance": outcome.instance.id.to_string(),
+            "root": outcome.instance.root.to_string_lossy(),
+            "storage": outcome.instance.storage.to_string(),
+            "servers": outcome
+                .servers
+                .iter()
+                .map(|server| serde_json::json!({
+                    "id": server.id.to_string(),
+                    "root": server.root.to_string_lossy(),
+                }))
+                .collect::<Vec<_>>(),
+            "warnings": outcome
+                .warnings
+                .iter()
+                .map(|warning| serde_json::json!({
+                    "server": warning.server.to_string(),
+                    "detail": warning.error.to_string(),
+                }))
+                .collect::<Vec<_>>(),
+        }));
+        return Ok(());
+    }
+
+    println!(
+        "{}",
+        ephervex_i18n::lookup_args(
+            "instance-made-persistent",
+            [
+                ("name", MessageArg::from(outcome.instance.name.as_str())),
+                ("path", MessageArg::from(outcome.instance.root.as_path())),
+            ]
+        )
+    );
+    for server in &outcome.servers {
+        println!(
+            "  {}",
+            ephervex_i18n::lookup_args(
+                "server-made-persistent",
+                [
+                    ("name", MessageArg::from(server.name.as_str())),
+                    ("path", MessageArg::from(server.root.as_path())),
+                ]
+            )
+        );
+    }
+    for warning in &outcome.warnings {
+        eprintln!(
+            "  {}",
+            ephervex_i18n::lookup_args(
+                "server-not-made-persistent",
+                [
+                    ("name", MessageArg::from(warning.name.as_str())),
+                    ("value", MessageArg::from(warning.error.to_string())),
+                ]
+            )
+        );
     }
     Ok(())
 }

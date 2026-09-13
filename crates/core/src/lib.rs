@@ -47,6 +47,7 @@ mod mod_display_cache;
 pub mod mods;
 pub mod mutation;
 pub mod open_files;
+pub mod promotion;
 pub mod running;
 pub mod server;
 pub mod server_pack;
@@ -105,6 +106,9 @@ pub use mods::{
 pub use mutation::{
     ModMutability, ModMutation, ModMutationPlan, ModVersionChoice, ModVersionChoices,
     MutationRestriction, PlannedFile, PlannedOutcome,
+};
+pub use promotion::{
+    PromotableServer, PromotionOutcome, PromotionPlan, PromotionRequest, PromotionWarning,
 };
 pub use running::{ProcessMonitor, ProcessUsage, RunningProcess};
 pub use server::{CaptureSnapshot, ServerCreateOptions, ServerPersistenceHealth, ServerStatus};

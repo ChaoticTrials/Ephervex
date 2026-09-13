@@ -17,6 +17,7 @@ use ephervex_java::JavaError;
 use ephervex_loaders::LoaderError;
 use ephervex_minecraft::{LaunchError, MinecraftError};
 use ephervex_mod_platform::ModPlatformError;
+use ephervex_model::{InstanceId, ServerId};
 use ephervex_pack::{CredentialUnavailable, PackError};
 use ephervex_server::ServerError;
 use ephervex_storage::StorageError;
@@ -218,6 +219,23 @@ pub enum CoreError {
     #[error("`{configured}` is not a mod catalog this version of Ephervex knows")]
     ModCatalogPreferenceUnrecognized { configured: String },
 
+    /// Asked to make an instance persistent that already is.
+    ///
+    /// A refusal rather than a silent success, so a frontend that offered the
+    /// action was wrong about the instance and hears so.
+    #[error("instance {id} is already persistent")]
+    InstanceAlreadyPersistent { id: InstanceId },
+
+    /// Asked to move a server that is not linked to the instance being moved.
+    ///
+    /// Promotion takes an explicit list of servers, and a list naming somebody
+    /// else's server is a caller mistake rather than a thing to quietly skip.
+    #[error("server {server} is not linked to instance {instance}")]
+    ServerNotLinkedToInstance {
+        server: ServerId,
+        instance: InstanceId,
+    },
+
     /// Asked to enable or disable a mod whose jar is in neither state.
     ///
     /// Reported rather than treated as a success: enabling a mod that is not
@@ -344,6 +362,8 @@ impl CoreError {
             Self::ModCatalogPreferenceUnrecognized { .. } => {
                 "error-mod-catalog-preference-unrecognized"
             }
+            Self::InstanceAlreadyPersistent { .. } => "error-instance-already-persistent",
+            Self::ServerNotLinkedToInstance { .. } => "error-server-not-linked",
             Self::ModFileMissing { .. } => "error-mod-file-missing",
             Self::ModFileNotToggled { .. } => "error-mod-file-not-toggled",
             Self::ModNotHandPlaced { .. } => "error-mod-not-hand-placed",
@@ -525,6 +545,8 @@ impl CoreError {
             | Self::ModIdentityIncomplete { .. }
             | Self::ModFileMissing { .. }
             | Self::ModFileNotToggled { .. }
+            | Self::InstanceAlreadyPersistent { .. }
+            | Self::ServerNotLinkedToInstance { .. }
             | Self::ModNotHandPlaced { .. }
             | Self::ModFileNotDeleted { .. }
             | Self::ModFileNotAdded { .. }
@@ -587,6 +609,8 @@ impl CoreError {
             | Self::LoaderFamilyFixed { .. }
             | Self::LoaderChangeBlockedByMods { .. }
             | Self::ModCatalogPreferenceUnrecognized { .. }
+            | Self::InstanceAlreadyPersistent { .. }
+            | Self::ServerNotLinkedToInstance { .. }
             | Self::EntityNameInvalid { .. }
             | Self::ArtworkUnusable { .. } => None,
         }

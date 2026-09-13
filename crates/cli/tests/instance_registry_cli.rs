@@ -295,3 +295,87 @@ fn client_launch_offers_one_linked_server_connection_option() {
         "help was:\n{stdout}"
     );
 }
+
+/// Promoting a temporary instance moves it, rather than copying it, and the
+/// instance keeps its identity (ADR 0025).
+#[test]
+fn persisting_an_instance_moves_it_under_the_persistent_root() {
+    let sandbox = Sandbox::new();
+
+    let created = sandbox.json(&[
+        "--json",
+        "instance",
+        "create",
+        "Repro",
+        "--minecraft",
+        "1.20.1",
+    ]);
+    let id = created["id"].as_str().expect("id").to_owned();
+    let temporary_root = PathBuf::from(created["root"].as_str().expect("root"));
+    assert_eq!(created["storage"], "temporary");
+    assert!(temporary_root.starts_with(sandbox.tmpdir()));
+
+    let promoted = sandbox.json(&["--json", "instance", "persist", &id]);
+
+    assert_eq!(promoted["instance"], id, "the same instance, not a copy");
+    assert_eq!(promoted["storage"], "persistent");
+    let persistent_root = PathBuf::from(promoted["root"].as_str().expect("root"));
+    assert!(
+        persistent_root.starts_with(sandbox.base().join("data")),
+        "expected the persistent data root, got {}",
+        persistent_root.display()
+    );
+    assert!(
+        !temporary_root.exists(),
+        "a move leaves nothing behind in the temporary root"
+    );
+    assert!(persistent_root.join("minecraft").is_dir());
+
+    // A separate process reads the same thing, and has nothing to reconcile.
+    let listed = sandbox.json(&["--json", "instances", "list"]);
+    let instances = listed.as_array().expect("array");
+    assert_eq!(
+        instances.len(),
+        1,
+        "promotion does not add a second instance"
+    );
+    assert_eq!(instances[0]["id"], id);
+    assert_eq!(instances[0]["storage"], "persistent");
+
+    let report = sandbox.json(&["--json", "reconcile"]);
+    assert_eq!(report["needs_attention"], false);
+    assert!(
+        report["removed_stale_temporary"]
+            .as_array()
+            .expect("array")
+            .is_empty()
+    );
+}
+
+#[test]
+fn persisting_an_instance_that_is_already_persistent_is_refused() {
+    let sandbox = Sandbox::new();
+
+    let created = sandbox.json(&[
+        "--json",
+        "instance",
+        "create",
+        "Kept",
+        "--minecraft",
+        "1.20.1",
+        "--persistent",
+    ]);
+    let id = created["id"].as_str().expect("id").to_owned();
+
+    let output = sandbox.run(&["instance", "persist", &id]);
+
+    assert!(
+        !output.status.success(),
+        "an instance that is already persistent has nothing to promote"
+    );
+    let message = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        message.contains("already persistent"),
+        "the refusal has to say why: {message}"
+    );
+}

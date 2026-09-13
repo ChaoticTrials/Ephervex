@@ -1046,7 +1046,7 @@ fn ensure_empty_directory(path: &Path) -> CoreResult<()> {
     }
 }
 
-fn refuse_if_running(record: &ServerRecord) -> CoreResult<()> {
+pub(crate) fn refuse_if_running(record: &ServerRecord) -> CoreResult<()> {
     if classify_runtime(&record.root)?.may_be_running() {
         return Err(ephervex_server::ServerError::AlreadyRunning.into());
     }
