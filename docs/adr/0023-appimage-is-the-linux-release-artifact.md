@@ -38,6 +38,12 @@ package that only ever installs two binaries and a desktop entry buys nothing an
 AppImage does not already give, at the cost of a second distribution surface to
 maintain and a per-distribution matrix to test.
 
+> Superseded by [ADR 0026](0026-a-debian-package-alongside-the-appimage.md).
+> The basename dispatch described below is what made this wrong: it means the
+> command-line interface exists only when the artifact is reached under the name
+> `ephervex`, which an ordinary symlink onto `PATH` does not do. Everything else
+> in this ADR still holds, and applies to that package as well.
+
 ### Two binaries, dispatched by the name the artifact was invoked under
 
 `AppRun` reads the basename of `$ARGV0`: `ephervex` runs the command-line

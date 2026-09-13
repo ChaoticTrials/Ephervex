@@ -28,6 +28,7 @@ so the reasoning trail survives.
 | [0020](0020-mod-mutation-is-one-undoable-transaction.md) | Mod mutation is one undoable transaction, and ownership decides what may be mutated | Accepted |
 | [0021](0021-linked-mod-sync-pins-the-root-and-resolves-per-target.md) | Linked mod synchronization pins the root release and resolves dependencies per target | Accepted |
 | [0022](0022-curseforge-uses-a-user-supplied-key-and-persists-nothing.md) | CurseForge uses a user-supplied API key, and its responses are never persisted | Accepted |
-| [0023](0023-appimage-is-the-linux-release-artifact.md) | AppImage is the Linux release artifact, on a declared glibc baseline | Accepted |
+| [0023](0023-appimage-is-the-linux-release-artifact.md) | AppImage is the Linux release artifact, on a declared glibc baseline | Accepted (its "No `.deb`" decision superseded by ADR 0026) |
 | [0024](0024-published-server-files-are-a-complete-installation.md) | Published server files are installed as a complete server, and the loader stays the launcher's | Accepted |
 | [0025](0025-storage-class-is-promoted-in-place.md) | An instance becomes persistent by moving, not by being copied | Accepted |
+| [0026](0026-a-debian-package-alongside-the-appimage.md) | A Debian package alongside the AppImage | Accepted |
