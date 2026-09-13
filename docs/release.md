@@ -38,7 +38,18 @@ Secret Service provider (GNOME Keyring, KWallet, or equivalent) is optional; see
 
 ## Installing
 
-The release artifact is a single AppImage:
+Each release publishes two artifacts. On Debian, Ubuntu, Linux Mint and their
+derivatives, the package is the easier one:
+
+```bash
+sudo apt install ./ephervex_<version>_amd64.deb
+```
+
+That installs `ephervex` and `ephervex-gui` into `/usr/bin`, so the
+command-line interface is on `PATH` immediately and the desktop entry appears in
+the system menu. `sudo apt remove ephervex` undoes it.
+
+Everywhere else, the AppImage runs without installing anything:
 
 ```bash
 chmod +x Ephervex-x86_64.AppImage
@@ -47,11 +58,15 @@ chmod +x Ephervex-x86_64.AppImage
 
 That starts the desktop application. Nothing is installed, nothing runs as root,
 and nothing is written outside the directories listed under
-[Where Ephervex keeps things](#where-ephervex-keeps-things).
+[Where Ephervex keeps things](#where-ephervex-keeps-things) -- which is also
+true of the package, whose payload is the two binaries and their desktop data
+and nothing else.
 
-The name is the same on every release, so a download address, a symlink, and a
-desktop integration all stay valid across upgrades. Which release you have is
-the tag it was published under, and what `ephervex --version` reports.
+The AppImage name is the same on every release, so a download address, a
+symlink, and a desktop integration all stay valid across upgrades. The package
+carries its version in its file name, because that is what a package manager and
+an apt repository read. Which release you have is the tag it was published
+under, and what `ephervex --version` reports.
 
 ### When FUSE is unavailable
 
@@ -179,9 +194,10 @@ Two limits worth knowing:
 
 ## Uninstalling
 
-Delete the AppImage. That removes the application.
+`sudo apt remove ephervex` if you installed the package, or delete the AppImage
+if you ran that. Either removes the application.
 
-It does not remove your data. To remove that as well:
+Neither removes your data. To remove that as well:
 
 ```bash
 rm -rf ~/.config/ephervex ~/.local/share/ephervex ~/.cache/ephervex ~/.local/state/ephervex
@@ -293,6 +309,14 @@ when present, and validate the desktop entry and the AppStream component;
 packaging itself runs with `--no-appstream`, so `appstreamcli` is the only thing
 that reads the component.
 
+`build-deb.sh` needs neither host tool above. It needs `dpkg-deb` (from `dpkg`)
+and `dpkg-shlibdeps` (from `dpkg-dev`), and fails naming them when they are
+absent. It reads the package's dependencies off the built binaries rather than
+from a list kept by hand, so the relationships a package manager enforces and
+the allowlist in
+[`packaging/linux-shared-libraries`](../packaging/linux-shared-libraries) cannot
+disagree about the facts (ADR 0026).
+
 ### The baseline build environment
 
 The release build runs inside a container pinned to the baseline distribution,
@@ -339,6 +363,26 @@ docker run --rm --network none \
   bash -c 'cd /src && packaging/build-appimage.sh /out'
 ```
 
+The Debian package is built the same way, from the same tree, by a script that
+takes the same argument:
+
+```bash
+docker run --rm --network none \
+  -v "$PWD:/src:ro" \
+  -v "$OUTPUT:/out" \
+  -v "$TARGET:/target" \
+  -v "$CARGO_CACHE:/cargo" \
+  -e CARGO_HOME=/cargo \
+  -e CARGO_TARGET_DIR=/target \
+  -e CARGO_NET_OFFLINE=true \
+  -e SOURCE_DATE_EPOCH=0 \
+  ephervex-baseline:22.04 \
+  bash -c 'cd /src && packaging/build-deb.sh /out'
+```
+
+It needs no host tools beyond `dpkg-deb` and `dpkg-shlibdeps`, so add `dpkg-dev`
+to the baseline image when building packages.
+
 The source tree is mounted read-only and the build output goes elsewhere, so a
 release build cannot modify the repository it is built from.
 
@@ -371,18 +415,42 @@ Ephervex.AppDir/
   usr/share/icons/hicolor/<size>/apps/ephervex.png  8 sizes, 16x16 to 512x512
 ```
 
+The Debian package installs the same content at real paths, with no `AppRun`,
+because there is nothing to dispatch: both binaries are files on `PATH`.
+
+```text
+/usr/bin/ephervex                                  command-line interface
+/usr/bin/ephervex-gui                              desktop application
+/usr/share/applications/ephervex.desktop
+/usr/share/metainfo/ephervex.metainfo.xml
+/usr/share/doc/ephervex/copyright
+/usr/share/icons/hicolor/<size>/apps/ephervex.png  8 sizes, 16x16 to 512x512
+```
+
 Everything the application reads at runtime is compiled into the binaries: the
 Minecraft options compatibility dataset, the preference catalog, the Fluent
 localization resources, and the interface icons. Nothing resolves back into the
-source tree, which the smoke test checks by running the packaged CLI from `/`.
+source tree, which both smoke tests check by running the packaged CLI from `/`.
 
 ### Smoke testing an artifact
 
-Run by `build-appimage.sh`, and repeatable by hand against any artifact:
+Each packaging script runs its own, and both are repeatable by hand:
 
 ```bash
 packaging/smoke-test-appimage.sh Ephervex-x86_64.AppImage
+packaging/smoke-test-deb.sh ephervex_<version>_amd64.deb
 ```
+
+They are two tests rather than one with a switch, because the artifacts fail
+differently. An AppImage is one file that must not read anything outside itself;
+a package is a tree of installed paths plus the control metadata a package
+manager reads before it will install anything. The package's test checks that
+metadata, that the payload is exactly the declared file set, and that the
+desktop entry names a binary the package actually installs. What they share is
+the baseline: the glibc floor, the shared-library allowlist, and the
+build-machine path check are one implementation in
+[`packaging/linux-release-artifact`](../packaging/linux-release-artifact), so
+neither artifact can clear a lower bar than the other.
 
 Most of it works on an extracted copy, so it needs no FUSE and runs in the build
 container. It checks the file layout; that no repository, fixture, tooling, or
