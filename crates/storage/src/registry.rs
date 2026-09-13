@@ -274,6 +274,144 @@ impl Registry {
         self.insert_client_row(record)
     }
 
+    /// Moves a client instance into a different storage root, unchanged.
+    ///
+    /// The opposite of [`Self::duplicate_client`] in the thing that matters:
+    /// this is the same instance at a new address. Its id, name, retained
+    /// recipe, launch history and linked servers are all untouched, and only
+    /// `root` and `storage` differ afterwards (ADR 0025).
+    ///
+    /// The move is a rename where a rename works and a symlink-preserving copy
+    /// where the roots are on different filesystems, which is the ordinary case
+    /// between a tmpfs temporary root and a data root on disk.
+    ///
+    /// Refusing while the game is running is the caller's job. Nothing here can
+    /// tell a live lock from a stale one, and the lock file itself is left
+    /// behind rather than moved, because it describes a process that is not
+    /// this one.
+    pub fn relocate_client(
+        &self,
+        id: InstanceId,
+        storage: StorageClass,
+        progress: &mut dyn FnMut(usize),
+    ) -> Result<ClientRecord, RegistryError> {
+        let mut record = self.client(id)?;
+        if record.storage == storage {
+            return Ok(record);
+        }
+        if !record.root.is_dir() {
+            return Err(RegistryError::RootMissing {
+                path: record.root.clone(),
+            });
+        }
+
+        let destination = self.paths.instance_root(storage, id);
+        clear_own_abandoned_move(&destination, |root| {
+            metadata::read_client_metadata(root).is_ok_and(|found| found.id == id)
+        })?;
+        discard_launch_lock(&record.root);
+
+        let report = crate::relocate::relocate_tree(&record.root, &destination, progress).map_err(
+            |source| RegistryError::Io {
+                path: destination.clone(),
+                source,
+            },
+        )?;
+
+        let source = std::mem::replace(&mut record.root, destination);
+        record.storage = storage;
+        // Metadata first, then the index, so an interruption leaves a directory
+        // reconciliation can adopt rather than a row pointing at nothing.
+        self.update_client(&mut record)?;
+        metadata::clear_incomplete(&record.root)?;
+
+        if !report.renamed {
+            // The instance is recorded at its new address, so what is left at
+            // the old one is a stale copy under a root the OS owns. Failing to
+            // remove it costs temporary space and nothing else.
+            if let Err(error) = remove_tree(&source) {
+                tracing::warn!(
+                    instance_id = %id,
+                    root = %source.display(),
+                    %error,
+                    "could not remove an instance's old directory after moving it"
+                );
+            }
+        }
+
+        tracing::info!(
+            instance_id = %id,
+            storage = %record.storage,
+            root = %record.root.display(),
+            renamed = report.renamed,
+            files = report.files,
+            links = report.links,
+            "moved a client instance to a different storage root"
+        );
+        Ok(record)
+    }
+
+    /// The same move for a dedicated server.
+    ///
+    /// A server's `libraries` is a link into the shared library store, which is
+    /// why the move recreates links rather than copying what they point at.
+    pub fn relocate_server(
+        &self,
+        id: ServerId,
+        storage: StorageClass,
+        progress: &mut dyn FnMut(usize),
+    ) -> Result<ServerCommit<ServerRecord>, RegistryError> {
+        let mut record = self.server(id)?;
+        if record.storage == storage {
+            return Ok(ServerCommit {
+                record,
+                warnings: Vec::new(),
+            });
+        }
+        if !record.root.is_dir() {
+            return Err(RegistryError::RootMissing {
+                path: record.root.clone(),
+            });
+        }
+
+        let destination = self.paths.server_root(storage, id);
+        clear_own_abandoned_move(&destination, |root| {
+            metadata::read_server_metadata(root).is_ok_and(|found| found.id == id)
+        })?;
+
+        let report = crate::relocate::relocate_tree(&record.root, &destination, progress).map_err(
+            |source| RegistryError::Io {
+                path: destination.clone(),
+                source,
+            },
+        )?;
+
+        let source = std::mem::replace(&mut record.root, destination);
+        record.storage = storage;
+        let commit = self.update_server_committed(&mut record)?;
+        metadata::clear_incomplete(&commit.record.root)?;
+
+        if !report.renamed
+            && let Err(error) = remove_tree(&source)
+        {
+            tracing::warn!(
+                server_id = %id,
+                root = %source.display(),
+                %error,
+                "could not remove a server's old directory after moving it"
+            );
+        }
+
+        tracing::info!(
+            server_id = %id,
+            storage = %commit.record.storage,
+            root = %commit.record.root.display(),
+            renamed = report.renamed,
+            "moved a server to a different storage root"
+        );
+        Ok(commit)
+    }
+
     /// Duplicates a client instance, files and all.
     ///
     /// The copy is a *new instance that happens to contain the same files*: it
@@ -1067,6 +1205,46 @@ fn ensure_free_root(root: &Path) -> Result<(), RegistryError> {
             path: root.to_path_buf(),
             source,
         }),
+    }
+}
+
+/// Frees the destination of a move, if what is there is our own leftover.
+///
+/// A move's destination is derived from the entity's id, so an interrupted
+/// attempt blocks every retry at exactly the path the retry needs. A directory
+/// that carries the incomplete marker *and* whose metadata names the same
+/// entity is provably that attempt and nothing else, so it is cleared. Anything
+/// else at that path is somebody's files and is refused (ADR 0025).
+fn clear_own_abandoned_move(
+    destination: &Path,
+    names_the_same_entity: impl Fn(&Path) -> bool,
+) -> Result<(), RegistryError> {
+    if metadata::is_incomplete(destination) && names_the_same_entity(destination) {
+        tracing::info!(
+            path = %destination.display(),
+            "clearing an unfinished move left at the destination by an earlier attempt"
+        );
+        remove_tree(destination)?;
+    }
+    ensure_free_root(destination)
+}
+
+/// Drops the launch lock before a move.
+///
+/// It describes a process, and a moved instance is not running one: the caller
+/// has already refused while it was. Failing to remove it is not worth failing
+/// the move over, because the lock is keyed on a pid and its start time and a
+/// stale file claims nothing.
+fn discard_launch_lock(root: &Path) {
+    let path = metadata::metadata_dir(root).join(LAUNCH_LOCK_FILE);
+    if let Err(error) = std::fs::remove_file(&path)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(
+            path = %path.display(),
+            %error,
+            "could not remove a stale launch lock before moving an instance"
+        );
     }
 }
 

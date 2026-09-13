@@ -71,6 +71,10 @@ pub struct ReconciliationReport {
     pub reindexed: Vec<ReconciledRecord>,
     /// Records whose previously missing root came back.
     pub recovered: Vec<ReconciledRecord>,
+    /// Records whose files were found at the persistent root they were being
+    /// moved to, so the record followed them instead of being forgotten
+    /// (ADR 0025).
+    pub relocated: Vec<ReconciledRecord>,
     /// Valid canonical metadata that replaced a disagreeing SQLite copy.
     pub index_repaired: Vec<ReconciledRecord>,
     /// Indexed recovery copies whose canonical metadata is unavailable or
@@ -103,6 +107,7 @@ impl ReconciliationReport {
             && self.missing_persistent.is_empty()
             && self.reindexed.is_empty()
             && self.recovered.is_empty()
+            && self.relocated.is_empty()
             && self.index_repaired.is_empty()
             && self.persistence_unhealthy.is_empty()
             && self.server_conflicts.is_empty()
@@ -141,6 +146,7 @@ pub fn reconcile(registry: &Registry) -> Result<ReconciliationReport, RegistryEr
             missing_persistent = report.missing_persistent.len(),
             reindexed = report.reindexed.len(),
             recovered = report.recovered.len(),
+            relocated = report.relocated.len(),
             index_repaired = report.index_repaired.len(),
             persistence_unhealthy = report.persistence_unhealthy.len(),
             server_conflicts = report.server_conflicts.len(),
@@ -189,6 +195,31 @@ fn reconcile_clients(
         }
 
         if record.storage.vanishing_is_expected() {
+            // Before calling it cleanup, check whether the files simply moved.
+            // A promotion that was interrupted between its rename and its index
+            // row leaves exactly this state, and forgetting the record would
+            // also unlink its servers (ADR 0025).
+            let moved = registry
+                .paths()
+                .instance_root(StorageClass::Persistent, record.id);
+            if is_finished_client_root(&moved, record.id) {
+                record.root.clone_from(&moved);
+                record.storage = StorageClass::Persistent;
+                registry.update_client(&mut record)?;
+                tracing::info!(
+                    instance_id = %record.id,
+                    root = %moved.display(),
+                    "an instance's files were found at the persistent root; the record followed them"
+                );
+                report.relocated.push(ReconciledRecord {
+                    reference: RecordRef::Client(record.id),
+                    name: record.name.clone(),
+                    root: moved,
+                    storage: StorageClass::Persistent,
+                });
+                continue;
+            }
+
             // Expected: the OS owns this directory's lifecycle (ADR 0006).
             // `Keep` because there is nothing left to remove, and because
             // asking the filesystem to delete a path the OS already cleared is
@@ -274,6 +305,29 @@ fn reconcile_servers(
         }
 
         if record.storage.vanishing_is_expected() {
+            // The same question a client is asked: were these files moved to
+            // the persistent root rather than cleared away (ADR 0025)?
+            let moved = registry
+                .paths()
+                .server_root(StorageClass::Persistent, record.id);
+            if is_finished_server_root(&moved, record.id) {
+                record.root.clone_from(&moved);
+                record.storage = StorageClass::Persistent;
+                let _committed = registry.update_server_committed(&mut record)?;
+                tracing::info!(
+                    server_id = %record.id,
+                    root = %moved.display(),
+                    "a server's files were found at the persistent root; the record followed them"
+                );
+                report.relocated.push(ReconciledRecord {
+                    reference: RecordRef::Server(record.id),
+                    name: record.name.clone(),
+                    root: moved,
+                    storage: StorageClass::Persistent,
+                });
+                continue;
+            }
+
             registry.delete_server(record.id, FileDisposition::Keep)?;
             report.removed_stale_temporary.push(entry);
         } else {
@@ -457,6 +511,26 @@ fn reindex_orphaned_servers(
     Ok(())
 }
 
+/// Whether a finished client instance with this id is standing at `root`.
+///
+/// All three conditions matter. The directory has to look like an instance, its
+/// metadata has to name this instance rather than another one, and it must not
+/// carry the incomplete marker -- a move that was interrupted partway through
+/// copying leaves a marked directory, and adopting that would hand the user a
+/// half-copied instance while the whole one is still where it was.
+fn is_finished_client_root(root: &Path, id: InstanceId) -> bool {
+    metadata::is_client_instance_root(root)
+        && !metadata::is_incomplete(root)
+        && metadata::read_client_metadata(root).is_ok_and(|found| found.id == id)
+}
+
+/// The same three conditions for a dedicated server.
+fn is_finished_server_root(root: &Path, id: ServerId) -> bool {
+    metadata::is_server_root(root)
+        && !metadata::is_incomplete(root)
+        && metadata::read_server_metadata(root).is_ok_and(|found| found.id == id)
+}
+
 /// Immediate subdirectories of `root`, or nothing if it does not exist.
 ///
 /// A missing persistent instance root is a first run or a not-yet-mounted disk,
@@ -521,6 +595,113 @@ mod tests {
             .expect("persistent record is kept");
         assert!(kept.attention.contains(&AttentionReason::MissingRoot));
         assert!(report.needs_attention());
+    }
+
+    /// A promotion interrupted between moving the files and recording where
+    /// they went. Without this rule the record is dropped as expected cleanup,
+    /// which also unlinks every server attached to it (ADR 0025).
+    #[test]
+    fn a_temporary_record_whose_files_moved_to_the_persistent_root_is_relocated_rather_than_forgotten()
+     {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = registry
+            .create_published_client(NewClient::new(
+                "repro",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create");
+        let server = registry
+            .create_server(NewServer::linked("repro server", client.id))
+            .expect("create server");
+
+        // The rename happened; the index row did not.
+        let moved = registry
+            .paths()
+            .instance_root(StorageClass::Persistent, client.id);
+        std::fs::create_dir_all(moved.parent().expect("parent")).expect("mkdir");
+        std::fs::rename(&client.root, &moved).expect("move the files");
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert!(
+            report.removed_stale_temporary.is_empty(),
+            "the files are right there; nothing was cleaned up"
+        );
+        assert_eq!(report.relocated.len(), 1);
+        assert_eq!(report.relocated[0].reference, RecordRef::Client(client.id));
+
+        let followed = registry.client(client.id).expect("the record survives");
+        assert_eq!(followed.storage, StorageClass::Persistent);
+        assert_eq!(followed.root, moved);
+        assert_eq!(
+            registry.linked_server_ids(client.id).expect("links"),
+            vec![server.id],
+            "the linked server is still attached, which is the whole point"
+        );
+        assert!(!report.needs_attention());
+    }
+
+    /// The destination of an interrupted *copy* is marked incomplete. Adopting
+    /// it would hand the user a half-copied instance while the whole one is
+    /// still sitting in the temporary root.
+    #[test]
+    fn a_half_copied_destination_is_not_mistaken_for_a_finished_move() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = registry
+            .create_published_client(NewClient::new(
+                "repro",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create");
+
+        let destination = registry
+            .paths()
+            .instance_root(StorageClass::Persistent, client.id);
+        std::fs::create_dir_all(&destination).expect("mkdir");
+        crate::metadata::mark_incomplete(&destination).expect("mark");
+        crate::metadata::write_client_metadata(&destination, &client).expect("metadata");
+        std::fs::remove_dir_all(&client.root).expect("clear temp");
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert!(report.relocated.is_empty());
+        assert_eq!(
+            report.removed_stale_temporary.len(),
+            1,
+            "an unfinished copy is not the instance"
+        );
+        assert_eq!(report.unfinished_instances.len(), 1);
+    }
+
+    #[test]
+    fn a_temporary_server_whose_files_moved_to_the_persistent_root_follows_them() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = registry
+            .create_server(NewServer::new(
+                "repro server",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create");
+
+        let moved = registry
+            .paths()
+            .server_root(StorageClass::Persistent, server.id);
+        std::fs::create_dir_all(moved.parent().expect("parent")).expect("mkdir");
+        std::fs::rename(&server.root, &moved).expect("move the files");
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert!(report.removed_stale_temporary.is_empty());
+        assert_eq!(report.relocated.len(), 1);
+        let followed = registry.server(server.id).expect("the record survives");
+        assert_eq!(followed.storage, StorageClass::Persistent);
+        assert_eq!(followed.root, moved);
     }
 
     #[test]

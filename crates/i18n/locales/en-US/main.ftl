@@ -78,6 +78,14 @@ reconcile-unfinished-instances = { $count ->
     }
 .action = Ephervex did not add them to the instance list, because their files are incomplete. Delete the directories when you no longer need what they hold.
 
+# An instance whose files were found already standing at the persistent root
+# they were being moved to. Good news, not a warning: the record followed them
+# rather than being forgotten (ADR 0025).
+reconcile-relocated = { $count ->
+        [one] Finished moving { $count } instance into your persistent instance folder.
+       *[other] Finished moving { $count } instances into your persistent instance folder.
+    }
+
 reconcile-nothing-to-do = Everything in the index matches what is on disk.
 
 # $name is user-authored, $path is a filesystem path. Untranslated.

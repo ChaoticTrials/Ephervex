@@ -4411,6 +4411,7 @@ fn show_reconciliation(report: &ReconciliationReport, json: bool) {
             "missing_persistent": reconciled_json(&report.missing_persistent),
             "reindexed": reconciled_json(&report.reindexed),
             "recovered": reconciled_json(&report.recovered),
+            "relocated": reconciled_json(&report.relocated),
             "unfinished_instances": reconciled_json(&report.unfinished_instances),
             "needs_attention": report.needs_attention(),
         }));
@@ -4432,6 +4433,12 @@ fn show_reconciliation(report: &ReconciliationReport, json: bool) {
         println!(
             "{}",
             ephervex_i18n::messages::reindexed(report.reindexed.len())
+        );
+    }
+    if !report.relocated.is_empty() {
+        println!(
+            "{}",
+            ephervex_i18n::messages::relocated(report.relocated.len())
         );
     }
     if !report.missing_persistent.is_empty() {

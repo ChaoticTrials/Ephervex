@@ -16,7 +16,10 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use ephervex_model::{AttentionReason, LoaderKind, LoaderSelection, StorageClass};
-use ephervex_storage::{Config, NewClient, Paths, Registry, SECRET_KEY_MARKERS, config, reconcile};
+use ephervex_storage::{
+    Config, NewClient, NewServer, Paths, Registry, RegistryError, SECRET_KEY_MARKERS, config,
+    reconcile,
+};
 use tempfile::TempDir;
 
 /// Lays every application root, including the temporary one, inside a
@@ -349,4 +352,180 @@ fn an_interrupted_duplication_is_reported_even_though_its_metadata_is_already_in
     // The original is untouched and still the only instance.
     assert_eq!(registry.list_clients().expect("list").len(), 1);
     assert!(abandoned.is_dir(), "reporting never deletes");
+}
+
+/// Promotion is the same instance at a new address, which is the whole thing
+/// that distinguishes it from duplication (ADR 0025).
+#[test]
+fn a_promoted_instance_keeps_its_id_its_name_and_its_linked_servers() {
+    let base = tempfile::tempdir().expect("temp dir");
+    let paths = isolated_paths(&base);
+    let registry = Registry::open(paths.clone()).expect("open registry");
+
+    let original = registry
+        .create_client(NewClient::new(
+            "Repro",
+            "1.20.1",
+            LoaderSelection::exact(LoaderKind::NeoForge, "47.1.106"),
+        ))
+        .expect("create");
+    registry.publish_client(&original).expect("publish");
+    let server = registry
+        .create_server(NewServer::linked("Repro Server", original.id))
+        .expect("create server");
+    std::fs::write(original.root.join("minecraft/options.txt"), "guiScale:2\n")
+        .expect("a setting worth keeping");
+
+    let promoted = registry
+        .relocate_client(original.id, StorageClass::Persistent, &mut |_| {})
+        .expect("promote");
+
+    assert_eq!(promoted.id, original.id, "the same instance, not a copy");
+    assert_eq!(promoted.name, original.name);
+    assert_eq!(promoted.loader, original.loader);
+    assert_eq!(promoted.storage, StorageClass::Persistent);
+    assert_eq!(
+        promoted.root,
+        paths.instance_root(StorageClass::Persistent, original.id)
+    );
+    assert!(!original.root.exists(), "the instance is not in two places");
+    assert_eq!(
+        std::fs::read_to_string(promoted.root.join("minecraft/options.txt")).expect("read"),
+        "guiScale:2\n"
+    );
+    assert_eq!(
+        registry.linked_server_ids(original.id).expect("links"),
+        vec![server.id],
+        "a promoted client keeps the servers a duplicate would not have got"
+    );
+
+    // What the next launch reads, rather than what this process remembers.
+    let registry = Registry::open(paths.clone()).expect("reopen registry");
+    let reopened = registry.client(original.id).expect("indexed");
+    assert_eq!(reopened.root, promoted.root);
+    assert_eq!(reopened.storage, StorageClass::Persistent);
+    assert!(reconcile(&registry).expect("reconcile").is_empty());
+}
+
+/// The destination path is derived from the instance id, so an interrupted
+/// attempt stands exactly where the retry needs to land.
+#[test]
+fn a_promotion_retried_after_an_interrupted_copy_clears_its_own_leftover() {
+    let base = tempfile::tempdir().expect("temp dir");
+    let paths = isolated_paths(&base);
+    let registry = Registry::open(paths.clone()).expect("open registry");
+
+    let original = registry
+        .create_client(NewClient::new(
+            "Repro",
+            "1.20.1",
+            LoaderSelection::vanilla(),
+        ))
+        .expect("create");
+    registry.publish_client(&original).expect("publish");
+
+    // What a promotion killed mid-copy leaves at the destination.
+    let destination = paths.instance_root(StorageClass::Persistent, original.id);
+    std::fs::create_dir_all(destination.join(".launcher")).expect("create the abandoned root");
+    std::fs::copy(
+        original.root.join(".launcher/instance.json"),
+        destination.join(".launcher/instance.json"),
+    )
+    .expect("the metadata the interrupted copy carried");
+    std::fs::write(destination.join(".launcher/incomplete"), b"").expect("mark it incomplete");
+    std::fs::write(destination.join("half-written.bin"), b"partial").expect("partial content");
+
+    let promoted = registry
+        .relocate_client(original.id, StorageClass::Persistent, &mut |_| {})
+        .expect("the retry clears its own leftover");
+
+    assert_eq!(promoted.root, destination);
+    assert!(
+        !destination.join("half-written.bin").exists(),
+        "the abandoned attempt's contents must not survive into the finished move"
+    );
+    assert!(promoted.root.join("minecraft").is_dir());
+}
+
+/// Somebody else's directory at the destination is a conflict, not a leftover
+/// to clear.
+#[test]
+fn a_promotion_refuses_a_destination_another_instance_occupies() {
+    let base = tempfile::tempdir().expect("temp dir");
+    let paths = isolated_paths(&base);
+    let registry = Registry::open(paths.clone()).expect("open registry");
+
+    let original = registry
+        .create_client(NewClient::new(
+            "Repro",
+            "1.20.1",
+            LoaderSelection::vanilla(),
+        ))
+        .expect("create");
+    registry.publish_client(&original).expect("publish");
+
+    let destination = paths.instance_root(StorageClass::Persistent, original.id);
+    std::fs::create_dir_all(&destination).expect("mkdir");
+    std::fs::write(destination.join("someones-file.txt"), b"not ours").expect("write");
+
+    let error = registry
+        .relocate_client(original.id, StorageClass::Persistent, &mut |_| {})
+        .expect_err("an occupied destination is refused");
+
+    assert!(
+        matches!(error, RegistryError::RootOccupied { .. }),
+        "expected an occupied-root refusal, got {error}"
+    );
+    assert!(
+        original.root.join("minecraft").is_dir(),
+        "a refused promotion leaves the instance exactly where it was"
+    );
+    assert!(destination.join("someones-file.txt").is_file());
+}
+
+/// Its launch lock describes a process, and the instance at the new address is
+/// not running one.
+#[test]
+fn a_promoted_instance_does_not_carry_its_launch_lock_to_the_new_root() {
+    let base = tempfile::tempdir().expect("temp dir");
+    let paths = isolated_paths(&base);
+    let registry = Registry::open(paths.clone()).expect("open registry");
+
+    let original = registry
+        .create_client(NewClient::new(
+            "Repro",
+            "1.20.1",
+            LoaderSelection::vanilla(),
+        ))
+        .expect("create");
+    registry.publish_client(&original).expect("publish");
+    std::fs::write(original.root.join(".launcher/launch.lock"), b"{}").expect("a stale lock");
+
+    let promoted = registry
+        .relocate_client(original.id, StorageClass::Persistent, &mut |_| {})
+        .expect("promote");
+
+    assert!(!promoted.root.join(".launcher/launch.lock").exists());
+}
+
+#[test]
+fn promoting_an_instance_that_is_already_persistent_changes_nothing() {
+    let base = tempfile::tempdir().expect("temp dir");
+    let paths = isolated_paths(&base);
+    let registry = Registry::open(paths.clone()).expect("open registry");
+
+    let original = registry
+        .create_client(
+            NewClient::new("Kept", "1.20.1", LoaderSelection::vanilla())
+                .with_storage(StorageClass::Persistent),
+        )
+        .expect("create");
+    registry.publish_client(&original).expect("publish");
+
+    let promoted = registry
+        .relocate_client(original.id, StorageClass::Persistent, &mut |_| {})
+        .expect("a no-op rather than a refusal at this level");
+
+    assert_eq!(promoted.root, original.root);
+    assert_eq!(promoted.storage, StorageClass::Persistent);
 }

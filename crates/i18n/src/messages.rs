@@ -56,6 +56,16 @@ pub fn reindexed(count: usize) -> String {
     fl!(LANGUAGE_LOADER, "reconcile-reindexed", count = count)
 }
 
+/// "Finished moving N instances into your persistent instance folder."
+///
+/// A promotion interrupted between moving the files and recording where they
+/// went. The record follows the files rather than being dropped, which is what
+/// keeps an instance's linked servers attached to it (ADR 0025).
+#[must_use]
+pub fn relocated(count: usize) -> String {
+    fl!(LANGUAGE_LOADER, "reconcile-relocated", count = count)
+}
+
 /// "N instance directories were left unfinished ..."
 ///
 /// A creation or import that was interrupted before it published. The

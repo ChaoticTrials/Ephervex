@@ -38,6 +38,7 @@ pub mod paths;
 pub mod reconcile;
 pub mod records;
 pub mod registry;
+pub(crate) mod relocate;
 
 #[cfg(test)]
 mod test_support;
