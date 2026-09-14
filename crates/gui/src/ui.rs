@@ -3567,7 +3567,7 @@ slint::slint! {
                                     HorizontalLayout {
                                         padding-left: 14px; padding-right: 8px; padding-top: 6px; padding-bottom: 6px; spacing: 10px;
                                         BodyText { text: host; color: Theme.text; horizontal-stretch: 1; vertical-alignment: center; overflow: elide; }
-                                        VerticalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-forget-pack-host"); clicked => { root.forget-pack-host(host); } } }
+                                        VerticalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-forget-pack-host"); tone: "danger"; clicked => { root.forget-pack-host(host); } } }
                                     }
                                 }
                                 SectionTitle { title: GuiI18n.text("gui-favorite-versions"); detail: GuiI18n.text("gui-favorite-versions-detail"); }
@@ -3744,19 +3744,33 @@ slint::slint! {
                                 BodyText { text: GuiI18n.text("gui-storage-change-future-only"); color: Theme.text-muted; wrap: word-wrap; }
                                 Divider { }
                                 SectionTitle { title: GuiI18n.text("gui-watched-download-folders"); detail: GuiI18n.text("gui-watched-download-folders-detail"); }
-                                if root.watched-download-folders.length > 0 : VerticalLayout {
-                                    spacing: 6px;
-                                    // One width for every button in this
-                                    // column, and the standard control height:
-                                    // a row that shrinks its own button leaves
-                                    // the one below it a different size.
-                                    for folder in root.watched-download-folders : ActionRow {
-                                        BodyText { text: folder; overflow: elide; vertical-alignment: center; horizontal-stretch: 1; }
-                                        AppButton { width: 128px; text: GuiI18n.text("gui-remove"); tone: "danger"; clicked => { root.remove-watched-folder(folder); } }
+                                // The same card the trusted sites and the favorite
+                                // versions use: all three are one remembered value and
+                                // one way to take it back, and they are read down the
+                                // same page.
+                                if root.watched-download-folders.length == 0 : Rectangle {
+                                    width: min(parent.width, 520px);
+                                    height: max(46px, no-watched-folders.preferred-height + 22px);
+                                    border-radius: 6px;
+                                    border-width: 1px;
+                                    border-color: Theme.border;
+                                    background: Theme.surface;
+                                    no-watched-folders := BodyText { x: 14px; width: parent.width - 28px; text: GuiI18n.text("gui-watched-download-folders-empty"); color: Theme.text-muted; wrap: word-wrap; }
+                                }
+                                for folder in root.watched-download-folders : Rectangle {
+                                    width: min(parent.width, 520px);
+                                    height: 48px;
+                                    border-radius: 6px;
+                                    border-width: 1px;
+                                    border-color: Theme.border;
+                                    background: Theme.surface;
+                                    HorizontalLayout {
+                                        padding-left: 14px; padding-right: 8px; padding-top: 6px; padding-bottom: 6px; spacing: 10px;
+                                        BodyText { text: folder; color: Theme.text; horizontal-stretch: 1; vertical-alignment: center; overflow: elide; }
+                                        VerticalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-remove"); tone: "danger"; clicked => { root.remove-watched-folder(folder); } } }
                                     }
                                 }
-                                if root.watched-download-folders.length == 0 : BodyText { text: GuiI18n.text("gui-watched-download-folders-empty"); color: Theme.text-muted; wrap: word-wrap; }
-                                ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { width: 128px; text: GuiI18n.text("gui-add-watched-folder"); clicked => { root.choose-watched-folder(); } } }
+                                ActionRow { width: min(parent.width, 520px); Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-add-watched-folder"); clicked => { root.choose-watched-folder(); } } }
                                 Divider { }
                                 SectionTitle { title: GuiI18n.text("gui-artifact-cache"); detail: GuiI18n.text("gui-artifact-cache-detail"); }
                                 // Height taken from the content rather than fixed:
