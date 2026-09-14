@@ -95,6 +95,28 @@ fn a_server_that_cannot_take_part_is_not_answerable() {
     );
 }
 
+/// The list is the only part of the confirmation that stretches, so every pixel
+/// the dialog's own arithmetic forgets comes out of it. A server the user has to
+/// scroll to is one they will not answer.
+#[test]
+fn the_list_is_tall_enough_for_every_server_it_offers() {
+    let ui = window();
+    confirmation(&ui);
+
+    let panel = ElementHandle::find_by_element_type_name(&ui, "LinkedTargetsPanel")
+        .find(|element| element.size().height > 0.0)
+        .expect("the confirmation lists its targets");
+
+    // Three rows of 62px, the 6px between them, and the list's own 8px padding
+    // and 1px border on each side.
+    let needed = 3.0f32.mul_add(62.0, 2.0 * 6.0) + 18.0;
+    assert!(
+        panel.size().height >= needed,
+        "the list is {}px for {needed}px of rows, so a server has to be scrolled to",
+        panel.size().height
+    );
+}
+
 /// The confirmation as the backend's plan opens it: two eligible servers, both
 /// unselected because the project leaves its server side undeclared, and one
 /// that cannot take part.
@@ -103,6 +125,10 @@ fn confirmation(ui: &AppWindow) {
     ui.set_mod_plan_title("Repro Mod".into());
     ui.set_mod_plan_version("1.2.3".into());
     ui.set_mod_plan_install_count(1);
+    // A plan that also has something to warn about: the warning, the summary
+    // and the support sentence are all fixed height, and the list is what is
+    // left over.
+    ui.set_mod_plan_warning_count(1);
     ui.set_linked_support(lookup("gui-linked-support-unknown").into());
     ui.set_linked_targets(ModelRc::new(VecModel::from(vec![
         offered("server-one", "Repro Server One"),
