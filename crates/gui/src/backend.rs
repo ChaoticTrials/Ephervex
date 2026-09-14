@@ -3207,10 +3207,14 @@ async fn open_pack_url(
     }
 
     let reporter = OperationReporter::silent("operation-downloading-pack");
-    match app
+    let outcome = app
         .fetch_pack(&source, consent, &reporter, &CancellationToken::new())
-        .await
-    {
+        .await;
+    // Either way: the host is agreed to before a byte is fetched, so a download
+    // that then failed still added a site the settings page has to show. Left
+    // out, the list only caught up on the next start.
+    send_link_settings(app, events);
+    match outcome {
         // `keep` because the import that follows owns the file now: it runs as
         // a separate command, so tying the archive's life to this scope would
         // delete it before anything read it.
@@ -5740,6 +5744,42 @@ mod tests {
             ModHost::Server(ephervex_model::ServerId::new()),
             false
         ));
+    }
+
+    /// Consent is recorded before a byte is fetched, so the settings page has a
+    /// new site to show whether or not the download that asked for it worked.
+    /// It used to learn about one only on the next start.
+    #[test]
+    fn agreeing_to_a_site_publishes_it_even_when_the_download_then_fails() {
+        let base = tempfile::tempdir().expect("a disposable root");
+        let mut app =
+            App::open_at(ephervex_core::Paths::rooted_at(base.path())).expect("an app opens");
+        let (events, received) = std::sync::mpsc::channel();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+
+        // Nothing is listening, so the fetch fails after the host is agreed to.
+        runtime.block_on(open_pack_url(
+            &mut app,
+            "https://packs.invalid.localhost:1/pack.mrpack",
+            Some(ephervex_core::HostConsent::Remember),
+            &events,
+        ));
+
+        let hosts: Vec<Vec<String>> = received
+            .try_iter()
+            .filter_map(|event| match event {
+                Event::UrlHandler(data) => Some(data.trusted_hosts),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            hosts,
+            vec![vec!["packs.invalid.localhost".to_owned()]],
+            "the site the user just agreed to has to reach the settings page"
+        );
     }
 
     fn busy_cache() -> CoreError {
