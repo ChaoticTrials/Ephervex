@@ -1,6 +1,9 @@
 # ADR 0027 - A pack address the user activated is a second trust category
 
-**Status:** Accepted
+**Status:** Accepted. Its decision about where the scheme is registered from is
+amended by
+[ADR 0028](0028-the-settings-screen-does-not-switch-the-link-handler.md);
+everything else stands.
 
 ## Context
 
@@ -63,7 +66,8 @@ Debian behavior. So the package ships a second desktop entry that claims the
 scheme, and the AppImage does not: it is not installed, has no moment to make
 the choice at, and is a file the user may move or delete, which would leave an
 entry naming a path that no longer exists. For that artifact registration stays
-an explicit action, from the command line or the settings switch.
+an explicit action, from the command line or the settings switch. *(Amended by
+ADR 0028: the settings switch is gone, and the command line is the one way.)*
 
 A registration the package owns is reported honestly and is not the
 application's to undo: the switch shows that links work and says the package

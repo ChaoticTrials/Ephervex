@@ -10,7 +10,9 @@
 //!
 //! So Ephervex writes a second entry, of its own, when asked. Only when asked:
 //! claiming a system-wide URL scheme is not something a launcher should do
-//! quietly on first run (ADR 0027).
+//! quietly on first run (ADR 0027). Asking means the command line - the desktop
+//! application offers no control over this, because registering is part of
+//! installing rather than a preference anybody revisits (ADR 0028).
 //!
 //! # Why `$APPIMAGE` rather than the running executable
 //!
@@ -21,7 +23,8 @@
 //! `current_exe()` is the fallback, which is the development and
 //! distribution-package case, where it is exactly right.
 
-use std::path::PathBuf;
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use tracing::{info, warn};
@@ -90,15 +93,38 @@ impl UrlHandlerStatus {
     /// happens.
     #[must_use]
     pub fn command_exists(&self) -> bool {
-        self.command
-            .as_deref()
-            .map(PathBuf::from)
-            .is_some_and(|path| path.exists())
+        self.command.as_deref().is_some_and(command_is_reachable)
     }
 }
 
+/// Whether a desktop entry's `Exec` still names something that can run.
+fn command_is_reachable(command: &str) -> bool {
+    command_is_reachable_in(command, std::env::var_os("PATH").as_deref())
+}
+
+/// The same question against an explicit `$PATH`.
+///
+/// Resolved the way a desktop resolves it: a bare command name is looked up on
+/// the search path, which is how the packaged entry is written, and only a path
+/// is checked as a path. Treating a bare name as a path made it relative to
+/// whatever directory the process started in, which reported every ordinary
+/// installation as broken.
+///
+/// Split from the environment for the reason `system_entry_in` is: the variable
+/// is process-wide and, since Rust 1.80, unsafe to set. This workspace denies
+/// unsafe code and that rule is not worth bending for a test.
+fn command_is_reachable_in(command: &str, search_path: Option<&OsStr>) -> bool {
+    let candidate = Path::new(command);
+    if candidate.is_absolute() || candidate.components().count() > 1 {
+        return candidate.exists();
+    }
+    search_path.is_some_and(|value| {
+        std::env::split_paths(value).any(|directory| directory.join(command).is_file())
+    })
+}
+
 /// What a desktop entry runs, without its URL placeholder.
-fn read_exec(entry: &std::path::Path) -> Option<String> {
+fn read_exec(entry: &Path) -> Option<String> {
     let text = std::fs::read_to_string(entry).ok()?;
     text.lines()
         .find_map(|line| line.strip_prefix("Exec="))
@@ -344,12 +370,22 @@ mod tests {
         App::open_at(Paths::rooted_at(base)).expect("app opens")
     }
 
+    /// This user's own half of the answer, with no package-installed entry.
+    ///
+    /// `App::url_handler_status` reads the real `$XDG_DATA_DIRS`, so on a
+    /// machine where Ephervex is installed it reports that machine's handler
+    /// and a test about a throwaway root would be answering a different
+    /// question. What the system half does is covered on its own, below.
+    fn user_status_of(app: &App) -> UrlHandlerStatus {
+        status_from(entry_path(app.paths()), None)
+    }
+
     #[test]
     fn nothing_handles_the_scheme_until_it_is_asked_for() {
         let base = tempfile::tempdir().expect("temp dir");
         let app = app_rooted_at(base.path());
 
-        let status = app.url_handler_status();
+        let status = user_status_of(&app);
 
         assert!(
             !status.registered,
@@ -498,6 +534,48 @@ mod tests {
         assert!(status.removable());
     }
 
+    /// The packaged entry names a bare `ephervex-gui`, which a desktop resolves
+    /// on `PATH`. Checked as a path it would be read relative to whatever
+    /// directory the process happened to start in, and every ordinary
+    /// installation would report itself as broken.
+    #[test]
+    fn a_bare_command_name_is_looked_for_on_the_search_path() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let bin = base.path().join("bin");
+        std::fs::create_dir_all(&bin).expect("bin");
+        std::fs::write(bin.join(DESKTOP_BINARY), b"gui").expect("gui");
+        let search_path = bin.as_os_str();
+
+        assert!(
+            command_is_reachable_in(DESKTOP_BINARY, Some(search_path)),
+            "a command on the search path is one the desktop can run"
+        );
+        assert!(
+            !command_is_reachable_in("ephervex-not-installed", Some(search_path)),
+            "and one that is nowhere on it is still reported missing"
+        );
+        assert!(
+            !command_is_reachable_in(DESKTOP_BINARY, None),
+            "with no search path there is nowhere for a bare name to be"
+        );
+    }
+
+    /// A path is still checked as a path, which is what an AppImage's entry
+    /// records and the case the warning was written for.
+    #[test]
+    fn a_recorded_path_is_checked_where_it_points() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let artifact = base.path().join("ephervex.appimage");
+        std::fs::write(&artifact, b"appimage").expect("artifact");
+
+        assert!(command_is_reachable_in(&artifact.to_string_lossy(), None));
+        std::fs::remove_file(&artifact).expect("remove");
+        assert!(
+            !command_is_reachable_in(&artifact.to_string_lossy(), None),
+            "a moved or deleted artifact is the failure this reports"
+        );
+    }
+
     #[test]
     fn nothing_installed_anywhere_is_reported_as_nothing() {
         let base = tempfile::tempdir().expect("temp dir");
@@ -532,7 +610,7 @@ mod tests {
         );
 
         assert!(app.unregister_url_handler().expect("unregister"));
-        assert!(!app.url_handler_status().registered);
+        assert!(!user_status_of(&app).registered);
         assert!(
             !app.unregister_url_handler().expect("unregister again"),
             "removing what is not there is not an error, and is not a removal either"

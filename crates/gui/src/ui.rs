@@ -2844,16 +2844,6 @@ slint::slint! {
         // A link this process was started for, or one a later launch handed
         // over. Asking is still the backend's decision, not this call's.
         callback deliver-pack-link(string);
-        // Whether this copy of Ephervex opens ephervex:// links, and what the
-        // desktop entry records it would run. The path is shown because the
-        // way this breaks is an AppImage that moved.
-        in-out property <bool> url-handler-registered;
-        in-out property <string> url-handler-command;
-        in-out property <bool> url-handler-command-missing;
-        // False when a package manager installed the handler, which Ephervex
-        // reports but must not offer to delete.
-        in-out property <bool> url-handler-removable: true;
-        callback set-url-handler(bool);
         // The sites agreed to serve modpacks. Granting happens in the link
         // dialog; this is where it is seen and taken back.
         in-out property <[string]> trusted-pack-hosts;
@@ -3522,28 +3512,9 @@ slint::slint! {
                                 HorizontalLayout { spacing: 12px; cross-axis-alignment: center; VerticalLayout { FieldLabel { text: GuiI18n.text("gui-default-operator-level"); } BodyText { text: GuiI18n.text("gui-default-operator-level-detail"); color: Theme.text-muted; } } Rectangle { horizontal-stretch: 1; } ComboBox { accessible-label: GuiI18n.text("gui-default-operator-level"); width: 220px; model: [GuiI18n.text("gui-operator-level-1"), GuiI18n.text("gui-operator-level-2"), GuiI18n.text("gui-operator-level-3"), GuiI18n.text("gui-operator-level-4")]; current-index: root.operator-permission-level - 1; selected(value) => { root.operator-permission-level = value == GuiI18n.text("gui-operator-level-1") ? 1 : value == GuiI18n.text("gui-operator-level-2") ? 2 : value == GuiI18n.text("gui-operator-level-3") ? 3 : 4; } } }
                                 ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-save-server-defaults"); tone: "primary"; clicked => { root.save-linked-server-settings(root.show-linked-servers, root.make-default-account-operator, root.operator-permission-level); } } }
                                 SectionTitle { title: GuiI18n.text("gui-link-handling"); detail: GuiI18n.text("gui-link-handling-detail"); }
-                                // The switch and what it currently means, grouped tightly so
-                                // the path reads as this control's answer rather than as a
-                                // stray line between two sections.
-                                VerticalLayout {
-                                    // `start` and no stretch, or the page hands this group
-                                    // its share of the spare height and the caption drifts
-                                    // away from the switch it belongs to.
-                                    alignment: start;
-                                    vertical-stretch: 0;
-                                    spacing: 5px;
-                                    LabeledToggle { width: min(parent.width, 520px); label: GuiI18n.text("gui-open-ephervex-links"); checked: root.url-handler-registered; enabled: root.url-handler-removable || !root.url-handler-registered; toggled(on) => { root.set-url-handler(on); } }
-                                    // A path, so it is set in the same face the rest of the
-                                    // application uses for one, and elided rather than
-                                    // wrapped: which binary it is matters, and the middle of
-                                    // a long path does not.
-                                    if root.url-handler-registered && root.url-handler-command != "" : BodyText { width: min(parent.width, 520px); text: GuiI18n.value("gui-link-handling-runs", root.url-handler-command); color: root.url-handler-command-missing ? Theme.warning : Theme.text-muted; font-family: Theme.mono-family; font-size: Theme.caption-size; overflow: elide; }
-                                    if root.url-handler-command-missing : BodyText { width: min(parent.width, 520px); text: GuiI18n.text("gui-link-handling-moved"); color: Theme.warning; font-size: Theme.caption-size; wrap: word-wrap; }
-                                    if root.url-handler-registered && !root.url-handler-removable : BodyText { width: min(parent.width, 520px); text: GuiI18n.text("gui-link-handling-system"); color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
-                                }
-                                // A heading of its own rather than a bold line: this is a
-                                // separate thing to manage from whether links open at all,
-                                // and the page's other sections are introduced this way.
+                                // Whether the scheme is claimed at all is settled by
+                                // installing, not here (ADR 0028). What this page manages is
+                                // the answers the user has given to link prompts.
                                 SectionTitle { title: GuiI18n.text("gui-trusted-pack-hosts"); detail: GuiI18n.text("gui-trusted-pack-hosts-detail"); }
                                 if root.trusted-pack-hosts.length == 0 : Rectangle {
                                     width: min(parent.width, 520px);

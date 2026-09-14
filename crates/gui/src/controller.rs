@@ -3134,23 +3134,20 @@ fn register_mod_state_actions(
     });
 }
 
-/// Making a temporary instance permanent.
+/// Opening a modpack a web page offered, and the sites agreed to serve one.
 ///
-/// Two steps rather than one: the plan says where the instance would go and
-/// which linked servers could come along, and the dialog it opens is where each
-/// of those is answered. The answers live in the model the dialog renders, so
-/// submitting reads them straight back rather than tracking them alongside.
+/// Whether the scheme is claimed at all is not here: that is settled by
+/// installing (ADR 0028). What the frontend owns is the prompt a link raises and
+/// the list of answers it has already been given.
 fn register_pack_link_actions(ui: &AppWindow, commands: &Sender<Command>) {
-    let sender = commands.clone();
-    ui.on_set_url_handler(move |wanted| send(&sender, Command::SetUrlHandler(wanted)));
-
     let sender = commands.clone();
     ui.on_forget_pack_host(move |host| {
         send(&sender, Command::ForgetPackHost(host.to_string()));
     });
 
-    // Read once at startup, so the switch shows what is true rather than off.
-    send(commands, Command::LoadUrlHandler);
+    // Read once at startup, so the sites already agreed to are on the page
+    // before anyone opens it.
+    send(commands, Command::LoadLinkSettings);
 
     let sender = commands.clone();
     ui.on_deliver_pack_link(move |url| {
@@ -4939,13 +4936,9 @@ fn apply_event(
             ui.set_modal("open-pack-link".into());
         }
         Event::PackDownloaded { archive } => begin_import(ui, import_flow, commands, archive),
-        Event::UrlHandler(handler) => {
-            ui.set_url_handler_registered(handler.registered);
-            ui.set_url_handler_removable(handler.removable);
-            ui.set_url_handler_command(handler.command.as_str().into());
-            ui.set_url_handler_command_missing(handler.command_missing);
+        Event::LinkSettings(settings) => {
             ui.set_trusted_pack_hosts(
-                handler
+                settings
                     .trusted_hosts
                     .iter()
                     .map(|host| SharedString::from(host.as_str()))

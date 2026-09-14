@@ -134,12 +134,11 @@ ephervex://import?url=<percent-encoded https address of the pack>
 
 **The Debian package sets this up for you.** It installs its own
 `ephervex-url-handler.desktop`, so links work as soon as it is installed and
-stop working when it is removed. Nothing further to do, and the settings switch
-says so rather than offering to undo something your package manager owns.
+stop working when it is removed. Nothing further to do.
 
 **The AppImage does not**, because it is not installed: there is no moment to
 make the choice at, and it is a file you may move or delete. Turn it on when you
-want it, from Settings or from the command line:
+want it, from the command line:
 
 ```bash
 ephervex url-handler register
@@ -151,6 +150,13 @@ Registering writes `ephervex-url-handler.desktop` into
 `$XDG_DATA_HOME/applications` and asks your desktop to prefer it. That entry
 records where the launcher is, so run `register` again after moving the
 AppImage; `status` says when the recorded path no longer exists.
+
+The desktop application has no switch for this (ADR 0028). Claiming a system-wide
+scheme is an installation step, `unregister` cannot remove a file your package
+manager owns, and a control that meant different things depending on how you
+installed Ephervex was worse than no control. On a Debian system, `apt remove`
+gives the scheme back, and your desktop's own default-applications settings are
+where you would change any other association.
 
 The first time a link points at a site, Ephervex shows you the address and asks
 before downloading anything. Agreeing remembers the host, so the next pack from

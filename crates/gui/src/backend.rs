@@ -178,10 +178,8 @@ pub enum Command {
         url: String,
         consent: Option<ephervex_core::HostConsent>,
     },
-    /// Read whether this copy opens ephervex:// links.
-    LoadUrlHandler,
-    /// Start or stop opening them.
-    SetUrlHandler(bool),
+    /// Read what this copy remembers about modpack links.
+    LoadLinkSettings,
     /// Stop trusting one site to serve modpacks.
     ForgetPackHost(String),
     /// Find out where making this instance persistent would put it, and which
@@ -738,31 +736,15 @@ pub struct AbsentModsData {
     pub names: Vec<String>,
 }
 
-/// Whether Ephervex opens its own links, as the settings page needs it.
+/// The modpack-link settings, as the settings page needs them.
+///
+/// Whether the scheme is claimed at all is not here: that is settled by
+/// installing, and the desktop application offers no control over it (ADR
+/// 0028).
 #[derive(Debug, Clone)]
-pub struct UrlHandlerData {
-    pub registered: bool,
-    /// Whether this is a registration Ephervex may undo. False when a package
-    /// manager installed it.
-    pub removable: bool,
-    pub command: String,
-    /// Whether the recorded path is gone, which is what a moved AppImage looks
-    /// like and the one failure worth showing rather than hiding.
-    pub command_missing: bool,
+pub struct LinkSettingsData {
     /// The sites agreed to serve modpacks.
     pub trusted_hosts: Vec<String>,
-}
-
-impl UrlHandlerData {
-    fn of(status: &ephervex_core::UrlHandlerStatus) -> Self {
-        Self {
-            registered: status.registered,
-            removable: status.removable(),
-            command: status.command.clone().unwrap_or_default(),
-            command_missing: status.registered && !status.command_exists(),
-            trusted_hosts: Vec::new(),
-        }
-    }
 }
 
 /// What making one instance persistent would move, as the prompt needs it.
@@ -1159,8 +1141,8 @@ pub enum Event {
     PackDownloaded {
         archive: PathBuf,
     },
-    /// Whether this copy opens ephervex:// links, and what it would run.
-    UrlHandler(UrlHandlerData),
+    /// The sites this copy may fetch a modpack archive from without asking.
+    LinkSettings(LinkSettingsData),
     CrashNotice(CrashNoticeData),
     Running(Vec<RunningData>),
     ModVersions(ModVersionsData),
@@ -1703,34 +1685,13 @@ fn run_worker(
                     Err(error) => send_error(&events, &error),
                 }
             }
-            Command::LoadUrlHandler => {
+            Command::LoadLinkSettings => {
                 send_link_settings(&app, &events);
             }
             Command::ForgetPackHost(host) => match app.withdraw_pack_host(&host) {
                 Ok(_) => send_link_settings(&app, &events),
                 Err(error) => send_error(&events, &error),
             },
-            Command::SetUrlHandler(wanted) => {
-                let outcome = if wanted {
-                    app.register_url_handler()
-                        .map(|status| UrlHandlerData::of(&status))
-                } else {
-                    app.unregister_url_handler()
-                        .map(|_| UrlHandlerData::of(&app.url_handler_status()))
-                };
-                match outcome {
-                    Ok(_) => send_link_settings(&app, &events),
-                    // The toggle is re-read either way, so a refusal leaves the
-                    // switch showing what is actually true rather than what was
-                    // asked for.
-                    Err(error) => {
-                        send_error(&events, &error);
-                        let _ = events.send(Event::UrlHandler(UrlHandlerData::of(
-                            &app.url_handler_status(),
-                        )));
-                    }
-                }
-            }
             Command::OpenPackUrl { url, consent } => {
                 runtime.block_on(open_pack_url(&mut app, &url, consent, &events));
             }
@@ -3168,14 +3129,10 @@ fn promote_instance(
 }
 
 /// Publishes everything the link settings section shows.
-///
-/// One event rather than two, because the switch and the trusted sites are read
-/// together and a frontend that applied one without the other would draw a
-/// half-updated section.
 fn send_link_settings(app: &App, events: &Sender<Event>) {
-    let mut data = UrlHandlerData::of(&app.url_handler_status());
-    data.trusted_hosts = app.trusted_pack_hosts().to_vec();
-    let _ = events.send(Event::UrlHandler(data));
+    let _ = events.send(Event::LinkSettings(LinkSettingsData {
+        trusted_hosts: app.trusted_pack_hosts().to_vec(),
+    }));
 }
 
 /// Turns an address a link carried into an archive the import dialog can open.
@@ -5771,7 +5728,7 @@ mod tests {
         let hosts: Vec<Vec<String>> = received
             .try_iter()
             .filter_map(|event| match event {
-                Event::UrlHandler(data) => Some(data.trusted_hosts),
+                Event::LinkSettings(data) => Some(data.trusted_hosts),
                 _ => None,
             })
             .collect();

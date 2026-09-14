@@ -757,6 +757,10 @@ enum InstanceCommand {
 #[derive(Debug, Subcommand)]
 enum UrlHandlerCommand {
     /// Show whether Ephervex currently opens its own links.
+    ///
+    /// This is where link handling is turned on and off. The desktop
+    /// application has no switch for it: claiming a system-wide scheme is part
+    /// of installing, and the Debian package does it for you.
     Status,
     /// Open ephervex:// links with this copy of Ephervex.
     ///
@@ -764,6 +768,10 @@ enum UrlHandlerCommand {
     /// launcher was, and a moved one leaves a link that resolves to nothing.
     Register,
     /// Stop opening ephervex:// links.
+    ///
+    /// Removes this user's own entry. A handler your package manager installed
+    /// stays where it is; removing the Ephervex package is what takes that one
+    /// back.
     Unregister,
 }
 
