@@ -430,6 +430,74 @@ slint::slint! {
         background: Theme.border;
     }
 
+    // What a control has to say on hover.
+    //
+    // Two things raise one, and they are the same thing said twice: something
+    // the screen cannot show. A disabled control cannot show why it is refusing,
+    // and a caption or a title that did not fit cannot show the rest of itself.
+    component HoverNote inherits Rectangle {
+        in property <string> text;
+        // The element being explained, so the note is at least as wide as it is
+        // and can be placed clear of it.
+        in property <length> anchor-width;
+        in property <length> anchor-height;
+        // Above by default, because a control in an action row usually has the
+        // window's edge under it and nothing above. A title has the opposite: it
+        // sits at the top of the card it names, with the card under it.
+        in property <bool> below: false;
+        x: 0;
+        y: root.below ? root.anchor-height + 6px : -self.height - 6px;
+        width: max(root.anchor-width, min(320px, note.preferred-width + 20px));
+        height: note.preferred-height + 14px;
+        border-radius: 6px;
+        border-width: 1px;
+        border-color: Theme.border;
+        background: Theme.elevated;
+        note := Text {
+            x: 10px;
+            y: 7px;
+            width: parent.width - 20px;
+            text: root.text;
+            color: Theme.text-secondary;
+            font-size: Theme.caption-size;
+            wrap: word-wrap;
+        }
+    }
+
+    // A heading that says the whole thing on hover when it had to be cut short.
+    //
+    // It owns a touch area, because hover is what raises the note, and hands the
+    // press back out again: without that, the strip of a card under its own
+    // title would stop selecting the card.
+    component ElidedHeading inherits Rectangle {
+        in property <string> text;
+        in property <length> font-size: Theme.heading-size;
+        callback clicked();
+        callback double-clicked();
+        horizontal-stretch: 1;
+        vertical-stretch: 0;
+        height: title.preferred-height;
+        title := Text {
+            width: parent.width;
+            text: root.text;
+            color: Theme.text;
+            font-size: root.font-size;
+            font-weight: 600;
+            overflow: elide;
+            vertical-alignment: center;
+        }
+        area := TouchArea {
+            clicked => { root.clicked(); }
+            double-clicked => { root.double-clicked(); }
+        }
+        if area.has-hover && title.preferred-width > title.width : HoverNote {
+            text: root.text;
+            anchor-width: root.width;
+            anchor-height: root.height;
+            below: true;
+        }
+    }
+
     component AppButton inherits Rectangle {
         in property <string> text;
         // Why this button cannot be pressed, shown on hover while it is
@@ -447,6 +515,12 @@ slint::slint! {
         in property <string> tone: "secondary";
         in property <bool> enabled: true;
         callback clicked();
+        // Why it cannot be pressed, or the whole caption when the button was
+        // given less room than the caption needed. A button that works and
+        // shows its label has nothing to add.
+        private property <string> hover-note: !root.enabled && root.hint != ""
+            ? root.hint
+            : label.preferred-width > label.width ? root.text : "";
         min-width: max(88px, label.preferred-width + 28px);
         height: Theme.control-height;
         horizontal-stretch: 0;
@@ -458,8 +532,14 @@ slint::slint! {
         accessible-label: root.accessible-name;
         accessible-enabled: enabled;
         accessible-action-default => { if root.enabled { root.clicked(); } }
+        // Held to the button's own width and elided there. `min-width` asks
+        // for room for the whole caption, but a layout that has none gives
+        // less, and a Rectangle does not clip what overflows it. The full text
+        // stays in `accessible-name`.
         label := Text {
             text: root.text;
+            width: root.width - 28px;
+            overflow: elide;
             color: !root.enabled ? Theme.text-muted : root.tone == "danger" ? #fff0f1 : Theme.text;
             font-size: Theme.body-size;
             font-weight: root.tone == "primary" ? 600 : 400;
@@ -472,26 +552,9 @@ slint::slint! {
             mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.not-allowed;
             clicked => { if root.enabled { root.clicked(); } }
         }
-        // Above the button rather than below it, because a button in an action
-        // row usually has the window's edge under it and nothing above.
-        if !root.enabled && root.hint != "" && area.has-hover : Rectangle {
-            x: 0;
-            y: -self.height - 6px;
-            width: max(root.width, min(320px, hint-label.preferred-width + 20px));
-            height: hint-label.preferred-height + 14px;
-            border-radius: 6px;
-            border-width: 1px;
-            border-color: Theme.border;
-            background: Theme.elevated;
-            hint-label := Text {
-                x: 10px;
-                y: 7px;
-                width: parent.width - 20px;
-                text: root.hint;
-                color: Theme.text-secondary;
-                font-size: Theme.caption-size;
-                wrap: word-wrap;
-            }
+        if root.hover-note != "" && area.has-hover : HoverNote {
+            text: root.hover-note;
+            anchor-width: root.width;
         }
     }
 
@@ -2038,12 +2101,17 @@ slint::slint! {
             LoaderGlyph { kind: item.loader-kind; }
             VerticalLayout {
                 spacing: 5px;
+                horizontal-stretch: 1;
                 HorizontalLayout {
                     spacing: 9px;
-                    Heading { text: item.name; }
+                    ElidedHeading {
+                        text: item.name;
+                        clicked => { root.choose(item.id); }
+                        double-clicked => { root.open-workspace(item.id); }
+                    }
                 }
-                BodyText { text: GuiI18n.values("gui-target-summary", item.minecraft, item.loader) + (item.mods > 0 ? " | " + GuiI18n.count("gui-managed-mods-count", item.mods) : ""); }
-                BodyText { text: item.linked-servers > 0 ? GuiI18n.count("gui-linked-servers-count", item.linked-servers) : GuiI18n.value("gui-source-instance", item.source); color: item.linked-servers > 0 ? Theme.accent : Theme.text-muted; }
+                BodyText { text: GuiI18n.values("gui-target-summary", item.minecraft, item.loader) + (item.mods > 0 ? " | " + GuiI18n.count("gui-managed-mods-count", item.mods) : ""); overflow: elide; }
+                BodyText { text: item.linked-servers > 0 ? GuiI18n.count("gui-linked-servers-count", item.linked-servers) : GuiI18n.value("gui-source-instance", item.source); color: item.linked-servers > 0 ? Theme.accent : Theme.text-muted; overflow: elide; }
             }
             VerticalLayout {
                 width: 224px; alignment: center; spacing: 7px;
@@ -2115,12 +2183,17 @@ slint::slint! {
             LoaderGlyph { kind: item.loader-kind; server: true; }
             VerticalLayout {
                 spacing: 5px;
+                horizontal-stretch: 1;
                 HorizontalLayout {
                     spacing: 9px;
-                    Heading { text: item.name; }
+                    ElidedHeading {
+                        text: item.name;
+                        clicked => { root.choose(item.id); }
+                        double-clicked => { root.open-workspace(item.id); }
+                    }
                 }
-                BodyText { text: GuiI18n.values("gui-target-summary", item.minecraft, item.loader) + " | " + item.relationship; }
-                BodyText { text: item.address + " | " + item.state-detail; color: Theme.text-muted; }
+                BodyText { text: GuiI18n.values("gui-target-summary", item.minecraft, item.loader) + " | " + item.relationship; overflow: elide; }
+                BodyText { text: item.address + " | " + item.state-detail; color: Theme.text-muted; overflow: elide; }
             }
             VerticalLayout {
                 width: 224px; alignment: center; spacing: 7px;
@@ -2182,8 +2255,9 @@ slint::slint! {
                 LoaderGlyph { kind: item.loader-kind; }
                 VerticalLayout {
                     spacing: 4px;
-                    Heading { text: item.name; font-size: Theme.item-title-size; }
-                    BodyText { text: GuiI18n.values("gui-target-summary", item.minecraft, item.loader); color: Theme.text-muted; }
+                    horizontal-stretch: 1;
+                    ElidedHeading { text: item.name; font-size: Theme.item-title-size; }
+                    BodyText { text: GuiI18n.values("gui-target-summary", item.minecraft, item.loader); color: Theme.text-muted; overflow: elide; }
                 }
             }
             Divider { }
@@ -2208,7 +2282,10 @@ slint::slint! {
                 if item.can-kill : AppButton { width: (parent.width - 8px) / 2; text: GuiI18n.text("gui-kill-instance"); tone: "danger"; clicked => { root.kill(item.id); } }
                 LaunchAsButton { width: (parent.width - 8px) / 2; accounts: root.accounts; alongside: item.can-kill; launch-as(account, alongside) => { root.launch-as(item.id, account, alongside); } add-account => { root.add-account(); } }
             }
-            if item.connect-server-id != "" : AppButton { text: GuiI18n.value("gui-launch-connect", item.connect-server-name); enabled: item.can-connect; clicked => { root.connect(item.id, item.connect-server-id); } }
+            // A server's name is in this caption, so the button takes the
+            // width the panel has rather than asking for the width the name
+            // wants.
+            if item.connect-server-id != "" : AppButton { min-width: 88px; text: GuiI18n.value("gui-launch-connect", item.connect-server-name); enabled: item.can-connect; clicked => { root.connect(item.id, item.connect-server-id); } }
             HorizontalLayout { spacing: 8px;
                 AppButton { width: (parent.width - 8px) / 2; text: GuiI18n.text("gui-open-workspace"); clicked => { root.workspace(item.id); } }
                 AppButton { width: (parent.width - 8px) / 2; text: GuiI18n.text("gui-open-folder"); clicked => { root.open-folder(item.id); } }
