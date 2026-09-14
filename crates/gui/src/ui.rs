@@ -4060,8 +4060,17 @@ slint::slint! {
                                             Text { text: entry.number; color: Theme.text; font-size: Theme.label-size; font-weight: 600; overflow: elide; }
                                             Text { text: entry.published + " | " + entry.channel; color: Theme.text-muted; font-size: Theme.caption-size; overflow: elide; }
                                         }
-                                        VerticalLayout { alignment: center; if entry.installed : Pill { text: GuiI18n.text("gui-mod-installed-version"); tone-color: Theme.accent-secondary; } }
-                                        VerticalLayout { alignment: center; if entry.newest && !entry.installed : Pill { text: GuiI18n.text("gui-mod-newest-version"); tone-color: Theme.success; } }
+                                        // One trailing group rather than a column
+                                        // each: an empty wrapper still takes the
+                                        // row's spare width, which pushed whichever
+                                        // badge was showing away from the edge. The
+                                        // two are not exclusive, because the
+                                        // installed release is often also the newest
+                                        // one and that is worth saying.
+                                        HorizontalLayout { spacing: 8px; horizontal-stretch: 0;
+                                            if entry.installed : VerticalLayout { alignment: center; Pill { text: GuiI18n.text("gui-mod-installed-version"); tone-color: Theme.accent-secondary; } }
+                                            if entry.newest : VerticalLayout { alignment: center; Pill { text: GuiI18n.text("gui-mod-newest-version"); tone-color: Theme.success; } }
+                                        }
                                     }
                                     TouchArea { enabled: root.mod-action-can-change && !entry.installed; mouse-cursor: pointer; clicked => { root.mod-action-selected = entry.version-id; } }
                                 }
