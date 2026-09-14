@@ -1132,7 +1132,15 @@ slint::slint! {
                     border-width: row.selected ? 2px : 1px;
                     border-color: row.selected ? Theme.accent : Theme.border.with-alpha(0.6);
                     background: row.actionable || !root.selectable ? Theme.surface : Theme.surface.with-alpha(0.45);
+                    // Under the row's content, so a click on the switch reaches
+                    // the switch and a click anywhere else still selects.
+                    TouchArea { enabled: root.selectable && row.actionable; mouse-cursor: pointer; clicked => { root.toggled(index); } }
                     HorizontalLayout { padding-left: 10px; padding-right: 10px; spacing: 10px;
+                        // A switch, because the state column says what the
+                        // operation would do to this server rather than whether
+                        // it was chosen, and a border weight is no answer to
+                        // "is this one selected".
+                        if root.selectable : VerticalLayout { alignment: center; Toggle { checked: row.selected; enabled: row.actionable; accessible-name: row.name; toggled => { root.toggled(index); } } }
                         // The explanation gets the full row width: a refusal is a
                         // sentence, and eliding it to a column loses the reason.
                         VerticalLayout { alignment: center; spacing: 1px; horizontal-stretch: 1;
@@ -1143,10 +1151,12 @@ slint::slint! {
                             Text { text: row.explanation; color: Theme.text-muted; font-size: Theme.caption-size; overflow: elide; }
                         }
                         VerticalLayout { alignment: center; max-width: 150px;
-                            Text { text: row.state; color: row.tone == "ok" ? Theme.success : row.tone == "warn" ? Theme.warning : row.tone == "error" ? Theme.danger : Theme.text-secondary; font-size: Theme.label-size; horizontal-alignment: right; overflow: elide; }
+                            // Muted while the row is off: what it would do is
+                            // still worth reading, but it is not what is about
+                            // to happen.
+                            Text { text: row.state; color: root.selectable && row.actionable && !row.selected ? Theme.text-muted : row.tone == "ok" ? Theme.success : row.tone == "warn" ? Theme.warning : row.tone == "error" ? Theme.danger : Theme.text-secondary; font-size: Theme.label-size; horizontal-alignment: right; overflow: elide; }
                         }
                     }
-                    TouchArea { enabled: root.selectable && row.actionable; mouse-cursor: pointer; clicked => { root.toggled(index); } }
                 }
             }
         }

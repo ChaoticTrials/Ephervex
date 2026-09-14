@@ -2823,6 +2823,10 @@ fn start_browser_install(ui: &AppWindow, commands: &Sender<Command>, request: &B
     ui.set_mod_plan_requested(request.project.as_str().into());
     ui.set_mod_plan_requested_provider(request.provider.as_str().into());
     ui.set_mod_plan_direct(true);
+    // The rows an earlier confirmation left behind name servers chosen for a
+    // different operation, and a plan that needs no confirmation submits
+    // whatever is in this model.
+    ui.set_linked_targets(model(Vec::new()));
     send(
         commands,
         Command::PlanMod {
@@ -6230,6 +6234,9 @@ fn apply_mod_install_plan(
             // The queue is retired by this install's own completion, not here:
             // the next one may not start while this one is writing the recipe.
             ui.set_mod_action_pending(true);
+            // Nothing was offered, so nothing was chosen. Submitting the rows
+            // still in the model would act on servers this plan never named.
+            ui.set_linked_targets(model(Vec::new()));
             ui.invoke_install_mod(
                 plan.instance.into(),
                 plan.provider.into(),
