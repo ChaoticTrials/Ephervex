@@ -33,4 +33,5 @@ so the reasoning trail survives.
 | [0025](0025-storage-class-is-promoted-in-place.md) | An instance becomes persistent by moving, not by being copied | Accepted |
 | [0026](0026-a-debian-package-alongside-the-appimage.md) | A Debian package alongside the AppImage | Accepted |
 | [0027](0027-a-pack-address-is-a-second-trust-category.md) | A pack address the user activated is a second trust category | Accepted (its scheme-registration decision amended by ADR 0028) |
-| [0028](0028-the-settings-screen-does-not-switch-the-link-handler.md) | The settings screen does not switch the link handler | Accepted |
+| [0028](0028-the-settings-screen-does-not-switch-the-link-handler.md) | The settings screen does not switch the link handler | Superseded by ADR 0029 |
+| [0029](0029-the-allowed-sites-list-carries-its-own-context.md) | The allowed-sites list carries its own context | Accepted |

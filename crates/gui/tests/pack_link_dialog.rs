@@ -99,22 +99,23 @@ fn cancelling_sends_nothing_at_all() {
     assert_eq!(ui.get_modal(), "", "declining closes the dialog");
 }
 
-/// Whether the scheme is claimed at all is settled by installing (ADR 0028).
-/// The control that used to stand here meant "yes" on an AppImage and nothing
-/// at all on a packaged install, and had three lines of copy explaining that.
+/// Whether the scheme is claimed at all is settled by installing (ADR 0028,
+/// ADR 0029). The control that used to stand here meant "yes" on an AppImage
+/// and nothing at all on a packaged install, and had three lines of copy
+/// explaining that.
 #[test]
 fn settings_offers_no_switch_for_the_link_handler() {
     let ui = window();
     general_settings(&ui);
 
-    let detail = ElementHandle::find_by_accessible_label(&ui, &lookup("gui-link-handling-detail"))
-        .find(|element| element.size().height > 0.0)
-        .expect("the section says what modpack links are");
     let sites = ElementHandle::find_by_accessible_label(&ui, &lookup("gui-trusted-pack-hosts"))
         .find(|element| element.size().height > 0.0)
         .expect("the section lists the sites agreed to");
-    let top = detail.absolute_position().y + detail.size().height;
-    let bottom = sites.absolute_position().y;
+    let favorites = ElementHandle::find_by_accessible_label(&ui, &lookup("gui-favorite-versions"))
+        .find(|element| element.size().height > 0.0)
+        .expect("the next section follows the sites list");
+    let top = sites.absolute_position().y;
+    let bottom = favorites.absolute_position().y;
 
     assert!(
         !ElementHandle::find_by_element_type_name(&ui, "Toggle").any(|element| {
@@ -122,7 +123,7 @@ fn settings_offers_no_switch_for_the_link_handler() {
                 && element.absolute_position().y >= top
                 && element.absolute_position().y < bottom
         }),
-        "the section between the description and the sites has to hold no control"
+        "the sites-allowed section has to hold no control for turning link handling on or off"
     );
 }
 

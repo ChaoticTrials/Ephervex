@@ -1291,8 +1291,6 @@ gui-make-persistent = Make Persistent
 # pull the directory out from under it.
 gui-make-persistent-while-running = Make Persistent (stop the game first)
 gui-takes-no-arguments = The Ephervex desktop application takes no arguments. Use the ephervex command for the command line.
-gui-link-handling = Modpack links
-gui-link-handling-detail = Let a web page hand a modpack straight to Ephervex. Ephervex still shows you the address and asks before it downloads anything.
 gui-trusted-pack-hosts = Sites allowed to serve modpacks
 gui-trusted-pack-hosts-detail = Ephervex may download a modpack archive from these without asking again. It does not change where a pack's own files may come from.
 gui-no-trusted-pack-hosts = None yet. The first time a link points at a site, Ephervex asks, and your answer appears here.

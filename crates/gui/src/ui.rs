@@ -3505,10 +3505,9 @@ slint::slint! {
                                 LabeledToggle { width: min(parent.width, 520px); label: GuiI18n.text("gui-default-account-operator"); checked <=> root.make-default-account-operator; }
                                 HorizontalLayout { spacing: 12px; cross-axis-alignment: center; VerticalLayout { FieldLabel { text: GuiI18n.text("gui-default-operator-level"); } BodyText { text: GuiI18n.text("gui-default-operator-level-detail"); color: Theme.text-muted; } } Rectangle { horizontal-stretch: 1; } ComboBox { accessible-label: GuiI18n.text("gui-default-operator-level"); width: 220px; model: [GuiI18n.text("gui-operator-level-1"), GuiI18n.text("gui-operator-level-2"), GuiI18n.text("gui-operator-level-3"), GuiI18n.text("gui-operator-level-4")]; current-index: root.operator-permission-level - 1; selected(value) => { root.operator-permission-level = value == GuiI18n.text("gui-operator-level-1") ? 1 : value == GuiI18n.text("gui-operator-level-2") ? 2 : value == GuiI18n.text("gui-operator-level-3") ? 3 : 4; } } }
                                 ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-save-server-defaults"); tone: "primary"; clicked => { root.save-linked-server-settings(root.show-linked-servers, root.make-default-account-operator, root.operator-permission-level); } } }
-                                SectionTitle { title: GuiI18n.text("gui-link-handling"); detail: GuiI18n.text("gui-link-handling-detail"); }
                                 // Whether the scheme is claimed at all is settled by
-                                // installing, not here (ADR 0028). What this page manages is
-                                // the answers the user has given to link prompts.
+                                // installing, not here (ADR 0028, ADR 0029). What this page
+                                // manages is the answers the user has given to link prompts.
                                 SectionTitle { title: GuiI18n.text("gui-trusted-pack-hosts"); detail: GuiI18n.text("gui-trusted-pack-hosts-detail"); }
                                 if root.trusted-pack-hosts.length == 0 : Rectangle {
                                     width: min(parent.width, 520px);

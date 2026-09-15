@@ -1,6 +1,6 @@
 # ADR 0028 - The settings screen does not switch the link handler
 
-**Status:** Accepted
+**Status:** Superseded by [ADR 0029](0029-the-allowed-sites-list-carries-its-own-context.md)
 
 Amends [ADR 0027](0027-a-pack-address-is-a-second-trust-category.md), whose
 scheme-registration decision named "the command line or the settings switch" as
