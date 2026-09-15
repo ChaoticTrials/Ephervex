@@ -23,6 +23,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use ephervex_download::{HttpConfig, Url, build_single_origin_client, check_transport, redacted};
 use ephervex_model::{
     CurseForgeFileId, CurseForgeProjectId, Hash, HashAlgorithm, LoaderKind, ModProvider,
@@ -39,7 +40,7 @@ use super::dto::{
     CurseForgeFingerprintMatches, CurseForgeGame, CurseForgePagination, CurseForgeProject,
     HASH_ALGO_SHA1,
 };
-use super::mapping::file_declared_sides;
+use super::mapping::{file_declared_sides, published_at, split_declared_support};
 use crate::error::{ModPlatformError, ModPlatformResult};
 use crate::model::{ModFile, RecognizedFile, SideSupport};
 
@@ -1102,6 +1103,14 @@ pub struct CurseForgeFileRelease {
     /// runs on. See [`file_declared_sides`] for how it is read.
     pub client_side: SideSupport,
     pub server_side: SideSupport,
+    /// The Minecraft releases this exact file's own `gameVersions` names, read
+    /// the same way [`super::mapping::version`] reads them for the mod
+    /// browser. Lets a caller that already knows which file it wants also ask
+    /// whether this build of it fits a particular Minecraft release.
+    pub game_versions: Vec<String>,
+    /// When CurseForge published this file. See [`published_at`] for how an
+    /// absent or unparsable date is read.
+    pub published_at: DateTime<Utc>,
 }
 
 /// Checks one file document against the request and normalizes it.
@@ -1157,6 +1166,8 @@ fn normalize_file(
     }
 
     let (client_side, server_side) = file_declared_sides(&document.game_versions);
+    let (game_versions, _loaders) = split_declared_support(&document.game_versions);
+    let published = published_at(document.file_date.as_deref());
 
     Ok(CurseForgeFileRelease {
         project,
@@ -1169,6 +1180,8 @@ fn normalize_file(
         },
         client_side,
         server_side,
+        game_versions,
+        published_at: published,
     })
 }
 

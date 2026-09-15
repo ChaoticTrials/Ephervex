@@ -32,10 +32,10 @@ use crate::presentation::{
     validate_port,
 };
 use crate::ui::{
-    AccountRow, ActivityRow, AppWindow, DiagnosticRow, GuiI18n, ImportBlockedRow, ImportOptionRow,
-    InstanceRow, JavaRow, LinkedTargetRow, LocalModClashRow, LogChunk, ModRow, ModSearchRow,
-    ModVersionRow, PendingEntityRow, PromoteServerRow, RunningRow, ServerRow, Theme,
-    WindowSizePreview,
+    AccountRow, ActivityRow, AppWindow, DiagnosticRow, GuiI18n, ImportBlockedRow,
+    ImportDuplicateRow, ImportOptionRow, InstanceRow, JavaRow, LinkedTargetRow, LocalModClashRow,
+    LogChunk, ModRow, ModSearchRow, ModVersionRow, PendingEntityRow, PromoteServerRow, RunningRow,
+    ServerRow, Theme, WindowSizePreview,
 };
 use crate::window_aspect;
 
@@ -864,6 +864,24 @@ fn render_import_flow(ui: &AppWindow, state: &ImportFlowState) {
         })
         .collect();
     ui.set_import_blocked_items(model(blocked_rows));
+
+    // Purely informational, so unlike `blocked` it has no state of its own:
+    // read straight from the current presentation, same as the header lines
+    // above it.
+    let duplicate_rows: Vec<ImportDuplicateRow> = state
+        .presentation
+        .as_ref()
+        .map(|facts| facts.duplicate_files.as_slice())
+        .unwrap_or_default()
+        .iter()
+        .map(|duplicate| ImportDuplicateRow {
+            project_line: duplicate.project_line.clone().into(),
+            kept_line: duplicate.kept_line.clone().into(),
+            discarded_line: duplicate.discarded_line.clone().into(),
+            matched_minecraft_version: duplicate.matched_minecraft_version,
+        })
+        .collect();
+    ui.set_import_duplicate_items(model(duplicate_rows));
 }
 
 fn register_import_flow(
@@ -8464,6 +8482,7 @@ mod tests {
             },
             needs_provider_resolution: needs_resolution,
             blocked: Vec::new(),
+            duplicate_files: Vec::new(),
         }
     }
 

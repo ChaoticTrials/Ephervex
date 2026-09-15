@@ -213,6 +213,17 @@ slint::slint! {
         browser-url: string,
     }
 
+    // One project a manifest declared twice under different file ids.
+    // Purely informational - the file that fits was already kept
+    // automatically - so unlike ImportBlockedRow this carries no identity to
+    // act on.
+    export struct ImportDuplicateRow {
+        project-line: string,
+        kept-line: string,
+        discarded-line: string,
+        matched-minecraft-version: bool,
+    }
+
     // One linked server in a mod confirmation, or one finished target in a
     // result. The same shape serves both so the two cannot describe the same
     // server differently.
@@ -2680,6 +2691,7 @@ slint::slint! {
         in-out property <string> import-optional-line;
         in-out property <[ImportOptionRow]> import-optional-items;
         in-out property <[ImportBlockedRow]> import-blocked-items;
+        in-out property <[ImportDuplicateRow]> import-duplicate-items;
         // Whether the current archive has a successful, fully resolved
         // analysis: the only condition the Import button's `enabled` needs.
         in-out property <bool> import-ready;
@@ -3964,6 +3976,45 @@ slint::slint! {
                                                     text: GuiI18n.text("gui-skip");
                                                     tone: "danger";
                                                     clicked => { root.skip-blocked-file(item.identity); }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if root.import-duplicate-items.length > 0 : VerticalLayout {
+                                spacing: 6px;
+                                BodyText { text: GuiI18n.text("gui-import-duplicate-detail"); color: Theme.text-secondary; wrap: word-wrap; }
+                                ScrollView {
+                                    viewport-width: self.width;
+                                    height: min(root.import-duplicate-items.length * 100px, 260px);
+                                    VerticalLayout {
+                                        spacing: 6px;
+                                        for item in root.import-duplicate-items : Rectangle {
+                                            height: max(
+                                                58px,
+                                                project-text.preferred-height
+                                                    + kept-text.preferred-height
+                                                    + reason-text.preferred-height
+                                                    + 22px);
+                                            border-radius: 6px;
+                                            border-width: 1px;
+                                            border-color: Theme.border;
+                                            background: Theme.surface;
+                                            VerticalLayout {
+                                                padding: 8px;
+                                                spacing: 2px;
+                                                project-text := BodyText { text: item.project-line; wrap: word-wrap; }
+                                                kept-text := BodyText {
+                                                    text: GuiI18n.values("gui-import-duplicate-kept", item.kept-line, item.discarded-line);
+                                                    color: Theme.text-muted;
+                                                    wrap: word-wrap;
+                                                }
+                                                reason-text := BodyText {
+                                                    text: item.matched-minecraft-version ? GuiI18n.text("gui-import-duplicate-matches-version") : GuiI18n.text("gui-import-duplicate-newer");
+                                                    color: Theme.text-muted;
+                                                    font-size: Theme.caption-size;
+                                                    wrap: word-wrap;
                                                 }
                                             }
                                         }

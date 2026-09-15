@@ -37,11 +37,18 @@
 //!
 //! An unsupported manifest revision, a manifest that is not a Minecraft
 //! modpack, a missing or empty Minecraft version, a missing, unsupported, or
-//! ambiguous loader, a zero or malformed project or file id, one project
-//! declared with two different files, one file declared both required and
-//! optional, and an overrides directory that does not name a plain directory.
-//! Every one is a hard failure rather than a repair: a pack quietly adjusted to
-//! import cleanly reproduces something other than the bug.
+//! ambiguous loader, a zero or malformed project or file id, one file declared
+//! both required and optional, and an overrides directory that does not name a
+//! plain directory. Every one is a hard failure rather than a repair: a pack
+//! quietly adjusted to import cleanly reproduces something other than the bug.
+//!
+//! One project declared with two *different* files is not refused here: a
+//! pack updated without trimming a stale entry is common enough upstream that
+//! failing the whole import over it would be worse than resolving both and
+//! choosing (see [`crate::recipe::PendingProviderFile`] and ADR 0031). Both
+//! ids still parse and both still travel through as their own entry; picking
+//! between them needs the provider's own file metadata, which this module
+//! never contacts.
 
 use std::collections::BTreeMap;
 
@@ -277,12 +284,18 @@ fn overrides_layer(declared: Option<&str>) -> PackResult<OverrideLayer> {
 /// Two entries naming the same project *and* the same file with the same
 /// inclusion are one declaration written twice, and are collapsed: the recipe's
 /// desired state has one entry per file, and refusing an exporter's harmless
-/// repetition would reject packs that install perfectly well. Anything the two
-/// entries disagree about is a genuine contradiction and is refused, because
-/// there is no honest way to install one project twice or to install a file
-/// that is both compulsory and optional.
+/// repetition would reject packs that install perfectly well. Two entries
+/// disagreeing about whether that one file is required is a genuine
+/// contradiction and is refused, because there is no honest way to install a
+/// file that is both compulsory and optional.
+///
+/// Two entries naming the same project with *different* files both survive as
+/// their own [`PendingProviderFile`], instead: resolving which one the pack
+/// actually means needs the provider's own metadata for each, which is a
+/// decision left to whatever resolves these entries against the API (see ADR
+/// 0031), not to this offline parser.
 fn pending_files(files: Vec<RawFile>) -> PackResult<Vec<PendingProviderFile>> {
-    let mut by_project: BTreeMap<u32, (CurseForgeFileId, bool)> = BTreeMap::new();
+    let mut by_pair: BTreeMap<(u32, u32), bool> = BTreeMap::new();
     let mut pending = Vec::with_capacity(files.len());
 
     for file in files {
@@ -298,14 +311,8 @@ fn pending_files(files: Vec<RawFile>) -> PackResult<Vec<PendingProviderFile>> {
                 value: file.file_id.to_string(),
             })?;
 
-        if let Some((declared_file, declared_required)) = by_project.get(&project.get()) {
-            if *declared_file != file_id {
-                return Err(PackError::PackEntryConflict {
-                    project_id: project.to_string(),
-                    first_file: declared_file.to_string(),
-                    second_file: file_id.to_string(),
-                });
-            }
+        let pair = (project.get(), file_id.get());
+        if let Some(declared_required) = by_pair.get(&pair) {
             if *declared_required != file.required {
                 return Err(PackError::PackEntryInclusionConflict {
                     project_id: project.to_string(),
@@ -315,7 +322,7 @@ fn pending_files(files: Vec<RawFile>) -> PackResult<Vec<PendingProviderFile>> {
             // The same file declared twice the same way: one entry, not two.
             continue;
         }
-        by_project.insert(project.get(), (file_id, file.required));
+        by_pair.insert(pair, file.required);
 
         pending.push(PendingProviderFile {
             identity: ProviderFileIdentity {
@@ -764,18 +771,20 @@ mod tests {
     }
 
     #[test]
-    fn one_project_declared_with_two_different_files_is_refused() {
-        let error = parse_manifest(&manifest(
+    fn one_project_declared_with_two_different_files_produces_two_entries() {
+        // A pack updated without trimming a stale entry, or a manifest that
+        // simply changed its mind mid-export: both files parse, and picking
+        // between them is left to whatever resolves these against the API
+        // (ADR 0031), not to this offline parser.
+        let parsed = parse_manifest(&manifest(
             FORGE,
             r#"{"projectID": 238222, "fileID": 1, "required": true},
                {"projectID": 238222, "fileID": 2, "required": true}"#,
         ))
-        .expect_err("must refuse");
-        assert!(matches!(
-            error,
-            PackError::PackEntryConflict { ref first_file, ref second_file, .. }
-                if first_file == "1" && second_file == "2"
-        ));
+        .expect("two different files for one project both parse");
+        assert_eq!(parsed.pending.len(), 2);
+        assert_eq!(parsed.pending[0].identity.file_id.as_deref(), Some("1"));
+        assert_eq!(parsed.pending[1].identity.file_id.as_deref(), Some("2"));
     }
 
     #[test]

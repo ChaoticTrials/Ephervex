@@ -221,12 +221,12 @@ pub use ephervex_options::{
     ReleaseSupport, SkipReason, SkippedPreference, WindowSize,
 };
 pub use ephervex_pack::{
-    AppliedLayer, BlockedProviderFile, ExtractionLimits, ManagedMod, ManagedModInstallation,
-    ManagedMutationReport, MaterializedFiles, MaterializedPack, MaterializedServerRecipe,
-    ModIdentity, ModOrigin, OptionalComponent, OptionalSelection, OverrideLayer, OverrideScope,
-    PackAnalysis, PackError, PackFileRecipe, PackFormat, PackPolicy, PackRecipe, PackSide,
-    ProviderFileIdentity, ProviderRecipeMetadata, RecordedMod, ServerReconstructionPlan, SidePlan,
-    SideRequirement, UnknownServerFiles,
+    AppliedLayer, BlockedProviderFile, DuplicateFileReason, DuplicateProviderFile,
+    ExtractionLimits, ManagedMod, ManagedModInstallation, ManagedMutationReport, MaterializedFiles,
+    MaterializedPack, MaterializedServerRecipe, ModIdentity, ModOrigin, OptionalComponent,
+    OptionalSelection, OverrideLayer, OverrideScope, PackAnalysis, PackError, PackFileRecipe,
+    PackFormat, PackPolicy, PackRecipe, PackSide, ProviderFileIdentity, ProviderRecipeMetadata,
+    RecordedMod, ServerReconstructionPlan, SidePlan, SideRequirement, UnknownServerFiles,
 };
 pub use ephervex_server::{
     CaptureHealth, CaptureRetention, CapturedLine, ControlAction, ControlResponse,

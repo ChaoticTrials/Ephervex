@@ -48,8 +48,8 @@ use crate::install::{self, AppliedLayer, MaterializedFiles};
 use crate::modrinth::{self, ParsedPack};
 use crate::policy::PackPolicy;
 use crate::recipe::{
-    BlockedProviderFile, OptionalComponent, OptionalSelection, OverrideScope, PackRecipe, PackSide,
-    PendingProviderFile, SideRequirement,
+    BlockedProviderFile, DuplicateProviderFile, OptionalComponent, OptionalSelection,
+    OverrideScope, PackRecipe, PackSide, PendingProviderFile, SideRequirement,
 };
 use crate::store::SourceStore;
 
@@ -77,6 +77,12 @@ pub struct PackAnalysis {
     /// becomes an instance - currently only a skipped provider file's
     /// [`AttentionReason::ManualDownloadRequired`].
     pub attention: Vec<AttentionReason>,
+    /// Files a CurseForge manifest declared twice for one project, and which
+    /// of each pair was kept (ADR 0031). Purely informational and never
+    /// retained past this preview: import proceeds either way, so this is
+    /// for a caller to show before the user commits to importing, not for
+    /// the resulting instance's own attention list.
+    pub duplicate_files: Vec<DuplicateProviderFile>,
 }
 
 impl PackAnalysis {
@@ -238,6 +244,7 @@ pub fn parse_with(
                 rejected_urls,
                 blocked: Vec::new(),
                 attention: Vec::new(),
+                duplicate_files: Vec::new(),
             })
         }
         PackFormat::CurseForgePack => {
@@ -256,6 +263,7 @@ pub fn parse_with(
                 rejected_urls: Vec::new(),
                 blocked: Vec::new(),
                 attention: Vec::new(),
+                duplicate_files: Vec::new(),
             })
         }
         PackFormat::PrismExport => Err(PackError::FormatUnsupported { format }),

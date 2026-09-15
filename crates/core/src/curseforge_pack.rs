@@ -22,6 +22,10 @@
 //! exactly that file, and the answer is checked against the question before it
 //! is used. Nothing here lists a project's versions, and nothing picks a newer
 //! file when the declared one is gone: a missing exact file fails the import.
+//! The one file this module *does* choose between is two files the manifest
+//! itself declared for the same project - see [`resolve_duplicate_projects`]
+//! and ADR 0031 - which is a defect in the pack's own declaration, not a
+//! missing file this module went looking for a substitute for.
 //!
 //! # The credential
 //!
@@ -66,9 +70,9 @@ use ephervex_model::{
     SecretString,
 };
 use ephervex_pack::{
-    ArtifactCredentials, BlockedProviderFile, CredentialUnavailable, MODS_DIR, PackAnalysis,
-    PackError, PackFileRecipe, PackFormat, PendingProviderFile, ProviderFileIdentity,
-    RESOURCEPACKS_DIR, SHADERPACKS_DIR, safe_file_name,
+    ArtifactCredentials, BlockedProviderFile, CredentialUnavailable, DuplicateFileReason,
+    DuplicateProviderFile, MODS_DIR, PackAnalysis, PackError, PackFileRecipe, PackFormat,
+    PendingProviderFile, ProviderFileIdentity, RESOURCEPACKS_DIR, SHADERPACKS_DIR, safe_file_name,
 };
 use futures_util::StreamExt as _;
 use reqwest::header::HeaderName;
@@ -152,17 +156,26 @@ impl App {
         let classes = classify_projects(&operation, &analysis.pending, cancel).await?;
 
         let pending = std::mem::take(&mut analysis.pending);
-        let (mut resolved, blocked) =
-            match resolve_files(&operation, &pending, &classes, &hosts, cancel).await {
-                Ok(outcome) => outcome,
-                Err(error) => {
-                    // The analysis is left describing the pack it describes: a
-                    // caller that retries after configuring a key must still see
-                    // the entries that need resolving.
-                    analysis.pending = pending;
-                    return Err(error);
-                }
-            };
+        let (mut resolved, blocked, duplicates) = match resolve_files(
+            &operation,
+            &pending,
+            &classes,
+            &hosts,
+            &analysis.recipe.minecraft_version,
+            cancel,
+        )
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                // The analysis is left describing the pack it describes: a
+                // caller that retries after configuring a key must still see
+                // the entries that need resolving.
+                analysis.pending = pending;
+                return Err(error);
+            }
+        };
+        analysis.duplicate_files.extend(duplicates);
 
         // A file the provider refused is not necessarily still missing: an
         // earlier import, or a folder a watcher is minding, may have already
@@ -650,6 +663,11 @@ struct BlockedFileDetail {
 /// author's decision. Every other lookup failure still propagates
 /// immediately and aborts the batch, exactly as before.
 ///
+/// A project two `pending` entries both declare (ADR 0031) is resolved down
+/// to one winner - see [`pick_winner`] - before recipe entries are built; the
+/// third return value reports which file was kept over which, by name, for
+/// every such project.
+///
 /// Returns resolved entries in the pack's own order, so the recipe reads the
 /// way the manifest does.
 async fn resolve_files(
@@ -657,8 +675,13 @@ async fn resolve_files(
     pending: &[PendingProviderFile],
     classes: &BTreeMap<CurseForgeProjectId, ClassifiedProject>,
     hosts: &DomainAllowlist,
+    minecraft_version: &str,
     cancel: &CancellationToken,
-) -> CoreResult<(Vec<PackFileRecipe>, Vec<BlockedProviderFile>)> {
+) -> CoreResult<(
+    Vec<PackFileRecipe>,
+    Vec<BlockedProviderFile>,
+    Vec<DuplicateProviderFile>,
+)> {
     let wanted: Vec<(CurseForgeProjectId, CurseForgeFileId)> = pending
         .iter()
         .map(declared_ids)
@@ -724,9 +747,40 @@ async fn resolve_files(
         }
     }
 
+    let (winners, duplicates) =
+        resolve_duplicate_projects(&by_identity, classes, minecraft_version);
+    let (resolved, blocked) = assemble_resolved_files(
+        pending,
+        &wanted,
+        &by_identity,
+        &blocked_reasons,
+        &winners,
+        classes,
+        hosts,
+    )?;
+    Ok((resolved, blocked, duplicates))
+}
+
+/// Turns each pending entry into a recipe entry or a blocked entry, skipping
+/// any a duplicate project (see [`resolve_duplicate_projects`]) already
+/// decided against.
+fn assemble_resolved_files(
+    pending: &[PendingProviderFile],
+    wanted: &[(CurseForgeProjectId, CurseForgeFileId)],
+    by_identity: &BTreeMap<(CurseForgeProjectId, CurseForgeFileId), CurseForgeFileRelease>,
+    blocked_reasons: &BTreeMap<(CurseForgeProjectId, CurseForgeFileId), BlockedFileDetail>,
+    winners: &BTreeMap<CurseForgeProjectId, CurseForgeFileId>,
+    classes: &BTreeMap<CurseForgeProjectId, ClassifiedProject>,
+    hosts: &DomainAllowlist,
+) -> CoreResult<(Vec<PackFileRecipe>, Vec<BlockedProviderFile>)> {
     let mut resolved = Vec::with_capacity(by_identity.len());
     let mut blocked = Vec::with_capacity(blocked_reasons.len());
-    for (entry, identity) in pending.iter().zip(&wanted) {
+    for (entry, identity) in pending.iter().zip(wanted) {
+        if by_identity.contains_key(identity) && winners.get(&identity.0) != Some(&identity.1) {
+            // Superseded by a better candidate for the same project; already
+            // named in `resolve_duplicate_projects`'s report.
+            continue;
+        }
         if let Some(release) = by_identity.get(identity) {
             let content_class = classes
                 .get(&identity.0)
@@ -745,12 +799,7 @@ async fn resolve_files(
             resolved.push(recipe_entry(entry, release, content_class, hosts)?);
         } else if let Some(detail) = blocked_reasons.get(identity) {
             blocked.push(BlockedProviderFile {
-                identity: ProviderFileIdentity {
-                    provider: Some(ModProvider::CurseForge),
-                    project_id: Some(identity.0.to_string()),
-                    version_id: Some(identity.1.to_string()),
-                    file_id: Some(identity.1.to_string()),
-                },
+                identity: provider_identity(identity.0, identity.1),
                 project_name: detail.project_name.clone(),
                 file_name: detail.file_name.clone(),
                 browser_url: detail.browser_url.clone(),
@@ -769,6 +818,121 @@ async fn resolve_files(
         }
     }
     Ok((resolved, blocked))
+}
+
+/// Groups every resolved file by project, picks one winner per project (see
+/// [`pick_winner`]), and reports every project where there was more than one
+/// candidate to choose from.
+///
+/// `by_identity`'s keys iterate sorted by `(project, file)`, so files for the
+/// same project are already adjacent and are grouped with [`slice::chunk_by`]
+/// rather than a second map.
+fn resolve_duplicate_projects(
+    by_identity: &BTreeMap<(CurseForgeProjectId, CurseForgeFileId), CurseForgeFileRelease>,
+    classes: &BTreeMap<CurseForgeProjectId, ClassifiedProject>,
+    minecraft_version: &str,
+) -> (
+    BTreeMap<CurseForgeProjectId, CurseForgeFileId>,
+    Vec<DuplicateProviderFile>,
+) {
+    let identities: Vec<(CurseForgeProjectId, CurseForgeFileId)> =
+        by_identity.keys().copied().collect();
+
+    let mut winners = BTreeMap::new();
+    let mut duplicates = Vec::new();
+    for group in identities.chunk_by(|left, right| left.0 == right.0) {
+        let project = group[0].0;
+        let files: Vec<CurseForgeFileId> = group.iter().map(|&(_, file)| file).collect();
+        let winner = pick_winner(
+            project,
+            files[0],
+            &files[1..],
+            by_identity,
+            minecraft_version,
+        );
+        let kept = &by_identity[&(project, winner)];
+        let reason = if kept
+            .game_versions
+            .iter()
+            .any(|version| version == minecraft_version)
+        {
+            DuplicateFileReason::MatchesMinecraftVersion
+        } else {
+            DuplicateFileReason::MoreRecentlyPublished
+        };
+        let project_name = classes
+            .get(&project)
+            .map(|classified| classified.name.clone());
+        for &file in &files {
+            if file != winner {
+                let discarded = &by_identity[&(project, file)];
+                duplicates.push(DuplicateProviderFile {
+                    kept: provider_identity(project, winner),
+                    discarded: provider_identity(project, file),
+                    project_name: project_name.clone(),
+                    kept_file_name: Some(kept.artifact.file_name.clone()),
+                    discarded_file_name: Some(discarded.artifact.file_name.clone()),
+                    reason,
+                });
+            }
+        }
+        winners.insert(project, winner);
+    }
+    (winners, duplicates)
+}
+
+/// The identity a resolved CurseForge project/file pair records, for a
+/// caller that needs the pair as a [`ProviderFileIdentity`] rather than as
+/// the raw ids.
+fn provider_identity(project: CurseForgeProjectId, file: CurseForgeFileId) -> ProviderFileIdentity {
+    ProviderFileIdentity {
+        provider: Some(ModProvider::CurseForge),
+        project_id: Some(project.to_string()),
+        version_id: Some(file.to_string()),
+        file_id: Some(file.to_string()),
+    }
+}
+
+/// Which of one project's several resolved candidate files to keep.
+///
+/// Preferred: the file whose own `gameVersions` names the pack's exact
+/// Minecraft version - the pack's declared target is a fact this launcher
+/// already has, and a file that fits it is a better answer than a guess from
+/// publish dates alone. When none, more than one, or exactly one candidate
+/// matches equally, the more recently published file wins, mirroring how the
+/// mod browser already orders versions by [`CurseForgeFileRelease::published_at`].
+/// A tie keeps whichever of the two was already winning.
+fn pick_winner(
+    project: CurseForgeProjectId,
+    first: CurseForgeFileId,
+    rest: &[CurseForgeFileId],
+    by_identity: &BTreeMap<(CurseForgeProjectId, CurseForgeFileId), CurseForgeFileRelease>,
+    minecraft_version: &str,
+) -> CurseForgeFileId {
+    let release_of = |file: CurseForgeFileId| &by_identity[&(project, file)];
+    let matches_target = |file: CurseForgeFileId| {
+        release_of(file)
+            .game_versions
+            .iter()
+            .any(|version| version == minecraft_version)
+    };
+    let beats = |candidate: CurseForgeFileId, current: CurseForgeFileId| {
+        matches_target(candidate)
+            .cmp(&matches_target(current))
+            .then(
+                release_of(candidate)
+                    .published_at
+                    .cmp(&release_of(current).published_at),
+            )
+            == std::cmp::Ordering::Greater
+    };
+    rest.iter().copied().fold(first, |best, candidate| {
+        if beats(candidate, best) {
+            candidate
+        } else {
+            best
+        }
+    })
 }
 
 /// A human-readable line naming a skipped file, for
@@ -1023,6 +1187,74 @@ mod tests {
             base = server.uri(),
             digest = sha1_of(body),
         )
+    }
+
+    /// The same document [`file_document_with_environment`] serves, but also
+    /// declaring `fileDate` - for a test that has to tell two candidate files
+    /// apart by when CurseForge published them.
+    fn file_document_with_game_versions_and_date(
+        server: &MockServer,
+        project: u32,
+        file: u32,
+        name: &str,
+        body: &[u8],
+        game_versions: &[&str],
+        file_date: &str,
+    ) -> String {
+        let game_versions = game_versions
+            .iter()
+            .map(|entry| format!("\"{entry}\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            r#"{{"data":{{"id":{file},"gameId":432,"modId":{project},"isAvailable":true,
+                "displayName":"{name}","fileName":"{name}","releaseType":1,"fileStatus":4,
+                "fileLength":{length},
+                "downloadUrl":"{base}/files/{project}/{file}/{name}",
+                "gameVersions":[{game_versions}],
+                "fileDate":"{file_date}",
+                "hashes":[{{"value":"{digest}","algo":1}},
+                          {{"value":"0123456789abcdef0123456789abcdef","algo":2}}]}}}}"#,
+            length = body.len(),
+            base = server.uri(),
+            digest = sha1_of(body),
+        )
+    }
+
+    /// Serves one exact file's metadata (with declared Minecraft versions and
+    /// a publish date) and its bytes.
+    async fn serve_file_with_game_versions_and_date(
+        server: &MockServer,
+        project: u32,
+        file: u32,
+        name: &str,
+        body: &[u8],
+        game_versions: &[&str],
+        file_date: &str,
+    ) {
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/mods/{project}/files/{file}")))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                file_document_with_game_versions_and_date(
+                    server,
+                    project,
+                    file,
+                    name,
+                    body,
+                    game_versions,
+                    file_date,
+                ),
+                "application/json",
+            ))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/files/{project}/{file}/{name}")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(body.to_vec(), "application/java-archive"),
+            )
+            .mount(server)
+            .await;
     }
 
     /// The numeric id this test fixture's loopback server uses for the Mods
@@ -2803,6 +3035,235 @@ mod tests {
                 .iter()
                 .all(|file| !file.ends_with("restricted.jar")),
             "a skipped file is never installed"
+        );
+    }
+
+    /// Builds and serves the Garden of Glass (Questbook Edition) v4.3.4
+    /// repro: Just Enough Items declared twice, a stale 1.16.4 file left over
+    /// from an earlier version of the pack, and the 1.16.5 file it actually
+    /// ships (ADR 0031), against a manifest that (unlike
+    /// [`export_manifest_with_files`], which always declares 1.20.1) declares
+    /// Minecraft 1.16.5 - the version the "matches" branch needs to see.
+    async fn serve_and_declare_the_jei_duplicate(
+        server: &MockServer,
+        stale_file: u32,
+        current_file: u32,
+    ) -> Vec<u8> {
+        serve_pack_as_mods(server).await;
+        serve_file_with_game_versions_and_date(
+            server,
+            REQUIRED_PROJECT,
+            stale_file,
+            "jei-1.16.4-7.6.1.65.jar",
+            REQUIRED_BODY,
+            &["1.16.4", "Forge"],
+            "2020-10-01T00:00:00.000Z",
+        )
+        .await;
+        serve_file_with_game_versions_and_date(
+            server,
+            REQUIRED_PROJECT,
+            current_file,
+            "jei-1.16.5-7.7.0.101.jar",
+            REQUIRED_BODY,
+            &["1.16.5", "Forge"],
+            "2021-05-01T00:00:00.000Z",
+        )
+        .await;
+        serve_file(
+            server,
+            OPTIONAL_PROJECT,
+            OPTIONAL_FILE,
+            "optional-1.0.0.jar",
+            OPTIONAL_BODY,
+        )
+        .await;
+
+        format!(
+            r#"{{
+                "minecraft": {{
+                    "version": "1.16.5",
+                    "modLoaders": [{{"id": "forge-36.2.0", "primary": true}}]
+                }},
+                "manifestType": "minecraftModpack",
+                "manifestVersion": 1,
+                "name": "Repro Pack",
+                "version": "4.3.4",
+                "author": "A Reporter",
+                "files": [
+                    {{"projectID": {REQUIRED_PROJECT}, "fileID": {stale_file}, "required": true}},
+                    {{"projectID": {REQUIRED_PROJECT}, "fileID": {current_file}, "required": true}},
+                    {{"projectID": {OPTIONAL_PROJECT}, "fileID": {OPTIONAL_FILE}, "required": false}}
+                ],
+                "overrides": "overrides"
+            }}"#
+        )
+        .into_bytes()
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_declaration_names_the_kept_and_discarded_files_before_import() {
+        // Resolution runs before the user ever sees an "Import pack" button
+        // (`spawn_import_resolution` in the GUI backend), so this is what the
+        // preview - not the resulting instance - has to show.
+        let server = MockServer::start().await;
+        let stale_file = REQUIRED_FILE;
+        let current_file = REQUIRED_FILE + 1;
+        let manifest = serve_and_declare_the_jei_duplicate(&server, stale_file, current_file).await;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = archive_with_manifest(dir.path(), "repro.zip", &manifest);
+        let app = app_against(dir.path(), &server);
+
+        let mut analysis = app.analyze_pack(&archive).expect("analyzed locally");
+        app.resolve_pack(&mut analysis, &[], &CancellationToken::new())
+            .await
+            .expect("a duplicate declaration does not fail resolution");
+
+        assert_eq!(
+            analysis.duplicate_files,
+            vec![DuplicateProviderFile {
+                kept: ProviderFileIdentity {
+                    provider: Some(ModProvider::CurseForge),
+                    project_id: Some(REQUIRED_PROJECT.to_string()),
+                    version_id: Some(current_file.to_string()),
+                    file_id: Some(current_file.to_string()),
+                },
+                discarded: ProviderFileIdentity {
+                    provider: Some(ModProvider::CurseForge),
+                    project_id: Some(REQUIRED_PROJECT.to_string()),
+                    version_id: Some(stale_file.to_string()),
+                    file_id: Some(stale_file.to_string()),
+                },
+                project_name: Some("Required Mod".to_owned()),
+                kept_file_name: Some("jei-1.16.5-7.7.0.101.jar".to_owned()),
+                discarded_file_name: Some("jei-1.16.4-7.6.1.65.jar".to_owned()),
+                reason: DuplicateFileReason::MatchesMinecraftVersion,
+            }],
+            "the resolved names are reported, not the raw fileIDs, and say why"
+        );
+        assert!(
+            analysis.attention.is_empty(),
+            "a duplicate declaration is not an instance attention reason"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_project_declared_twice_installs_the_file_matching_the_packs_minecraft_version() {
+        let server = MockServer::start().await;
+        let stale_file = REQUIRED_FILE;
+        let current_file = REQUIRED_FILE + 1;
+        let manifest = serve_and_declare_the_jei_duplicate(&server, stale_file, current_file).await;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = archive_with_manifest(dir.path(), "repro.zip", &manifest);
+        let app = app_against(dir.path(), &server);
+
+        let imported = import(&app, &archive)
+            .await
+            .expect("a duplicate declaration does not fail the import");
+
+        assert!(
+            imported
+                .materialized
+                .files
+                .installed
+                .iter()
+                .any(|file| file.ends_with("jei-1.16.5-7.7.0.101.jar")),
+            "the file matching the pack's own Minecraft version is installed"
+        );
+        assert!(
+            imported
+                .materialized
+                .files
+                .installed
+                .iter()
+                .all(|file| !file.ends_with("jei-1.16.4-7.6.1.65.jar")),
+            "the stale, non-matching file is never installed"
+        );
+        assert!(
+            imported.record.attention.is_empty(),
+            "a duplicate declaration is not carried onto the instance"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_project_declared_twice_with_no_matching_version_installs_the_newer_file() {
+        // Neither candidate names the pack's Minecraft version, so the tie
+        // falls to whichever CurseForge published more recently.
+        let server = MockServer::start().await;
+        serve_pack_as_mods(&server).await;
+
+        let older_file = REQUIRED_FILE;
+        let newer_file = REQUIRED_FILE + 1;
+        serve_file_with_game_versions_and_date(
+            &server,
+            REQUIRED_PROJECT,
+            older_file,
+            "older.jar",
+            REQUIRED_BODY,
+            &["1.19.2", "Forge"],
+            "2022-01-01T00:00:00.000Z",
+        )
+        .await;
+        serve_file_with_game_versions_and_date(
+            &server,
+            REQUIRED_PROJECT,
+            newer_file,
+            "newer.jar",
+            REQUIRED_BODY,
+            &["1.19.4", "Forge"],
+            "2023-06-01T00:00:00.000Z",
+        )
+        .await;
+        serve_file(
+            &server,
+            OPTIONAL_PROJECT,
+            OPTIONAL_FILE,
+            "optional-1.0.0.jar",
+            OPTIONAL_BODY,
+        )
+        .await;
+
+        let manifest = export_manifest_with_files(&format!(
+            r#"{{"projectID": {REQUIRED_PROJECT}, "fileID": {older_file}, "required": true}},
+               {{"projectID": {REQUIRED_PROJECT}, "fileID": {newer_file}, "required": true}},
+               {{"projectID": {OPTIONAL_PROJECT}, "fileID": {OPTIONAL_FILE}, "required": false}}"#
+        ));
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = archive_with_manifest(dir.path(), "repro.zip", &manifest);
+        let app = app_against(dir.path(), &server);
+
+        let mut analysis = app.analyze_pack(&archive).expect("analyzed locally");
+        app.resolve_pack(&mut analysis, &[], &CancellationToken::new())
+            .await
+            .expect("a duplicate declaration does not fail resolution");
+        assert_eq!(
+            analysis.duplicate_files[0].reason,
+            DuplicateFileReason::MoreRecentlyPublished,
+            "neither file matched the pack's Minecraft version"
+        );
+
+        let imported = import(&app, &archive)
+            .await
+            .expect("a duplicate declaration does not fail the import");
+
+        assert!(
+            imported
+                .materialized
+                .files
+                .installed
+                .iter()
+                .any(|file| file.ends_with("newer.jar")),
+            "the more recently published file wins when neither matches"
+        );
+        assert!(
+            imported
+                .materialized
+                .files
+                .installed
+                .iter()
+                .all(|file| !file.ends_with("older.jar")),
         );
     }
 

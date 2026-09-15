@@ -241,7 +241,7 @@ pub(super) fn version(
 /// level; everything else is left where a Minecraft release would be, which is
 /// harmless because compatibility asks whether the *exact* instance release is
 /// present rather than what else the list contains.
-fn split_declared_support(declared: &[String]) -> (Vec<String>, Vec<String>) {
+pub(super) fn split_declared_support(declared: &[String]) -> (Vec<String>, Vec<String>) {
     let mut versions = Vec::new();
     let mut loaders = Vec::new();
     for entry in declared {
@@ -303,7 +303,7 @@ const fn dependency_kind(relation_type: u32) -> Option<DependencyKind> {
 /// Version ordering is by publication date, so an unparsable or absent date
 /// becomes the epoch: it sorts oldest, which keeps an undated file from
 /// displacing a release that actually is the newest.
-fn published_at(raw: Option<&str>) -> DateTime<Utc> {
+pub(super) fn published_at(raw: Option<&str>) -> DateTime<Utc> {
     raw.and_then(|value| DateTime::parse_from_rfc3339(value.trim()).ok())
         .map_or_else(DateTime::<Utc>::default, |value| value.with_timezone(&Utc))
 }

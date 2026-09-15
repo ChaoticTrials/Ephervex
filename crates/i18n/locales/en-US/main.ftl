@@ -939,9 +939,6 @@ error-pack-limit-exceeded = The pack is larger than Ephervex is willing to unpac
 error-pack-entry-id-invalid = The pack names a mod by an id that identifies nothing.
 .action = { $field } is { $value }, which no project or file can have. Ephervex refused the whole pack rather than guessing which mod was meant.
 
-error-pack-entry-conflict = The pack asks for two different versions of the same mod.
-.action = Project { $project } is listed as both file { $first } and file { $second }. Ephervex installs one version of a mod and will not choose between them.
-
 error-pack-entry-inclusion-conflict = The pack lists the same file as both required and optional.
 .action = File { $file_id } of project { $project } appears twice with different answers, so what the pack wants installed is not clear.
 
@@ -1979,6 +1976,10 @@ gui-import-blocked-detail = These files' authors do not allow automatic download
 gui-import-open-watched-folders = Manage Watched Folders
 gui-import-blocked-opened = Opened the file's download page in your browser.
 gui-import-blocked-open-failed = Could not open a browser.
+gui-import-duplicate-detail = This pack lists some mods more than once. Ephervex kept the file that fits and left the other one out automatically.
+gui-import-duplicate-kept = Kept { $first } over { $second }
+gui-import-duplicate-matches-version = Matches this pack's Minecraft version; the other file does not.
+gui-import-duplicate-newer = Neither file names this pack's Minecraft version, so the more recently published one was kept.
 gui-created-entity = Created "{ $value }".
 gui-imported-pack = Imported "{ $value }".
 gui-folder-unavailable = Folder unavailable.

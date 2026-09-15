@@ -93,10 +93,10 @@ pub use mutate::{
 pub use path::{RESERVED_METADATA_DIR, safe_file_name};
 pub use policy::PackPolicy;
 pub use recipe::{
-    BlockedProviderFile, ManagedMod, ModIdentity, OptionalComponent, OptionalSelection,
-    OverrideLayer, OverrideScope, PackFileRecipe, PackRecipe, PackSide, PendingProviderFile,
-    ProviderFileIdentity, ProviderRecipeMetadata, RECIPE_VERSION, RecordedMod,
-    ServerReconstructionPlan, SidePlan, SideRequirement, UnknownServerFiles,
+    BlockedProviderFile, DuplicateFileReason, DuplicateProviderFile, ManagedMod, ModIdentity,
+    OptionalComponent, OptionalSelection, OverrideLayer, OverrideScope, PackFileRecipe, PackRecipe,
+    PackSide, PendingProviderFile, ProviderFileIdentity, ProviderRecipeMetadata, RECIPE_VERSION,
+    RecordedMod, ServerReconstructionPlan, SidePlan, SideRequirement, UnknownServerFiles,
 };
 pub use server_pack::{
     EULA_FILE, InstalledServerPack, LIBRARIES_DIR, ServerPackInstall, ServerPackMod,

@@ -36,3 +36,4 @@ so the reasoning trail survives.
 | [0028](0028-the-settings-screen-does-not-switch-the-link-handler.md) | The settings screen does not switch the link handler | Superseded by ADR 0029 |
 | [0029](0029-the-allowed-sites-list-carries-its-own-context.md) | The allowed-sites list carries its own context | Accepted |
 | [0030](0030-ephervex-ships-its-own-curseforge-key-as-a-fallback.md) | Ephervex ships its own CurseForge key as a fallback | Accepted |
+| [0031](0031-a-project-declared-twice-resolves-to-one-file.md) | A project declared twice resolves to one file | Accepted |

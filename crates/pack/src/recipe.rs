@@ -405,6 +405,39 @@ pub struct BlockedProviderFile {
     pub server: SideRequirement,
 }
 
+/// Why one of two files a manifest declared for the same project was kept
+/// over the other, for [`DuplicateProviderFile`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DuplicateFileReason {
+    /// The kept file's own declared Minecraft versions name the pack's exact
+    /// target; the discarded file's did not.
+    MatchesMinecraftVersion,
+    /// Neither candidate's declared Minecraft versions named the pack's exact
+    /// target (or more than one did equally), so the more recently published
+    /// file was kept.
+    MoreRecentlyPublished,
+}
+
+/// Two files a manifest declared for the same project, and which one was
+/// kept.
+///
+/// Only produced for a CurseForge manifest naming one project under two
+/// different file ids at once - typically a pack updated without trimming a
+/// stale entry (ADR 0031). Not an error and not a reason to refuse the pack:
+/// the file that best fits is kept automatically, and this is purely
+/// informational, for a caller to show before the user commits to importing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DuplicateProviderFile {
+    /// The identity of the file that was kept and will be installed.
+    pub kept: ProviderFileIdentity,
+    /// The identity of the file that was discarded.
+    pub discarded: ProviderFileIdentity,
+    pub project_name: Option<String>,
+    pub kept_file_name: Option<String>,
+    pub discarded_file_name: Option<String>,
+    pub reason: DuplicateFileReason,
+}
+
 /// One file the pack declares (the project's `PackFileRecipe`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PackFileRecipe {

@@ -124,19 +124,6 @@ pub enum PackError {
     #[error("the pack entry's `{field}` is `{value}`, which names nothing")]
     PackEntryIdInvalid { field: &'static str, value: String },
 
-    /// One project is declared with two different files.
-    ///
-    /// There is no honest way to install both: they are two versions of one
-    /// mod, and the desired state has room for one.
-    #[error(
-        "the pack declares project `{project_id}` as both file `{first_file}` and `{second_file}`"
-    )]
-    PackEntryConflict {
-        project_id: String,
-        first_file: String,
-        second_file: String,
-    },
-
     /// One file is declared both as part of the pack and as an optional choice.
     #[error("the pack declares file `{file_id}` of `{project_id}` as both required and optional")]
     PackEntryInclusionConflict { project_id: String, file_id: String },
@@ -367,7 +354,6 @@ impl PackError {
             Self::EntryTypeUnsupported { .. } => "error-pack-entry-type-unsupported",
             Self::LimitExceeded { .. } => "error-pack-limit-exceeded",
             Self::PackEntryIdInvalid { .. } => "error-pack-entry-id-invalid",
-            Self::PackEntryConflict { .. } => "error-pack-entry-conflict",
             Self::PackEntryInclusionConflict { .. } => "error-pack-entry-inclusion-conflict",
             Self::ProviderContentUnsupported { .. } => "error-pack-provider-content-unsupported",
             Self::ProviderFilesUnresolved { .. } => "error-pack-provider-files-unresolved",
@@ -463,15 +449,6 @@ impl PackError {
             Self::PackEntryIdInvalid { field, value } => {
                 vec![("field", (*field).to_owned()), ("value", value.clone())]
             }
-            Self::PackEntryConflict {
-                project_id,
-                first_file,
-                second_file,
-            } => vec![
-                ("project", project_id.clone()),
-                ("first", first_file.clone()),
-                ("second", second_file.clone()),
-            ],
             Self::PackEntryInclusionConflict {
                 project_id,
                 file_id,
@@ -631,11 +608,6 @@ mod tests {
             PackError::PackEntryIdInvalid {
                 field: "projectID",
                 value: "0".to_owned(),
-            },
-            PackError::PackEntryConflict {
-                project_id: "238222".to_owned(),
-                first_file: "1".to_owned(),
-                second_file: "2".to_owned(),
             },
             PackError::PackEntryInclusionConflict {
                 project_id: "238222".to_owned(),

@@ -9,8 +9,9 @@ use std::net::IpAddr;
 use ephervex_core::{
     ARTIFACT_CACHE_LIMIT_PRESETS, ArtifactCacheLimit, ArtifactCacheLimitError, BlockedProviderFile,
     ByteUnit, ClientRecord, DEFAULT_ARTIFACT_CACHE_LIMIT_BYTES, DiagnosticKind, DiagnosticScope,
-    LaunchAndConnectAvailability, NetworkAccess, PackAnalysis, PackSide, ProviderFileIdentity,
-    RuntimeClassification, ServerRecord, ServerStatus, format_binary_bytes,
+    DuplicateFileReason, DuplicateProviderFile, LaunchAndConnectAvailability, NetworkAccess,
+    PackAnalysis, PackSide, ProviderFileIdentity, RuntimeClassification, ServerRecord,
+    ServerStatus, format_binary_bytes,
 };
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use ephervex_model::{
@@ -1315,6 +1316,55 @@ impl BlockedFilePresentation {
     }
 }
 
+/// Two files a manifest declared for the same project, translated from
+/// [`ephervex_core::DuplicateProviderFile`] for the import modal's
+/// informational duplicate list.
+///
+/// Purely informational: the file that fits was already kept automatically,
+/// and this exists only to say so - and why - before the user commits to
+/// importing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DuplicateFilePresentation {
+    /// The project's own name, falling back to its catalog id.
+    pub project_line: String,
+    /// The file that was kept and will be installed.
+    pub kept_line: String,
+    /// The file that was discarded in its favor.
+    pub discarded_line: String,
+    /// Whether the kept file won because it declares the pack's own
+    /// Minecraft version, as opposed to being the more recently published
+    /// candidate when neither declared it (or both did).
+    pub matched_minecraft_version: bool,
+}
+
+impl DuplicateFilePresentation {
+    #[must_use]
+    fn from_duplicate(duplicate: &DuplicateProviderFile) -> Self {
+        let project_id = duplicate.kept.project_id.as_deref().unwrap_or_default();
+        let kept_id = duplicate.kept.file_id.as_deref().unwrap_or_default();
+        let discarded_id = duplicate.discarded.file_id.as_deref().unwrap_or_default();
+        Self {
+            project_line: duplicate
+                .project_name
+                .clone()
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| project_id.to_owned()),
+            kept_line: duplicate
+                .kept_file_name
+                .clone()
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| kept_id.to_owned()),
+            discarded_line: duplicate
+                .discarded_file_name
+                .clone()
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| discarded_id.to_owned()),
+            matched_minecraft_version: duplicate.reason
+                == DuplicateFileReason::MatchesMinecraftVersion,
+        }
+    }
+}
+
 /// The provider-neutral facts an import analysis has enough information to
 /// show, independent of whether provider resolution has finished.
 ///
@@ -1338,6 +1388,11 @@ pub struct ImportPresentation {
     /// cache nor an explicit skip has cleared yet. Import stays disabled
     /// while this is non-empty.
     pub blocked: Vec<BlockedFilePresentation>,
+    /// Projects the manifest declared twice under different file ids, and
+    /// which file of each pair was kept (ADR 0031). Purely informational -
+    /// import is never blocked by this - shown so the choice is visible
+    /// before the user commits, not just recorded afterward.
+    pub duplicate_files: Vec<DuplicateFilePresentation>,
 }
 
 impl ImportPresentation {
@@ -1366,6 +1421,11 @@ impl ImportPresentation {
                 .blocked
                 .iter()
                 .map(BlockedFilePresentation::from_blocked)
+                .collect(),
+            duplicate_files: analysis
+                .duplicate_files
+                .iter()
+                .map(DuplicateFilePresentation::from_duplicate)
                 .collect(),
         }
     }
@@ -1523,6 +1583,7 @@ mod import_tests {
             ],
             needs_provider_resolution: false,
             blocked: Vec::new(),
+            duplicate_files: Vec::new(),
         }
     }
 

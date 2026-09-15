@@ -86,8 +86,13 @@ pub struct CurseForgeProjectId(NonZeroU32);
 /// The exact numeric id CurseForge names one file of a project by.
 ///
 /// Distinct from [`CurseForgeProjectId`] for the reason given there. A file id
-/// is what makes a pack import exact: the launcher installs the file the pack
-/// declared, never the newest file of the same project.
+/// is what makes a pack import exact: the launcher installs a file the pack
+/// declared, never one it merely guessed at. The one narrow exception is a
+/// manifest that declares the *same* project under two different file ids at
+/// once - an update that left a stale entry behind, in practice - where the
+/// pack import resolver picks between the two rather than refusing the whole
+/// pack (ADR 0031). A single pinned id, as this type otherwise always names
+/// one, is never second-guessed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct CurseForgeFileId(NonZeroU32);
 
