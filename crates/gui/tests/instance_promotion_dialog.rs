@@ -12,7 +12,9 @@ use std::rc::Rc;
 
 use ephervex_gui::ui::{AppWindow, GuiI18n, InstanceRow, PromoteServerRow};
 use ephervex_i18n::{Arg, lookup, lookup_args};
-use i_slint_backend_testing::{ElementHandle, TestingBackend, TestingBackendOptions};
+use i_slint_backend_testing::{
+    ElementHandle, TestingBackend, TestingBackendOptions, mock_elapsed_time,
+};
 use slint::platform::PointerEventButton;
 use slint::{ComponentHandle, Model, ModelRc, PhysicalSize, SharedString, VecModel};
 
@@ -105,8 +107,10 @@ fn a_running_instance_says_why_it_cannot_be_made_persistent() {
 
     // The pointer is moved onto the button before the press, which is what
     // puts it under the cursor. The press itself is refused; the explanation
-    // is what the user gets instead.
+    // is what the user gets instead, once the built-in tooltip's hover delay
+    // has passed.
     button.mock_single_click(PointerEventButton::Left);
+    mock_elapsed_time(std::time::Duration::from_millis(600));
     settle(&ui);
 
     assert!(

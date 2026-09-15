@@ -13,7 +13,7 @@ use std::rc::Rc;
 use ephervex_gui::ui::{AppWindow, GuiI18n, InstanceRow};
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use i_slint_backend_testing::{
-    AccessibleRole, ElementHandle, TestingBackend, TestingBackendOptions,
+    AccessibleRole, ElementHandle, TestingBackend, TestingBackendOptions, mock_elapsed_time,
 };
 use slint::platform::PointerEventButton;
 use slint::{ComponentHandle, ModelRc, PhysicalSize, SharedString, VecModel};
@@ -74,6 +74,7 @@ fn a_shortened_card_title_says_the_whole_name_on_hover() {
     let before = bearing(&ui, LONG_NAME);
 
     card_title(&ui).mock_single_click(PointerEventButton::Left);
+    mock_elapsed_time(std::time::Duration::from_millis(600));
     settle(&ui);
 
     assert_eq!(
@@ -118,6 +119,7 @@ fn a_shortened_connect_button_says_its_whole_caption_on_hover() {
     widest(&ui, &caption)
         .expect("a linked client offers to launch and connect")
         .mock_single_click(PointerEventButton::Left);
+    mock_elapsed_time(std::time::Duration::from_millis(600));
     settle(&ui);
 
     assert_eq!(

@@ -30,6 +30,10 @@ slint::slint! {
         out property <color> background: #101315;
         out property <color> surface: #171b1e;
         out property <color> elevated: #1e2428;
+        // One step past `elevated`, for a popover that has to read against
+        // whatever is behind it - including a card that is `elevated` itself
+        // because hovering it is what raised the popover.
+        out property <color> overlay: #2b333a;
         out property <color> border: #30373c;
         out property <color> accent: #5dbbc3;
         out property <color> accent-secondary: #78a8c2;
@@ -430,29 +434,23 @@ slint::slint! {
         background: Theme.border;
     }
 
-    // What a control has to say on hover.
-    //
-    // Two things raise one, and they are the same thing said twice: something
-    // the screen cannot show. A disabled control cannot show why it is refusing,
-    // and a caption or a title that did not fit cannot show the rest of itself.
-    component HoverNote inherits Rectangle {
+    // What a control has to say on hover: a disabled control's reason, or a
+    // caption or title that did not fit and could not show the rest of
+    // itself. Custom content for the built-in `Tooltip`, which renders it in
+    // a real overlay above the whole window - not as an ordinary child
+    // element, which whatever the layout places after it would be free to
+    // paint over.
+    component TooltipCard inherits Rectangle {
         in property <string> text;
-        // The element being explained, so the note is at least as wide as it is
-        // and can be placed clear of it.
-        in property <length> anchor-width;
-        in property <length> anchor-height;
-        // Above by default, because a control in an action row usually has the
-        // window's edge under it and nothing above. A title has the opposite: it
-        // sits at the top of the card it names, with the card under it.
-        in property <bool> below: false;
-        x: 0;
-        y: root.below ? root.anchor-height + 6px : -self.height - 6px;
-        width: max(root.anchor-width, min(320px, note.preferred-width + 20px));
-        height: note.preferred-height + 14px;
         border-radius: 6px;
         border-width: 1px;
         border-color: Theme.border;
-        background: Theme.elevated;
+        background: Theme.overlay;
+        drop-shadow-color: #00000080;
+        drop-shadow-blur: 10px;
+        drop-shadow-offset-y: 2px;
+        width: min(320px, note.preferred-width + 20px);
+        height: note.preferred-height + 14px;
         note := Text {
             x: 10px;
             y: 7px;
@@ -466,9 +464,9 @@ slint::slint! {
 
     // A heading that says the whole thing on hover when it had to be cut short.
     //
-    // It owns a touch area, because hover is what raises the note, and hands the
-    // press back out again: without that, the strip of a card under its own
-    // title would stop selecting the card.
+    // It owns a touch area for the press, and hands it back out again:
+    // without that, the strip of a card under its own title would stop
+    // selecting the card.
     component ElidedHeading inherits Rectangle {
         in property <string> text;
         in property <length> font-size: Theme.heading-size;
@@ -490,11 +488,8 @@ slint::slint! {
             clicked => { root.clicked(); }
             double-clicked => { root.double-clicked(); }
         }
-        if area.has-hover && title.preferred-width > title.width : HoverNote {
-            text: root.text;
-            anchor-width: root.width;
-            anchor-height: root.height;
-            below: true;
+        if title.preferred-width > title.width : Tooltip {
+            TooltipCard { text: root.text; }
         }
     }
 
@@ -552,9 +547,8 @@ slint::slint! {
             mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.not-allowed;
             clicked => { if root.enabled { root.clicked(); } }
         }
-        if root.hover-note != "" && area.has-hover : HoverNote {
-            text: root.hover-note;
-            anchor-width: root.width;
+        if root.hover-note != "" : Tooltip {
+            TooltipCard { text: root.hover-note; }
         }
     }
 
