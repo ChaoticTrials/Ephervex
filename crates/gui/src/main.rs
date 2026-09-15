@@ -34,6 +34,20 @@ fn startup_from(arguments: &[String]) -> Startup {
     }
 }
 
+/// The text to hand an already-running launcher, if this launch names a link
+/// for it to act on.
+///
+/// Deliberately the *original* command-line argument, not the address
+/// [`Startup::Link`] decoded out of it: the primary instance re-parses
+/// whatever arrives on the handoff socket with `LauncherUrl::parse`, which
+/// expects a full `ephervex://...` link, not the bare address inside one.
+fn handoff_argument<'a>(startup: &Startup, arguments: &'a [String]) -> Option<&'a str> {
+    match startup {
+        Startup::Link(_) => arguments.first().map(String::as_str),
+        _ => None,
+    }
+}
+
 fn main() -> Result<(), slint::PlatformError> {
     let launcher_logs = ephervex_core::Paths::from_environment()
         .ok()
@@ -82,20 +96,21 @@ fn main() -> Result<(), slint::PlatformError> {
         Startup::Link(ephervex_core::LauncherUrl::Import { url }) => Some(url.as_str()),
         _ => None,
     };
-    let primary = match ephervex_core::single_instance::start(link) {
-        Ok(ephervex_core::SingleInstanceStartup::HandedOff) => {
-            tracing::info!("handed over to the launcher that is already running");
-            return Ok(());
-        }
-        Ok(ephervex_core::SingleInstanceStartup::Primary(primary)) => Some(primary),
-        // Not fatal. Failing to reach a socket is a reason to be a second
-        // window, not a reason to refuse to start: the user asked for a
-        // launcher and should get one.
-        Err(error) => {
-            tracing::warn!(%error, "starting without single-instance handover");
-            None
-        }
-    };
+    let primary =
+        match ephervex_core::single_instance::start(handoff_argument(&startup, &arguments)) {
+            Ok(ephervex_core::SingleInstanceStartup::HandedOff) => {
+                tracing::info!("handed over to the launcher that is already running");
+                return Ok(());
+            }
+            Ok(ephervex_core::SingleInstanceStartup::Primary(primary)) => Some(primary),
+            // Not fatal. Failing to reach a socket is a reason to be a second
+            // window, not a reason to refuse to start: the user asked for a
+            // launcher and should get one.
+            Err(error) => {
+                tracing::warn!(%error, "starting without single-instance handover");
+                None
+            }
+        };
 
     let ui = ephervex_gui::ui::AppWindow::new()?;
     // Before anything is drawn, because the console and every other technical
@@ -142,4 +157,41 @@ fn main() -> Result<(), slint::PlatformError> {
         ephervex_model::APP_VERSION
     );
     ui.run()
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used)]
+    use super::*;
+
+    #[test]
+    fn handoff_carries_the_raw_argument_a_running_launcher_can_reparse() {
+        let argument = "ephervex://import?url=https%3A%2F%2Fexample.test%2Fpack.mrpack".to_owned();
+        let arguments = vec![argument.clone()];
+        let startup = startup_from(&arguments);
+
+        let handoff =
+            handoff_argument(&startup, &arguments).expect("an import link hands off something");
+        assert_eq!(handoff, argument);
+        assert_eq!(
+            ephervex_core::LauncherUrl::parse(handoff).expect("the handoff round-trips"),
+            ephervex_core::LauncherUrl::Import {
+                url: "https://example.test/pack.mrpack".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_cold_start_with_no_arguments_hands_off_nothing() {
+        let arguments: Vec<String> = Vec::new();
+        let startup = startup_from(&arguments);
+        assert!(handoff_argument(&startup, &arguments).is_none());
+    }
+
+    #[test]
+    fn a_refused_argument_hands_off_nothing() {
+        let arguments = vec!["not-a-launcher-link".to_owned()];
+        let startup = startup_from(&arguments);
+        assert!(handoff_argument(&startup, &arguments).is_none());
+    }
 }
