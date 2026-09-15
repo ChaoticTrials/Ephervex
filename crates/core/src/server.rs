@@ -289,6 +289,7 @@ impl App {
             .registry_for_services()
             .publish_staged_server(&record, &staging)?;
         cleanup.disarm();
+        self.sync_linked_server_list(&committed.record);
         Ok(committed)
     }
 
@@ -515,6 +516,7 @@ impl App {
     pub fn delete_server(&self, id: ServerId, files: FileDisposition) -> CoreResult<()> {
         let record = self.canonical_server_for_mutation(id)?;
         refuse_if_running(&record)?;
+        self.forget_linked_server_list_entry(&record);
         Ok(self.registry_for_services().delete_server(id, files)?)
     }
 
@@ -543,9 +545,11 @@ impl App {
         typed.validate()?;
         merge_network_file(&server_properties_path(&record), &network)?;
         record.network = network;
-        Ok(self
+        let committed = self
             .registry_for_services()
-            .update_server_committed(&mut record)?)
+            .update_server_committed(&mut record)?;
+        self.sync_linked_server_list(&committed.record);
+        Ok(committed)
     }
 
     /// Replaces the server-specific Java and JVM overrides as one canonical
@@ -772,6 +776,46 @@ impl App {
         record: &ServerRecord,
     ) -> CoreResult<ephervex_model::ConnectionTarget> {
         Ok(network_properties(&record.network)?.connection_target()?)
+    }
+
+    /// Adds or updates `record`'s entry in its linked client's
+    /// `servers.dat`, so the client's own Multiplayer screen already names
+    /// this exact server without anyone typing its address in by hand.
+    ///
+    /// A no-op for a standalone server, or one whose client cannot currently
+    /// be read: there is nothing to update against. Never fails the caller;
+    /// see [`crate::linked_server_list`].
+    pub(super) fn sync_linked_server_list(&self, record: &ServerRecord) {
+        let Some(client_id) = record.linked_client_id else {
+            return;
+        };
+        let Ok(client) = self.client(client_id) else {
+            return;
+        };
+        let Ok(target) = Self::server_connection_target(record) else {
+            return;
+        };
+        let game_dir = ephervex_storage::metadata::client_game_dir(&client.root);
+        crate::linked_server_list::sync_entry(
+            &game_dir,
+            record.id,
+            &record.name,
+            &target.to_string(),
+        );
+    }
+
+    /// Removes `record`'s entry from its linked client's `servers.dat`, the
+    /// counterpart to [`Self::sync_linked_server_list`] called when the
+    /// server itself goes away.
+    pub(super) fn forget_linked_server_list_entry(&self, record: &ServerRecord) {
+        let Some(client_id) = record.linked_client_id else {
+            return;
+        };
+        let Ok(client) = self.client(client_id) else {
+            return;
+        };
+        let game_dir = ephervex_storage::metadata::client_game_dir(&client.root);
+        crate::linked_server_list::remove_entry(&game_dir, record.id);
     }
 }
 
@@ -1293,6 +1337,7 @@ mod tests {
 
     use ephervex_model::LoaderSelection;
     use ephervex_storage::Paths;
+    use fastnbt::Value;
 
     use super::*;
 
@@ -1784,6 +1829,81 @@ mod tests {
         ));
         assert!(app.list_servers().expect("servers").is_empty());
         assert!(!server.root.exists());
+    }
+
+    #[test]
+    fn a_linked_servers_entry_follows_it_through_a_rename_and_a_deletion() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = test_app(directory.path());
+        let client = app
+            .registry_for_services()
+            .create_client(ephervex_storage::NewClient::new(
+                "Repro Client",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("client");
+        app.registry_for_services()
+            .publish_client(&client)
+            .expect("publish");
+        let server = app
+            .registry_for_services()
+            .create_server(NewServer::linked("Repro Server", client.id))
+            .expect("create");
+
+        let servers_dat =
+            ephervex_storage::metadata::client_game_dir(&client.root).join("servers.dat");
+        assert!(
+            !servers_dat.exists(),
+            "creating the server alone does not touch the client yet"
+        );
+
+        let renamed = app
+            .rename_server(server.id, "Renamed Repro Server")
+            .expect("rename");
+        let entry = read_managed_entry(&servers_dat, renamed.id);
+        assert_eq!(
+            entry.get("name"),
+            Some(&Value::String("Renamed Repro Server".to_owned()))
+        );
+        assert_eq!(
+            entry.get("ip"),
+            Some(&Value::String("127.0.0.1:25565".to_owned()))
+        );
+
+        app.delete_server(server.id, FileDisposition::Remove)
+            .expect("delete");
+        assert!(
+            find_managed_entry(&servers_dat, server.id).is_none(),
+            "deleting the server removes its entry, not just the record"
+        );
+    }
+
+    /// The one entry `sync_entry`/`remove_entry` manage in a client's
+    /// `servers.dat`, found by the hidden id they tag it with.
+    fn find_managed_entry(
+        path: &Path,
+        server: ServerId,
+    ) -> Option<std::collections::HashMap<String, Value>> {
+        let bytes = std::fs::read(path).ok()?;
+        let root: std::collections::HashMap<String, Value> = fastnbt::from_bytes(&bytes).ok()?;
+        let Value::List(list) = root.get("servers")? else {
+            return None;
+        };
+        list.iter().find_map(|item| {
+            let Value::Compound(fields) = item else {
+                return None;
+            };
+            (fields.get("ephervexLinkedServerId") == Some(&Value::String(server.to_string())))
+                .then(|| fields.clone())
+        })
+    }
+
+    fn read_managed_entry(
+        path: &Path,
+        server: ServerId,
+    ) -> std::collections::HashMap<String, Value> {
+        find_managed_entry(path, server).expect("the managed entry is present")
     }
 
     #[test]

@@ -492,6 +492,7 @@ impl App {
         let mut record = self.server(server)?;
         record.name = name;
         self.registry_for_services().update_server(&mut record)?;
+        self.sync_linked_server_list(&record);
         Ok(record)
     }
 }

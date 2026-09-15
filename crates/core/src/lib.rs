@@ -38,6 +38,7 @@ pub mod import;
 pub mod instance;
 pub mod launch;
 pub mod linked_mods;
+mod linked_server_list;
 pub mod live_diagnostics;
 pub mod loader;
 pub mod local_mods;

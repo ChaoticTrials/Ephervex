@@ -49,6 +49,8 @@ open.workspace = true
 # and building the authenticated artifact request needs the header type.
 reqwest.workspace = true
 sysinfo.workspace = true
+# Reading and writing a linked server's entry in a client's servers.dat.
+fastnbt.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

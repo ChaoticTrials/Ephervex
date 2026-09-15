@@ -63,6 +63,10 @@ copypasta = "0.10.2"
 clap = { version = "4.6.6", features = ["derive"] }
 clap_complete = "4.6.9"
 directories = "6.0.0"
+# `servers.dat` is Minecraft's own multiplayer server list, in NBT. Read and
+# written through `Value` so a hand-added entry, or a field this launcher
+# does not know about, round-trips untouched.
+fastnbt = "2.6.3"
 flate2 = "1.1.9"
 futures-util = "0.3.33"
 # The OS entropy source, used for PKCE verifiers and OAuth `state` values. A
