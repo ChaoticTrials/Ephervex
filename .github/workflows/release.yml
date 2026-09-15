@@ -123,6 +123,11 @@ jobs:
           # `SOURCE_DATE_EPOCH` is honored by the squashfs step, so two builds of
           # the same source produce the same bytes.
           SOURCE_DATE_EPOCH: "0"
+          # Baked into the release binaries as the default CurseForge API key
+          # (ADR 0030), read only by `option_env!` at compile time. Empty when
+          # the secret is unset, which compiles to "no built-in key" - the
+          # same as any other build.
+          EPHERVEX_CURSEFORGE_API_KEY: ${{ secrets.CURSEFORGE_API_KEY }}
         run: |
           set -eu
           export APPIMAGETOOL="${PWD}/host-tools/squashfs-root/AppRun"

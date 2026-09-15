@@ -1,6 +1,6 @@
 # ADR 0022 - CurseForge uses a user-supplied API key, and its responses are never persisted
 
-**Status:** Accepted
+**Status:** Accepted (its no-embedded-key decision amended by [ADR 0030](0030-ephervex-ships-its-own-curseforge-key-as-a-fallback.md))
 
 ## Context
 

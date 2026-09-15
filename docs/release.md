@@ -634,6 +634,11 @@ access token with repository write access, so the release is attributed to an
 account rather than to Forgejo's Ghost user. The GitHub job needs no secret; it
 uses the token that workflow is given.
 
+Both jobs read an optional `CURSEFORGE_API_KEY` repository secret and bake it
+into the release binaries as the default CurseForge API key (ADR 0030). Leave
+it unset and the release ships with no built-in key, same as any other build:
+CurseForge features wait on the user's own key, entered through settings.
+
 No Forgejo job caches cargo, release or CI: an entry for this workspace is
 gigabytes a self-hosted runner keeps on its own disk, and nothing can replace
 the entry it supersedes, so they accumulate. The GitHub jobs do cache, because

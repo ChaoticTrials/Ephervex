@@ -299,13 +299,43 @@ impl AccountProvider for MicrosoftAccountProvider {
     }
 }
 
+/// Ephervex's own CurseForge API key, if one was baked in at build time.
+///
+/// Unlike [`crate::DEFAULT_MICROSOFT_CLIENT_ID`], this is a real bearer
+/// secret (ADR 0030), so it is never a literal in source: it is picked up
+/// only from the `EPHERVEX_CURSEFORGE_API_KEY` build-time environment
+/// variable, which the release workflows set from a repository secret. A
+/// local development build that leaves the variable unset compiles an empty
+/// default, meaning "no built-in key" - exactly today's behavior. A key a
+/// user saves through settings always wins over this.
+pub const DEFAULT_CURSEFORGE_API_KEY: &str = match option_env!("EPHERVEX_CURSEFORGE_API_KEY") {
+    Some(key) => key,
+    None => "",
+};
+
 /// Reads the CurseForge API key out of a credential store.
 ///
 /// Authentication owns this access because all credentials share the same
 /// secure store. CurseForge integrations consume the key, while the settings
 /// surface writes it. It must never reach `config.toml`.
+///
+/// Falls back to [`DEFAULT_CURSEFORGE_API_KEY`] only when the store holds
+/// nothing: a key the user configured always takes precedence over the
+/// build's own (ADR 0030).
 pub fn curseforge_api_key(store: &dyn CredentialStore) -> AuthResult<Option<SecretString>> {
-    store.load(&CredentialKey::CurseForgeApiKey)
+    let stored = store.load(&CredentialKey::CurseForgeApiKey)?;
+    Ok(resolve_curseforge_api_key(
+        stored,
+        DEFAULT_CURSEFORGE_API_KEY,
+    ))
+}
+
+/// The stored key wins; an empty build default means there is none to fall
+/// back to. Split out from [`curseforge_api_key`] so the ordering is testable
+/// against an arbitrary default, since [`DEFAULT_CURSEFORGE_API_KEY`] itself
+/// is fixed at compile time.
+fn resolve_curseforge_api_key(stored: Option<SecretString>, default: &str) -> Option<SecretString> {
+    stored.or_else(|| (!default.is_empty()).then(|| SecretString::new(default)))
 }
 
 /// Stores the CurseForge API key, replacing whatever was there.
@@ -402,6 +432,31 @@ mod tests {
         clear_curseforge_api_key(&store).expect("remove");
         assert!(curseforge_api_key(&store).expect("read").is_none());
         clear_curseforge_api_key(&store).expect("removing twice is not an error");
+    }
+
+    #[test]
+    fn an_empty_build_default_leaves_an_unconfigured_key_absent() {
+        assert!(resolve_curseforge_api_key(None, "").is_none());
+    }
+
+    #[test]
+    fn a_build_default_stands_in_only_when_nothing_is_stored() {
+        assert_eq!(
+            resolve_curseforge_api_key(None, "built-in-key")
+                .expect("the default applies")
+                .expose(),
+            "built-in-key"
+        );
+    }
+
+    #[test]
+    fn a_stored_key_outranks_the_build_default() {
+        assert_eq!(
+            resolve_curseforge_api_key(Some(SecretString::new(FAKE_KEY)), "built-in-key")
+                .expect("the stored key applies")
+                .expose(),
+            FAKE_KEY
+        );
     }
 
     #[test]
