@@ -4854,8 +4854,30 @@ fn loader_selection(loader: &str, version: &str) -> Result<LoaderSelection, Core
 }
 
 fn localized_error(error: &CoreError) -> String {
-    let args = error
-        .message_args()
+    // `message_args` deliberately excludes the values these accessors expose
+    // (see their doc comments), so a message or an action that reads one of
+    // their placeholders renders it literally unless every one of them is
+    // folded in here too. Every available argument is supplied rather than
+    // only the ones a given message happens to use - Fluent ignores the
+    // extras, and the alternative is a branch per combination that silently
+    // drops an argument the moment a message gains a second placeholder.
+    let mut raw_args = error.message_args();
+    if let Some(path) = error.failing_path() {
+        raw_args.push(("path", path.display().to_string()));
+    }
+    if let Some(url) = error.help_url() {
+        raw_args.push(("url", url.to_owned()));
+    }
+    if let Some(subject) = error.help_subject() {
+        raw_args.push(("client_id", subject.to_owned()));
+    }
+    if let Some(syntax) = error.expected_syntax() {
+        raw_args.push(("syntax", syntax.to_owned()));
+    }
+    if let Some(loader) = error.unsupported_loader() {
+        raw_args.push(("loader", loader.to_owned()));
+    }
+    let args = raw_args
         .into_iter()
         .map(|(name, value)| (name, Arg::from(value)))
         .collect::<Vec<_>>();
@@ -4864,11 +4886,16 @@ fn localized_error(error: &CoreError) -> String {
     } else {
         lookup_args(error.message_id(), args.clone())
     };
+    // Filtered rather than shown: an action that still has an unresolved
+    // placeholder after every known argument was supplied means this message
+    // needs one this function does not yet know about, and a raw `{$…}` in
+    // the user's face is worse than no action line at all.
     let action = if args.is_empty() {
         lookup_attribute(error.message_id(), "action")
     } else {
         lookup_attribute_args(error.message_id(), "action", args)
-    };
+    }
+    .filter(|action| !action.contains("{$") && !action.contains("{ $"));
     if let Some(action) = action {
         message.push('\n');
         message.push_str(&action);
@@ -5905,6 +5932,37 @@ mod tests {
         assert!(!rendered.contains("{$"));
         assert!(!rendered.contains("{ $"));
         assert!(rendered.contains("Expected"));
+    }
+
+    /// A regression guard for a real report: the path this failure names comes
+    /// only from `failing_path`, not `message_args`, and the action that reads
+    /// it rendered a literal `{$path}` in the user's face until both were
+    /// merged before the lookup.
+    #[test]
+    fn a_destination_occupied_action_names_the_actual_path() {
+        let error = CoreError::from(ephervex_core::PackError::DestinationOccupied {
+            path: PathBuf::from("/instance/minecraft/mods/theirs.jar"),
+        });
+        let rendered = localized_error(&error);
+
+        assert!(!rendered.contains("{$"));
+        assert!(!rendered.contains("{ $"));
+        assert!(rendered.contains("/instance/minecraft/mods/theirs.jar"));
+    }
+
+    /// Same failure mode as the path case, for the accessor the CLI's own
+    /// renderer already merges but the GUI's had not: a message naming the
+    /// unsupported loader by name rather than "$loader".
+    #[test]
+    fn a_loader_unsupported_message_names_the_actual_loader() {
+        let error = CoreError::from(ephervex_core::PackError::LoaderUnsupported {
+            loader: "fabric-loader".to_owned(),
+        });
+        let rendered = localized_error(&error);
+
+        assert!(!rendered.contains("{$"));
+        assert!(!rendered.contains("{ $"));
+        assert!(rendered.contains("fabric-loader"));
     }
 
     #[test]
