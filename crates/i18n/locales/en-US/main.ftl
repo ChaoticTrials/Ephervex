@@ -791,7 +791,7 @@ pack-requirement-unknown = Not stated
 
 # Why a mod cannot be changed or removed. Each names a different situation, and
 # the difference is what tells a user whether to expect this to change.
-mod-restriction-pack-owned = The imported pack declares this mod. Changing it on its own is not supported yet.
+mod-restriction-pack-owned = The imported pack declares this mod. Enable independent mod changes for this instance to change it on its own.
 mod-restriction-dependency = Another mod requires this one, so its release follows what needs it.
 mod-restriction-hand-placed = This jar was added by hand, so Ephervex leaves it alone. Remove it from the mods folder yourself.
 mod-restriction-identity-unresolved = Ephervex cannot tell which project this file is, so it has nothing to look up.
@@ -1394,6 +1394,7 @@ gui-mod-up-to-date = Up to date
 gui-mod-change-version = Change Version
 gui-mod-update = Update
 gui-mod-open-project-page = View Project Page
+gui-mod-reset-to-pack-version = Reset to Pack's Version
 gui-mod-project-page-opened = Opened the project's page in your browser.
 gui-mod-project-page-open-failed = Could not open a browser.
 gui-mod-version-changed = { $value } now runs the release you selected.
@@ -1438,6 +1439,9 @@ gui-instance-runtime-clear = Follow Global Settings
 gui-instance-runtime-saved = Saved this instance's runtime settings.
 # $first is the global heap range, $second the globally selected Java.
 gui-instance-runtime-global = Globally: { $first }, { $second }.
+gui-allow-pack-mod-changes = Independent mod changes
+gui-allow-pack-mod-changes-detail = By default, a mod the imported pack declares can only be inspected here, not moved: the pack's declaration is treated as a historical record. Turning this on lets you update or change the version of a pack-declared mod for this instance only. "Reset to Pack's Version" always remains available to undo it.
+gui-allow-pack-mod-changes-toggle = Allow changing pack-declared mods' versions
 gui-instance-settings-unavailable = Instance-owned Minecraft settings
 gui-instance-settings-unavailable-detail = The current core safely applies known Vanilla defaults when an instance is created, but does not expose a typed editor for an existing instance. Unknown and mod-added options remain untouched.
 gui-open-global-defaults = Open Global Defaults

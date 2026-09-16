@@ -25,7 +25,7 @@ so the reasoning trail survives.
 | [0017](0017-options-compatibility-is-generated-data.md) | options.txt compatibility is generated data, distributed separately from the application | Accepted |
 | [0018](0018-apache-2.0-project-license.md) | Apache-2.0 project license | Accepted |
 | [0019](0019-one-mod-list-with-typed-ownership-and-identity.md) | An instance has one mod list, with ownership and identity as separate typed facts | Accepted |
-| [0020](0020-mod-mutation-is-one-undoable-transaction.md) | Mod mutation is one undoable transaction, and ownership decides what may be mutated | Accepted |
+| [0020](0020-mod-mutation-is-one-undoable-transaction.md) | Mod mutation is one undoable transaction, and ownership decides what may be mutated | Accepted (its pack-owned refusal amended by ADR 0032) |
 | [0021](0021-linked-mod-sync-pins-the-root-and-resolves-per-target.md) | Linked mod synchronization pins the root release and resolves dependencies per target | Accepted |
 | [0022](0022-curseforge-uses-a-user-supplied-key-and-persists-nothing.md) | CurseForge uses a user-supplied API key, and its responses are never persisted | Accepted (its no-embedded-key decision amended by ADR 0030) |
 | [0023](0023-appimage-is-the-linux-release-artifact.md) | AppImage is the Linux release artifact, on a declared glibc baseline | Accepted (its "No `.deb`" decision superseded by ADR 0026) |
@@ -37,3 +37,4 @@ so the reasoning trail survives.
 | [0029](0029-the-allowed-sites-list-carries-its-own-context.md) | The allowed-sites list carries its own context | Accepted |
 | [0030](0030-ephervex-ships-its-own-curseforge-key-as-a-fallback.md) | Ephervex ships its own CurseForge key as a fallback | Accepted |
 | [0031](0031-a-project-declared-twice-resolves-to-one-file.md) | A project declared twice resolves to one file | Accepted |
+| [0032](0032-pack-owned-mod-versions-can-be-changed-per-instance-opt-in.md) | Pack-owned mod versions can be changed, per instance and opt-in | Accepted |

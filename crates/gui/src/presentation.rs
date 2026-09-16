@@ -885,6 +885,7 @@ mod tests {
             source: ImportSource::manual(),
             java_override: None,
             jvm_override: None,
+            allow_pack_mod_version_changes: false,
             attention: Vec::new(),
             created_at: Utc::now(),
             updated_at: Utc::now(),

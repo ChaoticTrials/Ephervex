@@ -10,7 +10,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use ephervex_download::{
     CacheLayout, DownloadManager, DownloaderConfig, HttpConfig, OperationReporter, RetryPolicy,
@@ -30,6 +30,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const ROOT_V1: &[u8] = b"a fixture jar standing in for version one of the chosen mod";
 const ROOT_V2: &[u8] = b"a fixture jar standing in for version two of the chosen mod";
+const ROOT_V3: &[u8] = b"a fixture jar standing in for version three of the chosen mod";
 const LIBRARY: &[u8] = b"a fixture jar standing in for a required library";
 const OTHER_LIBRARY: &[u8] = b"a fixture jar standing in for a second library";
 
@@ -139,6 +140,7 @@ fn entry(
             version_id: Some(version.to_owned()),
             file_id: None,
         }),
+        original_identity: None,
     }
 }
 
@@ -216,6 +218,13 @@ fn path_of(recipe: &PackRecipe, project: &str) -> Option<PathBuf> {
     recipe
         .managed_project(ModProvider::Modrinth, project)
         .map(|entry| entry.logical_path.clone())
+}
+
+fn original_version_of(recipe: &PackRecipe, project: &str) -> Option<String> {
+    recipe
+        .managed_project(ModProvider::Modrinth, project)
+        .and_then(|entry| entry.original_identity.as_ref())
+        .and_then(|identity| identity.version_id.clone())
 }
 
 // -- changing a version ---------------------------------------------------
@@ -600,6 +609,127 @@ async fn the_recorded_version_is_put_back_when_its_jar_has_gone_missing() {
     assert!(report.changed_anything(), "putting a mod back is a change");
     assert!(instance.jar("root-1.0.jar").is_file());
     assert_eq!(version_of(&recipe, "ROOTPROJ").as_deref(), Some("ROOTV1"));
+}
+
+// -- remembering the pack's original version -------------------------------
+
+#[tokio::test]
+async fn a_pack_owned_mods_first_version_change_records_what_the_pack_declared() {
+    let server = MockServer::start().await;
+    let instance = Instance::new();
+    let mut recipe = installed(&server, &instance).await;
+    // The library is `RequiredDependency` in `installed()`; give it a pack
+    // origin here to exercise the case this test is about.
+    for file in &mut recipe.files {
+        if file.logical_path == Path::new("mods/root-1.0.jar") {
+            file.origin = ModOrigin::PackDeclared;
+        }
+    }
+    serve(&server, "/root-2.jar", ROOT_V2).await;
+
+    mutate(
+        &instance,
+        &mut recipe,
+        &[entry(
+            &server,
+            "/root-2.jar",
+            "root-2.0.jar",
+            ROOT_V2,
+            "ROOTPROJ",
+            "ROOTV2",
+            ModOrigin::UserSelected,
+        )],
+        &[],
+    )
+    .await
+    .expect("version change");
+
+    assert_eq!(
+        original_version_of(&recipe, "ROOTPROJ").as_deref(),
+        Some("ROOTV1"),
+        "the pack's own release is preserved the first time this mod moves away from it"
+    );
+}
+
+#[tokio::test]
+async fn a_second_version_change_does_not_overwrite_the_remembered_original() {
+    let server = MockServer::start().await;
+    let instance = Instance::new();
+    let mut recipe = installed(&server, &instance).await;
+    for file in &mut recipe.files {
+        if file.logical_path == Path::new("mods/root-1.0.jar") {
+            file.origin = ModOrigin::PackDeclared;
+        }
+    }
+    serve(&server, "/root-2.jar", ROOT_V2).await;
+    mutate(
+        &instance,
+        &mut recipe,
+        &[entry(
+            &server,
+            "/root-2.jar",
+            "root-2.0.jar",
+            ROOT_V2,
+            "ROOTPROJ",
+            "ROOTV2",
+            ModOrigin::UserSelected,
+        )],
+        &[],
+    )
+    .await
+    .expect("first version change");
+
+    serve(&server, "/root-3.jar", ROOT_V3).await;
+    mutate(
+        &instance,
+        &mut recipe,
+        &[entry(
+            &server,
+            "/root-3.jar",
+            "root-3.0.jar",
+            ROOT_V3,
+            "ROOTPROJ",
+            "ROOTV3",
+            ModOrigin::UserSelected,
+        )],
+        &[],
+    )
+    .await
+    .expect("second version change");
+
+    assert_eq!(version_of(&recipe, "ROOTPROJ").as_deref(), Some("ROOTV3"));
+    assert_eq!(
+        original_version_of(&recipe, "ROOTPROJ").as_deref(),
+        Some("ROOTV1"),
+        "the original is set once and never overwritten by a later move"
+    );
+}
+
+#[tokio::test]
+async fn a_user_selected_mods_version_change_never_records_an_original() {
+    let server = MockServer::start().await;
+    let instance = Instance::new();
+    let mut recipe = installed(&server, &instance).await;
+    serve(&server, "/root-2.jar", ROOT_V2).await;
+
+    mutate(
+        &instance,
+        &mut recipe,
+        &[entry(
+            &server,
+            "/root-2.jar",
+            "root-2.0.jar",
+            ROOT_V2,
+            "ROOTPROJ",
+            "ROOTV2",
+            ModOrigin::UserSelected,
+        )],
+        &[],
+    )
+    .await
+    .expect("version change");
+
+    assert_eq!(original_version_of(&recipe, "ROOTPROJ"), None);
 }
 
 // -- mods the user turned off ---------------------------------------------

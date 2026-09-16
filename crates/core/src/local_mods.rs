@@ -879,6 +879,7 @@ mod tests {
                     version_id: Some("vvvv".to_owned()),
                     file_id: None,
                 }),
+                original_identity: None,
             })
             .expect("record");
         store.write_recipe(&recipe).expect("write the recipe");

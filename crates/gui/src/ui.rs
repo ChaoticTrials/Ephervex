@@ -2417,6 +2417,8 @@ slint::slint! {
         in-out property <bool> mod-action-up-to-date: false;
         in-out property <bool> mod-action-loading: false;
         in-out property <string> mod-action-project-url;
+        in-out property <bool> mod-action-is-pack-owned: false;
+        in-out property <string> mod-action-pack-original-version;
         // Set the moment a mutation is submitted and cleared when it answers,
         // so one click cannot become two operations.
         in-out property <bool> mod-action-pending: false;
@@ -2809,6 +2811,7 @@ slint::slint! {
         in-out property <string> instance-jvm-args;
         in-out property <bool> instance-runtime-pinned: false;
         in-out property <string> instance-runtime-global;
+        in-out property <bool> instance-allow-pack-mod-changes: false;
         in-out property <bool> java-auto-detect: true;
         in-out property <bool> java-auto-download: true;
         in-out property <bool> show-linked-servers: false;
@@ -2872,6 +2875,7 @@ slint::slint! {
         callback repair-server(string);
         callback save-instance-runtime(string, string, string, string, string);
         callback clear-instance-runtime(string);
+        callback set-allow-pack-mod-version-changes(string, bool);
         callback load-instance-workspace(string);
         callback search-mods(string, string, string);
         callback load-more-mods(string, string, string, int);
@@ -3280,6 +3284,9 @@ slint::slint! {
                                     Rectangle { horizontal-stretch: 1; }
                                     AppButton { text: GuiI18n.text("gui-instance-runtime-save"); tone: "primary"; clicked => { root.save-instance-runtime(root.selected-instance-id, root.instance-java-path, root.instance-memory-min, root.instance-memory-max, root.instance-jvm-args); } }
                                 }
+                                Divider { }
+                                SectionTitle { title: GuiI18n.text("gui-allow-pack-mod-changes"); detail: GuiI18n.text("gui-allow-pack-mod-changes-detail"); }
+                                LabeledToggle { width: min(parent.width, 520px); label: GuiI18n.text("gui-allow-pack-mod-changes-toggle"); checked: root.instance-allow-pack-mod-changes; toggled(value) => { root.set-allow-pack-mod-version-changes(root.selected-instance-id, value); } }
                                 Divider { }
                                 SectionTitle { title: GuiI18n.text("gui-instance-settings-unavailable"); detail: GuiI18n.text("gui-instance-settings-unavailable-detail"); }
                                 HorizontalLayout { AppButton { text: GuiI18n.text("gui-open-global-defaults"); clicked => { root.page = 4; root.workspace = ""; root.workspace-tab = "Minecraft"; } } Rectangle { horizontal-stretch: 1; } }
@@ -4113,6 +4120,7 @@ slint::slint! {
                             if root.mod-action-project-url != "" : AppButton { text: GuiI18n.text("gui-mod-open-project-page"); clicked => { root.open-mod-project-page(root.mod-action-project-url); } }
                             Rectangle { horizontal-stretch: 1; }
                             AppButton { text: GuiI18n.text("gui-close"); clicked => { root.modal = ""; root.modal-error = ""; } }
+                            if root.mod-action-is-pack-owned && root.mod-action-pack-original-version != "" : AppButton { text: GuiI18n.text("gui-mod-reset-to-pack-version"); enabled: !root.mod-action-pending; clicked => { root.mod-action-pending = true; root.modal-error = ""; root.plan-mod-apply(root.selected-instance-id, root.mod-action-path, root.mod-action-pack-original-version); } }
                             if root.mod-action-can-update : AppButton { text: GuiI18n.text("gui-mod-update"); enabled: !root.mod-action-pending; clicked => { root.mod-action-pending = true; root.modal-error = ""; root.plan-mod-apply(root.selected-instance-id, root.mod-action-path, ""); } }
                             if root.mod-action-can-change : AppButton { text: GuiI18n.text("gui-mod-change-version"); tone: "primary"; enabled: !root.mod-action-pending && root.mod-action-selected != "" && root.mod-action-selected != root.mod-action-installed; clicked => { root.mod-action-pending = true; root.modal-error = ""; root.plan-mod-apply(root.selected-instance-id, root.mod-action-path, root.mod-action-selected); } }
                         }

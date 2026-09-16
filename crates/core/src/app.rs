@@ -609,6 +609,30 @@ impl App {
         Ok(record)
     }
 
+    /// Turns pack-owned mod mutation on or off for this instance.
+    ///
+    /// Refused while running, for the same reason the runtime settings are: a
+    /// decision this deliberate should not be made, or silently take effect,
+    /// underneath a live game.
+    #[instrument(skip(self))]
+    pub fn set_allow_pack_mod_version_changes(
+        &self,
+        id: InstanceId,
+        allow: bool,
+    ) -> CoreResult<ClientRecord> {
+        let mut record = self.client(id)?;
+        if let Some(state) = self.launch_state(id)? {
+            return Err(ephervex_storage::LockError::AlreadyRunning {
+                pid: state.game_pid.unwrap_or(state.owner_pid),
+                since: state.since,
+            }
+            .into());
+        }
+        record.allow_pack_mod_version_changes = allow;
+        self.registry().update_client(&mut record)?;
+        Ok(record)
+    }
+
     /// The servers linked to a client.
     ///
     /// Derived from the server rows rather than stored on the client, so it
@@ -1565,6 +1589,41 @@ mod tests {
             .expect("clear");
         assert!(cleared.java_override.is_none());
         assert!(cleared.jvm_override.is_none());
+    }
+
+    #[test]
+    fn allowing_pack_mod_version_changes_persists_and_is_refused_while_running() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let created = app
+            .create_client_for_test(NewClient::new(
+                "Bug Repro",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create");
+        assert!(!created.allow_pack_mod_version_changes);
+
+        let updated = app
+            .set_allow_pack_mod_version_changes(created.id, true)
+            .expect("opt in");
+        assert!(updated.allow_pack_mod_version_changes);
+
+        // Reopened, because the point of the setting is that it survives.
+        let reopened = app_rooted_at(base.path());
+        let stored = reopened.client(created.id).expect("client");
+        assert!(stored.allow_pack_mod_version_changes);
+
+        let _lock = ephervex_storage::LaunchLock::acquire(&stored.root).expect("acquire lock");
+        let error = reopened
+            .set_allow_pack_mod_version_changes(created.id, false)
+            .expect_err("a live game's settings are not changed underneath it");
+        assert!(matches!(
+            error,
+            crate::error::CoreError::Storage(ephervex_storage::StorageError::Lock(
+                ephervex_storage::LockError::AlreadyRunning { .. }
+            ))
+        ));
     }
 
     /// A linked server exists to reproduce one client. Left behind it is

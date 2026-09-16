@@ -67,7 +67,13 @@ use crate::error::{PackError, PackResult};
 /// cannot deserialize at all. Bumping the version is what turns that into the
 /// clean refusal `SourceStore::read_recipe` already performs (ADR 0012) rather
 /// than an unreadable file.
-pub const RECIPE_VERSION: u32 = 3;
+///
+/// Version 4 added [`PackFileRecipe::original_identity`], capturing the pack's
+/// originally-declared release the first time a pack-owned mod's version is
+/// allowed to move away from it. Reading a version 3 recipe still works: the
+/// field defaults to absent, exactly the state of an entry that has never been
+/// mutated away from what the pack declared.
+pub const RECIPE_VERSION: u32 = 4;
 
 /// The extension a mod loader loads out of `mods/`.
 ///
@@ -467,6 +473,17 @@ pub struct PackFileRecipe {
     pub origin: ModOrigin,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<ProviderFileIdentity>,
+    /// The release the imported pack originally declared for this file, once a
+    /// mutation has moved it away from that release.
+    ///
+    /// `None` for a mod never mutated away from what the pack declared - in
+    /// which case `identity` itself already *is* the pack's version - and for
+    /// anything not [`ModOrigin::PackDeclared`]. Set once, by the mutation
+    /// that first changes a pack-owned entry's identity, and never overwritten
+    /// after that, so it always names what the pack originally shipped rather
+    /// than whatever it was most recently changed from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_identity: Option<ProviderFileIdentity>,
 }
 
 impl PackFileRecipe {
@@ -544,6 +561,10 @@ impl PackFileRecipe {
                 .identity
                 .as_ref()
                 .map_or(ModIdentity::Unresolved, ProviderFileIdentity::resolution),
+            original_identity: self
+                .original_identity
+                .as_ref()
+                .map(ProviderFileIdentity::resolution),
             hashes: self.hashes.clone(),
             size: self.size,
             client: self.client,
@@ -604,6 +625,9 @@ pub struct RecordedMod {
     pub origin: ModOrigin,
     /// How much of its provider identity is proven.
     pub identity: ModIdentity,
+    /// The release the imported pack originally declared, when this mod has
+    /// been moved away from it. See [`PackFileRecipe::original_identity`].
+    pub original_identity: Option<ModIdentity>,
     pub hashes: Vec<Hash>,
     pub size: Option<u64>,
     pub client: SideRequirement,
@@ -1338,6 +1362,7 @@ mod tests {
             selected: None,
             origin: ModOrigin::PackDeclared,
             identity: None,
+            original_identity: None,
         }
     }
 
@@ -1590,6 +1615,7 @@ mod tests {
                 version_id: Some(version.to_owned()),
                 file_id: None,
             }),
+            original_identity: None,
         }
     }
 
@@ -1850,5 +1876,33 @@ mod tests {
         let back: PackRecipe = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back.files[0].server, SideRequirement::Unknown);
         assert_eq!(back, recipe);
+    }
+
+    #[test]
+    fn a_version_3_shaped_entry_with_no_original_identity_key_reads_as_absent() {
+        // A recipe written before this field existed never mutated a pack-owned
+        // entry away from what the pack declared, so an absent key is exactly
+        // that entry's honest state.
+        let json = r#"{
+            "logical_path": "mods/thing.jar",
+            "hashes": [],
+            "client": "required",
+            "server": "unknown",
+            "origin": "pack_declared",
+            "identity": {"provider": "modrinth", "project_id": "ROOTPROJ", "version_id": "ROOTV1"}
+        }"#;
+        let file: PackFileRecipe = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(file.original_identity, None);
+    }
+
+    #[test]
+    fn an_absent_original_identity_is_not_written_to_json() {
+        let file = managed("u6dRKJwZ", "Orv4ObRj", "library.jar");
+        assert_eq!(file.original_identity, None);
+        let json = serde_json::to_string(&file).expect("serialize");
+        assert!(
+            !json.contains("original_identity"),
+            "machine-owned JSON stays compact: an absent value is omitted, not written as null: {json}"
+        );
     }
 }

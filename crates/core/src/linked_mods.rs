@@ -2186,6 +2186,7 @@ mod tests {
                 version_id: Some("ROOTV1".to_owned()),
                 file_id: None,
             }),
+            original_identity: None,
         });
         store.write_recipe(&recipe).expect("write recipe");
 
@@ -2447,6 +2448,7 @@ mod tests {
                 version_id: Some("OPTV1".to_owned()),
                 file_id: None,
             }),
+            original_identity: None,
         });
         store.write_recipe(&recipe).expect("write recipe");
 

@@ -97,6 +97,7 @@ fn browser_install(project: &str, version: &str, name: &str, origin: ModOrigin) 
             version_id: Some(version.to_owned()),
             file_id: None,
         }),
+        original_identity: None,
     }
 }
 

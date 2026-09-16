@@ -302,6 +302,7 @@ fn normalize_file(
         // The pack asked for this file; nobody browsed for it.
         origin: ModOrigin::PackDeclared,
         identity,
+        original_identity: None,
     })
 }
 

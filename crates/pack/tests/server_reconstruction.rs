@@ -41,6 +41,7 @@ fn file(
         selected,
         origin: ModOrigin::PackDeclared,
         identity: None,
+        original_identity: None,
     }
 }
 

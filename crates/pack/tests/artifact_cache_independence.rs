@@ -61,6 +61,7 @@ fn recipe(body: &[u8]) -> PackRecipe {
         selected: None,
         origin: ModOrigin::PackDeclared,
         identity: None,
+        original_identity: None,
     });
     recipe
 }

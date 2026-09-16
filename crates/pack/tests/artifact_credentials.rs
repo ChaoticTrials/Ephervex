@@ -143,6 +143,7 @@ fn recipe(address: &str, provider: Option<ModProvider>) -> PackRecipe {
             version_id: Some("4593548".to_owned()),
             file_id: Some("4593548".to_owned()),
         }),
+        original_identity: None,
     });
     recipe
 }

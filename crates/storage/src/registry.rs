@@ -58,8 +58,8 @@ use crate::records::{
 };
 
 const CLIENT_COLUMNS: &str = "id, name, root, storage_class, minecraft_version, loader_kind, \
-     loader_version, source_kind, source_reference, java_override, jvm_override, attention, \
-     created_at, updated_at, last_launched_at";
+     loader_version, source_kind, source_reference, java_override, jvm_override, \
+     allow_pack_mod_version_changes, attention, created_at, updated_at, last_launched_at";
 
 const SERVER_COLUMNS: &str = "id, name, root, storage_class, linked_client_id, minecraft_version, \
      loader_kind, loader_version, network, eula_accepted, source_kind, source_reference, \
@@ -188,6 +188,7 @@ impl Registry {
             source: request.source,
             java_override: None,
             jvm_override: None,
+            allow_pack_mod_version_changes: false,
             attention: request.attention,
             created_at: now,
             updated_at: now,
@@ -475,6 +476,7 @@ impl Registry {
             source: original.source,
             java_override: original.java_override,
             jvm_override: original.jvm_override,
+            allow_pack_mod_version_changes: original.allow_pack_mod_version_changes,
             attention: original.attention,
             created_at: now,
             updated_at: now,
@@ -565,8 +567,8 @@ impl Registry {
             "UPDATE instances SET
                 name = ?2, root = ?3, storage_class = ?4, minecraft_version = ?5,
                 loader_kind = ?6, loader_version = ?7, source_kind = ?8, source_reference = ?9,
-                java_override = ?10, jvm_override = ?11, attention = ?12,
-                updated_at = ?13, last_launched_at = ?14
+                java_override = ?10, jvm_override = ?11, allow_pack_mod_version_changes = ?12,
+                attention = ?13, updated_at = ?14, last_launched_at = ?15
              WHERE id = ?1",
             params![
                 record.id.to_string(),
@@ -580,6 +582,7 @@ impl Registry {
                 record.source.reference,
                 to_json_option(record.java_override.as_ref())?,
                 to_json_option(record.jvm_override.as_ref())?,
+                record.allow_pack_mod_version_changes,
                 to_json(&record.attention)?,
                 timestamp_to_sql(record.updated_at),
                 record.last_launched_at.map(timestamp_to_sql),
@@ -891,9 +894,10 @@ impl Registry {
         self.index.connection().execute(
             "INSERT INTO instances
              (id, name, root, storage_class, minecraft_version, loader_kind, loader_version,
-              source_kind, source_reference, java_override, jvm_override, attention,
+              source_kind, source_reference, java_override, jvm_override,
+              allow_pack_mod_version_changes, attention,
               created_at, updated_at, last_launched_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 record.id.to_string(),
                 record.name,
@@ -906,6 +910,7 @@ impl Registry {
                 record.source.reference,
                 to_json_option(record.java_override.as_ref())?,
                 to_json_option(record.jvm_override.as_ref())?,
+                record.allow_pack_mod_version_changes,
                 to_json(&record.attention)?,
                 timestamp_to_sql(record.created_at),
                 timestamp_to_sql(record.updated_at),
@@ -964,10 +969,11 @@ fn client_from_row(row: &Row<'_>) -> rusqlite::Result<Result<ClientRecord, Index
     let source_kind: String = row.get(7)?;
     let java_override: Option<String> = row.get(9)?;
     let jvm_override: Option<String> = row.get(10)?;
-    let attention: String = row.get(11)?;
-    let created_at: String = row.get(12)?;
-    let updated_at: String = row.get(13)?;
-    let last_launched_at: Option<String> = row.get(14)?;
+    let allow_pack_mod_version_changes: bool = row.get(11)?;
+    let attention: String = row.get(12)?;
+    let created_at: String = row.get(13)?;
+    let updated_at: String = row.get(14)?;
+    let last_launched_at: Option<String> = row.get(15)?;
 
     let record = (|| {
         Ok(ClientRecord {
@@ -992,6 +998,7 @@ fn client_from_row(row: &Row<'_>) -> rusqlite::Result<Result<ClientRecord, Index
                 jvm_override.as_deref(),
                 "instances.jvm_override",
             )?,
+            allow_pack_mod_version_changes,
             attention: from_json::<Vec<AttentionReason>>(&attention, "instances.attention")?,
             created_at: timestamp_from_sql(&created_at, "instances.created_at")?,
             updated_at: timestamp_from_sql(&updated_at, "instances.updated_at")?,

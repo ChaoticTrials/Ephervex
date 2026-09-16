@@ -2510,6 +2510,8 @@ fn register_mod_actions(ui: &AppWindow, commands: &Sender<Command>, browser: &Rc
         ui.set_mod_action_notice(SharedString::default());
         ui.set_mod_action_selected(SharedString::default());
         ui.set_mod_action_project_url(SharedString::default());
+        ui.set_mod_action_is_pack_owned(false);
+        ui.set_mod_action_pack_original_version(SharedString::default());
         ui.set_mod_versions(model(Vec::new()));
         ui.set_mod_action_can_change(false);
         ui.set_mod_action_can_update(false);
@@ -3420,11 +3422,9 @@ fn register_server_start(
     });
 }
 
-fn register_server_actions(
-    ui: &AppWindow,
-    commands: &Sender<Command>,
-    live_viewer: &Rc<RefCell<LiveViewerState>>,
-) {
+/// The instance workspace's Settings tab: Java/JVM overrides and the
+/// pack-owned-mod-mutation opt-in.
+fn register_instance_runtime_actions(ui: &AppWindow, commands: &Sender<Command>) {
     let sender = commands.clone();
     ui.on_save_instance_runtime(move |id, java, min, max, args| {
         let Some(instance) = backend::parse_instance_id(&id) else {
@@ -3460,6 +3460,24 @@ fn register_server_actions(
             );
         }
     });
+
+    let sender = commands.clone();
+    ui.on_set_allow_pack_mod_version_changes(move |id, allow| {
+        if let Some(instance) = backend::parse_instance_id(&id) {
+            send(
+                &sender,
+                Command::SetAllowPackModVersionChanges { instance, allow },
+            );
+        }
+    });
+}
+
+fn register_server_actions(
+    ui: &AppWindow,
+    commands: &Sender<Command>,
+    live_viewer: &Rc<RefCell<LiveViewerState>>,
+) {
+    register_instance_runtime_actions(ui, commands);
 
     let sender = commands.clone();
     ui.on_repair_server(move |id| {
@@ -5006,6 +5024,7 @@ fn apply_event(
                 ui.set_instance_jvm_args(runtime.jvm_args.into());
                 ui.set_instance_runtime_pinned(runtime.pinned);
                 ui.set_instance_runtime_global(runtime.global.into());
+                ui.set_instance_allow_pack_mod_changes(runtime.allow_pack_mod_version_changes);
             }
         }
         Event::CreationProgress {
@@ -6061,6 +6080,8 @@ fn apply_mod_versions(ui: &AppWindow, data: backend::ModVersionsData) {
     ui.set_mod_action_can_remove(data.can_remove);
     ui.set_mod_action_up_to_date(data.up_to_date);
     ui.set_mod_action_project_url(data.project_url.into());
+    ui.set_mod_action_is_pack_owned(data.is_pack_owned);
+    ui.set_mod_action_pack_original_version(data.pack_original_version.into());
     if !data.title.is_empty() {
         ui.set_mod_action_name(data.title.into());
     }

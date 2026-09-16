@@ -79,6 +79,11 @@ pub enum Command {
         max_memory_mib: Option<u32>,
         jvm_args: Vec<String>,
     },
+    /// Turns pack-owned mod mutation on or off for one instance.
+    SetAllowPackModVersionChanges {
+        instance: InstanceId,
+        allow: bool,
+    },
     /// Clear the runtime evidence a server left behind when its supervisor died.
     RepairServer(ServerId),
     /// Stop the game this launcher started for one instance.
@@ -846,6 +851,11 @@ pub struct ModVersionsData {
     /// The project's page on its provider's site. Empty when none could be
     /// built (e.g. a CurseForge project with no known slug).
     pub project_url: String,
+    pub is_pack_owned: bool,
+    /// The pack's originally-declared release, when one is on record and
+    /// differs from what is installed now. Empty when there is nothing to
+    /// reset to.
+    pub pack_original_version: String,
 }
 
 /// What a removal would take with it, before it is carried out.
@@ -928,6 +938,7 @@ pub struct InstanceRuntimeData {
     /// An already-localized sentence naming what the global settings are, so
     /// an empty field reads as a choice rather than as missing information.
     pub global: String,
+    pub allow_pack_mod_version_changes: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1457,6 +1468,14 @@ fn run_worker(
                     // user has to catch: a refused save leaves them looking at
                     // values that are not what the instance has.
                     Err(error) => send_modal_error(&events, &error),
+                }
+            }
+            Command::SetAllowPackModVersionChanges { instance, allow } => {
+                // No toast. The toggle itself is the confirmation; a refusal
+                // is still reported, because then nothing on screen changed.
+                match app.set_allow_pack_mod_version_changes(instance, allow) {
+                    Ok(_) => send_snapshot(&app, &events),
+                    Err(error) => send_error(&events, &error),
                 }
             }
             Command::RepairServer(id) => {
@@ -4374,6 +4393,7 @@ fn instance_runtime_data(app: &App, instance: InstanceId) -> CoreResult<Instance
                 |path| path.display().to_string(),
             ),
         ),
+        allow_pack_mod_version_changes: record.allow_pack_mod_version_changes,
     })
 }
 
@@ -4893,6 +4913,8 @@ async fn mod_versions(app: &App, instance: InstanceId, path: &Path) -> ModVersio
                 can_remove: choices.mutability.can_remove,
                 up_to_date,
                 project_url: choices.project_url().unwrap_or_default(),
+                is_pack_owned: choices.origin.is_pack_owned(),
+                pack_original_version: choices.original_version_id.clone().unwrap_or_default(),
                 versions,
             }
         }

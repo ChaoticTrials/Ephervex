@@ -116,6 +116,7 @@ fn addition(
             version_id: Some(format!("{project}-v1")),
             file_id: None,
         }),
+        original_identity: None,
     }
 }
 

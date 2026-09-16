@@ -56,6 +56,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "server-operator-setup",
         sql: include_str!("migrations/0003-server-operator-setup.sql"),
     },
+    Migration {
+        version: 4,
+        name: "pack-mod-version-changes",
+        sql: include_str!("migrations/0004-pack-mod-version-changes.sql"),
+    },
 ];
 
 /// The `user_version` a fully migrated database has.
@@ -469,8 +474,8 @@ mod tests {
             error,
             IndexError::SchemaFromFuture {
                 found: 999,
-                supported: 3
-            }
+                supported,
+            } if supported == latest_schema_version()
         ));
         assert_eq!(error.message_id(), "error-index-schema-from-future");
     }

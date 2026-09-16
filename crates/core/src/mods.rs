@@ -239,6 +239,7 @@ fn adopt_hand_placed(layout: &ModHostLayout, adopted: &[ManagedModEntry]) {
                     _ => None,
                 },
             }),
+            original_identity: None,
         };
         match recipe.record_managed(file) {
             Ok(()) => changed = true,
@@ -322,6 +323,7 @@ fn hand_placed_mods(game_dir: &Path, recorded: &[ManagedModEntry]) -> Vec<Manage
             file_name: stem.to_owned(),
             origin: ModOrigin::HandPlaced,
             identity: ModIdentity::Unresolved,
+            original_identity: None,
             // Not hashed here. This runs on every list and must stay a
             // directory read; the digest is computed when something is
             // actually going to look the file up.
@@ -401,6 +403,10 @@ pub struct ManagedModEntry {
     pub origin: ModOrigin,
     /// How much of its provider identity is proven.
     pub identity: ModIdentity,
+    /// The release the imported pack originally declared, when this mod has
+    /// been moved away from it. Always absent for anything not
+    /// [`ModOrigin::PackDeclared`].
+    pub original_identity: Option<ModIdentity>,
     pub hashes: Vec<Hash>,
     pub size: Option<u64>,
     pub client: SideRequirement,
@@ -440,6 +446,7 @@ impl ManagedModEntry {
             file_name: recorded.file_name,
             origin: recorded.origin,
             identity: recorded.identity,
+            original_identity: recorded.original_identity,
             hashes: recorded.hashes,
             size: recorded.size,
             client: recorded.client,
@@ -1861,6 +1868,7 @@ pub(crate) fn recipe_entry_for(
             version_id: Some(planned.version.id.clone()),
             file_id: exact_file_id(provider, &planned.version.id),
         }),
+        original_identity: None,
     })
 }
 
@@ -1953,6 +1961,7 @@ mod tests {
                 file_name: "known.jar".to_owned(),
                 origin: ModOrigin::PackDeclared,
                 identity: ModIdentity::Unresolved,
+                original_identity: None,
                 hashes: Vec::new(),
                 size: None,
                 client: SideRequirement::Required,
@@ -2164,6 +2173,7 @@ mod tests {
             file_name: name.to_owned(),
             origin,
             identity,
+            original_identity: None,
             hashes: vec![
                 Hash::new(
                     HashAlgorithm::Sha1,
@@ -2290,6 +2300,7 @@ mod tests {
             selected: None,
             origin: ModOrigin::PackDeclared,
             identity: None,
+            original_identity: None,
         }
     }
 
@@ -2483,6 +2494,7 @@ mod tests {
             file_name: file.to_owned(),
             origin: ModOrigin::PackDeclared,
             identity,
+            original_identity: None,
             hashes: Vec::new(),
             size: None,
             client: SideRequirement::Required,

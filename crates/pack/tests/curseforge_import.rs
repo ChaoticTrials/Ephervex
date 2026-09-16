@@ -291,6 +291,7 @@ fn curseforge_recipe() -> PackRecipe {
                 version_id: Some("4593548".to_owned()),
                 file_id: Some("4593548".to_owned()),
             }),
+            original_identity: None,
         }],
         override_layers: vec![ephervex_pack::OverrideLayer {
             scope: OverrideScope::Common,

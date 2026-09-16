@@ -56,8 +56,8 @@ use ephervex_mod_platform::{
 };
 use ephervex_model::{InstanceId, ModOrigin, ModProvider};
 use ephervex_pack::{
-    ArtifactFetch, ManagedMutation, ManagedProject, PackError, PackFileRecipe, PackRecipe,
-    RecordedMod, SourceStore,
+    ArtifactFetch, ManagedMutation, ManagedProject, ModIdentity, PackError, PackFileRecipe,
+    PackRecipe, RecordedMod, SourceStore,
 };
 use ephervex_storage::ClientRecord;
 use tokio_util::sync::CancellationToken;
@@ -235,6 +235,27 @@ impl ModMutability {
     }
 }
 
+/// `ModMutability::of`, loosened for a pack-owned mod once this instance has
+/// opted into moving them independently of the pack's declaration.
+///
+/// Never loosens `can_remove`: taking a pack mod out of the instance's desired
+/// state is a different decision from moving its version, and this setting
+/// says nothing about it.
+fn effective_mutability(entry: &ManagedModEntry, record: &ClientRecord) -> ModMutability {
+    let base = ModMutability::of(entry);
+    let can_move = record.allow_pack_mod_version_changes && entry.identity.is_fully_resolved();
+    if entry.origin == ModOrigin::PackDeclared && can_move {
+        ModMutability {
+            can_change_version: true,
+            can_update: true,
+            restriction: None,
+            ..base
+        }
+    } else {
+        base
+    }
+}
+
 /// Which release a mutation should move a mod to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModVersionChoice {
@@ -260,6 +281,11 @@ pub struct ModVersionChoices {
     /// The release an update would move to, when one exists.
     pub newest_compatible: Option<String>,
     pub mutability: ModMutability,
+    /// Why this mod belongs to the instance.
+    pub origin: ModOrigin,
+    /// The release the imported pack originally declared, when this mod has
+    /// been moved away from it and away from that exact release.
+    pub original_version_id: Option<String>,
 }
 
 impl ModVersionChoices {
@@ -416,7 +442,7 @@ impl App {
         let record = self.client(instance)?;
         let snapshot = self.managed_mod_snapshot(instance)?;
         let entry = entry_at(&snapshot, target)?;
-        let mutability = ModMutability::of(entry);
+        let mutability = effective_mutability(entry, &record);
         if !mutability.can_list_versions {
             return Err(CoreError::ModMutationRestricted {
                 path: target.to_path_buf(),
@@ -449,14 +475,24 @@ impl App {
             .filter(|annotated| annotated.compatibility.is_compatible())
             .collect();
 
+        let installed_version_id = entry.identity.version_id().map(ToOwned::to_owned);
+        let original_version_id = entry
+            .original_identity
+            .as_ref()
+            .and_then(ModIdentity::version_id)
+            .filter(|original| Some(*original) != installed_version_id.as_deref())
+            .map(ToOwned::to_owned);
+
         Ok(ModVersionChoices {
             logical_path: entry.logical_path.clone(),
             provider: provider_kind,
             project,
-            installed_version_id: entry.identity.version_id().map(ToOwned::to_owned),
+            installed_version_id,
             compatible,
             newest_compatible: newest,
             mutability,
+            origin: entry.origin,
+            original_version_id,
         })
     }
 
@@ -625,7 +661,7 @@ impl App {
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<ModMutationPlan> {
-        let mutability = ModMutability::of(&context.entry);
+        let mutability = effective_mutability(&context.entry, &context.record);
         if !mutability.can_change_version {
             return Err(CoreError::ModMutationRestricted {
                 path: context.entry.logical_path.clone(),
@@ -1150,6 +1186,7 @@ mod tests {
             file_name: "thing.jar".to_owned(),
             origin,
             identity,
+            original_identity: None,
             hashes: vec![
                 Hash::new(
                     HashAlgorithm::Sha1,
@@ -1180,6 +1217,26 @@ mod tests {
         ModIdentity::Project {
             provider: ModProvider::Modrinth,
             project_id: "ROOTPROJ".to_owned(),
+        }
+    }
+
+    fn client_record(allow_pack_mod_version_changes: bool) -> ClientRecord {
+        let now = chrono::Utc::now();
+        ClientRecord {
+            id: InstanceId::new(),
+            name: "Repro".to_owned(),
+            root: PathBuf::from("/tmp/repro"),
+            storage: ephervex_model::StorageClass::Temporary,
+            minecraft_version: "1.21.1".to_owned(),
+            loader: ephervex_model::LoaderSelection::vanilla(),
+            source: ephervex_storage::ImportSource::manual(),
+            java_override: None,
+            jvm_override: None,
+            allow_pack_mod_version_changes,
+            attention: Vec::new(),
+            created_at: now,
+            updated_at: now,
+            last_launched_at: None,
         }
     }
 
@@ -1237,6 +1294,55 @@ mod tests {
             "a pack's mod still has versions worth showing"
         );
         assert_eq!(mutability.restriction, Some(MutationRestriction::PackOwned));
+    }
+
+    #[test]
+    fn a_pack_owned_mod_stays_refused_until_the_instance_opts_in() {
+        let mutability = effective_mutability(
+            &entry(ModOrigin::PackDeclared, resolved()),
+            &client_record(false),
+        );
+        assert!(!mutability.can_change_version);
+        assert!(!mutability.can_update);
+        assert_eq!(mutability.restriction, Some(MutationRestriction::PackOwned));
+    }
+
+    #[test]
+    fn opting_in_allows_a_pack_owned_mod_to_move_but_never_to_be_removed() {
+        let mutability = effective_mutability(
+            &entry(ModOrigin::PackDeclared, resolved()),
+            &client_record(true),
+        );
+        assert!(mutability.can_change_version);
+        assert!(mutability.can_update);
+        assert!(
+            !mutability.can_remove,
+            "the setting says nothing about taking the mod out of the instance"
+        );
+        assert_eq!(mutability.restriction, None);
+    }
+
+    #[test]
+    fn opting_in_does_nothing_for_a_pack_owned_mod_with_no_resolved_version() {
+        // There is nothing to move it to without a proven version, opted in or
+        // not.
+        let mutability = effective_mutability(
+            &entry(ModOrigin::PackDeclared, project_only()),
+            &client_record(true),
+        );
+        assert!(!mutability.can_change_version);
+        assert!(!mutability.can_update);
+    }
+
+    #[test]
+    fn opting_in_does_not_loosen_a_dependencys_mutability() {
+        // The setting is specifically about the pack's own declarations.
+        let mutability = effective_mutability(
+            &entry(ModOrigin::RequiredDependency, resolved()),
+            &client_record(true),
+        );
+        assert!(!mutability.can_change_version);
+        assert!(!mutability.can_update);
     }
 
     #[test]
@@ -1419,6 +1525,8 @@ mod tests {
             compatible: Vec::new(),
             newest_compatible: None,
             mutability: ModMutability::of(&entry(ModOrigin::UserSelected, resolved())),
+            origin: ModOrigin::UserSelected,
+            original_version_id: None,
         }
     }
 

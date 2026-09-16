@@ -665,6 +665,15 @@ fn publish(
                 // one, on the strength of an unrelated operation.
                 let mut replacement = file.clone();
                 replacement.origin = updated.files[position].origin;
+                // A pack-owned entry's first move away from what the pack
+                // declared is the only chance to remember what that was; every
+                // later move must not overwrite it.
+                if updated.files[position].origin == ModOrigin::PackDeclared {
+                    replacement.original_identity = updated.files[position]
+                        .original_identity
+                        .clone()
+                        .or_else(|| updated.files[position].identity.clone());
+                }
                 updated.files[position] = replacement;
             }
             // A repair changes nothing about the record, and an unchanged mod

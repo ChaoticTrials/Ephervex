@@ -120,6 +120,14 @@ pub struct ClientRecord {
     pub java_override: Option<JavaOverride>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jvm_override: Option<JvmSettings>,
+    /// Whether this instance may change or update a mod the imported pack
+    /// declares, independently of what the pack shipped.
+    ///
+    /// Opt-in and defaults to `false`: the pack's declaration is a historical
+    /// record, and moving a mod away from it is a per-instance decision the
+    /// pack importer never asked about.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_pack_mod_version_changes: bool,
     /// Why this instance is not straightforwardly runnable, if it is not. The
     /// launcher never presents an approximation as faithful.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -556,6 +564,7 @@ mod tests {
                 max_memory_mib: Some(6144),
                 ..JvmSettings::default()
             }),
+            allow_pack_mod_version_changes: false,
             attention: Vec::new(),
             created_at: now,
             updated_at: now,
