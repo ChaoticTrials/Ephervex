@@ -2476,6 +2476,25 @@ fn register_mod_actions(ui: &AppWindow, commands: &Sender<Command>, browser: &Rc
     register_browser_install(ui, commands, browser);
     register_favorite_versions(ui, commands);
 
+    let weak = ui.as_weak();
+    ui.on_open_mod_project_page(move |url| {
+        if url.is_empty() {
+            return;
+        }
+        let opened = ephervex_core::open_in_browser(url.as_str());
+        if let Some(ui) = weak.upgrade() {
+            ui.invoke_present_toast(
+                lookup(if opened {
+                    "gui-mod-project-page-opened"
+                } else {
+                    "gui-mod-project-page-open-failed"
+                })
+                .into(),
+                !opened,
+            );
+        }
+    });
+
     let sender = commands.clone();
     let handle = ui.as_weak();
     ui.on_open_mod_manager(move |path| {
@@ -2490,6 +2509,7 @@ fn register_mod_actions(ui: &AppWindow, commands: &Sender<Command>, browser: &Rc
         ui.set_mod_action_name(mod_row_title(&ui, &path));
         ui.set_mod_action_notice(SharedString::default());
         ui.set_mod_action_selected(SharedString::default());
+        ui.set_mod_action_project_url(SharedString::default());
         ui.set_mod_versions(model(Vec::new()));
         ui.set_mod_action_can_change(false);
         ui.set_mod_action_can_update(false);
@@ -6040,6 +6060,7 @@ fn apply_mod_versions(ui: &AppWindow, data: backend::ModVersionsData) {
     ui.set_mod_action_can_update(data.can_update);
     ui.set_mod_action_can_remove(data.can_remove);
     ui.set_mod_action_up_to_date(data.up_to_date);
+    ui.set_mod_action_project_url(data.project_url.into());
     if !data.title.is_empty() {
         ui.set_mod_action_name(data.title.into());
     }

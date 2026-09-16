@@ -271,6 +271,30 @@ impl ModVersionChoices {
             _ => false,
         }
     }
+
+    /// The project's own page on its provider's site, when the identity is
+    /// complete enough to build one.
+    ///
+    /// `None` for CurseForge with no slug: its project-page address is built
+    /// from the slug, not the numeric id, and guessing one risks landing on
+    /// the wrong project.
+    #[must_use]
+    pub fn project_url(&self) -> Option<String> {
+        match self.provider {
+            ModProvider::Modrinth => {
+                let handle = self.project.slug.as_deref().unwrap_or(&self.project.id);
+                Some(format!("https://modrinth.com/mod/{handle}"))
+            }
+            ModProvider::CurseForge => self
+                .project
+                .slug
+                .as_deref()
+                .map(|slug| format!("https://www.curseforge.com/minecraft/mc-mods/{slug}")),
+            // Non-exhaustive so a future provider can be added without a
+            // breaking change here; nothing today can build its URL.
+            _ => None,
+        }
+    }
 }
 
 /// What a planned mutation would do to the mod it acts on.
@@ -1370,5 +1394,65 @@ mod tests {
             "the mod being removed is not one of its own consequences"
         );
         assert!(plan.changes_anything());
+    }
+
+    fn project(provider: ModProvider, slug: Option<&str>) -> ModProject {
+        ModProject {
+            provider,
+            id: "12345".to_owned(),
+            slug: slug.map(str::to_owned),
+            title: "Example Mod".to_owned(),
+            description: String::new(),
+            author: None,
+            client_side: ephervex_mod_platform::SideSupport::Unknown,
+            server_side: ephervex_mod_platform::SideSupport::Unknown,
+            icon_url: None,
+        }
+    }
+
+    fn choices(provider: ModProvider, slug: Option<&str>) -> ModVersionChoices {
+        ModVersionChoices {
+            logical_path: PathBuf::from("mods/thing.jar"),
+            provider,
+            project: project(provider, slug),
+            installed_version_id: None,
+            compatible: Vec::new(),
+            newest_compatible: None,
+            mutability: ModMutability::of(&entry(ModOrigin::UserSelected, resolved())),
+        }
+    }
+
+    #[test]
+    fn a_modrinth_project_page_url_prefers_the_slug() {
+        let url = choices(ModProvider::Modrinth, Some("example-mod"))
+            .project_url()
+            .expect("modrinth always has an id to fall back to");
+        assert_eq!(url, "https://modrinth.com/mod/example-mod");
+    }
+
+    #[test]
+    fn a_modrinth_project_page_url_falls_back_to_the_id_without_a_slug() {
+        let url = choices(ModProvider::Modrinth, None)
+            .project_url()
+            .expect("modrinth always has an id to fall back to");
+        assert_eq!(url, "https://modrinth.com/mod/12345");
+    }
+
+    #[test]
+    fn a_curseforge_project_page_url_needs_the_slug() {
+        let url = choices(ModProvider::CurseForge, Some("example-mod"))
+            .project_url()
+            .expect("a curseforge slug was supplied");
+        assert_eq!(
+            url,
+            "https://www.curseforge.com/minecraft/mc-mods/example-mod"
+        );
+    }
+
+    #[test]
+    fn a_curseforge_project_page_url_is_unavailable_without_a_slug() {
+        // Its address is built from the slug, not the numeric id, so guessing
+        // one without it risks landing on the wrong project.
+        assert_eq!(choices(ModProvider::CurseForge, None).project_url(), None);
     }
 }

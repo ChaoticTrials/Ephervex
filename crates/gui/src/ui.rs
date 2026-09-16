@@ -2416,6 +2416,7 @@ slint::slint! {
         in-out property <bool> mod-action-can-remove: false;
         in-out property <bool> mod-action-up-to-date: false;
         in-out property <bool> mod-action-loading: false;
+        in-out property <string> mod-action-project-url;
         // Set the moment a mutation is submitted and cleared when it answers,
         // so one click cannot become two operations.
         in-out property <bool> mod-action-pending: false;
@@ -2453,6 +2454,7 @@ slint::slint! {
         // this client", which is a different request from an exact choice.
         callback plan-mod-apply(string, string, string);
         callback remove-mod(string, string);
+        callback open-mod-project-page(string);
         in-out property <[ModSearchRow]> mod-results;
         in-out property <[DiagnosticRow]> diagnostics;
         // Whether the Logs tab is showing saved log files rather than the one
@@ -4108,6 +4110,7 @@ slint::slint! {
                         if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; }
                         HorizontalLayout { spacing: 8px;
                             if root.mod-action-can-remove : AppButton { text: GuiI18n.text("gui-remove"); tone: "danger"; enabled: !root.mod-action-pending; clicked => { root.modal-error = ""; root.plan-mod-removal(root.selected-instance-id, root.mod-action-path); } }
+                            if root.mod-action-project-url != "" : AppButton { text: GuiI18n.text("gui-mod-open-project-page"); clicked => { root.open-mod-project-page(root.mod-action-project-url); } }
                             Rectangle { horizontal-stretch: 1; }
                             AppButton { text: GuiI18n.text("gui-close"); clicked => { root.modal = ""; root.modal-error = ""; } }
                             if root.mod-action-can-update : AppButton { text: GuiI18n.text("gui-mod-update"); enabled: !root.mod-action-pending; clicked => { root.mod-action-pending = true; root.modal-error = ""; root.plan-mod-apply(root.selected-instance-id, root.mod-action-path, ""); } }

@@ -843,6 +843,9 @@ pub struct ModVersionsData {
     /// Localized: a refusal reason, or the reason the list is empty.
     pub notice: String,
     pub up_to_date: bool,
+    /// The project's page on its provider's site. Empty when none could be
+    /// built (e.g. a CurseForge project with no known slug).
+    pub project_url: String,
 }
 
 /// What a removal would take with it, before it is carried out.
@@ -4889,6 +4892,7 @@ async fn mod_versions(app: &App, instance: InstanceId, path: &Path) -> ModVersio
                 can_update: choices.mutability.can_update && !up_to_date,
                 can_remove: choices.mutability.can_remove,
                 up_to_date,
+                project_url: choices.project_url().unwrap_or_default(),
                 versions,
             }
         }
