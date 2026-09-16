@@ -2493,6 +2493,10 @@ slint::slint! {
         in-out property <[PendingEntityRow]> pending-instances;
         in-out property <[PendingEntityRow]> pending-servers;
         in-out property <[PendingEntityRow]> linked-pending-servers;
+        // How many of the rows above belong to the instance on screen. A count
+        // rather than a second filtered list: Slint has no array filter
+        // expression, and this is only ever compared against zero.
+        in-out property <int> selected-instance-pending-linked-servers: 0;
         in-out property <[LogChunk]> log-chunks;
         in-out property <bool> log-has-content: false;
         in-out property <string> log-status;
@@ -3145,8 +3149,11 @@ slint::slint! {
                                     VerticalLayout {
                                         spacing: Theme.card-gap;
                                         for pending in root.pending-instances : PendingCard { item: pending; }
-                                        for item[index] in root.instances : InstanceCard {
-                                            visible: root.instance-filter == "all" || item.storage-kind == root.instance-filter;
+                                        for item[index] in root.instances : VerticalLayout {
+                                        spacing: Theme.card-gap;
+                                        visible: root.instance-filter == "all" || item.storage-kind == root.instance-filter;
+                                        for pending in root.linked-pending-servers : PendingCard { visible: pending.linked-client-id == item.id; item: pending; }
+                                        InstanceCard {
                                             item: item;
                                             selected: item.id == root.selected-instance-id;
                                             choose(id) => { root.selected-instance-id = id; root.select-instance(id); }
@@ -3159,6 +3166,7 @@ slint::slint! {
                                             make-persistent(id) => { root.open-make-persistent(id); }
                                             rename(id, name) => { root.pending-action-kind = "client"; root.pending-action-id = id; root.pending-rename-text = name; root.modal-error = ""; root.modal = "rename"; }
                                             delete(id, name) => { root.pending-action-id = id; root.pending-action-name = name; root.pending-action-linked-servers = item.linked-servers; root.modal = "delete-instance"; }
+                                        }
                                         }
                                     }
                                 }
@@ -3219,8 +3227,8 @@ slint::slint! {
                                     }
                                     BodyText { text: root.instances[root.selected-instance-index].storage-kind == "temporary" ? GuiI18n.text("gui-temporary-lifecycle") : GuiI18n.text("gui-persistent-lifecycle"); color: Theme.text-muted; wrap: word-wrap; }
                                     Divider { }
-                                    HorizontalLayout { Heading { text: GuiI18n.text("gui-linked-server"); font-size: Theme.section-size; } Rectangle { horizontal-stretch: 1; } if root.linked-servers.length == 0 && root.linked-pending-servers.length == 0 : AppButton { text: GuiI18n.text("gui-create-linked-server"); clicked => { root.create-server-client-id = root.selected-instance-id; root.create-server-name = ""; root.create-server-name-suggestion = root.instances[root.selected-instance-index].name + " Server"; root.create-server-pack = ""; root.create-server-pack-name = ""; root.modal = "create-server"; } } }
-                                    if root.linked-servers.length == 0 && root.linked-pending-servers.length == 0 : BodyText { text: GuiI18n.text("gui-no-linked-server-detail"); color: Theme.text-muted; wrap: word-wrap; }
+                                    HorizontalLayout { Heading { text: GuiI18n.text("gui-linked-server"); font-size: Theme.section-size; } Rectangle { horizontal-stretch: 1; } if root.linked-servers.length == 0 && root.selected-instance-pending-linked-servers == 0 : AppButton { text: GuiI18n.text("gui-create-linked-server"); clicked => { root.create-server-client-id = root.selected-instance-id; root.create-server-name = ""; root.create-server-name-suggestion = root.instances[root.selected-instance-index].name + " Server"; root.create-server-pack = ""; root.create-server-pack-name = ""; root.modal = "create-server"; } } }
+                                    if root.linked-servers.length == 0 && root.selected-instance-pending-linked-servers == 0 : BodyText { text: GuiI18n.text("gui-no-linked-server-detail"); color: Theme.text-muted; wrap: word-wrap; }
                                     for pending in root.linked-pending-servers : PendingCard { visible: pending.linked-client-id == root.selected-instance-id; item: pending; }
                                     for server in root.linked-servers : Rectangle { height: 142px; border-radius: 8px; border-width: 1px; border-color: server.needs-attention ? Theme.warning : Theme.border; background: Theme.surface; VerticalLayout { padding: 14px; spacing: 8px;
                                         HorizontalLayout { Heading { text: server.name; font-size: Theme.row-heading-size; } Pill { text: server.state; tone-color: server.state-kind == "running" ? Theme.success : server.needs-attention ? Theme.warning : Theme.text-secondary; } Rectangle { horizontal-stretch: 1; } BodyText { text: server.address; color: Theme.text-muted; } }

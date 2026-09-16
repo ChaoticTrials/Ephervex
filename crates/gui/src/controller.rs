@@ -5596,15 +5596,25 @@ fn apply_pending_creations(ui: &AppWindow, tracker: &CreationTracker) {
     };
     ui.set_pending_instances(model(rows(false, false)));
     ui.set_pending_servers(model(rows(true, true)));
+    let linked = rows(true, false);
+    // Unfiltered by selection: the overview tab shows one of these next to
+    // every instance card whose id matches, not only the one currently open.
     let selected_instance = ui.get_selected_instance_id();
+    let pending_for_selected = linked
+        .iter()
+        .filter(|row| !row.linked_client_id.is_empty() && row.linked_client_id == selected_instance)
+        .count();
     ui.set_linked_pending_servers(model(
-        rows(true, false)
+        linked
             .into_iter()
-            .filter(|row| {
-                !row.linked_client_id.is_empty() && row.linked_client_id == selected_instance
-            })
+            .filter(|row| !row.linked_client_id.is_empty())
             .collect(),
     ));
+    // A plain count rather than a second filtered list: the instance
+    // workspace's own "no linked server" checks only ever need to know
+    // whether one exists for the instance on screen, and `linked-pending-servers`
+    // above already carries every row that page's `for` loop renders.
+    ui.set_selected_instance_pending_linked_servers(to_i32(pending_for_selected));
 }
 
 /// The non-secret provider identifiers: the Microsoft Client ID and the
@@ -7069,6 +7079,50 @@ mod tests {
                 .is_some()
         );
         assert_eq!(tracker.pending.len(), 2);
+    }
+
+    /// The overview tab shows every instance's own pending linked server, not
+    /// only the one the user currently has open.
+    #[test]
+    fn linked_pending_servers_are_not_filtered_to_the_selected_instance() {
+        let ui = test_window();
+        ui.set_selected_instance_id("client-a".into());
+
+        let first = CreationKey::Server {
+            name: "First Server".to_owned(),
+            client: "client-a".to_owned(),
+            minecraft: String::new(),
+            loader: String::new(),
+            loader_version: String::new(),
+            persistent: false,
+            port: None,
+            server_pack: String::new(),
+        };
+        let mut second = first.clone();
+        let CreationKey::Server { client, name, .. } = &mut second else {
+            unreachable!()
+        };
+        *client = "client-b".to_owned();
+        *name = "Second Server".to_owned();
+
+        let mut tracker = CreationTracker::default();
+        tracker.accept(first.clone(), pending_creation(&first, false));
+        tracker.accept(second.clone(), pending_creation(&second, false));
+
+        apply_pending_creations(&ui, &tracker);
+
+        let linked_client_ids: Vec<String> = ui
+            .get_linked_pending_servers()
+            .iter()
+            .map(|row| row.linked_client_id.to_string())
+            .collect();
+        assert_eq!(linked_client_ids.len(), 2);
+        assert!(linked_client_ids.contains(&"client-a".to_owned()));
+        assert!(
+            linked_client_ids.contains(&"client-b".to_owned()),
+            "an instance's pending linked server must show up on its own card \
+             even while a different instance is selected"
+        );
     }
 
     #[test]

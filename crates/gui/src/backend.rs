@@ -1583,9 +1583,12 @@ fn run_worker(
                         paths,
                         &events,
                         Arc::clone(&cancellations),
-                        request_id,
-                        "operation-creating-instance",
-                        entity,
+                        CreationRequest {
+                            id: request_id,
+                            title: "operation-creating-instance",
+                            entity,
+                            report_progress: false,
+                        },
                         move |app, _reporter, _cancel| async move {
                             app.create_client_reporting(
                                 NewClient::new(name, minecraft, loader)
@@ -2163,10 +2166,13 @@ fn run_worker(
                             paths,
                             &events,
                             Arc::clone(&cancellations),
-                            request_id,
-                            "operation-creating-server",
-                            request.name.clone(),
-                            move |app, _reporter, cancel| async move {
+                            CreationRequest {
+                                id: request_id,
+                                title: "operation-creating-server",
+                                entity: request.name.clone(),
+                                report_progress: true,
+                            },
+                            move |app, reporter, cancel| async move {
                                 app.create_server(
                                     request,
                                     &ServerCreateOptions {
@@ -2175,6 +2181,7 @@ fn run_worker(
                                             .map_or(ServerContentSource::Recipe, |path| {
                                                 ServerContentSource::Archive { path }
                                             }),
+                                        reporter: Some(reporter),
                                         ..ServerCreateOptions::default()
                                     },
                                     &cancel,
@@ -4226,19 +4233,35 @@ fn spawn_async_operation<F, Fut>(
     );
 }
 
+/// What one creation operation is and how it should report itself.
+struct CreationRequest {
+    id: String,
+    title: &'static str,
+    entity: String,
+    /// Whether the pending card for this creation should receive live
+    /// stage-by-stage progress. `false` for a caller with no pending card
+    /// watching this specific request id.
+    report_progress: bool,
+}
+
 fn spawn_creation_operation<F, Fut>(
     paths: Paths,
     events: &Sender<Event>,
     cancellations: CancellationRegistry,
-    request_id: String,
-    title: &'static str,
-    entity: String,
+    request: CreationRequest,
     operation: F,
 ) where
     F: FnOnce(App, OperationReporter, CancellationToken) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = Result<String, CoreError>> + 'static,
 {
+    let CreationRequest {
+        id: request_id,
+        title,
+        entity,
+        report_progress,
+    } = request;
     let failed_request_id = request_id.clone();
+    let progress_request_id = request_id.clone();
     spawn_detached_with_setup_failure(
         paths.clone(),
         events.clone(),
@@ -4252,7 +4275,7 @@ fn spawn_creation_operation<F, Fut>(
                 events: events.clone(),
                 entity,
                 allow_cancel: false,
-                pending: None,
+                pending: report_progress.then_some(progress_request_id),
             });
             let reporter = OperationReporter::new(title, false, sink);
             reporter.begin(Some(lookup("gui-activity-preparing-environment")));
