@@ -136,10 +136,15 @@ jobs:
           packaging/build-appimage.sh dist
 
       - name: Build the Debian package
+        env:
+          # Must match the AppImage step's value exactly: `build-deb.sh` calls
+          # the same `build_release_binaries`, and `option_env!` in
+          # `ephervex-auth` makes rustc track this variable, so a different
+          # value here (including unset) invalidates cargo's fingerprint and
+          # silently recompiles without the baked-in CurseForge key.
+          EPHERVEX_CURSEFORGE_API_KEY: ${{ secrets.CURSEFORGE_API_KEY }}
         run: |
           set -eu
-          # The binaries are already built and cached from the step above, so
-          # this is the packaging half rather than a second compile.
           packaging/build-deb.sh dist
 
       - name: Publish the release
