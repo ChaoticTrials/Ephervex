@@ -18,6 +18,13 @@
 //! reported as a failure. Nothing is wrong; the directory was simply never a
 //! runtime.
 //!
+//! Canonicalization only collapses a JDK 8's two executables when one is
+//! genuinely a symlink to the other. Some managed archives (Ephervex's own
+//! downloaded Temurin builds among them) ship `bin/java` and `jre/bin/java`
+//! as two separate real files reporting the same runtime, so
+//! [`merge_split_jdk_homes`] collapses those by JDK home once probing has
+//! confirmed they agree.
+//!
 //! # Where it looks
 //!
 //! `PATH`, `JAVA_HOME`, the common system JVM directories, Ephervex's own
@@ -311,6 +318,8 @@ impl JavaDiscovery {
             }
         }
 
+        let mut runtimes = merge_split_jdk_homes(runtimes);
+
         // Newest first, then by path so the order is stable between scans.
         runtimes.sort_by(|left, right| {
             right
@@ -385,8 +394,10 @@ impl JavaDiscovery {
 /// Adds both executables a JDK home can expose.
 ///
 /// Java 8 JDKs ship a `jre` subdirectory whose `bin/java` is the real binary,
-/// with `<home>/bin/java` as a symlink to it. Both are offered; canonicalization
-/// collapses them.
+/// with `<home>/bin/java` usually a symlink to it. Both are offered:
+/// canonicalization collapses the pair when one really is a symlink to the
+/// other, and [`merge_split_jdk_homes`] collapses them by JDK home when a
+/// distribution ships both as separate real files instead.
 fn push_home(candidates: &mut Vec<JavaOrigin>, kind: JavaSourceKind, home: &Path) {
     candidates.push(JavaOrigin {
         kind,
@@ -411,6 +422,62 @@ fn children(directory: &Path) -> Vec<PathBuf> {
         .collect();
     paths.sort();
     paths
+}
+
+/// Collapses runtimes that answer at both `<home>/bin/java` and
+/// `<home>/jre/bin/java` for the same JDK home into one entry.
+///
+/// Canonicalization already collapses the pair when one path is a symlink to
+/// the other, the common case for a distribution's own packaged JDK 8.
+/// Ephervex's own managed Temurin JDK 8 archives ship both as separate real
+/// files instead, so canonicalization alone leaves two distinct runtimes;
+/// this collapses them by JDK home once probing has confirmed they report the
+/// same version, runtime version, and vendor.
+fn merge_split_jdk_homes(mut runtimes: Vec<JavaRuntime>) -> Vec<JavaRuntime> {
+    let mut merged: Vec<JavaRuntime> = Vec::with_capacity(runtimes.len());
+    'runtimes: while let Some(runtime) = runtimes.pop() {
+        if let Some(home) = jdk_home_of(&runtime.executable) {
+            for existing in &mut merged {
+                let same_install = jdk_home_of(&existing.executable) == Some(home.clone())
+                    && existing.version == runtime.version
+                    && existing.runtime_version == runtime.runtime_version
+                    && existing.vendor == runtime.vendor;
+                if same_install {
+                    // The top-level `bin/java` entry is the runtime's public
+                    // entry point; prefer it as the merged runtime's own
+                    // identity over the private `jre/bin/java` one.
+                    if runtime.executable == home.join("bin").join("java") {
+                        existing.executable = runtime.executable;
+                        existing.home = runtime.home;
+                    }
+                    for origin in runtime.origins {
+                        existing.absorb(origin);
+                    }
+                    continue 'runtimes;
+                }
+            }
+        }
+        merged.push(runtime);
+    }
+    merged
+}
+
+/// The JDK home an executable belongs to, if its path matches one of the two
+/// shapes [`push_home`] offers: `<home>/bin/java` or `<home>/jre/bin/java`.
+fn jdk_home_of(executable: &Path) -> Option<PathBuf> {
+    if executable.file_name().and_then(|name| name.to_str()) != Some("java") {
+        return None;
+    }
+    let bin = executable.parent()?;
+    if bin.file_name().and_then(|name| name.to_str()) != Some("bin") {
+        return None;
+    }
+    let above_bin = bin.parent()?;
+    if above_bin.file_name().and_then(|name| name.to_str()) == Some("jre") {
+        above_bin.parent().map(Path::to_path_buf)
+    } else {
+        Some(above_bin.to_path_buf())
+    }
 }
 
 /// Resolves a candidate to a canonical executable, or `None` if it is not one.
@@ -610,6 +677,63 @@ mod tests {
         assert_eq!(
             inventory.runtimes[0].primary_source(),
             JavaSourceKind::Managed
+        );
+    }
+
+    /// Writes an executable reporting fixed JVM properties at exactly the
+    /// given path, rather than under a `<root>/<name>/bin/java` layout like
+    /// [`fake_jdk`] - needed here to place two of them under one JDK home.
+    fn fake_java_at(executable: &Path, home: &Path, version: &str, runtime: &str, vendor: &str) {
+        std::fs::create_dir_all(executable.parent().expect("parent")).expect("create bin dir");
+        let script = format!(
+            "#!/bin/sh\ncat >&2 <<'EOF'\nProperty settings:\n    java.home = {home}\n    \
+             java.runtime.version = {runtime}\n    java.vendor = {vendor}\n    \
+             java.version = {version}\n    os.arch = amd64\nEOF\n",
+            home = home.display(),
+        );
+        std::fs::write(executable, script).expect("write java");
+        set_executable(executable);
+    }
+
+    #[tokio::test]
+    async fn a_managed_jdk8_with_separate_jre_and_bin_executables_is_reported_once() {
+        // Some managed Temurin JDK 8 archives ship `bin/java` and
+        // `jre/bin/java` as two separate real files rather than one being a
+        // symlink to the other, so canonicalization alone cannot collapse
+        // them - this is what `merge_split_jdk_homes` exists for.
+        let temp = tempfile::tempdir().expect("temp");
+        let managed = temp.path().join("java");
+        let home = managed.join("8").join("eclipse-jdk8u312-b07");
+        let jre = home.join("jre");
+        for executable in [home.join("bin").join("java"), jre.join("bin").join("java")] {
+            fake_java_at(&executable, &jre, "1.8.0_312", "1.8.0_312-b07", "Temurin");
+        }
+
+        let inventory = JavaDiscovery::isolated()
+            .with_managed_root(&managed)
+            .discover()
+            .await;
+
+        assert_eq!(
+            inventory.runtimes.len(),
+            1,
+            "the two executables are one install, got {:?}",
+            inventory
+                .runtimes
+                .iter()
+                .map(|r| r.executable.display().to_string())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            inventory.runtimes[0].origins.len(),
+            2,
+            "{:?}",
+            inventory.runtimes[0].origins
+        );
+        assert_eq!(
+            inventory.runtimes[0].executable,
+            home.join("bin").join("java"),
+            "the top-level entry point is preferred as the runtime's identity"
         );
     }
 
