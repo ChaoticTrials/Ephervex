@@ -2003,7 +2003,7 @@ slint::slint! {
                     BodyText { text: item.storage; color: item.storage-kind == "temporary" ? Theme.warning : Theme.success; font-size: Theme.caption-size; }
                     Pill { text: item.state; tone-color: Theme.accent; }
                 }
-                HorizontalLayout { alignment: center; Spinner { width: 18px; height: 18px; } }
+                HorizontalLayout { alignment: center; Spinner { indeterminate: true; width: 18px; height: 18px; } }
             }
         }
     }
@@ -3283,7 +3283,7 @@ slint::slint! {
                                         TextField { text <=> root.instance-query; placeholder: GuiI18n.text("gui-filter-instances"); input-type: InputType.search; width: 290px; accepted => { root.refresh(); } }
                                     }
                                 }
-                                if root.loading : VerticalLayout { alignment: center; Spinner { width: 38px; height: 38px; } BodyText { text: GuiI18n.text("gui-loading-instances"); horizontal-alignment: center; } }
+                                if root.loading : VerticalLayout { alignment: center; Spinner { indeterminate: true; width: 38px; height: 38px; } BodyText { text: GuiI18n.text("gui-loading-instances"); horizontal-alignment: center; } }
                                 if !root.loading && root.instances.length == 0 && root.pending-instances.length == 0 : EmptyState {
                                     title: GuiI18n.text("gui-no-client-instances");
                                     message: GuiI18n.text("gui-no-client-instances-detail");
@@ -4101,7 +4101,7 @@ slint::slint! {
                             }
                             if root.import-status-kind == "analyzing" || root.import-status-kind == "resolving" : HorizontalLayout {
                                 spacing: 7px;
-                                Spinner { width: 16px; height: 16px; }
+                                Spinner { indeterminate: true; width: 16px; height: 16px; }
                                 BodyText {
                                     text: root.import-status-kind == "resolving" ? GuiI18n.text("gui-import-resolving") : GuiI18n.text("gui-import-analyzing");
                                     color: Theme.text-secondary;
