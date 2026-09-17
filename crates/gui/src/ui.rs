@@ -3843,14 +3843,51 @@ slint::slint! {
                                     AppButton { text: GuiI18n.text("gui-save-changes"); tone: "primary"; enabled: root.minecraft-can-save && !root.minecraft-saving; clicked => { root.minecraft-save-defaults(); } }
                                 }
                             }
-                            if root.workspace-tab == "Java" : VerticalLayout { spacing: 12px;
-                                VerticalLayout { spacing: 6px;
-                                    LabeledToggle { width: min(parent.width, 440px); label: GuiI18n.text("gui-java-detect"); checked <=> root.java-auto-detect; }
-                                    LabeledToggle { width: min(parent.width, 440px); label: GuiI18n.text("gui-java-download"); checked <=> root.java-auto-download; }
+                            if root.workspace-tab == "Java" : VerticalLayout { spacing: 14px;
+                                // The same cards the General page uses, two to a row
+                                // where the window is wide enough for them.
+                                GridLayout {
+                                    spacing: 14px;
+                                    SettingCard {
+                                        row: 0; col: 0;
+                                        title: GuiI18n.text("gui-java-detect");
+                                        detail: GuiI18n.text("gui-java-detect-detail");
+                                        Toggle { accessible-name: GuiI18n.text("gui-java-detect"); checked <=> root.java-auto-detect; }
+                                    }
+                                    SettingCard {
+                                        row: root.settings-two-columns ? 0 : 1;
+                                        col: root.settings-two-columns ? 1 : 0;
+                                        title: GuiI18n.text("gui-java-download");
+                                        detail: GuiI18n.text("gui-java-download-detail");
+                                        Toggle { accessible-name: GuiI18n.text("gui-java-download"); checked <=> root.java-auto-download; }
+                                    }
+                                    SettingCard {
+                                        row: root.settings-two-columns ? 1 : 2;
+                                        col: 0;
+                                        title: GuiI18n.text("gui-java-memory");
+                                        detail: GuiI18n.text("gui-java-memory-detail");
+                                        HorizontalLayout { spacing: 12px;
+                                            VerticalLayout { spacing: 4px; FieldLabel { text: GuiI18n.text("gui-java-memory-min"); } TextField { text <=> root.java-memory-min; accessible-name: GuiI18n.text("gui-java-memory-min"); input-type: InputType.number; width: 130px; } }
+                                            VerticalLayout { spacing: 4px; FieldLabel { text: GuiI18n.text("gui-java-memory-max"); } TextField { text <=> root.java-memory-max; accessible-name: GuiI18n.text("gui-java-memory-max"); input-type: InputType.number; width: 130px; } }
+                                        }
+                                    }
+                                    SettingCard {
+                                        row: root.settings-two-columns ? 1 : 3;
+                                        col: root.settings-two-columns ? 1 : 0;
+                                        title: GuiI18n.text("gui-java-preferred");
+                                        detail: GuiI18n.text("gui-java-preferred-detail");
+                                        TextField { text <=> root.java-preferred-path; accessible-name: GuiI18n.text("gui-java-preferred"); placeholder: "/usr/bin/java"; width: 260px; }
+                                    }
                                 }
-                                HorizontalLayout { spacing: 12px; VerticalLayout { FieldLabel { text: GuiI18n.text("gui-java-memory-min"); } TextField { text <=> root.java-memory-min; input-type: InputType.number; width: 190px; } } VerticalLayout { FieldLabel { text: GuiI18n.text("gui-java-memory-max"); } TextField { text <=> root.java-memory-max; input-type: InputType.number; width: 190px; } } }
-                                Text { text: GuiI18n.text("gui-java-preferred"); color: Theme.text-secondary; font-size: 12px; } TextField { text <=> root.java-preferred-path; placeholder: "/usr/bin/java"; }
-                                ActionRow { AppButton { text: GuiI18n.text("gui-java-refresh"); clicked => { root.refresh-java(); } } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-java-save"); tone: "primary"; clicked => { root.save-java-settings(root.java-auto-detect, root.java-auto-download, root.java-memory-min, root.java-memory-max, root.java-preferred-path); } } }
+                                ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-java-save"); tone: "primary"; clicked => { root.save-java-settings(root.java-auto-detect, root.java-auto-download, root.java-memory-min, root.java-memory-max, root.java-preferred-path); } } }
+                                // The list is its own thing, and the button that
+                                // rebuilds it belongs beside it rather than beside the
+                                // Save that has nothing to do with it.
+                                HorizontalLayout { spacing: 8px; cross-axis-alignment: center;
+                                    SectionTitle { title: GuiI18n.text("gui-java-runtimes"); detail: GuiI18n.text("gui-java-runtimes-detail"); horizontal-stretch: 1; }
+                                    VerticalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-java-refresh"); clicked => { root.refresh-java(); } } }
+                                }
+                                if root.java-runtimes.length == 0 : EmptyState { title: GuiI18n.text("gui-java-no-runtimes"); message: GuiI18n.text("gui-java-no-runtimes-detail"); }
                                 for java in root.java-runtimes : Rectangle { height: 75px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface; HorizontalLayout { padding: 12px; spacing: 10px; VerticalLayout { horizontal-stretch: 1; VerticalLayout { alignment: center; Heading { text: java.version + " | " + java.vendor; font-size: 14px; } BodyText { text: java.path; overflow: elide; } } } VerticalLayout { alignment: center; Pill { text: java.origin; tone-color: Theme.accent-secondary; } }
                                     // Only what the launcher installed itself offers the
                                     // bin: a runtime found on the system belongs to
