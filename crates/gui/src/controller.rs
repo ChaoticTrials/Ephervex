@@ -5601,25 +5601,68 @@ fn apply_pending_creations(ui: &AppWindow, tracker: &CreationTracker) {
     };
     ui.set_pending_instances(model(rows(false, false)));
     ui.set_pending_servers(model(rows(true, true)));
-    let linked = rows(true, false);
+    let linked: Vec<PendingEntityRow> = rows(true, false)
+        .into_iter()
+        .filter(|row| !row.linked_client_id.is_empty())
+        .collect();
     // Unfiltered by selection: the overview tab shows one of these next to
     // every instance card whose id matches, not only the one currently open.
     let selected_instance = ui.get_selected_instance_id();
-    let pending_for_selected = linked
+    let for_selected: Vec<PendingEntityRow> = linked
         .iter()
-        .filter(|row| !row.linked_client_id.is_empty() && row.linked_client_id == selected_instance)
-        .count();
-    ui.set_linked_pending_servers(model(
-        linked
-            .into_iter()
-            .filter(|row| !row.linked_client_id.is_empty())
-            .collect(),
-    ));
-    // A plain count rather than a second filtered list: the instance
-    // workspace's own "no linked server" checks only ever need to know
-    // whether one exists for the instance on screen, and `linked-pending-servers`
-    // above already carries every row that page's `for` loop renders.
-    ui.set_selected_instance_pending_linked_servers(to_i32(pending_for_selected));
+        .filter(|row| row.linked_client_id == selected_instance)
+        .cloned()
+        .collect();
+    ui.set_linked_pending_servers(model(linked));
+    // The instance workspace renders this one directly. Narrowing it here
+    // rather than hiding rows in the markup is what keeps the rows it does
+    // not want from taking up room where they are not shown.
+    ui.set_selected_instance_pending_servers(model(for_selected));
+    attach_creating_servers(ui);
+}
+
+/// Puts what each instance's linked server is doing onto that instance's own
+/// row.
+///
+/// The overview shows it there rather than in a card of its own: the work
+/// belongs to one instance, and a card above that instance is a second row
+/// for a single thing. Every row is written, including the ones with nothing
+/// to say, so a finished creation clears the row it was on.
+fn attach_creating_servers(ui: &AppWindow) {
+    let creating = ui.get_linked_pending_servers();
+    let instances = ui.get_instances();
+    for index in 0..instances.row_count() {
+        let Some(mut row) = instances.row_data(index) else {
+            continue;
+        };
+        let pending = creating
+            .iter()
+            .find(|entry| entry.linked_client_id == row.id);
+        let (detail, progress, indeterminate) = pending.map_or_else(
+            || (SharedString::default(), 0.0, false),
+            |entry| {
+                // Something, from the moment the work starts: the tracker has
+                // no detail to report until the first stage says one, and a
+                // row that said nothing would look like no server was coming.
+                let detail = if entry.detail.is_empty() {
+                    lookup("gui-creating-linked-server").into()
+                } else {
+                    entry.detail.clone()
+                };
+                (detail, entry.progress, entry.indeterminate)
+            },
+        );
+        if row.creating_server_detail == detail
+            && (row.creating_server_progress - progress).abs() < f32::EPSILON
+            && row.creating_server_indeterminate == indeterminate
+        {
+            continue;
+        }
+        row.creating_server_detail = detail;
+        row.creating_server_progress = progress;
+        row.creating_server_indeterminate = indeterminate;
+        instances.set_row_data(index, row);
+    }
 }
 
 /// The non-secret provider identifiers: the Microsoft Client ID and the
@@ -5877,6 +5920,11 @@ fn apply_instance_snapshot(
                 .launch_and_connect
                 .first()
                 .is_some_and(|connect| connect.enabled),
+            // Filled in from the creation tracker, which a snapshot knows
+            // nothing about.
+            creating_server_detail: SharedString::default(),
+            creating_server_progress: 0.0,
+            creating_server_indeterminate: false,
         })
         .collect::<Vec<_>>();
     let storage_filter = ui.get_instance_filter();
@@ -5897,6 +5945,9 @@ fn apply_instance_snapshot(
         ui.set_selected_instance_index(-1);
     }
     ui.set_instances(reconciled(&ui.get_instances(), instance_rows));
+    // A snapshot rebuilds the rows, so whatever was stamped on them about a
+    // server being built has to be stamped again.
+    attach_creating_servers(ui);
     // The list a pending reveal was waiting for. Cleared whether or not the
     // card turned up, so a request cannot outlive the list it was made against.
     let pending = ui.get_pending_reveal_instance();
@@ -7132,6 +7183,75 @@ mod tests {
             "an instance's pending linked server must show up on its own card \
              even while a different instance is selected"
         );
+
+        // The workspace's own list is the narrowed one, so that page renders
+        // only what it means to show rather than hiding the rest in place.
+        let on_the_open_instance: Vec<String> = ui
+            .get_selected_instance_pending_servers()
+            .iter()
+            .map(|row| row.linked_client_id.to_string())
+            .collect();
+        assert_eq!(on_the_open_instance, ["client-a".to_owned()]);
+    }
+
+    /// The overview reports the work on the row of the instance it belongs to,
+    /// so the rows have to be told about it, and told again when it ends.
+    #[test]
+    fn an_instances_row_carries_its_own_linked_servers_progress() {
+        let ui = test_window();
+        let rows = vec![
+            InstanceRow {
+                id: "client-a".into(),
+                ..InstanceRow::default()
+            },
+            InstanceRow {
+                id: "client-b".into(),
+                ..InstanceRow::default()
+            },
+        ];
+        ui.set_instances(model(rows));
+
+        let building = CreationKey::Server {
+            name: "First Server".to_owned(),
+            client: "client-a".to_owned(),
+            minecraft: String::new(),
+            loader: String::new(),
+            loader_version: String::new(),
+            persistent: false,
+            port: None,
+            server_pack: String::new(),
+        };
+        let mut tracker = CreationTracker::default();
+        tracker.accept(building.clone(), pending_creation(&building, false));
+        apply_pending_creations(&ui, &tracker);
+
+        let carried: Vec<String> = ui
+            .get_instances()
+            .iter()
+            .map(|row| row.creating_server_detail.to_string())
+            .collect();
+        assert_eq!(
+            carried.len(),
+            2,
+            "both rows are written, including the one with nothing to say"
+        );
+        assert!(
+            !carried[0].is_empty(),
+            "the instance being built for has to say what its server is doing"
+        );
+        assert!(
+            carried[1].is_empty(),
+            "an unrelated instance must not report somebody else's work"
+        );
+
+        // And when the work ends, the row it was on goes back to saying
+        // nothing rather than keeping the last thing it said.
+        apply_pending_creations(&ui, &CreationTracker::default());
+        assert!(
+            ui.get_instances()
+                .iter()
+                .all(|row| row.creating_server_detail.is_empty())
+        );
     }
 
     #[test]
@@ -8330,7 +8450,9 @@ mod tests {
         let source = include_str!("ui.rs");
         assert!(source.contains("for server in root.linked-servers"));
         assert!(source.contains("root.selected-server-id = server.id"));
-        assert!(source.contains("pending.linked-client-id == root.selected-instance-id"));
+        // Scoped by the model it renders rather than by hiding rows, which
+        // would leave the room they would have taken behind them.
+        assert!(source.contains("for pending in root.selected-instance-pending-servers"));
         assert!(source.contains("root.server-workspace-return-client"));
         assert!(source.contains("name + \" Server\""));
     }

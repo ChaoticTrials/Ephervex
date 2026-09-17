@@ -1229,6 +1229,11 @@ gui-creation-already-running = This creation request is already in progress.
 gui-creation-pending-detail = Validation and preparation are in progress. The finished environment will appear here automatically.
 gui-reset = Reset
 gui-state-creating = Creating
+# The badge an instance carries while a linked server is being built for it.
+gui-state-creating-server = Creating server
+# The row's own line before the work reports anything more specific. Kept
+# to one short line, because it stands where the instance's source line does.
+gui-creating-linked-server = Preparing the linked server
 gui-state-ready = Ready
 gui-state-starting = Starting
 gui-state-starting-detail = Preparing the runtime process

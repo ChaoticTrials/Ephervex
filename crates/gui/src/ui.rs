@@ -96,6 +96,13 @@ slint::slint! {
         connect-server-id: string,
         connect-server-name: string,
         can-connect: bool,
+        // What a linked server being built for this instance is doing, empty
+        // when none is. It is carried on the instance rather than listed
+        // beside it because the work belongs to this instance: a card of its
+        // own would be a second row for one thing.
+        creating-server-detail: string,
+        creating-server-progress: float,
+        creating-server-indeterminate: bool,
     }
 
     export struct ServerRow {
@@ -1959,15 +1966,44 @@ slint::slint! {
             VerticalLayout { horizontal-stretch: 1; spacing: 5px;
                 Heading { text: item.name; }
                 BodyText { text: item.target; wrap: word-wrap; }
-                BodyText { text: item.detail != "" ? item.detail : GuiI18n.text("gui-creation-pending-detail"); color: Theme.text-muted; wrap: word-wrap; overflow: elide; }
-                // Only where the work knows how far along it is. An
-                // indeterminate stage keeps the spinner and says nothing it
+                // The third line, and only the third line: what the work is
+                // doing, underlined by how far along it is. A bar on a row of
+                // its own made this card one row taller than the instance row
+                // it turns into, which is the one thing it should match.
+                //
+                // The bar shows only where the work knows how far along it is.
+                // An indeterminate stage keeps the spinner and says nothing it
                 // cannot back up.
-                if !item.indeterminate : Rectangle { height: 4px; border-radius: 2px; background: Theme.border; Rectangle { x: 0px; width: parent.width * item.progress; height: parent.height; border-radius: 2px; background: Theme.accent; } }
+                Rectangle {
+                    height: detail-line.preferred-height + 6px;
+                    detail-line := BodyText {
+                        y: 0px;
+                        width: parent.width;
+                        text: item.detail != "" ? item.detail : GuiI18n.text("gui-creation-pending-detail");
+                        color: Theme.text-muted;
+                        overflow: elide;
+                    }
+                    if !item.indeterminate : Rectangle {
+                        y: parent.height - 3px;
+                        height: 3px;
+                        width: parent.width;
+                        border-radius: 2px;
+                        background: Theme.border;
+                        Rectangle { x: 0px; width: parent.width * item.progress; height: parent.height; border-radius: 2px; background: Theme.accent; }
+                    }
+                }
             }
-            VerticalLayout { width: 140px; alignment: center; spacing: 7px;
-                Pill { text: item.storage; tone-color: item.storage-kind == "temporary" ? Theme.warning : Theme.success; }
-                HorizontalLayout { alignment: center; spacing: 7px; Spinner { width: 18px; height: 18px; } BodyText { text: item.state; color: Theme.accent; } }
+            // The same trailing column an InstanceCard has, down to its width:
+            // what is being created becomes one of those rows, and a row that
+            // states the same two things in the same two places reads as the
+            // same list rather than as a preview of one. The spinner stands
+            // where the row's buttons will be once there is something to press.
+            VerticalLayout { width: 224px; alignment: center; spacing: 7px;
+                HorizontalLayout { alignment: center; spacing: 7px;
+                    BodyText { text: item.storage; color: item.storage-kind == "temporary" ? Theme.warning : Theme.success; font-size: Theme.caption-size; }
+                    Pill { text: item.state; tone-color: Theme.accent; }
+                }
+                HorizontalLayout { alignment: center; Spinner { width: 18px; height: 18px; } }
             }
         }
     }
@@ -2186,7 +2222,29 @@ slint::slint! {
                     }
                 }
                 BodyText { text: GuiI18n.values("gui-target-summary", item.minecraft, item.loader) + (item.mods > 0 ? " | " + GuiI18n.count("gui-managed-mods-count", item.mods) : ""); overflow: elide; }
-                BodyText { text: item.linked-servers > 0 ? GuiI18n.count("gui-linked-servers-count", item.linked-servers) : GuiI18n.value("gui-source-instance", item.source); color: item.linked-servers > 0 ? Theme.accent : Theme.text-muted; overflow: elide; }
+                // The third line says where the instance came from, unless a
+                // linked server is being built for it, in which case it says
+                // what that is doing and is underlined by how far along it is.
+                // The work gets this row rather than a row of its own, because
+                // it is this instance's work.
+                Rectangle {
+                    height: source-line.preferred-height + (item.creating-server-detail != "" ? 6px : 0px);
+                    source-line := BodyText {
+                        y: 0px;
+                        width: parent.width;
+                        text: item.creating-server-detail != "" ? item.creating-server-detail : item.linked-servers > 0 ? GuiI18n.count("gui-linked-servers-count", item.linked-servers) : GuiI18n.value("gui-source-instance", item.source);
+                        color: item.creating-server-detail != "" ? Theme.accent : item.linked-servers > 0 ? Theme.accent : Theme.text-muted;
+                        overflow: elide;
+                    }
+                    if item.creating-server-detail != "" && !item.creating-server-indeterminate : Rectangle {
+                        y: parent.height - 3px;
+                        height: 3px;
+                        width: parent.width;
+                        border-radius: 2px;
+                        background: Theme.border;
+                        Rectangle { x: 0px; width: parent.width * item.creating-server-progress; height: parent.height; border-radius: 2px; background: Theme.accent; }
+                    }
+                }
             }
             VerticalLayout {
                 width: 224px; alignment: center; spacing: 7px;
@@ -2194,6 +2252,7 @@ slint::slint! {
                     alignment: center; spacing: 7px;
                     BodyText { text: item.storage; color: item.storage-kind == "temporary" ? Theme.warning : Theme.success; font-size: Theme.caption-size; }
                     Pill { text: item.state; tone-color: item.state-kind == "running" ? Theme.success : item.state-kind == "starting" ? Theme.warning : Theme.text-secondary; }
+                    if item.creating-server-detail != "" : Pill { text: GuiI18n.text("gui-state-creating-server"); tone-color: Theme.accent; }
                     if item.needs-attention : Pill { text: GuiI18n.text("gui-attention"); tone-color: Theme.danger; }
                 }
                 HorizontalLayout { alignment: center; spacing: 7px;
@@ -2571,11 +2630,14 @@ slint::slint! {
         in-out property <bool> minecraft-saving: false;
         in-out property <[PendingEntityRow]> pending-instances;
         in-out property <[PendingEntityRow]> pending-servers;
+        // Every instance's pending linked server, for the overview, which
+        // places each one against the card whose id it names.
         in-out property <[PendingEntityRow]> linked-pending-servers;
-        // How many of the rows above belong to the instance on screen. A count
-        // rather than a second filtered list: Slint has no array filter
-        // expression, and this is only ever compared against zero.
-        in-out property <int> selected-instance-pending-linked-servers: 0;
+        // The same rows narrowed to the instance on screen. Filtered here
+        // rather than in the markup because Slint has no array filter
+        // expression, and a `for` that hides most of what it renders still
+        // reserves the room for it.
+        in-out property <[PendingEntityRow]> selected-instance-pending-servers;
         in-out property <[LogChunk]> log-chunks;
         in-out property <bool> log-has-content: false;
         in-out property <string> log-status;
@@ -3239,9 +3301,7 @@ slint::slint! {
                                         spacing: Theme.card-gap;
                                         for pending in root.pending-instances : PendingCard { item: pending; }
                                         for item[index] in root.instances : VerticalLayout {
-                                        spacing: Theme.card-gap;
                                         visible: root.instance-filter == "all" || item.storage-kind == root.instance-filter;
-                                        for pending in root.linked-pending-servers : PendingCard { visible: pending.linked-client-id == item.id; item: pending; }
                                         InstanceCard {
                                             item: item;
                                             selected: item.id == root.selected-instance-id;
@@ -3316,9 +3376,9 @@ slint::slint! {
                                     }
                                     BodyText { text: root.instances[root.selected-instance-index].storage-kind == "temporary" ? GuiI18n.text("gui-temporary-lifecycle") : GuiI18n.text("gui-persistent-lifecycle"); color: Theme.text-muted; wrap: word-wrap; }
                                     Divider { }
-                                    HorizontalLayout { Heading { text: GuiI18n.text("gui-linked-server"); font-size: Theme.section-size; } Rectangle { horizontal-stretch: 1; } if root.linked-servers.length == 0 && root.selected-instance-pending-linked-servers == 0 : AppButton { text: GuiI18n.text("gui-create-linked-server"); clicked => { root.create-server-client-id = root.selected-instance-id; root.create-server-name = ""; root.create-server-name-suggestion = root.instances[root.selected-instance-index].name + " Server"; root.create-server-pack = ""; root.create-server-pack-name = ""; root.modal = "create-server"; } } }
-                                    if root.linked-servers.length == 0 && root.selected-instance-pending-linked-servers == 0 : BodyText { text: GuiI18n.text("gui-no-linked-server-detail"); color: Theme.text-muted; wrap: word-wrap; }
-                                    for pending in root.linked-pending-servers : PendingCard { visible: pending.linked-client-id == root.selected-instance-id; item: pending; }
+                                    HorizontalLayout { Heading { text: GuiI18n.text("gui-linked-server"); font-size: Theme.section-size; } Rectangle { horizontal-stretch: 1; } if root.linked-servers.length == 0 && root.selected-instance-pending-servers.length == 0 : AppButton { text: GuiI18n.text("gui-create-linked-server"); clicked => { root.create-server-client-id = root.selected-instance-id; root.create-server-name = ""; root.create-server-name-suggestion = root.instances[root.selected-instance-index].name + " Server"; root.create-server-pack = ""; root.create-server-pack-name = ""; root.modal = "create-server"; } } }
+                                    if root.linked-servers.length == 0 && root.selected-instance-pending-servers.length == 0 : BodyText { text: GuiI18n.text("gui-no-linked-server-detail"); color: Theme.text-muted; wrap: word-wrap; }
+                                    for pending in root.selected-instance-pending-servers : PendingCard { item: pending; }
                                     for server in root.linked-servers : Rectangle { height: 142px; border-radius: 8px; border-width: 1px; border-color: server.needs-attention ? Theme.warning : Theme.border; background: Theme.surface; VerticalLayout { padding: 14px; spacing: 8px;
                                         HorizontalLayout { Heading { text: server.name; font-size: Theme.row-heading-size; } Pill { text: server.state; tone-color: server.state-kind == "running" ? Theme.success : server.needs-attention ? Theme.warning : Theme.text-secondary; } Rectangle { horizontal-stretch: 1; } BodyText { text: server.address; color: Theme.text-muted; } }
                                         BodyText { text: server.needs-attention ? GuiI18n.text("gui-server-needs-attention") : server.state-detail; color: server.needs-attention ? Theme.warning : Theme.text-secondary; }
@@ -3436,7 +3496,7 @@ slint::slint! {
                                     TextField { text <=> root.server-query; placeholder: GuiI18n.text("gui-filter-servers"); input-type: InputType.search; width: 290px; accepted => { root.refresh(); } }
                                 }
                                 if root.global-servers.length == 0 && root.pending-servers.length == 0 : EmptyState { icon: @image-url("../../../assets/icons/nav-servers.svg"); title: GuiI18n.text("gui-no-servers"); message: GuiI18n.text("gui-no-standalone-servers-detail"); primary-text: GuiI18n.text("gui-modal-new-server"); primary => { root.create-server-client-id = ""; root.create-server-name = ""; root.recompute-create-server-name(); root.modal-error = ""; root.request-version-catalog(); root.warm-language-catalog(root.create-server-minecraft); root.create-server-pack = ""; root.create-server-pack-name = ""; root.modal = "create-server"; } }
-                                if root.global-servers.length > 0 || root.pending-servers.length > 0 : ScrollView { viewport-width: self.width; VerticalLayout { spacing: 12px; for pending in root.pending-servers : PendingCard { visible: root.show-linked-servers || pending.linked-client-id == ""; item: pending; } for item[index] in root.global-servers : ServerCard { item: item; selected: item.id == root.selected-global-server-id; choose(id) => { root.selected-global-server-id = id; root.selected-global-server-index = index; root.select-server(id); } primary(id) => { if item.can-start { root.server-start(id); } else { root.server-stop(id); } } open-workspace(id) => { root.selected-global-server-id = id; root.selected-global-server-index = index; root.selected-server-id = id; root.server-workspace-return-client = ""; root.select-server(id); root.workspace = "server"; root.workspace-tab = "Overview"; root.load-server-workspace(id); } open-folder(id) => { root.open-server-folder(id); } restart(id) => { root.server-restart(id); } kill(id, name) => { root.selected-server-id = id; root.pending-action-name = name; root.modal = "kill"; } rename(id, name) => { root.pending-action-kind = "server"; root.pending-action-id = id; root.pending-rename-text = name; root.modal-error = ""; root.modal = "rename"; } delete(id, name) => { root.pending-action-id = id; root.pending-action-name = name; root.modal = "delete-server"; } } } }
+                                if root.global-servers.length > 0 || root.pending-servers.length > 0 : ScrollView { viewport-width: self.width; VerticalLayout { spacing: 12px; for pending in root.pending-servers : PendingCard { item: pending; } for item[index] in root.global-servers : ServerCard { item: item; selected: item.id == root.selected-global-server-id; choose(id) => { root.selected-global-server-id = id; root.selected-global-server-index = index; root.select-server(id); } primary(id) => { if item.can-start { root.server-start(id); } else { root.server-stop(id); } } open-workspace(id) => { root.selected-global-server-id = id; root.selected-global-server-index = index; root.selected-server-id = id; root.server-workspace-return-client = ""; root.select-server(id); root.workspace = "server"; root.workspace-tab = "Overview"; root.load-server-workspace(id); } open-folder(id) => { root.open-server-folder(id); } restart(id) => { root.server-restart(id); } kill(id, name) => { root.selected-server-id = id; root.pending-action-name = name; root.modal = "kill"; } rename(id, name) => { root.pending-action-kind = "server"; root.pending-action-id = id; root.pending-rename-text = name; root.modal-error = ""; root.modal = "rename"; } delete(id, name) => { root.pending-action-id = id; root.pending-action-name = name; root.modal = "delete-server"; } } } }
                             }
                         }
                         if root.show-inspector && root.selected-global-server-index >= 0 : Rectangle { width: 360px; background: Theme.surface; border-width: 1px; border-color: Theme.border;

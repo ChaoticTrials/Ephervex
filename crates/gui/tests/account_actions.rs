@@ -286,6 +286,9 @@ fn instance() -> InstanceRow {
         connect_server_id: SharedString::default(),
         connect_server_name: SharedString::default(),
         can_connect: false,
+        creating_server_detail: SharedString::default(),
+        creating_server_progress: 0.0,
+        creating_server_indeterminate: false,
     }
 }
 
