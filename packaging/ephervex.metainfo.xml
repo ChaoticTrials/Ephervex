@@ -2,16 +2,16 @@
 <component type="desktop-application">
   <!--
     A reverse-DNS component id, which is what AppStream requires of a desktop
-    application, derived from the project's own repository. It is deliberately
+    application, derived from the domain the project owns. It is deliberately
     not `APP_ID`: that constant names the desktop entry, the XDG directories,
     and the keyring service (ADR 0003, ADR 0004), and the `launchable` below is
     what ties this component to it.
   -->
-  <id>io.github.chaotictrials.ephervex</id>
+  <id>de.chaotictrials.Ephervex</id>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>Apache-2.0</project_license>
 
-  <developer id="io.github.chaotictrials">
+  <developer id="de.chaotictrials">
     <name>ChaoticTrials</name>
   </developer>
 

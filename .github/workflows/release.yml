@@ -325,5 +325,5 @@ jobs:
             echo "The apt repository already carries this release."
             exit 0
           fi
-          git commit -m "Release ephervex ${GITHUB_REF_NAME}"
+          git commit -m "Release Ephervex ${GITHUB_REF_NAME}"
           git push
