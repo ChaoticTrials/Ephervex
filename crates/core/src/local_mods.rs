@@ -308,10 +308,9 @@ impl App {
     /// renamed into place, so an interrupted copy never leaves half a jar where
     /// a loader would find it.
     ///
-    /// Allowed while the host is running, unlike the other mutations in this
-    /// module: adding a new jar never touches a file the running loader
-    /// already has open, so it carries none of the risk that renaming or
-    /// deleting one does. The loader picks it up on the next launch.
+    /// Allowed while the host is running: adding a new jar never touches a
+    /// file the running loader already has open. The loader picks it up on
+    /// the next launch.
     pub fn add_local_mods(&self, host: ModHost, sources: &[PathBuf]) -> CoreResult<LocalModReport> {
         let layout = self.mod_host_layout(host)?;
         let dir = layout.game_dir.join(MODS_DIR);
@@ -371,7 +370,6 @@ impl App {
     /// jar underneath that record would leave the instance describing a mod it
     /// does not have and nothing to say why.
     pub fn delete_mod_file(&self, host: ModHost, logical_path: &Path) -> CoreResult<()> {
-        self.refuse_running_mod_host(host)?;
         let snapshot = self.host_mod_snapshot(host)?;
         let entry = snapshot
             .mods
@@ -439,7 +437,6 @@ impl App {
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<()> {
-        self.refuse_running_mod_host(host)?;
         let layout = self.mod_host_layout(host)?;
         let recipe = layout
             .recipe
@@ -622,9 +619,8 @@ mod tests {
 
     #[test]
     fn adding_a_local_mod_while_the_instance_is_running_still_succeeds() {
-        // Copying in a new jar never touches a file the running loader already
-        // has open, unlike deleting, restoring, or toggling one - so unlike
-        // those, this is not refused.
+        // Copying in a new jar never touches a file the running loader
+        // already has open, so this is never refused.
         let host = fixture();
         let _lock = ephervex_storage::LaunchLock::acquire(&host.root).expect("acquire lock");
         let chosen = tempfile::tempdir().expect("temp dir");

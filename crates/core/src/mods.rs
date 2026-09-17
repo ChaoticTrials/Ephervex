@@ -1092,33 +1092,6 @@ impl App {
         })
     }
 
-    /// Refuses to touch a host that is running.
-    ///
-    /// Renaming a jar underneath a running JVM does not unload it and does not
-    /// reliably do nothing either: the loader has the file open, and what the
-    /// next tick sees is up to the platform. So the rule is the same one every
-    /// other mutation follows.
-    pub(crate) fn refuse_running_mod_host(&self, host: ModHost) -> CoreResult<()> {
-        match host {
-            ModHost::Instance(id) => {
-                if let Some(state) = self.launch_state(id)? {
-                    return Err(ephervex_storage::LockError::AlreadyRunning {
-                        pid: state.game_pid.unwrap_or(state.owner_pid),
-                        since: state.since,
-                    }
-                    .into());
-                }
-            }
-            ModHost::Server(id) => {
-                let record = self.server(id)?;
-                if ephervex_server::classify_runtime(&record.root)?.may_be_running() {
-                    return Err(ephervex_server::ServerError::AlreadyRunning.into());
-                }
-            }
-        }
-        Ok(())
-    }
-
     /// Turns one recorded mod on or off without removing it.
     ///
     /// The jar moves between `<name>.jar` and `<name>.jar.disabled`, which is
@@ -1138,7 +1111,6 @@ impl App {
         logical_path: &Path,
         enabled: bool,
     ) -> CoreResult<ModPresence> {
-        self.refuse_running_mod_host(host)?;
         let layout = self.mod_host_layout(host)?;
         let installed = layout.game_dir.join(logical_path);
         let disabled = disabled_path(&installed);

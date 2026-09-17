@@ -217,10 +217,11 @@ fn an_instances_mod_row_offers_the_switch_its_servers_row_already_has() {
     );
 }
 
-/// Renaming a jar underneath a running loader does not unload it, and the core
-/// refuses it. The row says so before the click rather than after it.
+/// Toggling a mod off moves its jar aside rather than touching a file the
+/// running loader has open, so it is allowed whether the instance is running
+/// or not, just like deleting and restoring one.
 #[test]
-fn the_mod_switch_is_unavailable_while_the_instance_is_running() {
+fn the_mod_switch_stays_available_while_the_instance_is_running() {
     let ui = window();
     let flipped = record_toggles(&ui);
     instance_mods(
@@ -235,17 +236,17 @@ fn the_mod_switch_is_unavailable_while_the_instance_is_running() {
     );
 
     switch(&ui)
-        .expect("the switch is still shown, so its state stays readable")
+        .expect("the row offers the switch")
         .mock_single_click(PointerEventButton::Left);
 
-    assert!(
-        flipped.borrow().is_empty(),
-        "a press while the game is running must not reach the backend"
-    );
-    assert!(
-        ElementHandle::find_by_accessible_label(&ui, &lookup("gui-mods-locked-while-running"))
-            .any(|element| element.size().width > 0.0),
-        "an unavailable switch has to say why"
+    assert_eq!(
+        flipped.borrow().as_slice(),
+        [(
+            "client".to_owned(),
+            "mods/utilitix-1.21.1-1.13.2.jar".to_owned(),
+            false
+        )],
+        "a press while the game is running must still reach the backend"
     );
 }
 
