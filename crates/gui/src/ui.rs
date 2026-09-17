@@ -2760,10 +2760,17 @@ slint::slint! {
         in-out property <string> user-agent;
         in-out property <string> effective-user-agent;
         in-out property <bool> user-agent-is-custom;
-        // Whether a CurseForge API key is in the keyring. The only thing the
-        // view is told about it: there is no property the value could arrive
-        // in, so no snapshot can push a stored secret back into the window.
+        // Whether the user stored their own CurseForge API key in the
+        // keyring. The only thing the view is told about it: there is no
+        // property the value could arrive in, so no snapshot can push a
+        // stored secret back into the window.
         in-out property <bool> curseforge-key-configured;
+        // Whether this build's baked-in fallback key is in effect because the
+        // user has not configured their own (ADR 0030).
+        in-out property <bool> curseforge-key-default-in-use;
+        // Whether this build carries a key of its own at all, which is what
+        // decides whether having none configured is a state to warn about.
+        in-out property <bool> curseforge-build-key-available;
         // What the user is typing right now, and nothing else. Cleared on
         // submit and never written from a snapshot.
         in-out property <string> curseforge-api-key;
@@ -3710,13 +3717,19 @@ slint::slint! {
                                     BodyText { text: GuiI18n.value(root.user-agent-is-custom ? "gui-effective-value" : "gui-effective-default", root.effective-user-agent); color: Theme.text-muted; wrap: word-wrap; }
                                 } }
                                 ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-save-api-settings"); tone: "primary"; clicked => { root.save-api-settings(root.microsoft-client-id, root.user-agent); } } }
-                                SectionTitle { title: GuiI18n.text("gui-curseforge"); detail: GuiI18n.text("gui-curseforge-detail"); }
-                                Rectangle { height: 196px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface; VerticalLayout { padding: 16px; spacing: 8px;
-                                    HorizontalLayout { Heading { text: GuiI18n.text("gui-curseforge-api-key"); font-size: Theme.row-heading-size; } Rectangle { horizontal-stretch: 1; } Pill { text: root.curseforge-key-configured ? GuiI18n.text("gui-curseforge-key-configured") : GuiI18n.text("gui-curseforge-key-not-configured"); tone-color: root.curseforge-key-configured ? Theme.accent : Theme.text-secondary; } }
+                                SectionTitle { title: GuiI18n.text("gui-curseforge"); detail: root.curseforge-build-key-available ? GuiI18n.text("gui-curseforge-detail-default") : GuiI18n.text("gui-curseforge-detail-required"); }
+                                Rectangle { height: curseforge-card.preferred-height; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface; curseforge-card := VerticalLayout { padding: 16px; spacing: 8px;
+                                    HorizontalLayout { Heading { text: GuiI18n.text("gui-curseforge-api-key"); font-size: Theme.row-heading-size; } Rectangle { horizontal-stretch: 1; } Pill { text: root.curseforge-key-configured ? GuiI18n.text("gui-curseforge-key-configured") : root.curseforge-key-default-in-use ? GuiI18n.text("gui-curseforge-key-default-in-use") : GuiI18n.text("gui-curseforge-key-not-configured"); tone-color: root.curseforge-key-configured ? Theme.accent : root.curseforge-key-default-in-use ? Theme.text-secondary : Theme.danger; } }
                                     // Masked because it shows what the user is typing, never what is stored:
                                     // a saved key is not readable from here and the field is emptied on submit.
                                     HorizontalLayout { spacing: 8px; TextField { text <=> root.curseforge-api-key; placeholder: GuiI18n.text("gui-curseforge-key-placeholder"); accessible-name: GuiI18n.text("gui-curseforge-api-key"); input-type: InputType.password; horizontal-stretch: 1; accepted => { root.save-curseforge-api-key(root.curseforge-api-key); } } AppButton { text: root.curseforge-key-configured ? GuiI18n.text("gui-curseforge-key-replace") : GuiI18n.text("gui-curseforge-key-save"); tone: "primary"; enabled: root.curseforge-api-key != ""; clicked => { root.save-curseforge-api-key(root.curseforge-api-key); } } if root.curseforge-key-configured : AppButton { text: GuiI18n.text("gui-remove"); tone: "danger"; clicked => { root.remove-curseforge-api-key(); } } }
-                                    BodyText { text: GuiI18n.text("gui-curseforge-key-storage"); color: Theme.text-muted; wrap: word-wrap; }
+                                    // A note only where there is something to say. A
+                                    // stored key needs the keyring explained; no key at
+                                    // all needs what that costs said. A build's own key
+                                    // standing in needs neither: the heading above
+                                    // already says so, and it is not kept in a keyring.
+                                    if root.curseforge-key-configured : BodyText { text: GuiI18n.text("gui-curseforge-key-storage"); color: Theme.text-muted; wrap: word-wrap; }
+                                    if !root.curseforge-key-configured && !root.curseforge-key-default-in-use : BodyText { text: GuiI18n.text("gui-curseforge-key-missing-detail"); color: Theme.warning; wrap: word-wrap; }
                                     HorizontalLayout { AppButton { text: GuiI18n.text("gui-curseforge-key-help"); clicked => { root.open-curseforge-key-help(); } } Rectangle { horizontal-stretch: 1; } }
                                 } }
                             }

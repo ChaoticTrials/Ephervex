@@ -1,16 +1,19 @@
 # The CurseForge API key
 
 Ephervex reaches CurseForge through the official CurseForge third-party API.
-That API requires a key, and the key is yours rather than Ephervex's: the
-launcher ships no key of its own and cannot make a CurseForge request on your
-behalf until you have configured one.
+That API requires a key. An official release carries a key issued to Ephervex
+itself as a fallback (ADR 0030), so CurseForge features work out of the box;
+a key you configure yourself always takes precedence over that fallback, and
+a build without one (any local development build, or a private/forked build
+that does not set the release secret) cannot make a CurseForge request until
+you configure your own.
 
 ## Why Ephervex needs one
 
 CurseForge does not offer an anonymous read path for the data a launcher needs,
 and since 2026 direct CurseForge file downloads require an API key as well.
-Without a key, CurseForge features stay unavailable; every other part of
-Ephervex, including Modrinth workflows, works exactly as before.
+Without a key in effect, CurseForge features stay unavailable; every other
+part of Ephervex, including Modrinth workflows, works exactly as before.
 
 ## Getting a key
 
@@ -37,9 +40,12 @@ In your operating system's keyring, through the Secret Service (ADR 0004).
   rather than writing the key to a file.
 
 Once stored, the key cannot be read back through the launcher's interface.
-Settings reports it as *Configured* or *Not configured* and nothing more, so
-replacing a key means entering the new one. Removing a key never requires
-revealing the old one.
+Settings reports which key is in effect and nothing more: *Configured* for one
+of your own, *Default* where the build's own key is standing in for it, and
+*Not configured* where there is neither. Replacing a key means entering the new
+one. Removing a key never requires revealing the old one, and never touches a
+build's own fallback key: there is nothing to remove until you configure one
+yourself.
 
 ## Setting it
 

@@ -338,6 +338,18 @@ fn resolve_curseforge_api_key(stored: Option<SecretString>, default: &str) -> Op
     stored.or_else(|| (!default.is_empty()).then(|| SecretString::new(default)))
 }
 
+/// Whether the user has stored their own CurseForge API key.
+///
+/// Unlike [`curseforge_api_key`], this never falls back to
+/// [`DEFAULT_CURSEFORGE_API_KEY`]: it answers "did the user configure one",
+/// not "is a key in effect". A settings screen that shows removal as
+/// available, or reports the key as "configured", needs this rather than the
+/// resolving accessor - the build's own fallback key is never something a
+/// `Remove` button removes.
+pub fn curseforge_api_key_configured(store: &dyn CredentialStore) -> AuthResult<bool> {
+    Ok(store.load(&CredentialKey::CurseForgeApiKey)?.is_some())
+}
+
 /// Stores the CurseForge API key, replacing whatever was there.
 ///
 /// A value that is nothing but whitespace is refused before the store is
@@ -432,6 +444,30 @@ mod tests {
         clear_curseforge_api_key(&store).expect("remove");
         assert!(curseforge_api_key(&store).expect("read").is_none());
         clear_curseforge_api_key(&store).expect("removing twice is not an error");
+    }
+
+    #[test]
+    fn presence_reports_only_what_the_user_configured_never_the_build_default() {
+        let store = MemoryStore::new();
+        assert!(!curseforge_api_key_configured(&store).expect("read"));
+
+        set_curseforge_api_key(&store, &SecretString::new(FAKE_KEY)).expect("store");
+        assert!(curseforge_api_key_configured(&store).expect("read"));
+
+        clear_curseforge_api_key(&store).expect("remove");
+        // Even though `curseforge_api_key` would still resolve a usable key
+        // when a build default is compiled in, presence must go back to false:
+        // a `Remove` action clears the user's key, not the build's fallback.
+        assert!(!curseforge_api_key_configured(&store).expect("read"));
+        assert_eq!(
+            resolve_curseforge_api_key(
+                store.load(&CredentialKey::CurseForgeApiKey).expect("read"),
+                "built-in-key",
+            )
+            .expect("the default applies")
+            .expose(),
+            "built-in-key"
+        );
     }
 
     #[test]

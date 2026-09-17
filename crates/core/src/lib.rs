@@ -56,7 +56,10 @@ pub mod server_pack;
 pub mod single_instance;
 pub mod url_handler;
 
-pub use account::{AccountStatus, AccountSummary, ApiSettings, LoginOptions, TOKEN_REFRESH_MARGIN};
+pub use account::{
+    AccountStatus, AccountSummary, ApiSettings, CurseForgeKeyState, LoginOptions,
+    TOKEN_REFRESH_MARGIN,
+};
 pub use app::{
     App, ApplicationDisplaySettings, JavaPlan, JavaPlanRequest, JavaTarget,
     PersistentStorageSettings, ServerApplicationSettings, global_java_settings,

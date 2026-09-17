@@ -1789,10 +1789,17 @@ gui-client-id-reset = Restored the Ephervex Client ID default.
 gui-user-agent-reset = Restored the Ephervex User-Agent default.
 gui-save-api-settings = Save API Settings
 gui-curseforge = CurseForge
-gui-curseforge-detail = Ephervex uses the CurseForge third-party API with your own API key. You apply for one through CurseForge/Overwolf, who decide whether to approve it. This is not the CurseForge Upload API token.
+# Shown where this build carries a key of its own, so CurseForge works
+# without the user doing anything.
+gui-curseforge-detail-default = Set your own CurseForge API key to override the existing Ephervex key.
+# Shown where it does not, and CurseForge therefore waits on the user.
+gui-curseforge-detail-required = To use the CurseForge part of Ephervex, you need to set your own API key, none is provided by Ephervex itself.
 gui-curseforge-api-key = CurseForge API key
 gui-curseforge-key-configured = CONFIGURED
 gui-curseforge-key-not-configured = NOT CONFIGURED
+gui-curseforge-key-default-in-use = DEFAULT
+# Shown where nothing is configured and the build ships nothing either.
+gui-curseforge-key-missing-detail = Set a key to import CurseForge packs and to fetch CurseForge files. Everything else, Modrinth included, works without one.
 gui-curseforge-key-placeholder = Paste your API key
 gui-curseforge-key-save = Save Key
 gui-curseforge-key-replace = Replace Key

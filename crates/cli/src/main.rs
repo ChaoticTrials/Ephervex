@@ -4172,7 +4172,8 @@ fn show_api_settings(settings: &ApiSettings, json: bool) {
             "microsoft_client_id_is_custom": settings.microsoft_client_id_is_custom,
             "user_agent": settings.effective_user_agent,
             "user_agent_is_custom": !settings.user_agent.is_empty(),
-            "curseforge_api_key_present": settings.curseforge_api_key_present,
+            "curseforge_api_key": settings.curseforge_key.as_str(),
+            "curseforge_default_key_available": settings.curseforge_default_key_available,
             "credential_storage": settings.credential_storage.map(CredentialStorage::as_str),
         }));
         return;
@@ -4201,13 +4202,15 @@ fn show_api_settings(settings: &ApiSettings, json: bool) {
     // Presence, never the value.
     outln!(
         "curseforge api key:   {}",
-        if settings.curseforge_api_key_present {
-            "stored in the system keyring"
-        } else {
-            "not set"
+        match settings.curseforge_key {
+            ephervex_core::CurseForgeKeyState::Configured => "stored in the system keyring",
+            ephervex_core::CurseForgeKeyState::BuildDefault => {
+                "not set (using this build's built-in key)"
+            }
+            ephervex_core::CurseForgeKeyState::Missing => "not set",
         }
     );
-    if !settings.curseforge_api_key_present {
+    if !settings.curseforge_key.is_configured() {
         // The address a user needs at exactly the moment they discover they
         // have no key. Not the Upload API, which is a different credential.
         outln!(

@@ -592,12 +592,14 @@ pub struct SettingsData {
     pub user_agent: String,
     pub effective_user_agent: String,
     pub user_agent_origin: SettingOrigin,
-    /// Whether a CurseForge API key is stored.
+    /// Which CurseForge key is in effect.
     ///
-    /// A `bool` and nothing else. There is deliberately no field the key itself
+    /// A state and nothing else. There is deliberately no field the key itself
     /// could travel in, so no view can render it and no snapshot can carry it
     /// into a log or a crash report.
-    pub curseforge_key_present: bool,
+    pub curseforge_key: ephervex_core::CurseForgeKeyState,
+    /// Whether this build carries a key of its own, whatever is configured.
+    pub curseforge_default_key_available: bool,
     /// The catalog the mod browser opens on, as a provider id, or empty when
     /// the recorded name is one this build cannot resolve.
     ///
@@ -2971,7 +2973,8 @@ fn application_settings(app: &App) -> Result<SettingsData, CoreError> {
         effective_microsoft_client_id: api.effective_microsoft_client_id,
         user_agent: api.user_agent,
         effective_user_agent: api.effective_user_agent,
-        curseforge_key_present: api.curseforge_api_key_present,
+        curseforge_key: api.curseforge_key,
+        curseforge_default_key_available: api.curseforge_default_key_available,
         default_mod_catalog: catalog.selected,
         configured_mod_catalog: catalog.configured,
         mod_catalog_origin: origin(catalog.chosen),

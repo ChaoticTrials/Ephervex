@@ -52,6 +52,50 @@ use crate::error::{CoreError, CoreResult};
 /// a server problem. Refreshing early is cheap; refreshing late is not.
 pub const TOKEN_REFRESH_MARGIN: TimeDelta = TimeDelta::minutes(5);
 
+/// Which CurseForge API key an operation would use.
+///
+/// One value rather than a pair of booleans, because only three of the four
+/// combinations they could express exist: a key cannot be configured and
+/// absent at the same time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CurseForgeKeyState {
+    /// The user stored one, and it is the one used.
+    Configured,
+    /// None stored, so the key this build ships is the one used (ADR 0030).
+    BuildDefault,
+    /// None stored and none shipped: CurseForge requests have no credential.
+    ///
+    /// The default, because a value nobody has filled in yet is one that knows
+    /// of no key.
+    #[default]
+    Missing,
+}
+
+impl CurseForgeKeyState {
+    /// Whether any key is in effect.
+    #[must_use]
+    pub const fn is_present(self) -> bool {
+        matches!(self, Self::Configured | Self::BuildDefault)
+    }
+
+    /// Whether the user configured the key in effect, which is the only case
+    /// where there is something for a `Remove` action to remove.
+    #[must_use]
+    pub const fn is_configured(self) -> bool {
+        matches!(self, Self::Configured)
+    }
+
+    /// A stable identifier for `--json` output and frontend state.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Configured => "configured",
+            Self::BuildDefault => "build-default",
+            Self::Missing => "missing",
+        }
+    }
+}
+
 /// User-configurable external API settings.
 ///
 /// The CurseForge key is reported as *present or absent*, never as a value:
@@ -70,8 +114,15 @@ pub struct ApiSettings {
     pub user_agent: String,
     /// The User-Agent actually sent.
     pub effective_user_agent: String,
-    /// Whether a CurseForge API key exists in the keyring.
-    pub curseforge_api_key_present: bool,
+    /// Which CurseForge key is in effect, if any.
+    pub curseforge_key: CurseForgeKeyState,
+    /// Whether this build carries a CurseForge key of its own (ADR 0030).
+    ///
+    /// Separate from [`curseforge_key`](Self::curseforge_key), which says what
+    /// is *in use*: this stays true while a user's own key is the one in use,
+    /// because it is a fact about the build. What it answers is whether
+    /// removing a configured key leaves CurseForge working or not.
+    pub curseforge_default_key_available: bool,
     /// Where credentials would be kept, or `None` when Secret Service is
     /// unavailable and a persistent login is therefore impossible.
     pub credential_storage: Option<CredentialStorage>,
@@ -154,10 +205,19 @@ impl App {
             microsoft_client_id_is_custom: !configured.is_empty(),
             user_agent: api.user_agent().unwrap_or_default().to_owned(),
             effective_user_agent: self.effective_user_agent(),
-            curseforge_api_key_present: match &storage {
-                Some(store) => ephervex_auth::curseforge_api_key(store.as_ref())?.is_some(),
-                None => false,
+            curseforge_key: match &storage {
+                Some(store) => {
+                    if ephervex_auth::curseforge_api_key_configured(store.as_ref())? {
+                        CurseForgeKeyState::Configured
+                    } else if ephervex_auth::curseforge_api_key(store.as_ref())?.is_some() {
+                        CurseForgeKeyState::BuildDefault
+                    } else {
+                        CurseForgeKeyState::Missing
+                    }
+                }
+                None => CurseForgeKeyState::Missing,
             },
+            curseforge_default_key_available: !ephervex_auth::DEFAULT_CURSEFORGE_API_KEY.is_empty(),
             credential_storage: storage.map(|store| store.storage()),
         })
     }

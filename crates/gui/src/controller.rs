@@ -5808,7 +5808,11 @@ fn apply_snapshot(
     ui.set_user_agent_is_custom(settings.user_agent_origin.is_override());
     // Presence only. There is deliberately no `set_curseforge_api_key` here:
     // a snapshot must not be able to put a stored secret into a text field.
-    ui.set_curseforge_key_configured(settings.curseforge_key_present);
+    ui.set_curseforge_key_configured(settings.curseforge_key.is_configured());
+    ui.set_curseforge_key_default_in_use(
+        settings.curseforge_key == ephervex_core::CurseForgeKeyState::BuildDefault,
+    );
+    ui.set_curseforge_build_key_available(settings.curseforge_default_key_available);
     ui.set_default_mod_catalog(settings.default_mod_catalog.clone().into());
     ui.set_configured_mod_catalog(settings.configured_mod_catalog.clone().into());
     ui.set_default_mod_catalog_is_custom(settings.mod_catalog_origin.is_override());
@@ -8371,9 +8375,13 @@ mod tests {
         assert!(source.contains("callback open-curseforge-key-help()"));
         assert!(source.contains("gui-curseforge-key-configured"));
         assert!(source.contains("gui-curseforge-key-not-configured"));
+        assert!(source.contains("gui-curseforge-key-default-in-use"));
         // Replacing asks for the new value rather than revealing the old one.
         assert!(source.contains("gui-curseforge-key-replace"));
         assert!(source.contains("input-type: InputType.password"));
+        // The button that removes a credential must only appear once the user
+        // actually has one to remove - never for this build's own fallback key.
+        assert!(source.contains("if root.curseforge-key-configured : AppButton"));
     }
 
     #[test]
@@ -8396,7 +8404,7 @@ mod tests {
         assert!(found > 0, "the field is cleared somewhere");
         assert!(source.contains(concat!(
             "ui.set_",
-            "curseforge_key_configured(settings.curseforge_key_present)"
+            "curseforge_key_configured(settings.curseforge_key.is_configured())"
         )));
     }
 
