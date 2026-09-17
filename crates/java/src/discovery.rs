@@ -464,7 +464,11 @@ fn merge_split_jdk_homes(mut runtimes: Vec<JavaRuntime>) -> Vec<JavaRuntime> {
 
 /// The JDK home an executable belongs to, if its path matches one of the two
 /// shapes [`push_home`] offers: `<home>/bin/java` or `<home>/jre/bin/java`.
-fn jdk_home_of(executable: &Path) -> Option<PathBuf> {
+///
+/// Shared with [`crate::managed`], which answers the same question about a
+/// path a frontend hands it: both sides have to agree on which directory an
+/// executable makes a runtime of.
+pub(crate) fn jdk_home_of(executable: &Path) -> Option<PathBuf> {
     if executable.file_name().and_then(|name| name.to_str()) != Some("java") {
         return None;
     }

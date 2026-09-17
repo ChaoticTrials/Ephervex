@@ -444,7 +444,10 @@ pub enum Command {
         make_operator: bool,
         operator_level: ephervex_model::OperatorPermissionLevel,
     },
+    LoadJavaRuntimes,
     RefreshJava,
+    /// The canonical executable of the runtime to remove.
+    RemoveManagedJavaRuntime(String),
     SaveJavaSettings {
         auto_detect: bool,
         auto_download: bool,
@@ -2679,26 +2682,42 @@ fn run_worker(
                     Err(error) => send_error(&events, &error),
                 }
             }
-            Command::RefreshJava => match runtime.block_on(app.refresh_java_runtimes()) {
+            // Opening the page asks for the inventory, which is cached after
+            // the first scan; the page's own button is what forces a rescan.
+            // Probing forks a JVM per runtime, so a page that rescanned every
+            // time it was opened would pay for it every time.
+            Command::LoadJavaRuntimes => match runtime.block_on(app.java_runtimes()) {
                 Ok(inventory) => {
-                    let rows = inventory
-                        .runtimes
-                        .iter()
-                        .map(|java| JavaData {
-                            path: java.executable.display().to_string(),
-                            version: java.version_string.clone(),
-                            vendor: java.vendor.clone(),
-                            origin: java.origins.first().map_or_else(
-                                || "detected".to_owned(),
-                                |origin| origin.kind.to_string(),
-                            ),
-                            compatible: format!("Java {}", java.version.major),
-                        })
-                        .collect();
-                    let _ = events.send(Event::JavaRuntimes(rows));
+                    let _ = events.send(Event::JavaRuntimes(describe_runtimes(&inventory)));
                 }
                 Err(error) => send_error(&events, &error),
             },
+            Command::RefreshJava => match runtime.block_on(app.refresh_java_runtimes()) {
+                Ok(inventory) => {
+                    let _ = events.send(Event::JavaRuntimes(describe_runtimes(&inventory)));
+                }
+                Err(error) => send_error(&events, &error),
+            },
+            Command::RemoveManagedJavaRuntime(path) => {
+                match runtime.block_on(app.remove_managed_java_runtime(Path::new(&path))) {
+                    Ok(_) => {
+                        let _ = events.send(Event::Toast {
+                            message: lookup("gui-java-runtime-removed"),
+                            error: false,
+                        });
+                        // The list the page is showing now names a directory
+                        // that is gone, so it is re-read rather than left.
+                        match runtime.block_on(app.java_runtimes()) {
+                            Ok(inventory) => {
+                                let _ =
+                                    events.send(Event::JavaRuntimes(describe_runtimes(&inventory)));
+                            }
+                            Err(error) => send_error(&events, &error),
+                        }
+                    }
+                    Err(error) => send_error(&events, &error),
+                }
+            }
             Command::SaveJavaSettings {
                 auto_detect,
                 auto_download,
@@ -2851,6 +2870,24 @@ fn warm_language_catalog(paths: Paths, minecraft: &str) {
     {
         tracing::warn!(%error, %minecraft, "could not schedule language catalog warming");
     }
+}
+
+/// One row per runtime an inventory holds, in the order it reports them.
+fn describe_runtimes(inventory: &ephervex_core::RuntimeInventory) -> Vec<JavaData> {
+    inventory
+        .runtimes
+        .iter()
+        .map(|java| JavaData {
+            path: java.executable.display().to_string(),
+            version: java.version_string.clone(),
+            vendor: java.vendor.clone(),
+            origin: java
+                .origins
+                .first()
+                .map_or_else(|| "detected".to_owned(), |origin| origin.kind.to_string()),
+            compatible: format!("Java {}", java.version.major),
+        })
+        .collect()
 }
 
 fn send_snapshot(app: &App, events: &Sender<Event>) {

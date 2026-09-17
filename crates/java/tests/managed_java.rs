@@ -420,3 +420,86 @@ async fn a_major_adoptium_does_not_publish_fails_with_a_clear_error() {
         "{error:?}"
     );
 }
+
+#[tokio::test]
+async fn an_installed_runtime_is_removed_with_the_directory_that_held_it() {
+    let server = MockServer::start().await;
+    let archive = temurin_archive();
+    let checksum = sha256(&archive);
+    mount(&server, archive, &checksum).await;
+
+    let temp = tempfile::tempdir().expect("temp");
+    let java_dir = temp.path().join("data/java");
+    let provider = provider(&server, &temp.path().join("cache"), &java_dir);
+
+    let installed = provider
+        .install(21, &reporter(), &CancellationToken::new())
+        .await
+        .expect("install");
+    let directory = installed.directory.clone();
+    assert!(directory.is_dir());
+
+    let removed = provider
+        .remove(&installed.runtime.executable)
+        .await
+        .expect("a runtime the provider installed is one it can remove");
+
+    assert_eq!(removed.canonicalize().ok(), directory.canonicalize().ok());
+    assert!(!directory.exists(), "the install directory has to be gone");
+    // The major's own directory stays: it is where the next install of this
+    // major goes, and it was not what the user asked to remove.
+    assert!(java_dir.join("21").is_dir());
+
+    let inventory = JavaDiscovery::isolated()
+        .with_managed_root(&java_dir)
+        .discover()
+        .await;
+    assert!(
+        inventory.runtimes.is_empty(),
+        "a removed runtime must not still be discovered: {:?}",
+        inventory.runtimes
+    );
+}
+
+/// Removal deletes a directory tree and takes its path from a frontend, so
+/// what it accepts is the question that matters. Anything that is not one of
+/// this provider's own `<java_dir>/<major>/<build>` installs is refused
+/// before anything is deleted.
+#[tokio::test]
+async fn only_the_providers_own_installs_can_be_removed() {
+    let server = MockServer::start().await;
+    let temp = tempfile::tempdir().expect("temp");
+    let java_dir = temp.path().join("data/java");
+    let elsewhere = temp.path().join("usr/lib/jvm/java-21-openjdk-amd64");
+    std::fs::create_dir_all(java_dir.join("21/eclipse-jdk-21.0.12+8/bin")).expect("install dir");
+    std::fs::create_dir_all(elsewhere.join("bin")).expect("system dir");
+    std::fs::write(elsewhere.join("bin/java"), b"#!/bin/sh\n").expect("system java");
+    let provider = provider(&server, &temp.path().join("cache"), &java_dir);
+
+    for refused in [
+        // A runtime somebody else installed.
+        elsewhere.join("bin/java"),
+        // The major's directory, which is every build of that major.
+        java_dir.join("21/bin/java"),
+        // The root, which is every runtime there is.
+        java_dir.join("bin/java"),
+        // A path that is not shaped like a runtime at all.
+        java_dir.join("21/eclipse-jdk-21.0.12+8/release"),
+    ] {
+        let error = provider
+            .remove(&refused)
+            .await
+            .expect_err("only this provider's own installs may be removed");
+        assert!(
+            matches!(error, JavaError::NotManaged { .. }),
+            "{}: {error:?}",
+            refused.display()
+        );
+    }
+
+    assert!(
+        elsewhere.join("bin/java").exists(),
+        "a refused removal must not have deleted anything"
+    );
+    assert!(java_dir.join("21/eclipse-jdk-21.0.12+8").is_dir());
+}

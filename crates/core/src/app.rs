@@ -1131,6 +1131,38 @@ impl App {
         Ok(installed)
     }
 
+    /// Removes a runtime Ephervex installed, and reports the directory that
+    /// held it.
+    ///
+    /// Only a managed runtime can be removed this way: a JDK found on `PATH`
+    /// or in `/usr/lib/jvm` belongs to whoever installed it, and the launcher
+    /// deleting it would be deleting somebody else's software. The cached
+    /// inventory is dropped so the next scan reflects what is left.
+    ///
+    /// A runtime a game is currently running from is not special-cased: the
+    /// process holds its own open files, and what is deleted is the directory
+    /// the *next* launch would have selected.
+    #[instrument(skip(self))]
+    pub async fn remove_managed_java_runtime(&self, executable: &Path) -> CoreResult<PathBuf> {
+        let manager = DownloadManager::new(DownloaderConfig::default()).map_err(|source| {
+            JavaError::ManagedDownloadFailed {
+                major: 0,
+                release: String::new(),
+                source: Box::new(source),
+            }
+        })?;
+        let provider = ManagedJavaProvider::new(
+            manager,
+            CacheLayout::new(self.paths().cache_dir()),
+            self.paths().java_dir(),
+        )?;
+        let removed = provider.remove(executable).await?;
+        if let Ok(mut cache) = self.java.write() {
+            *cache = None;
+        }
+        Ok(removed)
+    }
+
     /// The Java major a Minecraft version needs.
     ///
     /// Mojang's own answer when the metadata can be reached, the fallback table

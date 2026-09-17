@@ -102,6 +102,46 @@ impl ManagedJavaProvider {
         self.java_dir.join(major.to_string())
     }
 
+    /// Deletes a runtime this provider installed, and reports its directory.
+    ///
+    /// The path comes from a frontend and what happens to it is a recursive
+    /// delete, so it is checked rather than trusted: only a
+    /// `<java_dir>/<major>/<build>` directory is ever removed. A runtime found
+    /// on the system belongs to whoever installed it, and the rest of the data
+    /// directory is not Java's to delete.
+    #[instrument(skip(self))]
+    pub async fn remove(&self, executable: &Path) -> Result<PathBuf, JavaError> {
+        let directory = self.installed_directory(executable)?;
+        fs::remove_dir_all(&directory)
+            .await
+            .map_err(|source| JavaError::Io {
+                path: directory.clone(),
+                source,
+            })?;
+        info!(path = %directory.display(), "removed a managed java runtime");
+        Ok(directory)
+    }
+
+    /// The install directory an executable belongs to, once it is established
+    /// that this provider is the one that put it there.
+    fn installed_directory(&self, executable: &Path) -> Result<PathBuf, JavaError> {
+        let not_managed = || JavaError::NotManaged {
+            path: executable.to_path_buf(),
+        };
+        let home = crate::discovery::jdk_home_of(executable).ok_or_else(not_managed)?;
+        // Against the resolved paths, so that neither a link nor a `..` can
+        // present a directory elsewhere as one of this provider's own.
+        let root = std::fs::canonicalize(&self.java_dir).map_err(|_| not_managed())?;
+        let home = std::fs::canonicalize(&home).map_err(|_| not_managed())?;
+        // Exactly `<root>/<major>/<build>`: one level shallower is every build
+        // of a major, and the root itself is every runtime there is.
+        let major = home.parent().ok_or_else(not_managed)?;
+        if major.parent() != Some(root.as_path()) || !home.is_dir() {
+            return Err(not_managed());
+        }
+        Ok(home)
+    }
+
     /// Installs the newest Temurin build of one major, or returns the one
     /// already installed.
     #[instrument(skip(self, reporter, cancel))]

@@ -421,6 +421,9 @@ error-java-managed-runtime-unusable = The downloaded Java runtime could not be s
 
 error-java-managed-cache-key-invalid = The Java runtime could not be given a safe location in the cache.
 
+error-java-not-managed = That Java runtime is not one Ephervex installed, so it cannot be removed here.
+    .action = Remove it the way it was installed: through your distribution's package manager, SDKMAN, or whatever placed it.
+
 error-java-io = A file needed for the Java runtime could not be written.
     .action = Check free space and permissions on { $path }.
 
@@ -1724,6 +1727,10 @@ gui-java-memory-max = Maximum memory (MiB)
 gui-java-preferred = Preferred Java executable (leave empty for automatic)
 gui-java-refresh = Refresh Runtimes
 gui-java-save = Save Java Settings
+gui-java-remove-runtime = Remove { $value }
+gui-java-remove-runtime-title = Remove Java Runtime
+gui-java-remove-runtime-detail = Delete the downloaded Java runtime { $value }?
+gui-java-remove-runtime-note = Ephervex downloads a runtime again when an instance needs one, so this is not permanent. A game already running keeps the files it opened.
 gui-accounts-detail = Access tokens and refresh credentials are never displayed. Microsoft credentials use the desktop keyring when available.
 gui-offline-account-placeholder = Offline player name
 gui-add-offline-account = Add Offline Account
@@ -2024,6 +2031,7 @@ gui-account-removed = Removed account.
 gui-provider-settings-saved = Saved provider settings.
 gui-storage-root-saved = Saved the persistent instance root.
 gui-java-settings-saved = Saved Java settings.
+gui-java-runtime-removed = Removed the Java runtime.
 gui-operation-canceled = Operation canceled.
 gui-cancellation-requested = Cancellation requested.
 gui-operation-not-cancellable = That operation has already finished or cannot be canceled.

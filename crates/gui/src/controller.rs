@@ -3747,7 +3747,15 @@ fn register_settings(ui: &AppWindow, commands: &Sender<Command>) {
     register_watched_folders(ui, commands);
 
     let sender = commands.clone();
+    ui.on_load_java_runtimes(move || send(&sender, Command::LoadJavaRuntimes));
+
+    let sender = commands.clone();
     ui.on_refresh_java(move || send(&sender, Command::RefreshJava));
+
+    let sender = commands.clone();
+    ui.on_remove_java_runtime(move |path| {
+        send(&sender, Command::RemoveManagedJavaRuntime(path.to_string()));
+    });
 
     let sender = commands.clone();
     let weak = ui.as_weak();

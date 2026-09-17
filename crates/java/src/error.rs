@@ -137,6 +137,15 @@ pub enum JavaError {
         source: ephervex_download::CacheKeyError,
     },
 
+    /// A path offered for removal is not one of the launcher's own installs.
+    ///
+    /// Removal takes a path from a frontend and deletes a directory tree, so
+    /// it accepts only what it put there: a runtime found on the system
+    /// belongs to whoever installed it, and everything else under the data
+    /// directory belongs to something other than Java.
+    #[error("{path} is not a runtime Ephervex installed")]
+    NotManaged { path: PathBuf },
+
     /// A filesystem operation failed.
     #[error("could not write {path}")]
     Io {
@@ -169,6 +178,7 @@ impl JavaError {
                 "error-java-managed-runtime-unusable"
             }
             Self::ManagedCacheKey { .. } => "error-java-managed-cache-key-invalid",
+            Self::NotManaged { .. } => "error-java-not-managed",
             Self::Io { .. } => "error-java-io",
         }
     }
@@ -184,6 +194,7 @@ impl JavaError {
             | Self::RuntimeUnusable { path, .. }
             | Self::ManagedRuntimeUnusable { path, .. }
             | Self::ManagedRuntimeWrongMajor { path, .. }
+            | Self::NotManaged { path }
             | Self::Io { path, .. } => Some(path.clone()),
             _ => None,
         }
