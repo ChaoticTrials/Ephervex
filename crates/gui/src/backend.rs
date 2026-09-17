@@ -436,11 +436,10 @@ pub enum Command {
     SaveDefaultModCatalog {
         catalog: Option<ModProvider>,
     },
-    SaveDisplaySettings {
+    /// Everything the General settings page edits, saved together.
+    SaveGeneralSettings {
         text_scale: ephervex_core::ApplicationTextScale,
         technical_text_size: ephervex_core::TechnicalTextSize,
-    },
-    SaveLinkedServerSettings {
         show_globally: bool,
         make_operator: bool,
         operator_level: ephervex_model::OperatorPermissionLevel,
@@ -2654,30 +2653,25 @@ fn run_worker(
                     send_snapshot(&app, &events);
                 }
             }
-            Command::SaveDisplaySettings {
+            Command::SaveGeneralSettings {
                 text_scale,
                 technical_text_size,
-            } => match app.set_application_display_settings(text_scale, technical_text_size) {
-                Ok(()) => {
-                    let _ = events.send(Event::Toast {
-                        message: lookup("gui-display-settings-saved"),
-                        error: false,
-                    });
-                    send_snapshot(&app, &events);
-                }
-                Err(error) => send_error(&events, &error),
-            },
-            Command::SaveLinkedServerSettings {
                 show_globally,
                 make_operator,
                 operator_level,
             } => {
-                let result =
-                    app.set_linked_server_settings(show_globally, make_operator, operator_level);
-                match result {
+                // Both halves, then one snapshot and one toast: the page has
+                // one button, so it reports one outcome. A failure in either
+                // is reported as itself and leaves the other where it was.
+                let saved = app
+                    .set_application_display_settings(text_scale, technical_text_size)
+                    .and_then(|()| {
+                        app.set_linked_server_settings(show_globally, make_operator, operator_level)
+                    });
+                match saved {
                     Ok(()) => {
                         let _ = events.send(Event::Toast {
-                            message: lookup("gui-server-defaults-saved"),
+                            message: lookup("gui-general-settings-saved"),
                             error: false,
                         });
                         send_snapshot(&app, &events);

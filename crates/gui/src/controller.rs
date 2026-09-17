@@ -3716,27 +3716,7 @@ fn register_diagnostics(ui: &AppWindow, commands: &Sender<Command>) {
 }
 
 fn register_settings(ui: &AppWindow, commands: &Sender<Command>) {
-    register_display_settings(ui, commands);
-
-    let sender = commands.clone();
-    let weak = ui.as_weak();
-    ui.on_save_linked_server_settings(move |show, make_operator, level| {
-        let level = u8::try_from(level)
-            .ok()
-            .and_then(ephervex_model::OperatorPermissionLevel::from_value);
-        if let Some(operator_level) = level {
-            send(
-                &sender,
-                Command::SaveLinkedServerSettings {
-                    show_globally: show,
-                    make_operator,
-                    operator_level,
-                },
-            );
-        } else if let Some(ui) = weak.upgrade() {
-            ui.invoke_present_toast(lookup("gui-operator-level-invalid").into(), true);
-        }
-    });
+    register_general_settings(ui, commands);
 
     let sender = commands.clone();
     ui.on_add_offline_account(move |name| {
@@ -4813,30 +4793,55 @@ fn request_minecraft_languages(
     send(commands, request);
 }
 
-fn register_display_settings(ui: &AppWindow, commands: &Sender<Command>) {
+/// The General page's single Save, which carries both of its sections.
+///
+/// Each value is checked before any of them is sent, and the toast names
+/// whichever one the view could not produce a usable value for: a page that
+/// saved what it could and said nothing about the rest would leave the user
+/// looking at a setting that did not take.
+fn register_general_settings(ui: &AppWindow, commands: &Sender<Command>) {
     let sender = commands.clone();
     let weak = ui.as_weak();
-    ui.on_save_display_settings(move |text_scale, technical_text_size| {
-        let settings = u16::try_from(text_scale)
-            .ok()
-            .and_then(ephervex_core::ApplicationTextScale::from_percent)
-            .zip(
-                u16::try_from(technical_text_size)
-                    .ok()
-                    .and_then(ephervex_core::TechnicalTextSize::from_pixels),
-            );
-        if let Some((text_scale, technical_text_size)) = settings {
-            send(
-                &sender,
-                Command::SaveDisplaySettings {
-                    text_scale,
-                    technical_text_size,
-                },
-            );
-        } else if let Some(ui) = weak.upgrade() {
-            ui.invoke_present_toast(lookup("gui-display-settings-invalid").into(), true);
-        }
-    });
+    ui.on_save_general_settings(
+        move |text_scale, technical_text_size, show_globally, make_operator, level| {
+            let display = u16::try_from(text_scale)
+                .ok()
+                .and_then(ephervex_core::ApplicationTextScale::from_percent)
+                .zip(
+                    u16::try_from(technical_text_size)
+                        .ok()
+                        .and_then(ephervex_core::TechnicalTextSize::from_pixels),
+                );
+            let operator_level = u8::try_from(level)
+                .ok()
+                .and_then(ephervex_model::OperatorPermissionLevel::from_value);
+            match (display, operator_level) {
+                (Some((text_scale, technical_text_size)), Some(operator_level)) => send(
+                    &sender,
+                    Command::SaveGeneralSettings {
+                        text_scale,
+                        technical_text_size,
+                        show_globally,
+                        make_operator,
+                        operator_level,
+                    },
+                ),
+                (None, _) => {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.invoke_present_toast(
+                            lookup("gui-display-settings-invalid").into(),
+                            true,
+                        );
+                    }
+                }
+                (_, None) => {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.invoke_present_toast(lookup("gui-operator-level-invalid").into(), true);
+                    }
+                }
+            }
+        },
+    );
 }
 
 fn parse_java_memory(minimum: &str, maximum: &str) -> Result<(u32, u32), String> {
@@ -8272,7 +8277,8 @@ mod tests {
         let source = include_str!("ui.rs");
         assert!(source.contains("in-out property <float> text-scale: 1"));
         assert!(source.contains("default-font-size: Theme.body-size"));
-        assert!(source.contains("callback save-display-settings(int, int)"));
+        // Saved with the rest of the General page, by its one button.
+        assert!(source.contains("callback save-general-settings(int, int, bool, bool, int)"));
         assert!(source.contains("root.technical-text-size * 1px"));
         assert!(!source.contains("They do not change Minecraft's GUI scale"));
     }

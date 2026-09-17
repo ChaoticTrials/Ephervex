@@ -473,6 +473,35 @@ slint::slint! {
         }
     }
 
+    // One setting: what it is on the left, the control that changes it on the
+    // right, in a box of its own.
+    //
+    // The control is whatever the caller puts inside, so a dropdown and a
+    // switch produce the same card rather than two shapes that happen to look
+    // alike. Its height follows its content, because the description wraps to
+    // a different number of lines at every text scale.
+    component SettingCard inherits Rectangle {
+        in property <string> title;
+        in property <string> detail;
+        height: card.preferred-height;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: Theme.border;
+        background: Theme.surface;
+        card := HorizontalLayout {
+            padding: 16px;
+            spacing: 20px;
+            cross-axis-alignment: center;
+            VerticalLayout {
+                horizontal-stretch: 1;
+                spacing: 5px;
+                Heading { text: root.title; font-size: Theme.row-heading-size; }
+                if root.detail != "" : BodyText { text: root.detail; wrap: word-wrap; }
+            }
+            @children
+        }
+    }
+
     // A heading that says the whole thing on hover when it had to be cut short.
     //
     // It owns a touch area for the press, and hands it back out again:
@@ -1943,6 +1972,51 @@ slint::slint! {
         }
     }
 
+    // The two halves of the General page, each declared once and placed either
+    // beside the other or above it depending on the room there is. Their
+    // answers live on the window, so each carries the ones it edits rather
+    // than reaching for them: a component cannot see the window's properties,
+    // and a section that owned them would be the only thing that could save.
+    component ApplicationDisplaySection inherits VerticalLayout {
+        in-out property <int> text-scale;
+        in-out property <int> technical-size;
+        alignment: start;
+        spacing: 14px;
+        SettingCard {
+            title: GuiI18n.text("gui-application-text-size");
+            detail: GuiI18n.text("gui-application-text-size-detail");
+            ComboBox { width: 190px; model: [GuiI18n.text("gui-text-scale-90"), GuiI18n.text("gui-text-scale-100"), GuiI18n.text("gui-text-scale-110"), GuiI18n.text("gui-text-scale-125")]; current-index: root.text-scale == 90 ? 0 : root.text-scale == 110 ? 2 : root.text-scale == 125 ? 3 : 1; selected(value) => { root.text-scale = value == GuiI18n.text("gui-text-scale-90") ? 90 : value == GuiI18n.text("gui-text-scale-110") ? 110 : value == GuiI18n.text("gui-text-scale-125") ? 125 : 100; } }
+        }
+        SettingCard {
+            title: GuiI18n.text("gui-technical-text-size");
+            detail: GuiI18n.text("gui-technical-text-size-detail");
+            ComboBox { width: 190px; model: [GuiI18n.text("gui-technical-size-11"), GuiI18n.text("gui-technical-size-12"), GuiI18n.text("gui-technical-size-14"), GuiI18n.text("gui-technical-size-16")]; current-index: root.technical-size == 11 ? 0 : root.technical-size == 14 ? 2 : root.technical-size == 16 ? 3 : 1; selected(value) => { root.technical-size = value == GuiI18n.text("gui-technical-size-11") ? 11 : value == GuiI18n.text("gui-technical-size-14") ? 14 : value == GuiI18n.text("gui-technical-size-16") ? 16 : 12; } }
+        }
+    }
+
+    component LinkedServerDefaultsSection inherits VerticalLayout {
+        in-out property <bool> show-linked-servers;
+        in-out property <bool> make-default-account-operator;
+        in-out property <int> operator-permission-level;
+        alignment: start;
+        spacing: 14px;
+        SettingCard {
+            title: GuiI18n.text("gui-show-linked-servers");
+            detail: GuiI18n.text("gui-show-linked-servers-detail");
+            Toggle { accessible-name: GuiI18n.text("gui-show-linked-servers"); checked <=> root.show-linked-servers; }
+        }
+        SettingCard {
+            title: GuiI18n.text("gui-default-account-operator");
+            detail: GuiI18n.text("gui-default-account-operator-detail");
+            Toggle { accessible-name: GuiI18n.text("gui-default-account-operator"); checked <=> root.make-default-account-operator; }
+        }
+        SettingCard {
+            title: GuiI18n.text("gui-default-operator-level");
+            detail: GuiI18n.text("gui-default-operator-level-detail");
+            ComboBox { accessible-label: GuiI18n.text("gui-default-operator-level"); width: 220px; model: [GuiI18n.text("gui-operator-level-1"), GuiI18n.text("gui-operator-level-2"), GuiI18n.text("gui-operator-level-3"), GuiI18n.text("gui-operator-level-4")]; current-index: root.operator-permission-level - 1; selected(value) => { root.operator-permission-level = value == GuiI18n.text("gui-operator-level-1") ? 1 : value == GuiI18n.text("gui-operator-level-2") ? 2 : value == GuiI18n.text("gui-operator-level-3") ? 3 : 4; } }
+        }
+    }
+
     component ToastPanel inherits Rectangle {
         in property <string> message;
         in property <bool> error;
@@ -2370,6 +2444,15 @@ slint::slint! {
         default-font-size: Theme.body-size;
 
         in property <image> logo: @image-url("../../../assets/logo.png");
+        // Whether a settings page has the room to put its cards two to a row.
+        //
+        // Measured against the window rather than against the page's own
+        // width, which is what the cards are being sized into: asking a
+        // layout how wide it is in order to decide what to put in it is a
+        // loop. The two navigation columns and the padding take a little over
+        // 470px of this before the cards see any of it, and two cards holding
+        // a wrapped description and a dropdown want about 460px each.
+        private property <bool> settings-two-columns: root.width >= 1440px;
         in-out property <int> page: 0;
         in-out property <[InstanceRow]> instances;
         in-out property <[ServerRow]> servers;
@@ -2981,8 +3064,11 @@ slint::slint! {
         callback measure-artifact-cache();
         callback save-artifact-cache-limit(int, string, string);
         callback clear-artifact-cache();
-        callback save-display-settings(int, int);
-        callback save-linked-server-settings(bool, bool, int);
+        // Text scale, technical text size, whether linked servers are listed
+        // globally, whether the default account is made an operator, and the
+        // level it is given. One callback because the General page saves with
+        // one button: two buttons on one page meant two ways to half-save it.
+        callback save-general-settings(int, int, bool, bool, int);
         callback refresh-java();
         callback save-java-settings(bool, bool, string, string, string);
         callback minecraft-select-category(int);
@@ -3511,31 +3597,48 @@ slint::slint! {
                             Divider { }
                             SettingsNavItem { label: GuiI18n.text("gui-settings-about"); selected: root.workspace-tab == "About & Licenses"; clicked => { root.workspace-tab = "About & Licenses"; } }
                         } }
-                        Rectangle { horizontal-stretch: 1; background: Theme.background; ScrollView { viewport-width: self.width; VerticalLayout { x: max(0px, (parent.width - self.width) / 2); alignment: start; width: min(parent.width, 1100px); padding: 30px; spacing: 20px;
+                        Rectangle { horizontal-stretch: 1; background: Theme.background; ScrollView { viewport-width: self.visible-width; VerticalLayout { x: max(0px, (parent.width - self.width) / 2); alignment: start; width: min(parent.width, root.settings-two-columns ? 1500px : 1100px); padding: 30px; spacing: 20px;
                             PageIntro {
                                 title: root.workspace-tab == "General" ? GuiI18n.text("gui-settings-general") : root.workspace-tab == "Minecraft" ? GuiI18n.text("gui-settings-minecraft") : root.workspace-tab == "Java" ? GuiI18n.text("gui-settings-java") : root.workspace-tab == "Accounts" ? GuiI18n.text("gui-settings-accounts") : root.workspace-tab == "Providers & APIs" ? GuiI18n.text("gui-settings-providers") : root.workspace-tab == "Storage" ? GuiI18n.text("gui-settings-storage") : GuiI18n.text("gui-settings-about");
                                 subtitle: root.workspace-tab == "Minecraft" ? GuiI18n.text("gui-minecraft-defaults-detail") : root.workspace-tab == "Java" ? GuiI18n.text("gui-java-detail") : root.workspace-tab == "Accounts" ? GuiI18n.text("gui-accounts-detail") : root.workspace-tab == "Providers & APIs" ? GuiI18n.text("gui-provider-detail") : root.workspace-tab == "Storage" ? GuiI18n.text("gui-storage-detail") : root.workspace-tab == "About & Licenses" ? GuiI18n.text("gui-tagline") : GuiI18n.text("gui-settings-detail");
                             }
                             if root.workspace-tab == "General" : VerticalLayout { alignment: start; spacing: 14px;
-                                SectionTitle { title: GuiI18n.text("gui-application-display"); detail: GuiI18n.text("gui-application-display-detail"); }
-                                Rectangle { height: root.application-text-scale >= 125 ? 124px : root.application-text-scale >= 110 ? 112px : 104px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface;
-                                    HorizontalLayout { padding: 16px; spacing: 20px; cross-axis-alignment: center;
-                                        VerticalLayout { horizontal-stretch: 1; spacing: 5px; Heading { text: GuiI18n.text("gui-application-text-size"); font-size: Theme.row-heading-size; } BodyText { text: GuiI18n.text("gui-application-text-size-detail"); wrap: word-wrap; } }
-                                        ComboBox { width: 190px; model: [GuiI18n.text("gui-text-scale-90"), GuiI18n.text("gui-text-scale-100"), GuiI18n.text("gui-text-scale-110"), GuiI18n.text("gui-text-scale-125")]; current-index: root.application-text-scale == 90 ? 0 : root.application-text-scale == 110 ? 2 : root.application-text-scale == 125 ? 3 : 1; selected(value) => { root.application-text-scale = value == GuiI18n.text("gui-text-scale-90") ? 90 : value == GuiI18n.text("gui-text-scale-110") ? 110 : value == GuiI18n.text("gui-text-scale-125") ? 125 : 100; } }
+                                // Side by side where the window is wide enough for two
+                                // readable columns, stacked where it is not. One grid
+                                // for both arrangements, so each heading and each
+                                // section is declared once: the cells they sit in move,
+                                // not the things themselves.
+                                //
+                                // Headings share a row so that the first card of each
+                                // column starts at the same height, whatever number of
+                                // lines a heading's description wraps to.
+                                GridLayout {
+                                    spacing: 14px;
+                                    SectionTitle {
+                                        row: 0; col: 0;
+                                        title: GuiI18n.text("gui-linked-server-defaults");
+                                        detail: GuiI18n.text("gui-linked-server-defaults-detail");
+                                    }
+                                    SectionTitle {
+                                        row: root.settings-two-columns ? 0 : 2;
+                                        col: root.settings-two-columns ? 1 : 0;
+                                        title: GuiI18n.text("gui-application-display");
+                                        detail: GuiI18n.text("gui-application-display-detail");
+                                    }
+                                    LinkedServerDefaultsSection {
+                                        row: 1; col: 0;
+                                        show-linked-servers <=> root.show-linked-servers;
+                                        make-default-account-operator <=> root.make-default-account-operator;
+                                        operator-permission-level <=> root.operator-permission-level;
+                                    }
+                                    ApplicationDisplaySection {
+                                        row: root.settings-two-columns ? 1 : 3;
+                                        col: root.settings-two-columns ? 1 : 0;
+                                        text-scale <=> root.application-text-scale;
+                                        technical-size <=> root.technical-text-size;
                                     }
                                 }
-                                Rectangle { height: root.application-text-scale >= 125 ? 124px : root.application-text-scale >= 110 ? 112px : 104px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface;
-                                    HorizontalLayout { padding: 16px; spacing: 20px; cross-axis-alignment: center;
-                                        VerticalLayout { horizontal-stretch: 1; spacing: 5px; Heading { text: GuiI18n.text("gui-technical-text-size"); font-size: Theme.row-heading-size; } BodyText { text: GuiI18n.text("gui-technical-text-size-detail"); wrap: word-wrap; } }
-                                        ComboBox { width: 190px; model: [GuiI18n.text("gui-technical-size-11"), GuiI18n.text("gui-technical-size-12"), GuiI18n.text("gui-technical-size-14"), GuiI18n.text("gui-technical-size-16")]; current-index: root.technical-text-size == 11 ? 0 : root.technical-text-size == 14 ? 2 : root.technical-text-size == 16 ? 3 : 1; selected(value) => { root.technical-text-size = value == GuiI18n.text("gui-technical-size-11") ? 11 : value == GuiI18n.text("gui-technical-size-14") ? 14 : value == GuiI18n.text("gui-technical-size-16") ? 16 : 12; } }
-                                    }
-                                }
-                                ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-save-display-settings"); tone: "primary"; clicked => { root.save-display-settings(root.application-text-scale, root.technical-text-size); } } }
-                                SectionTitle { title: GuiI18n.text("gui-linked-server-defaults"); detail: GuiI18n.text("gui-linked-server-defaults-detail"); }
-                                LabeledToggle { width: min(parent.width, 520px); label: GuiI18n.text("gui-show-linked-servers"); checked <=> root.show-linked-servers; }
-                                LabeledToggle { width: min(parent.width, 520px); label: GuiI18n.text("gui-default-account-operator"); checked <=> root.make-default-account-operator; }
-                                HorizontalLayout { spacing: 12px; cross-axis-alignment: center; VerticalLayout { FieldLabel { text: GuiI18n.text("gui-default-operator-level"); } BodyText { text: GuiI18n.text("gui-default-operator-level-detail"); color: Theme.text-muted; } } Rectangle { horizontal-stretch: 1; } ComboBox { accessible-label: GuiI18n.text("gui-default-operator-level"); width: 220px; model: [GuiI18n.text("gui-operator-level-1"), GuiI18n.text("gui-operator-level-2"), GuiI18n.text("gui-operator-level-3"), GuiI18n.text("gui-operator-level-4")]; current-index: root.operator-permission-level - 1; selected(value) => { root.operator-permission-level = value == GuiI18n.text("gui-operator-level-1") ? 1 : value == GuiI18n.text("gui-operator-level-2") ? 2 : value == GuiI18n.text("gui-operator-level-3") ? 3 : 4; } } }
-                                ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-save-server-defaults"); tone: "primary"; clicked => { root.save-linked-server-settings(root.show-linked-servers, root.make-default-account-operator, root.operator-permission-level); } } }
+                                ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-save-general-settings"); tone: "primary"; clicked => { root.save-general-settings(root.application-text-scale, root.technical-text-size, root.show-linked-servers, root.make-default-account-operator, root.operator-permission-level); } } }
                                 // Whether the scheme is claimed at all is settled by
                                 // installing, not here (ADR 0028, ADR 0029). What this page
                                 // manages is the answers the user has given to link prompts.
