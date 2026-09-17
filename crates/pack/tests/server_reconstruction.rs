@@ -180,6 +180,14 @@ async fn reconstruct(
         recipe,
         unknown_server_files,
         game_dir: game,
+        // These reconstruct from the addresses the recipe records, so the
+        // client's own game directory is never read. It still has to be named:
+        // it is where a file with no address would be copied from.
+        client_game_dir: &client_source
+            .parent()
+            .and_then(Path::parent)
+            .unwrap_or(client_source)
+            .join("minecraft"),
         client_source_dir: client_source,
         server_source_dir: server_source,
         fetch: ArtifactFetch {
@@ -448,5 +456,119 @@ async fn missing_layers_and_path_collisions_fail_before_overwriting_server_conte
     assert_eq!(
         std::fs::read(occupied_game.join("mods/same.jar")).expect("preserved"),
         b"base server file"
+    );
+}
+
+/// A jar the user dropped into the client themselves is recorded with no
+/// address to fetch it from, because there is none: what a digest lookup
+/// learned is what the jar *is*, not where it came from. The client has the
+/// file, and a linked server exists to run what the client runs, so the server
+/// takes its copy from the client rather than the build failing on a pack file
+/// that supposedly lost its source.
+#[tokio::test]
+async fn a_hand_placed_jar_reaches_the_server_from_the_client_that_holds_it() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (mut recipe, bodies) = recipe();
+    let client_source = temp.path().join("client/.launcher/source");
+    let client_game = temp.path().join("client/minecraft");
+    let cache = CacheLayout::new(temp.path().join("cache"));
+    write(
+        &client_source.join("modrinth/modrinth.index.json"),
+        b"manifest",
+    );
+    write(&client_source.join("modrinth/overrides/empty"), b"");
+    write(&client_source.join("modrinth/server-overrides/empty"), b"");
+    for (entry, body) in recipe.files.iter().zip(&bodies) {
+        cache_file(&cache, entry, body);
+    }
+
+    let hand_placed = b"a jar from a forum post";
+    let mut entry = file(
+        "mods/from-a-forum-post.jar",
+        hand_placed,
+        SideRequirement::Required,
+        SideRequirement::Required,
+        None,
+    );
+    entry.downloads.clear();
+    entry.origin = ModOrigin::HandPlaced;
+    recipe.files.push(entry);
+    write(&client_game.join("mods/from-a-forum-post.jar"), hand_placed);
+
+    let game = temp.path().join("server/minecraft");
+    let materialized = reconstruct(
+        &recipe,
+        &UnknownServerFiles::default(),
+        &game,
+        &client_source,
+        &temp.path().join("server/.launcher/source"),
+        &cache,
+    )
+    .await
+    .expect("a jar the client holds is one the server can have");
+
+    let installed = game.join("mods/from-a-forum-post.jar");
+    assert!(
+        installed.is_file(),
+        "the server has to end up with the jar the client has"
+    );
+    assert_eq!(
+        std::fs::read(&installed).expect("read back"),
+        hand_placed,
+        "and with its bytes, not an empty file standing in for it"
+    );
+    assert!(
+        materialized
+            .files
+            .installed
+            .contains(&PathBuf::from("mods/from-a-forum-post.jar")),
+        "{:?}",
+        materialized.files.installed
+    );
+}
+
+/// The same entry when the client does not have the file either: there is
+/// nowhere left to get it from, and that is worth failing over rather than
+/// quietly building a server missing a mod.
+#[tokio::test]
+async fn an_addressless_file_the_client_does_not_have_either_still_fails() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (mut recipe, bodies) = recipe();
+    let client_source = temp.path().join("client/.launcher/source");
+    let cache = CacheLayout::new(temp.path().join("cache"));
+    write(
+        &client_source.join("modrinth/modrinth.index.json"),
+        b"manifest",
+    );
+    write(&client_source.join("modrinth/overrides/empty"), b"");
+    write(&client_source.join("modrinth/server-overrides/empty"), b"");
+    for (entry, body) in recipe.files.iter().zip(&bodies) {
+        cache_file(&cache, entry, body);
+    }
+
+    let mut entry = file(
+        "mods/vanished.jar",
+        b"gone",
+        SideRequirement::Required,
+        SideRequirement::Required,
+        None,
+    );
+    entry.downloads.clear();
+    entry.origin = ModOrigin::HandPlaced;
+    recipe.files.push(entry);
+
+    let error = reconstruct(
+        &recipe,
+        &UnknownServerFiles::default(),
+        &temp.path().join("server/minecraft"),
+        &client_source,
+        &temp.path().join("server/.launcher/source"),
+        &cache,
+    )
+    .await
+    .expect_err("nothing to copy and nowhere to fetch from");
+    assert!(
+        matches!(error, PackError::FileDownloadsMissing { .. }),
+        "{error:?}"
     );
 }

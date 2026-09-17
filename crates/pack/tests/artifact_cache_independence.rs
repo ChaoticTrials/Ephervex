@@ -140,6 +140,7 @@ async fn a_reconstructed_server_survives_a_full_clear_of_the_reusable_cache() {
     let temp = tempfile::tempdir().expect("tempdir");
     let layout = CacheLayout::new(temp.path().join("cache"));
     let client_source = temp.path().join("client/.launcher/source");
+    let client_game = temp.path().join("client/minecraft");
     let server_source = temp.path().join("server/.launcher/source");
     let server_game = temp.path().join("server/minecraft");
     let body = mod_body();
@@ -153,6 +154,7 @@ async fn a_reconstructed_server_survives_a_full_clear_of_the_reusable_cache() {
         recipe: &recipe,
         unknown_server_files: &UnknownServerFiles::default(),
         game_dir: &server_game,
+        client_game_dir: &client_game,
         client_source_dir: &client_source,
         server_source_dir: &server_source,
         fetch: ArtifactFetch {

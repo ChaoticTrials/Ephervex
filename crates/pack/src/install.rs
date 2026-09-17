@@ -141,6 +141,9 @@ pub struct ServerMaterializeRequest<'a> {
     /// What to do with entries whose server side the pack never declared.
     pub unknown_server_files: &'a UnknownServerFiles,
     pub game_dir: &'a Path,
+    /// The client's own game directory, which is where a file the recipe
+    /// records no address for has to come from.
+    pub client_game_dir: &'a Path,
     pub client_source_dir: &'a Path,
     pub server_source_dir: &'a Path,
     pub fetch: ArtifactFetch<'a>,
@@ -170,7 +173,7 @@ pub async fn install_files(request: FileInstall<'_>) -> PackResult<MaterializedF
     } = request;
 
     let wanted = recipe.files_for(side, selection);
-    install_selected_files(&recipe.files, &wanted, game_dir, fetch).await
+    install_selected_files(&recipe.files, &wanted, game_dir, None, fetch).await
 }
 
 /// Puts one recorded file back where the recipe says it belongs.
@@ -198,7 +201,7 @@ pub async fn restore_file(
         .ok_or_else(|| PackError::ManagedIdentityMissing {
             path: logical_path.display().to_string(),
         })?;
-    install_selected_files(&recipe.files, &[wanted], game_dir, fetch).await
+    install_selected_files(&recipe.files, &[wanted], game_dir, None, fetch).await
 }
 
 /// Reconstructs server-applicable content without reading the source archive
@@ -215,6 +218,7 @@ pub async fn materialize_server_recipe(
         recipe,
         unknown_server_files,
         game_dir,
+        client_game_dir,
         client_source_dir,
         server_source_dir,
         fetch,
@@ -234,7 +238,14 @@ pub async fn materialize_server_recipe(
         )?;
     }
 
-    let files = install_selected_files(&recipe.files, &plan.files, game_dir, fetch).await?;
+    let files = install_selected_files(
+        &recipe.files,
+        &plan.files,
+        game_dir,
+        Some(client_game_dir),
+        fetch,
+    )
+    .await?;
     let client_store = SourceStore::new(client_source_dir);
     let layers = apply_retained_overrides(&client_store, recipe, PackSide::Server, game_dir)?;
     remove_retained_eula(game_dir)?;
@@ -299,6 +310,11 @@ async fn install_selected_files(
     all: &[PackFileRecipe],
     wanted: &[&PackFileRecipe],
     game_dir: &Path,
+    // Where a file the recipe records no address for can be copied from, for
+    // the one caller that has such a place: reconstructing a linked server
+    // from a client. `None` everywhere else, where a recipe entry with no
+    // address is a recipe that cannot be installed.
+    client_game_dir: Option<&Path>,
     fetch: ArtifactFetch<'_>,
 ) -> PackResult<MaterializedFiles> {
     let cancel = fetch.cancel;
@@ -314,6 +330,41 @@ async fn install_selected_files(
     if wanted.is_empty() {
         return Ok(report);
     }
+
+    // A jar the user put in the client themselves is recorded with no address
+    // to fetch it from, because there is none: the digest lookup that named it
+    // learned what it is, not where it came from. The client has the file, and
+    // a linked server exists to run what the client runs, so it is copied
+    // across rather than treated as a pack file that lost its source.
+    let mut downloadable: Vec<&PackFileRecipe> = wanted.to_vec();
+    if let Some(client_game_dir) = client_game_dir {
+        let local: Vec<&PackFileRecipe>;
+        (downloadable, local) = wanted.iter().partition(|file| !file.downloads.is_empty());
+        for file in local {
+            if cancel.is_cancelled() {
+                return Err(PackError::Canceled);
+            }
+            let source = client_game_dir.join(&file.logical_path);
+            if !source.is_file() {
+                // Nothing to copy and nowhere to fetch from: the recipe
+                // describes a file that exists in neither place, which is the
+                // failure the caller has to hear about.
+                return Err(PackError::FileDownloadsMissing {
+                    path: file.display_name(),
+                });
+            }
+            let destination = game_dir.join(&file.logical_path);
+            copy_into_instance(&source, &destination)?;
+            report.bytes = report
+                .bytes
+                .saturating_add(std::fs::metadata(&destination).map_or(0, |data| data.len()));
+            report.installed.push(file.logical_path.clone());
+        }
+    }
+    if downloadable.is_empty() {
+        return Ok(report);
+    }
+    let wanted = downloadable.as_slice();
 
     let outcomes = fetch_all(wanted, fetch).await?;
 

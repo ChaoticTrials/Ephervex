@@ -270,11 +270,11 @@ impl App {
                 cancel,
             })
             .await?;
-        } else if let Some((client_source, recipe)) = linked_recipe {
+        } else if let Some((client_root, recipe)) = linked_recipe {
             let unconfirmed_unknown = self
                 .materialize_linked_server_recipe(
                     &recipe,
-                    &client_source,
+                    &client_root,
                     &target,
                     &server_source,
                     options,
@@ -371,11 +371,11 @@ impl App {
                 cancel,
             })
             .await?;
-        } else if let Some((client_source, recipe)) = linked_recipe {
+        } else if let Some((client_root, recipe)) = linked_recipe {
             let unconfirmed_unknown = self
                 .materialize_linked_server_recipe(
                     &recipe,
-                    &client_source,
+                    &client_root,
                     &target,
                     &server_source,
                     options,
@@ -402,6 +402,12 @@ impl App {
         Some(ephervex_storage::metadata::source_dir(&client.root))
     }
 
+    /// The client's retained recipe, and the client instance's own root.
+    ///
+    /// The root rather than the retained source directory, because
+    /// reconstruction reads both that and the client's game directory: a jar
+    /// the user placed in the client themselves is recorded with no address to
+    /// fetch it from, so the server takes its copy from the client.
     fn linked_server_recipe(
         &self,
         record: &mut ServerRecord,
@@ -448,7 +454,7 @@ impl App {
             }
             .into());
         }
-        Ok(Some((store.dir().to_path_buf(), recipe)))
+        Ok(Some((client.root.clone(), recipe)))
     }
 
     /// Lays a linked server's content down from the client's retained recipe.
@@ -459,7 +465,7 @@ impl App {
     pub(crate) async fn materialize_linked_server_recipe(
         &self,
         recipe: &PackRecipe,
-        client_source: &Path,
+        client_root: &Path,
         target: &Path,
         server_source: &Path,
         options: &ServerCreateOptions,
@@ -470,7 +476,8 @@ impl App {
             recipe,
             unknown_server_files: &options.unknown_server_files,
             game_dir: target,
-            client_source_dir: client_source,
+            client_game_dir: &ephervex_storage::metadata::client_game_dir(client_root),
+            client_source_dir: &ephervex_storage::metadata::source_dir(client_root),
             server_source_dir: server_source,
             fetch: ArtifactFetch {
                 manager: &manager,

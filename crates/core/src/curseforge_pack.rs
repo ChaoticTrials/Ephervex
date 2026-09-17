@@ -3662,7 +3662,7 @@ mod tests {
             .pack_recipe(imported.record.id)
             .expect("query")
             .expect("an imported instance has a recipe");
-        let client_source = app.pack_source_dir(imported.record.id).expect("source dir");
+
         let target = staging.join("minecraft");
         let options = ServerCreateOptions {
             java_path: None,
@@ -3673,7 +3673,7 @@ mod tests {
         };
         app.materialize_linked_server_recipe(
             &recipe,
-            &client_source,
+            &imported.record.root,
             &target,
             &staging.join(".launcher/source"),
             &options,

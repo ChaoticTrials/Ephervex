@@ -330,6 +330,7 @@ async fn a_normalized_curseforge_recipe_reconstructs_a_server_through_the_generi
     publish_to_cache(&cache, &recipe.files[0], MOD_BODY);
 
     let client_source = workspace.path().join("client/.launcher/source");
+    let client_game = workspace.path().join("client/minecraft");
     std::fs::create_dir_all(client_source.join("curseforge/overrides/config")).expect("mkdir");
     std::fs::write(
         client_source.join("curseforge/overrides/config/repro.toml"),
@@ -351,6 +352,7 @@ async fn a_normalized_curseforge_recipe_reconstructs_a_server_through_the_generi
         recipe: &recipe,
         unknown_server_files: &UnknownServerFiles::only(OptionalSelection::none()),
         game_dir: &server_game,
+        client_game_dir: &client_game,
         client_source_dir: &client_source,
         server_source_dir: &server_source,
         fetch: ArtifactFetch {
@@ -383,6 +385,7 @@ async fn a_normalized_curseforge_recipe_reconstructs_a_server_through_the_generi
             "mods/required-1.0.0.jar",
         ])),
         game_dir: &server_game,
+        client_game_dir: &client_game,
         client_source_dir: &client_source,
         server_source_dir: &server_source,
         fetch: ArtifactFetch {
