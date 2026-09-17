@@ -1391,6 +1391,9 @@ gui-mod-up-to-date = Up to date
 gui-mod-change-version = Change Version
 gui-mod-update = Update
 gui-mod-open-project-page = View Project Page
+# Shown on hover over the mod's name in Manage Mod, which opens the mod's
+# project page in the browser.
+gui-mod-open-project-page-hint = Open project page
 gui-mod-reset-to-pack-version = Reset to Pack's Version
 gui-mod-project-page-opened = Opened the project's page in your browser.
 gui-mod-project-page-open-failed = Could not open a browser.

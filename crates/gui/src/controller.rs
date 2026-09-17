@@ -8304,6 +8304,27 @@ mod tests {
         );
     }
 
+    /// A name that opens a web page has to look like one before it is pressed.
+    /// The press itself is covered by the `mod_version_badges` suite; what is
+    /// asserted here is the affordance, which is invisible to a click test.
+    #[test]
+    fn the_mod_name_that_opens_a_project_page_is_marked_as_a_link() {
+        let source = include_str!("ui.rs");
+        let header = source
+            .split("if root.modal == \"mod-manage\"")
+            .nth(1)
+            .unwrap_or_default();
+        assert!(
+            header.contains("external-link.svg"),
+            "the arrow that says a name can be pressed"
+        );
+        assert!(header.contains("mouse-cursor: pointer"));
+        assert!(
+            header.contains("gui-mod-open-project-page-hint"),
+            "the tooltip naming where it leads"
+        );
+    }
+
     #[test]
     fn linked_server_workspace_and_pending_creation_remain_contextual() {
         let source = include_str!("ui.rs");

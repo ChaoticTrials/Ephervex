@@ -3991,7 +3991,7 @@ slint::slint! {
             background: #00000099;
             TouchArea { clicked => { } }
             Rectangle {
-                width: root.modal == "license" ? min(820px, parent.width - 80px) : root.modal == "mod-plan" || root.modal == "mod-apply" || root.modal == "mod-remove" || root.modal == "mod-result" ? min(720px, parent.width - 80px) : min(620px, parent.width - 80px);
+                width: root.modal == "license" ? min(820px, parent.width - 80px) : root.modal == "mod-plan" || root.modal == "mod-apply" || root.modal == "mod-remove" || root.modal == "mod-result" || root.modal == "mod-manage" ? min(720px, parent.width - 80px) : min(620px, parent.width - 80px);
                 height: root.modal == "license" ? min(720px, parent.height - 80px) : root.modal == "third-party" ? 340px : root.modal == "import" ? min(620px, parent.height - 80px) : root.modal == "mod-plan" ? min(500px * Theme.text-scale + root.linked-targets.length * 68px + 14px, parent.height - 80px) : root.modal == "mod-manage" ? min(620px, parent.height - 80px) : root.modal == "mod-apply" ? min(370px * Theme.text-scale + root.linked-targets.length * 68px + 14px, parent.height - 80px) : root.modal == "mod-result" ? min(300px * Theme.text-scale + root.linked-results.length * 68px + 14px, parent.height - 80px) : root.modal == "loader-change" ? 400px : root.modal == "mod-remove" ? min((root.linked-targets.length > 0 ? 424px : 300px) * Theme.text-scale + root.mod-removal-dependencies.length * 24px + root.linked-targets.length * 68px, parent.height - 80px) : root.modal == "eula" ? 440px : root.modal == "kill" ? 300px : root.modal == "delete-instance" || root.modal == "delete-server" ? 330px : root.modal == "rename" ? 300px : root.modal == "delete-mod" ? 320px : root.modal == "mod-clash" ? 320px : root.modal == "absent-mods" ? min(250px + root.absent-mods.length * 22px, parent.height - 80px) : root.modal == "make-persistent" ? min(290px + root.promote-servers.length * 28px, parent.height - 80px) : root.modal == "open-pack-link" ? 300px : root.modal == "create-server" ? min((root.create-server-client-id == "" ? 640px : 535px) + (root.create-server-client-id == "" && root.create-server-loader != "Vanilla" ? 44px : 0px), parent.height - 80px) : 570px;
                 x: (parent.width - self.width) / 2;
                 y: (parent.height - self.height) / 2;
@@ -4199,7 +4199,78 @@ slint::slint! {
                         if root.linked-targets.length > 0 : LinkedTargetsPanel { vertical-stretch: 1; rows: root.linked-targets; selectable: true; toggled(index) => { root.linked-targets[index].selected = !root.linked-targets[index].selected; } }
                         ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; root.abandon-browser-install(); } } AppButton { text: GuiI18n.text("gui-install-required"); tone: "primary"; enabled: root.mod-plan-install-count > 0 && !root.mod-action-pending; clicked => { root.mod-action-pending = true; root.install-mod(root.mod-plan-instance, root.mod-plan-provider, root.mod-plan-project, root.mod-plan-version-id); root.modal = ""; } } } }
                     if root.modal == "mod-manage" : VerticalLayout { spacing: 11px;
-                        HorizontalLayout { spacing: 8px; Heading { text: root.mod-action-name; font-size: Theme.section-size; overflow: elide; horizontal-stretch: 1; } if root.mod-action-up-to-date : Pill { text: GuiI18n.text("gui-mod-up-to-date"); tone-color: Theme.success; } }
+                        // The mod's own name leads to its project page, beside the
+                        // arrow that says a name can be pressed at all. The row of
+                        // actions below already carries up to four for a mod the pack
+                        // declares, and a fifth button for the project page left them
+                        // no room in a dialog this wide.
+                        HorizontalLayout { spacing: 8px; cross-axis-alignment: center;
+                            if root.mod-action-project-url == "" : Heading { text: root.mod-action-name; font-size: Theme.section-size; overflow: elide; horizontal-stretch: 1; }
+                            if root.mod-action-project-url != "" : Rectangle {
+                                horizontal-stretch: 1;
+                                height: max(project-title.preferred-height, 22px);
+                                // The name and its arrow, and nothing else: what is
+                                // announced as a button, what takes the press, and
+                                // what lights up on hover are all this one box, so
+                                // the rest of the header is not a click target that
+                                // opens a browser.
+                                Rectangle {
+                                    x: 0px;
+                                    width: project-title.width + 22px;
+                                    height: parent.height;
+                                    accessible-role: button;
+                                    accessible-label: GuiI18n.text("gui-mod-open-project-page");
+                                    accessible-action-default => { root.open-mod-project-page(root.mod-action-project-url); }
+                                // Packed to the left rather than stretched: the
+                                // arrow belongs against the end of the name, and a
+                                // stretched title would carry it off to the middle
+                                // of the dialog where it reads as its own control.
+                                HorizontalLayout {
+                                    spacing: 7px;
+                                    alignment: start;
+                                    cross-axis-alignment: center;
+                                    project-title := Text {
+                                        // Its own width, capped short of the
+                                        // dialog's own 720px so a very long name
+                                        // elides rather than pushing the arrow out.
+                                        // A constant because deriving it from the
+                                        // row would be a layout loop: the row is
+                                        // sized by this text.
+                                        width: min(self.preferred-width, 560px);
+                                        text: root.mod-action-name;
+                                        color: project-link.has-hover ? Theme.accent : Theme.text;
+                                        font-size: Theme.section-size;
+                                        font-weight: 600;
+                                        overflow: elide;
+                                        vertical-alignment: center;
+                                    }
+                                    Image {
+                                        width: 15px;
+                                        height: 15px;
+                                        source: @image-url("../../../assets/icons/external-link.svg");
+                                        image-fit: contain;
+                                        colorize: project-link.has-hover ? Theme.accent : Theme.text-secondary;
+                                    }
+                                }
+                                project-link := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.open-mod-project-page(root.mod-action-project-url); }
+                                }
+                                }
+                                if project-link.has-hover : Tooltip {
+                                    TooltipCard {
+                                        // Below and right of the pointer. The overlay
+                                        // starts at the element's own origin, which is
+                                        // the name itself, so a card left there covers
+                                        // the very thing being pointed at.
+                                        x: project-link.mouse-x + 14px;
+                                        y: project-link.mouse-y + 20px;
+                                        text: GuiI18n.text("gui-mod-open-project-page-hint");
+                                    }
+                                }
+                            }
+                            if root.mod-action-up-to-date : Pill { text: GuiI18n.text("gui-mod-up-to-date"); tone-color: Theme.success; }
+                        }
                         if root.mod-action-notice != "" : BodyText { text: root.mod-action-notice; color: root.mod-action-can-change ? Theme.text-muted : Theme.warning; wrap: word-wrap; }
                         if root.mod-action-loading : BodyText { text: GuiI18n.text("gui-mod-versions-loading"); color: Theme.text-muted; }
                         if !root.mod-action-loading && root.mod-versions.length == 0 && root.mod-action-notice == "" : BodyText { text: GuiI18n.text("gui-mod-no-compatible-versions"); color: Theme.text-muted; wrap: word-wrap; }
@@ -4234,14 +4305,17 @@ slint::slint! {
                             } }
                         }
                         if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; }
+                        // Leaving on the left, acting on the right, and the one
+                        // that takes the selected release last. Everything bunched
+                        // at one end left the dialog looking like it had run out
+                        // of room, which is what it used to do.
                         HorizontalLayout { spacing: 8px;
                             if root.mod-action-can-remove : AppButton { text: GuiI18n.text("gui-remove"); tone: "danger"; enabled: !root.mod-action-pending; clicked => { root.modal-error = ""; root.plan-mod-removal(root.selected-instance-id, root.mod-action-path); } }
-                            if root.mod-action-project-url != "" : AppButton { text: GuiI18n.text("gui-mod-open-project-page"); clicked => { root.open-mod-project-page(root.mod-action-project-url); } }
+                            AppButton { min-width: 124px; text: GuiI18n.text("gui-close"); clicked => { root.modal = ""; root.modal-error = ""; } }
                             Rectangle { horizontal-stretch: 1; }
-                            AppButton { text: GuiI18n.text("gui-close"); clicked => { root.modal = ""; root.modal-error = ""; } }
                             if root.mod-action-is-pack-owned && root.mod-action-pack-original-version != "" : AppButton { text: GuiI18n.text("gui-mod-reset-to-pack-version"); enabled: !root.mod-action-pending; clicked => { root.mod-action-pending = true; root.modal-error = ""; root.plan-mod-apply(root.selected-instance-id, root.mod-action-path, root.mod-action-pack-original-version); } }
-                            if root.mod-action-can-update : AppButton { text: GuiI18n.text("gui-mod-update"); enabled: !root.mod-action-pending; clicked => { root.mod-action-pending = true; root.modal-error = ""; root.plan-mod-apply(root.selected-instance-id, root.mod-action-path, ""); } }
-                            if root.mod-action-can-change : AppButton { text: GuiI18n.text("gui-mod-change-version"); tone: "primary"; enabled: !root.mod-action-pending && root.mod-action-selected != "" && root.mod-action-selected != root.mod-action-installed; clicked => { root.mod-action-pending = true; root.modal-error = ""; root.plan-mod-apply(root.selected-instance-id, root.mod-action-path, root.mod-action-selected); } }
+                            if root.mod-action-can-update : AppButton { min-width: 124px; text: GuiI18n.text("gui-mod-update"); enabled: !root.mod-action-pending; clicked => { root.mod-action-pending = true; root.modal-error = ""; root.plan-mod-apply(root.selected-instance-id, root.mod-action-path, ""); } }
+                            if root.mod-action-can-change : AppButton { min-width: 150px; text: GuiI18n.text("gui-mod-change-version"); tone: "primary"; enabled: !root.mod-action-pending && root.mod-action-selected != "" && root.mod-action-selected != root.mod-action-installed; clicked => { root.mod-action-pending = true; root.modal-error = ""; root.plan-mod-apply(root.selected-instance-id, root.mod-action-path, root.mod-action-selected); } }
                         }
                     }
                     if root.modal == "mod-remove" : VerticalLayout { spacing: 12px;
