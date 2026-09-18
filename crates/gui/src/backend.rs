@@ -440,6 +440,7 @@ pub enum Command {
     SaveGeneralSettings {
         text_scale: ephervex_core::ApplicationTextScale,
         technical_text_size: ephervex_core::TechnicalTextSize,
+        color_scheme: ephervex_core::ApplicationColorScheme,
         show_globally: bool,
         make_operator: bool,
         operator_level: ephervex_model::OperatorPermissionLevel,
@@ -618,6 +619,8 @@ pub struct SettingsData {
     pub mod_catalog_origin: SettingOrigin,
     pub text_scale_percent: u16,
     pub technical_text_size_pixels: u16,
+    /// Which color scheme the interface paints in, as its stable identifier.
+    pub color_scheme: String,
     pub show_linked_servers: bool,
     /// Minecraft releases the user pinned, in the order they should be offered.
     /// Kept exactly as recorded, including an entry no current release matches.
@@ -2668,6 +2671,7 @@ fn run_worker(
             Command::SaveGeneralSettings {
                 text_scale,
                 technical_text_size,
+                color_scheme,
                 show_globally,
                 make_operator,
                 operator_level,
@@ -2676,7 +2680,7 @@ fn run_worker(
                 // one button, so it reports one outcome. A failure in either
                 // is reported as itself and leaves the other where it was.
                 let saved = app
-                    .set_application_display_settings(text_scale, technical_text_size)
+                    .set_application_display_settings(text_scale, technical_text_size, color_scheme)
                     .and_then(|()| {
                         app.set_linked_server_settings(show_globally, make_operator, operator_level)
                     });
@@ -3020,6 +3024,7 @@ fn application_settings(app: &App) -> Result<SettingsData, CoreError> {
         mod_catalog_origin: origin(catalog.chosen),
         text_scale_percent: display.text_scale.percent(),
         technical_text_size_pixels: display.technical_text_size.pixels(),
+        color_scheme: display.color_scheme.as_str().to_owned(),
         show_linked_servers: display.show_linked_servers,
         favorite_minecraft_versions: app.favorite_minecraft_versions().to_vec(),
         make_default_account_operator: server.make_default_account_operator,

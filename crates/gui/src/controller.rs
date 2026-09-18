@@ -4811,7 +4811,12 @@ fn register_general_settings(ui: &AppWindow, commands: &Sender<Command>) {
     let sender = commands.clone();
     let weak = ui.as_weak();
     ui.on_save_general_settings(
-        move |text_scale, technical_text_size, show_globally, make_operator, level| {
+        move |text_scale,
+              technical_text_size,
+              color_scheme,
+              show_globally,
+              make_operator,
+              level| {
             let display = u16::try_from(text_scale)
                 .ok()
                 .and_then(ephervex_core::ApplicationTextScale::from_percent)
@@ -4819,21 +4824,27 @@ fn register_general_settings(ui: &AppWindow, commands: &Sender<Command>) {
                     u16::try_from(technical_text_size)
                         .ok()
                         .and_then(ephervex_core::TechnicalTextSize::from_pixels),
-                );
+                )
+                .zip(ephervex_core::ApplicationColorScheme::from_name(
+                    color_scheme.as_str(),
+                ));
             let operator_level = u8::try_from(level)
                 .ok()
                 .and_then(ephervex_model::OperatorPermissionLevel::from_value);
             match (display, operator_level) {
-                (Some((text_scale, technical_text_size)), Some(operator_level)) => send(
-                    &sender,
-                    Command::SaveGeneralSettings {
-                        text_scale,
-                        technical_text_size,
-                        show_globally,
-                        make_operator,
-                        operator_level,
-                    },
-                ),
+                (Some(((text_scale, technical_text_size), color_scheme)), Some(operator_level)) => {
+                    send(
+                        &sender,
+                        Command::SaveGeneralSettings {
+                            text_scale,
+                            technical_text_size,
+                            color_scheme,
+                            show_globally,
+                            make_operator,
+                            operator_level,
+                        },
+                    );
+                }
                 (None, _) => {
                     if let Some(ui) = weak.upgrade() {
                         ui.invoke_present_toast(
@@ -5876,6 +5887,9 @@ fn apply_snapshot(
     ui.set_technical_text_size(i32::from(settings.technical_text_size_pixels));
     ui.global::<Theme>()
         .set_text_scale(f32::from(settings.text_scale_percent) / 100.0);
+    ui.set_application_color_scheme(settings.color_scheme.clone().into());
+    ui.global::<Theme>()
+        .set_dark(settings.color_scheme != ephervex_core::ApplicationColorScheme::Light.as_str());
     ui.set_java_auto_detect(settings.java_auto_detect);
     ui.set_java_auto_download(settings.java_auto_download);
     ui.set_java_memory_min(settings.java_memory_min.to_string().into());
@@ -7500,6 +7514,30 @@ mod tests {
         assert!(hex.is_empty(), "colors written in the markup: {hex:?}");
     }
 
+    /// A token with one value is a token that breaks whichever scheme it was
+    /// not written for, and nothing on screen says which one that is.
+    #[test]
+    fn every_theme_color_carries_both_schemes() {
+        let (theme, _) = theme_and_markup(include_str!("ui.rs"));
+        let single: Vec<&str> = theme
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with("out property <color> "))
+            .filter(|line| !line.contains("dark ?"))
+            .collect();
+        assert!(single.is_empty(), "colors with one scheme: {single:#?}");
+    }
+
+    /// The shipped widgets paint from their own palette, so a window that
+    /// repaints itself and leaves that palette alone puts a light ComboBox on
+    /// a dark page.
+    #[test]
+    fn the_widget_palette_follows_the_interface_scheme() {
+        let source = include_str!("ui.rs");
+        assert!(source.contains("Palette.color-scheme = self.widget-scheme"));
+        assert!(source.contains("ListView, Palette, ScrollView"));
+    }
+
     /// Interface text follows the size the user chose, which it can only do
     /// while every `font-size` reads a `Theme` token. The separate size the
     /// diagnostics and console views use is the one exception, and it is
@@ -8526,7 +8564,9 @@ mod tests {
         assert!(source.contains("in-out property <float> text-scale: 1"));
         assert!(source.contains("default-font-size: Theme.body-size"));
         // Saved with the rest of the General page, by its one button.
-        assert!(source.contains("callback save-general-settings(int, int, bool, bool, int)"));
+        assert!(
+            source.contains("callback save-general-settings(int, int, string, bool, bool, int)")
+        );
         assert!(source.contains("root.technical-text-size * 1px"));
         assert!(!source.contains("They do not change Minecraft's GUI scale"));
     }

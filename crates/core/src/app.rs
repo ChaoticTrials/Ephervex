@@ -36,8 +36,9 @@ use ephervex_model::{
 };
 use ephervex_options::{OptionsCompatibility, OptionsFeed};
 use ephervex_storage::{
-    ApplicationTextScale, ClientRecord, Config, FileDisposition, JavaConfig, NewClient, Paths,
-    ReconciliationReport, Registry, ServerRecord, Storage, TechnicalTextSize,
+    ApplicationColorScheme, ApplicationTextScale, ClientRecord, Config, FileDisposition,
+    JavaConfig, NewClient, Paths, ReconciliationReport, Registry, ServerRecord, Storage,
+    TechnicalTextSize,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{instrument, warn};
@@ -95,6 +96,7 @@ pub struct JavaPlan {
 pub struct ApplicationDisplaySettings {
     pub text_scale: ApplicationTextScale,
     pub technical_text_size: TechnicalTextSize,
+    pub color_scheme: ApplicationColorScheme,
     pub show_linked_servers: bool,
 }
 
@@ -336,6 +338,7 @@ impl App {
         ApplicationDisplaySettings {
             text_scale: self.storage.config.display.text_scale,
             technical_text_size: self.storage.config.display.technical_text_size,
+            color_scheme: self.storage.config.display.color_scheme,
             show_linked_servers: self.storage.config.display.show_linked_servers,
         }
     }
@@ -393,10 +396,12 @@ impl App {
         &mut self,
         text_scale: ApplicationTextScale,
         technical_text_size: TechnicalTextSize,
+        color_scheme: ApplicationColorScheme,
     ) -> CoreResult<()> {
         self.mutate_config(|config| {
             config.display.text_scale = text_scale;
             config.display.technical_text_size = technical_text_size;
+            config.display.color_scheme = color_scheme;
         })
     }
 
@@ -1800,6 +1805,7 @@ mod tests {
             ApplicationDisplaySettings {
                 text_scale: ApplicationTextScale::Default,
                 technical_text_size: TechnicalTextSize::Default,
+                color_scheme: ApplicationColorScheme::Dark,
                 show_linked_servers: false,
             }
         );
@@ -1807,6 +1813,7 @@ mod tests {
         app.set_application_display_settings(
             ApplicationTextScale::Large,
             TechnicalTextSize::Comfortable,
+            ApplicationColorScheme::Light,
         )
         .expect("save display settings");
         assert!(app.config().minecraft_preferences.is_empty());
@@ -1817,6 +1824,7 @@ mod tests {
             ApplicationDisplaySettings {
                 text_scale: ApplicationTextScale::Large,
                 technical_text_size: TechnicalTextSize::Comfortable,
+                color_scheme: ApplicationColorScheme::Light,
                 show_linked_servers: false,
             }
         );

@@ -252,12 +252,49 @@ impl TechnicalTextSize {
     }
 }
 
+/// Which of Ephervex's own color schemes the interface paints in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ApplicationColorScheme {
+    #[default]
+    Dark,
+    Light,
+}
+
+impl ApplicationColorScheme {
+    /// Whether this scheme is the dark one.
+    #[must_use]
+    pub const fn is_dark(self) -> bool {
+        matches!(self, Self::Dark)
+    }
+
+    /// A stable identifier for `--json` output and frontend state.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Dark => "dark",
+            Self::Light => "light",
+        }
+    }
+
+    /// Resolves one of the bounded values accepted by application settings.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "dark" => Some(Self::Dark),
+            "light" => Some(Self::Light),
+            _ => None,
+        }
+    }
+}
+
 /// Display preferences for Ephervex itself.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct ApplicationDisplayConfig {
     pub text_scale: ApplicationTextScale,
     pub technical_text_size: TechnicalTextSize,
+    pub color_scheme: ApplicationColorScheme,
     /// Whether linked servers also appear in the global Servers list.
     pub show_linked_servers: bool,
     /// Keys this build does not know about. See [`Config::unknown`].

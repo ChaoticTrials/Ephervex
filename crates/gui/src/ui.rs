@@ -1,5 +1,5 @@
 slint::slint! {
-    import { AboutSlint, ComboBox, ListView, ScrollView, Slider, Spinner } from "std-widgets.slint";
+    import { AboutSlint, ComboBox, ListView, Palette, ScrollView, Slider, Spinner } from "std-widgets.slint";
 
     export global GuiI18n {
         pure callback text(string) -> string;
@@ -13,6 +13,10 @@ slint::slint! {
         // Rust macro, and Rust's own lexer reads `#0b0e10` as a binary literal
         // and `#16383e` as an exponent before the Slint compiler sees either.
         in-out property <float> text-scale: 1;
+        // Which scheme every color below resolves to. One switch rather than a
+        // palette written from Rust: each value stays beside the reasoning for
+        // its hue, and a token that carries only one scheme is visible here.
+        in-out property <bool> dark: true;
         // The fixed-width family this machine actually has, resolved once at
         // startup. `font-family` is matched as a literal family name, so the
         // generic "monospace" written here matches nothing and only stands
@@ -31,71 +35,71 @@ slint::slint! {
         out property <length> diagnostics-title-size: 25px * text-scale;
         out property <length> page-title-size: 27px * text-scale;
         out property <length> readout-size: 32px * text-scale;
-        out property <color> background: #101315;
-        out property <color> surface: #171b1e;
-        out property <color> elevated: #1e2428;
+        out property <color> background: dark ? #101315 : #e9edef;
+        out property <color> surface: dark ? #171b1e : #f4f7f8;
+        out property <color> elevated: dark ? #1e2428 : #fbfcfd;
         // One step past `elevated`, for a popover that has to read against
         // whatever is behind it - including a card that is `elevated` itself
         // because hovering it is what raised the popover.
-        out property <color> overlay: #2b333a;
-        out property <color> border: #30373c;
+        out property <color> overlay: dark ? #2b333a : #ffffff;
+        out property <color> border: dark ? #30373c : #c6ced3;
         // One step under `background`, for the chrome that frames a page:
         // the top bar, the navigation column and the status bar.
-        out property <color> bar: #11171a;
+        out property <color> bar: dark ? #11171a : #dfe5e7;
         // The floor a technical view is read against - a console, a crash
         // report, a log file - held apart from `background` so a page and the
         // output on it are never the same surface.
-        out property <color> well: rgb(11, 14, 16);
+        out property <color> well: dark ? rgb(11, 14, 16) : #e2e7e9;
         // A selected row, the card form of the same, and the stronger tint a
         // selected chip takes.
-        out property <color> selection: #192d32;
-        out property <color> selection-card: #17272c;
-        out property <color> selection-strong: #244a4e;
+        out property <color> selection: dark ? #192d32 : #d6e9ec;
+        out property <color> selection-card: dark ? #17272c : #dce9ec;
+        out property <color> selection-strong: dark ? #244a4e : #bfe0e3;
         // The track of a switch that is on, and the fill of a binding editor
         // waiting for a key. Both are an accent held far enough back that what
         // sits on them stays readable.
-        out property <color> toggle-on: #285e63;
-        out property <color> capture-active: rgb(22, 56, 62);
-        out property <color> accent: #5dbbc3;
-        out property <color> accent-secondary: #78a8c2;
-        out property <color> success: #62c58b;
-        out property <color> warning: #ddb76a;
-        out property <color> danger: #e06c75;
+        out property <color> toggle-on: dark ? #285e63 : #15707a;
+        out property <color> capture-active: dark ? rgb(22, 56, 62) : #d0eaed;
+        out property <color> accent: dark ? #5dbbc3 : #15707a;
+        out property <color> accent-secondary: dark ? #78a8c2 : #2f6b8a;
+        out property <color> success: dark ? #62c58b : #1f8a51;
+        out property <color> warning: dark ? #ddb76a : #8a6212;
+        out property <color> danger: dark ? #e06c75 : #b3323d;
         // The filled tones a primary or destructive button is drawn in, and
         // what each becomes under the pointer. Kept here rather than derived,
         // because a fill has to stay legible under its own caption and an
         // alpha over the surface behind it does not.
-        out property <color> primary-fill: #2d7d84;
-        out property <color> primary-fill-hover: #368b93;
-        out property <color> danger-fill: rgb(97, 39, 46);
-        out property <color> danger-fill-hover: #7b3038;
-        out property <color> text: #e8ecef;
-        out property <color> text-secondary: #a6b0b6;
-        out property <color> text-muted: #6f797f;
+        out property <color> primary-fill: dark ? #2d7d84 : #15707a;
+        out property <color> primary-fill-hover: dark ? #368b93 : #1a8691;
+        out property <color> danger-fill: dark ? rgb(97, 39, 46) : #b3323d;
+        out property <color> danger-fill-hover: dark ? #7b3038 : #c8404b;
+        out property <color> text: dark ? #e8ecef : #131719;
+        out property <color> text-secondary: dark ? #a6b0b6 : #4a565c;
+        out property <color> text-muted: dark ? #6f797f : #77838a;
         // A caption on a filled destructive button, which `text` is not quite
         // bright enough to carry.
-        out property <color> on-danger: #fff0f1;
+        out property <color> on-danger: dark ? #fff0f1 : #fff0f1;
         // An error line in a console. `danger` is a border and a button tone;
         // a page of fixed-width text needs it lifted to stay readable.
-        out property <color> log-error: #ef9a9f;
-        out property <color> server: #a888df;
+        out property <color> log-error: dark ? #ef9a9f : #b3323d;
+        out property <color> server: dark ? #a888df : #6b45b0;
         // The two mod catalogs, in their own brand colors, so a row says which
         // one a mod came from without being read.
-        out property <color> modrinth: #1bd96a;
-        out property <color> curseforge: #f16436;
+        out property <color> modrinth: dark ? #1bd96a : rgb(16, 158, 75);
+        out property <color> curseforge: dark ? #f16436 : #d2491b;
         // The game's own grass, at the color a plains biome tints it.
-        out property <color> vanilla: #91bd59;
+        out property <color> vanilla: dark ? #91bd59 : #5d8a2c;
         // The two loaders in their own marks' colors, the same way the two
         // catalogs above are. NeoForge is the rust its fox is drawn in. Forge's
         // anvil sits on a navy so dark (#1e2d44) that it disappears against
         // this background, so its own hue is kept and lifted into the range the
         // rest of this palette works in.
-        out property <color> forge: #5981c0;
-        out property <color> neoforge: #a44e37;
+        out property <color> forge: dark ? #5981c0 : #3a5f9c;
+        out property <color> neoforge: dark ? #a44e37 : #8b3a24;
         // What is drawn over the window rather than in it: a popover's shadow
         // and the wash that puts a modal in front of everything else.
-        out property <color> shadow: #00000080;
-        out property <color> scrim: #00000099;
+        out property <color> shadow: dark ? #00000080 : rgba(0, 0, 0, 0.18);
+        out property <color> scrim: dark ? #00000099 : #00000073;
         // Every control that can share a toolbar row is this tall, so a row
         // that mixes a button, a chip and a field lines up without each caller
         // having to know what the others chose.
@@ -2087,12 +2091,18 @@ slint::slint! {
     component ApplicationDisplaySection inherits VerticalLayout {
         in-out property <int> text-scale;
         in-out property <int> technical-size;
+        in-out property <string> color-scheme;
         alignment: start;
         spacing: 14px;
         SettingCard {
             title: GuiI18n.text("gui-application-text-size");
             detail: GuiI18n.text("gui-application-text-size-detail");
             ComboBox { width: 190px; model: [GuiI18n.text("gui-text-scale-90"), GuiI18n.text("gui-text-scale-100"), GuiI18n.text("gui-text-scale-110"), GuiI18n.text("gui-text-scale-125")]; current-index: root.text-scale == 90 ? 0 : root.text-scale == 110 ? 2 : root.text-scale == 125 ? 3 : 1; selected(value) => { root.text-scale = value == GuiI18n.text("gui-text-scale-90") ? 90 : value == GuiI18n.text("gui-text-scale-110") ? 110 : value == GuiI18n.text("gui-text-scale-125") ? 125 : 100; } }
+        }
+        SettingCard {
+            title: GuiI18n.text("gui-application-color-scheme");
+            detail: GuiI18n.text("gui-application-color-scheme-detail");
+            ComboBox { width: 190px; model: [GuiI18n.text("gui-color-scheme-dark"), GuiI18n.text("gui-color-scheme-light")]; current-index: root.color-scheme == "light" ? 1 : 0; selected(value) => { root.color-scheme = value == GuiI18n.text("gui-color-scheme-light") ? "light" : "dark"; } }
         }
         SettingCard {
             title: GuiI18n.text("gui-technical-text-size");
@@ -2577,6 +2587,14 @@ slint::slint! {
         background: Theme.background;
         default-font-size: Theme.body-size;
 
+        // The shipped widgets paint from their own palette, which is writable
+        // and repaints every ComboBox, ScrollView, ListView, Slider and Spinner
+        // when it changes. Moved with this window's scheme so a widget never
+        // sits light on a dark page. `init` runs before the first frame.
+        property <ColorScheme> widget-scheme: Theme.dark ? ColorScheme.dark : ColorScheme.light;
+        init => { Palette.color-scheme = self.widget-scheme; }
+        changed widget-scheme => { Palette.color-scheme = self.widget-scheme; }
+
         in property <image> logo: @image-url("../../../assets/logo.png");
         // Whether a settings page has the room to put its cards two to a row.
         //
@@ -3026,6 +3044,7 @@ slint::slint! {
         in-out property <bool> artifact-cache-clearing;
         in-out property <int> application-text-scale: 100;
         in-out property <int> technical-text-size: 12;
+        in-out property <string> application-color-scheme: "dark";
         in-out property <string> java-memory-min: "512";
         in-out property <string> java-memory-max: "4096";
         in-out property <string> java-preferred-path;
@@ -3205,7 +3224,7 @@ slint::slint! {
         // globally, whether the default account is made an operator, and the
         // level it is given. One callback because the General page saves with
         // one button: two buttons on one page meant two ways to half-save it.
-        callback save-general-settings(int, int, bool, bool, int);
+        callback save-general-settings(int, int, string, bool, bool, int);
         // What the Java settings page asks for when it opens, against the
         // cached inventory. `refresh-java` is the page's own button, which
         // rescans because the cache cannot notice a JDK installed since.
@@ -3769,9 +3788,10 @@ slint::slint! {
                                         col: root.settings-two-columns ? 1 : 0;
                                         text-scale <=> root.application-text-scale;
                                         technical-size <=> root.technical-text-size;
+                                        color-scheme <=> root.application-color-scheme;
                                     }
                                 }
-                                ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-save-general-settings"); tone: "primary"; clicked => { root.save-general-settings(root.application-text-scale, root.technical-text-size, root.show-linked-servers, root.make-default-account-operator, root.operator-permission-level); } } }
+                                ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-save-general-settings"); tone: "primary"; clicked => { root.save-general-settings(root.application-text-scale, root.technical-text-size, root.application-color-scheme, root.show-linked-servers, root.make-default-account-operator, root.operator-permission-level); } } }
                                 // Whether the scheme is claimed at all is settled by
                                 // installing, not here (ADR 0028, ADR 0029). What this page
                                 // manages is the answers the user has given to link prompts.
