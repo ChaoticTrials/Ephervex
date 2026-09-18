@@ -611,9 +611,10 @@ impl App {
 
     /// Turns pack-owned mod mutation on or off for this instance.
     ///
-    /// Refused while running, for the same reason the runtime settings are: a
-    /// decision this deliberate should not be made, or silently take effect,
-    /// underneath a live game.
+    /// Available while the instance is running. The setting decides what the
+    /// mod list offers, and the operations it unlocks write into `mods/`, which
+    /// the game reads when it starts; a running copy is a reason to restart it,
+    /// not a reason to refuse the decision.
     #[instrument(skip(self))]
     pub fn set_allow_pack_mod_version_changes(
         &self,
@@ -621,13 +622,6 @@ impl App {
         allow: bool,
     ) -> CoreResult<ClientRecord> {
         let mut record = self.client(id)?;
-        if let Some(state) = self.launch_state(id)? {
-            return Err(ephervex_storage::LockError::AlreadyRunning {
-                pid: state.game_pid.unwrap_or(state.owner_pid),
-                since: state.since,
-            }
-            .into());
-        }
         record.allow_pack_mod_version_changes = allow;
         self.registry().update_client(&mut record)?;
         Ok(record)
@@ -1623,8 +1617,11 @@ mod tests {
         assert!(cleared.jvm_override.is_none());
     }
 
+    /// The setting decides what the mod list offers, and what it unlocks is
+    /// written into `mods/` for the next start to read. A running copy is a
+    /// reason to restart the game, never a reason to refuse the decision.
     #[test]
-    fn allowing_pack_mod_version_changes_persists_and_is_refused_while_running() {
+    fn allowing_pack_mod_version_changes_persists_and_is_available_while_running() {
         let base = tempfile::tempdir().expect("temp dir");
         let app = app_rooted_at(base.path());
         let created = app
@@ -1647,15 +1644,10 @@ mod tests {
         assert!(stored.allow_pack_mod_version_changes);
 
         let _lock = ephervex_storage::LaunchLock::acquire(&stored.root).expect("acquire lock");
-        let error = reopened
+        let running = reopened
             .set_allow_pack_mod_version_changes(created.id, false)
-            .expect_err("a live game's settings are not changed underneath it");
-        assert!(matches!(
-            error,
-            crate::error::CoreError::Storage(ephervex_storage::StorageError::Lock(
-                ephervex_storage::LockError::AlreadyRunning { .. }
-            ))
-        ));
+            .expect("a running copy does not take the decision away");
+        assert!(!running.allow_pack_mod_version_changes);
     }
 
     /// A linked server exists to reproduce one client. Left behind it is

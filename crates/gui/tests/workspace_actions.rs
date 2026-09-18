@@ -12,7 +12,9 @@ use std::rc::Rc;
 
 use ephervex_gui::ui::{AppWindow, GuiI18n, InstanceRow};
 use ephervex_i18n::{Arg, lookup, lookup_args};
-use i_slint_backend_testing::{ElementHandle, TestingBackend, TestingBackendOptions};
+use i_slint_backend_testing::{
+    AccessibleRole, ElementHandle, TestingBackend, TestingBackendOptions,
+};
 use slint::{ComponentHandle, ModelRc, PhysicalSize, SharedString, VecModel};
 
 /// The client workspace opens the client's own folder.
@@ -72,6 +74,59 @@ fn a_vanilla_instance_still_offers_its_folder() {
     open_folder.invoke_accessible_default_action();
 
     assert_eq!(clients.borrow().as_slice(), ["repro-client".to_owned()]);
+}
+
+/// Turning the pack-mod opt-in on and leaving the Settings tab destroys the
+/// switch; coming back builds a new one from the window's own value. A switch
+/// that writes only its own state leaves that value behind, so the opt-in
+/// reads as off however many times it was turned on.
+#[test]
+fn the_pack_mod_opt_in_survives_leaving_its_tab() {
+    let ui = window();
+    let asked: Rc<RefCell<Vec<(String, bool)>>> = Rc::default();
+    let record = Rc::clone(&asked);
+    ui.on_set_allow_pack_mod_version_changes(move |instance, allow| {
+        record.borrow_mut().push((instance.to_string(), allow));
+    });
+
+    client_workspace(&ui);
+    ui.set_workspace_tab("Settings".into());
+    settle(&ui);
+
+    let toggle = opt_in(&ui).expect("the Settings tab offers the opt-in");
+    toggle.invoke_accessible_default_action();
+    settle(&ui);
+    assert_eq!(
+        asked.borrow().as_slice(),
+        [("repro-client".to_owned(), true)],
+        "turning it on has to reach the launcher"
+    );
+    assert!(
+        ui.get_instance_allow_pack_mod_changes(),
+        "and has to be what the window now holds"
+    );
+
+    ui.set_workspace_tab("Overview".into());
+    settle(&ui);
+    ui.set_workspace_tab("Settings".into());
+    settle(&ui);
+
+    let toggle = opt_in(&ui).expect("the opt-in is still there");
+    assert_eq!(
+        toggle.accessible_checked(),
+        Some(true),
+        "coming back to the tab must not turn it off again"
+    );
+}
+
+/// The switch itself, not the label beside it, which carries the same text.
+fn opt_in(ui: &AppWindow) -> Option<ElementHandle> {
+    ElementHandle::find_by_accessible_label(ui, &lookup("gui-allow-pack-mod-changes-toggle")).find(
+        |element| {
+            element.size().width > 0.0
+                && element.accessible_role() == Some(AccessibleRole::Checkbox)
+        },
+    )
 }
 
 fn client_workspace(ui: &AppWindow) {

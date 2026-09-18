@@ -3471,7 +3471,7 @@ slint::slint! {
                                 }
                                 Divider { }
                                 SectionTitle { title: GuiI18n.text("gui-allow-pack-mod-changes"); detail: GuiI18n.text("gui-allow-pack-mod-changes-detail"); }
-                                LabeledToggle { width: min(parent.width, 520px); label: GuiI18n.text("gui-allow-pack-mod-changes-toggle"); checked: root.instance-allow-pack-mod-changes; toggled(value) => { root.set-allow-pack-mod-version-changes(root.selected-instance-id, value); } }
+                                LabeledToggle { width: min(parent.width, 520px); label: GuiI18n.text("gui-allow-pack-mod-changes-toggle"); checked <=> root.instance-allow-pack-mod-changes; toggled(value) => { root.set-allow-pack-mod-version-changes(root.selected-instance-id, value); } }
                                 Divider { }
                                 SectionTitle { title: GuiI18n.text("gui-instance-settings-unavailable"); detail: GuiI18n.text("gui-instance-settings-unavailable-detail"); }
                                 HorizontalLayout { AppButton { text: GuiI18n.text("gui-open-global-defaults"); clicked => { root.page = 4; root.workspace = ""; root.workspace-tab = "Minecraft"; } } Rectangle { horizontal-stretch: 1; } }

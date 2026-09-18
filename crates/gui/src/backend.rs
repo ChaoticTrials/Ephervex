@@ -1481,6 +1481,13 @@ fn run_worker(
                     Ok(_) => send_snapshot(&app, &events),
                     Err(error) => send_error(&events, &error),
                 }
+                // Either way, because the snapshot does not carry this flag:
+                // after a refusal the toggle shows what the user asked for
+                // rather than what was stored, and it is the only thing on
+                // screen saying which it is.
+                if let Ok(runtime) = instance_runtime_data(&app, instance) {
+                    let _ = events.send(Event::InstanceRuntime(runtime));
+                }
             }
             Command::RepairServer(id) => {
                 match app.recover_server_runtime(id) {
