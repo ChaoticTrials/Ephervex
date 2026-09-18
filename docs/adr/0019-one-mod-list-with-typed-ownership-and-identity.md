@@ -185,3 +185,60 @@ it did not remove.
 Restoring is deliberately not a mutation. It resolves nothing and asks no
 catalog; it writes the file the recipe already describes, which is what lets it
 work for a pack file served from a mirror no catalog can name.
+
+## Amendment: a mod the pack ships inside itself is the pack's
+
+A Modrinth or CurseForge pack has two ways to give an instance a mod. It can
+declare one in its index, naming a download address and the hashes to verify it
+against, and it can carry the jar in its own override tree, where the index
+names the tree by its directory prefix and never lists what is inside it.
+
+Only the first was recorded. The second was extracted into `mods/` and then
+read back by the directory scan the amendment above introduced, which correctly
+found a jar nothing had recorded and reported it as `HandPlaced` - "somebody
+copied this in themselves". Every consequence followed from there: the row said
+"Added by hand", identification by digest answered from whichever catalog
+happened to recognize the file rather than from the pack, and adoption kept the
+origin, so the wrong answer was permanent.
+
+A mod the pack ships inside its override tree is `ModOrigin::PackOverride`. The
+pack owns it, Ephervex placed it by extracting that tree and may place it again,
+and it is part of the instance's desired state, so a reinstall restores it and
+the list is complete. It is recorded while the layer is extracted, which is the
+only moment its contents are known.
+
+It is **not** `PackDeclared`, and the difference is not cosmetic. A declared
+file is fetched and verified against published hashes; this one has no address
+and never will, because the pack shipped the bytes rather than a reference to
+them. So it is kept out of every plan that downloads - an entry with no address
+reaching one is a failure to report, not a fact to absorb - and it reads under
+its own badge, because "the pack ships this" and "the pack points at this" are
+different things to know about a jar that misbehaves.
+
+The per-instance version opt-in of ADR 0032 does not apply to it, and not
+because it is more restricted but because there is nothing for that opt-in to
+protect. The opt-in guards a *declaration*: the pack said which project and
+which release, that statement is a historical record, and moving away from it is
+the deliberate act the setting asks about. A shipped jar carries no such
+statement - no project, no release, nothing the recipe recorded from the pack.
+So once a digest lookup has found which project it is, it is managed like any
+other identified mod, with no setting in the way.
+
+Removing it from the desired state stays refused. The pack's own override layer
+would place the jar again on the next reapply, and a list that had dropped it
+would be wrong until then. Deleting the file is still offered, because putting a
+jar aside to find which one crashes is what this launcher is for.
+
+## Consequences
+
+- The recipe format is version 5. An entry recording a shipped mod carries no
+  hashes, no download address and no provider identity, which is exactly what
+  the pack said about it.
+- An instance imported by an earlier build records nothing about which of its
+  jars came out of an override tree, and cannot be repaired in place: the client
+  layer is deliberately not retained, because it is already in the game
+  directory, so for those jars the information is not on disk anywhere.
+  Recovering it by inspecting `mods/` would be the enumeration this ADR exists
+  to refuse. Those instances keep reading their shipped jars as hand-placed
+  until the pack is imported again, which is cheap in a launcher built around
+  disposable environments.
