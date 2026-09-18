@@ -7500,6 +7500,26 @@ mod tests {
         assert!(hex.is_empty(), "colors written in the markup: {hex:?}");
     }
 
+    /// Interface text follows the size the user chose, which it can only do
+    /// while every `font-size` reads a `Theme` token. The separate size the
+    /// diagnostics and console views use is the one exception, and it is
+    /// written from a property rather than as a literal.
+    #[test]
+    fn every_interface_text_size_follows_the_typography_scale() {
+        let (_, markup) = theme_and_markup(include_str!("ui.rs"));
+        let literals: Vec<&str> = markup
+            .match_indices("font-size:")
+            .map(|(at, _)| markup[at..].lines().next().unwrap_or_default())
+            .filter(|line| {
+                line.split("font-size:")
+                    .nth(1)
+                    .and_then(|rest| rest.trim_start().chars().next())
+                    .is_some_and(|first| first.is_ascii_digit())
+            })
+            .collect();
+        assert!(literals.is_empty(), "text sizes written out: {literals:#?}");
+    }
+
     /// `AppButton` asks for room for its whole caption and elides whatever it
     /// is not given. The console toolbar is the one row where a pinned width
     /// cannot be checked by eye, because its captions grow with the separately
