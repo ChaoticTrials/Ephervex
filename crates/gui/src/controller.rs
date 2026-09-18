@@ -7453,6 +7453,53 @@ mod tests {
         assert!(!source.contains("root.remove-account(account.name)"));
     }
 
+    /// The markup, split where the `Theme` global ends.
+    ///
+    /// Before the split is the one place a color belongs. After it is markup,
+    /// where a literal is a token nobody named and a scheme nobody checked.
+    fn theme_and_markup(source: &str) -> (&str, &str) {
+        let global = source
+            .find("export global Theme {")
+            .expect("the markup opens with the theme");
+        let end = source[global..]
+            .find("\n    }\n")
+            .expect("and the theme is closed")
+            + global;
+        (&source[global..end], &source[end..])
+    }
+
+    /// Every color the interface paints with is named in `Theme`, so a second
+    /// color scheme is a matter of giving each name a second value rather than
+    /// of finding the places that never asked for one.
+    #[test]
+    fn every_interface_color_is_named_in_the_theme_global() {
+        let (_, markup) = theme_and_markup(include_str!("ui.rs"));
+        // Comments may quote a color they are explaining.
+        let markup: String = markup
+            .lines()
+            .map(|line| line.split("//").next().unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join("\n");
+        for written in ["rgb(", "rgba(", "hsv(", "oklch("] {
+            assert!(
+                !markup.contains(written),
+                "`{written}` writes a color the theme does not name"
+            );
+        }
+        let hex: Vec<&str> = markup
+            .split('#')
+            .skip(1)
+            .map(|rest| {
+                let end = rest
+                    .find(|c: char| !c.is_ascii_hexdigit())
+                    .unwrap_or(rest.len());
+                &rest[..end]
+            })
+            .filter(|candidate| matches!(candidate.len(), 3 | 4 | 6 | 8))
+            .collect();
+        assert!(hex.is_empty(), "colors written in the markup: {hex:?}");
+    }
+
     /// `AppButton` asks for room for its whole caption and elides whatever it
     /// is not given. The console toolbar is the one row where a pinned width
     /// cannot be checked by eye, because its captions grow with the separately

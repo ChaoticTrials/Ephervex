@@ -9,6 +9,9 @@ slint::slint! {
     }
 
     export global Theme {
+        // A few colors below are written as `rgb(...)`: the markup lives in a
+        // Rust macro, and Rust's own lexer reads `#0b0e10` as a binary literal
+        // and `#16383e` as an exponent before the Slint compiler sees either.
         in-out property <float> text-scale: 1;
         // The fixed-width family this machine actually has, resolved once at
         // startup. `font-family` is matched as a literal family name, so the
@@ -35,14 +38,45 @@ slint::slint! {
         // because hovering it is what raised the popover.
         out property <color> overlay: #2b333a;
         out property <color> border: #30373c;
+        // One step under `background`, for the chrome that frames a page:
+        // the top bar, the navigation column and the status bar.
+        out property <color> bar: #11171a;
+        // The floor a technical view is read against - a console, a crash
+        // report, a log file - held apart from `background` so a page and the
+        // output on it are never the same surface.
+        out property <color> well: rgb(11, 14, 16);
+        // A selected row, the card form of the same, and the stronger tint a
+        // selected chip takes.
+        out property <color> selection: #192d32;
+        out property <color> selection-card: #17272c;
+        out property <color> selection-strong: #244a4e;
+        // The track of a switch that is on, and the fill of a binding editor
+        // waiting for a key. Both are an accent held far enough back that what
+        // sits on them stays readable.
+        out property <color> toggle-on: #285e63;
+        out property <color> capture-active: rgb(22, 56, 62);
         out property <color> accent: #5dbbc3;
         out property <color> accent-secondary: #78a8c2;
         out property <color> success: #62c58b;
         out property <color> warning: #ddb76a;
         out property <color> danger: #e06c75;
+        // The filled tones a primary or destructive button is drawn in, and
+        // what each becomes under the pointer. Kept here rather than derived,
+        // because a fill has to stay legible under its own caption and an
+        // alpha over the surface behind it does not.
+        out property <color> primary-fill: #2d7d84;
+        out property <color> primary-fill-hover: #368b93;
+        out property <color> danger-fill: rgb(97, 39, 46);
+        out property <color> danger-fill-hover: #7b3038;
         out property <color> text: #e8ecef;
         out property <color> text-secondary: #a6b0b6;
         out property <color> text-muted: #6f797f;
+        // A caption on a filled destructive button, which `text` is not quite
+        // bright enough to carry.
+        out property <color> on-danger: #fff0f1;
+        // An error line in a console. `danger` is a border and a button tone;
+        // a page of fixed-width text needs it lifted to stay readable.
+        out property <color> log-error: #ef9a9f;
         out property <color> server: #a888df;
         // The two mod catalogs, in their own brand colors, so a row says which
         // one a mod came from without being read.
@@ -57,6 +91,10 @@ slint::slint! {
         // rest of this palette works in.
         out property <color> forge: #5981c0;
         out property <color> neoforge: #a44e37;
+        // What is drawn over the window rather than in it: a popover's shadow
+        // and the wash that puts a modal in front of everything else.
+        out property <color> shadow: #00000080;
+        out property <color> scrim: #00000099;
         // Every control that can share a toolbar row is this tall, so a row
         // that mixes a button, a chip and a field lines up without each caller
         // having to know what the others chose.
@@ -468,7 +506,7 @@ slint::slint! {
         border-width: 1px;
         border-color: Theme.border;
         background: Theme.overlay;
-        drop-shadow-color: #00000080;
+        drop-shadow-color: Theme.shadow;
         drop-shadow-blur: 10px;
         drop-shadow-offset-y: 2px;
         width: min(320px, note.preferred-width + 20px);
@@ -575,7 +613,7 @@ slint::slint! {
         border-radius: 6px;
         border-width: 1px;
         border-color: !enabled ? Theme.border : tone == "primary" ? Theme.accent : tone == "danger" ? Theme.danger : Theme.border;
-        background: !enabled ? Theme.surface : area.pressed ? Theme.background : area.has-hover ? (tone == "primary" ? rgb(54, 139, 147) : tone == "danger" ? rgb(123, 48, 56) : Theme.elevated) : tone == "primary" ? rgb(45, 125, 132) : tone == "danger" ? rgb(97, 39, 46) : Theme.surface;
+        background: !enabled ? Theme.surface : area.pressed ? Theme.background : area.has-hover ? (tone == "primary" ? Theme.primary-fill-hover : tone == "danger" ? Theme.danger-fill-hover : Theme.elevated) : tone == "primary" ? Theme.primary-fill : tone == "danger" ? Theme.danger-fill : Theme.surface;
         accessible-role: button;
         accessible-label: root.accessible-name;
         accessible-enabled: enabled;
@@ -588,7 +626,7 @@ slint::slint! {
             text: root.text;
             width: root.width - 28px;
             overflow: elide;
-            color: !root.enabled ? Theme.text-muted : root.tone == "danger" ? #fff0f1 : Theme.text;
+            color: !root.enabled ? Theme.text-muted : root.tone == "danger" ? Theme.on-danger : Theme.text;
             font-size: Theme.body-size;
             font-weight: root.tone == "primary" ? 600 : 400;
             horizontal-alignment: center;
@@ -709,7 +747,7 @@ slint::slint! {
         in property <TextWrap> wrap: no-wrap;
         in property <string> font-family: Theme.mono-family;
         in property <length> font-size: 12px;
-        background: rgb(11, 14, 16);
+        background: Theme.well;
         forward-focus: selectable-input;
         accessible-role: text-input;
         accessible-read-only: true;
@@ -752,7 +790,7 @@ slint::slint! {
         border-radius: 5px;
         border-width: 1px;
         border-color: selected ? Theme.accent : Theme.border;
-        background: selected ? #244a4e : area.has-hover ? Theme.elevated : transparent;
+        background: selected ? Theme.selection-strong : area.has-hover ? Theme.elevated : transparent;
         accessible-role: checkbox;
         accessible-label: accessible-name;
         accessible-checked: selected;
@@ -816,7 +854,7 @@ slint::slint! {
         border-radius: 8px;
         border-width: 1px;
         border-color: Theme.border;
-        background: rgb(11, 14, 16);
+        background: Theme.well;
 
         // Measured, never drawn. A hidden text still reports the size it would
         // take, which is the only way to learn a font's advance, and a
@@ -866,7 +904,7 @@ slint::slint! {
                     Rectangle { horizontal-stretch: 1; }
                 }
             }
-            if root.chunks.length == 0 : Rectangle { background: rgb(11, 14, 16); VerticalLayout { alignment: center; spacing: 6px; Text { text: GuiI18n.text("gui-no-log-output"); color: Theme.text; font-size: Theme.heading-size; horizontal-alignment: center; } BodyText { text: GuiI18n.text("gui-no-log-output-detail"); horizontal-alignment: center; } } }
+            if root.chunks.length == 0 : Rectangle { background: Theme.well; VerticalLayout { alignment: center; spacing: 6px; Text { text: GuiI18n.text("gui-no-log-output"); color: Theme.text; font-size: Theme.heading-size; horizontal-alignment: center; } BodyText { text: GuiI18n.text("gui-no-log-output-detail"); horizontal-alignment: center; } } }
             if root.chunks.length > 0 : Rectangle {
               keys := FocusScope {
                 key-pressed(event) => {
@@ -938,7 +976,7 @@ slint::slint! {
                             width: root.wrap-lines ? output.visible-width - 20px : max(output.visible-width - 20px, self.preferred-width);
                             height: self.preferred-height;
                             text: chunk.text;
-                            color: chunk.level == "error" || chunk.level == "fatal" ? #ef9a9f : chunk.level == "warn" ? Theme.warning : chunk.level == "debug" || chunk.level == "trace" ? Theme.text-muted : Theme.text-secondary;
+                            color: chunk.level == "error" || chunk.level == "fatal" ? Theme.log-error : chunk.level == "warn" ? Theme.warning : chunk.level == "debug" || chunk.level == "trace" ? Theme.text-muted : Theme.text-secondary;
                             selection-background-color: Theme.accent;
                             selection-foreground-color: Theme.background;
                             read-only: true;
@@ -1092,7 +1130,7 @@ slint::slint! {
         border-radius: 12px;
         border-width: 1px;
         border-color: checked ? Theme.accent : Theme.border;
-        background: checked ? #285e63 : Theme.background;
+        background: checked ? Theme.toggle-on : Theme.background;
         accessible-role: checkbox;
         accessible-checked: checked;
         accessible-enabled: enabled;
@@ -1309,7 +1347,7 @@ slint::slint! {
         callback clicked();
         height: 46px;
         border-radius: 6px;
-        background: selected ? #192d32 : area.has-hover ? Theme.elevated : transparent;
+        background: selected ? Theme.selection : area.has-hover ? Theme.elevated : transparent;
         accessible-role: button;
         accessible-label: label;
         accessible-action-default => { root.clicked(); }
@@ -1334,7 +1372,7 @@ slint::slint! {
         callback clicked();
         height: 42px;
         border-radius: 6px;
-        background: selected ? #192d32 : area.has-hover ? Theme.elevated : transparent;
+        background: selected ? Theme.selection : area.has-hover ? Theme.elevated : transparent;
         accessible-role: button;
         accessible-label: label;
         accessible-action-default => { root.clicked(); }
@@ -1694,7 +1732,7 @@ slint::slint! {
         border-radius: 6px;
         border-width: root.capturing ? 2px : 1px;
         border-color: root.capturing ? Theme.accent : scope.has-focus ? Theme.accent : Theme.border;
-        background: root.capturing ? rgb(22, 56, 62) : Theme.background;
+        background: root.capturing ? Theme.capture-active : Theme.background;
         accessible-role: button;
         accessible-label: root.accessible-name;
         accessible-value: root.text;
@@ -2225,7 +2263,7 @@ slint::slint! {
         border-radius: 8px;
         border-width: selected ? 2px : 1px;
         border-color: selected ? Theme.accent : Theme.border;
-        background: selected ? #17272c : card-area.has-hover ? Theme.elevated : Theme.surface;
+        background: selected ? Theme.selection-card : card-area.has-hover ? Theme.elevated : Theme.surface;
         accessible-role: button;
         accessible-label: item.name;
         accessible-action-default => { root.choose(item.id); }
@@ -2334,7 +2372,7 @@ slint::slint! {
         border-radius: 8px;
         border-width: selected ? 2px : 1px;
         border-color: selected ? Theme.accent : Theme.border;
-        background: selected ? #17272c : card-area.has-hover ? Theme.elevated : Theme.surface;
+        background: selected ? Theme.selection-card : card-area.has-hover ? Theme.elevated : Theme.surface;
         accessible-role: button;
         accessible-label: item.name;
         accessible-action-default => { root.choose(item.id); }
@@ -3243,7 +3281,7 @@ slint::slint! {
             Rectangle {
                 min-height: 68px;
                 max-height: 68px;
-                background: #11171a;
+                background: Theme.bar;
                 border-width: 1px;
                 border-color: Theme.border;
                 HorizontalLayout {
@@ -3267,7 +3305,7 @@ slint::slint! {
                 // Primary navigation.
                 Rectangle {
                     width: Theme.sidebar-width;
-                    background: #11171a;
+                    background: Theme.bar;
                     border-width: 1px;
                     border-color: Theme.border;
                     VerticalLayout {
@@ -3502,7 +3540,7 @@ slint::slint! {
                                 // one and is read for the same reasons.
                                 if root.selected-diagnostic-kind != "crash-report" && root.log-shows-files : HorizontalLayout { spacing: 10px;
                                     DiagnosticFileList { items: root.diagnostics; selected: root.selected-diagnostic-name; opened(name) => { root.selected-diagnostic-name = name; root.open-log-file("client", root.selected-instance-id, name); } }
-                                    if root.selected-diagnostic-name == "" : Rectangle { horizontal-stretch: 1; background: rgb(11, 14, 16); border-radius: 8px; border-width: 1px; border-color: Theme.border; EmptyState { icon: @image-url("../../../assets/icons/nav-logs.svg"); title: GuiI18n.text("gui-no-file-open"); message: GuiI18n.text("gui-no-file-open-detail"); } }
+                                    if root.selected-diagnostic-name == "" : Rectangle { horizontal-stretch: 1; background: Theme.well; border-radius: 8px; border-width: 1px; border-color: Theme.border; EmptyState { icon: @image-url("../../../assets/icons/nav-logs.svg"); title: GuiI18n.text("gui-no-file-open"); message: GuiI18n.text("gui-no-file-open-detail"); } }
                                     if root.selected-diagnostic-name != "" : LiveLogViewer {
                                     chunks: root.log-chunks; has-content: root.log-has-content; status: root.log-status; history-truncated: root.log-history-truncated; pending-lines: root.log-pending-lines; content-columns: root.log-content-columns; font-size: root.technical-text-size * 1px; query <=> root.log-query; wrap-lines <=> root.log-wrap-lines; follow <=> root.log-follow; trace-enabled: root.log-trace-enabled; debug-enabled: root.log-debug-enabled; info-enabled: root.log-info-enabled; warn-enabled: root.log-warn-enabled; error-enabled: root.log-error-enabled; fatal-enabled: root.log-fatal-enabled; other-enabled: root.log-other-enabled; revision: root.log-revision; selection-start-row: root.log-selection-start-row; selection-start-offset: root.log-selection-start-offset; selection-end-row: root.log-selection-end-row; selection-end-offset: root.log-selection-end-offset; has-selection: root.log-has-selection; selection-revision: root.log-selection-revision;
                                     set-level(level, enabled) => { root.set-log-level(level, enabled); } search(query) => { root.search-live-log(query); } copy => { root.copy-live-log(); } copy-selection => { root.copy-log-selection(); } select-at(row, column, extend) => { root.select-log-at(row, column, extend); } select-word-at(row, column) => { root.select-log-word-at(row, column); } select-all => { root.select-all-log(); } follow-changed(follow) => { root.live-log-follow-changed(follow); }
@@ -3513,7 +3551,7 @@ slint::slint! {
                                 // would hide the report rather than narrow it.
                                 if root.selected-diagnostic-kind == "crash-report" : HorizontalLayout { spacing: 10px;
                                     DiagnosticFileList { items: root.diagnostics; selected: root.selected-diagnostic-name; crash: true; opened(name) => { root.selected-diagnostic-name = name; root.open-diagnostic("client", root.selected-instance-id, "crash-report", name); } }
-                                    Rectangle { horizontal-stretch: 1; background: rgb(11, 14, 16); border-radius: 8px; border-width: 1px; border-color: Theme.border; VerticalLayout { if root.diagnostic-content == "" : EmptyState { icon: @image-url("../../../assets/icons/nav-logs.svg"); title: GuiI18n.text("gui-no-file-open"); message: GuiI18n.text("gui-no-file-open-detail"); } if root.diagnostic-content != "" : SelectableText { text: root.diagnostic-content; font-size: root.technical-text-size * 1px; } if root.diagnostic-content != "" : AppButton { text: GuiI18n.text("gui-copy"); clicked => { root.copy-text(root.diagnostic-content); } } } }
+                                    Rectangle { horizontal-stretch: 1; background: Theme.well; border-radius: 8px; border-width: 1px; border-color: Theme.border; VerticalLayout { if root.diagnostic-content == "" : EmptyState { icon: @image-url("../../../assets/icons/nav-logs.svg"); title: GuiI18n.text("gui-no-file-open"); message: GuiI18n.text("gui-no-file-open-detail"); } if root.diagnostic-content != "" : SelectableText { text: root.diagnostic-content; font-size: root.technical-text-size * 1px; } if root.diagnostic-content != "" : AppButton { text: GuiI18n.text("gui-copy"); clicked => { root.copy-text(root.diagnostic-content); } } } }
                                 }
                             }
                         }
@@ -3613,7 +3651,7 @@ slint::slint! {
                                 // one and is read for the same reasons.
                                 if root.selected-diagnostic-kind != "crash-report" && root.log-shows-files : HorizontalLayout { spacing: 10px;
                                     DiagnosticFileList { items: root.diagnostics; selected: root.selected-diagnostic-name; opened(name) => { root.selected-diagnostic-name = name; root.open-log-file("server", root.selected-server-id, name); } }
-                                    if root.selected-diagnostic-name == "" : Rectangle { horizontal-stretch: 1; background: rgb(11, 14, 16); border-radius: 8px; border-width: 1px; border-color: Theme.border; EmptyState { icon: @image-url("../../../assets/icons/nav-logs.svg"); title: GuiI18n.text("gui-no-file-open"); message: GuiI18n.text("gui-no-file-open-detail"); } }
+                                    if root.selected-diagnostic-name == "" : Rectangle { horizontal-stretch: 1; background: Theme.well; border-radius: 8px; border-width: 1px; border-color: Theme.border; EmptyState { icon: @image-url("../../../assets/icons/nav-logs.svg"); title: GuiI18n.text("gui-no-file-open"); message: GuiI18n.text("gui-no-file-open-detail"); } }
                                     if root.selected-diagnostic-name != "" : LiveLogViewer {
                                     chunks: root.log-chunks; has-content: root.log-has-content; status: root.log-status; history-truncated: root.log-history-truncated; pending-lines: root.log-pending-lines; content-columns: root.log-content-columns; font-size: root.technical-text-size * 1px; query <=> root.log-query; wrap-lines <=> root.log-wrap-lines; follow <=> root.log-follow; trace-enabled: root.log-trace-enabled; debug-enabled: root.log-debug-enabled; info-enabled: root.log-info-enabled; warn-enabled: root.log-warn-enabled; error-enabled: root.log-error-enabled; fatal-enabled: root.log-fatal-enabled; other-enabled: root.log-other-enabled; revision: root.log-revision; selection-start-row: root.log-selection-start-row; selection-start-offset: root.log-selection-start-offset; selection-end-row: root.log-selection-end-row; selection-end-offset: root.log-selection-end-offset; has-selection: root.log-has-selection; selection-revision: root.log-selection-revision;
                                     set-level(level, enabled) => { root.set-log-level(level, enabled); } search(query) => { root.search-live-log(query); } copy => { root.copy-live-log(); } copy-selection => { root.copy-log-selection(); } select-at(row, column, extend) => { root.select-log-at(row, column, extend); } select-word-at(row, column) => { root.select-log-word-at(row, column); } select-all => { root.select-all-log(); } follow-changed(follow) => { root.live-log-follow-changed(follow); }
@@ -3624,7 +3662,7 @@ slint::slint! {
                                 // would hide the report rather than narrow it.
                                 if root.selected-diagnostic-kind == "crash-report" : HorizontalLayout { spacing: 10px;
                                     DiagnosticFileList { items: root.diagnostics; selected: root.selected-diagnostic-name; crash: true; opened(name) => { root.selected-diagnostic-name = name; root.open-diagnostic("server", root.selected-server-id, "crash-report", name); } }
-                                    Rectangle { horizontal-stretch: 1; background: rgb(11, 14, 16); border-radius: 8px; border-width: 1px; border-color: Theme.border; VerticalLayout { if root.diagnostic-content == "" : EmptyState { icon: @image-url("../../../assets/icons/nav-logs.svg"); title: GuiI18n.text("gui-no-file-open"); message: GuiI18n.text("gui-no-file-open-detail"); } if root.diagnostic-content != "" : SelectableText { text: root.diagnostic-content; font-size: root.technical-text-size * 1px; } if root.diagnostic-content != "" : AppButton { text: GuiI18n.text("gui-copy"); clicked => { root.copy-text(root.diagnostic-content); } } } }
+                                    Rectangle { horizontal-stretch: 1; background: Theme.well; border-radius: 8px; border-width: 1px; border-color: Theme.border; VerticalLayout { if root.diagnostic-content == "" : EmptyState { icon: @image-url("../../../assets/icons/nav-logs.svg"); title: GuiI18n.text("gui-no-file-open"); message: GuiI18n.text("gui-no-file-open-detail"); } if root.diagnostic-content != "" : SelectableText { text: root.diagnostic-content; font-size: root.technical-text-size * 1px; } if root.diagnostic-content != "" : AppButton { text: GuiI18n.text("gui-copy"); clicked => { root.copy-text(root.diagnostic-content); } } } }
                                 }
                             }
                             if root.workspace-tab == "Mods" : VerticalLayout { spacing: 10px;
@@ -4094,7 +4132,7 @@ slint::slint! {
                 }
             }
 
-            Rectangle { height: 34px; background: #11171a; border-width: 1px; border-color: Theme.border; HorizontalLayout { padding-left: 14px; padding-right: 14px; spacing: 22px; BodyText { text: root.active-operations > 0 ? GuiI18n.count("gui-active-operations", root.active-operations) : GuiI18n.text("gui-no-active-tasks"); color: root.active-operations > 0 ? Theme.accent : Theme.success; font-size: 11px; } Rectangle { horizontal-stretch: 1; } BodyText { text: root.status-message; font-size: 11px; } BodyText { text: root.storage-root; color: Theme.text-muted; font-size: 11px; overflow: elide; width: 300px; } }
+            Rectangle { height: 34px; background: Theme.bar; border-width: 1px; border-color: Theme.border; HorizontalLayout { padding-left: 14px; padding-right: 14px; spacing: 22px; BodyText { text: root.active-operations > 0 ? GuiI18n.count("gui-active-operations", root.active-operations) : GuiI18n.text("gui-no-active-tasks"); color: root.active-operations > 0 ? Theme.accent : Theme.success; font-size: 11px; } Rectangle { horizontal-stretch: 1; } BodyText { text: root.status-message; font-size: 11px; } BodyText { text: root.storage-root; color: Theme.text-muted; font-size: 11px; overflow: elide; width: 300px; } }
             }
         }
 
@@ -4137,7 +4175,7 @@ slint::slint! {
 
         // Modal overlay and focused workflows.
         if root.modal != "" : Rectangle {
-            background: #00000099;
+            background: Theme.scrim;
             TouchArea { clicked => { } }
             Rectangle {
                 width: root.modal == "license" ? min(820px, parent.width - 80px) : root.modal == "mod-plan" || root.modal == "mod-apply" || root.modal == "mod-remove" || root.modal == "mod-result" || root.modal == "mod-manage" ? min(720px, parent.width - 80px) : min(620px, parent.width - 80px);
