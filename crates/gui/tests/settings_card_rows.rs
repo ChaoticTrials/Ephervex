@@ -41,6 +41,49 @@ fn two_settings_cards_sharing_a_row_end_level() {
     }
 }
 
+/// The two provider overrides are one setting each, short enough that stacking
+/// them leaves the page half empty. They pair where there is room and stack
+/// where there is not, like every other settings card.
+#[test]
+fn the_provider_overrides_pair_where_the_window_is_wide_enough() {
+    let ui = window();
+    ui.set_loading(false);
+    ui.set_page(4);
+    ui.set_workspace_tab("Providers & APIs".into());
+
+    ui.window().set_size(PhysicalSize::new(1600, 1600));
+    settle(&ui);
+    let wide = override_cards(&ui);
+    assert_eq!(wide.len(), 2, "both overrides are on screen");
+    assert!(
+        (wide[0].1 - wide[1].1).abs() < 1.0,
+        "at 1600px the overrides start at {}px and {}px",
+        wide[0].1,
+        wide[1].1
+    );
+
+    ui.window().set_size(PhysicalSize::new(1200, 1600));
+    settle(&ui);
+    let narrow = override_cards(&ui);
+    assert_eq!(narrow.len(), 2, "both overrides are still on screen");
+    assert!(
+        (narrow[0].1 - narrow[1].1).abs() > 1.0,
+        "at 1200px both overrides start at {}px",
+        narrow[0].1
+    );
+}
+
+/// Every visible override card as its left edge and its top edge, ordered the
+/// way they are laid out.
+fn override_cards(ui: &AppWindow) -> Vec<(f32, f32)> {
+    let mut cards: Vec<(f32, f32)> = ElementHandle::find_by_element_type_name(ui, "OverrideCard")
+        .filter(|card| card.size().width > 0.0)
+        .map(|card| (card.absolute_position().x, card.absolute_position().y))
+        .collect();
+    cards.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    cards
+}
+
 /// The visible cards, grouped by the row they sit in and reduced to their
 /// heights. Rounded to the pixel so two cards laid out at the same height are
 /// grouped together rather than split by a fraction.

@@ -1220,6 +1220,31 @@ slint::slint! {
         }
     }
 
+    // One setting that ships with a default somebody may replace: what they
+    // typed, the default that stands while they have not, and a badge naming
+    // which of the two is in force.
+    component OverrideCard inherits Rectangle {
+        in property <string> title;
+        in property <string> placeholder;
+        in property <string> effective;
+        in property <bool> custom;
+        in-out property <string> value;
+        callback reset();
+        min-height: card.preferred-height;
+        vertical-stretch: 1;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: Theme.border;
+        background: Theme.surface;
+        card := VerticalLayout {
+            padding: 16px;
+            spacing: 8px;
+            HorizontalLayout { Heading { text: root.title; font-size: Theme.row-heading-size; } Rectangle { horizontal-stretch: 1; } Pill { text: root.custom ? GuiI18n.text("gui-override") : GuiI18n.text("gui-default"); tone-color: root.custom ? Theme.accent : Theme.text-secondary; } }
+            HorizontalLayout { spacing: 8px; TextField { text <=> root.value; placeholder: root.placeholder; horizontal-stretch: 1; } if root.custom : AppButton { text: GuiI18n.text("gui-reset-default"); clicked => { root.reset(); } } }
+            BodyText { text: GuiI18n.value(root.custom ? "gui-effective-value" : "gui-effective-default", root.effective); color: Theme.text-muted; wrap: word-wrap; }
+        }
+    }
+
     component LinkedTargetsPanel inherits Rectangle {
         in property <[LinkedTargetRow]> rows;
         // Result lists are read-only; a confirmation's are not.
@@ -3916,16 +3941,28 @@ slint::slint! {
                                     BodyText { text: root.default-mod-catalog == "" ? GuiI18n.value("gui-preferred-mod-catalog-unrecognized", root.configured-mod-catalog) : GuiI18n.text("gui-preferred-mod-catalog-note"); color: Theme.text-muted; wrap: word-wrap; }
                                 } }
                                 SectionTitle { title: GuiI18n.text("gui-provider-identifiers"); detail: GuiI18n.text("gui-provider-identifiers-detail"); }
-                                Rectangle { height: 146px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface; VerticalLayout { padding: 16px; spacing: 8px;
-                                    HorizontalLayout { Heading { text: GuiI18n.text("gui-microsoft-client-id"); font-size: Theme.row-heading-size; } Rectangle { horizontal-stretch: 1; } Pill { text: root.microsoft-client-id-is-custom ? GuiI18n.text("gui-override") : GuiI18n.text("gui-default"); tone-color: root.microsoft-client-id-is-custom ? Theme.accent : Theme.text-secondary; } }
-                                    HorizontalLayout { spacing: 8px; TextField { text <=> root.microsoft-client-id; placeholder: GuiI18n.text("gui-no-override"); horizontal-stretch: 1; } if root.microsoft-client-id-is-custom : AppButton { text: GuiI18n.text("gui-reset-default"); clicked => { root.reset-microsoft-client-id(); } } }
-                                    BodyText { text: GuiI18n.value(root.microsoft-client-id-is-custom ? "gui-effective-value" : "gui-effective-default", root.effective-microsoft-client-id); color: Theme.text-muted; wrap: word-wrap; }
-                                } }
-                                Rectangle { height: 146px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface; VerticalLayout { padding: 16px; spacing: 8px;
-                                    HorizontalLayout { Heading { text: GuiI18n.text("gui-user-agent"); font-size: Theme.row-heading-size; } Rectangle { horizontal-stretch: 1; } Pill { text: root.user-agent-is-custom ? GuiI18n.text("gui-override") : GuiI18n.text("gui-default"); tone-color: root.user-agent-is-custom ? Theme.accent : Theme.text-secondary; } }
-                                    HorizontalLayout { spacing: 8px; TextField { text <=> root.user-agent; placeholder: GuiI18n.text("gui-no-override"); horizontal-stretch: 1; } if root.user-agent-is-custom : AppButton { text: GuiI18n.text("gui-reset-default"); clicked => { root.reset-user-agent(); } } }
-                                    BodyText { text: GuiI18n.value(root.user-agent-is-custom ? "gui-effective-value" : "gui-effective-default", root.effective-user-agent); color: Theme.text-muted; wrap: word-wrap; }
-                                } }
+                                GridLayout {
+                                    spacing: 14px;
+                                    OverrideCard {
+                                        row: 0; col: 0;
+                                        title: GuiI18n.text("gui-microsoft-client-id");
+                                        placeholder: GuiI18n.text("gui-no-override");
+                                        effective: root.effective-microsoft-client-id;
+                                        custom: root.microsoft-client-id-is-custom;
+                                        value <=> root.microsoft-client-id;
+                                        reset => { root.reset-microsoft-client-id(); }
+                                    }
+                                    OverrideCard {
+                                        row: root.settings-two-columns ? 0 : 1;
+                                        col: root.settings-two-columns ? 1 : 0;
+                                        title: GuiI18n.text("gui-user-agent");
+                                        placeholder: GuiI18n.text("gui-no-override");
+                                        effective: root.effective-user-agent;
+                                        custom: root.user-agent-is-custom;
+                                        value <=> root.user-agent;
+                                        reset => { root.reset-user-agent(); }
+                                    }
+                                }
                                 ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-save-api-settings"); tone: "primary"; clicked => { root.save-api-settings(root.microsoft-client-id, root.user-agent); } } }
                                 SectionTitle { title: GuiI18n.text("gui-curseforge"); detail: root.curseforge-build-key-available ? GuiI18n.text("gui-curseforge-detail-default") : GuiI18n.text("gui-curseforge-detail-required"); }
                                 Rectangle { height: curseforge-card.preferred-height; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface; curseforge-card := VerticalLayout { padding: 16px; spacing: 8px;
