@@ -381,6 +381,39 @@ fn server_console(ui: &AppWindow) {
 }
 
 /// The server workspace, on its Logs tab.
+/// Saved logs and crash reports are the same shape of view, read by switching
+/// between two chips. A search row above only one of them makes its list and
+/// its viewer start lower, so the panes jump when the chip is pressed.
+#[test]
+fn saved_logs_and_crash_reports_start_at_the_same_height() {
+    let ui = window();
+    server_logs(&ui);
+    ui.set_diagnostics(ModelRc::new(VecModel::from(vec![log_file()])));
+
+    ui.set_log_shows_files(true);
+    settle(&ui);
+    let logs = file_list_top(&ui);
+
+    ui.set_log_shows_files(false);
+    ui.set_selected_diagnostic_kind("crash-report".into());
+    settle(&ui);
+    let crashes = file_list_top(&ui);
+
+    assert!(
+        (logs - crashes).abs() < 1.0,
+        "saved logs start at {logs}px and crash reports at {crashes}px"
+    );
+}
+
+/// Where the file list of whichever sub-tab is open begins.
+fn file_list_top(ui: &AppWindow) -> f32 {
+    ElementHandle::find_by_element_type_name(ui, "DiagnosticFileList")
+        .find(|list| list.size().width > 0.0)
+        .expect("the open sub-tab lists its files")
+        .absolute_position()
+        .y
+}
+
 fn server_logs(ui: &AppWindow) {
     ui.set_loading(false);
     ui.set_page(1);
