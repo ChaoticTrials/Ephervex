@@ -17,27 +17,32 @@ fn two_settings_cards_sharing_a_row_end_level() {
     let ui = window();
     ui.set_loading(false);
     ui.set_page(4);
-    ui.set_workspace_tab("Java".into());
-    // Wide enough for the two-column layout, and tall enough that every card
-    // is on screen to be measured.
-    ui.window().set_size(PhysicalSize::new(1600, 1600));
-    settle(&ui);
 
-    let rows = card_rows(&ui);
-    assert!(
-        rows.len() >= 2,
-        "the Java page has {} rows of cards to compare",
-        rows.len()
-    );
-    for (top, heights) in rows {
-        let (shortest, tallest) = (
-            heights.iter().copied().fold(f32::MAX, f32::min),
-            heights.iter().copied().fold(0.0, f32::max),
-        );
-        assert!(
-            tallest - shortest < 1.0,
-            "cards at {top}px are {shortest}px and {tallest}px tall"
-        );
+    // Both two-column pages, at the widths either side of the threshold and at
+    // one where the descriptions wrap to different numbers of lines in the two
+    // columns, which is what a page of independent columns cannot survive.
+    for tab in ["General", "Java"] {
+        ui.set_workspace_tab(tab.into());
+        for width in [1440, 1499, 1600, 1920] {
+            ui.window().set_size(PhysicalSize::new(width, 1600));
+            settle(&ui);
+
+            let rows = card_rows(&ui);
+            assert!(
+                !rows.is_empty(),
+                "{tab} at {width}px has no pair of cards to compare"
+            );
+            for (top, heights) in rows {
+                let (shortest, tallest) = (
+                    heights.iter().copied().fold(f32::MAX, f32::min),
+                    heights.iter().copied().fold(0.0, f32::max),
+                );
+                assert!(
+                    tallest - shortest < 1.0,
+                    "{tab} at {width}px: cards at {top}px are {shortest}px and {tallest}px tall"
+                );
+            }
+        }
     }
 }
 

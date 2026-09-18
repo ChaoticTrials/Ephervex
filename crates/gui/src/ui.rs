@@ -2095,57 +2095,6 @@ slint::slint! {
         }
     }
 
-    // The two halves of the General page, each declared once and placed either
-    // beside the other or above it depending on the room there is. Their
-    // answers live on the window, so each carries the ones it edits rather
-    // than reaching for them: a component cannot see the window's properties,
-    // and a section that owned them would be the only thing that could save.
-    component ApplicationDisplaySection inherits VerticalLayout {
-        in-out property <int> text-scale;
-        in-out property <int> technical-size;
-        in-out property <string> color-scheme;
-        alignment: start;
-        spacing: 14px;
-        SettingCard {
-            title: GuiI18n.text("gui-application-text-size");
-            detail: GuiI18n.text("gui-application-text-size-detail");
-            ComboBox { width: 190px; model: [GuiI18n.text("gui-text-scale-90"), GuiI18n.text("gui-text-scale-100"), GuiI18n.text("gui-text-scale-110"), GuiI18n.text("gui-text-scale-125")]; current-index: root.text-scale == 90 ? 0 : root.text-scale == 110 ? 2 : root.text-scale == 125 ? 3 : 1; selected(value) => { root.text-scale = value == GuiI18n.text("gui-text-scale-90") ? 90 : value == GuiI18n.text("gui-text-scale-110") ? 110 : value == GuiI18n.text("gui-text-scale-125") ? 125 : 100; } }
-        }
-        SettingCard {
-            title: GuiI18n.text("gui-application-color-scheme");
-            detail: GuiI18n.text("gui-application-color-scheme-detail");
-            ComboBox { width: 190px; model: [GuiI18n.text("gui-color-scheme-dark"), GuiI18n.text("gui-color-scheme-light")]; current-index: root.color-scheme == "light" ? 1 : 0; selected(value) => { root.color-scheme = value == GuiI18n.text("gui-color-scheme-light") ? "light" : "dark"; } }
-        }
-        SettingCard {
-            title: GuiI18n.text("gui-technical-text-size");
-            detail: GuiI18n.text("gui-technical-text-size-detail");
-            ComboBox { width: 190px; model: [GuiI18n.text("gui-technical-size-11"), GuiI18n.text("gui-technical-size-12"), GuiI18n.text("gui-technical-size-14"), GuiI18n.text("gui-technical-size-16")]; current-index: root.technical-size == 11 ? 0 : root.technical-size == 14 ? 2 : root.technical-size == 16 ? 3 : 1; selected(value) => { root.technical-size = value == GuiI18n.text("gui-technical-size-11") ? 11 : value == GuiI18n.text("gui-technical-size-14") ? 14 : value == GuiI18n.text("gui-technical-size-16") ? 16 : 12; } }
-        }
-    }
-
-    component LinkedServerDefaultsSection inherits VerticalLayout {
-        in-out property <bool> show-linked-servers;
-        in-out property <bool> make-default-account-operator;
-        in-out property <int> operator-permission-level;
-        alignment: start;
-        spacing: 14px;
-        SettingCard {
-            title: GuiI18n.text("gui-show-linked-servers");
-            detail: GuiI18n.text("gui-show-linked-servers-detail");
-            Toggle { accessible-name: GuiI18n.text("gui-show-linked-servers"); checked <=> root.show-linked-servers; }
-        }
-        SettingCard {
-            title: GuiI18n.text("gui-default-account-operator");
-            detail: GuiI18n.text("gui-default-account-operator-detail");
-            Toggle { accessible-name: GuiI18n.text("gui-default-account-operator"); checked <=> root.make-default-account-operator; }
-        }
-        SettingCard {
-            title: GuiI18n.text("gui-default-operator-level");
-            detail: GuiI18n.text("gui-default-operator-level-detail");
-            ComboBox { accessible-label: GuiI18n.text("gui-default-operator-level"); width: 220px; model: [GuiI18n.text("gui-operator-level-1"), GuiI18n.text("gui-operator-level-2"), GuiI18n.text("gui-operator-level-3"), GuiI18n.text("gui-operator-level-4")]; current-index: root.operator-permission-level - 1; selected(value) => { root.operator-permission-level = value == GuiI18n.text("gui-operator-level-1") ? 1 : value == GuiI18n.text("gui-operator-level-2") ? 2 : value == GuiI18n.text("gui-operator-level-3") ? 3 : 4; } }
-        }
-    }
-
     component ToastPanel inherits Rectangle {
         in property <string> message;
         in property <bool> error;
@@ -3762,7 +3711,10 @@ slint::slint! {
                                 //
                                 // Headings share a row so that the first card of each
                                 // column starts at the same height, whatever number of
-                                // lines a heading's description wraps to.
+                                // lines a heading's description wraps to. Every card
+                                // sits in the grid itself rather than in a column of
+                                // its own, so a card and the one beside it share a row
+                                // and end level however their descriptions wrap.
                                 GridLayout {
                                     spacing: 14px;
                                     SectionTitle {
@@ -3771,23 +3723,49 @@ slint::slint! {
                                         detail: GuiI18n.text("gui-linked-server-defaults-detail");
                                     }
                                     SectionTitle {
-                                        row: root.settings-two-columns ? 0 : 2;
+                                        row: root.settings-two-columns ? 0 : 4;
                                         col: root.settings-two-columns ? 1 : 0;
                                         title: GuiI18n.text("gui-application-display");
                                         detail: GuiI18n.text("gui-application-display-detail");
                                     }
-                                    LinkedServerDefaultsSection {
+                                    SettingCard {
                                         row: 1; col: 0;
-                                        show-linked-servers <=> root.show-linked-servers;
-                                        make-default-account-operator <=> root.make-default-account-operator;
-                                        operator-permission-level <=> root.operator-permission-level;
+                                        title: GuiI18n.text("gui-show-linked-servers");
+                                        detail: GuiI18n.text("gui-show-linked-servers-detail");
+                                        Toggle { accessible-name: GuiI18n.text("gui-show-linked-servers"); checked <=> root.show-linked-servers; }
                                     }
-                                    ApplicationDisplaySection {
-                                        row: root.settings-two-columns ? 1 : 3;
+                                    SettingCard {
+                                        row: 2; col: 0;
+                                        title: GuiI18n.text("gui-default-account-operator");
+                                        detail: GuiI18n.text("gui-default-account-operator-detail");
+                                        Toggle { accessible-name: GuiI18n.text("gui-default-account-operator"); checked <=> root.make-default-account-operator; }
+                                    }
+                                    SettingCard {
+                                        row: 3; col: 0;
+                                        title: GuiI18n.text("gui-default-operator-level");
+                                        detail: GuiI18n.text("gui-default-operator-level-detail");
+                                        ComboBox { accessible-label: GuiI18n.text("gui-default-operator-level"); width: 220px; model: [GuiI18n.text("gui-operator-level-1"), GuiI18n.text("gui-operator-level-2"), GuiI18n.text("gui-operator-level-3"), GuiI18n.text("gui-operator-level-4")]; current-index: root.operator-permission-level - 1; selected(value) => { root.operator-permission-level = value == GuiI18n.text("gui-operator-level-1") ? 1 : value == GuiI18n.text("gui-operator-level-2") ? 2 : value == GuiI18n.text("gui-operator-level-3") ? 3 : 4; } }
+                                    }
+                                    SettingCard {
+                                        row: root.settings-two-columns ? 1 : 5;
                                         col: root.settings-two-columns ? 1 : 0;
-                                        text-scale <=> root.application-text-scale;
-                                        technical-size <=> root.technical-text-size;
-                                        color-scheme <=> root.application-color-scheme;
+                                        title: GuiI18n.text("gui-application-text-size");
+                                        detail: GuiI18n.text("gui-application-text-size-detail");
+                                        ComboBox { width: 190px; model: [GuiI18n.text("gui-text-scale-90"), GuiI18n.text("gui-text-scale-100"), GuiI18n.text("gui-text-scale-110"), GuiI18n.text("gui-text-scale-125")]; current-index: root.application-text-scale == 90 ? 0 : root.application-text-scale == 110 ? 2 : root.application-text-scale == 125 ? 3 : 1; selected(value) => { root.application-text-scale = value == GuiI18n.text("gui-text-scale-90") ? 90 : value == GuiI18n.text("gui-text-scale-110") ? 110 : value == GuiI18n.text("gui-text-scale-125") ? 125 : 100; } }
+                                    }
+                                    SettingCard {
+                                        row: root.settings-two-columns ? 2 : 6;
+                                        col: root.settings-two-columns ? 1 : 0;
+                                        title: GuiI18n.text("gui-application-color-scheme");
+                                        detail: GuiI18n.text("gui-application-color-scheme-detail");
+                                        ComboBox { width: 190px; model: [GuiI18n.text("gui-color-scheme-dark"), GuiI18n.text("gui-color-scheme-light")]; current-index: root.application-color-scheme == "light" ? 1 : 0; selected(value) => { root.application-color-scheme = value == GuiI18n.text("gui-color-scheme-light") ? "light" : "dark"; } }
+                                    }
+                                    SettingCard {
+                                        row: root.settings-two-columns ? 3 : 7;
+                                        col: root.settings-two-columns ? 1 : 0;
+                                        title: GuiI18n.text("gui-technical-text-size");
+                                        detail: GuiI18n.text("gui-technical-text-size-detail");
+                                        ComboBox { width: 190px; model: [GuiI18n.text("gui-technical-size-11"), GuiI18n.text("gui-technical-size-12"), GuiI18n.text("gui-technical-size-14"), GuiI18n.text("gui-technical-size-16")]; current-index: root.technical-text-size == 11 ? 0 : root.technical-text-size == 14 ? 2 : root.technical-text-size == 16 ? 3 : 1; selected(value) => { root.technical-text-size = value == GuiI18n.text("gui-technical-size-11") ? 11 : value == GuiI18n.text("gui-technical-size-14") ? 14 : value == GuiI18n.text("gui-technical-size-16") ? 16 : 12; } }
                                     }
                                 }
                                 ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-save-general-settings"); tone: "primary"; clicked => { root.save-general-settings(root.application-text-scale, root.technical-text-size, root.application-color-scheme, root.show-linked-servers, root.make-default-account-operator, root.operator-permission-level); } } }
