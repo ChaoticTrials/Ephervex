@@ -4,7 +4,9 @@
 //! behavior. They translate the application service records into stable UI
 //! states that can be tested without constructing a Slint window.
 
+use std::collections::VecDeque;
 use std::net::IpAddr;
+use std::time::{Duration, Instant};
 
 use ephervex_core::{
     ARTIFACT_CACHE_LIMIT_PRESETS, ArtifactCacheLimit, ArtifactCacheLimitError, BlockedProviderFile,
@@ -17,6 +19,9 @@ use ephervex_i18n::{Arg, lookup, lookup_args};
 use ephervex_model::{
     DefaultModCatalog, LoaderKind, ModProvider, Operation, OperationStatus, StorageClass,
 };
+use slint::SharedString;
+
+use crate::ui::ToastRow;
 
 /// Orders the release list so favorites come first.
 ///
@@ -2177,5 +2182,240 @@ mod mod_browser_empty_state_tests {
     #[test]
     fn not_loading_ran_and_no_notice_is_what_finished_means() {
         assert!(mod_search_finished_successfully(false, true, true));
+    }
+}
+
+/// How many notifications are on screen at once.
+const VISIBLE_TOASTS: usize = 3;
+/// How many wait behind them before the oldest is dropped.
+const MAX_WAITING_TOASTS: usize = 12;
+/// How long an ordinary notification stays, and how long one reporting a
+/// failure stays. A failure is worth more of the reader's attention and is the
+/// one they are most likely to have looked away from.
+const NORMAL_DWELL: Duration = Duration::from_millis(4_500);
+const ERROR_DWELL: Duration = Duration::from_millis(9_000);
+
+/// One notification on screen or waiting to be.
+#[derive(Debug, Clone)]
+struct ToastGroup {
+    id: i32,
+    message: SharedString,
+    error: bool,
+    /// When this one stops being shown. Meaningless until it is.
+    expires_at: Instant,
+}
+
+/// The notifications the window is showing, and the ones waiting behind them.
+///
+/// Held here rather than in the markup because the waiting list is here: a
+/// notification that arrives while every panel is full has to be recognized
+/// as one already waiting, and the markup cannot see that list.
+#[derive(Debug)]
+pub struct ToastStack {
+    next_id: i32,
+    visible: Vec<ToastGroup>,
+    waiting: VecDeque<ToastGroup>,
+}
+
+impl Default for ToastStack {
+    fn default() -> Self {
+        Self {
+            next_id: 1,
+            visible: Vec::with_capacity(VISIBLE_TOASTS),
+            waiting: VecDeque::new(),
+        }
+    }
+}
+
+impl ToastStack {
+    /// Adds one notification, showing it if there is room and queueing it if
+    /// there is not.
+    pub fn present(&mut self, message: SharedString, error: bool, now: Instant) {
+        if self.visible.len() < VISIBLE_TOASTS {
+            let group = self.group(message, error, now);
+            self.visible.push(group);
+            return;
+        }
+        if self.waiting.len() == MAX_WAITING_TOASTS {
+            self.waiting.pop_front();
+        }
+        let group = self.group(message, error, now);
+        self.waiting.push_back(group);
+    }
+
+    /// Takes one notification off the screen, by the id it was given.
+    pub fn dismiss(&mut self, id: i32, now: Instant) {
+        self.visible.retain(|group| group.id != id);
+        self.promote(now);
+    }
+
+    /// Takes off whatever has been shown for long enough.
+    pub fn expire(&mut self, now: Instant) {
+        self.visible.retain(|group| group.expires_at > now);
+        self.promote(now);
+    }
+
+    /// What the window draws, oldest first.
+    #[must_use]
+    pub fn rows(&self) -> Vec<ToastRow> {
+        self.visible
+            .iter()
+            .map(|group| ToastRow {
+                id: group.id,
+                message: group.message.clone(),
+                error: group.error,
+            })
+            .collect()
+    }
+
+    /// Whether anything is on screen or waiting to be.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.visible.is_empty() && self.waiting.is_empty()
+    }
+
+    fn group(&mut self, message: SharedString, error: bool, now: Instant) -> ToastGroup {
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1);
+        ToastGroup {
+            id,
+            message,
+            error,
+            expires_at: now + dwell(error),
+        }
+    }
+
+    /// Fills whatever room there is from the front of the waiting list, each
+    /// one starting its time on screen now rather than when it arrived.
+    fn promote(&mut self, now: Instant) {
+        while self.visible.len() < VISIBLE_TOASTS {
+            let Some(mut group) = self.waiting.pop_front() else {
+                break;
+            };
+            group.expires_at = now + dwell(group.error);
+            self.visible.push(group);
+        }
+    }
+}
+
+const fn dwell(error: bool) -> Duration {
+    if error { ERROR_DWELL } else { NORMAL_DWELL }
+}
+
+#[cfg(test)]
+mod toast_tests {
+    #![allow(clippy::expect_used, clippy::unchecked_time_subtraction)]
+    use super::*;
+
+    /// A moment before a deadline, and a moment after one.
+    const JUST_SHORT: Duration = Duration::from_millis(1);
+
+    #[test]
+    fn three_notifications_are_shown_and_the_rest_wait_their_turn() {
+        let mut stack = ToastStack::default();
+        let start = Instant::now();
+        for index in 0..5 {
+            stack.present(format!("failure {index}").into(), true, start);
+        }
+
+        assert_eq!(shown(&stack), ["failure 0", "failure 1", "failure 2"]);
+
+        stack.dismiss(stack.rows()[0].id, start);
+        assert_eq!(
+            shown(&stack),
+            ["failure 1", "failure 2", "failure 3"],
+            "one leaving lets the next in"
+        );
+    }
+
+    #[test]
+    fn a_notification_leaves_once_it_has_been_shown_for_long_enough() {
+        let mut stack = ToastStack::default();
+        let start = Instant::now();
+        stack.present("done".into(), false, start);
+        stack.present("failed".into(), true, start);
+
+        stack.expire(start + NORMAL_DWELL - JUST_SHORT);
+        assert_eq!(shown(&stack), ["done", "failed"]);
+
+        stack.expire(start + NORMAL_DWELL + Duration::from_millis(1));
+        assert_eq!(
+            shown(&stack),
+            ["failed"],
+            "a failure is worth longer than an ordinary result"
+        );
+
+        stack.expire(start + ERROR_DWELL + Duration::from_millis(1));
+        assert!(stack.is_empty());
+    }
+
+    #[test]
+    fn a_promoted_notification_starts_its_time_on_screen_when_it_is_shown() {
+        let mut stack = ToastStack::default();
+        let start = Instant::now();
+        for index in 0..4 {
+            stack.present(format!("done {index}").into(), false, start);
+        }
+
+        let late = start + NORMAL_DWELL + Duration::from_millis(1);
+        stack.expire(late);
+
+        assert_eq!(shown(&stack), ["done 3"]);
+        stack.expire(late + NORMAL_DWELL - JUST_SHORT);
+        assert_eq!(
+            shown(&stack),
+            ["done 3"],
+            "the one that waited is not cut short by the time it spent waiting"
+        );
+    }
+
+    #[test]
+    fn the_oldest_waiting_notification_is_dropped_once_too_many_have_piled_up() {
+        let mut stack = ToastStack::default();
+        let start = Instant::now();
+        let total = VISIBLE_TOASTS + MAX_WAITING_TOASTS + 1;
+        for index in 0..total {
+            stack.present(format!("done {index}").into(), false, start);
+        }
+
+        let mut drained = Vec::new();
+        while !stack.is_empty() {
+            drained.extend(shown(&stack));
+            for row in stack.rows() {
+                stack.dismiss(row.id, start);
+            }
+        }
+
+        assert_eq!(
+            drained.len(),
+            total - 1,
+            "one was dropped rather than growing the list without a bound"
+        );
+        assert!(
+            !drained.contains(&"done 3".to_owned()),
+            "and it is the one that had waited longest: {drained:?}"
+        );
+    }
+
+    #[test]
+    fn dismissing_names_the_notification_rather_than_its_place_in_the_stack() {
+        let mut stack = ToastStack::default();
+        let start = Instant::now();
+        stack.present("first".into(), false, start);
+        stack.present("second".into(), false, start);
+        let second = stack.rows()[1].id;
+
+        stack.dismiss(second, start);
+
+        assert_eq!(shown(&stack), ["first"]);
+    }
+
+    /// What the window would draw, in order.
+    fn shown(stack: &ToastStack) -> Vec<String> {
+        stack
+            .rows()
+            .into_iter()
+            .map(|row| row.message.to_string())
+            .collect()
     }
 }

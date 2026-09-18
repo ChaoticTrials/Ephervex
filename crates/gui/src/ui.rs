@@ -115,6 +115,15 @@ slint::slint! {
         out property <length> card-gap: 12px;
     }
 
+    // One notification on screen.
+    export struct ToastRow {
+        // Stable for as long as this notification is shown, so dismissing one
+        // names the notification rather than a position that may have moved.
+        id: int,
+        message: string,
+        error: bool,
+    }
+
     export struct InstanceRow {
         id: string,
         name: string,
@@ -2844,12 +2853,7 @@ slint::slint! {
         in-out property <string> storage-root;
         in-out property <string> app-version;
         in-out property <string> license-text;
-        in-out property <string> toast-one-text;
-        in-out property <bool> toast-one-error;
-        in-out property <string> toast-two-text;
-        in-out property <bool> toast-two-error;
-        in-out property <string> toast-three-text;
-        in-out property <bool> toast-three-error;
+        in-out property <[ToastRow]> toasts;
         in-out property <string> pending-action-id;
         in-out property <string> pending-action-name;
         // How many servers go with the instance the delete dialog is about, so
@@ -3262,23 +3266,7 @@ slint::slint! {
         callback minecraft-discard-defaults();
         callback cancel-operation(string);
         callback present-toast(string, bool);
-        callback queue-toast(string, bool);
-        callback toast-slot-available();
-
-        present-toast(message, error) => {
-            if root.toast-one-text == "" {
-                root.toast-one-error = error;
-                root.toast-one-text = message;
-            } else if root.toast-two-text == "" {
-                root.toast-two-error = error;
-                root.toast-two-text = message;
-            } else if root.toast-three-text == "" {
-                root.toast-three-error = error;
-                root.toast-three-text = message;
-            } else {
-                root.queue-toast(message, error);
-            }
-        }
+        callback dismiss-toast(int);
 
         changed create-minecraft => {
             if root.create-minecraft != "" {
@@ -4157,21 +4145,13 @@ slint::slint! {
             }
         }
 
-        Timer { interval: 4500ms; running: root.toast-one-text != "" && !root.toast-one-error; triggered => { root.toast-one-text = ""; root.toast-slot-available(); } }
-        Timer { interval: 9000ms; running: root.toast-one-text != "" && root.toast-one-error; triggered => { root.toast-one-text = ""; root.toast-slot-available(); } }
-        Timer { interval: 4500ms; running: root.toast-two-text != "" && !root.toast-two-error; triggered => { root.toast-two-text = ""; root.toast-slot-available(); } }
-        Timer { interval: 9000ms; running: root.toast-two-text != "" && root.toast-two-error; triggered => { root.toast-two-text = ""; root.toast-slot-available(); } }
-        Timer { interval: 4500ms; running: root.toast-three-text != "" && !root.toast-three-error; triggered => { root.toast-three-text = ""; root.toast-slot-available(); } }
-        Timer { interval: 9000ms; running: root.toast-three-text != "" && root.toast-three-error; triggered => { root.toast-three-text = ""; root.toast-slot-available(); } }
         Rectangle {
             x: parent.width - self.width - 22px;
             y: 78px;
             width: min(440px, parent.width - 44px);
             height: parent.height - 126px;
             VerticalLayout { alignment: end; spacing: 8px;
-                if root.toast-one-text != "" : ToastPanel { message: root.toast-one-text; error: root.toast-one-error; dismiss => { root.toast-one-text = ""; root.toast-slot-available(); } }
-                if root.toast-two-text != "" : ToastPanel { message: root.toast-two-text; error: root.toast-two-error; dismiss => { root.toast-two-text = ""; root.toast-slot-available(); } }
-                if root.toast-three-text != "" : ToastPanel { message: root.toast-three-text; error: root.toast-three-error; dismiss => { root.toast-three-text = ""; root.toast-slot-available(); } }
+                for toast in root.toasts : ToastPanel { message: toast.message; error: toast.error; dismiss => { root.dismiss-toast(toast.id); } }
             }
         }
 

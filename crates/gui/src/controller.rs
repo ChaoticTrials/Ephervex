@@ -1,11 +1,11 @@
 //! Slint callback registration and UI model updates.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::mpsc::Sender;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use copypasta::{ClipboardContext, ClipboardProvider as _};
 use ephervex_core::live_diagnostics::{LogFilter, LogLevel, RetainedLog};
@@ -29,8 +29,8 @@ use crate::minecraft_defaults::{
     self, LanguageCatalogState, MinecraftDefaultsModel, WindowAspect, WindowAxis, window_anchor,
 };
 use crate::presentation::{
-    self, ImportErrorKind, ImportFailure, ImportPresentation, parse_network, validate_ip,
-    validate_port,
+    self, ImportErrorKind, ImportFailure, ImportPresentation, ToastStack, parse_network,
+    validate_ip, validate_port,
 };
 use crate::ui::{
     AccountRow, ActivityRow, AppWindow, DiagnosticRow, GuiI18n, ImportBlockedRow,
@@ -1795,24 +1795,59 @@ const SERVERS_PAGE: i32 = 1;
 /// bare number in that check would say nothing about which screen it is.
 const RUNNING_PAGE: i32 = 2;
 
-fn register_toasts(ui: &AppWindow) {
-    const MAX_QUEUED_TOASTS: usize = 12;
+/// How often the stack is asked what has been shown for long enough.
+///
+/// One timer, running only while something is on screen, rather than a binding
+/// per panel. A quarter second of slop on a dwell measured in seconds is not
+/// visible, and this way an idle window wakes for nothing.
+const TOAST_SWEEP: Duration = Duration::from_millis(250);
 
-    let queue = Rc::new(RefCell::new(VecDeque::<(SharedString, bool)>::new()));
-    let queued = Rc::clone(&queue);
-    ui.on_queue_toast(move |message, error| {
-        let mut queued = queued.borrow_mut();
-        if queued.len() == MAX_QUEUED_TOASTS {
-            queued.pop_front();
-        }
-        queued.push_back((message, error));
+fn register_toasts(ui: &AppWindow) {
+    let stack = Rc::new(RefCell::new(ToastStack::default()));
+    let sweep = Rc::new(slint::Timer::default());
+
+    let weak = ui.as_weak();
+    let shown = Rc::clone(&stack);
+    let ticking = Rc::clone(&sweep);
+    ui.on_present_toast(move |message, error| {
+        let Some(ui) = weak.upgrade() else { return };
+        shown.borrow_mut().present(message, error, Instant::now());
+        publish_toasts(&ui, &shown);
+        start_toast_sweep(&ui, &shown, &ticking);
     });
 
     let weak = ui.as_weak();
-    ui.on_toast_slot_available(move || {
-        let next = queue.borrow_mut().pop_front();
-        if let (Some((message, error)), Some(ui)) = (next, weak.upgrade()) {
-            ui.invoke_present_toast(message, error);
+    let shown = Rc::clone(&stack);
+    ui.on_dismiss_toast(move |id| {
+        let Some(ui) = weak.upgrade() else { return };
+        shown.borrow_mut().dismiss(id, Instant::now());
+        publish_toasts(&ui, &shown);
+    });
+}
+
+/// Shows what the stack now holds.
+fn publish_toasts(ui: &AppWindow, stack: &Rc<RefCell<ToastStack>>) {
+    ui.set_toasts(model(stack.borrow().rows()));
+}
+
+/// Starts the sweep if it is not already running, and stops it once the stack
+/// has emptied.
+fn start_toast_sweep(ui: &AppWindow, stack: &Rc<RefCell<ToastStack>>, sweep: &Rc<slint::Timer>) {
+    if sweep.running() {
+        return;
+    }
+    let weak = ui.as_weak();
+    let shown = Rc::clone(stack);
+    let ticking = Rc::clone(sweep);
+    sweep.start(slint::TimerMode::Repeated, TOAST_SWEEP, move || {
+        let Some(ui) = weak.upgrade() else {
+            ticking.stop();
+            return;
+        };
+        shown.borrow_mut().expire(Instant::now());
+        publish_toasts(&ui, &shown);
+        if shown.borrow().is_empty() {
+            ticking.stop();
         }
     });
 }
@@ -4972,7 +5007,7 @@ fn render_local_mod_refusals(ui: &AppWindow, plan: &backend::LocalModPlanData) {
         .map(|it| format!("{} - {}", it.file_name, it.reason))
         .collect::<Vec<_>>()
         .join("; ");
-    ui.invoke_queue_toast(detail.into(), true);
+    ui.invoke_present_toast(detail.into(), true);
 }
 
 /// Asks what a copy should do with the mods whose jars are gone, if any are.
@@ -7429,10 +7464,6 @@ mod tests {
 
     #[test]
     fn every_callback_the_window_declares_reaches_the_rust_side() {
-        // The exception, and the only kind there is: a callback Rust *invokes*
-        // rather than handles. Its implementation is in the markup.
-        const INVOKED_BY_RUST: &[&str] = &["present-toast"];
-
         let declared = window_callbacks(include_str!("ui.rs"));
         assert!(
             declared.len() > 50,
@@ -7443,9 +7474,6 @@ mod tests {
         let controller = include_str!("controller.rs");
         let main = include_str!("main.rs");
         for name in declared {
-            if INVOKED_BY_RUST.contains(&name.as_str()) {
-                continue;
-            }
             let handler = format!("on_{}(", name.replace('-', "_"));
             assert!(
                 controller.contains(&handler) || main.contains(&handler),
