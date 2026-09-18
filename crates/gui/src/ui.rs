@@ -485,12 +485,14 @@ slint::slint! {
     //
     // The control is whatever the caller puts inside, so a dropdown and a
     // switch produce the same card rather than two shapes that happen to look
-    // alike. Its height follows its content, because the description wraps to
-    // a different number of lines at every text scale.
+    // alike. Its content sets its minimum, because the description wraps to a
+    // different number of lines at every text scale, and it fills its row from
+    // there so two cards side by side end level.
     component SettingCard inherits Rectangle {
         in property <string> title;
         in property <string> detail;
-        height: card.preferred-height;
+        min-height: card.preferred-height;
+        vertical-stretch: 1;
         border-radius: 8px;
         border-width: 1px;
         border-color: Theme.border;
