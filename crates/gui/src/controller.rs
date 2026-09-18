@@ -6474,6 +6474,7 @@ fn linked_target_rows(rows: Vec<backend::LinkedTargetData>) -> Vec<LinkedTargetR
             explanation: row.explanation.into(),
             tone: row.tone.into(),
             actionable: row.actionable,
+            blocked: row.blocked,
             selected: row.selected,
         })
         .collect()
@@ -7524,6 +7525,7 @@ mod tests {
                         explanation: String::new(),
                         tone: String::new(),
                         actionable: true,
+                        blocked: false,
                         selected: true,
                     })
                     .collect(),

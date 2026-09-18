@@ -896,6 +896,8 @@ pub struct LinkedTargetData {
     pub explanation: String,
     pub tone: String,
     pub actionable: bool,
+    /// Whether `state` is a refusal rather than what this target would do.
+    pub blocked: bool,
     pub selected: bool,
 }
 
@@ -5189,6 +5191,7 @@ fn linked_target_row(target: &LinkedTargetPlan) -> LinkedTargetData {
             "muted".to_owned()
         },
         actionable: target.state.is_actionable(),
+        blocked: target.state.block().is_some(),
         selected: target.selected_by_default,
     }
 }

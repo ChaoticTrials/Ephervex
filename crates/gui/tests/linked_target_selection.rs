@@ -95,6 +95,28 @@ fn a_server_that_cannot_take_part_is_not_answerable() {
     );
 }
 
+/// A refusal is one word and every other badge in the launcher is drawn as
+/// one, so this reads as a badge too. What a target would instead do is a
+/// sentence, which does not fit one and stays plain text.
+#[test]
+fn a_refusal_is_a_badge_and_what_a_target_would_do_is_not() {
+    let ui = window();
+    confirmation(&ui);
+
+    let badges: Vec<String> = ElementHandle::find_by_element_type_name(&ui, "Pill")
+        .filter(|pill| pill.size().width > 0.0)
+        .filter_map(|pill| pill.accessible_label().map(|label| label.to_string()))
+        .collect();
+    assert!(
+        badges.contains(&lookup("gui-linked-unavailable")),
+        "a blocked target's refusal is drawn as a badge: {badges:?}"
+    );
+    assert!(
+        !badges.contains(&lookup("linked-target-will-install")),
+        "what a target would do stays a sentence: {badges:?}"
+    );
+}
+
 /// The list is the only part of the confirmation that stretches, so every pixel
 /// the dialog's own arithmetic forgets comes out of it. A server the user has to
 /// scroll to is one they will not answer.
@@ -138,6 +160,7 @@ fn confirmation(ui: &AppWindow) {
             explanation: lookup("linked-target-incompatible-loader").into(),
             tone: "warn".into(),
             actionable: false,
+            blocked: true,
             ..offered("server-blocked", "Repro Server Blocked")
         },
     ])));
@@ -154,6 +177,7 @@ fn offered(id: &str, name: &str) -> LinkedTargetRow {
         explanation: String::new().into(),
         tone: "ok".into(),
         actionable: true,
+        blocked: false,
         selected: false,
     }
 }

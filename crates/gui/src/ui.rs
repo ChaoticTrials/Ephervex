@@ -242,6 +242,10 @@ slint::slint! {
         explanation: string,
         tone: string,
         actionable: bool,
+        // Whether `state` is a refusal rather than what this target is about
+        // to do. A refusal is one word and reads as a badge; what a target
+        // will do is a sentence and does not.
+        blocked: bool,
         selected: bool,
     }
 
@@ -1289,7 +1293,8 @@ slint::slint! {
                             // Muted while the row is off: what it would do is
                             // still worth reading, but it is not what is about
                             // to happen.
-                            Text { text: row.state; color: root.selectable && row.actionable && !row.selected ? Theme.text-muted : row.tone == "ok" ? Theme.success : row.tone == "warn" ? Theme.warning : row.tone == "error" ? Theme.danger : Theme.text-secondary; font-size: Theme.label-size; horizontal-alignment: right; overflow: elide; }
+                            if !row.blocked : Text { text: row.state; color: root.selectable && row.actionable && !row.selected ? Theme.text-muted : row.tone == "ok" ? Theme.success : row.tone == "error" ? Theme.danger : Theme.text-secondary; font-size: Theme.label-size; horizontal-alignment: right; overflow: elide; }
+                            if row.blocked : HorizontalLayout { Rectangle { horizontal-stretch: 1; } Pill { text: row.state; tone-color: row.tone == "error" ? Theme.danger : Theme.warning; } }
                         }
                     }
                 }
