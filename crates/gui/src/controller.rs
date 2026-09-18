@@ -23,6 +23,7 @@ use crate::backend::{
     DiagnosticData, Event, JavaData, LiveLogLine, LiveLogSource, LiveLogUpdate, ManagedModData,
     ModSearchData, ServerPackTarget, ServerWorkspaceData, SettingsData, Snapshot,
 };
+use crate::binding_capture::{BindingCapture, CapturedInput};
 use crate::file_drop::{FileDrop, FileDrops};
 use crate::minecraft_defaults::{
     self, LanguageCatalogState, MinecraftDefaultsModel, WindowAspect, WindowAxis, window_anchor,
@@ -1667,7 +1668,7 @@ const fn drop_overlay_kind(intent: &DropIntent) -> &'static str {
     }
 }
 
-pub fn attach(ui: &AppWindow) -> Controller {
+pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
     let backend = backend::spawn();
     let receiver = Rc::new(RefCell::new(backend.events));
     let activities = Rc::new(RefCell::new(Vec::<ActivityData>::new()));
@@ -1690,6 +1691,7 @@ pub fn attach(ui: &AppWindow) -> Controller {
         &browser,
         &mod_lists,
         &local_mods,
+        keys,
     );
 
     let weak = ui.as_weak();
@@ -2022,6 +2024,7 @@ fn register_callbacks(
     browser: &Rc<ModBrowser>,
     mod_lists: &Rc<RefCell<ModLists>>,
     local_mods: &Rc<RefCell<LocalModDrop>>,
+    keys: &BindingCapture,
 ) {
     register_catalog_actions(ui, commands);
     register_mod_filter(ui, mod_lists);
@@ -2040,7 +2043,7 @@ fn register_callbacks(
     register_diagnostics(ui, commands);
     register_live_viewer(ui, commands, live_viewer);
     register_settings(ui, commands);
-    register_minecraft_defaults(ui, commands, minecraft);
+    register_minecraft_defaults(ui, commands, minecraft, keys);
 
     let weak = ui.as_weak();
     ui.on_copy_text(move |text| {
@@ -3818,6 +3821,7 @@ fn register_minecraft_defaults(
     ui: &AppWindow,
     commands: &Sender<Command>,
     minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
+    keys: &BindingCapture,
 ) {
     ui.set_minecraft_categories(model(
         minecraft_defaults::CATEGORIES
@@ -3899,7 +3903,7 @@ fn register_minecraft_defaults(
 
     // -- the draft itself.
     register_minecraft_editors(ui, commands, minecraft);
-    register_minecraft_capture(ui, commands, minecraft);
+    register_minecraft_capture(ui, commands, minecraft, keys);
 
     let handle = ui.as_weak();
     let state = Rc::clone(minecraft);
@@ -4430,9 +4434,11 @@ fn register_minecraft_capture(
     ui: &AppWindow,
     commands: &Sender<Command>,
     minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
+    keys: &BindingCapture,
 ) {
     let handle = ui.as_weak();
     let state = Rc::clone(minecraft);
+    let armed = keys.clone();
     ui.on_minecraft_begin_capture(move |id| {
         let Some(ui) = handle.upgrade() else { return };
         let Some(parsed) = minecraft_preference_id(&id) else {
@@ -4440,19 +4446,45 @@ fn register_minecraft_capture(
         };
         state.borrow_mut().begin_capture(&parsed);
         ui.set_minecraft_capturing_id(id);
+        armed.arm();
     });
 
     let handle = ui.as_weak();
     let state = Rc::clone(minecraft);
+    let armed = keys.clone();
     ui.on_minecraft_cancel_capture(move || {
         let Some(ui) = handle.upgrade() else { return };
+        armed.disarm();
         state.borrow_mut().cancel_capture();
         ui.set_minecraft_capturing_id(SharedString::default());
+    });
+
+    // The press itself, where the windowing layer can be reached: the key
+    // rather than the character it prints, and a mouse button wherever in the
+    // window it was pressed. Nothing arrives here otherwise, and the two
+    // toolkit paths below stand in.
+    let handle = ui.as_weak();
+    let state = Rc::clone(minecraft);
+    let sender = commands.clone();
+    let armed = keys.clone();
+    keys.listen(move |input| {
+        let Some(ui) = handle.upgrade() else { return };
+        let Some(parsed) = minecraft_preference_id(&ui.get_minecraft_capturing_id()) else {
+            return;
+        };
+        let outcome = match input {
+            CapturedInput::Key(key) => state.borrow_mut().capture_physical_key(&parsed, key),
+            CapturedInput::Mouse(button) => {
+                state.borrow_mut().capture_mouse_button(&parsed, button)
+            }
+        };
+        apply_capture_outcome(&ui, &state, &sender, &armed, outcome);
     });
 
     let handle = ui.as_weak();
     let state = Rc::clone(minecraft);
     let sender = commands.clone();
+    let armed = keys.clone();
     ui.on_minecraft_captured_key(move |id, reported| {
         let Some(ui) = handle.upgrade() else { return };
         let Some(parsed) = minecraft_preference_id(&id) else {
@@ -4464,19 +4496,20 @@ fn register_minecraft_capture(
             return;
         };
         let outcome = state.borrow_mut().capture_key(&parsed, character);
-        apply_capture_outcome(&ui, &state, &sender, outcome);
+        apply_capture_outcome(&ui, &state, &sender, &armed, outcome);
     });
 
     let handle = ui.as_weak();
     let state = Rc::clone(minecraft);
     let sender = commands.clone();
+    let armed = keys.clone();
     ui.on_minecraft_captured_mouse(move |id, reported| {
         let Some(ui) = handle.upgrade() else { return };
         let Some(parsed) = minecraft_preference_id(&id) else {
             return;
         };
         let outcome = state.borrow_mut().capture_mouse(&parsed, &reported);
-        apply_capture_outcome(&ui, &state, &sender, outcome);
+        apply_capture_outcome(&ui, &state, &sender, &armed, outcome);
     });
 }
 
@@ -4488,6 +4521,7 @@ fn apply_capture_outcome(
     ui: &AppWindow,
     minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
     commands: &Sender<Command>,
+    keys: &BindingCapture,
     outcome: minecraft_defaults::CaptureOutcome,
 ) {
     use minecraft_defaults::CaptureOutcome;
@@ -4496,6 +4530,7 @@ fn apply_capture_outcome(
         ui.invoke_present_toast(lookup("gui-minecraft-capture-refused").into(), true);
         return;
     }
+    keys.disarm();
     ui.set_minecraft_capturing_id(SharedString::default());
     render_minecraft(ui, minecraft);
     if outcome != CaptureOutcome::Canceled {

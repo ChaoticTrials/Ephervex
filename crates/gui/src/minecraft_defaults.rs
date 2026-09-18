@@ -1496,6 +1496,10 @@ fn read_window_size(width: &str, height: &str) -> Result<MinecraftPreferenceValu
 
 /// Reads one focused key press as a physical key Minecraft can name.
 ///
+/// The fallback path, used on a backend whose raw keyboard events this build
+/// cannot reach. Where it can, the key itself is read instead and every key
+/// the game names can be bound; see the `physical_keys` module.
+///
 /// # What the toolkit actually supplies
 ///
 /// Slint's `KeyEvent` carries a `text`, a set of modifier booleans, and a
@@ -1650,9 +1654,10 @@ impl MinecraftDefaultsModel {
 
     /// Offers one focused key press to the row that is capturing.
     ///
-    /// Escape leaves the binding alone and Delete or Backspace clears it.
-    /// Anything the toolkit does not identify exactly is refused, leaving
-    /// capture open so another key can be tried. See [`physical_key_of`].
+    /// The fallback path, taking the character the toolkit reported. Escape
+    /// leaves the binding alone and Delete or Backspace clears it. Anything a
+    /// character does not identify exactly is refused, leaving capture open so
+    /// another key can be tried. See [`physical_key_of`].
     pub fn capture_key(&mut self, id: &PreferenceId, character: char) -> CaptureOutcome {
         use slint::platform::Key;
 
@@ -1676,6 +1681,51 @@ impl MinecraftDefaultsModel {
         };
         self.capturing = None;
         self.set_binding(id, InputBinding::Keyboard(key));
+        CaptureOutcome::Bound
+    }
+
+    /// Offers one physical key press to the row that is capturing.
+    ///
+    /// The same three exits [`Self::capture_key`] has: Escape leaves the
+    /// binding alone, Delete and Backspace clear it, and anything else binds.
+    /// There is no fourth, because the windowing layer names the key and there
+    /// is nothing left to refuse. Those three stay unbindable in exchange,
+    /// which is what the game does with Escape itself and what the row's own
+    /// clear action covers for the other two.
+    pub fn capture_physical_key(&mut self, id: &PreferenceId, key: PhysicalKey) -> CaptureOutcome {
+        if self.capturing.as_ref() != Some(id) {
+            return CaptureOutcome::Canceled;
+        }
+        if key == PhysicalKey::Escape {
+            self.capturing = None;
+            return CaptureOutcome::Canceled;
+        }
+        if key == PhysicalKey::Delete || key == PhysicalKey::Backspace {
+            self.capturing = None;
+            self.set_binding(id, InputBinding::Unbound);
+            return CaptureOutcome::Cleared;
+        }
+        self.capturing = None;
+        self.set_binding(id, InputBinding::Keyboard(key));
+        CaptureOutcome::Bound
+    }
+
+    /// Offers one mouse button to the row that is capturing.
+    ///
+    /// Takes the button rather than the name the toolkit reported, so a press
+    /// anywhere in the window binds. The control says "press any key or mouse
+    /// button", and a click that only counted on the control itself made that
+    /// a smaller promise than it reads as.
+    pub fn capture_mouse_button(
+        &mut self,
+        id: &PreferenceId,
+        button: MouseButton,
+    ) -> CaptureOutcome {
+        if self.capturing.as_ref() != Some(id) {
+            return CaptureOutcome::Canceled;
+        }
+        self.capturing = None;
+        self.set_binding(id, InputBinding::Mouse(button));
         CaptureOutcome::Bound
     }
 
@@ -5067,8 +5117,84 @@ mod tests {
         assert_eq!(physical_key_of(char::from(Key::Menu)), None);
     }
 
+    /// The whole reason the key is read rather than the character it prints:
+    /// a keypad 7 and a number-row 7 print the same thing and are two keys the
+    /// game binds separately.
     #[test]
-    fn an_input_the_frontend_cannot_identify_leaves_the_binding_alone() {
+    fn a_key_the_windowing_layer_names_becomes_that_exact_key() {
+        let mut model = loaded_model();
+        let sneak = id("keybind_sneak");
+
+        model.begin_capture(&sneak);
+        assert_eq!(
+            model.capture_physical_key(&sneak, PhysicalKey::Keypad7),
+            CaptureOutcome::Bound,
+            "an ordinary key is nothing to refuse once it has been named"
+        );
+        assert_eq!(
+            model.state_of(&sneak).value,
+            Some(MinecraftPreferenceValue::KeyBinding(
+                InputBinding::Keyboard(PhysicalKey::Keypad7)
+            )),
+            "and the keypad key is not stored as the number-row one"
+        );
+
+        model.begin_capture(&sneak);
+        assert_eq!(
+            model.capture_physical_key(&sneak, PhysicalKey::Digit7),
+            CaptureOutcome::Bound
+        );
+        assert_eq!(
+            model.state_of(&sneak).value,
+            Some(MinecraftPreferenceValue::KeyBinding(
+                InputBinding::Keyboard(PhysicalKey::Digit7)
+            ))
+        );
+    }
+
+    #[test]
+    fn escape_and_delete_keep_their_meaning_when_the_key_itself_is_read() {
+        let mut model = loaded_model();
+        let sneak = id("keybind_sneak");
+        model.set_binding(&sneak, InputBinding::Keyboard(PhysicalKey::LeftShift));
+        let before = model.state_of(&sneak);
+
+        model.begin_capture(&sneak);
+        assert_eq!(
+            model.capture_physical_key(&sneak, PhysicalKey::Escape),
+            CaptureOutcome::Canceled
+        );
+        assert_eq!(model.state_of(&sneak), before, "escape changes nothing");
+
+        model.begin_capture(&sneak);
+        assert_eq!(
+            model.capture_physical_key(&sneak, PhysicalKey::Delete),
+            CaptureOutcome::Cleared
+        );
+        assert_eq!(
+            model.state_of(&sneak).value,
+            Some(MinecraftPreferenceValue::KeyBinding(InputBinding::Unbound))
+        );
+    }
+
+    #[test]
+    fn a_physical_key_offered_to_a_row_that_is_not_capturing_changes_nothing() {
+        let mut model = loaded_model();
+        let sneak = id("keybind_sneak");
+        model.set_binding(&sneak, InputBinding::Keyboard(PhysicalKey::LeftShift));
+        let before = model.state_of(&sneak);
+
+        assert_eq!(
+            model.capture_physical_key(&sneak, PhysicalKey::W),
+            CaptureOutcome::Canceled
+        );
+        assert_eq!(model.state_of(&sneak), before);
+    }
+
+    /// The character path, which is what a backend whose raw keyboard events
+    /// this build cannot reach still falls back to.
+    #[test]
+    fn a_character_that_identifies_no_key_leaves_the_binding_alone() {
         use slint::platform::Key;
 
         let mut model = loaded_model();

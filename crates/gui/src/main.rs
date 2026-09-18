@@ -69,15 +69,25 @@ fn main() -> Result<(), slint::PlatformError> {
     // build with no windowing backend to configure, simply keeps the file
     // dialog as the only way to name an archive.
     let drops = ephervex_gui::file_drop::FileDrops::default();
+    let keys = ephervex_gui::binding_capture::BindingCapture::default();
     if let Err(error) = slint::BackendSelector::new()
         .backend_name("winit".to_owned())
         .with_winit_custom_application_handler(
             ephervex_gui::window_events::WindowEventHandlers::new()
+                // First, because it takes keyboard events away while a binding
+                // editor is open, and a file drop is not one.
+                .with(ephervex_gui::binding_capture::BindingCaptureReader::new(
+                    keys.clone(),
+                ))
                 .with(ephervex_gui::file_drop::FileDropHandler::new(drops.clone())),
         )
         .select()
     {
-        tracing::info!(%error, "dropping a modpack onto the window is unavailable here");
+        tracing::info!(
+            %error,
+            "dropping a modpack onto the window, and binding a key by pressing it, \
+             are unavailable here"
+        );
     }
 
     // Read before the window exists: a refusal should cost a line on stderr
@@ -127,7 +137,7 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     ui.set_app_version(ephervex_model::APP_VERSION.into());
     ui.set_license_text(include_str!("../../../LICENSE").into());
-    let controller = ephervex_gui::controller::attach(&ui);
+    let controller = ephervex_gui::controller::attach(&ui, &keys);
     ephervex_gui::controller::accept_file_drops(&ui, &drops, &controller);
     if let Some(url) = link {
         tracing::info!("opening a modpack a link named");

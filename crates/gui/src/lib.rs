@@ -1,6 +1,7 @@
 //! Slint desktop frontend and presentation models.
 
 pub mod backend;
+pub mod binding_capture;
 pub mod controller;
 pub mod file_drop;
 pub mod minecraft_defaults;
