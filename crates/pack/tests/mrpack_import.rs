@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use ephervex_download::{
     CacheLayout, DomainAllowlist, DownloadManager, DownloaderConfig, HttpConfig, OperationReporter,
 };
-use ephervex_model::LoaderKind;
+use ephervex_model::{LoaderKind, ModOrigin};
 use ephervex_pack::{
     ExtractionLimits, MaterializeRequest, OpenArtifacts, OptionalSelection, PackArchive, PackError,
     PackFormat, PackPolicy, PackSide, SideRequirement, analyze, materialize, retained_recipe,
@@ -305,6 +305,93 @@ async fn the_workflow_fixture_produces_the_correct_client_and_later_the_correct_
     assert_eq!(optional.client, SideRequirement::Optional);
     assert_eq!(optional.server, SideRequirement::Optional);
     assert_eq!(optional.selected, Some(false));
+}
+
+/// The index lists what the pack points at. What it carries in its own
+/// override tree is named nowhere, so a jar shipped that way was read back off
+/// disk as one somebody had copied in by hand and reported as theirs.
+#[tokio::test]
+async fn a_mod_the_pack_ships_in_its_override_tree_is_recorded_as_pack_content() {
+    let server = MockServer::start().await;
+    let index = serve_pack_files(&server).await;
+    let workspace = tempfile::tempdir().expect("temp dir");
+    let archive = workspace.path().join("layered-client-server.mrpack");
+    build_archive(
+        &archive,
+        index.as_bytes(),
+        &["overrides", "client-overrides", "server-overrides"],
+    );
+
+    let imported = import(
+        workspace.path(),
+        &archive,
+        &loopback_policy(&server),
+        &OptionalSelection::none(),
+    )
+    .await;
+    let recipe = retained_recipe(&imported.source).expect("the recipe was retained");
+
+    let shipped = |name: &str| {
+        recipe
+            .files
+            .iter()
+            .find(|file| file.display_name() == name)
+            .unwrap_or_else(|| panic!("{name} is recorded"))
+    };
+
+    for name in [
+        "mods/shipped-with-the-pack.jar",
+        "mods/client-only-shipped.jar",
+        "mods/server-only-shipped.jar",
+    ] {
+        assert_eq!(
+            shipped(name).origin,
+            ModOrigin::PackOverride,
+            "{name} came out of the pack, so the list has to say so"
+        );
+        assert!(
+            shipped(name).downloads.is_empty(),
+            "{name} was shipped rather than pointed at"
+        );
+    }
+
+    // The layer says which sides a shipped mod belongs to, because it is the
+    // only thing the pack said about it.
+    assert_eq!(
+        shipped("mods/client-only-shipped.jar").server,
+        SideRequirement::Unsupported
+    );
+    assert_eq!(
+        shipped("mods/server-only-shipped.jar").client,
+        SideRequirement::Unsupported
+    );
+    assert_eq!(
+        shipped("mods/shipped-with-the-pack.jar").client,
+        SideRequirement::Required
+    );
+
+    assert!(
+        recipe
+            .files
+            .iter()
+            .all(|file| file.display_name() != "mods/notes.txt"),
+        "a pack may ship anything into mods/, and only a jar is a mod"
+    );
+
+    // Recorded, and still never fetched: the plans that download are the ones
+    // an entry with no address would fail in.
+    assert!(
+        recipe
+            .files_for(PackSide::Client, &OptionalSelection::none())
+            .iter()
+            .all(|file| !file.is_layer_supplied()),
+        "a shipped jar is extracted, never downloaded"
+    );
+    let plan = recipe.plan(PackSide::Server, &OptionalSelection::none());
+    assert!(
+        plan.files.iter().all(|file| !file.is_layer_supplied()),
+        "and a server is built from the retained layer rather than by fetching it"
+    );
 }
 
 #[tokio::test]

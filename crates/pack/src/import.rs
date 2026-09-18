@@ -39,7 +39,7 @@ use ephervex_model::{AttentionReason, ImportSourceKind, LoaderSelection};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument};
 
-use crate::archive::PackArchive;
+use crate::archive::{EntryDecision, PackArchive};
 use crate::credentials::ArtifactCredentials;
 use crate::curseforge::{self, ParsedExport};
 use crate::detect::PackFormat;
@@ -49,7 +49,7 @@ use crate::modrinth::{self, ParsedPack};
 use crate::policy::PackPolicy;
 use crate::recipe::{
     BlockedProviderFile, DuplicateProviderFile, OptionalComponent, OptionalSelection,
-    OverrideScope, PackRecipe, PackSide, PendingProviderFile, SideRequirement,
+    OverrideScope, PackRecipe, PackSide, PendingProviderFile, SideRequirement, is_mod_file_path,
 };
 use crate::store::SourceStore;
 
@@ -405,6 +405,11 @@ pub async fn materialize(request: MaterializeRequest<'_>) -> PackResult<Material
         {
             layer.files = applied.files;
         }
+        // The pack shipped these jars rather than declaring them, so this is
+        // the only place the desired state can learn they are its mods.
+        for path in &applied.mod_files {
+            recipe.record_layer_mod(path.clone(), applied.layer.scope, 0);
+        }
     }
 
     // 3. Retain the source recipe, which is mandatory even for a client-only
@@ -451,6 +456,8 @@ fn retain_source(
     }
 
     let already_applied = side.override_scope();
+    // Collected while the layers are borrowed, and recorded once they are not.
+    let mut retained_mods: Vec<(OverrideScope, Vec<PathBuf>)> = Vec::new();
     for layer in &mut recipe.override_layers {
         if layer.scope == already_applied {
             // Already in the game directory, so it does not need to be
@@ -460,9 +467,25 @@ fn retain_source(
             continue;
         }
         let (absolute, relative) = store.layer_dir(kind, &layer.archive_prefix);
-        let report = archive.extract_prefix(&layer.archive_prefix, &absolute)?;
+        // The same record the applied layers get. A client import retains the
+        // server layer without applying it, and a server built from this
+        // instance loads whatever that layer places.
+        let mut mod_files = Vec::new();
+        let report =
+            archive.extract_prefix_filtered(&layer.archive_prefix, &absolute, &mut |path| {
+                if is_mod_file_path(path) {
+                    mod_files.push(path.to_path_buf());
+                }
+                EntryDecision::Extract
+            })?;
         layer.files = report.files;
         layer.retained_at = Some(relative);
+        retained_mods.push((layer.scope, mod_files));
+    }
+    for (scope, paths) in retained_mods {
+        for path in paths {
+            recipe.record_layer_mod(path, scope, 0);
+        }
     }
     Ok(())
 }

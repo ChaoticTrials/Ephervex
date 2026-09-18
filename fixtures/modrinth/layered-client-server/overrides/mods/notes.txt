@@ -1,0 +1,1 @@
+A pack may ship anything into mods/. Only a jar is a mod.

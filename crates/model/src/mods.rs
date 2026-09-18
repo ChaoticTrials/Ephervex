@@ -152,6 +152,16 @@ pub enum ModOrigin {
     /// written before managed mods existed is.
     #[default]
     PackDeclared,
+    /// Shipped inside the imported pack rather than referenced by it.
+    ///
+    /// A jar the pack carries in its own override tree. The pack owns it and
+    /// Ephervex placed it, by extracting that tree, so it is part of the
+    /// instance's desired state and a reinstall puts it back. It has no
+    /// download address and never will, because the pack shipped the bytes
+    /// rather than a reference to them, which is why it is not
+    /// [`Self::PackDeclared`]: a declared file is fetched and verified against
+    /// published hashes, and this one is extracted.
+    PackOverride,
     /// Chosen by name in the mod browser.
     UserSelected,
     /// Installed to satisfy another mod's required dependency.
@@ -174,6 +184,7 @@ impl ModOrigin {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::PackDeclared => "pack_declared",
+            Self::PackOverride => "pack_override",
             Self::UserSelected => "user_selected",
             Self::RequiredDependency => "required_dependency",
             Self::SelectedOptionalDependency => "selected_optional_dependency",
@@ -196,7 +207,7 @@ impl ModOrigin {
     /// offer the two as though they were the same.
     #[must_use]
     pub const fn is_pack_owned(self) -> bool {
-        matches!(self, Self::PackDeclared)
+        matches!(self, Self::PackDeclared | Self::PackOverride)
     }
 
     /// Whether this file is here only because something else needed it.
@@ -213,6 +224,7 @@ impl ModOrigin {
     pub const fn message_id(self) -> &'static str {
         match self {
             Self::PackDeclared => "mod-origin-pack-declared",
+            Self::PackOverride => "mod-origin-pack-override",
             Self::UserSelected => "mod-origin-user-selected",
             Self::RequiredDependency => "mod-origin-required-dependency",
             Self::SelectedOptionalDependency => "mod-origin-selected-optional-dependency",

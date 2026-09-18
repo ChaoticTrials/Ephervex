@@ -68,13 +68,13 @@ use ephervex_model::Hash;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument, warn};
 
-use crate::archive::{ExtractionLimits, ExtractionReport, PackArchive};
+use crate::archive::{EntryDecision, ExtractionLimits, ExtractionReport, PackArchive};
 use crate::credentials::ArtifactCredentials;
 use crate::error::{PackError, PackResult};
 use crate::path::{contained_join, is_reserved, safe_relative_path};
 use crate::recipe::{
     OptionalSelection, OverrideLayer, PackFileRecipe, PackRecipe, PackSide,
-    ServerReconstructionPlan, UnknownServerFiles,
+    ServerReconstructionPlan, UnknownServerFiles, is_mod_file_path,
 };
 use crate::store::SourceStore;
 
@@ -819,6 +819,10 @@ pub(crate) fn copy_into_instance(source: &Path, destination: &Path) -> PackResul
 pub struct AppliedLayer {
     pub layer: OverrideLayer,
     pub files: u64,
+    /// The `mods/*.jar` entries this layer placed, relative to the game
+    /// directory. The pack shipped these bytes rather than a reference to
+    /// them, so the recipe learns them here or never.
+    pub mod_files: Vec<PathBuf>,
 }
 
 /// Extracts the override layers one side takes, in the required order.
@@ -834,15 +838,29 @@ pub fn apply_overrides(
     let layers: Vec<OverrideLayer> = recipe.layers_for(side).into_iter().cloned().collect();
     let mut applied = Vec::with_capacity(layers.len());
     for layer in layers {
-        let report = archive.extract_prefix(&layer.archive_prefix, game_dir)?;
+        // Recorded as the reader walks the layer, which is the only moment the
+        // per-file contents of one are known: the index names the layer by its
+        // prefix and never lists what is inside it. An entry recorded here and
+        // then refused takes the whole extraction down with it, and the recipe
+        // is only written once extraction has succeeded.
+        let mut mod_files = Vec::new();
+        let report =
+            archive.extract_prefix_filtered(&layer.archive_prefix, game_dir, &mut |path| {
+                if is_mod_file_path(path) {
+                    mod_files.push(path.to_path_buf());
+                }
+                EntryDecision::Extract
+            })?;
         debug!(
             layer = layer.scope.as_str(),
             files = report.files,
+            mods = mod_files.len(),
             "applied a pack override layer"
         );
         applied.push(AppliedLayer {
             layer,
             files: report.files,
+            mod_files,
         });
     }
     Ok(applied)
@@ -873,6 +891,9 @@ pub fn apply_retained_overrides(
         applied.push(AppliedLayer {
             layer: layer.clone(),
             files: report.files,
+            // Nothing to learn here. The recipe this is rebuilding from already
+            // records what its layers place, from the import that retained them.
+            mod_files: Vec::new(),
         });
     }
     Ok(applied)

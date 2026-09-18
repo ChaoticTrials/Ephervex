@@ -24,6 +24,10 @@ text rather than sitting in a binary blob nobody opens.
 | `overrides/options.txt` | the common layer is *replaced* by a later layer that ships the same file |
 | `client-overrides/options.txt` | the client layer wins over the common one, and carries a mod key with a second colon (`jei:configVersion:2`) that must survive the managed-preference merge |
 | `server-overrides/server.properties` | a file the client must never receive, retained under `.launcher/source/` for server creation |
+| `overrides/mods/shipped-with-the-pack.jar` | a mod the pack carries rather than declares, which the recipe has to learn from the archive because the index never lists it |
+| `overrides/mods/notes.txt` | a pack may ship anything into `mods/`, and only a jar is recorded as a mod |
+| `client-overrides/mods/client-only-shipped.jar` | a shipped mod the server must not receive |
+| `server-overrides/mods/server-only-shipped.jar` | a shipped mod the client must not receive, recorded on a client import so a server built later still lists it |
 
 The four files in `files/` are the pack's downloadable content:
 

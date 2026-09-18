@@ -73,13 +73,31 @@ use crate::error::{PackError, PackResult};
 /// allowed to move away from it. Reading a version 3 recipe still works: the
 /// field defaults to absent, exactly the state of an entry that has never been
 /// mutated away from what the pack declared.
-pub const RECIPE_VERSION: u32 = 4;
+pub const RECIPE_VERSION: u32 = 5;
 
 /// The extension a mod loader loads out of `mods/`.
 ///
 /// Compared case-insensitively. A pack author who ships `Mod.JAR` has shipped a
 /// mod; one who ships `mod.jar.disabled` deliberately has not.
 const MOD_EXTENSION: &str = "jar";
+
+/// Whether one logical path is a mod jar of the instance.
+///
+/// It must sit directly in `mods/`, which is the one directory a loader reads,
+/// and it must actually be a `.jar`, because packs also ship a `README.txt`, a
+/// generated `metadata.json`, or a `.disabled` jar into that directory and
+/// none of those is a mod the instance is running.
+///
+/// The extension is the whole test. Nothing here opens the file: deciding what
+/// a jar contains would mean parsing an archive out of an untrusted pack to
+/// answer a question about presentation.
+#[must_use]
+pub fn is_mod_file_path(path: &Path) -> bool {
+    path.parent() == Some(Path::new(crate::managed::MODS_DIR))
+        && path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case(MOD_EXTENSION))
+}
 
 /// Whether one side of the game needs a file.
 ///
@@ -521,23 +539,23 @@ impl PackFileRecipe {
     }
 
     /// Whether this entry describes a jar in the game's `mods/` directory.
-    ///
-    /// Two conditions, both necessary. The entry must be a *direct child* of
-    /// `mods/`, because a nested path there is not something any supported
-    /// loader reads; and it must actually be a `.jar`, because packs also ship
-    /// a `README.txt`, a generated `metadata.json`, or a `.disabled` jar into
-    /// that directory, and none of those is a mod the instance is running.
-    ///
-    /// The extension is the whole test. Nothing here opens the file: deciding
-    /// what a jar contains would mean parsing an archive out of an untrusted
-    /// pack to answer a question about presentation.
+    /// See [`is_mod_file_path`].
     #[must_use]
     pub fn is_mod_file(&self) -> bool {
-        self.logical_path.parent() == Some(Path::new(crate::managed::MODS_DIR))
-            && self
-                .logical_path
-                .extension()
-                .is_some_and(|extension| extension.eq_ignore_ascii_case(MOD_EXTENSION))
+        is_mod_file_path(&self.logical_path)
+    }
+
+    /// Whether extracting the pack's own override tree is what puts this file
+    /// in place.
+    ///
+    /// Such an entry has no download address and never will: the pack shipped
+    /// the bytes rather than a reference to them. It belongs in the desired
+    /// state, so the mod list is complete and a reinstall restores it, and it
+    /// stays out of every download plan, where an entry with no address is a
+    /// failure rather than a fact.
+    #[must_use]
+    pub const fn is_layer_supplied(&self) -> bool {
+        matches!(self.origin, ModOrigin::PackOverride)
     }
 
     /// This entry as a mod of the instance, if it is one.
@@ -802,6 +820,7 @@ impl PackRecipe {
     pub fn files_for(&self, side: PackSide, selection: &OptionalSelection) -> Vec<&PackFileRecipe> {
         self.files
             .iter()
+            .filter(|file| !file.is_layer_supplied())
             .filter(|file| file.is_installed_on(side, selection))
             .collect()
     }
@@ -893,6 +912,11 @@ impl PackRecipe {
         let mut files = Vec::new();
         let mut unconfirmed_unknown = Vec::new();
         for file in &self.files {
+            // The retained override layer places these, so a plan that also
+            // listed them would be asking for an address the pack never gave.
+            if file.is_layer_supplied() {
+                continue;
+            }
             match file.server {
                 SideRequirement::Required => files.push(file),
                 SideRequirement::Optional => {
@@ -1017,6 +1041,45 @@ impl PackRecipe {
                 .and_then(ProviderFileIdentity::project)
                 .is_some_and(|(kind, id)| kind == provider && id == project_id)
         })
+    }
+
+    /// Records one mod the pack shipped inside its own override tree.
+    ///
+    /// Insert-only by path, the way [`Self::record_managed`] is by project and
+    /// for the same reason: re-importing the same pack leaves the recipe
+    /// byte-identical. No provider identity is required, because an override
+    /// jar has none - the pack shipped the file rather than a reference to a
+    /// catalog entry - and none can be invented from a file name.
+    ///
+    /// Side requirements follow the layer, which is the only thing the pack
+    /// said about where the file belongs.
+    pub fn record_layer_mod(&mut self, logical_path: PathBuf, scope: OverrideScope, size: u64) {
+        if self
+            .files
+            .iter()
+            .any(|file| file.logical_path == logical_path)
+        {
+            return;
+        }
+        let required = |side: PackSide| {
+            if scope.applies_to(side) {
+                SideRequirement::Required
+            } else {
+                SideRequirement::Unsupported
+            }
+        };
+        self.files.push(PackFileRecipe {
+            logical_path,
+            hashes: Vec::new(),
+            downloads: Vec::new(),
+            size: (size > 0).then_some(size),
+            client: required(PackSide::Client),
+            server: required(PackSide::Server),
+            selected: None,
+            origin: ModOrigin::PackOverride,
+            identity: None,
+            original_identity: None,
+        });
     }
 
     /// Adds a managed mod to the desired state.

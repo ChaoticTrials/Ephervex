@@ -193,13 +193,30 @@ impl ModMutability {
                 can_delete_file: true,
                 ..Self::restricted(MutationRestriction::HandPlaced, has_project)
             },
+            // A jar the pack shipped inside itself, once a digest lookup has
+            // said which project it is. There is no declaration to preserve
+            // here: the pack named no project and no release for it, so the
+            // opt-in that guards a declaration has nothing to guard and does
+            // not gate this. Taking it out of the desired state is still
+            // refused, because the pack's own override layer would place it
+            // again and the list would be wrong until it did.
+            ModOrigin::PackOverride if has_version => Self {
+                can_change_version: true,
+                can_update: true,
+                can_remove: false,
+                can_delete_file: true,
+                can_list_versions: true,
+                restriction: None,
+            },
             // The pack's declaration is a historical record and stays one, so
-            // no provider operation may reach a pack file. Deleting the jar is
-            // not one of those: it resolves nothing, retires nothing, and asks
-            // no catalog, and putting a pack mod aside to find which one
-            // crashes is what this launcher is for. The recipe still declares
-            // it, so it is restored rather than gone (ADR 0019).
-            ModOrigin::PackDeclared => Self {
+            // no provider operation may reach a pack file. A shipped jar
+            // nothing recognized lands here too: there is no project to look a
+            // release up in yet. Deleting the jar is not one of those
+            // operations: it resolves nothing, retires nothing, and asks no
+            // catalog, and putting a pack mod aside to find which one crashes
+            // is what this launcher is for. The recipe still records it, so it
+            // is restored rather than gone (ADR 0019).
+            ModOrigin::PackDeclared | ModOrigin::PackOverride => Self {
                 can_delete_file: true,
                 ..Self::restricted(MutationRestriction::PackOwned, has_project)
             },
@@ -241,6 +258,10 @@ impl ModMutability {
 /// Never loosens `can_remove`: taking a pack mod out of the instance's desired
 /// state is a different decision from moving its version, and this setting
 /// says nothing about it.
+///
+/// Only a *declared* mod is gated this way. A jar the pack shipped inside
+/// itself carries no declaration to preserve, so it needs no opt-in and is
+/// already free in [`ModMutability::of`].
 fn effective_mutability(entry: &ManagedModEntry, record: &ClientRecord) -> ModMutability {
     let base = ModMutability::of(entry);
     let can_move = record.allow_pack_mod_version_changes && entry.identity.is_fully_resolved();
@@ -1305,6 +1326,46 @@ mod tests {
         assert!(!mutability.can_change_version);
         assert!(!mutability.can_update);
         assert_eq!(mutability.restriction, Some(MutationRestriction::PackOwned));
+    }
+
+    /// The pack shipped the jar and named nothing about it: no project, no
+    /// release, nothing a declaration could preserve. So once a digest lookup
+    /// has said which project it is, moving it needs no opt-in - there is no
+    /// declaration for one to protect.
+    #[test]
+    fn an_identified_override_mod_can_be_managed_without_the_opt_in() {
+        let allowed = effective_mutability(
+            &entry(ModOrigin::PackOverride, resolved()),
+            &client_record(false),
+        );
+        assert!(allowed.can_change_version);
+        assert!(allowed.can_update);
+        assert!(allowed.can_list_versions);
+        assert_eq!(allowed.restriction, None);
+        assert!(
+            !allowed.can_remove,
+            "the pack's own layer would place it again, so the list would lie"
+        );
+        assert!(
+            allowed.can_delete_file,
+            "putting a jar aside to find which one crashes is what this is for"
+        );
+    }
+
+    /// Until then there is no project to look a newer release up in, and the
+    /// row says the pack owns it rather than claiming an action it cannot take.
+    #[test]
+    fn an_override_mod_nothing_recognized_is_still_the_packs() {
+        let unidentified = effective_mutability(
+            &entry(ModOrigin::PackOverride, ModIdentity::Unresolved),
+            &client_record(true),
+        );
+        assert!(!unidentified.can_change_version);
+        assert!(!unidentified.can_list_versions);
+        assert_eq!(
+            unidentified.restriction,
+            Some(MutationRestriction::PackOwned)
+        );
     }
 
     #[test]

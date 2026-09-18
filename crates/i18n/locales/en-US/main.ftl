@@ -881,6 +881,10 @@ local-mod-too-large = Too large to be a mod.
 # Why a mod belongs to an instance. Kept distinct because they are different
 # things to look at and, later, different things to change.
 mod-origin-pack-declared = From pack
+# A jar the pack ships inside itself rather than pointing at a catalog for.
+# Named apart from a declared one because the two behave differently: this one
+# has no published release behind it and reappears when the pack is reapplied.
+mod-origin-pack-override = Override
 mod-origin-user-selected = Added
 mod-origin-required-dependency = Dependency
 mod-origin-selected-optional-dependency = Optional dependency
