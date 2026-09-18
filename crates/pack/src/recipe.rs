@@ -1043,6 +1043,26 @@ impl PackRecipe {
         })
     }
 
+    /// Fills in what a recorded entry turned out to be, without changing whose
+    /// it is.
+    ///
+    /// For an entry the launcher placed but the pack gave no identity for: a
+    /// digest lookup can say which project and release a jar is, and that is
+    /// worth keeping, but it does not make the file anybody else's. Returns
+    /// whether anything changed, and never overwrites an identity already
+    /// recorded.
+    pub fn record_identity(&mut self, path: &Path, identity: ProviderFileIdentity) -> bool {
+        let Some(file) = self
+            .files
+            .iter_mut()
+            .find(|file| file.logical_path == path && file.identity.is_none())
+        else {
+            return false;
+        };
+        file.identity = Some(identity);
+        true
+    }
+
     /// Records one mod the pack shipped inside its own override tree.
     ///
     /// Insert-only by path, the way [`Self::record_managed`] is by project and
@@ -1407,6 +1427,117 @@ mod tests {
     use ephervex_model::{HashAlgorithm, LoaderKind};
 
     use super::*;
+
+    #[test]
+    fn a_shipped_mod_takes_the_side_requirements_of_the_layer_that_placed_it() {
+        let mut recipe = recipe();
+        recipe.files.clear();
+        recipe.record_layer_mod("mods/common.jar".into(), OverrideScope::Common, 42);
+        recipe.record_layer_mod("mods/client.jar".into(), OverrideScope::Client, 0);
+        recipe.record_layer_mod("mods/server.jar".into(), OverrideScope::Server, 0);
+
+        let by_path = |name: &str| {
+            recipe
+                .files
+                .iter()
+                .find(|file| file.display_name() == name)
+                .unwrap_or_else(|| panic!("{name} is recorded"))
+        };
+        assert_eq!(by_path("mods/common.jar").client, SideRequirement::Required);
+        assert_eq!(by_path("mods/common.jar").server, SideRequirement::Required);
+        assert_eq!(by_path("mods/client.jar").client, SideRequirement::Required);
+        assert_eq!(
+            by_path("mods/client.jar").server,
+            SideRequirement::Unsupported
+        );
+        assert_eq!(
+            by_path("mods/server.jar").client,
+            SideRequirement::Unsupported
+        );
+        assert_eq!(by_path("mods/server.jar").server, SideRequirement::Required);
+        assert_eq!(by_path("mods/common.jar").size, Some(42));
+        assert_eq!(
+            by_path("mods/client.jar").size,
+            None,
+            "an unknown size is absent rather than zero"
+        );
+    }
+
+    #[test]
+    fn recording_the_same_shipped_mod_twice_leaves_the_recipe_unchanged() {
+        let mut recipe = recipe();
+        recipe.files.clear();
+        recipe.record_layer_mod("mods/common.jar".into(), OverrideScope::Common, 42);
+        let after_first = recipe.files.clone();
+        recipe.record_layer_mod("mods/common.jar".into(), OverrideScope::Client, 9);
+
+        assert_eq!(
+            recipe.files, after_first,
+            "importing the same pack again is not a second mod"
+        );
+    }
+
+    #[test]
+    fn a_shipped_mod_is_kept_out_of_the_plans_that_download() {
+        let mut recipe = recipe();
+        recipe.files.clear();
+        recipe.files.push(file(
+            "mods/declared.jar",
+            SideRequirement::Required,
+            SideRequirement::Required,
+        ));
+        recipe.record_layer_mod("mods/shipped.jar".into(), OverrideScope::Common, 0);
+
+        let installed = recipe.files_for(PackSide::Client, &OptionalSelection::none());
+        assert_eq!(installed.len(), 1);
+        assert_eq!(installed[0].display_name(), "mods/declared.jar");
+
+        let plan = recipe
+            .server_reconstruction_plan(&UnknownServerFiles::IncludeAll)
+            .expect("plan");
+        assert!(
+            plan.files
+                .iter()
+                .all(|file| file.display_name() != "mods/shipped.jar"),
+            "the retained layer places it, so a plan that fetched it would fail"
+        );
+
+        // Still the instance's mod, which is the whole point of recording it.
+        assert!(
+            recipe
+                .recorded_mods_for(PackSide::Client)
+                .iter()
+                .any(|recorded| recorded.logical_path == Path::new("mods/shipped.jar")),
+            "it is listed as a mod even though nothing downloads it"
+        );
+    }
+
+    #[test]
+    fn identifying_a_shipped_mod_says_what_it_is_without_changing_whose_it_is() {
+        let mut recipe = recipe();
+        recipe.files.clear();
+        recipe.record_layer_mod("mods/shipped.jar".into(), OverrideScope::Common, 0);
+        let identity = ProviderFileIdentity {
+            provider: Some(ModProvider::CurseForge),
+            project_id: Some("358191".to_owned()),
+            version_id: Some("4711".to_owned()),
+            file_id: Some("4711".to_owned()),
+        };
+
+        assert!(recipe.record_identity(Path::new("mods/shipped.jar"), identity.clone()));
+
+        let shipped = &recipe.files[0];
+        assert_eq!(shipped.identity.as_ref(), Some(&identity));
+        assert_eq!(
+            shipped.origin,
+            ModOrigin::PackOverride,
+            "knowing what a jar is does not make it somebody else's"
+        );
+        assert!(
+            !recipe.record_identity(Path::new("mods/shipped.jar"), identity),
+            "an identity already recorded is never overwritten"
+        );
+    }
 
     fn file(path: &str, client: SideRequirement, server: SideRequirement) -> PackFileRecipe {
         PackFileRecipe {

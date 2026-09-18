@@ -186,23 +186,43 @@ impl ModPresence {
     }
 }
 
-/// Records identified hand-placed jars in the host's own recipe.
+/// Whether a digest lookup could still say something about this mod.
 ///
-/// Adoption is what makes the answer durable and what lets the jar reach a
-/// server the recipe builds. It is deliberately narrow:
+/// Two jars arrive without an identity: one somebody copied into `mods/`
+/// themselves, and one the pack shipped inside its own override tree rather
+/// than declaring. Neither names a project, both are on disk to be hashed, and
+/// a catalog recognizing either is what gives it a name, artwork, and a release
+/// to move from. One that already carries a full identity has nothing to gain
+/// from a second round trip, and one whose jar is gone has nothing to hash.
+fn may_be_identified(entry: &ManagedModEntry) -> bool {
+    matches!(
+        entry.origin,
+        ModOrigin::HandPlaced | ModOrigin::PackOverride
+    ) && !entry.identity.is_fully_resolved()
+        && entry.presence != ModPresence::Missing
+}
+
+/// Records what a digest lookup identified in the host's own recipe.
+///
+/// This is what makes the answer durable. It is deliberately narrow, and it
+/// changes nothing about whose a file is:
 ///
 /// * only jars a catalog actually recognized, so the recipe never gains an
 ///   entry the launcher could not describe;
-/// * `server` stays `Unknown`, which is the existing way of saying "nobody has
-///   decided whether this belongs on a server". Creating one then asks, exactly
-///   as it does for a CurseForge pack's files, rather than assuming;
-/// * the origin stays [`ModOrigin::HandPlaced`], so the mod list keeps saying
-///   who put the file there and mutation keeps refusing to touch it.
+/// * a jar the pack shipped inside itself is already an entry, so only its
+///   identity is filled in and its origin, sides and path stay as the pack's
+///   own layer put them;
+/// * for a hand-placed jar, `server` stays `Unknown`, which is the existing way
+///   of saying "nobody has decided whether this belongs on a server". Creating
+///   one then asks, exactly as it does for a CurseForge pack's files, rather
+///   than assuming;
+/// * the origin stays whatever it was, so the mod list keeps saying who put the
+///   file there and mutation keeps refusing what it refused.
 ///
 /// A refusal from `record_managed` is left alone on purpose: it means this
 /// project is already recorded at another version, which is two jars for one
 /// mod and a thing to tell somebody about rather than to overwrite.
-fn adopt_hand_placed(layout: &ModHostLayout, adopted: &[ManagedModEntry]) {
+fn record_identified(layout: &ModHostLayout, adopted: &[ManagedModEntry]) {
     if adopted.is_empty() {
         return;
     }
@@ -221,6 +241,20 @@ fn adopt_hand_placed(layout: &ModHostLayout, adopted: &[ManagedModEntry]) {
         else {
             continue;
         };
+        let identity = ProviderFileIdentity {
+            provider: Some(provider),
+            project_id: Some(project_id.to_owned()),
+            version_id: entry.identity.version_id().map(ToOwned::to_owned),
+            file_id: match &entry.identity {
+                ModIdentity::Version { file_id, .. } => file_id.clone(),
+                _ => None,
+            },
+        };
+        // The pack already recorded this one; a lookup only says what it is.
+        if entry.origin == ModOrigin::PackOverride {
+            changed |= recipe.record_identity(&entry.logical_path, identity);
+            continue;
+        }
         let file = PackFileRecipe {
             logical_path: entry.logical_path.clone(),
             hashes: entry.hashes.clone(),
@@ -230,15 +264,7 @@ fn adopt_hand_placed(layout: &ModHostLayout, adopted: &[ManagedModEntry]) {
             server: SideRequirement::Unknown,
             selected: None,
             origin: ModOrigin::HandPlaced,
-            identity: Some(ProviderFileIdentity {
-                provider: Some(provider),
-                project_id: Some(project_id.to_owned()),
-                version_id: entry.identity.version_id().map(ToOwned::to_owned),
-                file_id: match &entry.identity {
-                    ModIdentity::Version { file_id, .. } => file_id.clone(),
-                    _ => None,
-                },
-            }),
+            identity: Some(identity),
             original_identity: None,
         };
         match recipe.record_managed(file) {
@@ -251,7 +277,7 @@ fn adopt_hand_placed(layout: &ModHostLayout, adopted: &[ManagedModEntry]) {
 
     if changed {
         if let Err(error) = store.write_recipe(&recipe) {
-            warn!(%error, "identified hand-placed mods could not be recorded");
+            warn!(%error, "identified mods could not be recorded");
         }
     }
 }
@@ -1293,8 +1319,8 @@ impl App {
         if snapshot.mods.is_empty() {
             return Ok(snapshot);
         }
-        // Before metadata, because identifying a hand-placed jar is what gives
-        // it a project to fetch metadata for at all.
+        // Before metadata, because identifying a jar the pack did not declare is
+        // what gives it a project to fetch a name and artwork for at all.
         self.identify_hand_placed(host, &mut snapshot, cancel).await;
 
         match self.mod_details(&snapshot, reporter, cancel).await {
@@ -1356,9 +1382,14 @@ impl App {
 
         // Hashed now, not during the listing. A missing jar has nothing to
         // hash and a disabled one is read under the name it actually has.
+        //
+        // Every jar this build may look up: one somebody copied in, and one the
+        // pack shipped inside itself. Neither came with an identity, both are
+        // on disk to be hashed, and one already carrying an identity has
+        // nothing to gain from a second round trip.
         let mut candidates: Vec<usize> = Vec::new();
         for (index, entry) in snapshot.mods.iter_mut().enumerate() {
-            if entry.origin != ModOrigin::HandPlaced || entry.presence == ModPresence::Missing {
+            if !may_be_identified(entry) {
                 continue;
             }
             let installed = layout.game_dir.join(&entry.logical_path);
@@ -1425,7 +1456,7 @@ impl App {
             };
             adopted.push(entry.clone());
         }
-        adopt_hand_placed(&layout, &adopted);
+        record_identified(&layout, &adopted);
     }
 
     /// Whatever Modrinth did not recognize, asked of CurseForge by fingerprint.
@@ -2137,6 +2168,93 @@ mod tests {
     }
 
     // -- the managed mod view ---------------------------------------------
+
+    /// A jar the pack shipped inside itself arrives with no project, exactly
+    /// like one somebody copied in, and a digest lookup is the only thing that
+    /// can give either a name, artwork, or a release to move from. Reading it
+    /// as the pack's must not cost it that lookup.
+    #[test]
+    fn a_mod_the_pack_shipped_is_looked_up_the_way_a_hand_placed_one_is() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let game_dir = directory.path();
+        std::fs::create_dir_all(game_dir.join(MODS_DIR)).expect("mods");
+        std::fs::write(game_dir.join("mods/shipped.jar"), b"jar").expect("jar");
+
+        let shipped = ManagedModEntry::from_recorded(
+            recorded(
+                "shipped.jar",
+                ModOrigin::PackOverride,
+                ModIdentity::Unresolved,
+            ),
+            game_dir,
+        );
+        assert_eq!(shipped.presence, ModPresence::Installed);
+        assert!(
+            may_be_identified(&shipped),
+            "the pack named no project for it, so a catalog is the only way to one"
+        );
+
+        let hand_placed = ManagedModEntry::from_recorded(
+            recorded(
+                "shipped.jar",
+                ModOrigin::HandPlaced,
+                ModIdentity::Unresolved,
+            ),
+            game_dir,
+        );
+        assert_eq!(
+            may_be_identified(&shipped),
+            may_be_identified(&hand_placed),
+            "the two are looked up the same way; only the badge differs"
+        );
+    }
+
+    /// The pack declares these, so their identity comes from the declaration
+    /// and hashing them would be a round trip for an answer already held.
+    #[test]
+    fn a_pack_declared_mod_and_an_identified_one_are_not_looked_up_again() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let game_dir = directory.path();
+        std::fs::create_dir_all(game_dir.join(MODS_DIR)).expect("mods");
+        std::fs::write(game_dir.join("mods/shipped.jar"), b"jar").expect("jar");
+
+        let declared = ManagedModEntry::from_recorded(
+            recorded(
+                "shipped.jar",
+                ModOrigin::PackDeclared,
+                ModIdentity::Unresolved,
+            ),
+            game_dir,
+        );
+        assert!(!may_be_identified(&declared));
+
+        let identified = ManagedModEntry::from_recorded(
+            recorded(
+                "shipped.jar",
+                ModOrigin::PackOverride,
+                ModIdentity::Version {
+                    provider: ModProvider::CurseForge,
+                    project_id: "358191".to_owned(),
+                    version_id: "4711".to_owned(),
+                    file_id: None,
+                },
+            ),
+            game_dir,
+        );
+        assert!(!may_be_identified(&identified));
+    }
+
+    /// A jar that is gone has nothing to hash.
+    #[test]
+    fn a_mod_whose_jar_is_gone_is_not_looked_up() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let entry = ManagedModEntry::from_recorded(
+            recorded("gone.jar", ModOrigin::PackOverride, ModIdentity::Unresolved),
+            directory.path(),
+        );
+        assert_eq!(entry.presence, ModPresence::Missing);
+        assert!(!may_be_identified(&entry));
+    }
 
     /// One recorded mod, with as much identity as the caller says it has.
     fn recorded(name: &str, origin: ModOrigin, identity: ModIdentity) -> RecordedMod {
