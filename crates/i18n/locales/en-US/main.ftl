@@ -1333,6 +1333,8 @@ gui-instance-deleted = Instance removed.
 gui-server-deleted = Server removed.
 gui-notification-error = Action Needed
 gui-notification-complete = Complete
+# How many times the same notification arrived, shown on it as x2, x3 and so on.
+gui-notification-repeat = x{ $count }
 gui-fov-normal = Normal
 gui-fov-quake-pro = Quake Pro
 gui-select-all = Select All

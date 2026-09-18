@@ -122,6 +122,9 @@ slint::slint! {
         id: int,
         message: string,
         error: bool,
+        // How many identical notifications this panel stands for. Only shown
+        // once there is more than one.
+        repeats: int,
     }
 
     export struct InstanceRow {
@@ -2146,6 +2149,7 @@ slint::slint! {
     component ToastPanel inherits Rectangle {
         in property <string> message;
         in property <bool> error;
+        in property <int> repeats;
         callback dismiss();
         width: 420px;
         height: max(72px, toast-message.preferred-height + 38px);
@@ -2156,7 +2160,14 @@ slint::slint! {
         background: Theme.elevated;
         Rectangle { x: 0px; y: 0px; width: 4px; height: parent.height; background: root.error ? Theme.danger : Theme.success; border-radius: 3px; }
         HorizontalLayout { padding-left: 16px; padding-right: 10px; padding-top: 10px; padding-bottom: 10px; spacing: 10px; cross-axis-alignment: center;
-            VerticalLayout { horizontal-stretch: 1; spacing: 3px; Heading { text: root.error ? GuiI18n.text("gui-notification-error") : GuiI18n.text("gui-notification-complete"); font-size: Theme.body-size; } toast-message := BodyText { text: root.message; color: Theme.text-secondary; wrap: word-wrap; } }
+            VerticalLayout { horizontal-stretch: 1; spacing: 3px;
+                HorizontalLayout { spacing: 6px; cross-axis-alignment: center;
+                    Heading { text: root.error ? GuiI18n.text("gui-notification-error") : GuiI18n.text("gui-notification-complete"); font-size: Theme.body-size; }
+                    Rectangle { horizontal-stretch: 1; }
+                    if root.repeats > 1 : Pill { text: GuiI18n.count("gui-notification-repeat", root.repeats); tone-color: root.error ? Theme.danger : Theme.success; content-height: 18px; }
+                }
+                toast-message := BodyText { text: root.message; color: Theme.text-secondary; wrap: word-wrap; }
+            }
             IconButton { icon: @image-url("../../../assets/icons/close.svg"); accessible-name: GuiI18n.text("gui-dismiss-notification"); width: 32px; height: 32px; clicked => { root.dismiss(); } }
         }
     }
@@ -4151,7 +4162,7 @@ slint::slint! {
             width: min(440px, parent.width - 44px);
             height: parent.height - 126px;
             VerticalLayout { alignment: end; spacing: 8px;
-                for toast in root.toasts : ToastPanel { message: toast.message; error: toast.error; dismiss => { root.dismiss-toast(toast.id); } }
+                for toast in root.toasts : ToastPanel { message: toast.message; error: toast.error; repeats: toast.repeats; dismiss => { root.dismiss-toast(toast.id); } }
             }
         }
 

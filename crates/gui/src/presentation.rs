@@ -2201,8 +2201,22 @@ struct ToastGroup {
     id: i32,
     message: SharedString,
     error: bool,
+    /// How many identical notifications this one stands for, counting itself.
+    repeats: i32,
     /// When this one stops being shown. Meaningless until it is.
     expires_at: Instant,
+}
+
+impl ToastGroup {
+    /// Whether another notification is the same one to a reader.
+    ///
+    /// The sentence and its severity are all a notification carries, so they
+    /// are all identity can be. Two unrelated failures that print the same
+    /// sentence are the same notification to somebody reading it, which is the
+    /// only point of view this collapse serves.
+    fn same_as(&self, message: &SharedString, error: bool) -> bool {
+        self.error == error && self.message == *message
+    }
 }
 
 /// The notifications the window is showing, and the ones waiting behind them.
@@ -2228,9 +2242,32 @@ impl Default for ToastStack {
 }
 
 impl ToastStack {
-    /// Adds one notification, showing it if there is room and queueing it if
-    /// there is not.
+    /// Adds one notification, collapsing it into an identical one that is
+    /// already here, showing it if there is room, and queueing it if not.
+    ///
+    /// A repeat restarts the dwell of the panel it joined: the count on it just
+    /// changed, and a count nobody has time to read is worse than not
+    /// collapsing at all.
     pub fn present(&mut self, message: SharedString, error: bool, now: Instant) {
+        if let Some(group) = self
+            .visible
+            .iter_mut()
+            .find(|group| group.same_as(&message, error))
+        {
+            group.repeats += 1;
+            group.expires_at = now + dwell(error);
+            return;
+        }
+        // A repeat of one that is still waiting has no dwell to restart; it
+        // takes one when it is shown.
+        if let Some(group) = self
+            .waiting
+            .iter_mut()
+            .find(|group| group.same_as(&message, error))
+        {
+            group.repeats += 1;
+            return;
+        }
         if self.visible.len() < VISIBLE_TOASTS {
             let group = self.group(message, error, now);
             self.visible.push(group);
@@ -2244,8 +2281,17 @@ impl ToastStack {
     }
 
     /// Takes one notification off the screen, by the id it was given.
+    ///
+    /// Every identical one still waiting goes with it. Dismissing a panel that
+    /// says a thing happened three times has to mean that thing, not the third
+    /// of three copies.
     pub fn dismiss(&mut self, id: i32, now: Instant) {
-        self.visible.retain(|group| group.id != id);
+        let Some(at) = self.visible.iter().position(|group| group.id == id) else {
+            return;
+        };
+        let dropped = self.visible.remove(at);
+        self.waiting
+            .retain(|group| !group.same_as(&dropped.message, dropped.error));
         self.promote(now);
     }
 
@@ -2264,6 +2310,7 @@ impl ToastStack {
                 id: group.id,
                 message: group.message.clone(),
                 error: group.error,
+                repeats: group.repeats,
             })
             .collect()
     }
@@ -2281,6 +2328,7 @@ impl ToastStack {
             id,
             message,
             error,
+            repeats: 1,
             expires_at: now + dwell(error),
         }
     }
@@ -2408,6 +2456,85 @@ mod toast_tests {
         stack.dismiss(second, start);
 
         assert_eq!(shown(&stack), ["first"]);
+    }
+
+    #[test]
+    fn an_identical_notification_bumps_the_count_instead_of_opening_a_second_panel() {
+        let mut stack = ToastStack::default();
+        let start = Instant::now();
+        for _ in 0..3 {
+            stack.present("nothing was bound".into(), true, start);
+        }
+
+        assert_eq!(shown(&stack), ["nothing was bound"]);
+        assert_eq!(stack.rows()[0].repeats, 3);
+    }
+
+    #[test]
+    fn a_repeat_restarts_the_dwell_so_the_new_count_can_be_read() {
+        let mut stack = ToastStack::default();
+        let start = Instant::now();
+        stack.present("done".into(), false, start);
+
+        let late = start + NORMAL_DWELL - JUST_SHORT;
+        stack.present("done".into(), false, late);
+        stack.expire(start + NORMAL_DWELL + JUST_SHORT);
+
+        assert_eq!(shown(&stack), ["done"], "the panel just changed");
+        stack.expire(late + NORMAL_DWELL + JUST_SHORT);
+        assert!(stack.is_empty());
+    }
+
+    #[test]
+    fn two_notifications_that_differ_only_in_severity_are_not_the_same_one() {
+        let mut stack = ToastStack::default();
+        let start = Instant::now();
+        stack.present("the same words".into(), false, start);
+        stack.present("the same words".into(), true, start);
+
+        assert_eq!(shown(&stack), ["the same words", "the same words"]);
+        assert_eq!(stack.rows().len(), 2);
+    }
+
+    #[test]
+    fn a_repeat_that_arrives_with_every_panel_full_bumps_the_copy_that_is_waiting() {
+        let mut stack = ToastStack::default();
+        let start = Instant::now();
+        for index in 0..VISIBLE_TOASTS {
+            stack.present(format!("done {index}").into(), false, start);
+        }
+        stack.present("waiting".into(), false, start);
+        stack.present("waiting".into(), false, start);
+
+        for row in stack.rows() {
+            stack.dismiss(row.id, start);
+        }
+
+        assert_eq!(shown(&stack), ["waiting"]);
+        assert_eq!(
+            stack.rows()[0].repeats,
+            2,
+            "a repeat is collapsed before it is ever shown, not after"
+        );
+    }
+
+    #[test]
+    fn dismissing_a_collapsed_notification_drops_the_copies_still_waiting() {
+        let mut stack = ToastStack::default();
+        let start = Instant::now();
+        stack.present("nothing was bound".into(), true, start);
+        for index in 0..VISIBLE_TOASTS {
+            stack.present(format!("something else {index}").into(), true, start);
+        }
+        stack.present("nothing was bound".into(), true, start);
+
+        stack.dismiss(stack.rows()[0].id, start);
+
+        assert!(
+            !shown(&stack).contains(&"nothing was bound".to_owned()),
+            "pressing the X once has to be the end of it: {:?}",
+            shown(&stack)
+        );
     }
 
     /// What the window would draw, in order.
