@@ -2113,11 +2113,7 @@ slint::slint! {
                 alignment: center;
                 spacing: 3px;
                 horizontal-stretch: 1;
-                HorizontalLayout {
-                    spacing: 8px;
-                    Text { text: root.item.name; color: Theme.text; font-size: Theme.row-heading-size; font-weight: 600; overflow: elide; horizontal-stretch: 1; vertical-alignment: center; }
-                    VerticalLayout { alignment: center; Pill { text: root.item.kind == "server" ? GuiI18n.text("gui-server") : GuiI18n.text("gui-instance"); tone-color: root.item.kind == "server" ? Theme.server : Theme.accent; } }
-                }
+                Text { text: root.item.name; color: Theme.text; font-size: Theme.row-heading-size; font-weight: 600; overflow: elide; horizontal-stretch: 1; vertical-alignment: center; }
                 // Exact, because a pid is what a developer chases outside the
                 // launcher and a rounded one would be useless.
                 BodyText {
@@ -2134,8 +2130,16 @@ slint::slint! {
                     overflow: elide;
                 }
             }
+            // What this row is, over what can be done to it: the badge reads
+            // against the row's right edge and the buttons sit under it, so a
+            // wide window does not leave the two competing for the same line.
             VerticalLayout {
                 alignment: center;
+                spacing: 6px;
+                HorizontalLayout {
+                    Rectangle { horizontal-stretch: 1; }
+                    Pill { text: root.item.kind == "server" ? GuiI18n.text("gui-server") : GuiI18n.text("gui-instance"); tone-color: root.item.kind == "server" ? Theme.server : Theme.accent; }
+                }
                 HorizontalLayout {
                     spacing: 8px;
                     AppButton { text: GuiI18n.text("gui-open-log"); clicked => { root.open-log(root.item.kind, root.item.id); } }

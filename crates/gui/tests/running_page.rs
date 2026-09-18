@@ -198,6 +198,36 @@ fn opening_a_runs_log_lands_on_its_own_workspace() {
     );
 }
 
+/// The badge says what the row is and the buttons say what can be done to it.
+/// Read on one line they compete for the same corner, so the badge sits above
+/// the buttons and against the same right edge.
+#[test]
+fn a_rows_badge_sits_above_its_buttons_against_the_same_edge() {
+    let ui = window();
+    running_page(&ui, vec![server()]);
+    settle(&ui);
+
+    let badge = ElementHandle::find_by_accessible_label(&ui, &lookup("gui-server"))
+        .find(|element| element.size().width > 0.0)
+        .expect("a server row says it is a server");
+    let stop = ElementHandle::find_by_accessible_label(&ui, &lookup("gui-stop"))
+        .find(|element| element.size().width > 0.0)
+        .expect("a running server can be stopped");
+
+    let badge_bottom = badge.absolute_position().y + badge.size().height;
+    assert!(
+        badge_bottom <= stop.absolute_position().y,
+        "the badge ends at {badge_bottom}px, below the buttons at {}px",
+        stop.absolute_position().y
+    );
+    let badge_right = badge.absolute_position().x + badge.size().width;
+    let stop_right = stop.absolute_position().x + stop.size().width;
+    assert!(
+        (badge_right - stop_right).abs() < 1.0,
+        "the badge ends at {badge_right}px and the buttons at {stop_right}px"
+    );
+}
+
 fn running_page(ui: &AppWindow, rows: Vec<RunningRow>) {
     ui.set_loading(false);
     ui.set_page(2);
