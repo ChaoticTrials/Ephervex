@@ -6078,7 +6078,9 @@ fn apply_server_workspace(ui: &AppWindow, workspace: ServerWorkspaceData) {
 fn apply_diagnostic_content(ui: &AppWindow, content: DiagnosticContent) {
     ui.set_diagnostic_title(content.title.into());
     ui.set_diagnostic_path(content.path.into());
-    ui.set_diagnostic_content(content.text.into());
+    // Through the same expansion a log record gets. A crash report is tab
+    // indented on nearly every stack line, and a tab has no glyph to draw.
+    ui.set_diagnostic_content(expand_tabs(&content.text).into());
     let status = match (content.truncated, content.lossy, content.matches) {
         (_, _, Some(matches)) => lookup_args(
             "gui-diagnostic-search-matches",
@@ -8236,6 +8238,34 @@ mod tests {
             expand_tabs("no tabs here"),
             "no tabs here",
             "text without one is returned untouched"
+        );
+    }
+
+    /// A crash report is tab indented on nearly every stack line, so a viewer
+    /// that shows the file as it is draws a column of missing-character boxes
+    /// down the left of the report.
+    #[test]
+    fn a_crash_report_reaches_its_viewer_with_no_tab_left_in_it() {
+        let ui = test_window();
+        apply_diagnostic_content(
+            &ui,
+            DiagnosticContent {
+                title: "crash-2026-09-18_16.54.00-client.txt".to_owned(),
+                path: "/tmp/crash-reports/crash-2026-09-18_16.54.00-client.txt".to_owned(),
+                text: "java.lang.Throwable\n\tat net.minecraft.Util.run(Util.java:12)\n".to_owned(),
+                truncated: false,
+                lossy: false,
+                matches: None,
+            },
+        );
+        let shown = ui.get_diagnostic_content();
+        assert!(
+            !shown.contains('\t'),
+            "a tab left in the report has no glyph"
+        );
+        assert!(
+            shown.contains("\n    at net.minecraft.Util.run"),
+            "the indentation the report carries has to survive as spaces: {shown}"
         );
     }
 
