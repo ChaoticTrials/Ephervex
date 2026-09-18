@@ -52,7 +52,6 @@ use ephervex_pack::{
     ArtifactFetch, ManagedMutation, ManagedMutationReport, ManagedProject, OptionalSelection,
     PackFileRecipe, PackRecipe, PackSide, SideRequirement, SourceStore,
 };
-use ephervex_server::classify_runtime;
 use ephervex_storage::ServerRecord;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument, warn};
@@ -168,9 +167,6 @@ pub enum LinkedTargetBlock {
     /// dependency that does not fit this server, or a conflicting pin. Never a
     /// reason to look for a different release.
     ExactReleaseUnavailable,
-    /// Changing a running server's mods is not something this build can do
-    /// safely, so it refuses rather than writing under a live process.
-    ServerRunning,
     /// The server has no complete base installation yet.
     ServerNotInstalled,
     /// The relationship this plan assumed is gone.
@@ -198,7 +194,6 @@ impl LinkedTargetBlock {
             Self::IncompatibleMinecraft { .. } => "linked-target-incompatible-minecraft",
             Self::IncompatibleLoader { .. } => "linked-target-incompatible-loader",
             Self::ExactReleaseUnavailable => "linked-target-exact-release-unavailable",
-            Self::ServerRunning => "linked-target-server-running",
             Self::ServerNotInstalled => "linked-target-server-not-installed",
             Self::NoLongerLinked => "linked-target-no-longer-linked",
             Self::ProviderUnavailable => "linked-target-provider-unavailable",
@@ -216,7 +211,6 @@ impl LinkedTargetBlock {
             Self::IncompatibleMinecraft { .. } => "incompatible-minecraft",
             Self::IncompatibleLoader { .. } => "incompatible-loader",
             Self::ExactReleaseUnavailable => "exact-release-unavailable",
-            Self::ServerRunning => "server-running",
             Self::ServerNotInstalled => "server-not-installed",
             Self::NoLongerLinked => "no-longer-linked",
             Self::ProviderUnavailable => "provider-unavailable",
@@ -831,8 +825,8 @@ impl App {
     ///
     /// `None` when the server is gone entirely, which is the honest answer to
     /// "what would this do to it": nothing, because it is not there. Everything
-    /// else — unlinked, running, incompatible, unreadable — is a target with a
-    /// reason, because those are states a user can act on.
+    /// else, unlinked or incompatible or unreadable, is a target with a reason,
+    /// because those are states a user can act on.
     async fn resolve_target(
         &self,
         client: InstanceId,
@@ -860,15 +854,6 @@ impl App {
                 LinkedTargetBlock::ServerNotInstalled,
             ));
         }
-        // An unreadable runtime state counts as "possibly running" for the same
-        // reason `server_status` treats it that way: writing into a live
-        // server's mods directory is the failure worth avoiding, and a refusal
-        // costs a retry.
-        let stopped = classify_runtime(&record.root).is_ok_and(|runtime| !runtime.may_be_running());
-        if !stopped {
-            return Some(blocked(&record, root, LinkedTargetBlock::ServerRunning));
-        }
-
         let store = SourceStore::new(ephervex_storage::metadata::source_dir(&record.root));
         if !store.has_recipe() {
             return Some(blocked(&record, root, LinkedTargetBlock::StateUnavailable));
@@ -889,7 +874,14 @@ impl App {
             .managed_project(root.provider, &root.project_id)
             .cloned();
         if let Some(entry) = &existing {
-            if entry.origin.is_pack_owned() {
+            // The client's own opt-in decides this for its servers too. A
+            // linked server exists to reproduce one instance, so an instance
+            // allowed to move a pack mod's version and a server refusing the
+            // same move is the two of them disagreeing about the same pack.
+            let opted_in = self
+                .client(client)
+                .is_ok_and(|client| client.allow_pack_mod_version_changes);
+            if entry.origin.is_pack_owned() && !opted_in {
                 return Some(blocked(&record, root, LinkedTargetBlock::PackOwned));
             }
             if entry.origin.is_dependency() {
@@ -2199,36 +2191,73 @@ mod tests {
         );
     }
 
+    /// A linked server exists to reproduce one instance. An instance allowed to
+    /// move a pack mod's version, beside a server refusing the same move, is
+    /// the pair disagreeing about the pack they share.
+    #[tokio::test]
+    async fn the_clients_pack_mod_opt_in_reaches_the_servers_linked_to_it() {
+        let world = world().await;
+        let server = world.link_server("Reproduction Server", MINECRAFT);
+
+        let store = SourceStore::new(ephervex_storage::metadata::source_dir(
+            &world.server_root(server),
+        ));
+        let mut recipe = store.read_recipe().expect("recipe");
+        recipe.files.push(PackFileRecipe {
+            logical_path: PathBuf::from("mods/from-the-pack.jar"),
+            hashes: Vec::new(),
+            downloads: Vec::new(),
+            size: None,
+            client: SideRequirement::Required,
+            server: SideRequirement::Required,
+            selected: None,
+            origin: ModOrigin::PackDeclared,
+            identity: Some(ephervex_pack::ProviderFileIdentity {
+                provider: Some(ModProvider::Modrinth),
+                project_id: Some("ROOTPROJ".to_owned()),
+                version_id: Some("ROOTV1".to_owned()),
+                file_id: None,
+            }),
+            original_identity: None,
+        });
+        store.write_recipe(&recipe).expect("write recipe");
+
+        world
+            .app
+            .set_allow_pack_mod_version_changes(world.client, true)
+            .expect("opt in");
+
+        let plan = plan(&world, &install("ROOTPROJ")).await;
+        assert_ne!(
+            target(&plan, server).state,
+            LinkedTargetState::Blocked(LinkedTargetBlock::PackOwned),
+            "the instance said its pack's mods may move, and this is its server"
+        );
+    }
+
     // -- runtime and stale targets -----------------------------------------
 
+    /// A server's mods directory is read when the server starts, so writing
+    /// into it while one runs changes what the next start loads and nothing
+    /// else. Refusing instead only moved the work to after a stop.
     #[tokio::test]
-    async fn a_running_server_is_refused_rather_than_written_to() {
+    async fn a_running_server_receives_the_change_its_next_start_will_load() {
         let world = world().await;
         let server = world.link_server("Running Server", MINECRAFT);
         world.mark_running(server);
 
         let plan = plan(&world, &install("ROOTPROJ")).await;
-        assert_eq!(
-            target(&plan, server).state,
-            LinkedTargetState::Blocked(LinkedTargetBlock::ServerRunning)
-        );
+        assert_eq!(target(&plan, server).state, LinkedTargetState::WillInstall);
 
-        // Selected anyway, as a stale confirmation would.
         let outcome = apply(&world, &install("ROOTPROJ"), &[server]).await;
 
         assert!(matches!(
             result_for(&outcome, server),
-            LinkedTargetResult::Skipped(LinkedTargetState::Blocked(
-                LinkedTargetBlock::ServerRunning
-            ))
+            LinkedTargetResult::Applied(_)
         ));
         assert!(
-            world.server_jars(server).is_empty(),
-            "nothing is written under a live process, and nothing stops it either"
-        );
-        assert!(
-            !world.client_jars().is_empty(),
-            "the client operation is independent of the server that refused"
+            !world.server_jars(server).is_empty(),
+            "the jar has to reach the directory the next start reads"
         );
     }
 
@@ -2363,14 +2392,13 @@ mod tests {
     async fn each_target_keeps_its_own_result_and_a_partial_outcome_says_so() {
         let world = world().await;
         let applied = world.link_server("Reproduction Server", MINECRAFT);
-        let running = world.link_server("Running Server", MINECRAFT);
+        let stale = world.link_server("Old Server", OTHER_MINECRAFT);
         let unselected = world.link_server("Second Server", MINECRAFT);
-        world.mark_running(running);
 
-        let outcome = apply(&world, &install("ROOTPROJ"), &[applied, running]).await;
+        let outcome = apply(&world, &install("ROOTPROJ"), &[applied, stale]).await;
 
         assert!(result_for(&outcome, applied).succeeded());
-        assert!(!result_for(&outcome, running).succeeded());
+        assert!(!result_for(&outcome, stale).succeeded());
         assert!(
             outcome.is_partial(),
             "one target failing does not make the successful ones fail"
@@ -2769,7 +2797,6 @@ Details:\n\
         for state in [
             LinkedTargetState::AlreadyCurrent,
             LinkedTargetState::NotPresent,
-            LinkedTargetState::Blocked(LinkedTargetBlock::ServerRunning),
         ] {
             assert!(!default_selection(&state, SideRequirement::Required));
         }
@@ -2786,7 +2813,6 @@ Details:\n\
                 supported: Vec::new(),
             },
             LinkedTargetBlock::ExactReleaseUnavailable,
-            LinkedTargetBlock::ServerRunning,
             LinkedTargetBlock::ServerNotInstalled,
             LinkedTargetBlock::NoLongerLinked,
             LinkedTargetBlock::ProviderUnavailable,

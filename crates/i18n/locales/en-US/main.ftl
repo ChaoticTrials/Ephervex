@@ -815,7 +815,6 @@ linked-target-server-unsupported = This mod does not support servers.
 linked-target-incompatible-minecraft = This release does not support the server's Minecraft version.
 linked-target-incompatible-loader = This release does not support the server's loader.
 linked-target-exact-release-unavailable = This exact release cannot be installed on this server.
-linked-target-server-running = Stop this server before changing its mods.
 linked-target-server-not-installed = This server has no installation yet.
 linked-target-no-longer-linked = This server is no longer linked to this instance.
 linked-target-provider-unavailable = The mod catalog could not be reached, so this server could not be checked.
