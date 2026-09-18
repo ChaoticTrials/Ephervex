@@ -12,6 +12,7 @@ pub mod presentation;
 #[allow(unsafe_code)]
 pub mod ui;
 pub mod window_aspect;
+pub mod window_events;
 
 #[cfg(test)]
 mod test_support;

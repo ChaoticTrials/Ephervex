@@ -71,9 +71,10 @@ fn main() -> Result<(), slint::PlatformError> {
     let drops = ephervex_gui::file_drop::FileDrops::default();
     if let Err(error) = slint::BackendSelector::new()
         .backend_name("winit".to_owned())
-        .with_winit_custom_application_handler(ephervex_gui::file_drop::FileDropHandler::new(
-            drops.clone(),
-        ))
+        .with_winit_custom_application_handler(
+            ephervex_gui::window_events::WindowEventHandlers::new()
+                .with(ephervex_gui::file_drop::FileDropHandler::new(drops.clone())),
+        )
         .select()
     {
         tracing::info!(%error, "dropping a modpack onto the window is unavailable here");
