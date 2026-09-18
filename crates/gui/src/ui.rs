@@ -843,11 +843,11 @@ slint::slint! {
                 HorizontalLayout {
                     padding-left: 10px; padding-right: 10px; spacing: 8px; cross-axis-alignment: center;
                     TextField { text <=> root.query; placeholder: GuiI18n.text("gui-search-retained-logs"); input-type: InputType.search; width: 230px; accepted => { root.search(root.query); } accessible-label: GuiI18n.text("gui-search-retained-logs"); }
-                    AppButton { text: GuiI18n.text("gui-find"); min-width: 62px; clicked => { root.search(root.query); } }
+                    AppButton { text: GuiI18n.text("gui-find"); clicked => { root.search(root.query); } }
                     FilterChip { text: GuiI18n.text("gui-wrap-lines"); accessible-name: GuiI18n.text("gui-wrap-lines"); selected: root.wrap-lines; clicked => { root.wrap-lines = !root.wrap-lines; } }
                     FilterChip { text: root.follow ? GuiI18n.text("gui-following") : GuiI18n.text("gui-jump-latest"); accessible-name: root.follow ? GuiI18n.text("gui-pause-following") : GuiI18n.text("gui-jump-latest"); selected: root.follow; clicked => { root.follow = !root.follow; root.follow-changed(root.follow); } }
-                    AppButton { text: GuiI18n.text("gui-copy-selection"); min-width: 104px; enabled: root.has-selection; clicked => { root.copy-selection(); } }
-                    AppButton { text: GuiI18n.text("gui-copy-retained"); min-width: 104px; enabled: root.has-content; clicked => { root.copy(); } }
+                    AppButton { text: GuiI18n.text("gui-copy-selection"); enabled: root.has-selection; clicked => { root.copy-selection(); } }
+                    AppButton { text: GuiI18n.text("gui-copy-retained"); enabled: root.has-content; clicked => { root.copy(); } }
                     Rectangle { horizontal-stretch: 1; }
                     if root.pending-lines > 0 : BodyText { text: GuiI18n.count("gui-new-log-lines", root.pending-lines); color: Theme.accent; font-size: Theme.caption-size; }
                 }

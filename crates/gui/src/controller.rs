@@ -7450,6 +7450,27 @@ mod tests {
         assert!(!source.contains("root.remove-account(account.name)"));
     }
 
+    /// `AppButton` asks for room for its whole caption and elides whatever it
+    /// is not given. The console toolbar is the one row where a pinned width
+    /// cannot be checked by eye, because its captions grow with the separately
+    /// chosen diagnostics text size, so nothing on it pins one.
+    #[test]
+    fn no_control_on_the_console_toolbar_is_pinned_to_a_width() {
+        let source = include_str!("ui.rs");
+        let start = source
+            .find("gui-search-retained-logs")
+            .expect("the console toolbar starts at its search field");
+        let end = source[start..]
+            .find("gui-new-log-lines")
+            .expect("and ends at its pending-line count")
+            + start;
+        let pinned: Vec<&str> = source[start..end]
+            .lines()
+            .filter(|line| line.contains("min-width:"))
+            .collect();
+        assert!(pinned.is_empty(), "controls pinned to a width: {pinned:#?}");
+    }
+
     #[test]
     fn context_menus_expose_entity_actions_without_redundant_inspector_deletion() {
         let source = include_str!("ui.rs");
