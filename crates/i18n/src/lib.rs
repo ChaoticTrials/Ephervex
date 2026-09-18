@@ -14,7 +14,7 @@
 //! user reads. That is what keeps the CLI, the GUI, and a future locale from
 //! having to agree on prose.
 //!
-//! [`ephervex_storage`-style `message_id()` methods]: https://github.com/ChaoticTrials/ephervex
+//! [`ephervex_storage`-style `message_id()` methods]: https://github.com/ChaoticTrials/Ephervex
 //!
 //! # Two lookup paths, deliberately
 //!

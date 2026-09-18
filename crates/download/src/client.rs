@@ -211,7 +211,7 @@ mod tests {
         assert!(
             config
                 .user_agent
-                .contains("github.com/ChaoticTrials/ephervex")
+                .contains("github.com/ChaoticTrials/Ephervex")
         );
         assert!(!config.allow_plaintext_http);
     }

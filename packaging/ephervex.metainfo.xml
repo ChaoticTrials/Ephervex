@@ -34,8 +34,8 @@
   </description>
 
   <launchable type="desktop-id">ephervex.desktop</launchable>
-  <url type="homepage">https://github.com/ChaoticTrials/ephervex</url>
-  <url type="bugtracker">https://github.com/ChaoticTrials/ephervex/issues</url>
+  <url type="homepage">https://github.com/ChaoticTrials/Ephervex</url>
+  <url type="bugtracker">https://github.com/ChaoticTrials/Ephervex/issues</url>
 
   <categories>
     <category>Game</category>

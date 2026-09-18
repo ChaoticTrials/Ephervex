@@ -14,7 +14,7 @@ pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Project URL advertised in the HTTP `User-Agent` so upstream services can
 /// identify and contact us.
-pub const APP_URL: &str = "https://github.com/ChaoticTrials/ephervex";
+pub const APP_URL: &str = "https://github.com/ChaoticTrials/Ephervex";
 
 /// The `User-Agent` sent with every outbound HTTP request.
 #[must_use]

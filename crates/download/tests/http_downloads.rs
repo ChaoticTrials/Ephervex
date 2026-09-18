@@ -794,7 +794,7 @@ async fn every_request_identifies_ephervex_and_its_project_url() {
         .expect("user-agent is ascii");
     assert_eq!(agent, ephervex_model::user_agent());
     assert!(agent.starts_with("Ephervex/"));
-    assert!(agent.contains("github.com/ChaoticTrials/ephervex"));
+    assert!(agent.contains("github.com/ChaoticTrials/Ephervex"));
 }
 
 #[tokio::test]

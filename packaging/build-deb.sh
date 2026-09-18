@@ -177,7 +177,7 @@ Installed-Size: ${INSTALLED_SIZE}
 Depends: ${DEPENDS}
 Section: games
 Priority: optional
-Homepage: https://github.com/ChaoticTrials/ephervex
+Homepage: https://github.com/ChaoticTrials/Ephervex
 Description: Disposable Minecraft instances for mod development
  Ephervex is a Linux-first Minecraft launcher and developer tool for
  short-lived bug-reproduction environments. It imports a Modrinth, CurseForge,
