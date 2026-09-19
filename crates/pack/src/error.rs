@@ -23,6 +23,7 @@ use ephervex_download::{DownloadError, UrlPolicyError};
 
 use crate::credentials::CredentialUnavailable;
 use crate::detect::PackFormat;
+use crate::mutate::MutationRecoveryIssue;
 
 /// Anything importing or reading back a pack can fail with.
 #[derive(Debug, thiserror::Error)]
@@ -327,6 +328,17 @@ pub enum PackError {
     #[error("two mods in this installation both install as `{name}`")]
     DestinationCollision { name: String },
 
+    /// The original failure was followed by a rollback failure.
+    ///
+    /// The paths in `issues` remain in launcher-owned recovery storage. They
+    /// must not be silently discarded by a later operation.
+    #[error("the mod mutation failed and its previous state could not be fully restored")]
+    RollbackIncomplete {
+        #[source]
+        source: Box<PackError>,
+        issues: Vec<MutationRecoveryIssue>,
+    },
+
     /// The user canceled the import.
     #[error("the import was canceled")]
     Canceled,
@@ -381,6 +393,7 @@ impl PackError {
             Self::ManagedVersionConflict { .. } => "error-mod-already-installed",
             Self::DestinationOccupied { .. } => "error-mod-destination-occupied",
             Self::DestinationCollision { .. } => "error-mod-destination-collision",
+            Self::RollbackIncomplete { .. } => "error-mod-rollback-incomplete",
             Self::Canceled => "error-pack-canceled",
         }
     }
@@ -408,6 +421,10 @@ impl PackError {
             | Self::DestinationOccupied { path }
             | Self::HandPlacedNotMutable { path }
             | Self::FileUnmeasurable { path, .. } => Some(path.clone()),
+            Self::RollbackIncomplete { source, issues } => issues
+                .first()
+                .map(|issue| issue.path.clone())
+                .or_else(|| source.failing_path()),
             _ => None,
         }
     }
@@ -542,6 +559,15 @@ impl PackError {
     #[must_use]
     pub const fn is_cancellation(&self) -> bool {
         matches!(self, Self::Canceled)
+    }
+
+    /// Filesystem artifacts left by an incomplete rollback, if any.
+    #[must_use]
+    pub fn recovery_issues(&self) -> &[MutationRecoveryIssue] {
+        match self {
+            Self::RollbackIncomplete { issues, .. } => issues,
+            _ => &[],
+        }
     }
 
     /// The loader a pack asked for that this launcher does not support.
@@ -700,6 +726,14 @@ mod tests {
             },
             PackError::DestinationCollision {
                 name: "mods/a.jar".to_owned(),
+            },
+            PackError::RollbackIncomplete {
+                source: Box::new(PackError::Canceled),
+                issues: vec![MutationRecoveryIssue {
+                    action: crate::mutate::MutationRecoveryAction::RestoreRetired,
+                    path: PathBuf::from("/instance/.launcher/retired/a.jar"),
+                    error_kind: std::io::ErrorKind::PermissionDenied,
+                }],
             },
             PackError::ArtifactCredentialUnavailable {
                 path: "mods/a.jar".to_owned(),

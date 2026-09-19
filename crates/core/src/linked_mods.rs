@@ -47,7 +47,7 @@ use ephervex_mod_platform::{
     Compatibility, IncompatibilityReason, InstalledPolicy, InstanceTarget, ModInstallPlan,
     ModPlatformError, ModProject, ModVersionInfo, PlannedMod, SideSupport,
 };
-use ephervex_model::{InstanceId, LoaderSelection, ModProvider, ServerId};
+use ephervex_model::{AttentionReason, InstanceId, LoaderSelection, ModProvider, ServerId};
 use ephervex_pack::{
     ArtifactFetch, ManagedMutation, ManagedMutationReport, ManagedProject, OptionalSelection,
     PackFileRecipe, PackRecipe, PackSide, SideRequirement, SourceStore,
@@ -1135,7 +1135,7 @@ impl App {
             };
         };
 
-        let result = match self.commit_target(mutation, reporter, cancel).await {
+        let result = match self.commit_target(server, mutation, reporter, cancel).await {
             Ok(report) => LinkedTargetResult::Applied(Box::new(report)),
             Err(error) => {
                 warn!(%server, %error, "a linked server kept its previous mods after a failed mutation");
@@ -1157,6 +1157,7 @@ impl App {
     /// client's installed jar — mutable instance state — is never the source.
     async fn commit_target(
         &self,
+        server: ServerId,
         mutation: TargetMutation,
         reporter: &OperationReporter,
         cancel: &CancellationToken,
@@ -1171,12 +1172,7 @@ impl App {
         } = mutation;
 
         let manager = self.artifact_manager()?;
-
-        // Anything an interrupted mutation could not clean up goes now, so the
-        // directory cannot grow across operations.
-        ephervex_pack::clear_retired(&retired_dir);
-
-        Ok(ephervex_pack::mutate_managed(ManagedMutation {
+        let result = ephervex_pack::mutate_managed(ManagedMutation {
             recipe: &mut recipe,
             upserts: &upserts,
             removals: &removals,
@@ -1194,7 +1190,19 @@ impl App {
                 cancel,
             },
         })
-        .await?)
+        .await;
+
+        let recovery_needed = match &result {
+            Ok(report) => !report.recovery_issues.is_empty(),
+            Err(error) => !error.recovery_issues().is_empty(),
+        };
+        if recovery_needed {
+            let mut record = self.server(server)?;
+            record.add_attention(AttentionReason::InterruptedMutation);
+            self.registry().update_server(&mut record)?;
+        }
+
+        Ok(result?)
     }
 }
 

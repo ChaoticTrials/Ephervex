@@ -54,7 +54,7 @@ use ephervex_mod_platform::{
     AnnotatedVersion, InstalledPolicy, InstanceTarget, ModInstallPlan, ModProject, PlanWarning,
     PlannedMod, annotate, newest_compatible,
 };
-use ephervex_model::{InstanceId, ModOrigin, ModProvider};
+use ephervex_model::{AttentionReason, InstanceId, ModOrigin, ModProvider};
 use ephervex_pack::{
     ArtifactFetch, ManagedMutation, ManagedProject, ModIdentity, PackError, PackFileRecipe,
     PackRecipe, RecordedMod, SourceStore,
@@ -1021,11 +1021,7 @@ impl App {
         let manager = self.artifact_manager()?;
 
         let retired = ephervex_storage::metadata::retired_dir(&context.record.root);
-        // Anything an interrupted mutation could not clean up goes now, so the
-        // directory cannot grow across operations.
-        ephervex_pack::clear_retired(&retired);
-
-        context.report = ephervex_pack::mutate_managed(ManagedMutation {
+        let result = ephervex_pack::mutate_managed(ManagedMutation {
             recipe: &mut context.recipe,
             upserts,
             removals,
@@ -1043,7 +1039,20 @@ impl App {
                 cancel,
             },
         })
-        .await?;
+        .await;
+
+        let recovery_needed = match &result {
+            Ok(report) => !report.recovery_issues.is_empty(),
+            Err(error) => !error.recovery_issues().is_empty(),
+        };
+        if recovery_needed {
+            context
+                .record
+                .add_attention(AttentionReason::InterruptedMutation);
+            self.registry().update_client(&mut context.record)?;
+        }
+
+        context.report = result?;
         Ok(())
     }
 }

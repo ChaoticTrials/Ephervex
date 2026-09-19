@@ -87,8 +87,8 @@ pub use managed::{
     SHADERPACKS_DIR, disabled_path, install_managed,
 };
 pub use mutate::{
-    ManagedMutation, ManagedMutationReport, ManagedProject, ReplacedMod, clear_retired,
-    mutate_managed, projected,
+    ManagedMutation, ManagedMutationReport, ManagedProject, MutationRecoveryAction,
+    MutationRecoveryIssue, ReplacedMod, mutate_managed, projected,
 };
 pub use path::{RESERVED_METADATA_DIR, safe_file_name};
 pub use policy::PackPolicy;

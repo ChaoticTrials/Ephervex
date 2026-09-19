@@ -118,6 +118,11 @@ pub struct ManagedMutationReport {
     pub unchanged: Vec<PathBuf>,
     pub reused_from_cache: usize,
     pub bytes: u64,
+    /// Cleanup that could not finish after the new recipe was published.
+    ///
+    /// The mutation itself succeeded, but these paths remain in
+    /// launcher-owned recovery storage and need explicit reconciliation.
+    pub recovery_issues: Vec<MutationRecoveryIssue>,
 }
 
 impl ManagedMutationReport {
@@ -129,6 +134,22 @@ impl ManagedMutationReport {
             || !self.removed.is_empty()
             || !self.repaired.is_empty()
     }
+}
+
+/// Which compensating filesystem action could not finish.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MutationRecoveryAction {
+    RemoveCreated,
+    RestoreRetired,
+    RemoveRetired,
+}
+
+/// One durable artifact left by an incomplete rollback or cleanup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MutationRecoveryIssue {
+    pub action: MutationRecoveryAction,
+    pub path: PathBuf,
+    pub error_kind: std::io::ErrorKind,
 }
 
 /// One mod that moved from one version to another.
@@ -238,8 +259,15 @@ pub async fn mutate_managed(request: ManagedMutation<'_>) -> PackResult<ManagedM
         .and_then(|()| publish(recipe, upserts, &actions, removals, store));
 
     if let Err(error) = outcome {
-        journal.undo();
-        return Err(error);
+        let issues = journal.undo();
+        return if issues.is_empty() {
+            Err(error)
+        } else {
+            Err(PackError::RollbackIncomplete {
+                source: Box::new(error),
+                issues,
+            })
+        };
     }
 
     for retirement in &retirements {
@@ -249,9 +277,9 @@ pub async fn mutate_managed(request: ManagedMutation<'_>) -> PackResult<ManagedM
     }
 
     // The recipe is on disk and agrees with `mods/`. What is left in the
-    // retired directory is scratch the game cannot see, so failing to delete it
-    // is worth a log line and nothing more.
-    journal.discard();
+    // retired directory is scratch the game cannot see, but a failure is part
+    // of the typed outcome and stays visible to startup reconciliation.
+    report.recovery_issues = journal.discard();
 
     info!(
         installed = report.installed.len(),
@@ -476,7 +504,8 @@ impl Journal {
     /// New files go first and retired ones come back second, which is the only
     /// order that works when a replacement reused its predecessor's file name:
     /// restoring first would land on a path the new jar still occupies.
-    fn undo(&mut self) {
+    fn undo(&mut self) -> Vec<MutationRecoveryIssue> {
+        let mut issues = Vec::new();
         for path in self.created.drain(..) {
             if let Err(error) = std::fs::remove_file(&path) {
                 warn!(
@@ -484,6 +513,11 @@ impl Journal {
                     %error,
                     "could not remove a file left behind by a failed mutation"
                 );
+                issues.push(MutationRecoveryIssue {
+                    action: MutationRecoveryAction::RemoveCreated,
+                    path,
+                    error_kind: error.kind(),
+                });
             }
         }
         for moved in self.retired.drain(..) {
@@ -493,12 +527,19 @@ impl Journal {
                     %error,
                     "could not restore a mod set aside by a failed mutation"
                 );
+                issues.push(MutationRecoveryIssue {
+                    action: MutationRecoveryAction::RestoreRetired,
+                    path: moved.to,
+                    error_kind: error.kind(),
+                });
             }
         }
+        issues
     }
 
     /// Drops the retired files for good, after the recipe has been published.
-    fn discard(&self) {
+    fn discard(&self) -> Vec<MutationRecoveryIssue> {
+        let mut issues = Vec::new();
         for moved in &self.retired {
             if let Err(error) = std::fs::remove_file(&moved.to) {
                 warn!(
@@ -506,8 +547,14 @@ impl Journal {
                     %error,
                     "a replaced mod is still in the instance's retired directory"
                 );
+                issues.push(MutationRecoveryIssue {
+                    action: MutationRecoveryAction::RemoveRetired,
+                    path: moved.to.clone(),
+                    error_kind: error.kind(),
+                });
             }
         }
+        issues
     }
 }
 
@@ -737,31 +784,6 @@ fn version_of(file: &PackFileRecipe) -> Option<&str> {
         .and_then(|identity| identity.version_id.as_deref())
 }
 
-/// Removes anything an earlier mutation could not clean up.
-///
-/// Called before a mutation rather than after, so a crash between publishing a
-/// recipe and deleting a retired file does not leave the directory growing
-/// forever. Failures are logged: scratch the game cannot see is never a reason
-/// to refuse an operation.
-pub fn clear_retired(retired_dir: &Path) {
-    let Ok(entries) = std::fs::read_dir(retired_dir) else {
-        return;
-    };
-    let mut left = 0usize;
-    for entry in entries.flatten() {
-        if std::fs::remove_file(entry.path()).is_err() {
-            left += 1;
-        }
-    }
-    if left > 0 {
-        warn!(
-            path = %retired_dir.display(),
-            left,
-            "some replaced mods could not be cleared from the retired directory"
-        );
-    }
-}
-
 /// The mods an instance would have if this mutation succeeded, without doing it.
 ///
 /// Exists so a caller can show the outcome before committing to it, using the
@@ -804,4 +826,55 @@ pub fn projected(
         }
     }
     projected
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used)]
+
+    use super::*;
+
+    #[test]
+    fn rollback_failures_are_returned_as_typed_recovery_issues() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let created_directory = temporary.path().join("created-as-directory");
+        std::fs::create_dir(&created_directory).expect("created directory");
+        let absent_retired = temporary.path().join("retired-but-absent.jar");
+        let restore_target = temporary.path().join("mods/original.jar");
+        let mut journal = Journal {
+            created: vec![created_directory.clone()],
+            retired: vec![Moved {
+                from: restore_target,
+                to: absent_retired.clone(),
+            }],
+        };
+
+        let issues = journal.undo();
+
+        assert_eq!(issues.len(), 2);
+        assert_eq!(issues[0].action, MutationRecoveryAction::RemoveCreated);
+        assert_eq!(issues[0].path, created_directory);
+        assert_eq!(issues[1].action, MutationRecoveryAction::RestoreRetired);
+        assert_eq!(issues[1].path, absent_retired);
+    }
+
+    #[test]
+    fn post_commit_cleanup_failures_are_part_of_the_reportable_outcome() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let retired_directory = temporary.path().join("retired-as-directory");
+        std::fs::create_dir(&retired_directory).expect("retired directory");
+        let journal = Journal {
+            created: Vec::new(),
+            retired: vec![Moved {
+                from: temporary.path().join("mods/original.jar"),
+                to: retired_directory.clone(),
+            }],
+        };
+
+        let issues = journal.discard();
+
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].action, MutationRecoveryAction::RemoveRetired);
+        assert_eq!(issues[0].path, retired_directory);
+    }
 }

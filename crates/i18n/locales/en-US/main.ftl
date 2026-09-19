@@ -1008,6 +1008,9 @@ error-mod-destination-occupied = A file Ephervex did not install is already in t
 error-mod-destination-collision = Two of these mods install under the same file name.
 .action = { $name } is claimed twice, so installing them would leave only one. Install them separately, or leave one out.
 
+error-mod-rollback-incomplete = The mod change failed and the previous files could not be fully restored.
+.action = Review the recovery files at { $path } before changing this instance again.
+
 # Changing an installed mod's version is a mod update, which this build does not
 # implement. Replacing the file would delete a jar the user did not ask about.
 error-mod-already-installed = That mod is already installed at a different version.
