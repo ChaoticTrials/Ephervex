@@ -629,8 +629,10 @@ The desktop application turns one mod off by asking what else that affects and
 then taking one of three paths: nothing affected applies straight away, an
 affected set with the confirmation wanted opens a dialog and changes nothing
 yet, and an affected set with the confirmation turned off applies the whole
-cascade and reports it in a toast. Deleting a jar asks the same question,
-because the loader sees the same absence either way. The dialog carries the
+cascade and reports it in a toast. Deleting a jar takes the same three paths,
+because the loader sees the same absence either way: the confirmation it raises
+is about what else goes with the jar, so a jar nothing needs is simply deleted
+rather than confirmed twice. The dialog carries the
 preference's own switch, so the decision is recorded where it is made, and the
 General settings page carries the same one, so it can be taken back: an answer
 given inside a dialog that only ever appears while the answer is still yes

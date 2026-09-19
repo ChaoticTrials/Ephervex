@@ -1834,6 +1834,10 @@ gui-modal-delete-mod = Delete Mod
 gui-delete-mod-detail = Delete { $value } from the mods folder?
 gui-delete-mod-note = You added this JAR yourself, so Ephervex cannot fetch it again. The file is removed from disk.
 gui-mod-deleted = Deleted { $value }.
+gui-mod-deleted-with-dependents = { $count ->
+    [one] Deleted { $value } and one mod that required it.
+   *[other] Deleted { $value } and { $count } mods that required it.
+}
 gui-modal-mod-clash = Name Already Taken
 gui-mod-clash-detail = The mods folder already has a file called { $value }.
 gui-mod-clash-disabled = The one already there is turned off. Replacing it turns the mod back on.

@@ -2502,17 +2502,7 @@ fn run_worker(
                 Err(error) => send_error(&events, &error),
             },
             Command::QueryDeleteImpact { host, path, name } => {
-                match app.dependents_of(host, &path) {
-                    Ok(mut impact) => {
-                        // The row's own label, which carries a provider title
-                        // the durable read does not have.
-                        impact.target.name = name;
-                        let view =
-                            ModImpactPresentation::new(host_kind(host), &host.id(), true, &impact);
-                        let _ = events.send(Event::ModImpact(Box::new(view)));
-                    }
-                    Err(error) => send_error(&events, &error),
-                }
+                delete_mod(&app, host, &path, name, &events, &refreshed_mods);
             }
             Command::OpenLiveLog(source) => {
                 open_live_log(&app, source, &events, &live_log_generation);
@@ -5980,6 +5970,77 @@ fn set_mod_enabled(
     match app.set_mods_enabled(host, &changes) {
         Ok(_) => send_host_mods(app, host, events, refreshed, false),
         Err(error) => send_error(events, &error),
+    }
+}
+
+/// Takes one mod's jar off disk, asking first what else that takes with it.
+///
+/// The same three outcomes a disable has, decided the same way, because the
+/// loader sees the same absence either way. Nothing else affected: delete it,
+/// which is what the confirmation the user just gave was for. Something
+/// affected and the confirmation wanted: put it in front of them and delete
+/// nothing yet. Something affected and the confirmation turned off: take the
+/// jars that needed it too and say so, because leaving them behind would leave
+/// the instance holding mods that cannot load.
+fn delete_mod(
+    app: &App,
+    host: ModHost,
+    path: &Path,
+    name: String,
+    events: &Sender<Event>,
+    refreshed: &RefreshedHosts,
+) {
+    let impact = match app.dependents_of(host, path) {
+        Ok(mut impact) => {
+            // The row's own label, which carries a provider title the durable
+            // read does not have.
+            impact.target.name = name;
+            impact
+        }
+        Err(error) => {
+            send_error(events, &error);
+            return;
+        }
+    };
+    let view = ModImpactPresentation::new(host_kind(host), &host.id(), true, &impact);
+    if !view.is_silent() && app.warn_on_dependency_impact() {
+        let _ = events.send(Event::ModImpact(Box::new(view)));
+        return;
+    }
+
+    let taken = view.breaks.len();
+    let paths: Vec<PathBuf> = if view.has_cascade() {
+        view.cascade_paths()
+            .into_iter()
+            .map(PathBuf::from)
+            .collect()
+    } else {
+        vec![path.to_path_buf()]
+    };
+    match app.delete_mod_files(host, &paths) {
+        Ok(_) => {
+            let _ = events.send(Event::CloseModal);
+            let file = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let _ = events.send(Event::Toast {
+                message: if taken > 0 {
+                    lookup_args(
+                        "gui-mod-deleted-with-dependents",
+                        [
+                            ("value", Arg::from(file.as_str())),
+                            ("count", Arg::from(i64::try_from(taken).unwrap_or(0))),
+                        ],
+                    )
+                } else {
+                    localized_value("gui-mod-deleted", &file)
+                },
+                error: false,
+            });
+            send_host_mods(app, host, events, refreshed, false);
+        }
+        Err(error) => send_modal_error(events, &error),
     }
 }
 
