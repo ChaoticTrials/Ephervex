@@ -23,7 +23,6 @@
 //! leaves a directory that startup reconciliation will re-index; the reverse
 //! order would leave an index row pointing at nothing.
 
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -377,37 +376,11 @@ fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), MetadataError>
         source: std::io::Error::other(error),
     })?;
 
-    // Same rename dance as the configuration file: an interrupted write must
-    // not be able to turn a recoverable instance into an unparseable one.
-    let temporary = path.with_extension("json.tmp");
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(&temporary)
+    crate::atomic::write_bytes_atomic(path, &body, crate::atomic::AtomicWriteOptions::default())
         .map_err(|source| MetadataError::Unwritable {
-            path: temporary.clone(),
+            path: path.to_path_buf(),
             source,
-        })?;
-    file.write_all(&body)
-        .and_then(|()| file.sync_all())
-        .map_err(|source| MetadataError::Unwritable {
-            path: temporary.clone(),
-            source,
-        })?;
-    std::fs::rename(&temporary, path).map_err(|source| MetadataError::Unwritable {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    if let Some(parent) = path.parent() {
-        std::fs::File::open(parent)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|source| MetadataError::Unwritable {
-                path: parent.to_path_buf(),
-                source,
-            })?;
-    }
-    Ok(())
+        })
 }
 
 #[cfg(test)]

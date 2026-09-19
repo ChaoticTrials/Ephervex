@@ -122,12 +122,12 @@ impl SourceStore {
             source: std::io::Error::other(error),
         })?;
 
-        let temporary = path.with_extension("json.tmp");
-        std::fs::write(&temporary, body).map_err(|source| PackError::Unwritable {
-            path: temporary.clone(),
-            source,
-        })?;
-        std::fs::rename(&temporary, &path).map_err(|source| PackError::Unwritable {
+        ephervex_storage::write_bytes_atomic(
+            &path,
+            &body,
+            ephervex_storage::AtomicWriteOptions::default(),
+        )
+        .map_err(|source| PackError::Unwritable {
             path: path.clone(),
             source,
         })?;

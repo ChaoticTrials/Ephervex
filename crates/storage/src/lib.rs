@@ -27,6 +27,7 @@
 //! (ADR 0004), and [`Config::save`] refuses to write anything whose key name
 //! looks like one.
 
+pub mod atomic;
 pub mod config;
 pub(crate) mod copy;
 pub mod diagnostics;
@@ -43,6 +44,7 @@ pub(crate) mod relocate;
 #[cfg(test)]
 mod test_support;
 
+pub use atomic::{AtomicWriteOptions, sync_parent, write_atomic, write_bytes_atomic};
 pub use config::{
     AccountConfig, AccountLookup, ApiConfig, ApplicationColorScheme, ApplicationDisplayConfig,
     ApplicationTextScale, ArtifactCacheLimitMode, CONFIG_SCHEMA_VERSION, CacheConfig, Config,

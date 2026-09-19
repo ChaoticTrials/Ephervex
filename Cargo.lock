@@ -1779,6 +1779,7 @@ dependencies = [
  "ephervex-download",
  "ephervex-i18n",
  "ephervex-model",
+ "ephervex-storage",
  "hex",
  "reqwest",
  "serde",

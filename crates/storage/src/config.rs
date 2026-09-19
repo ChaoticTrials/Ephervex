@@ -14,7 +14,6 @@
 //! refuses to write a key whose name looks like a credential.
 
 use std::collections::BTreeMap;
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -896,49 +895,15 @@ impl Config {
     /// leaves the previous configuration intact instead of a truncated one.
     pub fn save_to(&self, path: &Path) -> Result<(), ConfigError> {
         let text = self.to_toml_string()?;
-        let mut temporary_name = path.as_os_str().to_os_string();
-        temporary_name.push(format!(".tmp.{}", uuid::Uuid::new_v4()));
-        let temporary = PathBuf::from(temporary_name);
-
-        let mut options = std::fs::OpenOptions::new();
-        options.create_new(true).write(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.mode(0o600);
-        }
-        let mut file = options
-            .open(&temporary)
-            .map_err(|source| ConfigError::Unwritable {
-                path: temporary.clone(),
-                source,
-            })?;
-        let result = file
-            .write_all(text.as_bytes())
-            .and_then(|()| file.sync_all())
-            .map_err(|source| ConfigError::Unwritable {
-                path: temporary.clone(),
-                source,
-            })
-            .and_then(|()| {
-                std::fs::rename(&temporary, path).map_err(|source| ConfigError::Unwritable {
-                    path: path.to_path_buf(),
-                    source,
-                })
-            });
-        if result.is_err() {
-            let _ = std::fs::remove_file(&temporary);
-        }
-        result?;
-        if let Some(parent) = path.parent() {
-            std::fs::File::open(parent)
-                .and_then(|directory| directory.sync_all())
-                .map_err(|source| ConfigError::Unwritable {
-                    path: parent.to_path_buf(),
-                    source,
-                })?;
-        }
-        Ok(())
+        crate::atomic::write_bytes_atomic(
+            path,
+            text.as_bytes(),
+            crate::atomic::AtomicWriteOptions::private(),
+        )
+        .map_err(|source| ConfigError::Unwritable {
+            path: path.to_path_buf(),
+            source,
+        })
     }
 
     /// The configured persistent instance root, or `None` for the XDG default.
