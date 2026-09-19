@@ -5090,6 +5090,11 @@ fn register_general_settings(ui: &AppWindow, commands: &Sender<Command>) {
     ui.on_set_dependency_warning(move |warn| {
         send(&sender, Command::SaveDependencyWarning(warn));
     });
+
+    let sender = commands.clone();
+    ui.on_set_dependency_following(move |follow| {
+        send(&sender, Command::SaveDependencyFollowing(follow));
+    });
 }
 
 fn parse_java_memory(minimum: &str, maximum: &str) -> Result<(u32, u32), String> {
@@ -6077,6 +6082,7 @@ fn apply_snapshot(
         eula,
     } = snapshot;
     ui.set_show_linked_servers(settings.show_linked_servers);
+    ui.set_follow_mod_dependencies(settings.follow_mod_dependencies);
     ui.set_warn_on_dependency_impact(settings.warn_on_dependency_impact);
     apply_favorite_versions(ui, settings.favorite_minecraft_versions.clone());
     ui.set_make_default_account_operator(settings.make_default_account_operator);

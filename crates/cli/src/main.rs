@@ -3440,9 +3440,10 @@ fn run_mod_delete(
     only_this: bool,
     json: bool,
 ) -> anyhow::Result<()> {
+    let policy = app.dependency_policy();
     let impact = app.dependents_of(host, path)?;
-    let cascade = !only_this && (with_dependents || !app.warn_on_dependency_impact());
-    if !only_this && !cascade && !impact.breaks.is_empty() {
+    let cascade = !only_this && (with_dependents || (policy.cascades() && !policy.asks()));
+    if policy.asks() && !only_this && !cascade && !impact.breaks.is_empty() {
         print_dependency_impact(&impact, json);
         anyhow::bail!(
             "{} other mods need this one. Pass --with-dependents to delete their jars too, \
@@ -3480,8 +3481,11 @@ fn print_deleted_mods(deleted: &[PathBuf], json: bool) {
 /// Refusing by default is what a command with no prompt can do instead of
 /// asking. It is not a warning that scrolled past: nothing is changed, and the
 /// exit status says so, so a script cannot walk into a mod set that does not
-/// load. The refusal is skipped when the user has turned the confirmation off
-/// in settings, which is the same rule the desktop application follows.
+/// load. Which of those happens is the recorded dependency policy, the same one
+/// the desktop application follows: it refuses while changes are confirmed,
+/// carries the dependents along while they are applied, and turns off the one
+/// named mod while relations are not followed at all. A flag given here is an
+/// instruction for this run and wins over all three.
 fn run_mod_disable(
     app: &App,
     host: ModHost,
@@ -3490,9 +3494,10 @@ fn run_mod_disable(
     only_this: bool,
     json: bool,
 ) -> anyhow::Result<()> {
+    let policy = app.dependency_policy();
     let impact = app.dependents_of(host, path)?;
-    let cascade = !only_this && (with_dependents || !app.warn_on_dependency_impact());
-    if !only_this && !cascade && !impact.breaks.is_empty() {
+    let cascade = !only_this && (with_dependents || (policy.cascades() && !policy.asks()));
+    if policy.asks() && !only_this && !cascade && !impact.breaks.is_empty() {
         print_dependency_impact(&impact, json);
         anyhow::bail!(
             "{} other mods need this one. Pass --with-dependents to turn them off too, \
@@ -3528,9 +3533,10 @@ fn run_mod_enable(
     only_this: bool,
     json: bool,
 ) -> anyhow::Result<()> {
+    let policy = app.dependency_policy();
     let needs = app.dependencies_of(host, path)?;
-    let cascade = !only_this && (with_dependencies || !app.warn_on_dependency_impact());
-    if !only_this && !cascade && !needs.disabled.is_empty() {
+    let cascade = !only_this && (with_dependencies || (policy.cascades() && !policy.asks()));
+    if policy.asks() && !only_this && !cascade && !needs.disabled.is_empty() {
         print_required_mods(&needs, json);
         anyhow::bail!(
             "this mod needs {} others that are turned off. Pass --with-dependencies to turn \
@@ -3550,7 +3556,7 @@ fn run_mod_enable(
     }
     changes.push((path.to_path_buf(), true));
     print_mod_states(&app.set_mods_enabled(host, &changes)?, json);
-    if !needs.absent.is_empty() {
+    if policy.cascades() {
         for entry in &needs.absent {
             eprintln!("still missing: {} is not installed here", entry.name);
         }

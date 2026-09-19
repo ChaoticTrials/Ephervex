@@ -392,32 +392,11 @@ fn a_deleted_jar_leaves_a_record_that_still_wants_it() {
 fn turning_the_warning_off_applies_the_cascade_without_being_asked() {
     let sandbox = Sandbox::new();
     let (id, mods) = sandbox.instance_with_a_shared_library();
-    // Reading a configuration never writes one, so a setting change is what
-    // puts the file on disk for this test to edit.
-    assert!(
-        sandbox
-            .run(&["mod", "catalog", "modrinth"])
-            .status
-            .success()
+    set_config(
+        &sandbox,
+        "warn_on_dependency_impact = true",
+        "warn_on_dependency_impact = false",
     );
-    let config = sandbox
-        .base()
-        .join("config")
-        .join("ephervex")
-        .join("config.toml");
-    let document = std::fs::read_to_string(&config).expect("config");
-    assert!(
-        document.contains("warn_on_dependency_impact = true"),
-        "warning is the default a saved configuration records: {document}"
-    );
-    std::fs::write(
-        &config,
-        document.replace(
-            "warn_on_dependency_impact = true",
-            "warn_on_dependency_impact = false",
-        ),
-    )
-    .expect("write config");
 
     let output = sandbox.run(&["mod", "disable", "--instance", &id, "mods/LibX.jar"]);
     assert!(
@@ -435,4 +414,94 @@ fn turning_the_warning_off_applies_the_cascade_without_being_asked() {
         ],
         "leaving the dependents loading would be the broken set the warning exists to prevent"
     );
+}
+
+#[test]
+fn not_following_relations_turns_off_exactly_the_mod_that_was_named() {
+    // Arranging a mod set by hand is a thing this launcher is for, and a
+    // launcher that keeps carrying other mods along is in the way of it.
+    let sandbox = Sandbox::new();
+    let (id, mods) = sandbox.instance_with_a_shared_library();
+    set_config(
+        &sandbox,
+        "follow_mod_dependencies = true",
+        "follow_mod_dependencies = false",
+    );
+
+    let output = sandbox.run(&["mod", "disable", "--instance", &id, "mods/LibX.jar"]);
+    assert!(
+        output.status.success(),
+        "there is nothing to refuse when nothing else is being changed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        jars(&mods),
+        [
+            "LibX.jar.disabled",
+            "SkyGUIs.jar",
+            "SkyblockBuilder.jar",
+            "UtilitiX.jar",
+        ],
+        "only the named mod was turned off"
+    );
+}
+
+#[test]
+fn an_explicit_flag_still_carries_the_dependents_when_relations_are_not_followed() {
+    // The preference is what happens by default. A flag given on this command
+    // is an instruction for this run.
+    let sandbox = Sandbox::new();
+    let (id, mods) = sandbox.instance_with_a_shared_library();
+    set_config(
+        &sandbox,
+        "follow_mod_dependencies = true",
+        "follow_mod_dependencies = false",
+    );
+
+    assert!(
+        sandbox
+            .run(&[
+                "mod",
+                "disable",
+                "--instance",
+                &id,
+                "mods/LibX.jar",
+                "--with-dependents",
+            ])
+            .status
+            .success()
+    );
+    assert_eq!(
+        jars(&mods),
+        [
+            "LibX.jar.disabled",
+            "SkyGUIs.jar.disabled",
+            "SkyblockBuilder.jar.disabled",
+            "UtilitiX.jar.disabled",
+        ],
+    );
+}
+
+/// Rewrites one recorded setting, through a save the launcher itself made.
+///
+/// Reading a configuration never writes one, so a setting change is what puts
+/// the file on disk to edit.
+fn set_config(sandbox: &Sandbox, from: &str, to: &str) {
+    assert!(
+        sandbox
+            .run(&["mod", "catalog", "modrinth"])
+            .status
+            .success()
+    );
+    let config = sandbox
+        .base()
+        .join("config")
+        .join("ephervex")
+        .join("config.toml");
+    let document = std::fs::read_to_string(&config).expect("config");
+    assert!(
+        document.contains(from),
+        "expected {from} in the saved configuration: {document}"
+    );
+    std::fs::write(&config, document.replace(from, to)).expect("write config");
 }

@@ -345,7 +345,20 @@ pub struct ModsConfig {
     /// [`DefaultModCatalog`], which can say "not this build" instead of
     /// guessing.
     pub default_catalog: String,
+    /// Whether turning a mod off, on, or deleting its jar acts on the mods
+    /// that require it.
+    ///
+    /// Off, every switch changes exactly the mod it belongs to and nothing
+    /// else. The relations stay recorded and stay on display: what this
+    /// decides is whether a change follows them, not whether they are known.
+    /// It exists because arranging a mod set by hand is a thing this launcher
+    /// is for, and a launcher that keeps adding mods back is in the way of it.
+    #[serde(default = "follow_mod_dependencies_default")]
+    pub follow_mod_dependencies: bool,
     /// Whether a mod change that affects other mods stops to be confirmed.
+    ///
+    /// Read only when [`Self::follow_mod_dependencies`] is on: with nothing
+    /// else being changed there is nothing to confirm.
     ///
     /// Off does not mean the change is made blind. The consequence is still
     /// worked out and still reported; what it stops doing is blocking. A
@@ -362,6 +375,11 @@ pub struct ModsConfig {
 
 /// Warning about a mod change that affects other mods is the default.
 const fn warn_on_dependency_impact_default() -> bool {
+    true
+}
+
+/// Acting on what a mod change affects is the default.
+const fn follow_mod_dependencies_default() -> bool {
     true
 }
 
@@ -445,6 +463,7 @@ impl Default for ModsConfig {
     fn default() -> Self {
         Self {
             default_catalog: String::new(),
+            follow_mod_dependencies: follow_mod_dependencies_default(),
             warn_on_dependency_impact: warn_on_dependency_impact_default(),
             unknown: toml::Table::new(),
         }

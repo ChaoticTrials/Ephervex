@@ -3174,9 +3174,11 @@ slint::slint! {
         in-out property <bool> java-auto-detect: true;
         in-out property <bool> java-auto-download: true;
         in-out property <bool> show-linked-servers: false;
-        // Whether a mod change that affects other mods stops to be confirmed.
-        // Written from the stored value, never from the click, so a save that
-        // fails leaves the switch showing what is actually recorded.
+        // Whether a mod change acts on the mods its relations name, and
+        // whether it stops to be confirmed when it does. Both written from the
+        // stored value, never from the click, so a save that fails leaves the
+        // switch showing what is actually recorded.
+        in-out property <bool> follow-mod-dependencies: true;
         in-out property <bool> warn-on-dependency-impact: true;
         in-out property <bool> make-default-account-operator: true;
         in-out property <int> operator-permission-level: 4;
@@ -3345,6 +3347,7 @@ slint::slint! {
         // Applied on the click rather than on Save, like the other remembered
         // answers on this screen: it is one recorded decision, not a form.
         callback set-dependency-warning(bool);
+        callback set-dependency-following(bool);
         // What the Java settings page asks for when it opens, against the
         // cached inventory. `refresh-java` is the page's own button, which
         // rescans because the cache cannot notice a JDK installed since.
@@ -3933,9 +3936,22 @@ slint::slint! {
                                 SettingCard {
                                     width: min(parent.width, 520px);
                                     vertical-stretch: 0;
+                                    title: GuiI18n.text("gui-follow-dependencies");
+                                    detail: GuiI18n.text("gui-follow-dependencies-detail");
+                                    Toggle { accessible-name: GuiI18n.text("gui-follow-dependencies"); sets-its-own-position: false; checked: root.follow-mod-dependencies; toggled(value) => { root.set-dependency-following(value); } }
+                                }
+                                // Greyed rather than hidden while nothing is
+                                // being carried along: with no other mod
+                                // changing, there is nothing for a
+                                // confirmation to be about, and a row that
+                                // vanished would read as a setting that was
+                                // lost.
+                                SettingCard {
+                                    width: min(parent.width, 520px);
+                                    vertical-stretch: 0;
                                     title: GuiI18n.text("gui-dependency-warning");
-                                    detail: GuiI18n.text("gui-dependency-warning-detail");
-                                    Toggle { accessible-name: GuiI18n.text("gui-dependency-warning"); sets-its-own-position: false; checked: root.warn-on-dependency-impact; toggled(value) => { root.set-dependency-warning(value); } }
+                                    detail: root.follow-mod-dependencies ? GuiI18n.text("gui-dependency-warning-detail") : GuiI18n.text("gui-dependency-warning-unused");
+                                    Toggle { accessible-name: GuiI18n.text("gui-dependency-warning"); enabled: root.follow-mod-dependencies; sets-its-own-position: false; checked: root.warn-on-dependency-impact && root.follow-mod-dependencies; toggled(value) => { root.set-dependency-warning(value); } }
                                 }
                                 // Whether the scheme is claimed at all is settled by
                                 // installing, not here (ADR 0028, ADR 0029). What this page

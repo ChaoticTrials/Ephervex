@@ -331,6 +331,8 @@ pub enum Command {
     /// Sent from the dialog's own "do not ask again", so the decision is
     /// recorded where the user made it rather than only in settings.
     SaveDependencyWarning(bool),
+    /// Stop acting on what a mod change affects, or start again.
+    SaveDependencyFollowing(bool),
     /// Ask each catalog what this host's mods need, and record the answers.
     ///
     /// `reload` is the mod whose own page is open, so the answer it is showing
@@ -669,6 +671,8 @@ pub struct SettingsData {
     /// Which color scheme the interface paints in, as its stable identifier.
     pub color_scheme: String,
     pub show_linked_servers: bool,
+    /// Whether a mod change acts on the mods its relations name.
+    pub follow_mod_dependencies: bool,
     /// Whether a mod change that affects other mods stops to be confirmed.
     pub warn_on_dependency_impact: bool,
     /// Minecraft releases the user pinned, in the order they should be offered.
@@ -2461,6 +2465,13 @@ fn run_worker(
                     send_snapshot(&app, &events);
                 }
             }
+            Command::SaveDependencyFollowing(follow) => {
+                if let Err(error) = app.set_follow_mod_dependencies(follow) {
+                    send_error(&events, &error);
+                } else {
+                    send_snapshot(&app, &events);
+                }
+            }
             Command::LoadModRelations { host, path } => {
                 send_mod_relations(&app, host, &path, &events);
             }
@@ -3135,6 +3146,7 @@ fn application_settings(app: &App) -> Result<SettingsData, CoreError> {
         technical_text_size_pixels: display.technical_text_size.pixels(),
         color_scheme: display.color_scheme.as_str().to_owned(),
         show_linked_servers: display.show_linked_servers,
+        follow_mod_dependencies: app.follow_mod_dependencies(),
         warn_on_dependency_impact: app.warn_on_dependency_impact(),
         favorite_minecraft_versions: app.favorite_minecraft_versions().to_vec(),
         make_default_account_operator: server.make_default_account_operator,
@@ -5889,13 +5901,14 @@ const fn host_kind(host: ModHost) -> &'static str {
 
 /// Turns one mod on or off, asking first what else the change affects.
 ///
-/// Three outcomes, and which one happens is decided here rather than in the
-/// markup. Nothing else affected: apply it. Something affected and the
-/// confirmation wanted: send the answer up and change nothing yet. Something
-/// affected and the confirmation turned off: apply the whole cascade and say
-/// what happened in a toast, because somebody who turned the question off has
-/// already agreed to it and leaving the other mods behind would hand them a
-/// set that does not load.
+/// Which of the outcomes happens is decided here rather than in the markup.
+/// Nothing else affected: apply it. Something affected and the confirmation
+/// wanted: send the answer up and change nothing yet. Something affected and
+/// the confirmation turned off: apply the whole cascade and say what happened
+/// in a toast, because somebody who turned the question off has already agreed
+/// to it and leaving the other mods behind would hand them a set that does not
+/// load. Relations not followed at all: change this mod, and say nothing about
+/// any other.
 fn set_mod_enabled(
     app: &App,
     host: ModHost,
@@ -5904,7 +5917,15 @@ fn set_mod_enabled(
     events: &Sender<Event>,
     refreshed: &RefreshedHosts,
 ) {
-    let warn = app.warn_on_dependency_impact();
+    let policy = app.dependency_policy();
+    if !policy.cascades() {
+        match app.set_mods_enabled(host, &[(path.to_path_buf(), enabled)]) {
+            Ok(_) => send_host_mods(app, host, events, refreshed, false),
+            Err(error) => send_error(events, &error),
+        }
+        return;
+    }
+    let warn = policy.asks();
     let changes: Vec<(PathBuf, bool)> = if enabled {
         match app.dependencies_of(host, path) {
             Ok(needs) => {
@@ -5990,20 +6011,23 @@ fn delete_mod(
     events: &Sender<Event>,
     refreshed: &RefreshedHosts,
 ) {
-    let impact = match app.dependents_of(host, path) {
-        Ok(mut impact) => {
-            // The row's own label, which carries a provider title the durable
-            // read does not have.
-            impact.target.name = name;
-            impact
-        }
-        Err(error) => {
-            send_error(events, &error);
-            return;
-        }
+    let policy = app.dependency_policy();
+    let view = if policy.cascades() {
+        let mut impact = match app.dependents_of(host, path) {
+            Ok(impact) => impact,
+            Err(error) => {
+                send_error(events, &error);
+                return;
+            }
+        };
+        // The row's own label, which carries a provider title the durable read
+        // does not have.
+        impact.target.name = name;
+        ModImpactPresentation::new(host_kind(host), &host.id(), true, &impact)
+    } else {
+        ModImpactPresentation::default()
     };
-    let view = ModImpactPresentation::new(host_kind(host), &host.id(), true, &impact);
-    if !view.is_silent() && app.warn_on_dependency_impact() {
+    if !view.is_silent() && policy.asks() {
         let _ = events.send(Event::ModImpact(Box::new(view)));
         return;
     }

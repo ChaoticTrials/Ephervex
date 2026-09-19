@@ -206,11 +206,84 @@ impl ModRelations {
     }
 }
 
+/// What a frontend does about a mod change that affects other mods.
+///
+/// One rule, in one place, for both frontends and both directions. Deriving it
+/// from the two preferences at each of the six call sites is how the desktop
+/// application and the command line would come to disagree about when a change
+/// is quiet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DependencyPolicy {
+    /// Work out what else the change affects and stop for an answer.
+    Confirm,
+    /// Work out what else it affects, change those too, and report it.
+    Apply,
+    /// Change the named mod and nothing else.
+    Ignore,
+}
+
+impl DependencyPolicy {
+    /// A stable identifier for `--json` output.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Confirm => "confirm",
+            Self::Apply => "apply",
+            Self::Ignore => "ignore",
+        }
+    }
+
+    /// Whether a change carries the mods its target's relations name.
+    #[must_use]
+    pub const fn cascades(self) -> bool {
+        matches!(self, Self::Confirm | Self::Apply)
+    }
+
+    /// Whether a change with something to report stops for an answer.
+    #[must_use]
+    pub const fn asks(self) -> bool {
+        matches!(self, Self::Confirm)
+    }
+}
+
 impl App {
+    /// What a mod change that affects other mods does here.
+    ///
+    /// Both preferences resolve into one answer, because they are not
+    /// independent: with the change acting on nothing else, there is nothing
+    /// for a confirmation to be about.
+    #[must_use]
+    pub fn dependency_policy(&self) -> DependencyPolicy {
+        if !self.follow_mod_dependencies() {
+            DependencyPolicy::Ignore
+        } else if self.warn_on_dependency_impact() {
+            DependencyPolicy::Confirm
+        } else {
+            DependencyPolicy::Apply
+        }
+    }
+
+    /// Whether a mod change acts on the mods its relations name.
+    ///
+    /// Off, a switch changes exactly the mod it belongs to. What each mod
+    /// requires is still recorded and still shown: this decides whether a
+    /// change follows those relations, not whether they are known.
+    #[must_use]
+    pub fn follow_mod_dependencies(&self) -> bool {
+        self.config().mods.follow_mod_dependencies
+    }
+
+    /// Records whether mod changes follow recorded relations.
+    pub fn set_follow_mod_dependencies(&mut self, follow: bool) -> CoreResult<()> {
+        self.mutate_config(|config| config.mods.follow_mod_dependencies = follow)
+    }
+
     /// Whether a mod change that affects other mods stops to be confirmed.
     ///
     /// The answer decides only whether a frontend asks. What the change does is
-    /// the same either way, and so is the report of what it did.
+    /// the same either way, and so is the report of what it did. Read through
+    /// [`Self::dependency_policy`] rather than on its own: it says nothing
+    /// about a launcher that is not following relations at all.
     #[must_use]
     pub fn warn_on_dependency_impact(&self) -> bool {
         self.config().mods.warn_on_dependency_impact
@@ -972,6 +1045,39 @@ mod tests {
 
     fn names(mods: &[ImpactedMod]) -> Vec<&str> {
         mods.iter().map(|entry| entry.name.as_str()).collect()
+    }
+
+    #[test]
+    fn the_two_preferences_resolve_into_one_rule() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (mut app, _instance, _root) = library_and_its_dependents(base.path());
+
+        assert_eq!(app.dependency_policy(), DependencyPolicy::Confirm);
+        assert!(app.dependency_policy().cascades() && app.dependency_policy().asks());
+
+        app.set_warn_on_dependency_impact(false).expect("record");
+        assert_eq!(
+            app.dependency_policy(),
+            DependencyPolicy::Apply,
+            "not asking is not the same as not acting"
+        );
+        assert!(app.dependency_policy().cascades());
+
+        app.set_follow_mod_dependencies(false).expect("record");
+        assert_eq!(app.dependency_policy(), DependencyPolicy::Ignore);
+        assert!(!app.dependency_policy().cascades());
+
+        // The confirmation's own answer is still recorded, and comes back when
+        // relations are followed again: one preference must not silently
+        // rewrite the other.
+        app.set_warn_on_dependency_impact(true).expect("record");
+        assert_eq!(
+            app.dependency_policy(),
+            DependencyPolicy::Ignore,
+            "with nothing else changing there is nothing to confirm"
+        );
+        app.set_follow_mod_dependencies(true).expect("record");
+        assert_eq!(app.dependency_policy(), DependencyPolicy::Confirm);
     }
 
     #[test]

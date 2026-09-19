@@ -417,6 +417,37 @@ fn a_file_without_the_dependency_warning_key_reads_as_warning() {
 }
 
 #[test]
+fn a_file_without_the_dependency_following_key_reads_as_following() {
+    // The same silence rule, for the setting that decides whether a change
+    // acts on other mods at all: an upgrade must not quietly stop carrying a
+    // library along with the mods that need it.
+    let base = TempDir::new().expect("temp dir");
+    let paths = paths(&base);
+    std::fs::write(paths.config_file(), CURRENT).expect("write");
+
+    let loaded = Config::load_or_default(&paths).expect("load");
+    assert!(loaded.mods.follow_mod_dependencies);
+}
+
+#[test]
+fn the_two_dependency_settings_are_recorded_independently() {
+    let base = TempDir::new().expect("temp dir");
+    let paths = paths(&base);
+    std::fs::write(paths.config_file(), CURRENT).expect("write");
+
+    let mut loaded = Config::load_or_default(&paths).expect("load");
+    loaded.mods.follow_mod_dependencies = false;
+    loaded.save(&paths).expect("save");
+
+    let reloaded = Config::load_or_default(&paths).expect("reload");
+    assert!(!reloaded.mods.follow_mod_dependencies);
+    assert!(
+        reloaded.mods.warn_on_dependency_impact,
+        "turning the cascade off must not rewrite the answer to the other question"
+    );
+}
+
+#[test]
 fn turning_the_dependency_warning_off_survives_a_save_and_reload() {
     let base = TempDir::new().expect("temp dir");
     let paths = paths(&base);

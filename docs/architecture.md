@@ -638,14 +638,30 @@ General settings page carries the same one, so it can be taken back: an answer
 given inside a dialog that only ever appears while the answer is still yes
 would otherwise be a one-way door.
 
-Whether a change that affects other mods stops to be confirmed is one global
-preference, `[mods] warn_on_dependency_impact`, defaulting to on. It decides
-only whether a frontend asks. Off does not mean the change is made blind and does
-not mean the other mods are left alone: the consequence is still worked out, the
-cascade is still applied, and what happened is still reported, without blocking.
-Somebody who turned the confirmation off has already agreed to it, and applying
-the change to the named mod alone would hand them a mod set that does not load -
-the outcome the warning exists to prevent.
+Two global preferences decide what a change does, and they resolve into one
+rule rather than being read separately at each call site, because a frontend
+that derived the rule for itself is how the desktop application and the command
+line would come to disagree about when a change is quiet.
+
+`[mods] warn_on_dependency_impact`, defaulting to on, decides only whether a
+frontend asks. Off does not mean the change is made blind and does not mean the
+other mods are left alone: the consequence is still worked out, the cascade is
+still applied, and what happened is still reported, without blocking. Somebody
+who turned the confirmation off has already agreed to it, and applying the
+change to the named mod alone would hand them a mod set that does not load - the
+outcome the warning exists to prevent.
+
+`[mods] follow_mod_dependencies`, also defaulting to on, decides whether a
+change acts on other mods at all. Off, every switch changes exactly the mod it
+belongs to: arranging a mod set by hand is one of the things this launcher is
+for, and a launcher that keeps putting a library back is in the way of it. What
+each mod requires stays recorded and stays on display either way - this decides
+whether a change follows those relations, not whether they are known. With it
+off there is nothing for a confirmation to be about, so the confirmation is not
+asked and its switch says it cannot be answered from there. On the command line
+the same rule holds, with one exception: `--with-dependents` and
+`--with-dependencies` are instructions for that run and carry the other mods
+whatever is recorded.
 
 Deleting a jar is offered whatever owns it, and takes the jars that needed it.
 It is not removal: the record survives, so the row offers to put the file back
