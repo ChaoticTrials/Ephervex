@@ -1814,6 +1814,18 @@ gui-mod-enabled-with-dependencies = { $count ->
     [one] Turned on one mod it needs as well.
    *[other] Turned on { $count } mods it needs as well.
 }
+gui-mod-requires = Requires
+gui-mod-required-by = Required by
+gui-mod-requires-nothing = Its catalog says it needs nothing else.
+gui-mod-requires-unrecorded = Nothing has asked its catalog what it needs.
+gui-mod-requires-unanswerable = Ephervex cannot tell what this JAR is, so no catalog can be asked what it needs.
+gui-mod-required-by-nothing = No other mod here names it.
+gui-mod-relation-required = Required
+gui-mod-relation-optional = Optional
+gui-mod-relation-incompatible = Incompatible
+gui-mod-relation-embedded = Bundled
+gui-mod-relation-disabled = turned off
+gui-mod-relation-absent = not installed here
 gui-mod-dependencies-refreshed = { $count ->
     [one] Recorded what one mod requires.
    *[other] Recorded what { $count } mods require.

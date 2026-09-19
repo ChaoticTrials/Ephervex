@@ -332,7 +332,20 @@ pub enum Command {
     /// recorded where the user made it rather than only in settings.
     SaveDependencyWarning(bool),
     /// Ask each catalog what this host's mods need, and record the answers.
-    RefreshModDependencies(ModHost),
+    ///
+    /// `reload` is the mod whose own page is open, so the answer it is showing
+    /// is replaced by the one that was just recorded rather than staying stale
+    /// behind the toast that says the refresh worked.
+    RefreshModDependencies {
+        host: ModHost,
+        reload: Option<PathBuf>,
+    },
+    /// What one mod declares and what declares it. Offline, so it answers
+    /// while the catalog call beside it is still in flight.
+    LoadModRelations {
+        host: ModHost,
+        path: PathBuf,
+    },
     /// Delete several mods' jars in one call, in dependency order.
     ///
     /// What the dialog sends once the user has agreed that taking one jar off
@@ -899,6 +912,14 @@ pub struct ModVersionsData {
     pub pack_original_version: String,
 }
 
+/// What one mod's own page says about its relations.
+#[derive(Debug, Clone, Default)]
+pub struct ModRelationsData {
+    pub host: String,
+    pub logical_path: String,
+    pub view: crate::presentation::ModRelationPresentation,
+}
+
 /// What a removal would take with it, before it is carried out.
 #[derive(Debug, Clone, Default)]
 pub struct ModRemovalPlanData {
@@ -1203,6 +1224,7 @@ pub enum Event {
     CrashNotice(CrashNoticeData),
     Running(Vec<RunningData>),
     ModVersions(ModVersionsData),
+    ModRelations(ModRelationsData),
     ModRemovalPlan(ModRemovalPlanData),
     ModResults(ModResultsData),
     ModPlan(ModPlanData),
@@ -2437,7 +2459,10 @@ fn run_worker(
                     send_snapshot(&app, &events);
                 }
             }
-            Command::RefreshModDependencies(host) => {
+            Command::LoadModRelations { host, path } => {
+                send_mod_relations(&app, host, &path, &events);
+            }
+            Command::RefreshModDependencies { host, reload } => {
                 let reporter = OperationReporter::silent("refreshing-mod-dependencies");
                 match runtime.block_on(app.refresh_mod_dependencies(
                     host,
@@ -2456,6 +2481,9 @@ fn run_worker(
                             error: !report.is_complete(),
                         });
                         send_host_mods(&app, host, &events, &refreshed_mods, false);
+                        if let Some(path) = reload {
+                            send_mod_relations(&app, host, &path, &events);
+                        }
                     }
                     Err(error) => send_error(&events, &error),
                 }
@@ -5061,6 +5089,24 @@ fn localized_value(message_id: &str, value: &str) -> String {
 /// A catalog that cannot be reached is reported in the view rather than as a
 /// failed operation: the mod list behind it is still correct, and the user
 /// asked to look at versions, not to change anything.
+/// Answers the relation question for one mod.
+///
+/// Silent on failure: the mod page it fills is opened for other reasons too,
+/// and an instance whose recipe cannot be read has already said so through the
+/// list the page was opened from.
+fn send_mod_relations(app: &App, host: ModHost, path: &Path, events: &Sender<Event>) {
+    match app.relations_of(host, path) {
+        Ok(relations) => {
+            let _ = events.send(Event::ModRelations(ModRelationsData {
+                host: host.id(),
+                logical_path: path.display().to_string(),
+                view: crate::presentation::ModRelationPresentation::new(&relations),
+            }));
+        }
+        Err(error) => tracing::warn!(%error, "a mod's relations could not be read"),
+    }
+}
+
 async fn mod_versions(app: &App, instance: InstanceId, path: &Path) -> ModVersionsData {
     let reporter = OperationReporter::silent("listing-mod-versions");
     let cancel = CancellationToken::new();

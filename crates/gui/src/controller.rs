@@ -35,8 +35,8 @@ use crate::presentation::{
 use crate::ui::{
     AccountRow, ActivityRow, AppWindow, DiagnosticRow, GuiI18n, ImpactRow, ImportBlockedRow,
     ImportDuplicateRow, ImportOptionRow, InstanceRow, JavaRow, LinkedTargetRow, LocalModClashRow,
-    LogChunk, ModRow, ModSearchRow, ModVersionRow, PendingEntityRow, PromoteServerRow, RunningRow,
-    ServerRow, Theme, WindowSizePreview,
+    LogChunk, ModRow, ModSearchRow, ModVersionRow, PendingEntityRow, PromoteServerRow, RelationRow,
+    RunningRow, ServerRow, Theme, WindowSizePreview,
 };
 use crate::window_aspect;
 
@@ -2557,8 +2557,19 @@ fn register_mod_actions(ui: &AppWindow, commands: &Sender<Command>, browser: &Rc
         ui.set_mod_action_up_to_date(false);
         ui.set_mod_action_pending(false);
         ui.set_mod_action_loading(true);
+        ui.set_mod_action_requires(model(Vec::new()));
+        ui.set_mod_action_required_by(model(Vec::new()));
+        ui.set_mod_action_requires_note(SharedString::default());
+        ui.set_mod_action_relations_refreshable(false);
         ui.set_modal_error(SharedString::default());
         ui.set_modal("mod-manage".into());
+        send(
+            &sender,
+            Command::LoadModRelations {
+                host: ModHost::Instance(instance),
+                path: PathBuf::from(path.as_str()),
+            },
+        );
         send(
             &sender,
             Command::LoadModVersions {
@@ -3273,19 +3284,20 @@ fn register_dependency_actions(ui: &AppWindow, commands: &Sender<Command>) {
         ui.set_modal_error(SharedString::new());
     });
 
+    // Asked from two places: the impact dialog, which closes itself, and a
+    // mod's own page, which stays open and is handed the new answer.
     let sender = commands.clone();
-    let handle = ui.as_weak();
-    ui.on_refresh_mod_dependencies(move || {
-        let Some(ui) = handle.upgrade() else {
+    ui.on_refresh_mod_dependencies(move |kind, host, path| {
+        let Some(host) = backend::parse_mod_host(&kind, &host) else {
             return;
         };
-        let Some(host) =
-            backend::parse_mod_host(&ui.get_mod_impact_kind(), &ui.get_mod_impact_host())
-        else {
-            return;
-        };
-        send(&sender, Command::RefreshModDependencies(host));
-        ui.set_modal(SharedString::new());
+        send(
+            &sender,
+            Command::RefreshModDependencies {
+                host,
+                reload: (!path.is_empty()).then(|| PathBuf::from(path.as_str())),
+            },
+        );
     });
 }
 
@@ -5345,6 +5357,7 @@ fn apply_event(
             )));
         }
         Event::ModVersions(data) => apply_mod_versions(ui, data),
+        Event::ModRelations(data) => apply_mod_relations(ui, &data),
         Event::ModRemovalPlan(data) => apply_mod_removal_plan(ui, data),
         Event::ModResults(results) => apply_mod_results(ui, results, browser, commands),
         Event::ModPlan(plan) => apply_mod_install_plan(ui, plan, browser, commands),
@@ -6394,6 +6407,28 @@ fn apply_mod_versions(ui: &AppWindow, data: backend::ModVersionsData) {
         ui.set_mod_action_name(data.title.into());
     }
     ui.set_mod_versions(model(mod_version_rows(data.versions)));
+}
+
+/// Fills in what the open mod declares and what declares it.
+fn apply_mod_relations(ui: &AppWindow, data: &backend::ModRelationsData) {
+    if !addresses_open_mod(ui, &data.host, &data.logical_path) {
+        return;
+    }
+    ui.set_mod_action_requires(model(relation_rows(&data.view.requires)));
+    ui.set_mod_action_required_by(model(relation_rows(&data.view.required_by)));
+    ui.set_mod_action_requires_note(data.view.requires_note.as_str().into());
+    ui.set_mod_action_relations_refreshable(data.view.refreshable);
+}
+
+fn relation_rows(rows: &[presentation::RelationRowPresentation]) -> Vec<RelationRow> {
+    rows.iter()
+        .map(|row| RelationRow {
+            name: row.name.as_str().into(),
+            kind: row.kind.as_str().into(),
+            state: row.state.as_str().into(),
+            attention: row.attention,
+        })
+        .collect()
 }
 
 /// Shows the page of the search the user is currently waiting on.

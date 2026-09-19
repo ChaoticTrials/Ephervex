@@ -194,6 +194,16 @@ slint::slint! {
         distance: int,
     }
 
+    // One recorded relation, on the page of the mod it is about. Every string
+    // arrives localized: the markup places these, it does not word them.
+    export struct RelationRow {
+        name: string,
+        kind: string,
+        // How the jar stands here, empty when it is simply loading.
+        state: string,
+        attention: bool,
+    }
+
     export struct ModRow {
         project-id: string,
         logical-path: string,
@@ -1219,6 +1229,59 @@ slint::slint! {
                     font-size: Theme.label-size;
                     height: 19px;
                     overflow: elide;
+                }
+            }
+        }
+    }
+
+    // The recorded relations of one mod, in one direction.
+    //
+    // Fixed height rather than sized to its contents: the two sit side by side
+    // on a mod's page, and a box that grew with its list would leave the pair
+    // uneven and push the version list around as different mods are opened.
+    component RelationList inherits Rectangle {
+        in property <[RelationRow]> rows;
+        // What to show in place of an empty list.
+        in property <string> note;
+        height: 76px * Theme.text-scale;
+        border-radius: 6px;
+        border-width: 1px;
+        border-color: Theme.border;
+        background: Theme.background;
+        ScrollView {
+            viewport-width: self.width;
+            VerticalLayout { alignment: start; padding: 9px; spacing: 3px;
+                if root.rows.length == 0 : BodyText {
+                    text: root.note;
+                    color: Theme.text-muted;
+                    wrap: word-wrap;
+                }
+                for entry in root.rows : HorizontalLayout {
+                    spacing: 6px;
+                    height: 19px;
+                    Text {
+                        text: entry.name;
+                        color: Theme.text-secondary;
+                        font-size: Theme.label-size;
+                        overflow: elide;
+                        horizontal-stretch: 1;
+                        vertical-alignment: center;
+                    }
+                    // What the relation said, and how the jar stands, in that
+                    // order: the kind is the durable fact, the state changes
+                    // with every toggle.
+                    Text {
+                        text: entry.kind;
+                        color: Theme.text-muted;
+                        font-size: Theme.caption-size;
+                        vertical-alignment: center;
+                    }
+                    if entry.state != "" : Text {
+                        text: entry.state;
+                        color: entry.attention ? Theme.warning : Theme.text-muted;
+                        font-size: Theme.caption-size;
+                        vertical-alignment: center;
+                    }
                 }
             }
         }
@@ -2681,6 +2744,13 @@ slint::slint! {
         in-out property <bool> mod-action-pending: false;
         in-out property <string> mod-action-selected;
         in-out property <[ModVersionRow]> mod-versions;
+        // What this mod declares and what declares it, direct relations only.
+        in-out property <[RelationRow]> mod-action-requires;
+        in-out property <[RelationRow]> mod-action-required-by;
+        // What to say instead of an empty "Requires" list, and whether asking
+        // the catalog again would turn it into an answer.
+        in-out property <string> mod-action-requires-note;
+        in-out property <bool> mod-action-relations-refreshable: false;
         in-out property <[string]> mod-removal-dependencies;
         // What turning a mod off, or deleting its jar, would do to the rest.
         // Written whole by the controller; the markup decides nothing here.
@@ -2702,7 +2772,8 @@ slint::slint! {
         in-out property <[ImpactRow]> mod-requires-absent;
         in-out property <[ImpactRow]> mod-requires-incompatible;
         callback apply-mod-impact(bool);
-        callback refresh-mod-dependencies();
+        // The host kind, the host, and the mod whose page to refill, if any.
+        callback refresh-mod-dependencies(string, string, string);
         in-out property <bool> mod-removal-unprovable: false;
         // -- carrying the same mod decision to this client's linked servers.
         in-out property <[LinkedTargetRow]> linked-targets;
@@ -4559,6 +4630,21 @@ slint::slint! {
                                 }
                             } }
                         }
+                        // Both directions side by side, because the question a
+                        // reader has here is symmetric: what this needs, and
+                        // what would stop working without it. The warning the
+                        // toggle raises is the same data, one closure further.
+                        HorizontalLayout { spacing: 10px; vertical-stretch: 0;
+                            VerticalLayout { spacing: 5px; horizontal-stretch: 1;
+                                Text { text: GuiI18n.text("gui-mod-requires"); color: Theme.text-secondary; font-size: Theme.label-size; }
+                                RelationList { rows: root.mod-action-requires; note: root.mod-action-requires-note; }
+                            }
+                            VerticalLayout { spacing: 5px; horizontal-stretch: 1;
+                                Text { text: GuiI18n.text("gui-mod-required-by"); color: Theme.text-secondary; font-size: Theme.label-size; }
+                                RelationList { rows: root.mod-action-required-by; note: GuiI18n.text("gui-mod-required-by-nothing"); }
+                            }
+                        }
+                        if root.mod-action-relations-refreshable : HorizontalLayout { AppButton { text: GuiI18n.text("gui-mod-impact-refresh"); clicked => { root.refresh-mod-dependencies("client", root.selected-instance-id, root.mod-action-path); } } Rectangle { horizontal-stretch: 1; } }
                         if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; }
                         // Leaving on the left, acting on the right, and the one
                         // that takes the selected release last. Everything bunched
@@ -4645,7 +4731,7 @@ slint::slint! {
                         if root.mod-impact-degrades.length > 0 : ImpactList { rows: root.mod-impact-degrades; }
                         if root.mod-impact-unknown.length > 0 : BodyText { text: GuiI18n.count("gui-mod-impact-unknown", root.mod-impact-unknown.length); color: Theme.text-muted; wrap: word-wrap; }
                         if root.mod-impact-unknown.length > 0 : ImpactList { rows: root.mod-impact-unknown; }
-                        if root.mod-impact-unknown.length > 0 : HorizontalLayout { AppButton { text: GuiI18n.text("gui-mod-impact-refresh"); clicked => { root.refresh-mod-dependencies(); } } Rectangle { horizontal-stretch: 1; } }
+                        if root.mod-impact-unknown.length > 0 : HorizontalLayout { AppButton { text: GuiI18n.text("gui-mod-impact-refresh"); clicked => { root.refresh-mod-dependencies(root.mod-impact-kind, root.mod-impact-host, ""); root.modal = ""; } } Rectangle { horizontal-stretch: 1; } }
                         if root.mod-impact-unidentifiable.length > 0 : BodyText { text: GuiI18n.count("gui-mod-impact-unidentifiable", root.mod-impact-unidentifiable.length); color: Theme.text-muted; wrap: word-wrap; }
                         if root.mod-impact-unidentifiable.length > 0 : ImpactList { rows: root.mod-impact-unidentifiable; }
                         if root.mod-impact-breaks.length > 0 || root.mod-requires-disabled.length > 0 : LabeledToggle {

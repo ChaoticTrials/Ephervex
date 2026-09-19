@@ -609,6 +609,14 @@ relations are excluded from the closure structurally, by a relation-kind
 predicate the disable path passes `Required` to, so there is no flag that widens
 it.
 
+A third question is asked of the same state and answers neither of those: what
+one mod's own entry declares, and which entries name it. Direct relations, both
+directions, no closure. It is what a mod's own page shows, and it is what makes
+the two warnings checkable - a reader who wants to know why turning one library
+off took three mods with it can open each of them and see the relation that said
+so. An entry nothing has asked about says that rather than showing an empty
+list, and carries the refresh as its action.
+
 A frontend asks the question and renders the answer; it re-derives none of it.
 A mod row's switch reports a request rather than setting its own position: the
 launcher may refuse it, or act on it and several other mods besides, so what the

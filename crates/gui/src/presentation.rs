@@ -10,14 +10,16 @@ use std::time::{Duration, Instant};
 
 use ephervex_core::{
     ARTIFACT_CACHE_LIMIT_PRESETS, ArtifactCacheLimit, ArtifactCacheLimitError, BlockedProviderFile,
-    ByteUnit, ClientRecord, DEFAULT_ARTIFACT_CACHE_LIMIT_BYTES, DependentMods, DiagnosticKind,
-    DiagnosticScope, DuplicateFileReason, DuplicateProviderFile, ImpactedMod,
-    LaunchAndConnectAvailability, NetworkAccess, PackAnalysis, PackSide, ProviderFileIdentity,
-    RequiredMods, RuntimeClassification, ServerRecord, ServerStatus, format_binary_bytes,
+    ByteUnit, ClientRecord, DEFAULT_ARTIFACT_CACHE_LIMIT_BYTES, DependencyKnowledge, DependentMods,
+    DiagnosticKind, DiagnosticScope, DuplicateFileReason, DuplicateProviderFile, ImpactedMod,
+    LaunchAndConnectAvailability, ModPresence, ModRelations, NetworkAccess, PackAnalysis, PackSide,
+    ProviderFileIdentity, RelatedMod, RequiredMods, RuntimeClassification, ServerRecord,
+    ServerStatus, format_binary_bytes,
 };
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use ephervex_model::{
-    DefaultModCatalog, LoaderKind, ModProvider, Operation, OperationStatus, StorageClass,
+    DefaultModCatalog, LoaderKind, ModProvider, ModRelationKind, Operation, OperationStatus,
+    StorageClass,
 };
 use slint::SharedString;
 
@@ -989,6 +991,83 @@ impl ModRequirementPresentation {
     }
 }
 
+/// One recorded relation, as a mod's own page lists it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RelationRowPresentation {
+    pub name: String,
+    /// What the catalog called the relation.
+    pub kind: String,
+    /// How that jar stands here, where one is here at all. Empty when it is
+    /// loading, because a list of mods that are fine has nothing to say about
+    /// each of them.
+    pub state: String,
+    /// Whether the state is one the reader should notice.
+    pub attention: bool,
+}
+
+impl From<&RelatedMod> for RelationRowPresentation {
+    fn from(related: &RelatedMod) -> Self {
+        let (state, attention) = match related.presence {
+            Some(ModPresence::Installed) => (String::new(), false),
+            Some(ModPresence::Disabled) => (lookup("gui-mod-relation-disabled"), true),
+            Some(ModPresence::Missing) | None => (lookup("gui-mod-relation-absent"), true),
+        };
+        Self {
+            name: related.name.clone(),
+            kind: lookup(match related.kind {
+                ModRelationKind::Required => "gui-mod-relation-required",
+                ModRelationKind::Optional => "gui-mod-relation-optional",
+                ModRelationKind::Incompatible => "gui-mod-relation-incompatible",
+                ModRelationKind::Embedded => "gui-mod-relation-embedded",
+            }),
+            state,
+            attention,
+        }
+    }
+}
+
+/// What one mod's own page says about its place among the others.
+///
+/// Direct relations in both directions, which is what makes the warning
+/// dialogs checkable: a reader who wants to know why disabling a library took
+/// three mods with it can open each of them and see the edge that said so.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModRelationPresentation {
+    pub requires: Vec<RelationRowPresentation>,
+    pub required_by: Vec<RelationRowPresentation>,
+    /// What to say instead of an empty "Requires" list. Empty when the list
+    /// speaks for itself.
+    pub requires_note: String,
+    /// Whether a refresh would turn that note into an answer.
+    pub refreshable: bool,
+}
+
+impl ModRelationPresentation {
+    /// Builds the view for one mod.
+    #[must_use]
+    pub fn new(relations: &ModRelations) -> Self {
+        let knowledge = relations.target.knowledge;
+        Self {
+            requires: relations.requires.iter().map(Into::into).collect(),
+            required_by: relations.required_by.iter().map(Into::into).collect(),
+            // Only the outgoing side depends on this mod's catalog having been
+            // asked. What other mods name is recorded on their entries, and is
+            // just as true when nothing has asked about this one.
+            requires_note: match knowledge {
+                DependencyKnowledge::Recorded if relations.requires.is_empty() => {
+                    lookup("gui-mod-requires-nothing")
+                }
+                DependencyKnowledge::Recorded => String::new(),
+                DependencyKnowledge::Unrecorded => lookup("gui-mod-requires-unrecorded"),
+                DependencyKnowledge::Unidentified | DependencyKnowledge::Unidentifiable => {
+                    lookup("gui-mod-requires-unanswerable")
+                }
+            },
+            refreshable: knowledge.a_refresh_would_help(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
@@ -1392,6 +1471,88 @@ mod tests {
             !result_is_current(&other.to_string(), ""),
             "with no workspace open there is nothing for a result to belong to"
         );
+    }
+
+    fn related(name: &str, kind: ModRelationKind, presence: Option<ModPresence>) -> RelatedMod {
+        RelatedMod {
+            kind,
+            name: name.to_owned(),
+            logical_path: presence.map(|_| std::path::PathBuf::from(format!("mods/{name}"))),
+            presence,
+            project_id: None,
+        }
+    }
+
+    #[test]
+    fn a_relation_says_what_it_was_and_how_that_jar_stands() {
+        let view = ModRelationPresentation::new(&ephervex_core::ModRelations {
+            target: impacted("SkyblockBuilder.jar", 0),
+            requires: vec![
+                related(
+                    "LibX.jar",
+                    ModRelationKind::Required,
+                    Some(ModPresence::Installed),
+                ),
+                related(
+                    "SkyGUIs.jar",
+                    ModRelationKind::Optional,
+                    Some(ModPresence::Disabled),
+                ),
+                related("AABBCCDD", ModRelationKind::Required, None),
+            ],
+            required_by: Vec::new(),
+        });
+
+        assert_eq!(view.requires[0].kind, lookup("gui-mod-relation-required"));
+        assert!(
+            view.requires[0].state.is_empty() && !view.requires[0].attention,
+            "a mod that is simply loading has nothing to report about itself"
+        );
+        assert_eq!(view.requires[1].kind, lookup("gui-mod-relation-optional"));
+        assert_eq!(view.requires[1].state, lookup("gui-mod-relation-disabled"));
+        assert_eq!(
+            view.requires[2].state,
+            lookup("gui-mod-relation-absent"),
+            "a relation no jar here matches is absent, not present and fine"
+        );
+        assert!(view.requires_note.is_empty(), "the list speaks for itself");
+    }
+
+    #[test]
+    fn an_empty_requires_list_says_which_kind_of_empty_it_is() {
+        let asked = ModRelationPresentation::new(&ephervex_core::ModRelations {
+            target: impacted("LibX.jar", 0),
+            requires: Vec::new(),
+            required_by: Vec::new(),
+        });
+        assert_eq!(asked.requires_note, lookup("gui-mod-requires-nothing"));
+        assert!(!asked.refreshable);
+
+        let mut target = impacted("LibX.jar", 0);
+        target.knowledge = DependencyKnowledge::Unrecorded;
+        let unasked = ModRelationPresentation::new(&ephervex_core::ModRelations {
+            target,
+            requires: Vec::new(),
+            required_by: Vec::new(),
+        });
+        assert_eq!(unasked.requires_note, lookup("gui-mod-requires-unrecorded"));
+        assert!(
+            unasked.refreshable,
+            "a mod nothing has asked about is one the user can do something about"
+        );
+
+        let mut target = impacted("Mystery.jar", 0);
+        target.knowledge = DependencyKnowledge::Unidentifiable;
+        let unanswerable = ModRelationPresentation::new(&ephervex_core::ModRelations {
+            target,
+            requires: Vec::new(),
+            required_by: Vec::new(),
+        });
+        assert_eq!(
+            unanswerable.requires_note,
+            lookup("gui-mod-requires-unanswerable")
+        );
+        assert!(!unanswerable.refreshable, "no catalog can answer for it");
     }
 }
 
