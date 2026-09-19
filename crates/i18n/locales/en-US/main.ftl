@@ -700,6 +700,9 @@ error-launch-loader-not-supported = This build does not support the { $loader } 
 error-launch-download-failed = A file Minecraft needs could not be downloaded.
 .action = Check your network connection and try again. Nothing partial or unverified is kept, so a retry starts clean.
 
+error-launch-artifact-mismatched = A file Minecraft needs arrived with the wrong contents.
+.action = Ephervex refused it rather than launching with a file it cannot vouch for. Nothing unverified was kept. If it happens again the source is serving the wrong file, and retrying will not change that.
+
 error-loader-metadata-unavailable = Loader version information is unavailable.
 .action = Check the network connection. Ephervex will use a cached copy when one exists.
 error-loader-metadata-invalid = Loader version information could not be understood.

@@ -398,7 +398,12 @@ async fn an_artifact_that_fails_its_digest_stops_the_launch_and_names_what_it_wa
         .expect_err("a tampered artifact must not reach the classpath");
 
     assert!(matches!(error, LaunchError::DownloadFailed { .. }));
-    assert_eq!(error.message_id(), "error-launch-download-failed");
+    assert_eq!(
+        error.message_id(),
+        "error-launch-artifact-mismatched",
+        "a file served with the wrong contents is not a network problem, and telling \
+         somebody to check their connection would send them the wrong way"
+    );
     assert!(
         !library_path.exists(),
         "a bad artifact is deleted rather than left where a retry would trust it"

@@ -712,6 +712,7 @@ mod tests {
             "error-launch-invalid-version-metadata",
             "error-launch-loader-not-supported",
             "error-launch-download-failed",
+            "error-launch-artifact-mismatched",
             "error-loader-metadata-unavailable",
             "error-loader-metadata-invalid",
             "error-loader-version-unavailable",

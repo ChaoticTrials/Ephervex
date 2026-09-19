@@ -145,6 +145,17 @@ impl DownloadError {
         }
     }
 
+    /// Whether the bytes that arrived were not the bytes that were promised.
+    ///
+    /// Told apart from every other failure because the answer is different: a
+    /// refused connection is worth retrying, and a digest that does not match
+    /// means what was served is wrong, which retrying the same address will not
+    /// mend.
+    #[must_use]
+    pub const fn is_hash_mismatch(&self) -> bool {
+        matches!(self, Self::HashMismatch { .. } | Self::SizeMismatch { .. })
+    }
+
     /// Whether the caller asked for this outcome rather than hitting a fault.
     #[must_use]
     pub const fn is_cancellation(&self) -> bool {

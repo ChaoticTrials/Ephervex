@@ -113,7 +113,7 @@ pub enum MinecraftError {
 impl MinecraftError {
     /// The `ephervex-i18n` message id describing this failure to a user.
     #[must_use]
-    pub const fn message_id(&self) -> &'static str {
+    pub fn message_id(&self) -> &'static str {
         match self {
             Self::ManifestUnavailable { .. } => "error-minecraft-manifest-unavailable",
             Self::ManifestInvalid { .. } => "error-minecraft-manifest-invalid",
@@ -272,6 +272,12 @@ impl LaunchError {
         match self {
             Self::InvalidVersionMetadata { .. } => "error-launch-invalid-version-metadata",
             Self::LoaderNotSupported { .. } => "error-launch-loader-not-supported",
+            // A digest that does not match is not a network problem and does
+            // not have a network answer: what was served is wrong, and trying
+            // the same address again will serve it again.
+            Self::DownloadFailed { source, .. } if source.is_hash_mismatch() => {
+                "error-launch-artifact-mismatched"
+            }
             Self::DownloadFailed { .. } => "error-launch-download-failed",
             Self::AssetIndex(_) => "error-launch-asset-index-invalid",
             Self::Natives(error) => error.message_id(),
