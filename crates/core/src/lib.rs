@@ -30,6 +30,7 @@ pub mod connection;
 pub mod crash_analysis;
 pub mod curseforge;
 pub mod curseforge_pack;
+pub mod dependencies;
 pub mod diagnostics;
 pub mod download_watch;
 pub mod error;
@@ -75,6 +76,7 @@ pub use crash_analysis::{
     analyze_crash_report,
 };
 pub use curseforge::StoredApiKey;
+pub use dependencies::DependencyRefreshReport;
 pub use diagnostics::{
     ClientLogTail, DEFAULT_DIAGNOSTIC_BYTES, DiagnosticCatalog, DiagnosticRequest, DiagnosticScope,
     DiagnosticSearch, DiagnosticSection,

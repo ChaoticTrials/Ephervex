@@ -24,9 +24,9 @@ use ephervex_core::{
     CaptureHealth, CapturedLine, ClientFolder, ClientRecord, Compatibility, Config,
     ConfigurationHealth, ControlResponse, CoreError, CrashReview, CreatedClient,
     CredentialBackendHealth, CredentialStorage, DEFAULT_DIAGNOSTIC_BYTES, DEFAULT_SEARCH_LIMIT,
-    DiagnosticEntry, DiagnosticKind, DiagnosticRequest, DiagnosticScope, DiagnosticSearch,
-    DirectoryState, DuplicateClient, EULA_CONFIRMATION_PHRASE, Entitlements, EulaStatus,
-    FileDisposition, Freshness, ImportRequest, ImportedPack, IncompatibilityReason,
+    DependencyRefreshReport, DiagnosticEntry, DiagnosticKind, DiagnosticRequest, DiagnosticScope,
+    DiagnosticSearch, DirectoryState, DuplicateClient, EULA_CONFIRMATION_PHRASE, Entitlements,
+    EulaStatus, FileDisposition, Freshness, ImportRequest, ImportedPack, IncompatibilityReason,
     InstallationHealth, InstalledMods, JavaHealth, JavaPathChoice, JavaPlan, JavaPlanRequest,
     JavaRuntime, JavaTarget, LaunchAndConnectEvent, LaunchAndConnectObserver,
     LaunchAndConnectOptions, LaunchAndConnectOutcome, LaunchEvent, LaunchFeatures, LaunchObserver,
@@ -389,6 +389,21 @@ enum ModCommand {
     List {
         /// The client instance to list.
         instance: InstanceId,
+    },
+    /// Ask each catalog what this instance's mods need, and record the answers.
+    ///
+    /// Ephervex records what a mod requires when it installs it, and when it
+    /// imports a CurseForge pack. Anything else starts out with nothing
+    /// recorded: a Modrinth pack states no dependencies at all, and an instance
+    /// built by an older Ephervex has none. Run this once and the instance can
+    /// answer what breaks when a mod is turned off, offline and from then on.
+    ///
+    /// A catalog that cannot be reached costs only its own mods' answers. Mods
+    /// it could not answer for stay unrecorded rather than being recorded as
+    /// needing nothing.
+    Refresh {
+        #[command(flatten)]
+        host: ModHostArgs,
     },
     /// Let a mod load again after it was disabled.
     Enable {
@@ -3181,6 +3196,16 @@ async fn run_mod_command(app: &mut App, command: &ModCommand, json: bool) -> any
             let mods = app.managed_mods(*instance)?;
             print_managed_mods(&mods, json);
         }
+        ModCommand::Refresh { host } => {
+            let report = app
+                .refresh_mod_dependencies(
+                    host.host()?,
+                    &OperationReporter::silent("refreshing-mod-dependencies"),
+                    &CancellationToken::new(),
+                )
+                .await?;
+            print_dependency_refresh(&report, json);
+        }
         ModCommand::Enable { host, path } => {
             print_mod_state(app.set_mod_enabled(host.host()?, path, true)?, path, json);
         }
@@ -3202,6 +3227,37 @@ fn print_mod_state(presence: ModPresence, path: &Path, json: bool) {
         return;
     }
     outln!("{}  {}", presence.as_str(), path.display());
+}
+
+/// Reports what a dependency refresh learned.
+///
+/// An unreachable catalog is named rather than folded into a count: the mods it
+/// covers are still unrecorded, and knowing which catalog to retry is the
+/// difference between running this again and giving up on it.
+fn print_dependency_refresh(report: &DependencyRefreshReport, json: bool) {
+    if json {
+        print_json(&serde_json::json!({
+            "recorded": report.recorded,
+            "unchanged": report.unchanged,
+            "unidentified": report.unidentified,
+            "providers_unavailable": report
+                .providers_unavailable
+                .iter()
+                .map(|provider| provider.as_str())
+                .collect::<Vec<_>>(),
+            "complete": report.is_complete(),
+        }));
+        return;
+    }
+    outln!(
+        "recorded {}  unchanged {}  no exact release {}",
+        report.recorded,
+        report.unchanged,
+        report.unidentified
+    );
+    for provider in &report.providers_unavailable {
+        outln!("{provider} could not be reached; its mods are still unrecorded");
+    }
 }
 
 /// Shows or records which catalog mod commands use when none is named.

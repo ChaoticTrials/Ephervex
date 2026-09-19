@@ -575,6 +575,16 @@ A Modrinth pack index declares no relations at all - it states paths, hashes and
 download addresses - so its entries stay unasked until an explicit refresh. A jar
 with no catalog identity has nothing to ask about and stays unasked.
 
+That refresh is `App::refresh_mod_dependencies`, and it is explicit because it
+reaches the network: reading a mod list stays a directory read. It asks each
+catalog once, in one batched request, about every mod whose recorded identity
+names an exact release - a project without one has nothing to look up, since
+asking about the project would answer for whichever release the catalog
+considers current rather than the one installed here. A catalog that cannot be
+reached is named in the report and costs only its own mods' answers; they stay
+unasked rather than being recorded as needing nothing, which is the one outcome
+that would turn a missing answer into a confident wrong one.
+
 ## Security boundaries
 
 ### Untrusted paths and archives
