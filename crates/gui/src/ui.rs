@@ -1140,6 +1140,18 @@ slint::slint! {
         in-out property <bool> checked;
         in property <bool> enabled: true;
         in property <string> accessible-name;
+        // Whether clicking this switch *is* the change, or only asks for it.
+        //
+        // A settings switch decides its own position: the click is the change.
+        // A switch that asks does not, and must not, because what it asked for
+        // may be refused, or may happen to several rows at once. Its position
+        // has to come from what actually happened.
+        //
+        // This is not a preference. Assigning to `checked` here replaces the
+        // binding the caller gave it, permanently, for that one element - and a
+        // repeater reuses elements, so the row would go on reporting a click
+        // from minutes ago no matter what the list said.
+        in property <bool> sets-its-own-position: true;
         callback toggled(bool);
         width: 42px;
         height: 23px;
@@ -1152,7 +1164,7 @@ slint::slint! {
         accessible-checked: checked;
         accessible-enabled: enabled;
         accessible-label: accessible-name;
-        accessible-action-default => { if root.enabled { root.checked = !root.checked; root.toggled(root.checked); } }
+        accessible-action-default => { if root.enabled { root.request(); } }
         Rectangle {
             x: root.checked ? 21px : 3px;
             y: 3px;
@@ -1163,7 +1175,15 @@ slint::slint! {
         }
         TouchArea {
             enabled: root.enabled;
-            clicked => { root.checked = !root.checked; root.toggled(root.checked); }
+            clicked => { root.request(); }
+        }
+        function request() {
+            if root.sets-its-own-position {
+                root.checked = !root.checked;
+                root.toggled(root.checked);
+            } else {
+                root.toggled(!root.checked);
+            }
         }
     }
 
@@ -1334,7 +1354,7 @@ slint::slint! {
                         // operation would do to this server rather than whether
                         // it was chosen, and a border weight is no answer to
                         // "is this one selected".
-                        if root.selectable : VerticalLayout { alignment: center; Toggle { checked: row.selected; enabled: row.actionable; accessible-name: row.name; toggled => { root.toggled(index); } } }
+                        if root.selectable : VerticalLayout { alignment: center; Toggle { checked: row.selected; sets-its-own-position: false; enabled: row.actionable; accessible-name: row.name; toggled => { root.toggled(index); } } }
                         // The explanation gets the full row width: a refusal is a
                         // sentence, and eliding it to a column loses the reason.
                         VerticalLayout { alignment: center; spacing: 1px; horizontal-stretch: 1;
@@ -1571,7 +1591,7 @@ slint::slint! {
                     // Nothing to turn on or throw away while the jar is gone.
                     // The one thing left is putting it back.
                     if root.item.deleted : AppButton { text: GuiI18n.text("gui-restore-mod"); clicked => { root.restore-file(root.item.logical-path); } }
-                    if !root.item.deleted && root.togglable : VerticalLayout { alignment: center; Toggle { checked: root.item.enabled; accessible-name: GuiI18n.value("gui-mod-loads", root.item.title); toggled(on) => { root.toggle(root.item.logical-path, on); } } }
+                    if !root.item.deleted && root.togglable : VerticalLayout { alignment: center; Toggle { checked: root.item.enabled; sets-its-own-position: false; accessible-name: GuiI18n.value("gui-mod-loads", root.item.title); toggled(on) => { root.toggle(root.item.logical-path, on); } } }
                     if !root.item.deleted && (root.item.can-delete-file || (root.removable && root.item.can-remove)) : IconButton {
                         icon: @image-url("../../../assets/icons/trash.svg");
                         accessible-name: GuiI18n.value(root.item.can-delete-file ? "gui-delete-mod" : "gui-remove-mod", root.item.title);
