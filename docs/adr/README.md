@@ -38,3 +38,4 @@ so the reasoning trail survives.
 | [0030](0030-ephervex-ships-its-own-curseforge-key-as-a-fallback.md) | Ephervex ships its own CurseForge key as a fallback | Accepted |
 | [0031](0031-a-project-declared-twice-resolves-to-one-file.md) | A project declared twice resolves to one file | Accepted |
 | [0032](0032-pack-owned-mod-versions-can-be-changed-per-instance-opt-in.md) | Pack-owned mod versions can be changed, per instance and opt-in | Accepted |
+| [0033](0033-internal-format-versions-stay-at-1-until-1.0.0.md) | Internal format versions stay at 1 until 1.0.0 | Accepted |

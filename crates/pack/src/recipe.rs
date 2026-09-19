@@ -56,24 +56,14 @@ use crate::error::{PackError, PackResult};
 /// server when one is created from a client, so it travels independently of the
 /// record that referenced it.
 ///
-/// Version 2 added managed-mod entries - [`PackFileRecipe::origin`],
-/// [`ProviderFileIdentity::provider`], and [`SideRequirement::Unknown`]. The
-/// bump is deliberate rather than a silent additive change: a version 1 build
-/// reading one of these files would drop every browser-installed mod without
-/// noticing, and build a server missing them. Reading a version 1 recipe still
-/// works, because the new fields default.
-///
-/// Version 3 added [`ImportSourceKind::ServerPack`], which a version 2 build
-/// cannot deserialize at all. Bumping the version is what turns that into the
-/// clean refusal `SourceStore::read_recipe` already performs (ADR 0012) rather
-/// than an unreadable file.
-///
-/// Version 4 added [`PackFileRecipe::original_identity`], capturing the pack's
-/// originally-declared release the first time a pack-owned mod's version is
-/// allowed to move away from it. Reading a version 3 recipe still works: the
-/// field defaults to absent, exactly the state of an entry that has never been
-/// mutated away from what the pack declared.
-pub const RECIPE_VERSION: u32 = 5;
+/// Frozen at 1 until Ephervex's 1.0.0 release (ADR 0033: internal format
+/// versions do not advance before then). A recipe-shape change made while this
+/// is frozen has to stay readable by every other pre-1.0.0 build - a new or
+/// changed field defaults when absent - because there is no version bump left
+/// to signal that an older build should refuse the file instead of misreading
+/// it. A change that cannot be made that way is not made; re-import is the
+/// recovery path for an instance whose on-disk recipe predates it.
+pub const RECIPE_VERSION: u32 = 1;
 
 /// The extension a mod loader loads out of `mods/`.
 ///

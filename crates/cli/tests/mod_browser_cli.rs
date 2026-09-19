@@ -93,7 +93,7 @@ fn seed_recipe(root: &Path) {
     std::fs::write(
         source.join("recipe.json"),
         r#"{
-          "recipe_version": 2,
+          "recipe_version": 1,
           "source_kind": "manual",
           "original_name": "Mod browser check",
           "minecraft_version": "1.20.1",
@@ -211,7 +211,7 @@ fn a_pack_declared_file_is_not_listed_as_a_provider_installed_mod() {
     std::fs::write(
         source.join("recipe.json"),
         r#"{
-          "recipe_version": 2,
+          "recipe_version": 1,
           "source_kind": "modrinth_pack",
           "original_name": "Imported Pack",
           "minecraft_version": "1.20.1",
@@ -250,7 +250,7 @@ fn a_recipe_from_a_newer_build_is_refused_rather_than_partly_read() {
     let path = root.join(".launcher/source/recipe.json");
     let text = std::fs::read_to_string(&path)
         .expect("read")
-        .replace("\"recipe_version\": 2", "\"recipe_version\": 99");
+        .replace("\"recipe_version\": 1", "\"recipe_version\": 99");
     std::fs::write(&path, text).expect("write");
 
     let output = sandbox.run(&["--json", "mod", "list", &id]);
