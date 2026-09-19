@@ -76,7 +76,9 @@ pub use crash_analysis::{
     analyze_crash_report,
 };
 pub use curseforge::StoredApiKey;
-pub use dependencies::DependencyRefreshReport;
+pub use dependencies::{
+    DependencyKnowledge, DependencyRefreshReport, DependentMods, ImpactedMod, RequiredMods,
+};
 pub use diagnostics::{
     ClientLogTail, DEFAULT_DIAGNOSTIC_BYTES, DiagnosticCatalog, DiagnosticRequest, DiagnosticScope,
     DiagnosticSearch, DiagnosticSection,

@@ -585,6 +585,29 @@ reached is named in the report and costs only its own mods' answers; they stay
 unasked rather than being recorded as needing nothing, which is the one outcome
 that would turn a missing answer into a confident wrong one.
 
+Two questions are asked of that state, both offline and both pure. What else
+stops loading if this mod does, which is the same answer for turning a mod off
+and for deleting its jar, because the loader sees the same absence either way;
+and what this mod needs before it can load, which is what a frontend asks before
+turning one back on. Neither reaches a catalog, so a frontend may ask on every
+toggle.
+
+The first keeps proven and unproven apart, in four lists rather than one. A mod
+is reported as breaking only because a recorded relation says so. A mod that
+declares the target optional is named and never cascaded: it keeps loading and
+does less. A mod nothing has asked about is reported as unknown, with a refresh
+offered where one would help, rather than being assumed independent - that
+assumption is the one that would make the warning confidently wrong. Optional
+relations are excluded from the closure structurally, by a relation-kind
+predicate the disable path passes `Required` to, so there is no flag that widens
+it.
+
+Turning several mods on or off is one call, ordered so that any prefix of it
+leaves a mod set the loader can start: disables go dependents first, enables go
+dependencies first. A frontend issuing one rename per row cannot promise that,
+and an operation interrupted mid-cascade would otherwise leave a dependency gone
+with something that needs it still loading.
+
 ## Security boundaries
 
 ### Untrusted paths and archives

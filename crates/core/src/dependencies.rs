@@ -10,15 +10,18 @@
 //! refresh and never part of reading a mod list, which has to stay a directory
 //! read that reaches no network.
 
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+
 use ephervex_download::OperationReporter;
-use ephervex_model::ModProvider;
-use ephervex_pack::{ModIdentity, PackRecipe, SourceStore};
+use ephervex_model::{ModOrigin, ModProvider, ModRelationKind};
+use ephervex_pack::{ModIdentity, PackRecipe, RecipeRelation, SourceStore};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument, warn};
 
 use crate::app::App;
-use crate::error::CoreResult;
-use crate::mods::{ModHost, recipe_relations};
+use crate::error::{CoreError, CoreResult};
+use crate::mods::{ModHost, ModPresence, recipe_relations};
 
 /// What a dependency refresh learned.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -49,7 +52,280 @@ impl DependencyRefreshReport {
     }
 }
 
+/// How much is known about what one mod requires.
+///
+/// Separate from what it requires, because "this mod needs nothing" and "nobody
+/// has asked what this mod needs" are different answers that a warning has to
+/// give differently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DependencyKnowledge {
+    /// A catalog answered. The answer may be that it needs nothing.
+    Recorded,
+    /// Identified, but never asked. A refresh can answer this one.
+    Unrecorded,
+    /// The project is known and the exact release is not, so there is no
+    /// release to ask about. A refresh cannot answer this one.
+    Unidentified,
+    /// Nothing a catalog can be asked about at all.
+    Unidentifiable,
+}
+
+impl DependencyKnowledge {
+    /// A stable identifier for `--json` output.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Recorded => "recorded",
+            Self::Unrecorded => "unrecorded",
+            Self::Unidentified => "unidentified",
+            Self::Unidentifiable => "unidentifiable",
+        }
+    }
+
+    /// Whether asking a catalog again could turn this into an answer.
+    #[must_use]
+    pub const fn a_refresh_would_help(self) -> bool {
+        matches!(self, Self::Unrecorded)
+    }
+}
+
+/// One mod named by a dependency question.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImpactedMod {
+    pub logical_path: PathBuf,
+    /// What to call it: a provider title where one is known, else the file name.
+    pub name: String,
+    pub presence: ModPresence,
+    pub origin: ModOrigin,
+    /// The catalog project, where one is recorded.
+    pub project_id: Option<String>,
+    pub knowledge: DependencyKnowledge,
+    /// How far from the mod that was asked about. One is a direct dependent.
+    pub distance: u32,
+}
+
+/// What else stops loading when one mod does.
+///
+/// The answer to "if I turn this off, or delete its jar, what goes with it".
+/// Deleting and disabling give the same answer, because the loader sees the
+/// same absence either way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DependentMods {
+    pub target: ImpactedMod,
+    /// Enabled mods that do not load without the target, transitively. Proven.
+    pub breaks: Vec<ImpactedMod>,
+    /// Enabled mods that declare the target optional. Named, never cascaded:
+    /// they keep loading and do less.
+    pub degrades: Vec<ImpactedMod>,
+    /// Enabled mods nothing has asked about yet, so whether they need the
+    /// target is unknown. A refresh would answer.
+    pub unknown: Vec<ImpactedMod>,
+    /// The same, for mods no refresh can answer about.
+    pub unidentifiable: Vec<ImpactedMod>,
+}
+
+impl DependentMods {
+    /// Whether anything at all is worth putting in front of the user.
+    #[must_use]
+    pub fn is_silent(&self) -> bool {
+        self.breaks.is_empty()
+            && self.degrades.is_empty()
+            && self.unknown.is_empty()
+            && self.unidentifiable.is_empty()
+    }
+
+    /// Whether every other installed mod gave a real answer.
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.unknown.is_empty() && self.unidentifiable.is_empty()
+    }
+}
+
+/// What one mod needs before it can load.
+///
+/// The inverse question, asked when a mod is turned back on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequiredMods {
+    pub target: ImpactedMod,
+    /// Required mods that are installed but turned off. Turning them on is a
+    /// rename and is exactly reversible, so it is offered.
+    pub disabled: Vec<ImpactedMod>,
+    /// Required projects with no jar in this host at all. Reported and never
+    /// fetched: installing one reaches a catalog, which a toggle must not do.
+    pub absent: Vec<ImpactedMod>,
+    /// Installed mods the target declares it does not work alongside. A
+    /// warning, never a refusal: reproducing exactly that is a reason to run
+    /// this launcher.
+    pub incompatible: Vec<ImpactedMod>,
+}
+
+impl RequiredMods {
+    /// Whether anything at all is worth putting in front of the user.
+    #[must_use]
+    pub fn is_silent(&self) -> bool {
+        self.disabled.is_empty() && self.absent.is_empty() && self.incompatible.is_empty()
+    }
+}
+
 impl App {
+    /// What else stops loading if this mod does.
+    ///
+    /// The question behind every disable and every delete: both take the jar
+    /// out of the loader's view, so both get the same answer.
+    ///
+    /// Offline and pure. It reads the recipe and the directory, and reaches no
+    /// catalog, so a frontend may ask it on every toggle.
+    ///
+    /// Proven and unproven are kept apart. A mod is in `breaks` only because a
+    /// recorded relation says so; a mod nothing has asked about is reported as
+    /// unknown rather than assumed independent, which is the assumption that
+    /// would make this warning confidently wrong.
+    pub fn dependents_of(&self, host: ModHost, logical_path: &Path) -> CoreResult<DependentMods> {
+        let graph = ModGraph::build(self, host)?;
+        let index = graph
+            .index_of(logical_path)
+            .ok_or_else(|| CoreError::ModFileMissing {
+                path: logical_path.to_path_buf(),
+            })?;
+        let target = graph.entries[index].mod_entry.clone();
+
+        let breaks = graph.dependents_of(index);
+        let named: BTreeSet<PathBuf> = breaks
+            .iter()
+            .map(|entry| entry.logical_path.clone())
+            .collect();
+
+        let mut degrades = Vec::new();
+        let mut unknown = Vec::new();
+        let mut unidentifiable = Vec::new();
+        for (candidate, entry) in graph.entries.iter().enumerate() {
+            if candidate == index
+                || entry.mod_entry.presence != ModPresence::Installed
+                || named.contains(&entry.mod_entry.logical_path)
+            {
+                continue;
+            }
+            match entry.mod_entry.knowledge {
+                DependencyKnowledge::Recorded => {
+                    if let Some(project) = target.project_id.as_deref()
+                        && graph.declares(candidate, project, ModRelationKind::Optional)
+                    {
+                        degrades.push(ImpactedMod {
+                            distance: 1,
+                            ..entry.mod_entry.clone()
+                        });
+                    }
+                }
+                DependencyKnowledge::Unrecorded => unknown.push(entry.mod_entry.clone()),
+                DependencyKnowledge::Unidentified | DependencyKnowledge::Unidentifiable => {
+                    unidentifiable.push(entry.mod_entry.clone());
+                }
+            }
+        }
+
+        Ok(DependentMods {
+            target,
+            breaks,
+            degrades,
+            unknown,
+            unidentifiable,
+        })
+    }
+
+    /// What this mod needs before it can load.
+    ///
+    /// The inverse of [`Self::dependents_of`], and what a frontend asks before
+    /// turning a mod back on. Offline and pure for the same reasons.
+    pub fn dependencies_of(&self, host: ModHost, logical_path: &Path) -> CoreResult<RequiredMods> {
+        let graph = ModGraph::build(self, host)?;
+        let index = graph
+            .index_of(logical_path)
+            .ok_or_else(|| CoreError::ModFileMissing {
+                path: logical_path.to_path_buf(),
+            })?;
+        let target = graph.entries[index].mod_entry.clone();
+
+        let mut disabled = Vec::new();
+        let mut absent = Vec::new();
+        let mut incompatible = Vec::new();
+        for relation in graph.entries[index].relations.iter().flatten() {
+            let installed = graph
+                .by_project
+                .get(&relation.project_id)
+                .map(|found| &graph.entries[*found].mod_entry);
+            match (relation.kind, installed) {
+                (ModRelationKind::Required, Some(entry))
+                    if entry.presence == ModPresence::Installed => {}
+                (ModRelationKind::Required, Some(entry)) => disabled.push(ImpactedMod {
+                    distance: 1,
+                    ..entry.clone()
+                }),
+                // Named by project alone, because there is no jar here to name
+                // it any better. Nothing is fetched for it.
+                (ModRelationKind::Required, None) => absent.push(ImpactedMod {
+                    logical_path: PathBuf::new(),
+                    name: relation.project_id.clone(),
+                    presence: ModPresence::Missing,
+                    origin: ModOrigin::RequiredDependency,
+                    project_id: Some(relation.project_id.clone()),
+                    knowledge: DependencyKnowledge::Recorded,
+                    distance: 1,
+                }),
+                (ModRelationKind::Incompatible, Some(entry))
+                    if entry.presence == ModPresence::Installed =>
+                {
+                    incompatible.push(ImpactedMod {
+                        distance: 1,
+                        ..entry.clone()
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        Ok(RequiredMods {
+            target,
+            disabled,
+            absent,
+            incompatible,
+        })
+    }
+
+    /// Turns several mods on or off in one call.
+    ///
+    /// Ordered so that any prefix of it leaves a mod set the loader can start:
+    /// disables go dependents first, enables go dependencies first. A frontend
+    /// issuing one rename per row cannot promise that, and an operation that
+    /// dies halfway through a cascade would otherwise leave a dependency gone
+    /// and something that needs it still loading.
+    ///
+    /// Each change is the same rename [`App::set_mod_enabled`] performs, and is
+    /// idempotent for the same reason.
+    pub fn set_mods_enabled(
+        &self,
+        host: ModHost,
+        changes: &[(PathBuf, bool)],
+    ) -> CoreResult<Vec<(PathBuf, ModPresence)>> {
+        let graph = ModGraph::build(self, host)?;
+        let mut ordered: Vec<&(PathBuf, bool)> = changes.iter().collect();
+        ordered.sort_by_key(|(path, enabled)| {
+            let depth = graph
+                .index_of(path)
+                .map_or(0, |index| graph.dependents_of(index).len());
+            // Disabling: fewest dependents first, so what everything needs goes
+            // last and nothing loses what it needs while still loading.
+            // Enabling: the same order reversed, so nothing loads before what
+            // it needs.
+            if *enabled { usize::MAX - depth } else { depth }
+        });
+
+        let mut applied = Vec::with_capacity(ordered.len());
+        for (path, enabled) in ordered {
+            applied.push((path.clone(), self.set_mod_enabled(host, path, *enabled)?));
+        }
+        Ok(applied)
+    }
+
     /// Asks each catalog what this host's mods need, and records the answers.
     ///
     /// Explicit on purpose. It reaches the network, so it is something a user
@@ -144,6 +420,145 @@ impl App {
             "refreshed what this host's mods require"
         );
         Ok(report)
+    }
+}
+
+/// One host's mods, indexed for dependency questions.
+///
+/// Built from durable state alone: the recipe says what each mod requires and
+/// the directory says which of them are loading. Reaches no network, so a
+/// frontend may ask as often as it likes.
+#[derive(Debug)]
+struct ModGraph {
+    /// Every mod of the host, in the order the snapshot listed them.
+    entries: Vec<GraphEntry>,
+    /// Where a catalog project sits in `entries`.
+    by_project: BTreeMap<String, usize>,
+}
+
+#[derive(Debug)]
+struct GraphEntry {
+    mod_entry: ImpactedMod,
+    /// What this mod's catalog said it needs, when anything asked.
+    relations: Option<Vec<RecipeRelation>>,
+}
+
+impl ModGraph {
+    /// Builds the index for one host.
+    fn build(app: &App, host: ModHost) -> CoreResult<Self> {
+        let layout = app.mod_host_layout(host)?;
+        let snapshot = app.host_mod_snapshot(host)?;
+        let relations: BTreeMap<PathBuf, Option<Vec<RecipeRelation>>> = layout
+            .recipe
+            .as_ref()
+            .map(|recipe| {
+                recipe
+                    .files
+                    .iter()
+                    .map(|file| (file.logical_path.clone(), file.relations.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut entries = Vec::with_capacity(snapshot.mods.len());
+        let mut by_project = BTreeMap::new();
+        for entry in &snapshot.mods {
+            let recorded = relations.get(&entry.logical_path).cloned().flatten();
+            let project_id = entry.identity.project_id().map(ToOwned::to_owned);
+            if let Some(project) = project_id.clone() {
+                by_project.insert(project, entries.len());
+            }
+            entries.push(GraphEntry {
+                mod_entry: ImpactedMod {
+                    logical_path: entry.logical_path.clone(),
+                    name: entry.display_name().to_owned(),
+                    presence: entry.presence,
+                    origin: entry.origin,
+                    project_id,
+                    knowledge: knowledge_of(&entry.identity, recorded.as_deref()),
+                    distance: 0,
+                },
+                relations: recorded,
+            });
+        }
+        Ok(Self {
+            entries,
+            by_project,
+        })
+    }
+
+    /// Where a mod sits, by the path a frontend named it with.
+    fn index_of(&self, logical_path: &Path) -> Option<usize> {
+        self.entries
+            .iter()
+            .position(|entry| entry.mod_entry.logical_path == logical_path)
+    }
+
+    /// Whether this mod declares a relation of one kind on a project.
+    fn declares(&self, index: usize, project: &str, kind: ModRelationKind) -> bool {
+        self.entries[index]
+            .relations
+            .as_ref()
+            .is_some_and(|relations| {
+                relations
+                    .iter()
+                    .any(|relation| relation.kind == kind && relation.project_id == project)
+            })
+    }
+
+    /// Every enabled mod that does not load without `start`, transitively.
+    ///
+    /// Breadth first, so the distance recorded on each mod is the shortest
+    /// chain that reaches it, which is what makes a list read as an
+    /// explanation rather than an accident of traversal order.
+    fn dependents_of(&self, start: usize) -> Vec<ImpactedMod> {
+        let mut found: BTreeMap<usize, u32> = BTreeMap::new();
+        let mut frontier = vec![start];
+        let mut distance = 0;
+        while !frontier.is_empty() {
+            distance += 1;
+            let mut next = Vec::new();
+            for index in frontier {
+                let Some(project) = self.entries[index].mod_entry.project_id.as_deref() else {
+                    // Nothing can name it, so nothing can be shown to require it.
+                    continue;
+                };
+                for (candidate, entry) in self.entries.iter().enumerate() {
+                    if candidate == start
+                        || found.contains_key(&candidate)
+                        || entry.mod_entry.presence != ModPresence::Installed
+                        || !self.declares(candidate, project, ModRelationKind::Required)
+                    {
+                        continue;
+                    }
+                    found.insert(candidate, distance);
+                    next.push(candidate);
+                }
+            }
+            frontier = next;
+        }
+        found
+            .into_iter()
+            .map(|(index, distance)| ImpactedMod {
+                distance,
+                ..self.entries[index].mod_entry.clone()
+            })
+            .collect()
+    }
+}
+
+/// How much is known about what one mod requires.
+fn knowledge_of(
+    identity: &ModIdentity,
+    relations: Option<&[RecipeRelation]>,
+) -> DependencyKnowledge {
+    if relations.is_some() {
+        return DependencyKnowledge::Recorded;
+    }
+    match identity {
+        ModIdentity::Version { .. } => DependencyKnowledge::Unrecorded,
+        ModIdentity::Project { .. } => DependencyKnowledge::Unidentified,
+        ModIdentity::Unresolved => DependencyKnowledge::Unidentifiable,
     }
 }
 
@@ -295,6 +710,258 @@ mod tests {
         SourceStore::new(ephervex_storage::metadata::source_dir(root))
             .read_recipe()
             .expect("the retained recipe")
+    }
+
+    const SKYGUIS: &str = "3Gdi7Qgq";
+    const UTILITIX: &str = "MMMWYsjm";
+
+    /// The real shape the feature exists for: one library, three mods that
+    /// need it, and one optional relation among them that must not cascade.
+    fn library_and_its_dependents(base: &std::path::Path) -> (App, InstanceId, PathBuf) {
+        let (app, instance, root) = instance_with_unasked_mods(base);
+        let store = SourceStore::new(ephervex_storage::metadata::source_dir(&root));
+        let mut recipe = store.read_recipe().expect("recipe");
+        recipe.files = vec![
+            with_relations(recorded("LibX.jar", LIBRARY, LIBRARY_RELEASE), &[]),
+            with_relations(
+                recorded("SkyblockBuilder.jar", DEPENDENT, DEPENDENT_RELEASE),
+                &[
+                    (LIBRARY, ModRelationKind::Required),
+                    (SKYGUIS, ModRelationKind::Optional),
+                ],
+            ),
+            with_relations(
+                recorded("SkyGUIs.jar", SKYGUIS, "zypaCGkp"),
+                &[
+                    (LIBRARY, ModRelationKind::Required),
+                    (DEPENDENT, ModRelationKind::Required),
+                ],
+            ),
+            with_relations(
+                recorded("UtilitiX.jar", UTILITIX, "WyTAmDcK"),
+                &[(LIBRARY, ModRelationKind::Required)],
+            ),
+        ];
+        store.write_recipe(&recipe).expect("write");
+
+        let game = ephervex_storage::metadata::client_game_dir(&root).join("mods");
+        std::fs::create_dir_all(&game).expect("mods dir");
+        for jar in [
+            "LibX.jar",
+            "SkyblockBuilder.jar",
+            "SkyGUIs.jar",
+            "UtilitiX.jar",
+        ] {
+            std::fs::write(game.join(jar), b"jar").expect("write jar");
+        }
+        (app, instance, root)
+    }
+
+    fn with_relations(
+        mut file: PackFileRecipe,
+        relations: &[(&str, ModRelationKind)],
+    ) -> PackFileRecipe {
+        file.relations = Some(
+            relations
+                .iter()
+                .map(|(project_id, kind)| RecipeRelation {
+                    project_id: (*project_id).to_owned(),
+                    kind: *kind,
+                    version_id: None,
+                })
+                .collect(),
+        );
+        file
+    }
+
+    fn names(mods: &[ImpactedMod]) -> Vec<&str> {
+        mods.iter().map(|entry| entry.name.as_str()).collect()
+    }
+
+    #[test]
+    fn disabling_a_library_names_every_installed_mod_that_requires_it() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, instance, _root) = library_and_its_dependents(base.path());
+
+        let impact = app
+            .dependents_of(ModHost::Instance(instance), Path::new("mods/LibX.jar"))
+            .expect("impact");
+
+        assert_eq!(
+            names(&impact.breaks),
+            ["SkyblockBuilder.jar", "SkyGUIs.jar", "UtilitiX.jar"],
+            "all three stop loading, and the launcher can prove it"
+        );
+        assert!(impact.is_complete(), "every other mod gave a real answer");
+        assert!(!impact.is_silent());
+    }
+
+    #[test]
+    fn a_mod_reached_only_through_an_optional_relation_never_breaks() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, instance, _root) = library_and_its_dependents(base.path());
+
+        // Skyblock Builder declares Sky GUIs optional. Turning Sky GUIs off
+        // costs a feature, so nothing may cascade from it.
+        let impact = app
+            .dependents_of(ModHost::Instance(instance), Path::new("mods/SkyGUIs.jar"))
+            .expect("impact");
+
+        assert!(impact.breaks.is_empty(), "nothing requires it");
+        assert_eq!(names(&impact.degrades), ["SkyblockBuilder.jar"]);
+    }
+
+    #[test]
+    fn the_break_set_is_transitive() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, instance, _root) = library_and_its_dependents(base.path());
+
+        // Sky GUIs requires Skyblock Builder, which requires nothing else here,
+        // so turning Skyblock Builder off reaches Sky GUIs at distance one.
+        let impact = app
+            .dependents_of(
+                ModHost::Instance(instance),
+                Path::new("mods/SkyblockBuilder.jar"),
+            )
+            .expect("impact");
+        assert_eq!(names(&impact.breaks), ["SkyGUIs.jar"]);
+        assert_eq!(impact.breaks[0].distance, 1);
+
+        // And from the library, Sky GUIs is reachable both directly and through
+        // Skyblock Builder. The shorter chain is the one reported.
+        let from_library = app
+            .dependents_of(ModHost::Instance(instance), Path::new("mods/LibX.jar"))
+            .expect("impact");
+        let skyguis = from_library
+            .breaks
+            .iter()
+            .find(|entry| entry.name == "SkyGUIs.jar")
+            .expect("reached");
+        assert_eq!(skyguis.distance, 1, "the shortest chain explains it best");
+    }
+
+    #[test]
+    fn an_already_disabled_dependent_is_not_reported_as_breaking() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, instance, root) = library_and_its_dependents(base.path());
+        let mods = ephervex_storage::metadata::client_game_dir(&root).join("mods");
+        std::fs::rename(
+            mods.join("UtilitiX.jar"),
+            mods.join("UtilitiX.jar.disabled"),
+        )
+        .expect("disable it");
+
+        let impact = app
+            .dependents_of(ModHost::Instance(instance), Path::new("mods/LibX.jar"))
+            .expect("impact");
+        assert_eq!(
+            names(&impact.breaks),
+            ["SkyblockBuilder.jar", "SkyGUIs.jar"],
+            "a mod that is already not loading cannot stop loading"
+        );
+    }
+
+    #[test]
+    fn a_mod_nothing_has_asked_about_is_unknown_rather_than_independent() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, instance, root) = library_and_its_dependents(base.path());
+        let store = SourceStore::new(ephervex_storage::metadata::source_dir(&root));
+        let mut recipe = store.read_recipe().expect("recipe");
+        recipe
+            .files
+            .iter_mut()
+            .find(|file| file.logical_path == Path::new("mods/UtilitiX.jar"))
+            .expect("the mod")
+            .relations = None;
+        store.write_recipe(&recipe).expect("write");
+
+        let impact = app
+            .dependents_of(ModHost::Instance(instance), Path::new("mods/LibX.jar"))
+            .expect("impact");
+
+        assert_eq!(
+            names(&impact.breaks),
+            ["SkyblockBuilder.jar", "SkyGUIs.jar"]
+        );
+        assert_eq!(names(&impact.unknown), ["UtilitiX.jar"]);
+        assert!(
+            !impact.is_complete(),
+            "a warning that claimed completeness here would be wrong"
+        );
+        assert!(impact.unknown[0].knowledge.a_refresh_would_help());
+    }
+
+    #[test]
+    fn enabling_a_mod_names_the_required_mods_that_are_turned_off() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, instance, root) = library_and_its_dependents(base.path());
+        let mods = ephervex_storage::metadata::client_game_dir(&root).join("mods");
+        std::fs::rename(mods.join("LibX.jar"), mods.join("LibX.jar.disabled"))
+            .expect("disable the library");
+
+        let needs = app
+            .dependencies_of(ModHost::Instance(instance), Path::new("mods/SkyGUIs.jar"))
+            .expect("requirements");
+
+        assert_eq!(names(&needs.disabled), ["LibX.jar"]);
+        assert!(
+            needs.absent.is_empty(),
+            "Skyblock Builder is installed and loading"
+        );
+        assert!(!needs.is_silent());
+    }
+
+    #[test]
+    fn a_required_project_with_no_jar_here_is_reported_and_never_fetched() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, instance, root) = library_and_its_dependents(base.path());
+        let store = SourceStore::new(ephervex_storage::metadata::source_dir(&root));
+        let mut recipe = store.read_recipe().expect("recipe");
+        recipe
+            .files
+            .retain(|file| file.logical_path != Path::new("mods/LibX.jar"));
+        store.write_recipe(&recipe).expect("write");
+
+        let needs = app
+            .dependencies_of(ModHost::Instance(instance), Path::new("mods/UtilitiX.jar"))
+            .expect("requirements");
+
+        assert!(needs.disabled.is_empty());
+        assert_eq!(names(&needs.absent), [LIBRARY], "named by project alone");
+        assert_eq!(needs.absent[0].presence, ModPresence::Missing);
+    }
+
+    #[test]
+    fn a_batch_disable_turns_dependents_off_before_what_they_require() {
+        // Any prefix of the batch has to leave a mod set that still starts.
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, instance, _root) = library_and_its_dependents(base.path());
+
+        let applied = app
+            .set_mods_enabled(
+                ModHost::Instance(instance),
+                &[
+                    (PathBuf::from("mods/LibX.jar"), false),
+                    (PathBuf::from("mods/SkyblockBuilder.jar"), false),
+                    (PathBuf::from("mods/SkyGUIs.jar"), false),
+                ],
+            )
+            .expect("batch");
+
+        let order: Vec<&str> = applied
+            .iter()
+            .map(|(path, _)| path.file_name().expect("name").to_str().expect("utf8"))
+            .collect();
+        assert_eq!(
+            order,
+            ["SkyGUIs.jar", "SkyblockBuilder.jar", "LibX.jar"],
+            "the library goes last, after everything that needs it"
+        );
+        assert!(
+            applied
+                .iter()
+                .all(|(_, presence)| *presence == ModPresence::Disabled)
+        );
     }
 
     #[tokio::test]
