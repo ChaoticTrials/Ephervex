@@ -104,6 +104,30 @@ reconciliation; corrupt or missing metadata leaves the SQLite recovery copy
 visible but unusable for launch or mutation. Multiple roots claiming one server
 ID are a blocking conflict rather than a selection opportunity (ADR 0014).
 
+## Mutation and interruption recovery
+
+State-changing operations use a publication boundary or leave durable evidence
+that startup reconciliation can report. They do not infer success from a
+free-space estimate. A write that reaches `ENOSPC` is classified as storage
+exhaustion with an actionable error.
+
+| Operation | Publication boundary | Interruption state and recovery |
+|---|---|---|
+| Configuration and launcher-owned JSON metadata | A sibling file is flushed, renamed over the destination, then the parent directory is flushed. | The previous file remains authoritative until rename. A temporary sibling is never read as state. |
+| Client creation and pack import | The incomplete marker is cleared, then canonical metadata and the index make the host visible. | A marked, unpublished root is reported and left untouched for manual review. |
+| Server installation | A fully built hidden sibling root is renamed into its final location before it is indexed. | An unpublished or incomplete root is not launched as a server. Reconciliation reports rather than guesses when canonical state is missing or conflicting. |
+| Instance duplication and storage promotion | The complete destination is published by rename, followed by the recoverable index update. | Incomplete destinations are reported. If a promoted root moved before its index update, reconciliation follows the canonical files instead of deleting the record. |
+| Downloads and shared artifacts | Bytes are staged, verified against the strongest supplied hash, then renamed into the shared store. | Partial or mismatching bytes are never published as cache entries. A retry starts from verified state. |
+| Managed mod install, update, and removal | Old jars move to `.launcher/retired/`; new jars land; the retained recipe is atomically published. | Pre-publication failure removes new jars and restores retired jars. Any failed compensation is returned as a typed recovery issue and persists `InterruptedMutation` attention. Post-publication cleanup failures are also reported. |
+| Dependency-aware enable, disable, and delete | One planned batch applies ordered file changes using the same recorded dependency graph. | Failure rolls back the batch. Any launcher-owned staging or retired content left behind is reported on the next reconciliation. |
+| Verification repair | Replacement bytes are verified before they replace a managed file. | A failed repair keeps or restores the prior file; leftover transaction state remains visible for reconciliation. |
+| Diagnostic bundle export | A caller-selected set is written to the requested local archive. | Failure is reported against the output path. Source logs are never changed or scrubbed. |
+| Launch and server process control | A durable owner record and kernel-visible process identity establish control. | Stale ownership evidence is distinguished from a live process. An orphan is reported and never adopted or signaled. |
+
+Non-empty `.launcher/retired/` or `.launcher/staging/` directories are always
+suspicious after restart. Reconciliation adds host attention and leaves every
+entry in place. A later operation must not silently erase that evidence.
+
 ## Reusable artifact cache budget
 
 The cache under the XDG cache root is a disposable optimization, never a source
