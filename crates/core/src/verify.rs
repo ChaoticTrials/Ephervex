@@ -26,7 +26,8 @@ use ephervex_minecraft::{
     LaunchFeatures, MinecraftError, PlannedArtifact, Platform, VERSION_MANIFEST_CACHE_KEY,
     VanillaInstaller,
 };
-use ephervex_model::{Hash, InstanceId, LoaderKind, Progress};
+use ephervex_model::{AttentionReason, Hash, InstanceId, LoaderKind, Progress};
+use ephervex_pack::{MutationRecoveryAction, MutationRecoveryIssue};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument, warn};
 
@@ -204,6 +205,8 @@ pub struct RepairReport {
     /// Kept apart from the ones nothing could have fixed, because one says the
     /// catalog or the network was the problem and the other says the pack was.
     pub failed: Vec<PathBuf>,
+    /// Scratch files that could not be removed or restored.
+    pub recovery_issues: Vec<MutationRecoveryIssue>,
 }
 
 impl RepairReport {
@@ -420,19 +423,43 @@ impl App {
             match self.restore_mod_file(host, &path, reporter, cancel).await {
                 Ok(()) => {
                     // Deleting the outgoing copy is allowed to fail: a leftover
-                    // in launcher-owned scratch is invisible to the game, and
-                    // the next mutation clears it.
+                    // in launcher-owned scratch is invisible to the game. It
+                    // remains a typed recovery issue until reviewed.
                     if let Some(retired) = retired {
-                        let _ = std::fs::remove_file(retired);
+                        if let Err(error) = std::fs::remove_file(&retired) {
+                            report.recovery_issues.push(MutationRecoveryIssue {
+                                action: MutationRecoveryAction::RemoveRetired,
+                                path: retired,
+                                error_kind: error.kind(),
+                            });
+                        }
                     }
                     report.repaired.push(path);
                 }
                 Err(error) => {
                     warn!(%error, path = %path.display(), "a file could not be repaired");
                     if let Some(retired) = retired {
-                        restore_retired(&retired, &layout.game_dir.join(&path));
+                        if let Some(issue) = restore_retired(&retired, &layout.game_dir.join(&path))
+                        {
+                            report.recovery_issues.push(issue);
+                        }
                     }
                     report.failed.push(path);
+                }
+            }
+        }
+
+        if !report.recovery_issues.is_empty() {
+            match host {
+                InstalledHost::Instance(id) => {
+                    let mut record = self.client(id)?;
+                    record.add_attention(AttentionReason::InterruptedMutation);
+                    self.registry().update_client(&mut record)?;
+                }
+                InstalledHost::Server(id) => {
+                    let mut record = self.server(id)?;
+                    record.add_attention(AttentionReason::InterruptedMutation);
+                    self.registry().update_server(&mut record)?;
                 }
             }
         }
@@ -479,17 +506,22 @@ fn retire(
 
 /// Puts a retired jar back where it came from.
 ///
-/// Best effort and reported rather than returned: the repair has already
-/// failed by the time this runs, and a second failure changes only how much of
-/// the instance is intact, not whether the operation went wrong.
-fn restore_retired(retired: &Path, destination: &Path) {
+/// The repair has already failed by the time this runs. A second failure is a
+/// separate recovery result because it changes how much of the host is intact.
+fn restore_retired(retired: &Path, destination: &Path) -> Option<MutationRecoveryIssue> {
     if let Err(error) = std::fs::rename(retired, destination) {
         warn!(
             %error,
             path = %destination.display(),
             "a broken file could not be put back after a failed repair"
         );
+        return Some(MutationRecoveryIssue {
+            action: MutationRecoveryAction::RestoreRetired,
+            path: retired.to_path_buf(),
+            error_kind: error.kind(),
+        });
     }
+    None
 }
 
 /// What one file on disk is, against the digests recorded for it.
@@ -520,6 +552,19 @@ async fn check(path: &Path, expected: &[Hash]) -> Integrity {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use std::path::Path;
+
+    #[test]
+    fn a_failed_repair_rollback_returns_a_typed_recovery_issue() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let absent = temporary.path().join("retired/absent.jar");
+        let destination = temporary.path().join("mods/original.jar");
+
+        let issue = restore_retired(&absent, &destination).expect("rollback failure");
+
+        assert_eq!(issue.action, MutationRecoveryAction::RestoreRetired);
+        assert_eq!(issue.path, absent);
+        assert_eq!(issue.error_kind, std::io::ErrorKind::NotFound);
+    }
 
     use ephervex_model::{HashAlgorithm, InstanceId, LoaderKind, LoaderSelection, ModOrigin};
     use ephervex_pack::{
