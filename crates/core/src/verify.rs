@@ -32,7 +32,7 @@ use tracing::{info, instrument, warn};
 
 use crate::app::App;
 use crate::error::CoreResult;
-use crate::mods::ModHost;
+use crate::mods::InstalledHost;
 
 /// What checking one recorded file found.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -231,11 +231,11 @@ impl App {
     #[instrument(skip(self, reporter, cancel), fields(host = %host.id()))]
     pub async fn verify_host(
         &self,
-        host: ModHost,
+        host: InstalledHost,
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<VerificationReport> {
-        let layout = self.mod_host_layout(host)?;
+        let layout = self.host_layout(host)?;
         let Some(recipe) = layout.recipe.as_ref() else {
             // Nothing recorded is nothing to check, and is not a fault: an
             // instance made by hand acquires a recipe when something is
@@ -381,11 +381,11 @@ impl App {
     #[instrument(skip(self, reporter, cancel), fields(host = %host.id()))]
     pub async fn repair_host(
         &self,
-        host: ModHost,
+        host: InstalledHost,
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<RepairReport> {
-        let layout = self.mod_host_layout(host)?;
+        let layout = self.host_layout(host)?;
         let found = self.verify_host(host, reporter, cancel).await?;
         let mut report = RepairReport {
             unrepairable: found
@@ -452,7 +452,7 @@ impl App {
 /// Returns where it went, or nothing when there was no file there to move -
 /// which is the ordinary case for a file that is simply absent.
 fn retire(
-    layout: &crate::mods::ModHostLayout,
+    layout: &crate::mods::HostLayout,
     logical_path: &Path,
 ) -> std::io::Result<Option<PathBuf>> {
     let installed = layout.game_dir.join(logical_path);
@@ -602,7 +602,7 @@ mod tests {
 
     async fn verify(app: &App, instance: InstanceId) -> VerificationReport {
         app.verify_host(
-            ModHost::Instance(instance),
+            InstalledHost::Instance(instance),
             &OperationReporter::silent("test-verify"),
             &CancellationToken::new(),
         )
@@ -700,7 +700,7 @@ mod tests {
 
         let report = app
             .repair_host(
-                ModHost::Instance(id),
+                InstalledHost::Instance(id),
                 &OperationReporter::silent("test-repair"),
                 &CancellationToken::new(),
             )
@@ -733,7 +733,7 @@ mod tests {
 
         let report = app
             .repair_host(
-                ModHost::Instance(id),
+                InstalledHost::Instance(id),
                 &OperationReporter::silent("test-repair"),
                 &CancellationToken::new(),
             )
@@ -773,7 +773,7 @@ mod tests {
 
         let report = app
             .repair_host(
-                ModHost::Instance(id),
+                InstalledHost::Instance(id),
                 &OperationReporter::silent("test-repair"),
                 &CancellationToken::new(),
             )

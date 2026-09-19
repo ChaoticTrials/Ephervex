@@ -15,11 +15,11 @@ use ephervex_core::live_diagnostics::TailedLine;
 use ephervex_core::{
     App, AuthEvent, AuthObserver, CancellationToken, ClientFolder, ClientModOutcome, ClientModPlan,
     CoreError, CoreResult, CrashReview, DiagnosticKind, DiagnosticRequest, DiagnosticScope,
-    ErrorChain, EulaStatus, ImportRequest, LaunchAndConnectObserver, LaunchAndConnectOptions,
-    LaunchEvent, LaunchObserver, LaunchOptions, LinkedModOutcome, LinkedModPlan, LinkedModRequest,
-    LinkedTargetPlan, LinkedTargetResult, LinkedTargetState, LocalModOffer, LocalModPlan,
-    LocalModReport, LoginOptions, ManagedModEntry, ManagedModSnapshot, MetadataAvailability,
-    ModHost, ModInstallPlan, ModMutability, ModMutation, ModMutationPlan, ModPresence,
+    ErrorChain, EulaStatus, ImportRequest, InstalledHost, LaunchAndConnectObserver,
+    LaunchAndConnectOptions, LaunchEvent, LaunchObserver, LaunchOptions, LinkedModOutcome,
+    LinkedModPlan, LinkedModRequest, LinkedTargetPlan, LinkedTargetResult, LinkedTargetState,
+    LocalModOffer, LocalModPlan, LocalModReport, LoginOptions, ManagedModEntry, ManagedModSnapshot,
+    MetadataAvailability, ModInstallPlan, ModMutability, ModMutation, ModMutationPlan, ModPresence,
     ModSearchQuery, MutationRestriction, NewClient, NewServer, OperationReporter,
     OptionalSelection, PackAnalysis, Paths, PlannedOutcome, ProcessMonitor, ProgressSink,
     ProviderFileIdentity, SearchOptions, ServerContentSource, ServerCreateOptions, ServerEvent,
@@ -306,7 +306,7 @@ pub enum Command {
     DisableSuggestedMods(ServerId),
     /// Ask a provider about this host's mods again, even though this run
     /// already has.
-    RefreshMods(ModHost),
+    RefreshMods(InstalledHost),
     /// What this launcher is running, with live resource use.
     LoadRunning,
     /// End a launch this process is not supervising, and release its lock.
@@ -322,7 +322,7 @@ pub enum Command {
     /// answer still reaches the user, as a dialog in the first case and a
     /// toast in the second.
     SetModEnabled {
-        host: ModHost,
+        host: InstalledHost,
         path: PathBuf,
         enabled: bool,
     },
@@ -339,13 +339,13 @@ pub enum Command {
     /// is replaced by the one that was just recorded rather than staying stale
     /// behind the toast that says the refresh worked.
     RefreshModDependencies {
-        host: ModHost,
+        host: InstalledHost,
         reload: Option<PathBuf>,
     },
     /// What one mod declares and what declares it. Offline, so it answers
     /// while the catalog call beside it is still in flight.
     LoadModRelations {
-        host: ModHost,
+        host: InstalledHost,
         path: PathBuf,
     },
     /// Delete several mods' jars in one call, in dependency order.
@@ -353,19 +353,19 @@ pub enum Command {
     /// What the dialog sends once the user has agreed that taking one jar off
     /// disk takes the ones that need it too.
     DeleteModFiles {
-        host: ModHost,
+        host: InstalledHost,
         paths: Vec<PathBuf>,
     },
     /// Turn several mods on or off in one call, in dependency order.
     ///
     /// What the dialog sends once the user has agreed to a cascade.
     SetModsEnabled {
-        host: ModHost,
+        host: InstalledHost,
         changes: Vec<(PathBuf, bool)>,
     },
     /// Work out what deleting one mod's jar would do to the rest.
     QueryDeleteImpact {
-        host: ModHost,
+        host: InstalledHost,
         path: PathBuf,
         name: String,
     },
@@ -375,7 +375,7 @@ pub enum Command {
     /// from, so the decision is made by the person who can make it rather than
     /// by a thread that cannot ask.
     PlanLocalMods {
-        host: ModHost,
+        host: InstalledHost,
         sources: Vec<PathBuf>,
     },
     /// Copy these files into a host's mods folder and reload the list.
@@ -383,18 +383,18 @@ pub enum Command {
     /// Only what the user agreed to: anything they chose to skip never gets
     /// here. `skipped` is carried through so the result can say so.
     AddLocalMods {
-        host: ModHost,
+        host: InstalledHost,
         sources: Vec<PathBuf>,
         skipped: usize,
     },
     /// Delete one jar the user put in the mods folder themselves.
     /// Put a deleted mod's jar back from what the recipe already declares.
     RestoreModFile {
-        host: ModHost,
+        host: InstalledHost,
         path: PathBuf,
     },
     DeleteHandPlacedMod {
-        host: ModHost,
+        host: InstalledHost,
         path: PathBuf,
     },
     /// Change what an instance or a server is called.
@@ -461,7 +461,7 @@ pub enum Command {
     /// made: a Wayland session delivers no file drops at all, and a drag out of
     /// an application that offers no file path is refused by the windowing
     /// layer before this process sees it.
-    PickLocalMods(ModHost),
+    PickLocalMods(InstalledHost),
     /// Replaces the whole configured watched-folder list. Sent with the full
     /// list after every add or remove, mirroring the settings screen's other
     /// list-shaped settings rather than diffing one entry at a time.
@@ -1782,7 +1782,7 @@ fn run_worker(
                 );
             }
             Command::PlanDuplicate(instance) => {
-                match app.absent_recorded_mods(ModHost::Instance(instance)) {
+                match app.absent_recorded_mods(InstalledHost::Instance(instance)) {
                     Ok(absent) => {
                         let _ = events.send(Event::AbsentMods(AbsentModsData {
                             instance: instance.to_string(),
@@ -2026,7 +2026,7 @@ fn run_worker(
                 // there leaves what is already shown standing.
                 match app.managed_mod_snapshot(instance) {
                     Ok(snapshot) => {
-                        let host = ModHost::Instance(instance);
+                        let host = InstalledHost::Instance(instance);
                         let review = app.crash_review(host).ok().flatten();
                         let _ = events
                             .send(Event::CrashNotice(crash_notice_data(host, review.as_ref())));
@@ -2198,8 +2198,10 @@ fn run_worker(
                         // artwork follow, so the new row does not sit there as a
                         // file name until the workspace is opened again.
                         if let Ok(snapshot) = app.managed_mod_snapshot(instance) {
-                            let review =
-                                app.crash_review(ModHost::Instance(instance)).ok().flatten();
+                            let review = app
+                                .crash_review(InstalledHost::Instance(instance))
+                                .ok()
+                                .flatten();
                             let _ = reports.send(Event::ManagedMods(managed_mods_data(
                                 &snapshot,
                                 review.as_ref(),
@@ -2328,7 +2330,7 @@ fn run_worker(
                 // The crash notice comes with the workspace rather than with
                 // the mods, so a server that failed to start says so on the tab
                 // the user lands on instead of only on the one they might open.
-                let host = ModHost::Server(server);
+                let host = InstalledHost::Server(server);
                 let review = app.crash_review(host).ok().flatten();
                 let _ = events.send(Event::CrashNotice(crash_notice_data(host, review.as_ref())));
                 send_server_workspace(&app, server, &events);
@@ -2336,7 +2338,7 @@ fn run_worker(
             Command::LoadServerMods(server) => {
                 send_host_mods(
                     &app,
-                    ModHost::Server(server),
+                    InstalledHost::Server(server),
                     &events,
                     &refreshed_mods,
                     false,
@@ -3263,7 +3265,7 @@ const fn origin(is_override: bool) -> SettingOrigin {
 /// server that will not start is the moment a user least wants to wait for one.
 fn send_host_mods(
     app: &App,
-    host: ModHost,
+    host: InstalledHost,
     events: &Sender<Event>,
     refreshed: &RefreshedHosts,
     force: bool,
@@ -3392,7 +3394,7 @@ fn disable_suggested_mods(
     events: &Sender<Event>,
     refreshed: &RefreshedHosts,
 ) {
-    let host = ModHost::Server(server);
+    let host = InstalledHost::Server(server);
     let review = match app.crash_review(host) {
         Ok(Some(review)) => review,
         Ok(None) => return,
@@ -3469,10 +3471,10 @@ fn running_data(
         .map(|process| {
             let id = process.host.id();
             let can_stop = match process.host {
-                ModHost::Instance(instance) => {
+                InstalledHost::Instance(instance) => {
                     supervised.contains(&launch_key(instance, process.launch.as_deref()))
                 }
-                ModHost::Server(_) => process.controllable,
+                InstalledHost::Server(_) => process.controllable,
             };
             let uptime = format_uptime(process.uptime_seconds());
             RunningData {
@@ -5099,7 +5101,7 @@ fn localized_value(message_id: &str, value: &str) -> String {
 /// Silent on failure: the mod page it fills is opened for other reasons too,
 /// and an instance whose recipe cannot be read has already said so through the
 /// list the page was opened from.
-fn send_mod_relations(app: &App, host: ModHost, path: &Path, events: &Sender<Event>) {
+fn send_mod_relations(app: &App, host: InstalledHost, path: &Path, events: &Sender<Event>) {
     match app.relations_of(host, path) {
         Ok(relations) => {
             let _ = events.send(Event::ModRelations(ModRelationsData {
@@ -5380,7 +5382,7 @@ fn target_explanation(target: &LinkedTargetPlan) -> String {
 ///
 /// `force` is an explicit Refresh, which also clears the mark so the answer it
 /// fetches is the one the rest of the run reuses.
-fn claim_refresh(refreshed: &RefreshedHosts, host: ModHost, force: bool) -> bool {
+fn claim_refresh(refreshed: &RefreshedHosts, host: InstalledHost, force: bool) -> bool {
     let Ok(mut refreshed) = refreshed.lock() else {
         // A poisoned lock is not a reason to stop showing mod names.
         return true;
@@ -5394,10 +5396,10 @@ fn claim_refresh(refreshed: &RefreshedHosts, host: ModHost, force: bool) -> bool
 }
 
 fn refresh_enriched_mods(paths: Paths, events: &Sender<Event>, instance: InstanceId) {
-    refresh_enriched_host_mods(paths, events, ModHost::Instance(instance));
+    refresh_enriched_host_mods(paths, events, InstalledHost::Instance(instance));
 }
 
-fn refresh_enriched_host_mods(paths: Paths, events: &Sender<Event>, host: ModHost) {
+fn refresh_enriched_host_mods(paths: Paths, events: &Sender<Event>, host: InstalledHost) {
     spawn_detached(paths, events.clone(), move |app, events, runtime| {
         let enriched = runtime.block_on(app.enriched_host_mods(
             host,
@@ -5440,7 +5442,10 @@ fn finish_linked(
                 let _ = events.send(Event::LinkedResult(linked_result_data(&outcome)));
             }
             if let ClientModOutcome::Mutated(mutation) = &outcome.client {
-                let review = app.crash_review(ModHost::Instance(instance)).ok().flatten();
+                let review = app
+                    .crash_review(InstalledHost::Instance(instance))
+                    .ok()
+                    .flatten();
                 let _ = events.send(Event::ManagedMods(managed_mods_data(
                     &mutation.snapshot,
                     review.as_ref(),
@@ -5533,7 +5538,7 @@ fn restriction_text(restriction: Option<MutationRestriction>) -> String {
 }
 
 /// Turns a local-mod plan into what the clash question is asked from.
-fn local_mod_plan_data(host: ModHost, plan: &LocalModPlan) -> LocalModPlanData {
+fn local_mod_plan_data(host: InstalledHost, plan: &LocalModPlan) -> LocalModPlanData {
     let mut ready = Vec::new();
     let mut clashing = Vec::new();
     let mut refused = Vec::new();
@@ -5627,7 +5632,7 @@ fn managed_mods_data(
     }
 }
 
-fn crash_notice_data(host: ModHost, review: Option<&CrashReview>) -> CrashNoticeData {
+fn crash_notice_data(host: InstalledHost, review: Option<&CrashReview>) -> CrashNoticeData {
     CrashNoticeData {
         host: host.id(),
         host_kind: host.kind().to_owned(),
@@ -5892,10 +5897,10 @@ pub fn parse_instance_id(value: &str) -> Option<InstanceId> {
     InstanceId::from_str(value).ok()
 }
 /// Which kind of host this is, in the spelling the markup uses.
-const fn host_kind(host: ModHost) -> &'static str {
+const fn host_kind(host: InstalledHost) -> &'static str {
     match host {
-        ModHost::Instance(_) => "client",
-        ModHost::Server(_) => "server",
+        InstalledHost::Instance(_) => "client",
+        InstalledHost::Server(_) => "server",
     }
 }
 
@@ -5911,7 +5916,7 @@ const fn host_kind(host: ModHost) -> &'static str {
 /// any other.
 fn set_mod_enabled(
     app: &App,
-    host: ModHost,
+    host: InstalledHost,
     path: &Path,
     enabled: bool,
     events: &Sender<Event>,
@@ -6005,7 +6010,7 @@ fn set_mod_enabled(
 /// the instance holding mods that cannot load.
 fn delete_mod(
     app: &App,
-    host: ModHost,
+    host: InstalledHost,
     path: &Path,
     name: String,
     events: &Sender<Event>,
@@ -6073,10 +6078,10 @@ pub fn parse_server_id(value: &str) -> Option<ServerId> {
 }
 
 /// The instance or server a mod action names, from what the markup carries.
-pub fn parse_mod_host(kind: &str, id: &str) -> Option<ModHost> {
+pub fn parse_mod_host(kind: &str, id: &str) -> Option<InstalledHost> {
     match kind {
-        "client" => parse_instance_id(id).map(ModHost::Instance),
-        "server" => parse_server_id(id).map(ModHost::Server),
+        "client" => parse_instance_id(id).map(InstalledHost::Instance),
+        "server" => parse_server_id(id).map(InstalledHost::Server),
         _ => None,
     }
 }
@@ -6105,8 +6110,8 @@ mod tests {
     #[test]
     fn a_hosts_mods_are_fetched_once_per_run_unless_refresh_is_asked_for() {
         let refreshed: RefreshedHosts = Arc::new(Mutex::new(HashSet::new()));
-        let instance = ModHost::Instance(ephervex_model::InstanceId::new());
-        let other = ModHost::Instance(ephervex_model::InstanceId::new());
+        let instance = InstalledHost::Instance(ephervex_model::InstanceId::new());
+        let other = InstalledHost::Instance(ephervex_model::InstanceId::new());
 
         assert!(claim_refresh(&refreshed, instance, false), "the first open");
         assert!(
@@ -6134,12 +6139,12 @@ mod tests {
         let refreshed: RefreshedHosts = Arc::new(Mutex::new(HashSet::new()));
         assert!(claim_refresh(
             &refreshed,
-            ModHost::Instance(ephervex_model::InstanceId::new()),
+            InstalledHost::Instance(ephervex_model::InstanceId::new()),
             false
         ));
         assert!(claim_refresh(
             &refreshed,
-            ModHost::Server(ephervex_model::ServerId::new()),
+            InstalledHost::Server(ephervex_model::ServerId::new()),
             false
         ));
     }

@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use copypasta::{ClipboardContext, ClipboardProvider as _};
 use ephervex_core::live_diagnostics::{LogFilter, LogLevel, RetainedLog};
-use ephervex_core::{ModHost, OptionalSelection, ProviderFileIdentity, WindowSize};
+use ephervex_core::{InstalledHost, OptionalSelection, ProviderFileIdentity, WindowSize};
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use ephervex_model::AbsentModPolicy;
 use ephervex_model::ModProvider;
@@ -1542,7 +1542,7 @@ enum DropIntent {
     /// What an open mods tab is asking for, in the same way an empty archive
     /// slot asks for an archive. A drop has no cursor position, so the tab
     /// being open is the whole aim.
-    Mods(ModHost),
+    Mods(InstalledHost),
     /// Nothing. A file let go over a confirmation the user is in the middle of
     /// is far more likely to be a misplaced gesture than a request to abandon
     /// it.
@@ -2201,7 +2201,7 @@ fn register_create_instance_naming(ui: &AppWindow, commands: &Sender<Command>) {
 /// rest of the list decided at once.
 #[derive(Debug, Default)]
 struct LocalModDrop {
-    host: Option<ModHost>,
+    host: Option<InstalledHost>,
     /// Files nothing was asked about, plus every clash answered "overwrite".
     accepted: Vec<PathBuf>,
     /// The clashes still to answer for, in the order they were dropped.
@@ -2214,7 +2214,7 @@ struct LocalModDrop {
 
 impl LocalModDrop {
     /// Starts over from one plan, discarding anything half-answered.
-    fn begin(&mut self, host: ModHost, plan: &backend::LocalModPlanData) {
+    fn begin(&mut self, host: InstalledHost, plan: &backend::LocalModPlanData) {
         self.host = Some(host);
         self.accepted.clone_from(&plan.ready);
         self.clashing.clone_from(&plan.clashing);
@@ -2566,7 +2566,7 @@ fn register_mod_actions(ui: &AppWindow, commands: &Sender<Command>, browser: &Rc
         send(
             &sender,
             Command::LoadModRelations {
-                host: ModHost::Instance(instance),
+                host: InstalledHost::Instance(instance),
                 path: PathBuf::from(path.as_str()),
             },
         );

@@ -50,7 +50,7 @@ use ephervex_storage::diagnostics::MAX_VIEW_BYTES;
 use crate::app::App;
 use crate::diagnostics::{DiagnosticRequest, DiagnosticScope};
 use crate::error::CoreResult;
-use crate::mods::{ModHost, ModPresence};
+use crate::mods::{InstalledHost, ModPresence};
 
 /// Mojang's own client-only packages.
 ///
@@ -544,7 +544,7 @@ impl App {
     /// and not a failure. A report that parses to nothing still returns a
     /// review, so a frontend can say that a crash happened and that it named no
     /// mod, rather than silently showing the same thing as no crash at all.
-    pub fn crash_review(&self, host: ModHost) -> CoreResult<Option<CrashReview>> {
+    pub fn crash_review(&self, host: InstalledHost) -> CoreResult<Option<CrashReview>> {
         let scope = diagnostic_scope(host);
         let Some(report) = self
             .diagnostic_entries(scope, DiagnosticKind::CrashReport)?
@@ -608,10 +608,10 @@ impl App {
     }
 }
 
-fn diagnostic_scope(host: ModHost) -> DiagnosticScope {
+fn diagnostic_scope(host: InstalledHost) -> DiagnosticScope {
     match host {
-        ModHost::Instance(id) => DiagnosticScope::Client(id),
-        ModHost::Server(id) => DiagnosticScope::Server(id),
+        InstalledHost::Instance(id) => DiagnosticScope::Client(id),
+        InstalledHost::Server(id) => DiagnosticScope::Server(id),
     }
 }
 

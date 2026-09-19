@@ -222,7 +222,7 @@ fn may_be_identified(entry: &ManagedModEntry) -> bool {
 /// A refusal from `record_managed` is left alone on purpose: it means this
 /// project is already recorded at another version, which is two jars for one
 /// mod and a thing to tell somebody about rather than to overwrite.
-fn record_identified(layout: &ModHostLayout, adopted: &[ManagedModEntry]) {
+fn record_identified(layout: &HostLayout, adopted: &[ManagedModEntry]) {
     if adopted.is_empty() {
         return;
     }
@@ -597,12 +597,12 @@ impl InstancePackSource {
 /// against two ids, which is what keeps the server's Mods panel from being a
 /// second implementation that drifts from the client's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ModHost {
+pub enum InstalledHost {
     Instance(InstanceId),
     Server(ServerId),
 }
 
-impl ModHost {
+impl InstalledHost {
     /// The host's own id, as a frontend addresses it.
     #[must_use]
     pub fn id(self) -> String {
@@ -622,21 +622,21 @@ impl ModHost {
     }
 }
 
-impl From<InstanceId> for ModHost {
+impl From<InstanceId> for InstalledHost {
     fn from(id: InstanceId) -> Self {
         Self::Instance(id)
     }
 }
 
-impl From<ServerId> for ModHost {
+impl From<ServerId> for InstalledHost {
     fn from(id: ServerId) -> Self {
         Self::Server(id)
     }
 }
 
-/// Where one mod host keeps the two things a mod list is read from.
+/// Where one installed host keeps the state shared by host-level workflows.
 #[derive(Debug)]
-pub(crate) struct ModHostLayout {
+pub(crate) struct HostLayout {
     /// The host's own root, which is what the display cache is keyed by.
     pub(crate) root: PathBuf,
     /// The directory the loader scans, which is what proves a jar is there.
@@ -647,7 +647,7 @@ pub(crate) struct ModHostLayout {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagedModSnapshot {
-    pub host: ModHost,
+    pub host: InstalledHost,
     /// The import this instance came from, when it came from one.
     pub source: Option<InstancePackSource>,
     /// Alphabetical by the name each mod is shown under. Recipe order is the
@@ -1095,15 +1095,15 @@ impl App {
     ///
     /// The one place that knows a client instance and a dedicated server are
     /// laid out differently. Everything above it is written against
-    /// [`ModHost`].
-    pub(crate) fn mod_host_layout(&self, host: ModHost) -> CoreResult<ModHostLayout> {
+    /// [`InstalledHost`].
+    pub(crate) fn host_layout(&self, host: InstalledHost) -> CoreResult<HostLayout> {
         let root = match host {
-            ModHost::Instance(id) => self.client(id)?.root,
-            ModHost::Server(id) => self.server(id)?.root,
+            InstalledHost::Instance(id) => self.client(id)?.root,
+            InstalledHost::Server(id) => self.server(id)?.root,
         };
         let game_dir = match host {
-            ModHost::Instance(_) => ephervex_storage::metadata::client_game_dir(&root),
-            ModHost::Server(_) => ephervex_storage::metadata::server_game_dir(&root),
+            InstalledHost::Instance(_) => ephervex_storage::metadata::client_game_dir(&root),
+            InstalledHost::Server(_) => ephervex_storage::metadata::server_game_dir(&root),
         };
         let store = SourceStore::new(ephervex_storage::metadata::source_dir(&root));
         // Not an error: a host created by hand has no pack to record.
@@ -1112,7 +1112,7 @@ impl App {
         } else {
             None
         };
-        Ok(ModHostLayout {
+        Ok(HostLayout {
             root,
             game_dir,
             recipe,
@@ -1134,11 +1134,11 @@ impl App {
     #[instrument(skip(self), fields(host = %host.id()))]
     pub fn set_mod_enabled(
         &self,
-        host: ModHost,
+        host: InstalledHost,
         logical_path: &Path,
         enabled: bool,
     ) -> CoreResult<ModPresence> {
-        let layout = self.mod_host_layout(host)?;
+        let layout = self.host_layout(host)?;
         let installed = layout.game_dir.join(logical_path);
         let disabled = disabled_path(&installed);
 
@@ -1187,7 +1187,7 @@ impl App {
     /// proof that a mod exists.
     #[instrument(skip(self), fields(instance = %instance))]
     pub fn managed_mod_snapshot(&self, instance: InstanceId) -> CoreResult<ManagedModSnapshot> {
-        self.host_mod_snapshot(ModHost::Instance(instance))
+        self.host_mod_snapshot(InstalledHost::Instance(instance))
     }
 
     /// The same view for a dedicated server.
@@ -1198,7 +1198,7 @@ impl App {
     /// the user can see and act on.
     #[instrument(skip(self), fields(server = %server))]
     pub fn server_mod_snapshot(&self, server: ServerId) -> CoreResult<ManagedModSnapshot> {
-        self.host_mod_snapshot(ModHost::Server(server))
+        self.host_mod_snapshot(InstalledHost::Server(server))
     }
 
     /// The mods this host records that have no jar in `mods/`.
@@ -1211,7 +1211,7 @@ impl App {
     ///
     /// Reaches no network. The recipe says what is wanted and the directory
     /// says what is there.
-    pub fn absent_recorded_mods(&self, host: ModHost) -> CoreResult<Vec<AbsentRecordedMod>> {
+    pub fn absent_recorded_mods(&self, host: InstalledHost) -> CoreResult<Vec<AbsentRecordedMod>> {
         Ok(self
             .host_mod_snapshot(host)?
             .missing()
@@ -1227,8 +1227,8 @@ impl App {
     }
 
     /// Every mod one host has, from durable state alone.
-    pub fn host_mod_snapshot(&self, host: ModHost) -> CoreResult<ManagedModSnapshot> {
-        let layout = self.mod_host_layout(host)?;
+    pub fn host_mod_snapshot(&self, host: InstalledHost) -> CoreResult<ManagedModSnapshot> {
+        let layout = self.host_layout(host)?;
 
         let mut mods: Vec<ManagedModEntry> = layout
             .recipe
@@ -1294,7 +1294,7 @@ impl App {
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<ManagedModSnapshot> {
-        self.enriched_host_mods(ModHost::Instance(instance), reporter, cancel)
+        self.enriched_host_mods(InstalledHost::Instance(instance), reporter, cancel)
             .await
     }
 
@@ -1305,14 +1305,14 @@ impl App {
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<ManagedModSnapshot> {
-        self.enriched_host_mods(ModHost::Server(server), reporter, cancel)
+        self.enriched_host_mods(InstalledHost::Server(server), reporter, cancel)
             .await
     }
 
     /// One host's mods with provider metadata and artwork applied.
     pub async fn enriched_host_mods(
         &self,
-        host: ModHost,
+        host: InstalledHost,
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<ManagedModSnapshot> {
@@ -1336,7 +1336,7 @@ impl App {
                 }
                 // An earlier build kept this beside each instance. The same
                 // metadata is now shared, so the copy is dead weight.
-                mod_display_cache::forget_instance_local(&self.mod_host_layout(host)?.root);
+                mod_display_cache::forget_instance_local(&self.host_layout(host)?.root);
             }
             Err(error) => {
                 // Deliberately not propagated. The mods are installed whether
@@ -1369,11 +1369,11 @@ impl App {
     /// exactly as the directory described it.
     async fn identify_hand_placed(
         &self,
-        host: ModHost,
+        host: InstalledHost,
         snapshot: &mut ManagedModSnapshot,
         cancel: &CancellationToken,
     ) {
-        let layout = match self.mod_host_layout(host) {
+        let layout = match self.host_layout(host) {
             Ok(layout) => layout,
             Err(error) => {
                 warn!(%error, "could not read this host's layout to identify its mods");
@@ -1463,7 +1463,7 @@ impl App {
     /// Whatever Modrinth did not recognize, asked of CurseForge by fingerprint.
     async fn recognize_hand_placed_with_curseforge(
         &self,
-        layout: &ModHostLayout,
+        layout: &HostLayout,
         snapshot: &ManagedModSnapshot,
         candidates: &[usize],
         recognized: &mut BTreeMap<String, RecognizedFile>,
@@ -2422,7 +2422,7 @@ mod tests {
 
     fn snapshot_of(entries: Vec<ManagedModEntry>) -> ManagedModSnapshot {
         ManagedModSnapshot {
-            host: ModHost::Instance(InstanceId::new()),
+            host: InstalledHost::Instance(InstanceId::new()),
             source: None,
             mods: entries,
             metadata: MetadataAvailability::Local,
@@ -2617,7 +2617,7 @@ mod tests {
         let base = tempfile::tempdir().expect("temp dir");
         let (app, instance) =
             imported_instance(base.path(), &["journeymap.jar", "architectury.jar"]).await;
-        let host = ModHost::Instance(instance);
+        let host = InstalledHost::Instance(instance);
         let path = PathBuf::from("mods/journeymap.jar");
         let mods_dir =
             ephervex_storage::metadata::client_game_dir(&app.client(instance).unwrap().root)
@@ -2667,7 +2667,7 @@ mod tests {
     async fn asking_for_the_state_a_mod_is_already_in_changes_nothing() {
         let base = tempfile::tempdir().expect("temp dir");
         let (app, instance) = imported_instance(base.path(), &["journeymap.jar"]).await;
-        let host = ModHost::Instance(instance);
+        let host = InstalledHost::Instance(instance);
         let path = PathBuf::from("mods/journeymap.jar");
 
         assert_eq!(
@@ -2687,7 +2687,7 @@ mod tests {
         let base = tempfile::tempdir().expect("temp dir");
         // Recorded by the recipe, never written into `mods/`.
         let (app, instance) = imported_instance(base.path(), &[]).await;
-        let host = ModHost::Instance(instance);
+        let host = InstalledHost::Instance(instance);
         let path = PathBuf::from("mods/journeymap.jar");
 
         let snapshot = app.host_mod_snapshot(host).expect("snapshot");
@@ -2753,7 +2753,7 @@ mod tests {
         let unresolved = base("mods/d.jar", "d.jar", ModIdentity::Unresolved);
 
         let snapshot = ManagedModSnapshot {
-            host: ModHost::Instance(InstanceId::new()),
+            host: InstalledHost::Instance(InstanceId::new()),
             source: None,
             mods: vec![answered, project_only, unanswered, unresolved],
             metadata: MetadataAvailability::Provider,

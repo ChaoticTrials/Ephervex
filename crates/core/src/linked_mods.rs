@@ -2558,7 +2558,7 @@ mod tests {
         let world = world().await;
         let server = world.link_server("Reproduction Server", MINECRAFT);
         apply(&world, &install("ROOTPROJ"), &[server]).await;
-        let host = crate::ModHost::Server(server);
+        let host = crate::InstalledHost::Server(server);
 
         let snapshot = world.app.server_mod_snapshot(server).expect("server mods");
         let entry = snapshot
@@ -2627,7 +2627,7 @@ mod tests {
         let world = world().await;
         let server = world.link_server("Reproduction Server", MINECRAFT);
         apply(&world, &install("ROOTPROJ"), &[server]).await;
-        let host = crate::ModHost::Server(server);
+        let host = crate::InstalledHost::Server(server);
 
         let installed = world
             .app

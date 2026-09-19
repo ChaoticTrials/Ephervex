@@ -37,7 +37,7 @@ use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 use crate::app::App;
 use crate::diagnostics::DiagnosticScope;
 use crate::error::CoreResult;
-use crate::mods::ModHost;
+use crate::mods::InstalledHost;
 use ephervex_storage::ForcedStop;
 
 /// How much of a log's tail is read to find the line a row shows.
@@ -59,7 +59,7 @@ pub struct ProcessUsage {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RunningProcess {
     /// Which entity this belongs to, and therefore where its actions go.
-    pub host: ModHost,
+    pub host: InstalledHost,
     /// Which of that entity's launches this is, when it is not the first.
     ///
     /// An instance can hold more than one at a time -- a second account is a
@@ -173,7 +173,7 @@ impl App {
             let shared_log = self.last_log_line(DiagnosticScope::Client(record.id));
             for launch in launches {
                 running.push(RunningProcess {
-                    host: ModHost::Instance(record.id),
+                    host: InstalledHost::Instance(record.id),
                     launch: launch.id,
                     name: record.name.clone(),
                     pid: launch.state.game_pid,
@@ -194,7 +194,7 @@ impl App {
                 continue;
             };
             running.push(RunningProcess {
-                host: ModHost::Server(record.id),
+                host: InstalledHost::Server(record.id),
                 launch: None,
                 name: record.name,
                 pid: Some(process.pid),
@@ -337,7 +337,7 @@ mod tests {
         let running = app.running_processes().expect("query");
         assert_eq!(running.len(), 1);
         assert_eq!(running[0].name, "Repro");
-        assert_eq!(running[0].host, ModHost::Instance(record.id));
+        assert_eq!(running[0].host, InstalledHost::Instance(record.id));
         assert_eq!(
             running[0].owner_pid,
             Some(std::process::id()),
@@ -449,7 +449,7 @@ mod tests {
         assert!(
             running
                 .iter()
-                .all(|process| process.host == ModHost::Instance(record.id)),
+                .all(|process| process.host == InstalledHost::Instance(record.id)),
             "both belong to the one instance"
         );
         let handles: Vec<Option<&str>> = running
@@ -519,7 +519,7 @@ mod tests {
 
         let running = app.running_processes().expect("query");
         assert_eq!(running.len(), 1);
-        assert_eq!(running[0].host, ModHost::Server(record.id));
+        assert_eq!(running[0].host, InstalledHost::Server(record.id));
         assert_eq!(
             running[0].pid,
             Some(supervisor.pid),
@@ -570,7 +570,7 @@ mod tests {
 
         // This process exists, so memory is readable on the very first sample.
         let mut mine = vec![RunningProcess {
-            host: ModHost::Instance(ephervex_model::InstanceId::new()),
+            host: InstalledHost::Instance(ephervex_model::InstanceId::new()),
             launch: None,
             name: "self".to_owned(),
             pid: Some(std::process::id()),

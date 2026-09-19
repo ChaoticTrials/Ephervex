@@ -27,21 +27,21 @@ use ephervex_core::{
     DependencyKnowledge, DependencyRefreshReport, DependentMods, DiagnosticEntry, DiagnosticKind,
     DiagnosticRequest, DiagnosticScope, DiagnosticSearch, DirectoryState, DuplicateClient,
     EULA_CONFIRMATION_PHRASE, Entitlements, EulaStatus, FileDisposition, Freshness, ImpactedMod,
-    ImportRequest, ImportedPack, IncompatibilityReason, InstallationHealth, InstalledMods,
-    JavaHealth, JavaPathChoice, JavaPlan, JavaPlanRequest, JavaRuntime, JavaTarget,
+    ImportRequest, ImportedPack, IncompatibilityReason, InstallationHealth, InstalledHost,
+    InstalledMods, JavaHealth, JavaPathChoice, JavaPlan, JavaPlanRequest, JavaRuntime, JavaTarget,
     LaunchAndConnectEvent, LaunchAndConnectObserver, LaunchAndConnectOptions,
     LaunchAndConnectOutcome, LaunchEvent, LaunchFeatures, LaunchObserver, LaunchOptions,
     LaunchOutcome, LaunchState, LoginFlow, LoginOptions, LoginRequest, MAX_SEARCH_MATCHES,
-    MINECRAFT_EULA_REFERENCE, ManagedInstallation, ManagedMod, ManagedModSnapshot, ModHost,
-    ModInstallPlan, ModInstallRequest, ModPresence, ModProjectDetails, ModRelations,
-    ModSearchQuery, ModSearchResults, NetworkAccess, NewClient, NewServer, OperationReporter,
-    OptionalSelection, OutputLine, PackAnalysis, PackRecipe, PackSide, Paths, PlanWarning,
-    PlannedMod, PreferenceApplication, PreferenceId, PreferenceKey, ProcessMonitor,
-    PromotionRequest, ReconciliationReport, RelatedMod, ReleaseListing, RequiredMods,
-    RequirementBasis, RuntimeClassification, RuntimeInventory, SearchOptions, SecretString,
-    ServerCommitWarning, ServerContentSource, ServerCreateOptions, ServerEvent, ServerFolder,
-    ServerNetworkSettings, ServerObserver, ServerPersistenceHealth, ServerRecord, ServerWarning,
-    Session, SharedArtifactReport, SideRequirement, SkipReason, SuspectConfidence, SuspectReason,
+    MINECRAFT_EULA_REFERENCE, ManagedInstallation, ManagedMod, ManagedModSnapshot, ModInstallPlan,
+    ModInstallRequest, ModPresence, ModProjectDetails, ModRelations, ModSearchQuery,
+    ModSearchResults, NetworkAccess, NewClient, NewServer, OperationReporter, OptionalSelection,
+    OutputLine, PackAnalysis, PackRecipe, PackSide, Paths, PlanWarning, PlannedMod,
+    PreferenceApplication, PreferenceId, PreferenceKey, ProcessMonitor, PromotionRequest,
+    ReconciliationReport, RelatedMod, ReleaseListing, RequiredMods, RequirementBasis,
+    RuntimeClassification, RuntimeInventory, SearchOptions, SecretString, ServerCommitWarning,
+    ServerContentSource, ServerCreateOptions, ServerEvent, ServerFolder, ServerNetworkSettings,
+    ServerObserver, ServerPersistenceHealth, ServerRecord, ServerWarning, Session,
+    SharedArtifactReport, SideRequirement, SkipReason, SuspectConfidence, SuspectReason,
     TextAnchor, TextView, UnknownServerFiles, VerificationReport, VersionMetadata, VersionRecord,
     format_binary_bytes,
 };
@@ -405,7 +405,7 @@ enum ModCommand {
     /// than pointing at one, published no hash for it and never will.
     Verify {
         #[command(flatten)]
-        host: ModHostArgs,
+        host: HostArgs,
         /// Also check the shared libraries and client JAR this instance
         /// launches from.
         ///
@@ -428,7 +428,7 @@ enum ModCommand {
     /// out for them and trying again is not.
     Repair {
         #[command(flatten)]
-        host: ModHostArgs,
+        host: HostArgs,
     },
     /// Show what each mod needs, and what needs it.
     ///
@@ -442,7 +442,7 @@ enum ModCommand {
     /// cascade would reach.
     Dependencies {
         #[command(flatten)]
-        host: ModHostArgs,
+        host: HostArgs,
         /// One mod's relations instead of every mod's, by its path inside the
         /// game directory, such as `mods/foo.jar`.
         #[arg(long, value_name = "PATH")]
@@ -461,7 +461,7 @@ enum ModCommand {
     /// needing nothing.
     Refresh {
         #[command(flatten)]
-        host: ModHostArgs,
+        host: HostArgs,
     },
     /// Take a mod's jar off disk, keeping the record that wants it.
     ///
@@ -477,7 +477,7 @@ enum ModCommand {
     /// `--only-this` takes just the jar you named.
     Delete {
         #[command(flatten)]
-        host: ModHostArgs,
+        host: HostArgs,
         /// The mod's path inside the game directory, such as `mods/foo.jar`.
         path: PathBuf,
         /// Also delete every mod that needs this one.
@@ -494,7 +494,7 @@ enum ModCommand {
     /// too, and `--only-this` turns on just the mod you named.
     Enable {
         #[command(flatten)]
-        host: ModHostArgs,
+        host: HostArgs,
         /// The mod's path inside the game directory, such as `mods/foo.jar`.
         path: PathBuf,
         /// Also turn on every mod this one needs.
@@ -516,7 +516,7 @@ enum ModCommand {
     /// leaves the others installed but unable to load.
     Disable {
         #[command(flatten)]
-        host: ModHostArgs,
+        host: HostArgs,
         /// The mod's path inside the game directory, such as `mods/foo.jar`.
         path: PathBuf,
         /// Also turn off every mod that needs this one.
@@ -530,7 +530,7 @@ enum ModCommand {
 
 /// Which instance or server a mod belongs to.
 #[derive(Debug, Args)]
-struct ModHostArgs {
+struct HostArgs {
     /// The client instance whose mods these are.
     #[arg(
         long,
@@ -544,16 +544,16 @@ struct ModHostArgs {
     server: Option<ServerId>,
 }
 
-impl ModHostArgs {
+impl HostArgs {
     /// The named host.
     ///
     /// `clap` has already refused both and neither, so the remaining
     /// combination cannot occur. It is reported rather than asserted, so that
     /// a change to the argument definitions above cannot turn into a panic.
-    fn host(&self) -> anyhow::Result<ModHost> {
+    fn host(&self) -> anyhow::Result<InstalledHost> {
         match (self.instance, self.server) {
-            (Some(instance), None) => Ok(ModHost::Instance(instance)),
-            (None, Some(server)) => Ok(ModHost::Server(server)),
+            (Some(instance), None) => Ok(InstalledHost::Instance(instance)),
+            (None, Some(server)) => Ok(InstalledHost::Server(server)),
             _ => Err(anyhow::anyhow!(
                 "name exactly one of --instance or --server"
             )),
@@ -1884,7 +1884,7 @@ async fn run_server_command(
             print_host_mods(&app.server_mod_snapshot(*id)?, json);
         }
         ServerCommand::Crash { id } => {
-            print_crash_review(app.crash_review(ModHost::Server(*id))?.as_ref(), json);
+            print_crash_review(app.crash_review(InstalledHost::Server(*id))?.as_ref(), json);
         }
         ServerCommand::Status { id } => print_server_status(app, *id, json)?,
         ServerCommand::Properties { command } => match command {
@@ -3447,7 +3447,7 @@ async fn run_mod_command(app: &mut App, command: &ModCommand, json: bool) -> any
 /// courtesy rather than a safety net.
 fn run_mod_delete(
     app: &App,
-    host: ModHost,
+    host: InstalledHost,
     path: &Path,
     with_dependents: bool,
     only_this: bool,
@@ -3501,7 +3501,7 @@ fn print_deleted_mods(deleted: &[PathBuf], json: bool) {
 /// instruction for this run and wins over all three.
 fn run_mod_disable(
     app: &App,
-    host: ModHost,
+    host: InstalledHost,
     path: &Path,
     with_dependents: bool,
     only_this: bool,
@@ -3540,7 +3540,7 @@ fn run_mod_disable(
 /// reporting that after the fact would be a worse answer than not doing it.
 fn run_mod_enable(
     app: &App,
-    host: ModHost,
+    host: InstalledHost,
     path: &Path,
     with_dependencies: bool,
     only_this: bool,
@@ -3629,7 +3629,7 @@ fn print_required_mods(needs: &RequiredMods, json: bool) {
 }
 
 /// Asks each catalog what the host's mods need, and records the answers.
-async fn run_mod_refresh(app: &App, host: ModHost, json: bool) -> anyhow::Result<()> {
+async fn run_mod_refresh(app: &App, host: InstalledHost, json: bool) -> anyhow::Result<()> {
     let report = app
         .refresh_mod_dependencies(
             host,
@@ -3647,7 +3647,7 @@ async fn run_mod_refresh(app: &App, host: ModHost, json: bool) -> anyhow::Result
 /// machine with no network as on one with.
 fn run_mod_dependencies(
     app: &App,
-    host: ModHost,
+    host: InstalledHost,
     of: Option<&Path>,
     json: bool,
 ) -> anyhow::Result<()> {
@@ -3830,7 +3830,7 @@ async fn run_mod_show(
 /// sound gets its answer without parsing prose.
 async fn run_mod_verify(
     app: &App,
-    host: &ModHostArgs,
+    host: &HostArgs,
     shared: bool,
     json: bool,
 ) -> anyhow::Result<()> {
@@ -3867,7 +3867,7 @@ async fn run_mod_verify(
 }
 
 /// Replaces what an instance is missing or holding wrongly.
-async fn run_mod_repair(app: &App, host: ModHost, json: bool) -> anyhow::Result<()> {
+async fn run_mod_repair(app: &App, host: InstalledHost, json: bool) -> anyhow::Result<()> {
     let report = app
         .repair_host(
             host,

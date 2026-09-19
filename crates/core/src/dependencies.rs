@@ -21,7 +21,7 @@ use tracing::{info, instrument, warn};
 
 use crate::app::App;
 use crate::error::{CoreError, CoreResult};
-use crate::mods::{ModHost, ModPresence, recipe_relations};
+use crate::mods::{InstalledHost, ModPresence, recipe_relations};
 
 /// What a dependency refresh learned.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -306,7 +306,11 @@ impl App {
     /// recorded relation says so; a mod nothing has asked about is reported as
     /// unknown rather than assumed independent, which is the assumption that
     /// would make this warning confidently wrong.
-    pub fn dependents_of(&self, host: ModHost, logical_path: &Path) -> CoreResult<DependentMods> {
+    pub fn dependents_of(
+        &self,
+        host: InstalledHost,
+        logical_path: &Path,
+    ) -> CoreResult<DependentMods> {
         let graph = ModGraph::build(self, host)?;
         let index = graph
             .index_of(logical_path)
@@ -360,7 +364,11 @@ impl App {
     ///
     /// The inverse of [`Self::dependents_of`], and what a frontend asks before
     /// turning a mod back on. Offline and pure for the same reasons.
-    pub fn dependencies_of(&self, host: ModHost, logical_path: &Path) -> CoreResult<RequiredMods> {
+    pub fn dependencies_of(
+        &self,
+        host: InstalledHost,
+        logical_path: &Path,
+    ) -> CoreResult<RequiredMods> {
         let graph = ModGraph::build(self, host)?;
         let index = graph
             .index_of(logical_path)
@@ -446,7 +454,11 @@ impl App {
     /// Offline and pure like the other two, and direct rather than transitive:
     /// it answers "what was recorded about this mod", which is the question a
     /// reader asks of one mod's own page.
-    pub fn relations_of(&self, host: ModHost, logical_path: &Path) -> CoreResult<ModRelations> {
+    pub fn relations_of(
+        &self,
+        host: InstalledHost,
+        logical_path: &Path,
+    ) -> CoreResult<ModRelations> {
         let graph = ModGraph::build(self, host)?;
         let index = graph
             .index_of(logical_path)
@@ -461,7 +473,7 @@ impl App {
     /// One graph answers all of them. Asking per mod would re-read the recipe
     /// and re-walk the directory once per jar, which on an instance with a
     /// couple of hundred is the difference between an answer and a pause.
-    pub fn mod_relations(&self, host: ModHost) -> CoreResult<Vec<ModRelations>> {
+    pub fn mod_relations(&self, host: InstalledHost) -> CoreResult<Vec<ModRelations>> {
         let graph = ModGraph::build(self, host)?;
         Ok((0..graph.entries.len())
             .map(|index| graph.relations_of(index))
@@ -479,7 +491,11 @@ impl App {
     /// Each deletion is the same [`App::delete_mod_file`] the list offers, so
     /// what each origin allows, and what record survives the file, is decided
     /// in one place rather than two.
-    pub fn delete_mod_files(&self, host: ModHost, paths: &[PathBuf]) -> CoreResult<Vec<PathBuf>> {
+    pub fn delete_mod_files(
+        &self,
+        host: InstalledHost,
+        paths: &[PathBuf],
+    ) -> CoreResult<Vec<PathBuf>> {
         let graph = ModGraph::build(self, host)?;
         let mut ordered: Vec<&PathBuf> = paths.iter().collect();
         ordered.sort_by_key(|path| {
@@ -508,7 +524,7 @@ impl App {
     /// idempotent for the same reason.
     pub fn set_mods_enabled(
         &self,
-        host: ModHost,
+        host: InstalledHost,
         changes: &[(PathBuf, bool)],
     ) -> CoreResult<Vec<(PathBuf, ModPresence)>> {
         let graph = ModGraph::build(self, host)?;
@@ -545,11 +561,11 @@ impl App {
     #[instrument(skip(self, reporter, cancel), fields(host = %host.id()))]
     pub async fn refresh_mod_dependencies(
         &self,
-        host: ModHost,
+        host: InstalledHost,
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<DependencyRefreshReport> {
-        let layout = self.mod_host_layout(host)?;
+        let layout = self.host_layout(host)?;
         let mut report = DependencyRefreshReport::default();
         // A host with no recipe records nothing and has nothing to refresh.
         let Some(mut recipe) = layout.recipe.clone() else {
@@ -652,8 +668,8 @@ struct GraphEntry {
 
 impl ModGraph {
     /// Builds the index for one host.
-    fn build(app: &App, host: ModHost) -> CoreResult<Self> {
-        let layout = app.mod_host_layout(host)?;
+    fn build(app: &App, host: InstalledHost) -> CoreResult<Self> {
+        let layout = app.host_layout(host)?;
         let snapshot = app.host_mod_snapshot(host)?;
         let relations: BTreeMap<PathBuf, Option<Vec<RecipeRelation>>> = layout
             .recipe
@@ -1102,7 +1118,10 @@ mod tests {
         let (app, instance, _root) = library_and_its_dependents(base.path());
 
         let impact = app
-            .dependents_of(ModHost::Instance(instance), Path::new("mods/LibX.jar"))
+            .dependents_of(
+                InstalledHost::Instance(instance),
+                Path::new("mods/LibX.jar"),
+            )
             .expect("impact");
 
         assert_eq!(
@@ -1121,7 +1140,7 @@ mod tests {
 
         let relations = app
             .relations_of(
-                ModHost::Instance(instance),
+                InstalledHost::Instance(instance),
                 Path::new("mods/SkyblockBuilder.jar"),
             )
             .expect("relations");
@@ -1160,7 +1179,7 @@ mod tests {
         let (app, instance, _root) = library_and_its_dependents(base.path());
 
         let all = app
-            .mod_relations(ModHost::Instance(instance))
+            .mod_relations(InstalledHost::Instance(instance))
             .expect("relations");
 
         assert_eq!(
@@ -1191,8 +1210,11 @@ mod tests {
         for entry in &all {
             assert_eq!(
                 *entry,
-                app.relations_of(ModHost::Instance(instance), &entry.target.logical_path)
-                    .expect("one mod"),
+                app.relations_of(
+                    InstalledHost::Instance(instance),
+                    &entry.target.logical_path
+                )
+                .expect("one mod"),
                 "the whole-host answer and the per-mod answer are the same answer"
             );
         }
@@ -1221,7 +1243,10 @@ mod tests {
         store.write_recipe(&recipe).expect("write");
 
         let relations = app
-            .relations_of(ModHost::Instance(instance), Path::new("mods/UtilitiX.jar"))
+            .relations_of(
+                InstalledHost::Instance(instance),
+                Path::new("mods/UtilitiX.jar"),
+            )
             .expect("relations");
 
         assert_eq!(relations.requires.len(), 1);
@@ -1252,7 +1277,10 @@ mod tests {
         store.write_recipe(&recipe).expect("write");
 
         let impact = app
-            .dependents_of(ModHost::Instance(instance), Path::new("mods/LibX.jar"))
+            .dependents_of(
+                InstalledHost::Instance(instance),
+                Path::new("mods/LibX.jar"),
+            )
             .expect("impact");
         assert!(
             names(&impact.breaks).contains(&"UtilitiX.jar"),
@@ -1268,7 +1296,10 @@ mod tests {
         // Skyblock Builder declares Sky GUIs optional. Turning Sky GUIs off
         // costs a feature, so nothing may cascade from it.
         let impact = app
-            .dependents_of(ModHost::Instance(instance), Path::new("mods/SkyGUIs.jar"))
+            .dependents_of(
+                InstalledHost::Instance(instance),
+                Path::new("mods/SkyGUIs.jar"),
+            )
             .expect("impact");
 
         assert!(impact.breaks.is_empty(), "nothing requires it");
@@ -1284,7 +1315,7 @@ mod tests {
         // so turning Skyblock Builder off reaches Sky GUIs at distance one.
         let impact = app
             .dependents_of(
-                ModHost::Instance(instance),
+                InstalledHost::Instance(instance),
                 Path::new("mods/SkyblockBuilder.jar"),
             )
             .expect("impact");
@@ -1294,7 +1325,10 @@ mod tests {
         // And from the library, Sky GUIs is reachable both directly and through
         // Skyblock Builder. The shorter chain is the one reported.
         let from_library = app
-            .dependents_of(ModHost::Instance(instance), Path::new("mods/LibX.jar"))
+            .dependents_of(
+                InstalledHost::Instance(instance),
+                Path::new("mods/LibX.jar"),
+            )
             .expect("impact");
         let skyguis = from_library
             .breaks
@@ -1316,7 +1350,10 @@ mod tests {
         .expect("disable it");
 
         let impact = app
-            .dependents_of(ModHost::Instance(instance), Path::new("mods/LibX.jar"))
+            .dependents_of(
+                InstalledHost::Instance(instance),
+                Path::new("mods/LibX.jar"),
+            )
             .expect("impact");
         assert_eq!(
             names(&impact.breaks),
@@ -1340,7 +1377,10 @@ mod tests {
         store.write_recipe(&recipe).expect("write");
 
         let impact = app
-            .dependents_of(ModHost::Instance(instance), Path::new("mods/LibX.jar"))
+            .dependents_of(
+                InstalledHost::Instance(instance),
+                Path::new("mods/LibX.jar"),
+            )
             .expect("impact");
 
         assert_eq!(
@@ -1376,7 +1416,10 @@ mod tests {
         disable_all(&root);
 
         let needs = app
-            .dependencies_of(ModHost::Instance(instance), Path::new("mods/SkyGUIs.jar"))
+            .dependencies_of(
+                InstalledHost::Instance(instance),
+                Path::new("mods/SkyGUIs.jar"),
+            )
             .expect("requirements");
         let mut named = names(&needs.disabled);
         named.sort_unstable();
@@ -1387,7 +1430,10 @@ mod tests {
         );
 
         let needs = app
-            .dependencies_of(ModHost::Instance(instance), Path::new("mods/UtilitiX.jar"))
+            .dependencies_of(
+                InstalledHost::Instance(instance),
+                Path::new("mods/UtilitiX.jar"),
+            )
             .expect("requirements");
         assert_eq!(
             names(&needs.disabled),
@@ -1421,7 +1467,10 @@ mod tests {
         disable_all(&root);
 
         let needs = app
-            .dependencies_of(ModHost::Instance(instance), Path::new("mods/SkyGUIs.jar"))
+            .dependencies_of(
+                InstalledHost::Instance(instance),
+                Path::new("mods/SkyGUIs.jar"),
+            )
             .expect("requirements");
         assert_eq!(
             names(&needs.disabled),
@@ -1441,7 +1490,10 @@ mod tests {
             .expect("disable the library");
 
         let needs = app
-            .dependencies_of(ModHost::Instance(instance), Path::new("mods/SkyGUIs.jar"))
+            .dependencies_of(
+                InstalledHost::Instance(instance),
+                Path::new("mods/SkyGUIs.jar"),
+            )
             .expect("requirements");
         assert_eq!(
             names(&needs.disabled),
@@ -1464,7 +1516,10 @@ mod tests {
         store.write_recipe(&recipe).expect("write");
 
         let needs = app
-            .dependencies_of(ModHost::Instance(instance), Path::new("mods/UtilitiX.jar"))
+            .dependencies_of(
+                InstalledHost::Instance(instance),
+                Path::new("mods/UtilitiX.jar"),
+            )
             .expect("requirements");
 
         assert!(needs.disabled.is_empty());
@@ -1478,7 +1533,7 @@ mod tests {
         // prefix may leave a mod loading with its library already gone.
         let base = tempfile::tempdir().expect("temp dir");
         let (app, instance, root) = library_and_its_dependents(base.path());
-        let host = ModHost::Instance(instance);
+        let host = InstalledHost::Instance(instance);
 
         let impact = app
             .dependents_of(host, Path::new("mods/LibX.jar"))
@@ -1523,7 +1578,7 @@ mod tests {
         store.write_recipe(&recipe).expect("write");
 
         app.delete_mod_files(
-            ModHost::Instance(instance),
+            InstalledHost::Instance(instance),
             &[PathBuf::from("mods/LibX.jar")],
         )
         .expect("a dependency's jar may be deleted");
@@ -1547,7 +1602,7 @@ mod tests {
 
         let applied = app
             .set_mods_enabled(
-                ModHost::Instance(instance),
+                InstalledHost::Instance(instance),
                 &[
                     (PathBuf::from("mods/LibX.jar"), false),
                     (PathBuf::from("mods/SkyblockBuilder.jar"), false),
@@ -1590,7 +1645,7 @@ mod tests {
 
         let report = app
             .refresh_mod_dependencies(
-                ModHost::Instance(instance),
+                InstalledHost::Instance(instance),
                 &OperationReporter::silent("test-refresh"),
                 &CancellationToken::new(),
             )
@@ -1637,12 +1692,12 @@ mod tests {
         let reporter = OperationReporter::silent("test-refresh");
         let cancel = CancellationToken::new();
         let first = app
-            .refresh_mod_dependencies(ModHost::Instance(instance), &reporter, &cancel)
+            .refresh_mod_dependencies(InstalledHost::Instance(instance), &reporter, &cancel)
             .await
             .expect("first");
         assert_eq!(first.recorded, 2);
         let second = app
-            .refresh_mod_dependencies(ModHost::Instance(instance), &reporter, &cancel)
+            .refresh_mod_dependencies(InstalledHost::Instance(instance), &reporter, &cancel)
             .await
             .expect("second");
         assert_eq!(second.recorded, 0);
@@ -1666,7 +1721,7 @@ mod tests {
 
         let report = app
             .refresh_mod_dependencies(
-                ModHost::Instance(instance),
+                InstalledHost::Instance(instance),
                 &OperationReporter::silent("test-refresh"),
                 &CancellationToken::new(),
             )
@@ -1702,7 +1757,7 @@ mod tests {
 
         let report = app
             .refresh_mod_dependencies(
-                ModHost::Instance(instance),
+                InstalledHost::Instance(instance),
                 &OperationReporter::silent("test-refresh"),
                 &CancellationToken::new(),
             )

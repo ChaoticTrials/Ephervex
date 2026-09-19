@@ -35,7 +35,7 @@ use tracing::{info, instrument, warn};
 
 use crate::app::App;
 use crate::error::{CoreError, CoreResult};
-use crate::mods::{ModHost, disabled_path};
+use crate::mods::{InstalledHost, disabled_path};
 
 /// The largest jar Ephervex will copy into a mods folder.
 ///
@@ -254,8 +254,12 @@ impl App {
     /// Reads and writes nothing. Its whole purpose is to let a frontend ask
     /// about the name clashes before it asks the filesystem to do anything, so
     /// that the decision is made by the person who can make it.
-    pub fn plan_local_mods(&self, host: ModHost, sources: &[PathBuf]) -> CoreResult<LocalModPlan> {
-        let layout = self.mod_host_layout(host)?;
+    pub fn plan_local_mods(
+        &self,
+        host: InstalledHost,
+        sources: &[PathBuf],
+    ) -> CoreResult<LocalModPlan> {
+        let layout = self.host_layout(host)?;
         let dir = layout.game_dir.join(MODS_DIR);
 
         let mut offers = Vec::with_capacity(sources.len());
@@ -311,8 +315,12 @@ impl App {
     /// Allowed while the host is running: adding a new jar never touches a
     /// file the running loader already has open. The loader picks it up on
     /// the next launch.
-    pub fn add_local_mods(&self, host: ModHost, sources: &[PathBuf]) -> CoreResult<LocalModReport> {
-        let layout = self.mod_host_layout(host)?;
+    pub fn add_local_mods(
+        &self,
+        host: InstalledHost,
+        sources: &[PathBuf],
+    ) -> CoreResult<LocalModReport> {
+        let layout = self.host_layout(host)?;
         let dir = layout.game_dir.join(MODS_DIR);
         let staging = ephervex_storage::metadata::staging_dir(&layout.root);
 
@@ -369,7 +377,7 @@ impl App {
     /// orphaned and retires the files so the change can be undone; deleting the
     /// jar underneath that record would leave the instance describing a mod it
     /// does not have and nothing to say why.
-    pub fn delete_mod_file(&self, host: ModHost, logical_path: &Path) -> CoreResult<()> {
+    pub fn delete_mod_file(&self, host: InstalledHost, logical_path: &Path) -> CoreResult<()> {
         let snapshot = self.host_mod_snapshot(host)?;
         let entry = snapshot
             .mods
@@ -385,7 +393,7 @@ impl App {
             });
         }
 
-        let layout = self.mod_host_layout(host)?;
+        let layout = self.host_layout(host)?;
         let installed = layout.game_dir.join(logical_path);
         let disabled = disabled_path(&installed);
         // Both spellings, because a jar the user turned off is still their jar
@@ -432,12 +440,12 @@ impl App {
     #[instrument(skip(self, reporter, cancel), fields(host = %host.id()))]
     pub async fn restore_mod_file(
         &self,
-        host: ModHost,
+        host: InstalledHost,
         logical_path: &Path,
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<()> {
-        let layout = self.mod_host_layout(host)?;
+        let layout = self.host_layout(host)?;
         let recipe = layout
             .recipe
             .as_ref()
@@ -482,7 +490,7 @@ impl App {
 /// Best effort on purpose. The file is already gone, and a recipe that could not
 /// be rewritten is a stale record rather than a lost one: the next refresh finds
 /// no jar behind it and the list does not show it either way.
-fn forget_adopted_record(layout: &crate::mods::ModHostLayout, logical_path: &Path) {
+fn forget_adopted_record(layout: &crate::mods::HostLayout, logical_path: &Path) {
     let Some(mut recipe) = layout.recipe.clone() else {
         return;
     };
@@ -541,7 +549,7 @@ mod tests {
     struct Fixture {
         _base: tempfile::TempDir,
         app: App,
-        host: ModHost,
+        host: InstalledHost,
         root: PathBuf,
         mods_dir: PathBuf,
     }
@@ -561,7 +569,7 @@ mod tests {
         Fixture {
             _base: base,
             app,
-            host: ModHost::Instance(record.id),
+            host: InstalledHost::Instance(record.id),
             root: record.root,
             mods_dir,
         }
@@ -647,7 +655,7 @@ mod tests {
             .add_local_mods(host.host, &[source])
             .expect("add the jar");
 
-        let layout = host.app.mod_host_layout(host.host).expect("layout");
+        let layout = host.app.host_layout(host.host).expect("layout");
         assert!(
             layout.recipe.is_none(),
             "an instance created by hand gains no recipe from a copied-in jar"
@@ -944,7 +952,7 @@ mod tests {
             .expect("a pack's mod may be put aside");
 
         assert!(names_in(&host.mods_dir).is_empty(), "the jar is gone");
-        let layout = host.app.mod_host_layout(host.host).expect("layout");
+        let layout = host.app.host_layout(host.host).expect("layout");
         assert!(
             layout
                 .recipe
@@ -972,7 +980,7 @@ mod tests {
             .delete_mod_file(host.host, Path::new("mods/identified.jar"))
             .expect("delete");
 
-        let layout = host.app.mod_host_layout(host.host).expect("layout");
+        let layout = host.app.host_layout(host.host).expect("layout");
         assert!(
             layout
                 .recipe
