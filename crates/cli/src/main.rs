@@ -41,7 +41,7 @@ use ephervex_core::{
     ServerContentSource, ServerCreateOptions, ServerEvent, ServerFolder, ServerNetworkSettings,
     ServerObserver, ServerPersistenceHealth, ServerRecord, ServerWarning, Session, SideRequirement,
     SkipReason, SuspectConfidence, SuspectReason, TextAnchor, TextView, UnknownServerFiles,
-    VersionMetadata, VersionRecord,
+    VerificationReport, VersionMetadata, VersionRecord,
 };
 use ephervex_i18n::Arg as MessageArg;
 use ephervex_model::{
@@ -389,6 +389,21 @@ enum ModCommand {
     List {
         /// The client instance to list.
         instance: InstanceId,
+    },
+    /// Check that every file this instance records is there, with the right
+    /// bytes.
+    ///
+    /// The recipe already carries the digest each provider published, so this
+    /// reaches no network and changes nothing. It answers the question looking
+    /// for the file cannot: a jar truncated by a full disk, or left half
+    /// written when a machine lost power, is present and still wrong.
+    ///
+    /// A file the recipe records no digest for is reported as unproven rather
+    /// than sound or broken. A pack that shipped a jar inside itself, rather
+    /// than pointing at one, published no hash for it and never will.
+    Verify {
+        #[command(flatten)]
+        host: ModHostArgs,
     },
     /// Ask each catalog what this instance's mods need, and record the answers.
     ///
@@ -3177,11 +3192,15 @@ async fn run_mod_command(app: &mut App, command: &ModCommand, json: bool) -> any
             provider,
             include_incompatible,
         } => {
-            let catalog = catalog_or_preference(app, *provider)?;
-            let details = app
-                .mod_project(*instance, catalog, project, *include_incompatible)
-                .await?;
-            print_mod_project(&details, json);
+            return run_mod_show(
+                app,
+                *instance,
+                project,
+                *provider,
+                *include_incompatible,
+                json,
+            )
+            .await;
         }
         ModCommand::Plan {
             instance,
@@ -3198,18 +3217,7 @@ async fn run_mod_command(app: &mut App, command: &ModCommand, json: bool) -> any
             instance,
             project,
             selection,
-        } => {
-            let catalog = catalog_or_preference(app, selection.provider)?;
-            let installed = app
-                .install_mods(
-                    *instance,
-                    &selection.request(project, catalog),
-                    &OperationReporter::silent("installing-mods"),
-                    &CancellationToken::new(),
-                )
-                .await?;
-            print_installed_mods(&installed, json);
-        }
+        } => return run_mod_install(app, *instance, project, selection, json).await,
         ModCommand::Catalog { catalog, clear } => {
             run_mod_catalog(app, *catalog, *clear, json)?;
         }
@@ -3217,6 +3225,7 @@ async fn run_mod_command(app: &mut App, command: &ModCommand, json: bool) -> any
             let mods = app.managed_mods(*instance)?;
             print_managed_mods(&mods, json);
         }
+        ModCommand::Verify { host } => return run_mod_verify(app, host.host()?, json).await,
         ModCommand::Refresh { host } => {
             let report = app
                 .refresh_mod_dependencies(
@@ -3419,6 +3428,98 @@ fn print_mod_states(applied: &[(PathBuf, ModPresence)], json: bool) {
     }
     for (path, presence) in applied {
         outln!("{}  {}", presence.as_str(), path.display());
+    }
+}
+
+/// Installs one mod, and whatever it needs, into an instance.
+async fn run_mod_install(
+    app: &App,
+    instance: InstanceId,
+    project: &str,
+    selection: &ModSelectionArgs,
+    json: bool,
+) -> anyhow::Result<()> {
+    let catalog = catalog_or_preference(app, selection.provider)?;
+    let request = selection.request(project, catalog);
+    let reporter = OperationReporter::silent("installing-mods");
+    let installed = app
+        .install_mods(instance, &request, &reporter, &CancellationToken::new())
+        .await?;
+    print_installed_mods(&installed, json);
+    Ok(())
+}
+
+/// Shows one mod and the releases available for an instance.
+async fn run_mod_show(
+    app: &App,
+    instance: InstanceId,
+    project: &str,
+    provider: Option<CatalogArg>,
+    include_incompatible: bool,
+    json: bool,
+) -> anyhow::Result<()> {
+    let catalog = catalog_or_preference(app, provider)?;
+    let details = app
+        .mod_project(instance, catalog, project, include_incompatible)
+        .await?;
+    print_mod_project(&details, json);
+    Ok(())
+}
+
+/// Checks an instance's recorded files and reports what it found.
+///
+/// A fault sets the exit status, so a script asking whether an instance is
+/// sound gets its answer without parsing prose.
+async fn run_mod_verify(app: &App, host: ModHost, json: bool) -> anyhow::Result<()> {
+    let report = app
+        .verify_host(
+            host,
+            &OperationReporter::silent("verifying-instance"),
+            &CancellationToken::new(),
+        )
+        .await?;
+    print_verification(&report, json);
+    if report.is_sound() {
+        return Ok(());
+    }
+    let unrepairable = report.unrepairable().count();
+    if unrepairable > 0 {
+        anyhow::bail!(
+            "{unrepairable} of these record no address, so replacing them is not something \
+             Ephervex can do"
+        );
+    }
+    anyhow::bail!("this instance does not hold what it recorded")
+}
+
+/// Reports what checking an instance's recorded files found.
+fn print_verification(report: &VerificationReport, json: bool) {
+    if json {
+        print_json(&serde_json::json!({
+            "sound": report.is_sound(),
+            "files": report
+                .files
+                .iter()
+                .map(|file| serde_json::json!({
+                    "path": file.logical_path,
+                    "integrity": file.integrity.as_str(),
+                    "repairable": file.integrity.is_repairable() && file.has_source,
+                }))
+                .collect::<Vec<_>>(),
+        }));
+        return;
+    }
+    for file in &report.files {
+        if !file.integrity.is_sound() {
+            outln!(
+                "{}  {}",
+                file.integrity.as_str(),
+                file.logical_path.display()
+            );
+        }
+    }
+    if report.is_sound() {
+        outln!("{} files, all intact", report.files.len());
     }
 }
 

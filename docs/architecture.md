@@ -640,6 +640,28 @@ dependencies first. A frontend issuing one rename per row cannot promise that,
 and an operation interrupted mid-cascade would otherwise leave a dependency gone
 with something that needs it still loading.
 
+## Verifying what an instance holds
+
+Installing decides what to do from whether a destination exists, which is right
+for an install and wrong for trusting an instance: a jar truncated by a full
+disk, or left half written by a machine that lost power, exists. Verification
+answers the question presence cannot, from the digests the recipe already
+records, so it reaches no network and writes nothing.
+
+Each recorded file comes back intact, absent, corrupt, unreadable, or
+unverifiable. The last is not a fault: a mod a pack shipped inside its own
+override tree has no published hash and never will, so nothing about it is
+proven either way, and it is reported as unproven rather than counted sound or
+broken. A disabled jar is checked under the name it actually has, because
+turning a mod off renames it out of the loader's way and leaves it installed.
+
+Repair is offered only where replacing the file could help, which means a fault
+plus a recorded address. Telling somebody to repair an instance that repairing
+cannot mend is worse than telling them nothing, so files with no address are
+reported separately. Acting on a report is a separate request: "this file is
+wrong" and "replace this file" are different decisions.
+
+
 ## Security boundaries
 
 ### Untrusted paths and archives

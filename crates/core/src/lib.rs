@@ -56,6 +56,7 @@ pub mod server;
 pub mod server_pack;
 pub mod single_instance;
 pub mod url_handler;
+pub mod verify;
 
 pub use account::{
     AccountStatus, AccountSummary, ApiSettings, CurseForgeKeyState, LoginOptions,
@@ -130,6 +131,7 @@ pub use server::{CaptureSnapshot, ServerCreateOptions, ServerPersistenceHealth, 
 pub use server_pack::{IdentificationOutcome, ServerContentSource, ServerPackOutcome};
 pub use single_instance::{PrimaryInstance, Startup as SingleInstanceStartup};
 pub use url_handler::{URL_HANDLER_ENTRY, UrlHandlerSource, UrlHandlerStatus, scheme_mime_type};
+pub use verify::{Integrity, VerificationReport, VerifiedFile};
 
 /// Cancellation, re-exported because the services take one.
 ///
