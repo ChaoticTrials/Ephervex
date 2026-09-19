@@ -21,34 +21,34 @@ use clap_complete::Shell;
 use ephervex_core::{
     AccountStatus, AccountSummary, ApiSettings, App, ArgumentForm, Artifact, ArtifactCacheHealth,
     AssetIndexRef, AuthEvent, AuthObserver, BundleContents, BundleSelection, BundledDocumentHealth,
-    CancellationToken, CaptureHealth, CapturedLine, ClientFolder, ClientRecord, Compatibility,
-    Config, ConfigurationHealth, ControlResponse, CoreError, CrashReview, CreatedClient,
-    CredentialBackendHealth, CredentialStorage, DEFAULT_DIAGNOSTIC_BYTES, DEFAULT_SEARCH_LIMIT,
-    DependencyKnowledge, DependencyRefreshReport, DependentMods, DiagnosticEntry, DiagnosticKind,
-    DiagnosticRequest, DiagnosticScope, DiagnosticSearch, DirectoryState, DuplicateClient,
-    EULA_CONFIRMATION_PHRASE, Entitlements, EulaStatus, FileDisposition, Freshness, ImpactedMod,
-    ImportRequest, ImportedPack, IncompatibilityReason, InstallationHealth, InstalledHost,
-    InstalledMods, JavaHealth, JavaPathChoice, JavaPlan, JavaPlanRequest, JavaRuntime, JavaTarget,
-    LaunchAndConnectEvent, LaunchAndConnectObserver, LaunchAndConnectOptions,
-    LaunchAndConnectOutcome, LaunchEvent, LaunchFeatures, LaunchObserver, LaunchOptions,
-    LaunchOutcome, LaunchState, LoginFlow, LoginOptions, LoginRequest, MAX_SEARCH_MATCHES,
-    MINECRAFT_EULA_REFERENCE, ManagedInstallation, ManagedMod, ManagedModSnapshot, ModInstallPlan,
-    ModInstallRequest, ModPresence, ModProjectDetails, ModRelations, ModSearchQuery,
-    ModSearchResults, NetworkAccess, NewClient, NewServer, OperationReporter, OptionalSelection,
-    OutputLine, PackAnalysis, PackRecipe, PackSide, Paths, PlanWarning, PlannedMod,
-    PreferenceApplication, PreferenceId, PreferenceKey, ProcessMonitor, PromotionRequest,
-    ReconciliationReport, RelatedMod, ReleaseListing, RequiredMods, RequirementBasis,
-    RuntimeClassification, RuntimeInventory, SearchOptions, SecretString, ServerCommitWarning,
-    ServerContentSource, ServerCreateOptions, ServerEvent, ServerFolder, ServerNetworkSettings,
-    ServerObserver, ServerPersistenceHealth, ServerRecord, ServerWarning, Session,
-    SharedArtifactReport, SideRequirement, SkipReason, SuspectConfidence, SuspectReason,
-    TextAnchor, TextView, UnknownServerFiles, VerificationReport, VersionMetadata, VersionRecord,
-    format_binary_bytes,
+    CancellationToken, CaptureHealth, CapturedLine, ClientFolder, ClientRecord, CloneMethod,
+    Compatibility, Config, ConfigurationHealth, ControlResponse, CoreError, CrashReview,
+    CreatedClient, CredentialBackendHealth, CredentialStorage, DEFAULT_DIAGNOSTIC_BYTES,
+    DEFAULT_SEARCH_LIMIT, DependencyKnowledge, DependencyRefreshReport, DependentMods,
+    DiagnosticEntry, DiagnosticKind, DiagnosticRequest, DiagnosticScope, DiagnosticSearch,
+    DirectoryState, DuplicateClient, EULA_CONFIRMATION_PHRASE, Entitlements, EulaStatus,
+    FileDisposition, Freshness, ImpactedMod, ImportRequest, ImportedPack, IncompatibilityReason,
+    InstallationHealth, InstalledHost, InstalledMods, JavaHealth, JavaPathChoice, JavaPlan,
+    JavaPlanRequest, JavaRuntime, JavaTarget, LaunchAndConnectEvent, LaunchAndConnectObserver,
+    LaunchAndConnectOptions, LaunchAndConnectOutcome, LaunchEvent, LaunchFeatures, LaunchObserver,
+    LaunchOptions, LaunchOutcome, LaunchState, LoginFlow, LoginOptions, LoginRequest,
+    MAX_SEARCH_MATCHES, MINECRAFT_EULA_REFERENCE, ManagedInstallation, ManagedMod,
+    ManagedModSnapshot, ModInstallPlan, ModInstallRequest, ModPresence, ModProjectDetails,
+    ModRelations, ModSearchQuery, ModSearchResults, NetworkAccess, NewClient, NewServer,
+    OperationReporter, OptionalSelection, OutputLine, PackAnalysis, PackRecipe, PackSide, Paths,
+    PlanWarning, PlannedMod, PreferenceApplication, PreferenceId, PreferenceKey, ProcessMonitor,
+    PromotionRequest, ReconciliationReport, RelatedMod, ReleaseListing, RequiredMods,
+    RequirementBasis, RuntimeClassification, RuntimeInventory, SearchOptions, SecretString,
+    ServerCommitWarning, ServerContentSource, ServerCreateOptions, ServerEvent, ServerFolder,
+    ServerNetworkSettings, ServerObserver, ServerPersistenceHealth, ServerRecord, ServerWarning,
+    Session, SharedArtifactReport, SideRequirement, SkipReason, SnapshotOrigin, SnapshotRecord,
+    SnapshotRestoreOptions, SuspectConfidence, SuspectReason, TextAnchor, TextView,
+    UnknownServerFiles, VerificationReport, VersionMetadata, VersionRecord, format_binary_bytes,
 };
 use ephervex_i18n::Arg as MessageArg;
 use ephervex_model::{
     AbsentModPolicy, DefaultModCatalog, InstanceId, JavaOverride, JvmSettings, LoaderKind,
-    LoaderSelection, ModProvider, OperationId, ServerId, StorageClass,
+    LoaderSelection, ModProvider, OperationId, ServerId, SnapshotId, StorageClass,
 };
 
 #[derive(Debug, Parser)]
@@ -139,6 +139,11 @@ enum Command {
     Mod {
         #[command(subcommand)]
         command: ModCommand,
+    },
+    /// Capture and restore local client or server state.
+    Snapshot {
+        #[command(subcommand)]
+        command: SnapshotCommand,
     },
     /// Inspect launcher, client, and server logs and crash reports.
     Logs {
@@ -528,10 +533,10 @@ enum ModCommand {
     },
 }
 
-/// Which instance or server a mod belongs to.
+/// Which installed local host an operation targets.
 #[derive(Debug, Args)]
 struct HostArgs {
-    /// The client instance whose mods these are.
+    /// The client instance to operate on.
     #[arg(
         long,
         value_name = "INSTANCE",
@@ -539,7 +544,7 @@ struct HostArgs {
         required_unless_present = "server"
     )]
     instance: Option<InstanceId>,
-    /// The dedicated server whose mods these are.
+    /// The dedicated server to operate on.
     #[arg(long, value_name = "SERVER")]
     server: Option<ServerId>,
 }
@@ -559,6 +564,57 @@ impl HostArgs {
             )),
         }
     }
+}
+
+#[derive(Debug, Subcommand)]
+enum SnapshotCommand {
+    /// List snapshots retained inside a client or server.
+    List {
+        #[command(flatten)]
+        host: HostArgs,
+    },
+    /// Capture the host's complete local development state.
+    Create {
+        #[command(flatten)]
+        host: HostArgs,
+        /// A short name shown in snapshot lists.
+        label: String,
+    },
+    /// Replace the live host state with one snapshot.
+    ///
+    /// Files created since the snapshot are removed because restore replaces
+    /// the captured state rather than merging it.
+    Restore {
+        #[command(flatten)]
+        host: HostArgs,
+        /// The snapshot to restore.
+        id: SnapshotId,
+        /// Skip the default snapshot of the current state.
+        #[arg(long)]
+        no_safety_snapshot: bool,
+        /// Confirm replacement of the live state.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Change a snapshot's display label.
+    Rename {
+        #[command(flatten)]
+        host: HostArgs,
+        /// The snapshot to rename.
+        id: SnapshotId,
+        /// The new display label.
+        label: String,
+    },
+    /// Permanently delete one retained snapshot.
+    Delete {
+        #[command(flatten)]
+        host: HostArgs,
+        /// The snapshot to delete.
+        id: SnapshotId,
+        /// Confirm permanent deletion.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 /// Which version, and which optional extras, an install should take.
@@ -1563,6 +1619,7 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(run_mod_command(&mut app, command, cli.json))
         }
+        Command::Snapshot { command } => run_snapshot_command(&open_app()?, command, cli.json),
         Command::Logs { command } => {
             // Reading a file and listing a directory need no executor.
             let app = open_app()?;
@@ -1587,13 +1644,14 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
             runtime.block_on(run_launch(&mut app, args, cli.json))
         }
         Command::Running => print_running(&open_app()?, cli.json),
-        Command::Reconcile => {
-            let app = open_app()?;
-            let report = app.reconcile()?;
-            show_reconciliation(&report, cli.json);
-            Ok(())
-        }
+        Command::Reconcile => run_reconciliation_command(cli.json),
     }
+}
+
+fn run_reconciliation_command(json: bool) -> anyhow::Result<()> {
+    let report = open_app()?.reconcile()?;
+    show_reconciliation(&report, json);
+    Ok(())
 }
 
 /// Opens configuration and the registry, and selects the configured language.
@@ -1614,6 +1672,138 @@ fn open_app() -> Result<App, CoreError> {
     }
 
     Ok(app)
+}
+
+fn run_snapshot_command(app: &App, command: &SnapshotCommand, json: bool) -> anyhow::Result<()> {
+    match command {
+        SnapshotCommand::List { host } => {
+            let snapshots = app.snapshots(host.host()?).map_err(CoreError::from)?;
+            print_snapshots(&snapshots, json)?;
+        }
+        SnapshotCommand::Create { host, label } => {
+            let snapshot = app
+                .create_snapshot(
+                    host.host()?,
+                    label,
+                    SnapshotOrigin::Manual,
+                    &CancellationToken::new(),
+                )
+                .map_err(CoreError::from)?;
+            print_snapshot(&snapshot, json)?;
+        }
+        SnapshotCommand::Restore {
+            host,
+            id,
+            no_safety_snapshot,
+            yes,
+        } => {
+            require_snapshot_confirmation(
+                *yes,
+                "snapshot restore requires --yes because it replaces the live state",
+            )?;
+            let restored = app
+                .restore_snapshot(
+                    host.host()?,
+                    *id,
+                    SnapshotRestoreOptions {
+                        safety_snapshot: !*no_safety_snapshot,
+                    },
+                    &CancellationToken::new(),
+                )
+                .map_err(CoreError::from)?;
+            if json {
+                print_json(&serde_json::json!({
+                    "restored": restored.restored,
+                    "safety_snapshot": restored.safety_snapshot,
+                }));
+            } else {
+                outln!(
+                    "Restored {} ({})",
+                    restored.restored.label,
+                    restored.restored.id
+                );
+                if let Some(safety) = restored.safety_snapshot {
+                    outln!("Safety snapshot: {} ({})", safety.label, safety.id);
+                }
+            }
+        }
+        SnapshotCommand::Rename { host, id, label } => {
+            let snapshot = app
+                .rename_snapshot(host.host()?, *id, label)
+                .map_err(CoreError::from)?;
+            print_snapshot(&snapshot, json)?;
+        }
+        SnapshotCommand::Delete { host, id, yes } => {
+            require_snapshot_confirmation(
+                *yes,
+                "snapshot deletion requires --yes because it cannot be undone",
+            )?;
+            app.delete_snapshot(host.host()?, *id)
+                .map_err(CoreError::from)?;
+            if json {
+                print_json(&serde_json::json!({ "deleted": id }));
+            } else {
+                outln!("Deleted snapshot {id}");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn require_snapshot_confirmation(confirmed: bool, message: &str) -> anyhow::Result<()> {
+    if confirmed {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(message.to_owned()))
+    }
+}
+
+fn print_snapshots(snapshots: &[SnapshotRecord], json: bool) -> anyhow::Result<()> {
+    if json {
+        print_json(&serde_json::to_value(snapshots)?);
+        return Ok(());
+    }
+    if snapshots.is_empty() {
+        outln!("No snapshots.");
+        return Ok(());
+    }
+    for snapshot in snapshots {
+        print_snapshot(snapshot, false)?;
+    }
+    let total = snapshots.iter().fold(0u64, |total, snapshot| {
+        total.saturating_add(snapshot.apparent_bytes)
+    });
+    outln!("Total apparent size: {}", format_binary_bytes(total));
+    if snapshots
+        .iter()
+        .any(|snapshot| snapshot.copy_method == CloneMethod::Copy)
+    {
+        outln!("Snapshots marked copy consume their full apparent size on disk.");
+    }
+    Ok(())
+}
+
+fn print_snapshot(snapshot: &SnapshotRecord, json: bool) -> anyhow::Result<()> {
+    if json {
+        print_json(&serde_json::to_value(snapshot)?);
+    } else {
+        let method = match snapshot.copy_method {
+            CloneMethod::Reflink => "reflink",
+            CloneMethod::Copy => "copy",
+        };
+        outln!(
+            "{}  {}  {}  {}  {}  mods: {} enabled, {} disabled  {}",
+            snapshot.id,
+            snapshot.label,
+            snapshot.captured_at.to_rfc3339(),
+            format_binary_bytes(snapshot.apparent_bytes),
+            method,
+            snapshot.enabled_mods,
+            snapshot.disabled_mods,
+            snapshot.origin.as_str(),
+        );
+    }
+    Ok(())
 }
 
 // ------------------------------------------------------------------- commands
@@ -6893,6 +7083,9 @@ fn localized_failure(error: &CoreError) -> (String, Option<String>) {
 mod tests {
     use super::*;
 
+    const INSTANCE_ID: &str = "11111111-1111-4111-8111-111111111111";
+    const SNAPSHOT_ID: &str = "22222222-2222-4222-8222-222222222222";
+
     fn import_args(argv: &[&str]) -> Result<ImportArgs, clap::Error> {
         let mut full = vec!["ephervex", "import"];
         full.extend_from_slice(argv);
@@ -6942,5 +7135,59 @@ mod tests {
             clap::error::ErrorKind::ArgumentConflict,
             "the conflict must be caught at the argument-parsing boundary, before any pack is read"
         );
+    }
+
+    #[test]
+    fn snapshot_restore_parses_the_host_and_explicit_safety_override() {
+        let cli = Cli::try_parse_from([
+            "ephervex",
+            "snapshot",
+            "restore",
+            "--instance",
+            INSTANCE_ID,
+            "--no-safety-snapshot",
+            "--yes",
+            SNAPSHOT_ID,
+        ])
+        .expect("valid snapshot restore");
+
+        let Command::Snapshot {
+            command:
+                SnapshotCommand::Restore {
+                    host,
+                    id,
+                    no_safety_snapshot,
+                    yes,
+                },
+        } = cli.command
+        else {
+            panic!("expected snapshot restore");
+        };
+        assert!(matches!(host.host(), Ok(InstalledHost::Instance(_))));
+        assert_eq!(id.to_string(), SNAPSHOT_ID);
+        assert!(no_safety_snapshot);
+        assert!(yes);
+    }
+
+    #[test]
+    fn snapshot_commands_require_exactly_one_host() {
+        let missing =
+            Cli::try_parse_from(["ephervex", "snapshot", "list"]).expect_err("a host is required");
+        assert_eq!(
+            missing.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+
+        let conflicting = Cli::try_parse_from([
+            "ephervex",
+            "snapshot",
+            "list",
+            "--instance",
+            INSTANCE_ID,
+            "--server",
+            "33333333-3333-4333-8333-333333333333",
+        ])
+        .expect_err("two hosts conflict");
+        assert_eq!(conflicting.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 }
