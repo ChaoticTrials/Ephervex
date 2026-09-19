@@ -24,11 +24,11 @@ use ephervex_core::{
     CaptureHealth, CapturedLine, ClientFolder, ClientRecord, Compatibility, Config,
     ConfigurationHealth, ControlResponse, CoreError, CrashReview, CreatedClient,
     CredentialBackendHealth, CredentialStorage, DEFAULT_DIAGNOSTIC_BYTES, DEFAULT_SEARCH_LIMIT,
-    DependencyRefreshReport, DiagnosticEntry, DiagnosticKind, DiagnosticRequest, DiagnosticScope,
-    DiagnosticSearch, DirectoryState, DuplicateClient, EULA_CONFIRMATION_PHRASE, Entitlements,
-    EulaStatus, FileDisposition, Freshness, ImportRequest, ImportedPack, IncompatibilityReason,
-    InstallationHealth, InstalledMods, JavaHealth, JavaPathChoice, JavaPlan, JavaPlanRequest,
-    JavaRuntime, JavaTarget, LaunchAndConnectEvent, LaunchAndConnectObserver,
+    DependencyRefreshReport, DependentMods, DiagnosticEntry, DiagnosticKind, DiagnosticRequest,
+    DiagnosticScope, DiagnosticSearch, DirectoryState, DuplicateClient, EULA_CONFIRMATION_PHRASE,
+    Entitlements, EulaStatus, FileDisposition, Freshness, ImpactedMod, ImportRequest, ImportedPack,
+    IncompatibilityReason, InstallationHealth, InstalledMods, JavaHealth, JavaPathChoice, JavaPlan,
+    JavaPlanRequest, JavaRuntime, JavaTarget, LaunchAndConnectEvent, LaunchAndConnectObserver,
     LaunchAndConnectOptions, LaunchAndConnectOutcome, LaunchEvent, LaunchFeatures, LaunchObserver,
     LaunchOptions, LaunchOutcome, LaunchState, LoginFlow, LoginOptions, LoginRequest,
     MAX_SEARCH_MATCHES, MINECRAFT_EULA_REFERENCE, ManagedInstallation, ManagedMod,
@@ -36,7 +36,7 @@ use ephervex_core::{
     ModSearchQuery, ModSearchResults, NetworkAccess, NewClient, NewServer, OperationReporter,
     OptionalSelection, OutputLine, PackAnalysis, PackRecipe, PackSide, Paths, PlanWarning,
     PlannedMod, PreferenceApplication, PreferenceId, PreferenceKey, ProcessMonitor,
-    PromotionRequest, ReconciliationReport, ReleaseListing, RequirementBasis,
+    PromotionRequest, ReconciliationReport, ReleaseListing, RequiredMods, RequirementBasis,
     RuntimeClassification, RuntimeInventory, SearchOptions, SecretString, ServerCommitWarning,
     ServerContentSource, ServerCreateOptions, ServerEvent, ServerFolder, ServerNetworkSettings,
     ServerObserver, ServerPersistenceHealth, ServerRecord, ServerWarning, Session, SideRequirement,
@@ -406,22 +406,43 @@ enum ModCommand {
         host: ModHostArgs,
     },
     /// Let a mod load again after it was disabled.
+    ///
+    /// A mod that needs others usually cannot load alone. Ephervex says which
+    /// of them are turned off and stops; `--with-dependencies` turns those on
+    /// too, and `--only-this` turns on just the mod you named.
     Enable {
         #[command(flatten)]
         host: ModHostArgs,
         /// The mod's path inside the game directory, such as `mods/foo.jar`.
         path: PathBuf,
+        /// Also turn on every mod this one needs.
+        #[arg(long, conflicts_with = "only_this")]
+        with_dependencies: bool,
+        /// Turn on only the mod named, leaving what it needs turned off.
+        #[arg(long)]
+        only_this: bool,
     },
     /// Keep a mod installed but stop the loader from loading it.
     ///
     /// The jar is renamed to `<name>.jar.disabled`, which every loader ignores.
     /// Nothing is deleted and nothing is forgotten: the mod keeps its recorded
     /// version and provider, and enabling it again needs no download.
+    ///
+    /// If other mods need this one, they stop loading too. Ephervex names them
+    /// and stops without changing anything; `--with-dependents` turns those off
+    /// as well, and `--only-this` turns off just the mod you named, which
+    /// leaves the others installed but unable to load.
     Disable {
         #[command(flatten)]
         host: ModHostArgs,
         /// The mod's path inside the game directory, such as `mods/foo.jar`.
         path: PathBuf,
+        /// Also turn off every mod that needs this one.
+        #[arg(long, conflicts_with = "only_this")]
+        with_dependents: bool,
+        /// Turn off only the mod named, leaving what needs it unable to load.
+        #[arg(long)]
+        only_this: bool,
     },
 }
 
@@ -3206,27 +3227,199 @@ async fn run_mod_command(app: &mut App, command: &ModCommand, json: bool) -> any
                 .await?;
             print_dependency_refresh(&report, json);
         }
-        ModCommand::Enable { host, path } => {
-            print_mod_state(app.set_mod_enabled(host.host()?, path, true)?, path, json);
+        ModCommand::Enable {
+            host,
+            path,
+            with_dependencies,
+            only_this,
+        } => {
+            return run_mod_enable(
+                app,
+                host.host()?,
+                path,
+                *with_dependencies,
+                *only_this,
+                json,
+            );
         }
-        ModCommand::Disable { host, path } => {
-            print_mod_state(app.set_mod_enabled(host.host()?, path, false)?, path, json);
+        ModCommand::Disable {
+            host,
+            path,
+            with_dependents,
+            only_this,
+        } => {
+            return run_mod_disable(app, host.host()?, path, *with_dependents, *only_this, json);
         }
     }
     Ok(())
 }
 
-/// Reports what a mod's file is now, after being enabled or disabled.
-fn print_mod_state(presence: ModPresence, path: &Path, json: bool) {
+/// Turns a mod off, saying first what else stops loading.
+///
+/// Refusing by default is what a command with no prompt can do instead of
+/// asking. It is not a warning that scrolled past: nothing is changed, and the
+/// exit status says so, so a script cannot walk into a mod set that does not
+/// load. The refusal is skipped when the user has turned the confirmation off
+/// in settings, which is the same rule the desktop application follows.
+fn run_mod_disable(
+    app: &App,
+    host: ModHost,
+    path: &Path,
+    with_dependents: bool,
+    only_this: bool,
+    json: bool,
+) -> anyhow::Result<()> {
+    let impact = app.dependents_of(host, path)?;
+    let cascade = !only_this && (with_dependents || !app.warn_on_dependency_impact());
+    if !only_this && !cascade && !impact.breaks.is_empty() {
+        print_dependency_impact(&impact, json);
+        anyhow::bail!(
+            "{} other mods need this one. Pass --with-dependents to turn them off too, \
+             or --only-this to turn off just this mod.",
+            impact.breaks.len()
+        );
+    }
+
+    let mut changes: Vec<(PathBuf, bool)> = Vec::new();
+    if cascade {
+        changes.extend(
+            impact
+                .breaks
+                .iter()
+                .map(|entry| (entry.logical_path.clone(), false)),
+        );
+    }
+    changes.push((path.to_path_buf(), false));
+    print_mod_states(&app.set_mods_enabled(host, &changes)?, json);
+    Ok(())
+}
+
+/// Turns a mod on, saying first what it needs that is turned off.
+///
+/// Enabling breaks nothing, so this refuses for a different reason than
+/// disabling does: a mod turned on without what it needs does not load, and
+/// reporting that after the fact would be a worse answer than not doing it.
+fn run_mod_enable(
+    app: &App,
+    host: ModHost,
+    path: &Path,
+    with_dependencies: bool,
+    only_this: bool,
+    json: bool,
+) -> anyhow::Result<()> {
+    let needs = app.dependencies_of(host, path)?;
+    let cascade = !only_this && (with_dependencies || !app.warn_on_dependency_impact());
+    if !only_this && !cascade && !needs.disabled.is_empty() {
+        print_required_mods(&needs, json);
+        anyhow::bail!(
+            "this mod needs {} others that are turned off. Pass --with-dependencies to turn \
+             them on too, or --only-this to turn on just this mod.",
+            needs.disabled.len()
+        );
+    }
+
+    let mut changes: Vec<(PathBuf, bool)> = Vec::new();
+    if cascade {
+        changes.extend(
+            needs
+                .disabled
+                .iter()
+                .map(|entry| (entry.logical_path.clone(), true)),
+        );
+    }
+    changes.push((path.to_path_buf(), true));
+    print_mod_states(&app.set_mods_enabled(host, &changes)?, json);
+    if !needs.absent.is_empty() {
+        for entry in &needs.absent {
+            eprintln!("still missing: {} is not installed here", entry.name);
+        }
+    }
+    Ok(())
+}
+
+/// What turning one mod off would do to the rest.
+fn print_dependency_impact(impact: &DependentMods, json: bool) {
     if json {
         print_json(&serde_json::json!({
-            "path": path,
-            "presence": presence.as_str(),
-            "enabled": presence.is_enabled(),
+            "mod": impact.target.name,
+            "path": impact.target.logical_path,
+            "breaks": impacted_json(&impact.breaks),
+            "degrades": impacted_json(&impact.degrades),
+            "unknown": impacted_json(&impact.unknown),
+            "unidentifiable": impacted_json(&impact.unidentifiable),
+            "complete": impact.is_complete(),
         }));
         return;
     }
-    outln!("{}  {}", presence.as_str(), path.display());
+    for entry in &impact.breaks {
+        eprintln!("needs it:   {}", entry.name);
+    }
+    for entry in &impact.degrades {
+        eprintln!("optional:   {}", entry.name);
+    }
+    for entry in &impact.unknown {
+        eprintln!("not known:  {} (run `ephervex mod refresh`)", entry.name);
+    }
+    for entry in &impact.unidentifiable {
+        eprintln!("unknowable: {}", entry.name);
+    }
+}
+
+/// What turning one mod on would need.
+fn print_required_mods(needs: &RequiredMods, json: bool) {
+    if json {
+        print_json(&serde_json::json!({
+            "mod": needs.target.name,
+            "path": needs.target.logical_path,
+            "disabled": impacted_json(&needs.disabled),
+            "absent": impacted_json(&needs.absent),
+            "incompatible": impacted_json(&needs.incompatible),
+        }));
+        return;
+    }
+    for entry in &needs.disabled {
+        eprintln!("turned off: {}", entry.name);
+    }
+    for entry in &needs.absent {
+        eprintln!("missing:    {}", entry.name);
+    }
+    for entry in &needs.incompatible {
+        eprintln!("conflicts:  {}", entry.name);
+    }
+}
+
+fn impacted_json(mods: &[ImpactedMod]) -> Vec<serde_json::Value> {
+    mods.iter()
+        .map(|entry| {
+            serde_json::json!({
+                "name": entry.name,
+                "path": entry.logical_path,
+                "distance": entry.distance,
+                "knowledge": entry.knowledge.as_str(),
+            })
+        })
+        .collect()
+}
+
+/// Reports every mod one call turned on or off, in the order it did.
+fn print_mod_states(applied: &[(PathBuf, ModPresence)], json: bool) {
+    if json {
+        let rows: Vec<serde_json::Value> = applied
+            .iter()
+            .map(|(path, presence)| {
+                serde_json::json!({
+                    "path": path,
+                    "presence": presence.as_str(),
+                    "enabled": presence.is_enabled(),
+                })
+            })
+            .collect();
+        print_json(&serde_json::Value::Array(rows));
+        return;
+    }
+    for (path, presence) in applied {
+        outln!("{}  {}", presence.as_str(), path.display());
+    }
 }
 
 /// Reports what a dependency refresh learned.
