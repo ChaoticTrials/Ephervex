@@ -482,6 +482,123 @@ fn an_explicit_flag_still_carries_the_dependents_when_relations_are_not_followed
     );
 }
 
+#[test]
+fn the_whole_graph_is_listed_in_both_directions() {
+    let sandbox = Sandbox::new();
+    let (id, _mods) = sandbox.instance_with_a_shared_library();
+
+    let output = sandbox.run(&["mod", "dependencies", "--instance", &id]);
+    assert!(output.status.success());
+    let printed = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        printed.contains("mods/LibX.jar\n  needed by  required     mods/SkyblockBuilder.jar"),
+        "the library has to name what needs it: {printed}"
+    );
+    assert!(
+        printed.contains("needs      optional     mods/SkyGUIs.jar"),
+        "an optional relation is shown as its own kind rather than left out: {printed}"
+    );
+    assert!(
+        printed.contains("mods/UtilitiX.jar\n  needs      required     mods/LibX.jar"),
+        "every mod gets its own block: {printed}"
+    );
+}
+
+#[test]
+fn one_mod_can_be_asked_about_on_its_own() {
+    let sandbox = Sandbox::new();
+    let (id, _mods) = sandbox.instance_with_a_shared_library();
+
+    let output = sandbox.run(&[
+        "mod",
+        "dependencies",
+        "--instance",
+        &id,
+        "--of",
+        "mods/UtilitiX.jar",
+    ]);
+    assert!(output.status.success());
+    let printed = String::from_utf8_lossy(&output.stdout);
+    assert!(printed.contains("mods/UtilitiX.jar"));
+    assert!(
+        !printed.contains("mods/SkyGUIs.jar"),
+        "asking about one mod answers about that mod: {printed}"
+    );
+}
+
+#[test]
+fn a_mod_nothing_has_asked_about_says_so_rather_than_appearing_independent() {
+    // The distinction the whole feature exists for: an empty list because the
+    // catalog said "nothing", and an empty list because nobody asked, must not
+    // print the same.
+    let sandbox = Sandbox::new();
+    let (id, mods) = sandbox.instance_with_a_shared_library();
+    std::fs::write(mods.join("HandPlaced.jar"), b"jar").expect("write jar");
+
+    let output = sandbox.run(&["mod", "dependencies", "--instance", &id]);
+    let printed = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        printed.contains("mods/HandPlaced.jar\n  not asked"),
+        "a jar nothing records must not read as one that needs nothing: {printed}"
+    );
+    assert!(
+        printed.contains("mods/LibX.jar\n  needed by"),
+        "and the recorded mods still answer: {printed}"
+    );
+}
+
+#[test]
+fn the_json_form_carries_every_relation_with_its_kind_and_state() {
+    let sandbox = Sandbox::new();
+    let (id, mods) = sandbox.instance_with_a_shared_library();
+    assert!(
+        sandbox
+            .run(&[
+                "mod",
+                "disable",
+                "--instance",
+                &id,
+                "mods/UtilitiX.jar",
+                "--only-this",
+            ])
+            .status
+            .success()
+    );
+    assert!(mods.join("UtilitiX.jar.disabled").is_file());
+
+    let output = sandbox.run(&[
+        "--json",
+        "mod",
+        "dependencies",
+        "--instance",
+        &id,
+        "--of",
+        "mods/LibX.jar",
+    ]);
+    assert!(output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
+    let entry = &value[0];
+    assert_eq!(entry["path"], "mods/LibX.jar");
+    assert_eq!(entry["knowledge"], "recorded");
+    assert!(
+        entry["requires"].as_array().expect("requires").is_empty(),
+        "the library needs nothing, and its catalog said so"
+    );
+
+    let required_by = entry["required_by"].as_array().expect("required_by");
+    assert_eq!(required_by.len(), 3);
+    let utility = required_by
+        .iter()
+        .find(|row| row["path"] == "mods/UtilitiX.jar")
+        .expect("the utility");
+    assert_eq!(utility["kind"], "required");
+    assert_eq!(
+        utility["presence"], "disabled",
+        "a dependent that is turned off is still a dependent, and says which it is"
+    );
+}
+
 /// Rewrites one recorded setting, through a save the launcher itself made.
 ///
 /// Reading a configuration never writes one, so a setting change is what puts

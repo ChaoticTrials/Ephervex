@@ -611,11 +611,14 @@ it.
 
 A third question is asked of the same state and answers neither of those: what
 one mod's own entry declares, and which entries name it. Direct relations, both
-directions, no closure. It is what a mod's own page shows, and it is what makes
-the two warnings checkable - a reader who wants to know why turning one library
-off took three mods with it can open each of them and see the relation that said
-so. An entry nothing has asked about says that rather than showing an empty
-list, and carries the refresh as its action.
+directions, no closure. It is what a mod's own page shows, and what
+`ephervex mod dependencies` prints for one mod or for every mod of a host, and
+it is what makes the two warnings checkable - a reader who wants to know why
+turning one library off took three mods with it can look at each of them and see
+the relation that said so. An entry nothing has asked about says that rather
+than showing an empty list, and carries the refresh as its action. Asking for
+every mod builds the graph once: asking per mod would re-read the recipe and
+re-walk the directory once per jar.
 
 A frontend asks the question and renders the answer; it re-derives none of it.
 A mod row's switch reports a request rather than setting its own position: the

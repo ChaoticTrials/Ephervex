@@ -24,23 +24,24 @@ use ephervex_core::{
     CancellationToken, CaptureHealth, CapturedLine, ClientFolder, ClientRecord, Compatibility,
     Config, ConfigurationHealth, ControlResponse, CoreError, CrashReview, CreatedClient,
     CredentialBackendHealth, CredentialStorage, DEFAULT_DIAGNOSTIC_BYTES, DEFAULT_SEARCH_LIMIT,
-    DependencyRefreshReport, DependentMods, DiagnosticEntry, DiagnosticKind, DiagnosticRequest,
-    DiagnosticScope, DiagnosticSearch, DirectoryState, DuplicateClient, EULA_CONFIRMATION_PHRASE,
-    Entitlements, EulaStatus, FileDisposition, Freshness, ImpactedMod, ImportRequest, ImportedPack,
-    IncompatibilityReason, InstallationHealth, InstalledMods, JavaHealth, JavaPathChoice, JavaPlan,
-    JavaPlanRequest, JavaRuntime, JavaTarget, LaunchAndConnectEvent, LaunchAndConnectObserver,
-    LaunchAndConnectOptions, LaunchAndConnectOutcome, LaunchEvent, LaunchFeatures, LaunchObserver,
-    LaunchOptions, LaunchOutcome, LaunchState, LoginFlow, LoginOptions, LoginRequest,
-    MAX_SEARCH_MATCHES, MINECRAFT_EULA_REFERENCE, ManagedInstallation, ManagedMod,
-    ManagedModSnapshot, ModHost, ModInstallPlan, ModInstallRequest, ModPresence, ModProjectDetails,
+    DependencyKnowledge, DependencyRefreshReport, DependentMods, DiagnosticEntry, DiagnosticKind,
+    DiagnosticRequest, DiagnosticScope, DiagnosticSearch, DirectoryState, DuplicateClient,
+    EULA_CONFIRMATION_PHRASE, Entitlements, EulaStatus, FileDisposition, Freshness, ImpactedMod,
+    ImportRequest, ImportedPack, IncompatibilityReason, InstallationHealth, InstalledMods,
+    JavaHealth, JavaPathChoice, JavaPlan, JavaPlanRequest, JavaRuntime, JavaTarget,
+    LaunchAndConnectEvent, LaunchAndConnectObserver, LaunchAndConnectOptions,
+    LaunchAndConnectOutcome, LaunchEvent, LaunchFeatures, LaunchObserver, LaunchOptions,
+    LaunchOutcome, LaunchState, LoginFlow, LoginOptions, LoginRequest, MAX_SEARCH_MATCHES,
+    MINECRAFT_EULA_REFERENCE, ManagedInstallation, ManagedMod, ManagedModSnapshot, ModHost,
+    ModInstallPlan, ModInstallRequest, ModPresence, ModProjectDetails, ModRelations,
     ModSearchQuery, ModSearchResults, NetworkAccess, NewClient, NewServer, OperationReporter,
     OptionalSelection, OutputLine, PackAnalysis, PackRecipe, PackSide, Paths, PlanWarning,
     PlannedMod, PreferenceApplication, PreferenceId, PreferenceKey, ProcessMonitor,
-    PromotionRequest, ReconciliationReport, ReleaseListing, RequiredMods, RequirementBasis,
-    RuntimeClassification, RuntimeInventory, SearchOptions, SecretString, ServerCommitWarning,
-    ServerContentSource, ServerCreateOptions, ServerEvent, ServerFolder, ServerNetworkSettings,
-    ServerObserver, ServerPersistenceHealth, ServerRecord, ServerWarning, Session,
-    SharedArtifactReport, SideRequirement, SkipReason, SuspectConfidence, SuspectReason,
+    PromotionRequest, ReconciliationReport, RelatedMod, ReleaseListing, RequiredMods,
+    RequirementBasis, RuntimeClassification, RuntimeInventory, SearchOptions, SecretString,
+    ServerCommitWarning, ServerContentSource, ServerCreateOptions, ServerEvent, ServerFolder,
+    ServerNetworkSettings, ServerObserver, ServerPersistenceHealth, ServerRecord, ServerWarning,
+    Session, SharedArtifactReport, SideRequirement, SkipReason, SuspectConfidence, SuspectReason,
     TextAnchor, TextView, UnknownServerFiles, VerificationReport, VersionMetadata, VersionRecord,
     format_binary_bytes,
 };
@@ -428,6 +429,24 @@ enum ModCommand {
     Repair {
         #[command(flatten)]
         host: ModHostArgs,
+    },
+    /// Show what each mod needs, and what needs it.
+    ///
+    /// Answered from what is recorded here, so it reaches no catalog and works
+    /// offline. A mod nothing has asked about says so rather than appearing to
+    /// need nothing; `ephervex mod refresh` is what answers for it.
+    ///
+    /// Relations are shown exactly as the catalog stated them, including the
+    /// optional and incompatible ones, which no change ever acts on. Only the
+    /// direct ones: this says what was recorded about a mod, not what a whole
+    /// cascade would reach.
+    Dependencies {
+        #[command(flatten)]
+        host: ModHostArgs,
+        /// One mod's relations instead of every mod's, by its path inside the
+        /// game directory, such as `mods/foo.jar`.
+        #[arg(long, value_name = "PATH")]
+        of: Option<PathBuf>,
     },
     /// Ask each catalog what this instance's mods need, and record the answers.
     ///
@@ -3381,16 +3400,10 @@ async fn run_mod_command(app: &mut App, command: &ModCommand, json: bool) -> any
             return run_mod_verify(app, host, *shared, json).await;
         }
         ModCommand::Repair { host } => return run_mod_repair(app, host.host()?, json).await,
-        ModCommand::Refresh { host } => {
-            let report = app
-                .refresh_mod_dependencies(
-                    host.host()?,
-                    &OperationReporter::silent("refreshing-mod-dependencies"),
-                    &CancellationToken::new(),
-                )
-                .await?;
-            print_dependency_refresh(&report, json);
+        ModCommand::Dependencies { host, of } => {
+            return run_mod_dependencies(app, host.host()?, of.as_deref(), json);
         }
+        ModCommand::Refresh { host } => return run_mod_refresh(app, host.host()?, json).await,
         ModCommand::Delete {
             host,
             path,
@@ -3613,6 +3626,117 @@ fn print_required_mods(needs: &RequiredMods, json: bool) {
     for entry in &needs.incompatible {
         eprintln!("conflicts:  {}", entry.name);
     }
+}
+
+/// Asks each catalog what the host's mods need, and records the answers.
+async fn run_mod_refresh(app: &App, host: ModHost, json: bool) -> anyhow::Result<()> {
+    let report = app
+        .refresh_mod_dependencies(
+            host,
+            &OperationReporter::silent("refreshing-mod-dependencies"),
+            &CancellationToken::new(),
+        )
+        .await?;
+    print_dependency_refresh(&report, json);
+    Ok(())
+}
+
+/// Shows what the host's mods declare about each other.
+///
+/// Offline: it reads the recipe and the directory, so it answers the same on a
+/// machine with no network as on one with.
+fn run_mod_dependencies(
+    app: &App,
+    host: ModHost,
+    of: Option<&Path>,
+    json: bool,
+) -> anyhow::Result<()> {
+    let relations = match of {
+        Some(path) => vec![app.relations_of(host, path)?],
+        None => app.mod_relations(host)?,
+    };
+    print_mod_relations(&relations, json);
+    Ok(())
+}
+
+/// What each mod declares, and what declares it.
+///
+/// One block per mod, and an empty direction is left out rather than printed
+/// as a heading with nothing under it. A mod whose catalog was never asked
+/// says so, because otherwise "nobody asked" and "needs nothing" would read
+/// the same - which is the confusion this whole feature exists to avoid.
+fn print_mod_relations(relations: &[ModRelations], json: bool) {
+    if json {
+        let rows: Vec<serde_json::Value> = relations
+            .iter()
+            .map(|entry| {
+                serde_json::json!({
+                    "mod": entry.target.name,
+                    "path": entry.target.logical_path,
+                    "presence": entry.target.presence.as_str(),
+                    "knowledge": entry.target.knowledge.as_str(),
+                    "requires": related_json(&entry.requires),
+                    "required_by": related_json(&entry.required_by),
+                })
+            })
+            .collect();
+        print_json(&serde_json::Value::Array(rows));
+        return;
+    }
+    for entry in relations {
+        outln!("{}", entry.target.logical_path.display());
+        match entry.target.knowledge {
+            DependencyKnowledge::Recorded => {}
+            DependencyKnowledge::Unrecorded => {
+                outln!("  not asked  (run `ephervex mod refresh`)");
+            }
+            DependencyKnowledge::Unidentified => {
+                outln!("  not asked  (no exact release recorded to ask about)");
+            }
+            DependencyKnowledge::Unidentifiable => {
+                outln!("  not asked  (nothing records what this JAR is)");
+            }
+        }
+        for related in &entry.requires {
+            outln!("  needs      {}", related_line(related));
+        }
+        for related in &entry.required_by {
+            outln!("  needed by  {}", related_line(related));
+        }
+    }
+}
+
+/// One relation as a line: what it was, who it is about, and how that mod
+/// stands here when a jar for it is here at all.
+fn related_line(related: &RelatedMod) -> String {
+    let state = match related.presence {
+        Some(ModPresence::Installed) => String::new(),
+        Some(presence) => format!("  ({})", presence.as_str()),
+        None => "  (not installed here)".to_owned(),
+    };
+    format!(
+        "{:<12} {}{state}",
+        related.kind.as_str(),
+        related
+            .logical_path
+            .as_deref()
+            .map_or_else(|| related.name.clone(), |path| path.display().to_string())
+    )
+}
+
+fn related_json(relations: &[RelatedMod]) -> Vec<serde_json::Value> {
+    relations
+        .iter()
+        .map(|related| {
+            serde_json::json!({
+                "kind": related.kind.as_str(),
+                "name": related.name,
+                "path": related.logical_path,
+                "presence": related.presence.map(ModPresence::as_str),
+                "project_id": related.project_id,
+            })
+        })
+        .collect()
 }
 
 fn impacted_json(mods: &[ImpactedMod]) -> Vec<serde_json::Value> {

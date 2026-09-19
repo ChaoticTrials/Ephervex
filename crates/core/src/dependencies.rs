@@ -453,63 +453,19 @@ impl App {
             .ok_or_else(|| CoreError::ModFileMissing {
                 path: logical_path.to_path_buf(),
             })?;
-        let target = graph.entries[index].mod_entry.clone();
+        Ok(graph.relations_of(index))
+    }
 
-        let requires = graph.entries[index]
-            .relations
-            .iter()
-            .flatten()
-            .map(|relation| {
-                graph.target_of(relation).map_or_else(
-                    || RelatedMod {
-                        kind: relation.kind,
-                        name: relation.target.display_name().to_owned(),
-                        logical_path: None,
-                        presence: None,
-                        project_id: relation.target.project_id().map(ToOwned::to_owned),
-                    },
-                    |found| {
-                        let entry = &graph.entries[found].mod_entry;
-                        RelatedMod {
-                            kind: relation.kind,
-                            name: entry.name.clone(),
-                            logical_path: Some(entry.logical_path.clone()),
-                            presence: Some(entry.presence),
-                            project_id: entry.project_id.clone(),
-                        }
-                    },
-                )
-            })
-            .collect();
-
-        let file_name = target
-            .logical_path
-            .file_name()
-            .and_then(std::ffi::OsStr::to_str)
-            .unwrap_or_default();
-        let mut required_by = Vec::new();
-        for (candidate, entry) in graph.entries.iter().enumerate() {
-            if candidate == index {
-                continue;
-            }
-            for relation in entry.relations.iter().flatten() {
-                if relation.names(target.project_id.as_deref(), file_name) {
-                    required_by.push(RelatedMod {
-                        kind: relation.kind,
-                        name: entry.mod_entry.name.clone(),
-                        logical_path: Some(entry.mod_entry.logical_path.clone()),
-                        presence: Some(entry.mod_entry.presence),
-                        project_id: entry.mod_entry.project_id.clone(),
-                    });
-                }
-            }
-        }
-
-        Ok(ModRelations {
-            target,
-            requires,
-            required_by,
-        })
+    /// The same, for every mod of the host, in the order the list shows them.
+    ///
+    /// One graph answers all of them. Asking per mod would re-read the recipe
+    /// and re-walk the directory once per jar, which on an instance with a
+    /// couple of hundred is the difference between an answer and a pause.
+    pub fn mod_relations(&self, host: ModHost) -> CoreResult<Vec<ModRelations>> {
+        let graph = ModGraph::build(self, host)?;
+        Ok((0..graph.entries.len())
+            .map(|index| graph.relations_of(index))
+            .collect())
     }
 
     /// Deletes several mods' jars in one call.
@@ -775,6 +731,66 @@ impl ModGraph {
                     relation.kind == kind && relation.names(target.project_id.as_deref(), file_name)
                 })
             })
+    }
+
+    /// What the mod at `index` declares, and what declares it.
+    fn relations_of(&self, index: usize) -> ModRelations {
+        let target = self.entries[index].mod_entry.clone();
+        let requires = self.entries[index]
+            .relations
+            .iter()
+            .flatten()
+            .map(|relation| {
+                self.target_of(relation).map_or_else(
+                    || RelatedMod {
+                        kind: relation.kind,
+                        name: relation.target.display_name().to_owned(),
+                        logical_path: None,
+                        presence: None,
+                        project_id: relation.target.project_id().map(ToOwned::to_owned),
+                    },
+                    |found| {
+                        let entry = &self.entries[found].mod_entry;
+                        RelatedMod {
+                            kind: relation.kind,
+                            name: entry.name.clone(),
+                            logical_path: Some(entry.logical_path.clone()),
+                            presence: Some(entry.presence),
+                            project_id: entry.project_id.clone(),
+                        }
+                    },
+                )
+            })
+            .collect();
+
+        let file_name = target
+            .logical_path
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or_default();
+        let mut required_by = Vec::new();
+        for (candidate, entry) in self.entries.iter().enumerate() {
+            if candidate == index {
+                continue;
+            }
+            for relation in entry.relations.iter().flatten() {
+                if relation.names(target.project_id.as_deref(), file_name) {
+                    required_by.push(RelatedMod {
+                        kind: relation.kind,
+                        name: entry.mod_entry.name.clone(),
+                        logical_path: Some(entry.mod_entry.logical_path.clone()),
+                        presence: Some(entry.mod_entry.presence),
+                        project_id: entry.mod_entry.project_id.clone(),
+                    });
+                }
+            }
+        }
+
+        ModRelations {
+            target,
+            requires,
+            required_by,
+        }
     }
 
     /// Every enabled mod that does not load without `start`, transitively.
@@ -1136,6 +1152,50 @@ mod tests {
             Some(ModPresence::Installed),
             "a relation the instance holds carries how that jar stands"
         );
+    }
+
+    #[test]
+    fn every_mod_of_a_host_is_answered_from_one_graph() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, instance, _root) = library_and_its_dependents(base.path());
+
+        let all = app
+            .mod_relations(ModHost::Instance(instance))
+            .expect("relations");
+
+        assert_eq!(
+            all.iter()
+                .map(|entry| entry.target.name.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "LibX.jar",
+                "SkyblockBuilder.jar",
+                "SkyGUIs.jar",
+                "UtilitiX.jar"
+            ],
+            "every mod of the host is listed, in the order the list shows them"
+        );
+        let library = all
+            .iter()
+            .find(|entry| entry.target.name == "LibX.jar")
+            .expect("the library");
+        assert!(library.requires.is_empty());
+        assert_eq!(
+            library
+                .required_by
+                .iter()
+                .map(|related| related.name.as_str())
+                .collect::<Vec<_>>(),
+            ["SkyblockBuilder.jar", "SkyGUIs.jar", "UtilitiX.jar"]
+        );
+        for entry in &all {
+            assert_eq!(
+                *entry,
+                app.relations_of(ModHost::Instance(instance), &entry.target.logical_path)
+                    .expect("one mod"),
+                "the whole-host answer and the per-mod answer are the same answer"
+            );
+        }
     }
 
     #[test]
