@@ -37,7 +37,7 @@ use ephervex_download::{
 };
 use ephervex_mod_platform::{
     AnnotatedVersion, InstallSelection, InstalledPolicy, InstalledProject, InstanceTarget,
-    ModInstallPlan, ModPlatformError, ModProject, ModProjectDetails, ModProviderApi,
+    ModDependency, ModInstallPlan, ModPlatformError, ModProject, ModProjectDetails, ModProviderApi,
     ModSearchQuery, ModSearchResults, ModVersionInfo, ModrinthProvider, PlannedMod, RecognizedFile,
     SideSupport, annotate, curseforge_fingerprint, newest_compatible,
 };
@@ -47,8 +47,8 @@ use ephervex_model::{
 };
 use ephervex_pack::{
     ArtifactFetch, MODS_DIR, ManagedMod, ManagedModInstall, ManagedModInstallation, ModIdentity,
-    PackError, PackFileRecipe, PackRecipe, PackSide, ProviderFileIdentity, RecordedMod,
-    SideRequirement, SourceStore,
+    PackError, PackFileRecipe, PackRecipe, PackSide, ProviderFileIdentity, RecipeRelation,
+    RecordedMod, SideRequirement, SourceStore,
 };
 /// Where a disabled jar sits, and the suffix that puts it there.
 ///
@@ -1873,8 +1873,31 @@ pub(crate) fn recipe_entry_for(
             file_id: exact_file_id(provider, &planned.version.id),
         }),
         original_identity: None,
-        relations: None,
+        relations: Some(recipe_relations(&planned.version.dependencies)),
     })
+}
+
+/// What the catalog said this release needs, in the recipe's own shape.
+///
+/// The resolver already has this and used to drop it. Recording it is what
+/// lets the instance answer dependency questions later without a catalog
+/// (ADR 0034).
+///
+/// A relation the provider states by file name alone carries no project to key
+/// on and is left out. That never loses a requirement: the resolver refuses a
+/// required dependency that names only a file rather than skipping it, so
+/// anything reaching here has already proven every requirement resolvable.
+fn recipe_relations(dependencies: &[ModDependency]) -> Vec<RecipeRelation> {
+    dependencies
+        .iter()
+        .filter_map(|dependency| {
+            Some(RecipeRelation {
+                project_id: dependency.project_id.clone()?,
+                kind: dependency.kind,
+                version_id: dependency.version_id.clone(),
+            })
+        })
+        .collect()
 }
 
 /// The exact provider file this release is, where the provider names one.
@@ -1924,7 +1947,7 @@ mod tests {
         index
     }
 
-    use ephervex_model::{Hash, HashAlgorithm, ModOrigin};
+    use ephervex_model::{Hash, HashAlgorithm, ModOrigin, ModRelationKind};
 
     use super::*;
 
@@ -2110,6 +2133,73 @@ mod tests {
         assert_eq!(managed.version_id, "LIBV1");
         assert_eq!(managed.origin, ModOrigin::RequiredDependency);
         assert!(!managed.hashes.is_empty());
+    }
+
+    /// The same planned mod, with relations the catalog stated about it.
+    fn planned_needing(dependencies: Vec<ModDependency>) -> PlannedMod {
+        let mut planned = planned(SideSupport::Required, "library-1.0.0.jar");
+        planned.version.dependencies = dependencies;
+        planned
+    }
+
+    fn relation(kind: ModRelationKind, project_id: Option<&str>) -> ModDependency {
+        ModDependency {
+            kind,
+            project_id: project_id.map(str::to_owned),
+            version_id: None,
+            file_name: None,
+        }
+    }
+
+    #[test]
+    fn an_installed_mods_entry_carries_the_relations_its_catalog_declared() {
+        let entry = recipe_entry(
+            &planned_needing(vec![
+                relation(ModRelationKind::Required, Some("qEH6GYul")),
+                relation(ModRelationKind::Optional, Some("3Gdi7Qgq")),
+            ]),
+            ModProvider::Modrinth,
+        )
+        .expect("entry");
+
+        let relations = entry.recorded_relations().expect("relations were recorded");
+        assert_eq!(relations.len(), 2);
+        assert!(
+            entry.requires_project("qEH6GYul"),
+            "a required relation is what a disable warning is built on"
+        );
+        assert!(
+            !entry.requires_project("3Gdi7Qgq"),
+            "an optional relation never becomes a requirement"
+        );
+    }
+
+    #[test]
+    fn a_mod_the_catalog_says_needs_nothing_records_an_answered_empty_set() {
+        // Not `None`: the catalog answered. Recording it as unasked would send
+        // a later warning to "Ephervex cannot tell" for a mod it can.
+        let entry =
+            recipe_entry(&planned_needing(Vec::new()), ModProvider::Modrinth).expect("entry");
+        assert_eq!(entry.recorded_relations(), Some(&[][..]));
+    }
+
+    #[test]
+    fn a_relation_named_only_by_file_is_left_out_rather_than_given_a_project() {
+        // Inventing a project id here is what makes a recipe name something no
+        // catalog can resolve. The resolver already refuses a *required*
+        // dependency shaped this way, so nothing requirement-bearing is lost.
+        let entry = recipe_entry(
+            &planned_needing(vec![
+                relation(ModRelationKind::Optional, None),
+                relation(ModRelationKind::Required, Some("qEH6GYul")),
+            ]),
+            ModProvider::Modrinth,
+        )
+        .expect("entry");
+
+        let relations = entry.recorded_relations().expect("relations were recorded");
+        assert_eq!(relations.len(), 1);
+        assert_eq!(relations[0].project_id, "qEH6GYul");
     }
 
     #[test]

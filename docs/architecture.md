@@ -557,6 +557,13 @@ them, because a mod nothing has asked about is unknown rather than independent,
 and a warning that treats it as independent is confidently wrong rather than
 merely incomplete.
 
+Installing a mod through a catalog records them, because the resolver already
+has the release's declared dependencies in hand and used to drop them; the same
+entry, and the same relations, is what a linked server's own recipe receives.
+A relation the catalog states by file name alone carries no project to key on and
+is left out rather than given an invented one, which loses no requirement: the
+resolver refuses a required dependency shaped that way rather than skipping it.
+
 A Modrinth pack index declares no relations at all - it states paths, hashes and
 download addresses - so its entries stay unasked until an explicit refresh. A jar
 with no catalog identity has nothing to ask about and stays unasked.
