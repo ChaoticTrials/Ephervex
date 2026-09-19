@@ -594,7 +594,9 @@ Two questions are asked of that state, both offline and both pure. What else
 stops loading if this mod does, which is the same answer for turning a mod off
 and for deleting its jar, because the loader sees the same absence either way;
 and what this mod needs before it can load, which is what a frontend asks before
-turning one back on. Neither reaches a catalog, so a frontend may ask on every
+turning one back on. Both walk transitively: a dependency's own dependencies are
+needed just as much, so turning a mod on while something two steps below it
+stays off would produce a set that still does not load. Neither reaches a catalog, so a frontend may ask on every
 toggle.
 
 The first keeps proven and unproven apart, in four lists rather than one. A mod

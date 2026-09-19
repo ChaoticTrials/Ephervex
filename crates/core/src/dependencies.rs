@@ -246,38 +246,65 @@ impl App {
         let mut disabled = Vec::new();
         let mut absent = Vec::new();
         let mut incompatible = Vec::new();
-        for relation in graph.entries[index].relations.iter().flatten() {
-            let installed = graph
-                .target_of(relation)
-                .map(|found| &graph.entries[found].mod_entry);
-            match (relation.kind, installed) {
-                (ModRelationKind::Required, Some(entry))
-                    if entry.presence == ModPresence::Installed => {}
-                (ModRelationKind::Required, Some(entry)) => disabled.push(ImpactedMod {
-                    distance: 1,
-                    ..entry.clone()
-                }),
-                // Named by whatever the catalog gave, because there is no jar
-                // here to name it any better. Nothing is fetched for it.
-                (ModRelationKind::Required, None) => absent.push(ImpactedMod {
-                    logical_path: PathBuf::new(),
-                    name: relation.target.display_name().to_owned(),
-                    presence: ModPresence::Missing,
-                    origin: ModOrigin::RequiredDependency,
-                    project_id: relation.target.project_id().map(ToOwned::to_owned),
-                    knowledge: DependencyKnowledge::Recorded,
-                    distance: 1,
-                }),
-                (ModRelationKind::Incompatible, Some(entry))
-                    if entry.presence == ModPresence::Installed =>
-                {
-                    incompatible.push(ImpactedMod {
-                        distance: 1,
-                        ..entry.clone()
-                    });
+        // Transitively, because a dependency's own dependencies are needed just
+        // as much: turning a mod on and leaving something two steps down it off
+        // produces a set that still does not load.
+        let mut seen: BTreeSet<usize> = BTreeSet::from([index]);
+        let mut frontier = vec![index];
+        let mut distance = 0;
+        while !frontier.is_empty() {
+            distance += 1;
+            let mut next = Vec::new();
+            for current in frontier {
+                for relation in graph.entries[current].relations.iter().flatten() {
+                    let found = graph.target_of(relation);
+                    match (relation.kind, found) {
+                        (ModRelationKind::Required, Some(found)) => {
+                            if !seen.insert(found) {
+                                continue;
+                            }
+                            let entry = &graph.entries[found].mod_entry;
+                            match entry.presence {
+                                // Already loading, and still walked: something
+                                // it needs may itself be turned off.
+                                ModPresence::Installed => {}
+                                ModPresence::Disabled => disabled.push(ImpactedMod {
+                                    distance,
+                                    ..entry.clone()
+                                }),
+                                ModPresence::Missing => absent.push(ImpactedMod {
+                                    distance,
+                                    ..entry.clone()
+                                }),
+                            }
+                            next.push(found);
+                        }
+                        // Named by whatever the catalog gave, because there is
+                        // no jar here to name it any better. Nothing is fetched
+                        // for it, and nothing below it can be walked.
+                        (ModRelationKind::Required, None) => absent.push(ImpactedMod {
+                            logical_path: PathBuf::new(),
+                            name: relation.target.display_name().to_owned(),
+                            presence: ModPresence::Missing,
+                            origin: ModOrigin::RequiredDependency,
+                            project_id: relation.target.project_id().map(ToOwned::to_owned),
+                            knowledge: DependencyKnowledge::Recorded,
+                            distance,
+                        }),
+                        (ModRelationKind::Incompatible, Some(found))
+                            if graph.entries[found].mod_entry.presence
+                                == ModPresence::Installed =>
+                        {
+                            incompatible.push(ImpactedMod {
+                                distance,
+                                ..graph.entries[found].mod_entry.clone()
+                            });
+                        }
+                        _ => {}
+                    }
                 }
-                _ => {}
             }
+            frontier = next;
         }
 
         Ok(RequiredMods {
@@ -938,8 +965,85 @@ mod tests {
         assert!(impact.unknown[0].knowledge.a_refresh_would_help());
     }
 
+    /// Turns every jar of the instance off, the way a disable cascade leaves it.
+    fn disable_all(root: &std::path::Path) {
+        let mods = ephervex_storage::metadata::client_game_dir(root).join("mods");
+        for jar in [
+            "LibX.jar",
+            "SkyblockBuilder.jar",
+            "SkyGUIs.jar",
+            "UtilitiX.jar",
+        ] {
+            std::fs::rename(mods.join(jar), mods.join(format!("{jar}.disabled")))
+                .expect("disable it");
+        }
+    }
+
     #[test]
-    fn enabling_a_mod_names_the_required_mods_that_are_turned_off() {
+    fn enabling_a_mod_names_every_mod_it_needs_and_no_others() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, instance, root) = library_and_its_dependents(base.path());
+        disable_all(&root);
+
+        let needs = app
+            .dependencies_of(ModHost::Instance(instance), Path::new("mods/SkyGUIs.jar"))
+            .expect("requirements");
+        let mut named = names(&needs.disabled);
+        named.sort_unstable();
+        assert_eq!(
+            named,
+            ["LibX.jar", "SkyblockBuilder.jar"],
+            "Sky GUIs needs both, and UtilitiX is nobody's business here"
+        );
+
+        let needs = app
+            .dependencies_of(ModHost::Instance(instance), Path::new("mods/UtilitiX.jar"))
+            .expect("requirements");
+        assert_eq!(
+            names(&needs.disabled),
+            ["LibX.jar"],
+            "UtilitiX needs the library and nothing else"
+        );
+    }
+
+    #[test]
+    fn enabling_a_mod_reaches_a_dependency_of_its_dependency() {
+        // The case one level of walking gets wrong. Sky GUIs is made to need
+        // only Skyblock Builder, which still needs the library; turning Sky
+        // GUIs on without the library produces a set that does not load.
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, instance, root) = library_and_its_dependents(base.path());
+        let store = SourceStore::new(ephervex_storage::metadata::source_dir(&root));
+        let mut recipe = store.read_recipe().expect("recipe");
+        recipe
+            .files
+            .iter_mut()
+            .find(|file| file.file_name() == "SkyGUIs.jar")
+            .expect("the addon")
+            .relations = Some(vec![RecipeRelation {
+            kind: ModRelationKind::Required,
+            target: RelationTarget::Project {
+                project_id: DEPENDENT.to_owned(),
+                version_id: None,
+            },
+        }]);
+        store.write_recipe(&recipe).expect("write");
+        disable_all(&root);
+
+        let needs = app
+            .dependencies_of(ModHost::Instance(instance), Path::new("mods/SkyGUIs.jar"))
+            .expect("requirements");
+        assert_eq!(
+            names(&needs.disabled),
+            ["SkyblockBuilder.jar", "LibX.jar"],
+            "the library is two steps away and needed all the same"
+        );
+        assert_eq!(needs.disabled[0].distance, 1);
+        assert_eq!(needs.disabled[1].distance, 2);
+    }
+
+    #[test]
+    fn a_dependency_that_is_already_loading_is_not_offered() {
         let base = tempfile::tempdir().expect("temp dir");
         let (app, instance, root) = library_and_its_dependents(base.path());
         let mods = ephervex_storage::metadata::client_game_dir(&root).join("mods");
@@ -949,12 +1053,12 @@ mod tests {
         let needs = app
             .dependencies_of(ModHost::Instance(instance), Path::new("mods/SkyGUIs.jar"))
             .expect("requirements");
-
-        assert_eq!(names(&needs.disabled), ["LibX.jar"]);
-        assert!(
-            needs.absent.is_empty(),
-            "Skyblock Builder is installed and loading"
+        assert_eq!(
+            names(&needs.disabled),
+            ["LibX.jar"],
+            "Skyblock Builder is already loading, so it is not offered"
         );
+        assert!(needs.absent.is_empty());
         assert!(!needs.is_silent());
     }
 
