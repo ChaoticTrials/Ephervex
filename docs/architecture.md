@@ -544,7 +544,12 @@ result is per target.
 ## What a mod requires
 
 A recipe entry records the relations its catalog declared about that file:
-required, optional, incompatible, embedded (ADR 0034). The direction stored is
+required, optional, incompatible, embedded (ADR 0034). What a relation names is
+typed rather than optional fields: a project, with the exact release where the
+catalog pinned one, or a jar, for a relation that names only that. CurseForge
+states relations between projects and never pins a release; Modrinth may do
+either. Nothing a catalog stated is discarded, and a relation that names neither
+a project nor a jar is not representable. The direction stored is
 forward, on the entry the catalog described, so installing or removing one mod
 never rewrites another mod's record and an entry copied into a linked server's
 recipe stays correct there. The direction a warning needs - which installed files

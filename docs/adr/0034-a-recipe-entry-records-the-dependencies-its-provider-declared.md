@@ -60,6 +60,17 @@ belongs to the entry's `ProviderFileIdentity::provider`. A dependency graph neve
 crosses catalogs, so a second place to record a provider would only be a second
 place for it to be wrong.
 
+**Nothing the catalog stated is thrown away.** What a relation names is a typed
+choice rather than a bag of optional ids: `RelationTarget::Project`, carrying the
+exact release where the catalog pinned one, or `RelationTarget::File`, for a
+relation that names only a jar. CurseForge always produces the first, because it
+states relations between projects. Modrinth produces either. A relation naming a
+jar is matched against an installed file by name, case-insensitively, rather than
+discarded for lacking a project; one that named a project is matched by project
+alone, because falling back to a file name there would match a file the catalog
+never mentioned. A relation that names neither cannot be matched against anything
+and is not representable.
+
 **The field is additive.** `RECIPE_VERSION` stays 1 (ADR 0033): an absent field
 defaults, so a recipe written by a build that predates this reads correctly and a
 build that predates it reads one written now.

@@ -1057,6 +1057,8 @@ mod tests {
     use std::io::Write as _;
     use std::path::Path;
 
+    use ephervex_pack::RelationTarget;
+
     use ephervex_auth::{CredentialStore, MemoryStore};
     use ephervex_download::{
         ArtifactCache, CacheLayout, ContentStore, FileExtension, OperationReporter,
@@ -1739,18 +1741,28 @@ mod tests {
             .recorded_relations()
             .expect("the file document declared relations");
         assert_eq!(relations.len(), 2);
+        let required_on = |project: u32| {
+            relations.iter().any(|relation| {
+                relation.kind.is_required()
+                    && relation.target.project_id() == Some(project.to_string().as_str())
+            })
+        };
         assert!(
-            required.requires_project(&LIBRARY_PROJECT.to_string()),
+            required_on(LIBRARY_PROJECT),
             "a required relation is what a disable warning is built on"
         );
         assert!(
-            !required.requires_project(&SUGGESTED_PROJECT.to_string()),
+            !required_on(SUGGESTED_PROJECT),
             "an optional relation never becomes a requirement"
         );
         assert!(
-            relations
-                .iter()
-                .all(|relation| relation.version_id.is_none()),
+            relations.iter().all(|relation| matches!(
+                &relation.target,
+                RelationTarget::Project {
+                    version_id: None,
+                    ..
+                }
+            )),
             "CurseForge states relations project to project; no file is pinned"
         );
 

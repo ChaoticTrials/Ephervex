@@ -48,7 +48,7 @@ use ephervex_model::{
 use ephervex_pack::{
     ArtifactFetch, MODS_DIR, ManagedMod, ManagedModInstall, ManagedModInstallation, ModIdentity,
     PackError, PackFileRecipe, PackRecipe, PackSide, ProviderFileIdentity, RecipeRelation,
-    RecordedMod, SideRequirement, SourceStore,
+    RecordedMod, RelationTarget, SideRequirement, SourceStore,
 };
 /// Where a disabled jar sits, and the suffix that puts it there.
 ///
@@ -1883,18 +1883,21 @@ pub(crate) fn recipe_entry_for(
 /// lets the instance answer dependency questions later without a catalog
 /// (ADR 0034).
 ///
-/// A relation the provider states by file name alone carries no project to key
-/// on and is left out. That never loses a requirement: the resolver refuses a
-/// required dependency that names only a file rather than skipping it, so
-/// anything reaching here has already proven every requirement resolvable.
+/// Every identifier the catalog gave is kept, including a relation that names
+/// only a jar: matching one of those to an installed file is a file-name
+/// comparison rather than a project lookup, which is still an answer. The only
+/// relation left out is one that names nothing to match against at all.
 pub(crate) fn recipe_relations(dependencies: &[ModDependency]) -> Vec<RecipeRelation> {
     dependencies
         .iter()
         .filter_map(|dependency| {
             Some(RecipeRelation {
-                project_id: dependency.project_id.clone()?,
                 kind: dependency.kind,
-                version_id: dependency.version_id.clone(),
+                target: RelationTarget::from_declared(
+                    dependency.project_id.clone(),
+                    dependency.version_id.clone(),
+                    dependency.file_name.clone(),
+                )?,
             })
         })
         .collect()
@@ -2165,12 +2168,16 @@ mod tests {
         let relations = entry.recorded_relations().expect("relations were recorded");
         assert_eq!(relations.len(), 2);
         assert!(
-            entry.requires_project("qEH6GYul"),
+            relations.iter().any(|relation| relation.kind.is_required()
+                && relation.target.project_id() == Some("qEH6GYul")),
             "a required relation is what a disable warning is built on"
         );
         assert!(
-            !entry.requires_project("3Gdi7Qgq"),
-            "an optional relation never becomes a requirement"
+            relations
+                .iter()
+                .any(|relation| relation.kind == ModRelationKind::Optional
+                    && relation.target.project_id() == Some("3Gdi7Qgq")),
+            "and an optional one stays optional rather than becoming a requirement"
         );
     }
 
@@ -2184,13 +2191,16 @@ mod tests {
     }
 
     #[test]
-    fn a_relation_named_only_by_file_is_left_out_rather_than_given_a_project() {
-        // Inventing a project id here is what makes a recipe name something no
-        // catalog can resolve. The resolver already refuses a *required*
-        // dependency shaped this way, so nothing requirement-bearing is lost.
+    fn a_relation_named_only_by_a_jar_is_kept_under_that_name() {
+        // Inventing a project id here would make the recipe name something no
+        // catalog can resolve. Dropping it loses a relation the catalog did
+        // state. Neither: it keeps the only name it was given, and matching it
+        // to an installed file is a jar-name comparison.
+        let mut named_by_jar = relation(ModRelationKind::Optional, None);
+        named_by_jar.file_name = Some("somelibrary.jar".to_owned());
         let entry = recipe_entry(
             &planned_needing(vec![
-                relation(ModRelationKind::Optional, None),
+                named_by_jar,
                 relation(ModRelationKind::Required, Some("qEH6GYul")),
             ]),
             ModProvider::Modrinth,
@@ -2198,8 +2208,28 @@ mod tests {
         .expect("entry");
 
         let relations = entry.recorded_relations().expect("relations were recorded");
-        assert_eq!(relations.len(), 1);
-        assert_eq!(relations[0].project_id, "qEH6GYul");
+        assert_eq!(relations.len(), 2, "the jar-named relation is kept too");
+        assert_eq!(
+            relations[0].target,
+            RelationTarget::File {
+                file_name: "somelibrary.jar".to_owned()
+            }
+        );
+        assert_eq!(relations[1].target.project_id(), Some("qEH6GYul"));
+    }
+
+    #[test]
+    fn a_relation_that_names_nothing_at_all_is_the_only_one_dropped() {
+        let entry = recipe_entry(
+            &planned_needing(vec![relation(ModRelationKind::Required, None)]),
+            ModProvider::Modrinth,
+        )
+        .expect("entry");
+        assert_eq!(
+            entry.recorded_relations(),
+            Some(&[][..]),
+            "there is nothing in it to match an installed file against"
+        );
     }
 
     #[test]

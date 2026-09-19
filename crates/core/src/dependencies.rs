@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use ephervex_download::OperationReporter;
 use ephervex_model::{ModOrigin, ModProvider, ModRelationKind};
-use ephervex_pack::{ModIdentity, PackRecipe, RecipeRelation, SourceStore};
+use ephervex_pack::{ModIdentity, PackRecipe, RecipeRelation, RelationTarget, SourceStore};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument, warn};
 
@@ -207,9 +207,7 @@ impl App {
             }
             match entry.mod_entry.knowledge {
                 DependencyKnowledge::Recorded => {
-                    if let Some(project) = target.project_id.as_deref()
-                        && graph.declares(candidate, project, ModRelationKind::Optional)
-                    {
+                    if graph.declares(candidate, index, ModRelationKind::Optional) {
                         degrades.push(ImpactedMod {
                             distance: 1,
                             ..entry.mod_entry.clone()
@@ -250,9 +248,8 @@ impl App {
         let mut incompatible = Vec::new();
         for relation in graph.entries[index].relations.iter().flatten() {
             let installed = graph
-                .by_project
-                .get(&relation.project_id)
-                .map(|found| &graph.entries[*found].mod_entry);
+                .target_of(relation)
+                .map(|found| &graph.entries[found].mod_entry);
             match (relation.kind, installed) {
                 (ModRelationKind::Required, Some(entry))
                     if entry.presence == ModPresence::Installed => {}
@@ -260,14 +257,14 @@ impl App {
                     distance: 1,
                     ..entry.clone()
                 }),
-                // Named by project alone, because there is no jar here to name
-                // it any better. Nothing is fetched for it.
+                // Named by whatever the catalog gave, because there is no jar
+                // here to name it any better. Nothing is fetched for it.
                 (ModRelationKind::Required, None) => absent.push(ImpactedMod {
                     logical_path: PathBuf::new(),
-                    name: relation.project_id.clone(),
+                    name: relation.target.display_name().to_owned(),
                     presence: ModPresence::Missing,
                     origin: ModOrigin::RequiredDependency,
-                    project_id: Some(relation.project_id.clone()),
+                    project_id: relation.target.project_id().map(ToOwned::to_owned),
                     knowledge: DependencyKnowledge::Recorded,
                     distance: 1,
                 }),
@@ -434,6 +431,8 @@ struct ModGraph {
     entries: Vec<GraphEntry>,
     /// Where a catalog project sits in `entries`.
     by_project: BTreeMap<String, usize>,
+    /// Where a jar name sits, lowercased, for a relation that named only one.
+    by_file_name: BTreeMap<String, usize>,
 }
 
 #[derive(Debug)]
@@ -462,12 +461,14 @@ impl ModGraph {
 
         let mut entries = Vec::with_capacity(snapshot.mods.len());
         let mut by_project = BTreeMap::new();
+        let mut by_file_name = BTreeMap::new();
         for entry in &snapshot.mods {
             let recorded = relations.get(&entry.logical_path).cloned().flatten();
             let project_id = entry.identity.project_id().map(ToOwned::to_owned);
             if let Some(project) = project_id.clone() {
                 by_project.insert(project, entries.len());
             }
+            by_file_name.insert(entry.file_name.to_ascii_lowercase(), entries.len());
             entries.push(GraphEntry {
                 mod_entry: ImpactedMod {
                     logical_path: entry.logical_path.clone(),
@@ -484,7 +485,19 @@ impl ModGraph {
         Ok(Self {
             entries,
             by_project,
+            by_file_name,
         })
+    }
+
+    /// The mod a relation is about, whichever way the catalog named it.
+    fn target_of(&self, relation: &RecipeRelation) -> Option<usize> {
+        match &relation.target {
+            RelationTarget::Project { project_id, .. } => self.by_project.get(project_id),
+            RelationTarget::File { file_name } => {
+                self.by_file_name.get(&file_name.to_ascii_lowercase())
+            }
+        }
+        .copied()
     }
 
     /// Where a mod sits, by the path a frontend named it with.
@@ -494,15 +507,21 @@ impl ModGraph {
             .position(|entry| entry.mod_entry.logical_path == logical_path)
     }
 
-    /// Whether this mod declares a relation of one kind on a project.
-    fn declares(&self, index: usize, project: &str, kind: ModRelationKind) -> bool {
+    /// Whether this mod declares a relation of one kind on another mod.
+    fn declares(&self, index: usize, about: usize, kind: ModRelationKind) -> bool {
+        let target = &self.entries[about].mod_entry;
+        let file_name = target
+            .logical_path
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or_default();
         self.entries[index]
             .relations
             .as_ref()
             .is_some_and(|relations| {
-                relations
-                    .iter()
-                    .any(|relation| relation.kind == kind && relation.project_id == project)
+                relations.iter().any(|relation| {
+                    relation.kind == kind && relation.names(target.project_id.as_deref(), file_name)
+                })
             })
     }
 
@@ -519,15 +538,11 @@ impl ModGraph {
             distance += 1;
             let mut next = Vec::new();
             for index in frontier {
-                let Some(project) = self.entries[index].mod_entry.project_id.as_deref() else {
-                    // Nothing can name it, so nothing can be shown to require it.
-                    continue;
-                };
                 for (candidate, entry) in self.entries.iter().enumerate() {
                     if candidate == start
                         || found.contains_key(&candidate)
                         || entry.mod_entry.presence != ModPresence::Installed
-                        || !self.declares(candidate, project, ModRelationKind::Required)
+                        || !self.declares(candidate, index, ModRelationKind::Required)
                     {
                         continue;
                     }
@@ -765,9 +780,11 @@ mod tests {
             relations
                 .iter()
                 .map(|(project_id, kind)| RecipeRelation {
-                    project_id: (*project_id).to_owned(),
                     kind: *kind,
-                    version_id: None,
+                    target: RelationTarget::Project {
+                        project_id: (*project_id).to_owned(),
+                        version_id: None,
+                    },
                 })
                 .collect(),
         );
@@ -794,6 +811,36 @@ mod tests {
         );
         assert!(impact.is_complete(), "every other mod gave a real answer");
         assert!(!impact.is_silent());
+    }
+
+    #[test]
+    fn a_relation_that_names_only_a_jar_still_matches_the_installed_file() {
+        // Modrinth may state a dependency by file name and no project. That is
+        // still an answer, and the mod it names still stops loading.
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, instance, root) = library_and_its_dependents(base.path());
+        let store = SourceStore::new(ephervex_storage::metadata::source_dir(&root));
+        let mut recipe = store.read_recipe().expect("recipe");
+        recipe
+            .files
+            .iter_mut()
+            .find(|file| file.file_name() == "UtilitiX.jar")
+            .expect("the mod")
+            .relations = Some(vec![RecipeRelation {
+            kind: ModRelationKind::Required,
+            target: RelationTarget::File {
+                file_name: "libx.JAR".to_owned(),
+            },
+        }]);
+        store.write_recipe(&recipe).expect("write");
+
+        let impact = app
+            .dependents_of(ModHost::Instance(instance), Path::new("mods/LibX.jar"))
+            .expect("impact");
+        assert!(
+            names(&impact.breaks).contains(&"UtilitiX.jar"),
+            "a jar name is matched case-insensitively, like the filesystem entry it names"
+        );
     }
 
     #[test]
@@ -994,7 +1041,12 @@ mod tests {
         assert!(report.is_complete());
 
         let recipe = recipe_at(&root);
-        let dependents = recipe.required_by(LIBRARY);
+        let library = recipe
+            .files
+            .iter()
+            .find(|file| file.file_name() == "LibX.jar")
+            .expect("the library");
+        let dependents = recipe.required_by(library);
         assert_eq!(dependents.len(), 1);
         assert_eq!(
             dependents[0].logical_path,

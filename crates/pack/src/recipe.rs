@@ -454,22 +454,90 @@ pub struct DuplicateProviderFile {
     pub reason: DuplicateFileReason,
 }
 
+/// What a catalog named when it stated a relation.
+///
+/// Two shapes because the catalogs give two. CurseForge always names a project
+/// and never a release. Modrinth usually names a project, may pin a release
+/// with it, and may name only a jar. A relation that names neither cannot be
+/// matched against anything and is not representable here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelationTarget {
+    /// A project, plus the exact release where the catalog pinned one.
+    Project {
+        project_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        version_id: Option<String>,
+    },
+    /// A jar, which is all the catalog gave.
+    File { file_name: String },
+}
+
+impl RelationTarget {
+    /// The target a catalog's own optional fields describe, if any.
+    #[must_use]
+    pub fn from_declared(
+        project_id: Option<String>,
+        version_id: Option<String>,
+        file_name: Option<String>,
+    ) -> Option<Self> {
+        project_id.map_or_else(
+            || file_name.map(|file_name| Self::File { file_name }),
+            |project_id| {
+                Some(Self::Project {
+                    project_id,
+                    version_id,
+                })
+            },
+        )
+    }
+
+    /// The project, where one was named.
+    #[must_use]
+    pub fn project_id(&self) -> Option<&str> {
+        match self {
+            Self::Project { project_id, .. } => Some(project_id),
+            Self::File { .. } => None,
+        }
+    }
+
+    /// Whatever the catalog gave, as something to show.
+    #[must_use]
+    pub fn display_name(&self) -> &str {
+        match self {
+            Self::Project { project_id, .. } => project_id,
+            Self::File { file_name } => file_name,
+        }
+    }
+}
+
 /// One relation a catalog stated about a file, as the catalog stated it.
 ///
 /// The catalog is the entry's own [`ProviderFileIdentity::provider`], not a
 /// field here: a dependency graph never crosses catalogs, so a second place to
 /// record a provider would be a second place for it to be wrong.
-///
-/// `version_id` is present only where the catalog pins one. Modrinth may;
-/// CurseForge states relations between projects and never between files.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecipeRelation {
-    /// The project this file says something about, in the catalog's own
-    /// spelling.
-    pub project_id: String,
     pub kind: ModRelationKind,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub version_id: Option<String>,
+    pub target: RelationTarget,
+}
+
+impl RecipeRelation {
+    /// Whether this relation is about one particular file of the instance.
+    ///
+    /// A relation that named a project matches by project alone: falling back
+    /// to the jar name for it would match a file the catalog never mentioned.
+    /// One that named only a jar matches by that name, case-insensitively,
+    /// because that is the whole of what the catalog gave.
+    #[must_use]
+    pub fn names(&self, project_id: Option<&str>, file_name: &str) -> bool {
+        match &self.target {
+            RelationTarget::Project {
+                project_id: named, ..
+            } => project_id == Some(named.as_str()),
+            RelationTarget::File { file_name: named } => named.eq_ignore_ascii_case(file_name),
+        }
+    }
 }
 
 /// One file the pack declares (the project's `PackFileRecipe`).
@@ -532,17 +600,30 @@ impl PackFileRecipe {
         self.relations.as_deref()
     }
 
-    /// Whether this file declares that it does not load without `project_id`.
+    /// The jar's own name, as the catalog would have named it.
+    #[must_use]
+    pub fn file_name(&self) -> &str {
+        self.logical_path
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or_default()
+    }
+
+    /// Whether this file declares that it does not load without `other`.
     ///
     /// False for a file whose relations were never recorded, so a caller that
     /// needs to tell "does not require it" from "nobody asked" checks
     /// [`Self::recorded_relations`] first.
     #[must_use]
-    pub fn requires_project(&self, project_id: &str) -> bool {
+    pub fn requires(&self, other: &Self) -> bool {
+        let project_id = other
+            .identity
+            .as_ref()
+            .and_then(|identity| identity.project_id.as_deref());
         self.recorded_relations().is_some_and(|relations| {
-            relations
-                .iter()
-                .any(|relation| relation.kind.is_required() && relation.project_id == project_id)
+            relations.iter().any(|relation| {
+                relation.kind.is_required() && relation.names(project_id, other.file_name())
+            })
         })
     }
 
@@ -1032,7 +1113,7 @@ impl PackRecipe {
         }
     }
 
-    /// Every recorded file that does not load without `project_id`.
+    /// Every recorded file that does not load without `target`.
     ///
     /// The reverse of what each entry stores. Edges are kept forward, on the
     /// entry the catalog described, so installing or removing one mod never has
@@ -1043,10 +1124,10 @@ impl PackRecipe {
     /// this list and is not thereby independent - [`PackRecipe::files`] with
     /// [`PackFileRecipe::recorded_relations`] is what answers that.
     #[must_use]
-    pub fn required_by(&self, project_id: &str) -> Vec<&PackFileRecipe> {
+    pub fn required_by<'a>(&'a self, target: &PackFileRecipe) -> Vec<&'a PackFileRecipe> {
         self.files
             .iter()
-            .filter(|file| file.requires_project(project_id))
+            .filter(|file| file.requires(target))
             .collect()
     }
 
@@ -2166,9 +2247,11 @@ mod tests {
                 requires
                     .iter()
                     .map(|(project_id, kind)| RecipeRelation {
-                        project_id: (*project_id).to_owned(),
                         kind: *kind,
-                        version_id: None,
+                        target: RelationTarget::Project {
+                            project_id: (*project_id).to_owned(),
+                            version_id: None,
+                        },
                     })
                     .collect(),
             ),
@@ -2211,8 +2294,10 @@ mod tests {
 
     #[test]
     fn the_reverse_index_names_every_file_that_requires_a_project() {
-        let names: Vec<String> = library_and_its_dependents()
-            .required_by("qEH6GYul")
+        let recipe = library_and_its_dependents();
+        let library = recipe.files.first().expect("the library");
+        let names: Vec<String> = recipe
+            .required_by(library)
             .into_iter()
             .map(PackFileRecipe::display_name)
             .collect();
@@ -2231,10 +2316,14 @@ mod tests {
     fn an_optional_relation_never_appears_in_the_required_reverse_index() {
         // Skyblock Builder declares Sky GUIs optional. Turning Sky GUIs off
         // costs a feature, so nothing may cascade from it.
+        let recipe = library_and_its_dependents();
+        let sky_guis = recipe
+            .files
+            .iter()
+            .find(|file| file.file_name() == "SkyGUIs.jar")
+            .expect("the addon");
         assert!(
-            library_and_its_dependents()
-                .required_by("3Gdi7Qgq")
-                .is_empty(),
+            recipe.required_by(sky_guis).is_empty(),
             "an optional relation is not a requirement"
         );
     }
@@ -2277,7 +2366,7 @@ mod tests {
         let file: PackFileRecipe = serde_json::from_str(json).expect("deserialize");
         assert_eq!(file.recorded_relations(), None);
         assert!(
-            !file.requires_project("qEH6GYul"),
+            !file.requires(&managed("qEH6GYul", "Orv4ObRj", "LibX.jar")),
             "an unrecorded entry proves nothing, so it requires nothing provably"
         );
     }
