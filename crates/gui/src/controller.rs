@@ -3237,13 +3237,19 @@ fn register_dependency_actions(ui: &AppWindow, commands: &Sender<Command>) {
         }
         let target = PathBuf::from(ui.get_mod_impact_path().as_str());
         if ui.get_mod_impact_deleting() {
-            send(
-                &sender,
-                Command::DeleteHandPlacedMod {
-                    host,
-                    path: target.clone(),
-                },
-            );
+            // The jars that stop loading go too when the user agreed to it.
+            // Taking only the one named would leave the others installed and
+            // unable to load, which is the state the dialog exists to prevent.
+            let mut paths = Vec::new();
+            if cascade {
+                paths.extend(
+                    ui.get_mod_impact_breaks()
+                        .iter()
+                        .map(|row| PathBuf::from(row.logical_path.as_str())),
+                );
+            }
+            paths.push(target.clone());
+            send(&sender, Command::DeleteModFiles { host, paths });
         } else {
             let enabling = ui.get_mod_requires_disabled().row_count() > 0
                 || ui.get_mod_impact_breaks().row_count() == 0;

@@ -420,6 +420,30 @@ enum ModCommand {
         #[command(flatten)]
         host: ModHostArgs,
     },
+    /// Take a mod's jar off disk, keeping the record that wants it.
+    ///
+    /// Not the same as removing it. The instance still says it should have
+    /// this mod, so the row offers to put it back, a server built from this
+    /// recipe still contains it, and a repair fetches it again. What changes
+    /// is that the loader cannot see it, which is how a crash gets bisected
+    /// down to one jar.
+    ///
+    /// If other mods need this one, their jars go too, because leaving them
+    /// installed and unable to load is the state worth avoiding. Ephervex names
+    /// them and stops; `--with-dependents` takes them as well, and
+    /// `--only-this` takes just the jar you named.
+    Delete {
+        #[command(flatten)]
+        host: ModHostArgs,
+        /// The mod's path inside the game directory, such as `mods/foo.jar`.
+        path: PathBuf,
+        /// Also delete every mod that needs this one.
+        #[arg(long, conflicts_with = "only_this")]
+        with_dependents: bool,
+        /// Delete only the jar named, leaving what needs it unable to load.
+        #[arg(long)]
+        only_this: bool,
+    },
     /// Let a mod load again after it was disabled.
     ///
     /// A mod that needs others usually cannot load alone. Ephervex says which
@@ -3206,13 +3230,7 @@ async fn run_mod_command(app: &mut App, command: &ModCommand, json: bool) -> any
             instance,
             project,
             selection,
-        } => {
-            let catalog = catalog_or_preference(app, selection.provider)?;
-            let plan = app
-                .plan_mod_installation(*instance, &selection.request(project, catalog))
-                .await?;
-            print_mod_plan(&plan, json);
-        }
+        } => return run_mod_plan(app, *instance, project, selection, json).await,
         ModCommand::Install {
             instance,
             project,
@@ -3235,6 +3253,14 @@ async fn run_mod_command(app: &mut App, command: &ModCommand, json: bool) -> any
                 )
                 .await?;
             print_dependency_refresh(&report, json);
+        }
+        ModCommand::Delete {
+            host,
+            path,
+            with_dependents,
+            only_this,
+        } => {
+            return run_mod_delete(app, host.host()?, path, *with_dependents, *only_this, json);
         }
         ModCommand::Enable {
             host,
@@ -3261,6 +3287,55 @@ async fn run_mod_command(app: &mut App, command: &ModCommand, json: bool) -> any
         }
     }
     Ok(())
+}
+
+/// Takes a mod's jar off disk, saying first what else goes with it.
+///
+/// Refuses by default for the same reason disabling does: a command cannot ask,
+/// so it says what would happen and changes nothing until told. The record each
+/// jar leaves behind is what makes this recoverable, and what makes refusing a
+/// courtesy rather than a safety net.
+fn run_mod_delete(
+    app: &App,
+    host: ModHost,
+    path: &Path,
+    with_dependents: bool,
+    only_this: bool,
+    json: bool,
+) -> anyhow::Result<()> {
+    let impact = app.dependents_of(host, path)?;
+    let cascade = !only_this && (with_dependents || !app.warn_on_dependency_impact());
+    if !only_this && !cascade && !impact.breaks.is_empty() {
+        print_dependency_impact(&impact, json);
+        anyhow::bail!(
+            "{} other mods need this one. Pass --with-dependents to delete their jars too, \
+             or --only-this to delete just this one.",
+            impact.breaks.len()
+        );
+    }
+
+    let mut paths: Vec<PathBuf> = Vec::new();
+    if cascade {
+        paths.extend(impact.breaks.iter().map(|entry| entry.logical_path.clone()));
+    }
+    paths.push(path.to_path_buf());
+    print_deleted_mods(&app.delete_mod_files(host, &paths)?, json);
+    Ok(())
+}
+
+/// Reports every jar one call took off disk, in the order it did.
+fn print_deleted_mods(deleted: &[PathBuf], json: bool) {
+    if json {
+        let rows: Vec<serde_json::Value> = deleted
+            .iter()
+            .map(|path| serde_json::json!({ "path": path, "deleted": true }))
+            .collect();
+        print_json(&serde_json::Value::Array(rows));
+        return;
+    }
+    for path in deleted {
+        outln!("deleted  {}", path.display());
+    }
 }
 
 /// Turns a mod off, saying first what else stops loading.
@@ -3429,6 +3504,22 @@ fn print_mod_states(applied: &[(PathBuf, ModPresence)], json: bool) {
     for (path, presence) in applied {
         outln!("{}  {}", presence.as_str(), path.display());
     }
+}
+
+/// Works out what installing one mod would do, without doing it.
+async fn run_mod_plan(
+    app: &App,
+    instance: InstanceId,
+    project: &str,
+    selection: &ModSelectionArgs,
+    json: bool,
+) -> anyhow::Result<()> {
+    let catalog = catalog_or_preference(app, selection.provider)?;
+    let plan = app
+        .plan_mod_installation(instance, &selection.request(project, catalog))
+        .await?;
+    print_mod_plan(&plan, json);
+    Ok(())
 }
 
 /// Installs one mod, and whatever it needs, into an instance.

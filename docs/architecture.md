@@ -634,6 +634,12 @@ Somebody who turned the confirmation off has already agreed to it, and applying
 the change to the named mod alone would hand them a mod set that does not load -
 the outcome the warning exists to prevent.
 
+Deleting a jar is offered whatever owns it, and takes the jars that needed it.
+It is not removal: the record survives, so the row offers to put the file back
+and anything built from the recipe is still complete. The set it takes is the
+one the graph proves for disabling, so the two can never disagree about
+consequences.
+
 Turning several mods on or off is one call, ordered so that any prefix of it
 leaves a mod set the loader can start: disables go dependents first, enables go
 dependencies first. A frontend issuing one rename per row cannot promise that,

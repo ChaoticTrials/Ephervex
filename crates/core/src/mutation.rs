@@ -149,10 +149,17 @@ pub struct ModMutability {
     /// Whether the jar itself may simply be deleted.
     ///
     /// Addressed by path rather than by project, because a jar nothing
-    /// recognizes has no project. It resolves nothing, retires nothing, and
-    /// asks no catalog, which is what makes it available where a provider
-    /// operation is not: a hand-placed jar, which is the user's to throw away,
-    /// and a pack file, which the recipe still declares and can put back.
+    /// recognizes has no project. It resolves nothing, retires nothing and
+    /// asks no catalog, which is what makes it available wherever a provider
+    /// operation is not, and true for every origin today: taking the jar away
+    /// never makes a claim the launcher cannot support. What survives it
+    /// differs - a hand-placed jar takes its adopted record with it, because
+    /// that record only ever said what a digest lookup found, and everything
+    /// else keeps its record, which is what lets the file come back.
+    ///
+    /// Distinct from [`Self::can_remove`] and not a weaker form of it. Removing
+    /// says the instance should no longer contain this mod. Deleting says the
+    /// jar should not be on disk right now, which is how a crash gets bisected.
     pub can_delete_file: bool,
     /// Whether the mod's other releases can be listed at all. True for anything
     /// with a project, including mods nothing may mutate: seeing what else
@@ -169,7 +176,9 @@ impl ModMutability {
             can_change_version: false,
             can_update: false,
             can_remove: false,
-            can_delete_file: false,
+            // Never restricted: see the field's own documentation. Nothing a
+            // restriction protects is reached by taking the jar off disk.
+            can_delete_file: true,
             can_list_versions,
             restriction: Some(restriction),
         }
@@ -189,10 +198,7 @@ impl ModMutability {
             // Ephervex did not put this file here and does not own it, so no
             // mutation may reach for it. Deleting the jar is the exception:
             // the user owns it, and the user may throw it away.
-            ModOrigin::HandPlaced => Self {
-                can_delete_file: true,
-                ..Self::restricted(MutationRestriction::HandPlaced, has_project)
-            },
+            ModOrigin::HandPlaced => Self::restricted(MutationRestriction::HandPlaced, has_project),
             // A jar the pack shipped inside itself, once a digest lookup has
             // said which project it is. There is no declaration to preserve
             // here: the pack named no project and no release for it, so the
@@ -216,10 +222,16 @@ impl ModMutability {
             // catalog, and putting a pack mod aside to find which one crashes
             // is what this launcher is for. The recipe still records it, so it
             // is restored rather than gone (ADR 0019).
-            ModOrigin::PackDeclared | ModOrigin::PackOverride => Self {
-                can_delete_file: true,
-                ..Self::restricted(MutationRestriction::PackOwned, has_project)
-            },
+            ModOrigin::PackDeclared | ModOrigin::PackOverride => {
+                Self::restricted(MutationRestriction::PackOwned, has_project)
+            }
+            // Its release belongs to whatever required it, so no provider
+            // operation may move it and it is not the user's to take out of
+            // the desired state: removing the root is what collects it.
+            // Deleting the jar is none of those. It resolves nothing, retires
+            // nothing and asks no catalog, the record stays so the file can
+            // come back, and a library is very often exactly the jar somebody
+            // needs to put aside to find out which mod crashes.
             ModOrigin::RequiredDependency => {
                 Self::restricted(MutationRestriction::Dependency, has_project)
             }
@@ -229,7 +241,7 @@ impl ModMutability {
                 // The one thing an explicit optional choice keeps: the person
                 // who ticked it may untick it.
                 can_remove: true,
-                can_delete_file: false,
+                can_delete_file: true,
                 can_list_versions: true,
                 restriction: Some(MutationRestriction::Dependency),
             },
@@ -237,7 +249,7 @@ impl ModMutability {
                 can_change_version: true,
                 can_update: true,
                 can_remove: true,
-                can_delete_file: false,
+                can_delete_file: true,
                 can_list_versions: true,
                 restriction: None,
             },
@@ -1453,10 +1465,10 @@ mod tests {
     }
 
     #[test]
-    fn deleting_the_jar_outright_is_offered_where_deleting_it_is_recoverable_or_the_users_own() {
-        // The permission is about who owns the file, not about what is known
-        // about it, so an identified hand-placed jar keeps it whatever its
-        // identity says.
+    fn deleting_the_jar_outright_is_offered_whatever_owns_it() {
+        // The permission is about whether taking the jar off disk makes a claim
+        // the launcher cannot support, and it never does: what survives the
+        // file differs by origin, and whether the file may go does not.
         for identity in [resolved(), project_only(), ModIdentity::Unresolved] {
             assert!(
                 ModMutability::of(&entry(ModOrigin::HandPlaced, identity.clone())).can_delete_file
@@ -1471,19 +1483,33 @@ mod tests {
             "deleting the file is not permission to mutate the pack's declaration"
         );
 
-        // A dependency's file is not the user's to throw away: something else
-        // asked for it, and a user-selected mod is removed rather than deleted,
-        // which resolves what it leaves orphaned.
+        // A dependency's jar may be put aside too. Its release is still not
+        // the user's to move and it is still not theirs to take out of the
+        // desired state - the record stays, so the file comes back - but a
+        // library is very often the one jar a bisect needs gone.
         for origin in [
-            ModOrigin::UserSelected,
             ModOrigin::RequiredDependency,
             ModOrigin::SelectedOptionalDependency,
         ] {
+            let allowed = ModMutability::of(&entry(origin, resolved()));
+            assert!(allowed.can_delete_file, "{origin:?}");
             assert!(
-                !ModMutability::of(&entry(origin, resolved())).can_delete_file,
+                !allowed.can_change_version && !allowed.can_update,
+                "deleting the file is not permission to move the release: {origin:?}"
+            );
+            assert_eq!(
+                allowed.restriction,
+                Some(MutationRestriction::Dependency),
                 "{origin:?}"
             );
         }
+
+        // A mod somebody chose by name keeps both, and they say different
+        // things: removing it means the instance should stop containing it,
+        // deleting the jar means it should not be on disk right now.
+        let chosen = ModMutability::of(&entry(ModOrigin::UserSelected, resolved()));
+        assert!(chosen.can_delete_file);
+        assert!(chosen.can_remove);
     }
 
     #[test]

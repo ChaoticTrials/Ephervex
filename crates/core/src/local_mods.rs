@@ -906,24 +906,29 @@ mod tests {
     }
 
     #[test]
-    fn deleting_a_jar_the_launcher_installed_is_refused() {
-        // Taking one of those out is a removal, which retires the jar and
-        // collects what its dependencies leave orphaned. Deleting it underneath
-        // that record would leave the instance describing a mod it lacks.
+    fn deleting_a_jar_the_launcher_installed_keeps_the_record_that_wants_it() {
+        // Deleting is not removing. The instance still says it should have
+        // this mod, which is what makes the row offer to put it back, keeps a
+        // server built from this recipe complete, and lets a repair fetch it.
         let host = fixture();
         std::fs::write(host.mods_dir.join("installed.jar"), b"jar").expect("jar");
         record_mod(&host, "installed.jar", ModOrigin::UserSelected);
 
-        let error = host
-            .app
+        host.app
             .delete_mod_file(host.host, Path::new("mods/installed.jar"))
-            .expect_err("a launcher-owned mod is not deleted this way");
+            .expect("putting a jar aside is how a crash gets bisected");
 
+        assert!(names_in(&host.mods_dir).is_empty());
+        let recipe = SourceStore::new(ephervex_storage::metadata::source_dir(&host.root))
+            .read_recipe()
+            .expect("recipe");
         assert!(
-            matches!(error, CoreError::ModNotHandPlaced { .. }),
-            "{error:?}"
+            recipe
+                .files
+                .iter()
+                .any(|file| file.logical_path == Path::new("mods/installed.jar")),
+            "the record outlives the file"
         );
-        assert_eq!(names_in(&host.mods_dir), vec!["installed.jar"]);
     }
 
     /// A pack's own file is the other side of that rule. The declaration is

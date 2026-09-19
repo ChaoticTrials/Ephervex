@@ -329,6 +329,34 @@ impl App {
         })
     }
 
+    /// Deletes several mods' jars in one call.
+    ///
+    /// Ordered exactly as a disable is, and for the same reason: what
+    /// everything needs goes last, so an interrupted run never leaves a mod
+    /// loading with its library already gone.
+    ///
+    /// The set to pass is the one [`Self::dependents_of`] proves, which is what
+    /// keeps deleting and disabling from ever disagreeing about consequences.
+    /// Each deletion is the same [`App::delete_mod_file`] the list offers, so
+    /// what each origin allows, and what record survives the file, is decided
+    /// in one place rather than two.
+    pub fn delete_mod_files(&self, host: ModHost, paths: &[PathBuf]) -> CoreResult<Vec<PathBuf>> {
+        let graph = ModGraph::build(self, host)?;
+        let mut ordered: Vec<&PathBuf> = paths.iter().collect();
+        ordered.sort_by_key(|path| {
+            graph
+                .index_of(path)
+                .map_or(0, |index| graph.dependents_of(index).len())
+        });
+
+        let mut deleted = Vec::with_capacity(ordered.len());
+        for path in ordered {
+            self.delete_mod_file(host, path)?;
+            deleted.push(path.clone());
+        }
+        Ok(deleted)
+    }
+
     /// Turns several mods on or off in one call.
     ///
     /// Ordered so that any prefix of it leaves a mod set the loader can start:
@@ -1094,6 +1122,73 @@ mod tests {
         assert!(needs.disabled.is_empty());
         assert_eq!(names(&needs.absent), [LIBRARY], "named by project alone");
         assert_eq!(needs.absent[0].presence, ModPresence::Missing);
+    }
+
+    #[test]
+    fn deleting_a_library_takes_what_needed_it_and_takes_it_first() {
+        // The same order a disable uses, for the same reason: no interrupted
+        // prefix may leave a mod loading with its library already gone.
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, instance, root) = library_and_its_dependents(base.path());
+        let host = ModHost::Instance(instance);
+
+        let impact = app
+            .dependents_of(host, Path::new("mods/LibX.jar"))
+            .expect("impact");
+        let mut paths: Vec<PathBuf> = impact
+            .breaks
+            .iter()
+            .map(|entry| entry.logical_path.clone())
+            .collect();
+        paths.push(PathBuf::from("mods/LibX.jar"));
+
+        let deleted = app.delete_mod_files(host, &paths).expect("delete");
+        assert_eq!(
+            deleted.last(),
+            Some(&PathBuf::from("mods/LibX.jar")),
+            "the library goes last"
+        );
+
+        let mods = ephervex_storage::metadata::client_game_dir(&root).join("mods");
+        assert!(
+            std::fs::read_dir(&mods).expect("mods dir").next().is_none(),
+            "every jar the cascade named is gone"
+        );
+    }
+
+    #[test]
+    fn a_deleted_dependency_keeps_its_record_so_it_can_come_back() {
+        // Deleting is not removing. The recipe still wants the mod, which is
+        // what makes the row offer to restore it and what keeps a server built
+        // from this recipe complete.
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, instance, root) = library_and_its_dependents(base.path());
+        let store = SourceStore::new(ephervex_storage::metadata::source_dir(&root));
+
+        let mut recipe = store.read_recipe().expect("recipe");
+        recipe
+            .files
+            .iter_mut()
+            .find(|file| file.file_name() == "LibX.jar")
+            .expect("the library")
+            .origin = ModOrigin::RequiredDependency;
+        store.write_recipe(&recipe).expect("write");
+
+        app.delete_mod_files(
+            ModHost::Instance(instance),
+            &[PathBuf::from("mods/LibX.jar")],
+        )
+        .expect("a dependency's jar may be deleted");
+
+        assert!(
+            store
+                .read_recipe()
+                .expect("recipe")
+                .files
+                .iter()
+                .any(|file| file.file_name() == "LibX.jar"),
+            "the record outlives the file, so the file can come back"
+        );
     }
 
     #[test]

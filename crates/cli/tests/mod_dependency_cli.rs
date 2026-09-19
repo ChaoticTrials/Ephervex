@@ -314,6 +314,81 @@ fn enabling_an_addon_brings_back_what_it_needs_and_nothing_else() {
 }
 
 #[test]
+fn deleting_a_library_refuses_and_changes_nothing() {
+    let sandbox = Sandbox::new();
+    let (id, mods) = sandbox.instance_with_a_shared_library();
+    let before = jars(&mods);
+
+    let output = sandbox.run(&["mod", "delete", "--instance", &id, "mods/LibX.jar"]);
+    assert!(
+        !output.status.success(),
+        "a refusal has to fail the command"
+    );
+    assert_eq!(jars(&mods), before, "nothing on disk may change");
+}
+
+#[test]
+fn deleting_with_dependents_takes_every_jar_that_needed_it() {
+    let sandbox = Sandbox::new();
+    let (id, mods) = sandbox.instance_with_a_shared_library();
+
+    let output = sandbox.run(&[
+        "mod",
+        "delete",
+        "--instance",
+        &id,
+        "--with-dependents",
+        "mods/LibX.jar",
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        jars(&mods).is_empty(),
+        "every jar the cascade named is gone"
+    );
+}
+
+#[test]
+fn a_deleted_jar_leaves_a_record_that_still_wants_it() {
+    // Deleting is not removing: the instance still says it should have these
+    // mods, which is what makes putting them back possible at all.
+    let sandbox = Sandbox::new();
+    let (id, mods) = sandbox.instance_with_a_shared_library();
+    assert!(
+        sandbox
+            .run(&[
+                "mod",
+                "delete",
+                "--instance",
+                &id,
+                "--only-this",
+                "mods/UtilitiX.jar"
+            ])
+            .status
+            .success()
+    );
+    assert!(!jars(&mods).contains(&"UtilitiX.jar".to_owned()));
+
+    let recipe = std::fs::read_to_string(
+        mods.parent()
+            .expect("game dir")
+            .parent()
+            .expect("root")
+            .join(".launcher")
+            .join("source")
+            .join("recipe.json"),
+    )
+    .expect("recipe");
+    assert!(
+        recipe.contains("mods/UtilitiX.jar"),
+        "the record outlives the file"
+    );
+}
+
+#[test]
 fn turning_the_warning_off_applies_the_cascade_without_being_asked() {
     let sandbox = Sandbox::new();
     let (id, mods) = sandbox.instance_with_a_shared_library();

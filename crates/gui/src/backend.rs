@@ -333,6 +333,14 @@ pub enum Command {
     SaveDependencyWarning(bool),
     /// Ask each catalog what this host's mods need, and record the answers.
     RefreshModDependencies(ModHost),
+    /// Delete several mods' jars in one call, in dependency order.
+    ///
+    /// What the dialog sends once the user has agreed that taking one jar off
+    /// disk takes the ones that need it too.
+    DeleteModFiles {
+        host: ModHost,
+        paths: Vec<PathBuf>,
+    },
     /// Turn several mods on or off in one call, in dependency order.
     ///
     /// What the dialog sends once the user has agreed to a cascade.
@@ -2452,6 +2460,10 @@ fn run_worker(
                     Err(error) => send_error(&events, &error),
                 }
             }
+            Command::DeleteModFiles { host, paths } => match app.delete_mod_files(host, &paths) {
+                Ok(_) => send_host_mods(&app, host, &events, &refreshed_mods, false),
+                Err(error) => send_error(&events, &error),
+            },
             Command::SetModsEnabled { host, changes } => match app.set_mods_enabled(host, &changes)
             {
                 // Re-read rather than patched in place: the durable state is

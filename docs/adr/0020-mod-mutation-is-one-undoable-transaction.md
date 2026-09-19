@@ -71,6 +71,9 @@ replacements separately so a caller knows what to retire.
 
 **Ownership is the policy.**
 
+Deleting the jar is not in this table and never was one of these operations;
+ADR 0019's amendments made it available for every origin.
+
 | Origin | Change version | Update | Remove |
 |---|---|---|---|
 | `UserSelected` | yes | yes | yes |

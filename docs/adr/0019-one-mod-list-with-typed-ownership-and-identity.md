@@ -186,6 +186,41 @@ Restoring is deliberately not a mutation. It resolves nothing and asks no
 catalog; it writes the file the recipe already describes, which is what lets it
 work for a pack file served from a mirror no catalog can name.
 
+## Amendment: any jar may be put aside, and taking one takes what needed it
+
+`can_delete_file` has been widened twice already, each time by the same
+argument, and each time it stopped one origin short of where the argument
+reaches. It is about whether taking the jar off disk makes a claim the launcher
+cannot support. It never does.
+
+A dependency was the last origin still refused, on the grounds that its presence
+belongs to whatever required it and that removing the root is what collects it.
+That is right about *removal* and says nothing about deletion. A library is very
+often the one jar a bisect needs gone, and "remove the four mods that wanted it,
+then put them back afterwards" is not the same operation.
+
+So deleting the jar is available for every origin. The two permissions now say
+genuinely different things rather than one being a weaker form of the other:
+
+- `can_remove` - the instance should stop containing this mod. A provider
+  operation, addressed by project, which resolves orphans, retires files and
+  rewrites desired state. Still refused for a dependency and for a pack file.
+- `can_delete_file` - the jar should not be on disk right now. Addressed by
+  path, resolves nothing, asks no catalog.
+
+What survives the file still differs by origin, and that is the part that
+matters. A hand-placed jar takes its adopted record with it, because that record
+only ever said what a digest lookup found. Everything else keeps its record, so
+the row offers to put the file back, a server built from the recipe is still
+complete, and a repair still fetches it.
+
+**Deleting one jar takes the jars that needed it.** The set is the one the
+dependency graph proves for disabling (ADR 0034), so deleting and disabling can
+never disagree about consequences, and it is applied in the same order: what
+everything needs goes last, so an interrupted run never leaves a mod on disk
+with its library already gone. A frontend that cannot ask refuses instead and
+changes nothing.
+
 ## Amendment: a mod the pack ships inside itself is the pack's
 
 A Modrinth or CurseForge pack has two ways to give an instance a mod. It can
