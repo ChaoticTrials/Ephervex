@@ -861,6 +861,8 @@ error-mod-file-not-toggled = That mod's file could not be renamed. Check that th
 error-mod-not-hand-placed = Ephervex installed that mod, so it is removed rather than deleted.
 .action = Open the mod and use Remove, which also takes care of what it depended on.
 error-mod-file-not-deleted = That mod's file could not be deleted. Check that the mods folder is writable.
+error-diagnostic-bundle-not-written = The diagnostic bundle could not be written.
+    .action = Check that there is room and that you can write to { $path }.
 error-mod-file-not-added = That file could not be copied into the mods folder. Check that there is room and that the folder is writable.
 
 error-name-empty = A name cannot be blank.

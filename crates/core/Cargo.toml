@@ -27,6 +27,10 @@ ephervex-i18n.workspace = true
 # Raising this process's descriptor limit, which std cannot do and which the
 # workspace's `unsafe_code = "deny"` rules out doing through libc directly.
 rustix.workspace = true
+# Writing a diagnostic bundle. Reading archives is `ephervex-pack`'s job and
+# stays there, hardened against the untrusted ones it is handed; this writes one
+# from files the launcher already owns and never reads it back.
+zip.workspace = true
 image.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true

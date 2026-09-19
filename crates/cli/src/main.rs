@@ -20,9 +20,9 @@ use clap::{Args, CommandFactory as _, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use ephervex_core::{
     AccountStatus, AccountSummary, ApiSettings, App, ArgumentForm, Artifact, ArtifactCacheHealth,
-    AssetIndexRef, AuthEvent, AuthObserver, BundledDocumentHealth, CancellationToken,
-    CaptureHealth, CapturedLine, ClientFolder, ClientRecord, Compatibility, Config,
-    ConfigurationHealth, ControlResponse, CoreError, CrashReview, CreatedClient,
+    AssetIndexRef, AuthEvent, AuthObserver, BundleContents, BundleSelection, BundledDocumentHealth,
+    CancellationToken, CaptureHealth, CapturedLine, ClientFolder, ClientRecord, Compatibility,
+    Config, ConfigurationHealth, ControlResponse, CoreError, CrashReview, CreatedClient,
     CredentialBackendHealth, CredentialStorage, DEFAULT_DIAGNOSTIC_BYTES, DEFAULT_SEARCH_LIMIT,
     DependencyRefreshReport, DependentMods, DiagnosticEntry, DiagnosticKind, DiagnosticRequest,
     DiagnosticScope, DiagnosticSearch, DirectoryState, DuplicateClient, EULA_CONFIRMATION_PHRASE,
@@ -41,7 +41,7 @@ use ephervex_core::{
     ServerContentSource, ServerCreateOptions, ServerEvent, ServerFolder, ServerNetworkSettings,
     ServerObserver, ServerPersistenceHealth, ServerRecord, ServerWarning, Session, SideRequirement,
     SkipReason, SuspectConfidence, SuspectReason, TextAnchor, TextView, UnknownServerFiles,
-    VerificationReport, VersionMetadata, VersionRecord,
+    VerificationReport, VersionMetadata, VersionRecord, format_binary_bytes,
 };
 use ephervex_i18n::Arg as MessageArg;
 use ephervex_model::{
@@ -871,6 +871,31 @@ enum LogsCommand {
         scope: DiagnosticScopeArgs,
         #[command(flatten)]
         kind: DiagnosticKindArgs,
+    },
+    /// Collect diagnostics into one archive to attach to a bug report.
+    ///
+    /// Nothing is uploaded: the archive is written where you say and goes no
+    /// further than you take it.
+    ///
+    /// Files go in exactly as they are on disk. A crash report that has been
+    /// tidied is a crash report missing the line somebody needed, so Ephervex
+    /// does not tidy one. What it guarantees instead is that it adds no secret
+    /// of its own, and the configuration file is never included.
+    ///
+    /// Without `--include`, everything on offer goes in. Run `ephervex logs
+    /// bundle --list` to see what that is, then name the parts you want.
+    Bundle {
+        #[command(flatten)]
+        scope: DiagnosticScopeArgs,
+        /// Where to write the archive.
+        #[arg(long, value_name = "FILE")]
+        output: Option<PathBuf>,
+        /// Take only these parts, by the names `--list` prints. Repeatable.
+        #[arg(long, value_name = "NAME")]
+        include: Vec<String>,
+        /// Show what could go in, with what each part costs, and write nothing.
+        #[arg(long)]
+        list: bool,
     },
     /// Print part of one log or crash report.
     ///
@@ -1980,6 +2005,14 @@ fn run_logs_command(app: &App, command: &LogsCommand, json: bool) -> anyhow::Res
             let entries = app.diagnostic_entries(scope.scope()?, kind.kind())?;
             print_diagnostic_entries(&entries, json);
         }
+        LogsCommand::Bundle {
+            scope,
+            output,
+            include,
+            list,
+        } => {
+            return run_logs_bundle(app, scope.scope()?, output.as_deref(), include, *list, json);
+        }
         LogsCommand::Show {
             name,
             scope,
@@ -2773,6 +2806,83 @@ fn show_paths(paths: &Paths, json: bool) {
             }
         );
     }
+}
+
+/// Collects diagnostics into one archive, or says what one would hold.
+fn run_logs_bundle(
+    app: &App,
+    scope: DiagnosticScope,
+    output: Option<&Path>,
+    include: &[String],
+    list: bool,
+    json: bool,
+) -> anyhow::Result<()> {
+    let contents = app.plan_diagnostic_bundle(scope)?;
+    if list {
+        print_bundle_contents(&contents, json);
+        return Ok(());
+    }
+
+    let destination = match output {
+        Some(path) => path.to_path_buf(),
+        None => anyhow::bail!("name where the archive should go with --output"),
+    };
+    let selection = if include.is_empty() {
+        contents.everything()
+    } else {
+        BundleSelection {
+            names: include.to_vec(),
+        }
+    };
+
+    let report = app.export_diagnostic_bundle(scope, &selection, &destination)?;
+    if json {
+        print_json(&serde_json::json!({
+            "path": report.path,
+            "bytes": report.bytes,
+            "included": report.included,
+            "omitted": report.omitted,
+            "unreadable": report.unreadable,
+        }));
+    } else {
+        outln!(
+            "{}  {} files, {}",
+            report.path.display(),
+            report.included.len(),
+            format_binary_bytes(report.bytes)
+        );
+    }
+    for name in &report.unreadable {
+        eprintln!("asked for and could not be read: {name}");
+    }
+    Ok(())
+}
+
+/// Lists what a bundle could hold, and what each part costs.
+fn print_bundle_contents(contents: &BundleContents, json: bool) {
+    if json {
+        print_json(&serde_json::json!({
+            "total_bytes": contents.total_bytes(),
+            "parts": contents
+                .parts
+                .iter()
+                .map(|part| serde_json::json!({
+                    "name": part.name,
+                    "kind": part.kind.as_str(),
+                    "size_bytes": part.size_bytes,
+                }))
+                .collect::<Vec<_>>(),
+        }));
+        return;
+    }
+    for part in &contents.parts {
+        outln!(
+            "{:>10}  {}",
+            format_binary_bytes(part.size_bytes),
+            part.name
+        );
+    }
+    outln!("{:>10}  total", format_binary_bytes(contents.total_bytes()));
 }
 
 /// Renders `ephervex doctor`.

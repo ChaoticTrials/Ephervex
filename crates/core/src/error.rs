@@ -299,6 +299,10 @@ pub enum CoreError {
         source: std::io::Error,
     },
 
+    /// Writing a diagnostic bundle failed.
+    #[error("a diagnostic bundle could not be written to `{}`", path.display())]
+    DiagnosticBundleNotWritten { path: PathBuf, detail: String },
+
     /// Copying a jar into `mods/` failed part-way.
     ///
     /// The staged copy is discarded, so `mods/` never holds the half of a file
@@ -401,6 +405,7 @@ impl CoreError {
             Self::ModFileNotToggled { .. } => "error-mod-file-not-toggled",
             Self::ModNotHandPlaced { .. } => "error-mod-not-hand-placed",
             Self::ModFileNotDeleted { .. } => "error-mod-file-not-deleted",
+            Self::DiagnosticBundleNotWritten { .. } => "error-diagnostic-bundle-not-written",
             Self::ModFileNotAdded { .. } => "error-mod-file-not-added",
             Self::EntityNameInvalid { reason } => reason.message_id(),
         }
@@ -559,6 +564,7 @@ impl CoreError {
             Self::Storage(_)
             | Self::ArtifactCache(_)
             | Self::ArtifactCacheLimitInvalid(_)
+            | Self::DiagnosticBundleNotWritten { .. }
             | Self::JavaSettingsInvalid { .. }
             | Self::Minecraft(_)
             | Self::Loader(_)
@@ -633,7 +639,8 @@ impl CoreError {
             | Self::ModNotHandPlaced { path }
             | Self::ModFileNotDeleted { path, .. }
             | Self::ModFileNotAdded { path, .. }
-            | Self::ModIdentityIncomplete { path } => Some(path.clone()),
+            | Self::ModIdentityIncomplete { path }
+            | Self::DiagnosticBundleNotWritten { path, .. } => Some(path.clone()),
             Self::ArtifactCache(error) => error.failing_path(),
             Self::Auth(_)
             | Self::ArtifactCacheLimitInvalid(_)

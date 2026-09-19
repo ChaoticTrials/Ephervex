@@ -26,6 +26,7 @@ pub mod account;
 pub mod app;
 pub mod artifact_cache;
 mod artwork;
+pub mod bundle;
 pub mod connection;
 pub mod crash_analysis;
 pub mod curseforge;
@@ -67,6 +68,7 @@ pub use app::{
     PersistentStorageSettings, ServerApplicationSettings, global_java_settings,
 };
 pub use artifact_cache::ArtifactCacheStatus;
+pub use bundle::{BundleContents, BundlePart, BundlePartKind, BundleReport, BundleSelection};
 pub use connection::{
     ConnectError, DEFAULT_SERVER_READINESS_TIMEOUT, LaunchAndConnectAvailability,
     LaunchAndConnectEvent, LaunchAndConnectObserver, LaunchAndConnectOptions,

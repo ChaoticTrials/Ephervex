@@ -682,6 +682,30 @@ reported separately. Acting on a report is a separate request: "this file is
 wrong" and "replace this file" are different decisions.
 
 
+## Diagnostic bundles
+
+A bundle collects diagnostics into one archive somebody can attach to a bug
+report. It is not an upload: nothing contacts a service, no paste site is
+integrated, and the archive is written to a path the user named and goes no
+further than they take it.
+
+Files go in byte for byte. A crash report that has been tidied is a crash report
+missing the line somebody needed, so nothing here tidies one (ADR 0016). What is
+guaranteed instead is narrower and checkable: Ephervex contributes no secret of
+its own. Its own log is written under the same redaction rules as its stderr,
+launch commands are redacted before reaching any log, and `config.toml` is
+neither offered nor included - it is the one file whose whole job is to hold
+settings, and the walk that strips credential-shaped keys from it exists because
+that is where they collect.
+
+The contents are chosen rather than fixed, because two reports are rarely about
+the same thing: a crash wants the report and the game log, a failed import wants
+the launcher log and the recipe. The archive carries a manifest naming what was
+taken, what was declined, and what was asked for and could not be read - a log
+that rotated away between choosing and writing is said out loud rather than
+quietly missing. One unreadable part never abandons the rest.
+
+
 ## Security boundaries
 
 ### Untrusted paths and archives
