@@ -199,16 +199,17 @@ pub use ephervex_minecraft::{
 /// The provider trait and the resolver itself are deliberately *not* here: a
 /// frontend displays a plan, it does not build one.
 pub use ephervex_mod_platform::{
-    AnnotatedVersion, CURSEFORGE_API_KEY_HELP, Compatibility, DEFAULT_SEARCH_LIMIT, DependencyKind,
-    EmbeddedNote, ExternalDependency, IncompatibilityReason, InstanceTarget, MAX_SEARCH_LIMIT,
-    ModFile, ModInstallPlan, ModPlatformError, ModProject, ModProjectDetails, ModSearchHit,
-    ModSearchQuery, ModSearchResults, ModVersionInfo, OptionalCandidate, PlanWarning, PlannedMod,
-    ReleaseChannel, SideSupport,
+    AnnotatedVersion, CURSEFORGE_API_KEY_HELP, Compatibility, DEFAULT_SEARCH_LIMIT, EmbeddedNote,
+    ExternalDependency, IncompatibilityReason, InstanceTarget, MAX_SEARCH_LIMIT, ModFile,
+    ModInstallPlan, ModPlatformError, ModProject, ModProjectDetails, ModSearchHit, ModSearchQuery,
+    ModSearchResults, ModVersionInfo, OptionalCandidate, PlanWarning, PlannedMod, ReleaseChannel,
+    SideSupport,
 };
 pub use ephervex_model::{
     ARTIFACT_CACHE_LIMIT_PRESETS, ArtifactCacheLimit, ArtifactCacheLimitError, ByteUnit,
     ConnectionTarget, DEFAULT_ARTIFACT_CACHE_LIMIT_BYTES, JavaOverride, JvmSettings,
-    MAX_ARTIFACT_CACHE_LIMIT_BYTES, ServerInstallation, ServerRelativePath, format_binary_bytes,
+    MAX_ARTIFACT_CACHE_LIMIT_BYTES, ModRelationKind, ServerInstallation, ServerRelativePath,
+    format_binary_bytes,
 };
 pub use ephervex_options::catalog::{
     EnumValuePresentation, KeyBindingDefaultPresentation, PreferenceExclusion, PreferenceField,

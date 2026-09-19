@@ -16,7 +16,7 @@
 use std::fmt;
 
 use chrono::{DateTime, Utc};
-use ephervex_model::{Hash, LoaderKind, ModProvider};
+use ephervex_model::{Hash, LoaderKind, ModProvider, ModRelationKind};
 
 /// The instance a search or a resolution is for.
 ///
@@ -127,28 +127,6 @@ impl ReleaseChannel {
     }
 }
 
-/// What a mod says about another mod.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum DependencyKind {
-    Required,
-    Optional,
-    Incompatible,
-    Embedded,
-}
-
-impl DependencyKind {
-    /// A stable identifier for `--json` output.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Required => "required",
-            Self::Optional => "optional",
-            Self::Incompatible => "incompatible",
-            Self::Embedded => "embedded",
-        }
-    }
-}
-
 /// One relation, exactly as the provider stated it.
 ///
 /// All three identity fields are optional because the provider's own schema
@@ -156,7 +134,7 @@ impl DependencyKind {
 /// one shape; nothing else should interpret these fields directly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModDependency {
-    pub kind: DependencyKind,
+    pub kind: ModRelationKind,
     pub project_id: Option<String>,
     pub version_id: Option<String>,
     pub file_name: Option<String>,

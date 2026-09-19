@@ -6,10 +6,10 @@
 #![allow(clippy::expect_used)]
 
 use chrono::{DateTime, TimeZone as _, Utc};
-use ephervex_model::{Hash, HashAlgorithm, ModProvider};
+use ephervex_model::{Hash, HashAlgorithm, ModProvider, ModRelationKind};
 
 use crate::model::{
-    DependencyKind, ModDependency, ModFile, ModProject, ModVersionInfo, ReleaseChannel, SideSupport,
+    ModDependency, ModFile, ModProject, ModVersionInfo, ReleaseChannel, SideSupport,
 };
 
 /// A digest that is well-formed but means nothing. Tests here never hash bytes.
@@ -67,7 +67,7 @@ pub(crate) fn at(mut version: ModVersionInfo, minutes: i64) -> ModVersionInfo {
 /// Adds a relation naming a project.
 pub(crate) fn needs(
     mut version: ModVersionInfo,
-    kind: DependencyKind,
+    kind: ModRelationKind,
     project_id: &str,
 ) -> ModVersionInfo {
     version.dependencies.push(ModDependency {
@@ -82,7 +82,7 @@ pub(crate) fn needs(
 /// Adds a relation pinning an exact version.
 pub(crate) fn pins(
     mut version: ModVersionInfo,
-    kind: DependencyKind,
+    kind: ModRelationKind,
     version_id: &str,
 ) -> ModVersionInfo {
     version.dependencies.push(ModDependency {
@@ -97,7 +97,7 @@ pub(crate) fn pins(
 /// Adds a relation naming only a bare file.
 pub(crate) fn needs_file(
     mut version: ModVersionInfo,
-    kind: DependencyKind,
+    kind: ModRelationKind,
     file_name: &str,
 ) -> ModVersionInfo {
     version.dependencies.push(ModDependency {

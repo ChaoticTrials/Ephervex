@@ -138,6 +138,58 @@ macro_rules! curseforge_id {
 curseforge_id!(CurseForgeProjectId);
 curseforge_id!(CurseForgeFileId);
 
+/// What one mod says about another.
+///
+/// Kept as relations rather than dependencies because `Incompatible` and
+/// `Embedded` are not requirements. A relation reaches the recipe (ADR 0034),
+/// so it parses as well as prints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModRelationKind {
+    /// The mod does not load without it.
+    Required,
+    /// The mod loads without it and does more with it.
+    Optional,
+    /// The mod declares it does not work alongside it.
+    Incompatible,
+    /// The mod already carries it, so installing it separately duplicates it.
+    Embedded,
+}
+
+impl ModRelationKind {
+    /// A stable identifier for the recipe file and `--json` output.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Required => "required",
+            Self::Optional => "optional",
+            Self::Incompatible => "incompatible",
+            Self::Embedded => "embedded",
+        }
+    }
+
+    /// Parses the identifier back.
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "required" => Some(Self::Required),
+            "optional" => Some(Self::Optional),
+            "incompatible" => Some(Self::Incompatible),
+            "embedded" => Some(Self::Embedded),
+            _ => None,
+        }
+    }
+
+    /// Whether the mod that declared it refuses to load without it.
+    ///
+    /// The one predicate a dependency closure may widen on. Everything else is
+    /// named explicitly, so no caller can quietly fold an optional relation in.
+    #[must_use]
+    pub const fn is_required(self) -> bool {
+        matches!(self, Self::Required)
+    }
+}
+
 /// Why a file is part of an instance's desired state.
 ///
 /// The distinction the mod browser needs and the pack importer does not: a
@@ -363,6 +415,46 @@ mod tests {
             Some(ModProvider::CurseForge)
         );
         assert_eq!(ModProvider::CurseForge.as_str(), "curseforge");
+    }
+
+    #[test]
+    fn the_relation_identifier_round_trips_for_every_kind() {
+        for kind in [
+            ModRelationKind::Required,
+            ModRelationKind::Optional,
+            ModRelationKind::Incompatible,
+            ModRelationKind::Embedded,
+        ] {
+            assert_eq!(ModRelationKind::parse(kind.as_str()), Some(kind));
+        }
+        assert_eq!(
+            ModRelationKind::parse(" Required "),
+            Some(ModRelationKind::Required)
+        );
+    }
+
+    #[test]
+    fn a_relation_this_build_does_not_know_is_refused_rather_than_guessed_at() {
+        // Leaning an unknown relation either way is how a conflicting mod ends
+        // up installed, or a needed one left out.
+        assert_eq!(ModRelationKind::parse("conflicts"), None);
+        assert_eq!(ModRelationKind::parse(""), None);
+    }
+
+    #[test]
+    fn only_a_required_relation_is_required() {
+        assert!(ModRelationKind::Required.is_required());
+        for kind in [
+            ModRelationKind::Optional,
+            ModRelationKind::Incompatible,
+            ModRelationKind::Embedded,
+        ] {
+            assert!(
+                !kind.is_required(),
+                "{} must not widen a closure",
+                kind.as_str()
+            );
+        }
     }
 
     #[test]

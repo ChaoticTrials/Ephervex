@@ -17,7 +17,7 @@
 //! * the strongest published hash comes first, so one artifact has one shared
 //!   cache path however it was discovered.
 
-use ephervex_model::{Hash, HashAlgorithm, ModProvider};
+use ephervex_model::{Hash, HashAlgorithm, ModProvider, ModRelationKind};
 
 use super::PROJECT_TYPE;
 use super::dto::{
@@ -25,7 +25,7 @@ use super::dto::{
 };
 use crate::error::{ModPlatformError, ModPlatformResult};
 use crate::model::{
-    DependencyKind, ModDependency, ModFile, ModProject, ModVersionInfo, ReleaseChannel, SideSupport,
+    ModDependency, ModFile, ModProject, ModVersionInfo, ReleaseChannel, SideSupport,
 };
 
 impl From<RawSide> for SideSupport {
@@ -49,7 +49,7 @@ impl From<RawChannel> for ReleaseChannel {
     }
 }
 
-impl From<RawDependencyKind> for DependencyKind {
+impl From<RawDependencyKind> for ModRelationKind {
     fn from(value: RawDependencyKind) -> Self {
         match value {
             RawDependencyKind::Required => Self::Required,
@@ -320,10 +320,10 @@ mod tests {
     #[test]
     fn every_documented_dependency_type_maps_to_a_relation() {
         for (raw, expected) in [
-            ("required", DependencyKind::Required),
-            ("optional", DependencyKind::Optional),
-            ("incompatible", DependencyKind::Incompatible),
-            ("embedded", DependencyKind::Embedded),
+            ("required", ModRelationKind::Required),
+            ("optional", ModRelationKind::Optional),
+            ("incompatible", ModRelationKind::Incompatible),
+            ("embedded", ModRelationKind::Embedded),
         ] {
             let parsed: RawDependency = serde_json::from_str(&format!(
                 r#"{{"project_id":"P","dependency_type":"{raw}"}}"#

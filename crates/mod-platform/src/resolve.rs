@@ -34,14 +34,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use ephervex_download::OperationReporter;
-use ephervex_model::{ModOrigin, ModProvider};
+use ephervex_model::{ModOrigin, ModProvider, ModRelationKind};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, instrument};
 
 use crate::error::{ModPlatformError, ModPlatformResult};
-use crate::model::{
-    Compatibility, DependencyKind, InstanceTarget, ModDependency, ModProject, ModVersionInfo,
-};
+use crate::model::{Compatibility, InstanceTarget, ModDependency, ModProject, ModVersionInfo};
 use crate::provider::ModProviderApi;
 
 /// How many resolution rounds are allowed before the resolver declares its own
@@ -157,7 +155,7 @@ pub struct OptionalCandidate {
 /// A relation naming a bare file rather than a project.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalDependency {
-    pub kind: DependencyKind,
+    pub kind: ModRelationKind,
     pub file_name: String,
     pub declared_by: String,
 }
@@ -265,7 +263,7 @@ impl ModInstallPlan {
 enum Normalized {
     /// Resolvable against the provider's catalog.
     Project {
-        kind: DependencyKind,
+        kind: ModRelationKind,
         project_id: String,
         pinned_version: Option<String>,
     },
@@ -273,7 +271,7 @@ enum Normalized {
     /// identity: there is nothing to derive one from, and inventing one would
     /// make the plan claim something it cannot look up.
     External {
-        kind: DependencyKind,
+        kind: ModRelationKind,
         file_name: String,
     },
 }
@@ -499,8 +497,8 @@ impl<'a> Resolver<'a> {
                     continue;
                 };
                 let origin = match kind {
-                    DependencyKind::Required => ModOrigin::RequiredDependency,
-                    DependencyKind::Optional if selection.optional.contains(&project_id) => {
+                    ModRelationKind::Required => ModOrigin::RequiredDependency,
+                    ModRelationKind::Optional if selection.optional.contains(&project_id) => {
                         ModOrigin::SelectedOptionalDependency
                     }
                     // Optional and not taken, incompatible, or embedded: none
@@ -723,7 +721,7 @@ impl<'a> Resolver<'a> {
             for relation in relations {
                 match relation {
                     Normalized::Project {
-                        kind: DependencyKind::Optional,
+                        kind: ModRelationKind::Optional,
                         project_id,
                         pinned_version,
                     } => {
@@ -735,7 +733,7 @@ impl<'a> Resolver<'a> {
                             .await;
                     }
                     Normalized::Project {
-                        kind: DependencyKind::Embedded,
+                        kind: ModRelationKind::Embedded,
                         project_id,
                         ..
                     } => self.embedded.push(EmbeddedNote {
@@ -803,30 +801,30 @@ impl<'a> Resolver<'a> {
     fn record_external(
         &mut self,
         source: &str,
-        kind: DependencyKind,
+        kind: ModRelationKind,
         file_name: String,
     ) -> ModPlatformResult<()> {
         match kind {
             // Installing an incomplete graph would produce an instance that
             // crashes on launch for a reason the launcher already knew.
-            DependencyKind::Required => {
+            ModRelationKind::Required => {
                 return Err(ModPlatformError::UnresolvableRequiredDependency {
                     declared_by: source.to_owned(),
                     file_name,
                 });
             }
-            DependencyKind::Incompatible => {
+            ModRelationKind::Incompatible => {
                 self.warnings.push(PlanWarning::UncheckableConflict {
                     declared_by: source.to_owned(),
                     file_name: file_name.clone(),
                 });
             }
-            DependencyKind::Embedded => self.embedded.push(EmbeddedNote {
+            ModRelationKind::Embedded => self.embedded.push(EmbeddedNote {
                 project_id: None,
                 file_name: Some(file_name.clone()),
                 declared_by: source.to_owned(),
             }),
-            DependencyKind::Optional => {}
+            ModRelationKind::Optional => {}
         }
         self.external.push(ExternalDependency {
             kind,
@@ -852,7 +850,7 @@ impl<'a> Resolver<'a> {
         for ((source, _), relations) in &self.edges {
             for relation in relations {
                 let Normalized::Project {
-                    kind: DependencyKind::Incompatible,
+                    kind: ModRelationKind::Incompatible,
                     project_id,
                     ..
                 } = relation
@@ -1323,7 +1321,7 @@ mod tests {
                 "ROOT",
                 vec![needs(
                     compatible("v1", "ROOT"),
-                    DependencyKind::Required,
+                    ModRelationKind::Required,
                     "MID",
                 )],
             )
@@ -1331,7 +1329,7 @@ mod tests {
                 "MID",
                 vec![needs(
                     compatible("v1", "MID"),
-                    DependencyKind::Required,
+                    ModRelationKind::Required,
                     "LEAF",
                 )],
             )
@@ -1353,7 +1351,7 @@ mod tests {
                 "ROOT",
                 vec![needs(
                     compatible("v1", "ROOT"),
-                    DependencyKind::Optional,
+                    ModRelationKind::Optional,
                     "EXTRA",
                 )],
             )
@@ -1380,7 +1378,7 @@ mod tests {
                 "ROOT",
                 vec![needs(
                     compatible("v1", "ROOT"),
-                    DependencyKind::Optional,
+                    ModRelationKind::Optional,
                     "EXTRA",
                 )],
             )
@@ -1388,7 +1386,7 @@ mod tests {
                 "EXTRA",
                 vec![needs(
                     compatible("v1", "EXTRA"),
-                    DependencyKind::Required,
+                    ModRelationKind::Required,
                     "LEAF",
                 )],
             )
@@ -1432,8 +1430,8 @@ mod tests {
             .with(
                 "ROOT",
                 vec![needs(
-                    needs(compatible("v1", "ROOT"), DependencyKind::Required, "MID"),
-                    DependencyKind::Incompatible,
+                    needs(compatible("v1", "ROOT"), ModRelationKind::Required, "MID"),
+                    ModRelationKind::Incompatible,
                     "MID",
                 )],
             )
@@ -1457,7 +1455,7 @@ mod tests {
                 "ROOT",
                 vec![needs(
                     compatible("v1", "ROOT"),
-                    DependencyKind::Required,
+                    ModRelationKind::Required,
                     "MID",
                 )],
             )
@@ -1465,7 +1463,7 @@ mod tests {
                 "MID",
                 vec![needs(
                     compatible("v1", "MID"),
-                    DependencyKind::Required,
+                    ModRelationKind::Required,
                     "LEAF",
                 )],
             )
@@ -1473,7 +1471,7 @@ mod tests {
                 "LEAF",
                 vec![needs(
                     compatible("v1", "LEAF"),
-                    DependencyKind::Incompatible,
+                    ModRelationKind::Incompatible,
                     "MID",
                 )],
             );
@@ -1493,7 +1491,7 @@ mod tests {
             "ROOT",
             vec![needs(
                 compatible("v1", "ROOT"),
-                DependencyKind::Incompatible,
+                ModRelationKind::Incompatible,
                 "PRESENT",
             )],
         );
@@ -1517,11 +1515,11 @@ mod tests {
         let catalog = Catalog::default()
             .with(
                 "A",
-                vec![needs(compatible("v1", "A"), DependencyKind::Required, "B")],
+                vec![needs(compatible("v1", "A"), ModRelationKind::Required, "B")],
             )
             .with(
                 "B",
-                vec![needs(compatible("v1", "B"), DependencyKind::Required, "A")],
+                vec![needs(compatible("v1", "B"), ModRelationKind::Required, "A")],
             );
 
         let plan = plan(&catalog, InstallSelection::new("A")).await;
@@ -1535,8 +1533,8 @@ mod tests {
             .with(
                 "ROOT",
                 vec![needs(
-                    needs(compatible("v1", "ROOT"), DependencyKind::Required, "LEFT"),
-                    DependencyKind::Required,
+                    needs(compatible("v1", "ROOT"), ModRelationKind::Required, "LEFT"),
+                    ModRelationKind::Required,
                     "RIGHT",
                 )],
             )
@@ -1544,7 +1542,7 @@ mod tests {
                 "LEFT",
                 vec![needs(
                     compatible("v1", "LEFT"),
-                    DependencyKind::Required,
+                    ModRelationKind::Required,
                     "SHARED",
                 )],
             )
@@ -1552,7 +1550,7 @@ mod tests {
                 "RIGHT",
                 vec![needs(
                     compatible("v1", "RIGHT"),
-                    DependencyKind::Required,
+                    ModRelationKind::Required,
                     "SHARED",
                 )],
             )
@@ -1586,8 +1584,8 @@ mod tests {
             .with(
                 "ROOT",
                 vec![needs(
-                    needs(compatible("v1", "ROOT"), DependencyKind::Required, "AAA"),
-                    DependencyKind::Required,
+                    needs(compatible("v1", "ROOT"), ModRelationKind::Required, "AAA"),
+                    ModRelationKind::Required,
                     "ZZZ",
                 )],
             )
@@ -1602,7 +1600,7 @@ mod tests {
                 "ZZZ",
                 vec![pins(
                     compatible("v1", "ZZZ"),
-                    DependencyKind::Required,
+                    ModRelationKind::Required,
                     "old",
                 )],
             );
@@ -1625,8 +1623,8 @@ mod tests {
             .with(
                 "ROOT",
                 vec![needs(
-                    pins(compatible("v1", "ROOT"), DependencyKind::Required, "old"),
-                    DependencyKind::Required,
+                    pins(compatible("v1", "ROOT"), ModRelationKind::Required, "old"),
+                    ModRelationKind::Required,
                     "ZZZ",
                 )],
             )
@@ -1641,7 +1639,7 @@ mod tests {
                 "ZZZ",
                 vec![needs(
                     compatible("v1", "ZZZ"),
-                    DependencyKind::Required,
+                    ModRelationKind::Required,
                     "AAA",
                 )],
             );
@@ -1664,8 +1662,8 @@ mod tests {
             .with(
                 "ROOT",
                 vec![needs(
-                    needs(compatible("v1", "ROOT"), DependencyKind::Required, "AAA"),
-                    DependencyKind::Required,
+                    needs(compatible("v1", "ROOT"), ModRelationKind::Required, "AAA"),
+                    ModRelationKind::Required,
                     "BBB",
                 )],
             )
@@ -1673,7 +1671,7 @@ mod tests {
                 "AAA",
                 vec![pins(
                     compatible("v1", "AAA"),
-                    DependencyKind::Required,
+                    ModRelationKind::Required,
                     "old",
                 )],
             )
@@ -1681,7 +1679,7 @@ mod tests {
                 "BBB",
                 vec![pins(
                     compatible("v1", "BBB"),
-                    DependencyKind::Required,
+                    ModRelationKind::Required,
                     "new",
                 )],
             )
@@ -1719,8 +1717,8 @@ mod tests {
             .with(
                 "ROOT",
                 vec![needs(
-                    needs(compatible("v1", "ROOT"), DependencyKind::Required, "LEFT"),
-                    DependencyKind::Required,
+                    needs(compatible("v1", "ROOT"), ModRelationKind::Required, "LEFT"),
+                    ModRelationKind::Required,
                     "RIGHT",
                 )],
             )
@@ -1728,7 +1726,7 @@ mod tests {
                 "LEFT",
                 vec![needs(
                     compatible("v1", "LEFT"),
-                    DependencyKind::Required,
+                    ModRelationKind::Required,
                     "SHARED",
                 )],
             )
@@ -1736,7 +1734,7 @@ mod tests {
                 "RIGHT",
                 vec![needs(
                     compatible("v1", "RIGHT"),
-                    DependencyKind::Required,
+                    ModRelationKind::Required,
                     "SHARED",
                 )],
             )
@@ -1787,7 +1785,7 @@ mod tests {
                 "ROOT",
                 vec![pins(
                     compatible("v1", "ROOT"),
-                    DependencyKind::Required,
+                    ModRelationKind::Required,
                     "lib-v1",
                 )],
             )
@@ -1802,7 +1800,7 @@ mod tests {
     async fn a_dependency_naming_a_project_and_a_version_that_disagree_is_refused() {
         let mut root = compatible("v1", "ROOT");
         root.dependencies.push(ModDependency {
-            kind: DependencyKind::Required,
+            kind: ModRelationKind::Required,
             project_id: Some("LIB".to_owned()),
             version_id: Some("other-v1".to_owned()),
             file_name: None,
@@ -1827,7 +1825,7 @@ mod tests {
             "ROOT",
             vec![needs_file(
                 compatible("v1", "ROOT"),
-                DependencyKind::Required,
+                ModRelationKind::Required,
                 "some-library.jar",
             )],
         );
@@ -1848,7 +1846,7 @@ mod tests {
             "ROOT",
             vec![needs_file(
                 compatible("v1", "ROOT"),
-                DependencyKind::Optional,
+                ModRelationKind::Optional,
                 "nice-to-have.jar",
             )],
         );
@@ -1866,7 +1864,7 @@ mod tests {
             "ROOT",
             vec![needs_file(
                 compatible("v1", "ROOT"),
-                DependencyKind::Incompatible,
+                ModRelationKind::Incompatible,
                 "conflicts-with-this.jar",
             )],
         );
@@ -1883,7 +1881,7 @@ mod tests {
     async fn a_dependency_identifying_nothing_is_refused() {
         let mut root = compatible("v1", "ROOT");
         root.dependencies.push(ModDependency {
-            kind: DependencyKind::Required,
+            kind: ModRelationKind::Required,
             project_id: None,
             version_id: None,
             file_name: None,
@@ -1908,7 +1906,7 @@ mod tests {
                 "ROOT",
                 vec![needs(
                     compatible("v1", "ROOT"),
-                    DependencyKind::Embedded,
+                    ModRelationKind::Embedded,
                     "SHADED",
                 )],
             )
@@ -1929,8 +1927,12 @@ mod tests {
             .with(
                 "ROOT",
                 vec![needs(
-                    needs(compatible("v1", "ROOT"), DependencyKind::Embedded, "SHADED"),
-                    DependencyKind::Required,
+                    needs(
+                        compatible("v1", "ROOT"),
+                        ModRelationKind::Embedded,
+                        "SHADED",
+                    ),
+                    ModRelationKind::Required,
                     "OTHER",
                 )],
             )
@@ -1938,7 +1940,7 @@ mod tests {
                 "OTHER",
                 vec![needs(
                     compatible("v1", "OTHER"),
-                    DependencyKind::Required,
+                    ModRelationKind::Required,
                     "SHADED",
                 )],
             )
@@ -2004,7 +2006,7 @@ mod tests {
                 "ROOT",
                 vec![needs(
                     compatible("v1", "ROOT"),
-                    DependencyKind::Required,
+                    ModRelationKind::Required,
                     "LIB",
                 )],
             )
@@ -2048,7 +2050,7 @@ mod tests {
                     at(
                         needs(
                             compatible("ROOTV2", "ROOTPROJ"),
-                            DependencyKind::Required,
+                            ModRelationKind::Required,
                             "LIBPROJ",
                         ),
                         10,
@@ -2246,10 +2248,10 @@ mod tests {
                     pins(
                         needs(
                             compatible("ROOTV2", "ROOTPROJ"),
-                            DependencyKind::Required,
+                            ModRelationKind::Required,
                             "MIDPROJ",
                         ),
-                        DependencyKind::Required,
+                        ModRelationKind::Required,
                         "LIBV1",
                     ),
                     10,
@@ -2260,7 +2262,7 @@ mod tests {
                 vec![at(
                     pins(
                         compatible("MIDV1", "MIDPROJ"),
-                        DependencyKind::Required,
+                        ModRelationKind::Required,
                         "LIBV2",
                     ),
                     0,

@@ -32,7 +32,7 @@ pub use java::{JavaOverride, JvmSettings};
 pub use loader::{LoaderKind, LoaderSelection, LoaderVersionMode, default_instance_name};
 pub use mods::{
     AbsentModPolicy, CurseForgeFileId, CurseForgeProjectId, DefaultModCatalog, ModOrigin,
-    ModProvider,
+    ModProvider, ModRelationKind,
 };
 pub use operation::{Operation, OperationStatus, Progress};
 pub use secret::{REDACTED, SecretString};

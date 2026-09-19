@@ -23,7 +23,7 @@
 
 use chrono::{DateTime, Utc};
 use ephervex_download::DomainAllowlist;
-use ephervex_model::{CurseForgeFileId, CurseForgeProjectId, ModProvider};
+use ephervex_model::{CurseForgeFileId, CurseForgeProjectId, ModProvider, ModRelationKind};
 
 use super::api::{
     CURSEFORGE_CLIENT_ENVIRONMENT, CURSEFORGE_ENVIRONMENT_NAMES, CURSEFORGE_SERVER_ENVIRONMENT,
@@ -36,7 +36,7 @@ use super::dto::{
 };
 use crate::error::{ModPlatformError, ModPlatformResult};
 use crate::model::{
-    DependencyKind, ModDependency, ModFile, ModProject, ModVersionInfo, ReleaseChannel, SideSupport,
+    ModDependency, ModFile, ModProject, ModVersionInfo, ReleaseChannel, SideSupport,
 };
 
 /// One project, once its class has been confirmed to be Mods.
@@ -288,12 +288,12 @@ const fn channel(release_type: Option<u32>) -> ReleaseChannel {
 /// also want, not something the mod needs, and installing one because a file
 /// mentioned it would add a mod nobody asked for. An unrecognized value is
 /// dropped for the same reason: it never becomes a requirement.
-const fn dependency_kind(relation_type: u32) -> Option<DependencyKind> {
+const fn dependency_kind(relation_type: u32) -> Option<ModRelationKind> {
     match relation_type {
-        RELATION_REQUIRED_DEPENDENCY => Some(DependencyKind::Required),
-        RELATION_OPTIONAL_DEPENDENCY => Some(DependencyKind::Optional),
-        RELATION_INCOMPATIBLE => Some(DependencyKind::Incompatible),
-        RELATION_EMBEDDED_LIBRARY | RELATION_INCLUDE => Some(DependencyKind::Embedded),
+        RELATION_REQUIRED_DEPENDENCY => Some(ModRelationKind::Required),
+        RELATION_OPTIONAL_DEPENDENCY => Some(ModRelationKind::Optional),
+        RELATION_INCOMPATIBLE => Some(ModRelationKind::Incompatible),
+        RELATION_EMBEDDED_LIBRARY | RELATION_INCLUDE => Some(ModRelationKind::Embedded),
         _ => None,
     }
 }
