@@ -104,6 +104,7 @@ pub fn loader_choices(minecraft: &str, current: &str) -> LoaderChoices {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstancePresentation {
+    pub snapshot_deletion_note: String,
     pub id: String,
     pub name: String,
     pub minecraft: String,
@@ -152,6 +153,7 @@ impl InstancePresentation {
             None => (lookup("gui-state-ready"), "ready"),
         };
         Self {
+            snapshot_deletion_note: String::new(),
             id: record.id.to_string(),
             name: record.name.clone(),
             minecraft: record.minecraft_version.clone(),
@@ -201,6 +203,7 @@ impl InstancePresentation {
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerPresentation {
+    pub snapshot_deletion_note: String,
     pub id: String,
     pub name: String,
     pub minecraft: String,
@@ -311,6 +314,7 @@ impl ServerPresentation {
             can_connect: false,
             connect_reason: String::new(),
             destructive_recovery: uncertain,
+            snapshot_deletion_note: String::new(),
         }
     }
 }

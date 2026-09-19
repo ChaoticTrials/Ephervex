@@ -23,8 +23,8 @@ use ephervex_core::{
     ModSearchQuery, MutationRestriction, NewClient, NewServer, OperationReporter,
     OptionalSelection, PackAnalysis, Paths, PlannedOutcome, ProcessMonitor, ProgressSink,
     ProviderFileIdentity, SearchOptions, ServerContentSource, ServerCreateOptions, ServerEvent,
-    ServerFolder, ServerNetworkSettings, ServerObserver, SideRequirement, SuspectReason,
-    WatchTarget,
+    ServerFolder, ServerNetworkSettings, ServerObserver, SideRequirement, SnapshotOrigin,
+    SnapshotRestoreOptions, SuspectReason, WatchTarget,
 };
 use ephervex_core::{
     ConfiguredPreferences, LanguageAvailability, LanguageEntry, MinecraftPreferencePreview,
@@ -33,7 +33,7 @@ use ephervex_core::{
 use ephervex_i18n::{Arg, lookup, lookup_args, lookup_attribute, lookup_attribute_args};
 use ephervex_model::{
     AbsentModPolicy, InstanceId, LoaderKind, LoaderSelection, ModOrigin, ModProvider, Operation,
-    OperationStatus, ServerId, StorageClass,
+    OperationStatus, ServerId, SnapshotId, StorageClass,
 };
 
 use crate::presentation::{
@@ -208,6 +208,25 @@ pub enum Command {
         files: bool,
     },
     LoadInstanceWorkspace(InstanceId),
+    LoadSnapshots(InstalledHost),
+    CreateSnapshot {
+        host: InstalledHost,
+        label: String,
+    },
+    RestoreSnapshot {
+        host: InstalledHost,
+        snapshot: SnapshotId,
+        safety_snapshot: bool,
+    },
+    RenameSnapshot {
+        host: InstalledHost,
+        snapshot: SnapshotId,
+        label: String,
+    },
+    DeleteSnapshot {
+        host: InstalledHost,
+        snapshot: SnapshotId,
+    },
     LoadModVersions {
         instance: InstanceId,
         path: PathBuf,
@@ -1134,6 +1153,27 @@ pub struct DiagnosticContent {
 }
 
 #[derive(Debug, Clone)]
+pub struct SnapshotData {
+    pub id: String,
+    pub label: String,
+    pub captured: String,
+    pub size: String,
+    pub mods: String,
+    pub origin: String,
+    pub copy_method: String,
+    pub uses_full_space: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct HostSnapshotsData {
+    pub host: String,
+    pub host_kind: String,
+    pub rows: Vec<SnapshotData>,
+    pub total: String,
+    pub has_plain_copies: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct ServerWorkspaceData {
     pub motd: String,
     pub max_players: String,
@@ -1248,6 +1288,7 @@ pub enum Event {
     },
     DiagnosticContent(DiagnosticContent),
     DiagnosticUnavailable(String),
+    HostSnapshots(HostSnapshotsData),
     JavaRuntimes(Vec<JavaData>),
     Activity(ActivityData),
     Toast {
@@ -2046,6 +2087,139 @@ fn run_worker(
                 }
                 refresh_enriched_mods(app.paths().clone(), &events, instance);
             }
+            Command::LoadSnapshots(host) => match host_snapshots_data(&app, host) {
+                Ok(data) => {
+                    let _ = events.send(Event::HostSnapshots(data));
+                }
+                Err(error) => send_error(&events, &error),
+            },
+            Command::CreateSnapshot { host, label } => {
+                let paths = app.paths().clone();
+                let reports = events.clone();
+                spawn_async_operation(
+                    paths,
+                    &events,
+                    Arc::clone(&cancellations),
+                    AsyncOperationRequest {
+                        title: "operation-creating-snapshot",
+                        entity: label.clone(),
+                        allow_cancel: true,
+                        finished: None,
+                    },
+                    move |app, _reporter, cancel| async move {
+                        app.create_snapshot(host, &label, SnapshotOrigin::Manual, &cancel)
+                            .map_err(CoreError::from)?;
+                        let data = host_snapshots_data(&app, host)?;
+                        let _ = reports.send(Event::HostSnapshots(data));
+                        Ok(OperationReport::Toast(lookup("gui-snapshot-created")))
+                    },
+                );
+            }
+            Command::RestoreSnapshot {
+                host,
+                snapshot,
+                safety_snapshot,
+            } => {
+                let paths = app.paths().clone();
+                let reports = events.clone();
+                let refreshed = Arc::clone(&refreshed_mods);
+                spawn_async_operation(
+                    paths,
+                    &events,
+                    Arc::clone(&cancellations),
+                    AsyncOperationRequest {
+                        title: "operation-restoring-snapshot",
+                        entity: snapshot.to_string(),
+                        allow_cancel: true,
+                        finished: None,
+                    },
+                    move |app, _reporter, cancel| async move {
+                        app.restore_snapshot(
+                            host,
+                            snapshot,
+                            SnapshotRestoreOptions { safety_snapshot },
+                            &cancel,
+                        )
+                        .map_err(CoreError::from)?;
+                        let data = host_snapshots_data(&app, host)?;
+                        let _ = reports.send(Event::HostSnapshots(data));
+                        // A restore rewrites the game directory underneath the
+                        // workspace, so the mods the other tabs are showing are
+                        // the ones from before it. Forced, because a restore can
+                        // bring back a mod this run has never enriched.
+                        send_host_mods(&app, host, &reports, &refreshed, true);
+                        // It replaces the host's own metadata as well, which is
+                        // where a client keeps its Java and JVM overrides and a
+                        // server its network settings, and `server.properties`
+                        // lives in the restored directory itself.
+                        match host {
+                            InstalledHost::Instance(instance) => {
+                                if let Ok(runtime) = instance_runtime_data(&app, instance) {
+                                    let _ = reports.send(Event::InstanceRuntime(runtime));
+                                }
+                            }
+                            InstalledHost::Server(server) => {
+                                send_server_workspace(&app, server, &reports);
+                            }
+                        }
+                        Ok(OperationReport::Toast(lookup("gui-snapshot-restored")))
+                    },
+                );
+            }
+            Command::RenameSnapshot {
+                host,
+                snapshot,
+                label,
+            } => {
+                let paths = app.paths().clone();
+                let reports = events.clone();
+                spawn_async_operation(
+                    paths,
+                    &events,
+                    Arc::clone(&cancellations),
+                    AsyncOperationRequest {
+                        title: "operation-renaming-snapshot",
+                        entity: label.clone(),
+                        allow_cancel: false,
+                        finished: None,
+                    },
+                    move |app, _reporter, cancel| async move {
+                        if cancel.is_cancelled() {
+                            return Err(CoreError::from(ephervex_core::SnapshotError::Canceled));
+                        }
+                        app.rename_snapshot(host, snapshot, &label)
+                            .map_err(CoreError::from)?;
+                        let data = host_snapshots_data(&app, host)?;
+                        let _ = reports.send(Event::HostSnapshots(data));
+                        Ok(OperationReport::Toast(lookup("gui-snapshot-renamed")))
+                    },
+                );
+            }
+            Command::DeleteSnapshot { host, snapshot } => {
+                let paths = app.paths().clone();
+                let reports = events.clone();
+                spawn_async_operation(
+                    paths,
+                    &events,
+                    Arc::clone(&cancellations),
+                    AsyncOperationRequest {
+                        title: "operation-deleting-snapshot",
+                        entity: snapshot.to_string(),
+                        allow_cancel: false,
+                        finished: None,
+                    },
+                    move |app, _reporter, cancel| async move {
+                        if cancel.is_cancelled() {
+                            return Err(CoreError::from(ephervex_core::SnapshotError::Canceled));
+                        }
+                        app.delete_snapshot(host, snapshot)
+                            .map_err(CoreError::from)?;
+                        let data = host_snapshots_data(&app, host)?;
+                        let _ = reports.send(Event::HostSnapshots(data));
+                        Ok(OperationReport::Toast(lookup("gui-snapshot-deleted")))
+                    },
+                );
+            }
             Command::SearchMods {
                 instance,
                 provider,
@@ -2168,13 +2342,16 @@ fn run_worker(
                     paths,
                     &events,
                     Arc::clone(&cancellations),
-                    "operation-installing-mods",
-                    project.clone(),
-                    Some(Event::ModInstallFinished {
-                        instance: instance.to_string(),
-                        provider: provider.as_str().to_owned(),
-                        project: project.clone(),
-                    }),
+                    AsyncOperationRequest {
+                        title: "operation-installing-mods",
+                        entity: project.clone(),
+                        allow_cancel: true,
+                        finished: Some(Event::ModInstallFinished {
+                            instance: instance.to_string(),
+                            provider: provider.as_str().to_owned(),
+                            project: project.clone(),
+                        }),
+                    },
                     move |app, reporter, cancel| async move {
                         let request = LinkedModRequest::Install {
                             provider,
@@ -3058,18 +3235,23 @@ fn snapshot(app: &App) -> Result<Snapshot, CoreError> {
         });
         let managed_mods = app.managed_mods(record.id).map_or(0, |mods| mods.len());
         let launch_state = app.launch_state(record.id)?;
-        instance_rows.push(InstancePresentation::from_record(
+        let mut presentation = InstancePresentation::from_record(
             &record,
             linked.len(),
             managed_mods,
             launch_state.as_ref(),
             connections,
-        ));
+        );
+        presentation.snapshot_deletion_note =
+            snapshot_deletion_note(app, InstalledHost::Instance(record.id));
+        instance_rows.push(presentation);
     }
     let mut server_rows = Vec::new();
     for server in servers {
         let status = app.server_status(server.id)?;
         let mut presentation = ServerPresentation::from_status(&status);
+        presentation.snapshot_deletion_note =
+            snapshot_deletion_note(app, InstalledHost::Server(server.id));
         presentation.can_connect = connection_states.get(&server.id).copied().unwrap_or(false);
         server_rows.push(presentation);
     }
@@ -3531,6 +3713,62 @@ fn format_usage(usage: Option<ephervex_core::ProcessUsage>) -> String {
             ("memory", Arg::from(format_bytes(usage.memory_bytes))),
         ],
     )
+}
+
+fn host_snapshots_data(app: &App, host: InstalledHost) -> CoreResult<HostSnapshotsData> {
+    let snapshots = app.snapshots(host).map_err(CoreError::from)?;
+    let total_bytes = snapshots.iter().fold(0u64, |total, snapshot| {
+        total.saturating_add(snapshot.apparent_bytes)
+    });
+    let has_plain_copies = snapshots
+        .iter()
+        .any(|snapshot| snapshot.copy_method == ephervex_core::CloneMethod::Copy);
+    let rows = snapshots
+        .into_iter()
+        .map(|snapshot| {
+            let origin = match &snapshot.origin {
+                SnapshotOrigin::Manual => lookup("gui-snapshot-origin-manual"),
+                SnapshotOrigin::BeforeRestore => lookup("gui-snapshot-origin-before-restore"),
+                SnapshotOrigin::BeforeIsolation => lookup("gui-snapshot-origin-before-isolation"),
+                SnapshotOrigin::Unknown(value) => value.clone(),
+            };
+            let uses_full_space = snapshot.copy_method == ephervex_core::CloneMethod::Copy;
+            SnapshotData {
+                id: snapshot.id.to_string(),
+                label: snapshot.label,
+                captured: relative_time(snapshot.captured_at),
+                size: ephervex_core::format_binary_bytes(snapshot.apparent_bytes),
+                mods: lookup_args(
+                    "gui-snapshot-mod-counts",
+                    [
+                        ("enabled", Arg::from(snapshot.enabled_mods)),
+                        ("disabled", Arg::from(snapshot.disabled_mods)),
+                    ],
+                ),
+                origin,
+                copy_method: lookup(if uses_full_space {
+                    "gui-snapshot-copy"
+                } else {
+                    "gui-snapshot-reflink"
+                }),
+                uses_full_space,
+            }
+        })
+        .collect();
+    Ok(HostSnapshotsData {
+        host: host.id(),
+        host_kind: host_kind(host).to_owned(),
+        rows,
+        total: ephervex_core::format_binary_bytes(total_bytes),
+        has_plain_copies,
+    })
+}
+
+fn snapshot_deletion_note(app: &App, host: InstalledHost) -> String {
+    match app.snapshots(host) {
+        Ok(snapshots) => localized_count("gui-delete-host-snapshots", snapshots.len()),
+        Err(_) => lookup("gui-delete-host-snapshots-unreadable"),
+    }
 }
 
 fn send_server_workspace(app: &App, server: ServerId, events: &Sender<Event>) {
@@ -4324,6 +4562,13 @@ enum OperationReport {
     Reported,
 }
 
+struct AsyncOperationRequest {
+    title: &'static str,
+    entity: String,
+    allow_cancel: bool,
+    finished: Option<Event>,
+}
+
 fn refresh_snapshot(paths: &Paths, events: &Sender<Event>) {
     if let Ok(app) = App::open_at(paths.clone()) {
         send_snapshot(&app, events);
@@ -4337,14 +4582,18 @@ fn spawn_async_operation<F, Fut>(
     paths: Paths,
     events: &Sender<Event>,
     cancellations: CancellationRegistry,
-    title: &'static str,
-    entity: String,
-    finished: Option<Event>,
+    request: AsyncOperationRequest,
     operation: F,
 ) where
     F: FnOnce(App, OperationReporter, CancellationToken) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = Result<OperationReport, CoreError>> + 'static,
 {
+    let AsyncOperationRequest {
+        title,
+        entity,
+        allow_cancel,
+        finished,
+    } = request;
     let announcement = finished.clone();
     spawn_detached_with_setup_failure(
         paths.clone(),
@@ -4358,10 +4607,10 @@ fn spawn_async_operation<F, Fut>(
             let sink = Arc::new(UiProgressSink {
                 events: events.clone(),
                 entity,
-                allow_cancel: true,
+                allow_cancel,
                 pending: None,
             });
-            let reporter = OperationReporter::new(title, true, sink);
+            let reporter = OperationReporter::new(title, allow_cancel, sink);
             reporter.begin(None);
             let cancel = CancellationToken::new();
             register_cancellation(&cancellations, &reporter, &cancel);
@@ -5896,6 +6145,11 @@ fn server_warning_message(warning: &ephervex_core::ServerWarning) -> String {
 pub fn parse_instance_id(value: &str) -> Option<InstanceId> {
     InstanceId::from_str(value).ok()
 }
+
+pub fn parse_snapshot_id(value: &str) -> Option<SnapshotId> {
+    SnapshotId::from_str(value).ok()
+}
+
 /// Which kind of host this is, in the spelling the markup uses.
 const fn host_kind(host: InstalledHost) -> &'static str {
     match host {

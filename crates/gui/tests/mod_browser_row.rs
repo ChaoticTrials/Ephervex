@@ -282,6 +282,7 @@ fn instance_mods(ui: &AppWindow, instance: InstanceRow) {
 /// An instance sitting there with nothing running.
 fn idle_instance() -> InstanceRow {
     InstanceRow {
+        snapshot_deletion_note: "Deleting files also deletes 2 retained snapshots.".into(),
         id: "repro-client".into(),
         name: "Repro".into(),
         minecraft: "1.21.1".into(),

@@ -89,6 +89,7 @@ fn card(ui: &AppWindow, name: &str) -> Option<ElementHandle> {
 
 fn instance(id: &str, name: &str) -> InstanceRow {
     InstanceRow {
+        snapshot_deletion_note: "Deleting files also deletes 2 retained snapshots.".into(),
         id: id.into(),
         name: name.into(),
         minecraft: "1.20.1".into(),
@@ -118,6 +119,7 @@ fn instance(id: &str, name: &str) -> InstanceRow {
 /// The same instance, with a linked server part-way through being built.
 fn creating(id: &str, name: &str) -> InstanceRow {
     InstanceRow {
+        snapshot_deletion_note: "Deleting files also deletes 2 retained snapshots.".into(),
         creating_server_detail: "Installing the linked server | 1.20.1 server_mappings".into(),
         creating_server_progress: 0.82,
         creating_server_indeterminate: false,

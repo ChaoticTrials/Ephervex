@@ -201,6 +201,7 @@ fn install_i18n(ui: &AppWindow) {
 
 fn instance() -> InstanceRow {
     InstanceRow {
+        snapshot_deletion_note: "Deleting files also deletes 2 retained snapshots.".into(),
         id: "repro-client".into(),
         name: "Repro Client".into(),
         minecraft: "1.20.1".into(),
@@ -229,6 +230,7 @@ fn instance() -> InstanceRow {
 
 fn server() -> ServerRow {
     ServerRow {
+        snapshot_deletion_note: "Deleting files also deletes 2 retained snapshots.".into(),
         id: "repro-server".into(),
         name: "Repro Server".into(),
         minecraft: "1.20.1".into(),

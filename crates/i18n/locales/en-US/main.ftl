@@ -1003,6 +1003,39 @@ error-snapshot-invalid = Snapshot metadata is invalid.
 error-snapshot-version-newer = This snapshot was written by a newer Ephervex format ({ $found }, supported { $supported }).
 .action = Update Ephervex before using { $path }.
 error-snapshot-canceled = The snapshot operation was canceled.
+gui-snapshots = Snapshots
+gui-snapshots-detail = Local safety copies of the complete development state. Snapshots are not pack exports.
+gui-snapshot-create = Create snapshot
+gui-snapshot-restore = Restore snapshot
+gui-snapshot-rename = Rename snapshot
+gui-snapshot-delete = Delete snapshot
+gui-snapshot-label = Label
+gui-snapshot-create-detail = Capture the game directory, retained source, and exact host metadata as they are now.
+gui-snapshot-local-note = The snapshot stays inside this client or server and is retained until you delete it.
+gui-snapshot-restore-detail = Restore "{ $value }"?
+gui-snapshot-replacement-note = Files created since this snapshot will be removed. Restore replaces the captured state; it does not merge files.
+gui-snapshot-safety-copy = Capture the current state first
+gui-snapshot-rename-detail = Change the label shown for this snapshot. Its contents and identity do not change.
+gui-snapshot-delete-detail = Permanently delete "{ $value }"?
+gui-snapshot-delete-note = This removes the retained safety copy and cannot be undone.
+gui-snapshot-none = No snapshots yet
+gui-snapshot-none-detail = Capture this host before changing a reproduction or testing a risky fix.
+gui-snapshot-total = { $value } apparent total
+gui-snapshot-copy-note = At least one snapshot used a full byte copy because this filesystem did not support reflinks.
+gui-snapshot-copy = Full copy
+gui-snapshot-reflink = Reflink
+gui-snapshot-origin-manual = Manual
+gui-snapshot-origin-before-restore = Before restore
+gui-snapshot-origin-before-isolation = Before isolation
+gui-snapshot-mod-counts = { $enabled } enabled, { $disabled } disabled mods
+gui-snapshot-created = Snapshot created.
+gui-snapshot-restored = Snapshot restored.
+gui-snapshot-renamed = Snapshot renamed.
+gui-snapshot-deleted = Snapshot deleted.
+operation-creating-snapshot = Creating snapshot
+operation-restoring-snapshot = Restoring snapshot
+operation-renaming-snapshot = Renaming snapshot
+operation-deleting-snapshot = Deleting snapshot
 
 error-pack-recipe-unreadable = This instance's retained pack recipe could not be read.
 .action = Check that { $path } is readable. Without it, a server cannot be created from this instance's pack.
@@ -1353,6 +1386,12 @@ gui-delete-server = Delete Server...
 gui-delete-instance-detail = Remove "{ $value }" from Ephervex?
 gui-delete-server-detail = Remove "{ $value }" from Ephervex?
 gui-delete-choice-detail = Keeping files only removes the Ephervex record. Deleting files permanently removes the managed game or server directory.
+gui-delete-host-snapshots =
+    { $count ->
+        [one] Deleting files also deletes 1 retained snapshot.
+       *[other] Deleting files also deletes { $count } retained snapshots.
+    }
+gui-delete-host-snapshots-unreadable = Deleting files also deletes all retained snapshots. Their count could not be read.
 # $count is how many servers were created from this instance.
 gui-delete-instance-linked = { $count ->
     [one] Its linked server is deleted with it, the same way.

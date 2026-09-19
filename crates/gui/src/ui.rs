@@ -128,6 +128,7 @@ slint::slint! {
     }
 
     export struct InstanceRow {
+        snapshot-deletion-note: string,
         id: string,
         name: string,
         minecraft: string,
@@ -161,6 +162,7 @@ slint::slint! {
     }
 
     export struct ServerRow {
+        snapshot-deletion-note: string,
         id: string,
         name: string,
         minecraft: string,
@@ -349,6 +351,17 @@ slint::slint! {
         modified: string,
         size: string,
         summary: string,
+    }
+
+    export struct SnapshotRow {
+        id: string,
+        label: string,
+        captured: string,
+        size: string,
+        mods: string,
+        origin: string,
+        copy-method: string,
+        uses-full-space: bool,
     }
 
     export struct RunningRow {
@@ -1555,6 +1568,77 @@ slint::slint! {
             background: root.selected ? Theme.accent : transparent;
         }
         area := TouchArea { clicked => { root.clicked(); } }
+    }
+
+    component SnapshotCard inherits Rectangle {
+        in property <SnapshotRow> item;
+        callback restore();
+        callback rename();
+        callback delete();
+        height: 96px;
+        border-radius: 7px;
+        border-width: 1px;
+        border-color: Theme.border;
+        background: Theme.surface;
+        HorizontalLayout {
+            padding: 13px;
+            spacing: 12px;
+            cross-axis-alignment: center;
+            VerticalLayout {
+                spacing: 4px;
+                horizontal-stretch: 1;
+                Heading { text: root.item.label; font-size: Theme.row-heading-size; }
+                BodyText { text: root.item.captured + " | " + root.item.size + " | " + root.item.mods; color: Theme.text-secondary; }
+                BodyText { text: root.item.id; color: Theme.text-muted; font-size: Theme.caption-size; }
+            }
+            VerticalLayout {
+                alignment: center; spacing: 7px;
+                HorizontalLayout {
+                    alignment: end; spacing: 7px;
+                    Pill { text: root.item.origin; tone-color: Theme.accent-secondary; }
+                    if root.item.uses-full-space : Pill { text: root.item.copy-method; tone-color: Theme.warning; }
+                }
+                HorizontalLayout {
+                    alignment: end; spacing: 7px;
+                    AppButton { text: GuiI18n.text("gui-snapshot-restore"); clicked => { root.restore(); } }
+                    AppButton { text: GuiI18n.text("gui-rename"); clicked => { root.rename(); } }
+                    AppButton { text: GuiI18n.text("gui-delete"); tone: "danger"; clicked => { root.delete(); } }
+                }
+            }
+        }
+    }
+
+    component SnapshotPanel inherits Rectangle {
+        in property <[SnapshotRow]> items;
+        in property <string> total;
+        in property <bool> has-plain-copies;
+        callback create();
+        callback restore(string, string);
+        callback rename(string, string);
+        callback delete(string, string);
+        VerticalLayout {
+            spacing: 12px;
+            HorizontalLayout {
+                spacing: 10px;
+                SectionTitle { title: GuiI18n.text("gui-snapshots"); detail: GuiI18n.text("gui-snapshots-detail"); horizontal-stretch: 1; }
+                VerticalLayout { alignment: center; BodyText { text: GuiI18n.value("gui-snapshot-total", root.total); color: Theme.text-muted; } }
+                VerticalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-snapshot-create"); tone: "primary"; clicked => { root.create(); } } }
+            }
+            if root.has-plain-copies : BodyText { text: GuiI18n.text("gui-snapshot-copy-note"); color: Theme.warning; wrap: word-wrap; }
+            if root.items.length == 0 : Rectangle { vertical-stretch: 1; VerticalLayout { alignment: center; spacing: 8px; Heading { text: GuiI18n.text("gui-snapshot-none"); horizontal-alignment: center; } BodyText { text: GuiI18n.text("gui-snapshot-none-detail"); color: Theme.text-muted; wrap: word-wrap; horizontal-alignment: center; } } }
+            if root.items.length > 0 : ScrollView {
+                viewport-width: self.width;
+                VerticalLayout {
+                    spacing: 9px;
+                    for item in root.items : SnapshotCard {
+                        item: item;
+                        restore => { root.restore(item.id, item.label); }
+                        rename => { root.rename(item.id, item.label); }
+                        delete => { root.delete(item.id, item.label); }
+                    }
+                }
+            }
+        }
     }
 
     component LoaderGlyph inherits Rectangle {
@@ -2808,6 +2892,16 @@ slint::slint! {
         callback open-mod-project-page(string);
         in-out property <[ModSearchRow]> mod-results;
         in-out property <[DiagnosticRow]> diagnostics;
+        in-out property <[SnapshotRow]> snapshots;
+        in-out property <string> snapshot-total;
+        in-out property <bool> snapshots-have-plain-copies;
+        // The host and snapshot selected by a snapshot modal. IDs rather than
+        // row positions keep the action attached when a refreshed list moves.
+        in-out property <string> snapshot-host-kind;
+        in-out property <string> snapshot-host-id;
+        in-out property <string> snapshot-action-id;
+        in-out property <string> snapshot-action-label;
+        in-out property <bool> snapshot-safety-copy: true;
         // Whether the Logs tab is showing saved log files rather than the one
         // being written. Beside `selected-diagnostic-kind` rather than folded
         // into it, because that value names a kind of file for the services
@@ -2968,6 +3062,7 @@ slint::slint! {
         // How many servers go with the instance the delete dialog is about, so
         // "Delete Files" is never a surprise.
         in-out property <int> pending-action-linked-servers: 0;
+        in-out property <string> pending-snapshot-deletion-note;
         // "client" or "server", for the dialogs that serve both.
         in-out property <string> pending-action-kind;
         // What the rename field holds. Seeded with the current name, which is
@@ -3319,6 +3414,13 @@ slint::slint! {
         callback search-diagnostic(string, string, string, string, string);
         callback refresh-diagnostic(string, string, string, string);
         callback open-diagnostic-folder(string, string, string);
+        callback load-snapshots(string, string);
+        callback create-snapshot(string, string, string);
+        in-out property <string> snapshot-label-suggestion;
+        callback recompute-snapshot-label();
+        callback restore-snapshot(string, string, string, bool);
+        callback rename-snapshot(string, string, string, string);
+        callback delete-snapshot(string, string, string);
         callback copy-text(string);
         callback add-offline-account(string);
         callback set-default-account(string);
@@ -3522,7 +3624,7 @@ slint::slint! {
                                             duplicate(id) => { root.duplicate-client(id); }
                                             make-persistent(id) => { root.open-make-persistent(id); }
                                             rename(id, name) => { root.pending-action-kind = "client"; root.pending-action-id = id; root.pending-rename-text = name; root.modal-error = ""; root.modal = "rename"; }
-                                            delete(id, name) => { root.pending-action-id = id; root.pending-action-name = name; root.pending-action-linked-servers = item.linked-servers; root.modal = "delete-instance"; }
+                                            delete(id, name) => { root.pending-action-id = id; root.pending-action-name = name; root.pending-snapshot-deletion-note = item.snapshot-deletion-note; root.pending-action-linked-servers = item.linked-servers; root.modal = "delete-instance"; }
                                         }
                                         }
                                     }
@@ -3556,6 +3658,7 @@ slint::slint! {
                                 WorkspaceTab { text: GuiI18n.text("gui-instance-tab-overview"); selected: root.workspace-tab == "Overview"; clicked => { root.close-live-log(); root.workspace-tab = "Overview"; } }
                                 WorkspaceTab { text: GuiI18n.text("gui-instance-tab-mods"); selected: root.workspace-tab == "Mods"; clicked => { root.close-live-log(); root.workspace-tab = "Mods"; } }
                                 WorkspaceTab { text: GuiI18n.text("gui-instance-tab-settings"); selected: root.workspace-tab == "Settings"; clicked => { root.close-live-log(); root.workspace-tab = "Settings"; } }
+                                WorkspaceTab { text: GuiI18n.text("gui-snapshots"); selected: root.workspace-tab == "Snapshots"; clicked => { root.close-live-log(); root.workspace-tab = "Snapshots"; root.snapshots = []; root.snapshot-total = ""; root.snapshots-have-plain-copies = false; root.snapshot-host-kind = "client"; root.snapshot-host-id = root.selected-instance-id; root.load-snapshots("client", root.selected-instance-id); } }
                                 WorkspaceTab { text: GuiI18n.text("gui-instance-tab-logs"); selected: root.workspace-tab == "Logs"; clicked => { root.workspace-tab = "Logs"; root.selected-diagnostic-kind = "log"; root.log-shows-files = false; root.selected-diagnostic-name = ""; root.open-live-log("client", root.selected-instance-id); } }
                                 Rectangle { horizontal-stretch: 1; }
                             }
@@ -3588,7 +3691,7 @@ slint::slint! {
                                             AppButton { text: GuiI18n.text("gui-open-folder"); clicked => { root.open-server-folder(server.id); } }
                                             if server.state-kind == "needs-recovery" : AppButton { text: GuiI18n.text("gui-repair-server"); tone: "primary"; clicked => { root.repair-server(server.id); } }
                                             Rectangle { horizontal-stretch: 1; }
-                                            AppButton { text: GuiI18n.text("gui-delete-server"); tone: "danger"; clicked => { root.pending-action-id = server.id; root.pending-action-name = server.name; root.modal = "delete-server"; } }
+                                            AppButton { text: GuiI18n.text("gui-delete-server"); tone: "danger"; clicked => { root.pending-action-id = server.id; root.pending-action-name = server.name; root.pending-snapshot-deletion-note = server.snapshot-deletion-note; root.modal = "delete-server"; } }
                                         }
                                     } }
                                 }
@@ -3646,6 +3749,13 @@ slint::slint! {
                                 SectionTitle { title: GuiI18n.text("gui-instance-settings-unavailable"); detail: GuiI18n.text("gui-instance-settings-unavailable-detail"); }
                                 HorizontalLayout { AppButton { text: GuiI18n.text("gui-open-global-defaults"); clicked => { root.page = 4; root.workspace = ""; root.workspace-tab = "Minecraft"; } } Rectangle { horizontal-stretch: 1; } }
                             } }
+                            if root.workspace-tab == "Snapshots" : SnapshotPanel {
+                                items: root.snapshots; total: root.snapshot-total; has-plain-copies: root.snapshots-have-plain-copies;
+                                create => { root.snapshot-action-label = ""; root.recompute-snapshot-label(); root.modal-error = ""; root.modal = "snapshot-create"; }
+                                restore(id, label) => { root.snapshot-action-id = id; root.snapshot-action-label = label; root.snapshot-safety-copy = true; root.modal-error = ""; root.modal = "snapshot-restore"; }
+                                rename(id, label) => { root.snapshot-action-id = id; root.snapshot-action-label = label; root.modal-error = ""; root.modal = "snapshot-rename"; }
+                                delete(id, label) => { root.snapshot-action-id = id; root.snapshot-action-label = label; root.modal-error = ""; root.modal = "snapshot-delete"; }
+                            }
                             if root.workspace-tab == "Logs" : VerticalLayout { spacing: 9px;
                                 HorizontalLayout { spacing: 8px;
                                     FilterChip { text: GuiI18n.text("gui-live-latest-log"); accessible-name: GuiI18n.text("gui-live-latest-log"); selected: root.selected-diagnostic-kind != "crash-report" && !root.log-shows-files; clicked => { root.selected-diagnostic-kind = "log"; root.log-shows-files = false; root.selected-diagnostic-name = ""; root.open-live-log("client", root.selected-instance-id); } }
@@ -3695,7 +3805,7 @@ slint::slint! {
                                     TextField { text <=> root.server-query; placeholder: GuiI18n.text("gui-filter-servers"); input-type: InputType.search; width: 290px; accepted => { root.refresh(); } }
                                 }
                                 if root.global-servers.length == 0 && root.pending-servers.length == 0 : EmptyState { icon: @image-url("../../../assets/icons/nav-servers.svg"); title: GuiI18n.text("gui-no-servers"); message: GuiI18n.text("gui-no-standalone-servers-detail"); primary-text: GuiI18n.text("gui-modal-new-server"); primary => { root.create-server-client-id = ""; root.create-server-name = ""; root.recompute-create-server-name(); root.modal-error = ""; root.request-version-catalog(); root.warm-language-catalog(root.create-server-minecraft); root.create-server-pack = ""; root.create-server-pack-name = ""; root.modal = "create-server"; } }
-                                if root.global-servers.length > 0 || root.pending-servers.length > 0 : ScrollView { viewport-width: self.width; VerticalLayout { spacing: 12px; for pending in root.pending-servers : PendingCard { item: pending; } for item[index] in root.global-servers : ServerCard { item: item; selected: item.id == root.selected-global-server-id; choose(id) => { root.selected-global-server-id = id; root.selected-global-server-index = index; root.select-server(id); } primary(id) => { if item.can-start { root.server-start(id); } else { root.server-stop(id); } } open-workspace(id) => { root.selected-global-server-id = id; root.selected-global-server-index = index; root.selected-server-id = id; root.server-workspace-return-client = ""; root.select-server(id); root.workspace = "server"; root.workspace-tab = "Overview"; root.load-server-workspace(id); } open-folder(id) => { root.open-server-folder(id); } restart(id) => { root.server-restart(id); } kill(id, name) => { root.selected-server-id = id; root.pending-action-name = name; root.modal = "kill"; } rename(id, name) => { root.pending-action-kind = "server"; root.pending-action-id = id; root.pending-rename-text = name; root.modal-error = ""; root.modal = "rename"; } delete(id, name) => { root.pending-action-id = id; root.pending-action-name = name; root.modal = "delete-server"; } } } }
+                                if root.global-servers.length > 0 || root.pending-servers.length > 0 : ScrollView { viewport-width: self.width; VerticalLayout { spacing: 12px; for pending in root.pending-servers : PendingCard { item: pending; } for item[index] in root.global-servers : ServerCard { item: item; selected: item.id == root.selected-global-server-id; choose(id) => { root.selected-global-server-id = id; root.selected-global-server-index = index; root.select-server(id); } primary(id) => { if item.can-start { root.server-start(id); } else { root.server-stop(id); } } open-workspace(id) => { root.selected-global-server-id = id; root.selected-global-server-index = index; root.selected-server-id = id; root.server-workspace-return-client = ""; root.select-server(id); root.workspace = "server"; root.workspace-tab = "Overview"; root.load-server-workspace(id); } open-folder(id) => { root.open-server-folder(id); } restart(id) => { root.server-restart(id); } kill(id, name) => { root.selected-server-id = id; root.pending-action-name = name; root.modal = "kill"; } rename(id, name) => { root.pending-action-kind = "server"; root.pending-action-id = id; root.pending-rename-text = name; root.modal-error = ""; root.modal = "rename"; } delete(id, name) => { root.pending-action-id = id; root.pending-action-name = name; root.pending-snapshot-deletion-note = item.snapshot-deletion-note; root.modal = "delete-server"; } } } }
                             }
                         }
                         if root.show-inspector && root.selected-global-server-index >= 0 : Rectangle { width: 360px; background: Theme.surface; border-width: 1px; border-color: Theme.border;
@@ -3737,6 +3847,7 @@ slint::slint! {
                                 WorkspaceTab { text: GuiI18n.text("gui-server-tab-console"); selected: root.workspace-tab == "Console"; clicked => { root.workspace-tab = "Console"; root.open-live-log("server", root.selected-server-id); } }
                                 WorkspaceTab { text: GuiI18n.text("gui-instance-tab-mods"); selected: root.workspace-tab == "Mods"; clicked => { root.close-live-log(); root.workspace-tab = "Mods"; root.load-server-mods(root.selected-server-id); } }
                                 WorkspaceTab { text: GuiI18n.text("gui-server-tab-properties"); selected: root.workspace-tab == "Properties"; clicked => { root.close-live-log(); root.workspace-tab = "Properties"; } }
+                                WorkspaceTab { text: GuiI18n.text("gui-snapshots"); selected: root.workspace-tab == "Snapshots"; clicked => { root.close-live-log(); root.workspace-tab = "Snapshots"; root.snapshots = []; root.snapshot-total = ""; root.snapshots-have-plain-copies = false; root.snapshot-host-kind = "server"; root.snapshot-host-id = root.selected-server-id; root.load-snapshots("server", root.selected-server-id); } }
                                 WorkspaceTab { text: GuiI18n.text("gui-instance-tab-logs"); selected: root.workspace-tab == "Logs"; clicked => { root.workspace-tab = "Logs"; root.selected-diagnostic-kind = "log"; root.log-shows-files = false; root.selected-diagnostic-name = ""; root.open-live-log("server", root.selected-server-id); } }
                                 Rectangle { horizontal-stretch: 1; }
                             }
@@ -3748,7 +3859,14 @@ slint::slint! {
                                 HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-network"); } BodyText { text: root.servers[root.selected-server-index].address; } }
                                 HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-storage"); } BodyText { text: root.servers[root.selected-server-index].storage; } }
                                 HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-relationship"); } BodyText { text: root.servers[root.selected-server-index].relationship; } }
-                            } } HorizontalLayout { spacing: 8px; AppButton { text: GuiI18n.text("gui-view-logs"); clicked => { root.workspace-tab = "Logs"; root.selected-diagnostic-kind = "log"; root.load-diagnostics("server", root.selected-server-id, "log"); } } if root.servers[root.selected-server-index].linked-client-id != "" : AppButton { text: GuiI18n.text("gui-launch-client-connect"); tone: "primary"; enabled: root.servers[root.selected-server-index].can-connect; clicked => { root.launch-and-connect(root.servers[root.selected-server-index].linked-client-id, root.selected-server-id); } } if root.servers[root.selected-server-index].state-kind == "needs-recovery" : AppButton { text: GuiI18n.text("gui-repair-server"); tone: "primary"; clicked => { root.repair-server(root.selected-server-id); } } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-delete-server"); tone: "danger"; clicked => { root.pending-action-id = root.selected-server-id; root.pending-action-name = root.servers[root.selected-server-index].name; root.modal = "delete-server"; } } } } }
+                            } } HorizontalLayout { spacing: 8px; AppButton { text: GuiI18n.text("gui-view-logs"); clicked => { root.workspace-tab = "Logs"; root.selected-diagnostic-kind = "log"; root.load-diagnostics("server", root.selected-server-id, "log"); } } if root.servers[root.selected-server-index].linked-client-id != "" : AppButton { text: GuiI18n.text("gui-launch-client-connect"); tone: "primary"; enabled: root.servers[root.selected-server-index].can-connect; clicked => { root.launch-and-connect(root.servers[root.selected-server-index].linked-client-id, root.selected-server-id); } } if root.servers[root.selected-server-index].state-kind == "needs-recovery" : AppButton { text: GuiI18n.text("gui-repair-server"); tone: "primary"; clicked => { root.repair-server(root.selected-server-id); } } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-delete-server"); tone: "danger"; clicked => { root.pending-action-id = root.selected-server-id; root.pending-action-name = root.servers[root.selected-server-index].name; root.pending-snapshot-deletion-note = root.servers[root.selected-server-index].snapshot-deletion-note; root.modal = "delete-server"; } } } } }
+                            if root.workspace-tab == "Snapshots" : SnapshotPanel {
+                                items: root.snapshots; total: root.snapshot-total; has-plain-copies: root.snapshots-have-plain-copies;
+                                create => { root.snapshot-action-label = ""; root.recompute-snapshot-label(); root.modal-error = ""; root.modal = "snapshot-create"; }
+                                restore(id, label) => { root.snapshot-action-id = id; root.snapshot-action-label = label; root.snapshot-safety-copy = true; root.modal-error = ""; root.modal = "snapshot-restore"; }
+                                rename(id, label) => { root.snapshot-action-id = id; root.snapshot-action-label = label; root.modal-error = ""; root.modal = "snapshot-rename"; }
+                                delete(id, label) => { root.snapshot-action-id = id; root.snapshot-action-label = label; root.modal-error = ""; root.modal = "snapshot-delete"; }
+                            }
                             if root.workspace-tab == "Console" : VerticalLayout { spacing: 10px;
                                 ActionRow { BodyText { text: GuiI18n.value("gui-bounded-output", root.servers[root.selected-server-index].state); color: root.servers[root.selected-server-index].can-send-command ? Theme.success : Theme.text-secondary; } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-restart"); enabled: root.servers[root.selected-server-index].can-restart; clicked => { root.server-restart(root.selected-server-id); } } AppButton { text: GuiI18n.text("gui-stop"); enabled: root.servers[root.selected-server-index].can-stop; clicked => { root.server-stop(root.selected-server-id); } } AppButton { text: GuiI18n.text("gui-kill"); tone: "danger"; enabled: root.servers[root.selected-server-index].can-kill; clicked => { root.modal = "kill"; } } }
                                 LiveLogViewer {
@@ -4353,7 +4471,7 @@ slint::slint! {
             TouchArea { clicked => { } }
             Rectangle {
                 width: root.modal == "license" ? min(820px, parent.width - 80px) : root.modal == "mod-plan" || root.modal == "mod-apply" || root.modal == "mod-remove" || root.modal == "mod-result" || root.modal == "mod-manage" ? min(720px, parent.width - 80px) : min(620px, parent.width - 80px);
-                height: root.modal == "license" ? min(720px, parent.height - 80px) : root.modal == "third-party" ? 340px : root.modal == "import" ? min(620px, parent.height - 80px) : root.modal == "mod-plan" ? min(500px * Theme.text-scale + root.linked-targets.length * 68px + 14px, parent.height - 80px) : root.modal == "mod-manage" ? min(620px, parent.height - 80px) : root.modal == "mod-apply" ? min(370px * Theme.text-scale + root.linked-targets.length * 68px + 14px, parent.height - 80px) : root.modal == "mod-result" ? min(300px * Theme.text-scale + root.linked-results.length * 68px + 14px, parent.height - 80px) : root.modal == "loader-change" ? 400px : root.modal == "mod-remove" ? min((root.linked-targets.length > 0 ? 424px : 300px) * Theme.text-scale + root.mod-removal-dependencies.length * 24px + root.linked-targets.length * 68px, parent.height - 80px) : root.modal == "eula" ? 440px : root.modal == "kill" ? 300px : root.modal == "delete-instance" || root.modal == "delete-server" ? 330px : root.modal == "rename" ? 300px : root.modal == "mod-impact" ? min(300px * Theme.text-scale + (root.mod-impact-breaks.length + root.mod-impact-degrades.length + root.mod-impact-unknown.length + root.mod-impact-unidentifiable.length + root.mod-requires-disabled.length + root.mod-requires-absent.length + root.mod-requires-incompatible.length) * 24px, parent.height - 80px) : root.modal == "delete-mod" ? 320px : root.modal == "remove-java-runtime" ? 320px : root.modal == "mod-clash" ? 320px : root.modal == "absent-mods" ? min(250px + root.absent-mods.length * 22px, parent.height - 80px) : root.modal == "make-persistent" ? min(290px + root.promote-servers.length * 28px, parent.height - 80px) : root.modal == "open-pack-link" ? 300px : root.modal == "create-server" ? min((root.create-server-client-id == "" ? 640px : 535px) + (root.create-server-client-id == "" && root.create-server-loader != "Vanilla" ? 44px : 0px), parent.height - 80px) : 570px;
+                height: root.modal == "license" ? min(720px, parent.height - 80px) : root.modal == "third-party" ? 340px : root.modal == "import" ? min(620px, parent.height - 80px) : root.modal == "mod-plan" ? min(500px * Theme.text-scale + root.linked-targets.length * 68px + 14px, parent.height - 80px) : root.modal == "mod-manage" ? min(620px, parent.height - 80px) : root.modal == "mod-apply" ? min(370px * Theme.text-scale + root.linked-targets.length * 68px + 14px, parent.height - 80px) : root.modal == "mod-result" ? min(300px * Theme.text-scale + root.linked-results.length * 68px + 14px, parent.height - 80px) : root.modal == "loader-change" ? 400px : root.modal == "mod-remove" ? min((root.linked-targets.length > 0 ? 424px : 300px) * Theme.text-scale + root.mod-removal-dependencies.length * 24px + root.linked-targets.length * 68px, parent.height - 80px) : root.modal == "eula" ? 440px : root.modal == "kill" ? 300px : root.modal == "delete-instance" || root.modal == "delete-server" ? 330px : root.modal == "rename" ? 300px : root.modal == "snapshot-create" || root.modal == "snapshot-restore" || root.modal == "snapshot-rename" || root.modal == "snapshot-delete" ? 330px : root.modal == "mod-impact" ? min(300px * Theme.text-scale + (root.mod-impact-breaks.length + root.mod-impact-degrades.length + root.mod-impact-unknown.length + root.mod-impact-unidentifiable.length + root.mod-requires-disabled.length + root.mod-requires-absent.length + root.mod-requires-incompatible.length) * 24px, parent.height - 80px) : root.modal == "delete-mod" ? 320px : root.modal == "remove-java-runtime" ? 320px : root.modal == "mod-clash" ? 320px : root.modal == "absent-mods" ? min(250px + root.absent-mods.length * 22px, parent.height - 80px) : root.modal == "make-persistent" ? min(290px + root.promote-servers.length * 28px, parent.height - 80px) : root.modal == "open-pack-link" ? 300px : root.modal == "create-server" ? min((root.create-server-client-id == "" ? 640px : 535px) + (root.create-server-client-id == "" && root.create-server-loader != "Vanilla" ? 44px : 0px), parent.height - 80px) : 570px;
                 x: (parent.width - self.width) / 2;
                 y: (parent.height - self.height) / 2;
                 border-radius: 8px;
@@ -4361,7 +4479,7 @@ slint::slint! {
                 border-color: Theme.border;
                 background: Theme.elevated;
                 VerticalLayout { padding: 22px; spacing: 13px;
-                    HorizontalLayout { cross-axis-alignment: center; Heading { text: root.modal == "create-instance" ? GuiI18n.text("gui-modal-new-instance") : root.modal == "import" ? GuiI18n.text("gui-modal-import") : root.modal == "create-server" ? GuiI18n.text("gui-modal-new-server") : root.modal == "mod-plan" ? GuiI18n.text("gui-modal-install-mod") : root.modal == "mod-manage" ? GuiI18n.text("gui-modal-manage-mod") : root.modal == "loader-change" ? GuiI18n.text("gui-modal-change-loader") : root.modal == "mod-remove" ? GuiI18n.text("gui-modal-remove-mod") : root.modal == "mod-apply" ? GuiI18n.text("gui-modal-apply-mod") : root.modal == "mod-result" ? GuiI18n.text("gui-modal-mod-result") : root.modal == "eula" ? GuiI18n.text("gui-server-eula") : root.modal == "kill" ? GuiI18n.text("gui-modal-force-kill") : root.modal == "delete-instance" ? GuiI18n.text("gui-delete-instance") : root.modal == "delete-server" ? GuiI18n.text("gui-delete-server") : root.modal == "rename" ? GuiI18n.text("gui-modal-rename") : root.modal == "mod-impact" ? GuiI18n.value(root.mod-requires-disabled.length > 0 || root.mod-requires-absent.length > 0 || root.mod-requires-incompatible.length > 0 ? "gui-mod-impact-enable-title" : "gui-mod-impact-disable-title", root.mod-impact-name) : root.modal == "delete-mod" ? GuiI18n.text("gui-modal-delete-mod") : root.modal == "remove-java-runtime" ? GuiI18n.text("gui-java-remove-runtime-title") : root.modal == "mod-clash" ? GuiI18n.text("gui-modal-mod-clash") : root.modal == "absent-mods" ? GuiI18n.text("gui-modal-absent-mods") : root.modal == "make-persistent" ? GuiI18n.text("gui-make-persistent") : root.modal == "open-pack-link" ? GuiI18n.text("gui-open-pack-link") : root.modal == "license" ? GuiI18n.text("gui-modal-apache-license") : GuiI18n.text("gui-third-party-licenses"); font-size: Theme.brand-size; } Rectangle { horizontal-stretch: 1; } IconButton { icon: @image-url("../../../assets/icons/close.svg"); accessible-name: GuiI18n.text("gui-close"); clicked => { if root.modal == "import" { root.close-import-modal(); } else { if root.modal == "mod-plan" { root.abandon-browser-install(); } root.modal = ""; root.modal-error = ""; } } } }
+                    HorizontalLayout { cross-axis-alignment: center; Heading { text: root.modal == "create-instance" ? GuiI18n.text("gui-modal-new-instance") : root.modal == "import" ? GuiI18n.text("gui-modal-import") : root.modal == "create-server" ? GuiI18n.text("gui-modal-new-server") : root.modal == "mod-plan" ? GuiI18n.text("gui-modal-install-mod") : root.modal == "mod-manage" ? GuiI18n.text("gui-modal-manage-mod") : root.modal == "loader-change" ? GuiI18n.text("gui-modal-change-loader") : root.modal == "mod-remove" ? GuiI18n.text("gui-modal-remove-mod") : root.modal == "mod-apply" ? GuiI18n.text("gui-modal-apply-mod") : root.modal == "mod-result" ? GuiI18n.text("gui-modal-mod-result") : root.modal == "eula" ? GuiI18n.text("gui-server-eula") : root.modal == "kill" ? GuiI18n.text("gui-modal-force-kill") : root.modal == "delete-instance" ? GuiI18n.text("gui-delete-instance") : root.modal == "delete-server" ? GuiI18n.text("gui-delete-server") : root.modal == "rename" ? GuiI18n.text("gui-modal-rename") : root.modal == "snapshot-create" ? GuiI18n.text("gui-snapshot-create") : root.modal == "snapshot-restore" ? GuiI18n.text("gui-snapshot-restore") : root.modal == "snapshot-rename" ? GuiI18n.text("gui-snapshot-rename") : root.modal == "snapshot-delete" ? GuiI18n.text("gui-snapshot-delete") : root.modal == "mod-impact" ? GuiI18n.value(root.mod-requires-disabled.length > 0 || root.mod-requires-absent.length > 0 || root.mod-requires-incompatible.length > 0 ? "gui-mod-impact-enable-title" : "gui-mod-impact-disable-title", root.mod-impact-name) : root.modal == "delete-mod" ? GuiI18n.text("gui-modal-delete-mod") : root.modal == "remove-java-runtime" ? GuiI18n.text("gui-java-remove-runtime-title") : root.modal == "mod-clash" ? GuiI18n.text("gui-modal-mod-clash") : root.modal == "absent-mods" ? GuiI18n.text("gui-modal-absent-mods") : root.modal == "make-persistent" ? GuiI18n.text("gui-make-persistent") : root.modal == "open-pack-link" ? GuiI18n.text("gui-open-pack-link") : root.modal == "license" ? GuiI18n.text("gui-modal-apache-license") : GuiI18n.text("gui-third-party-licenses"); font-size: Theme.brand-size; } Rectangle { horizontal-stretch: 1; } IconButton { icon: @image-url("../../../assets/icons/close.svg"); accessible-name: GuiI18n.text("gui-close"); clicked => { if root.modal == "import" { root.close-import-modal(); } else { if root.modal == "mod-plan" { root.abandon-browser-install(); } root.modal = ""; root.modal-error = ""; } } } }
                     Divider { }
                     if root.modal == "create-instance" : VerticalLayout { spacing: 11px; BodyText { text: GuiI18n.text("gui-create-instance-detail"); wrap: word-wrap; } Text { text: GuiI18n.text("gui-name"); color: Theme.text-secondary; font-size: Theme.label-size; } TextField { text <=> root.create-name; placeholder: root.create-name-suggestion; accessible-name: GuiI18n.text("gui-name"); } Text { text: GuiI18n.text("gui-minecraft-release"); color: Theme.text-secondary; font-size: Theme.label-size; } HorizontalLayout { spacing: 8px; ComboBox { horizontal-stretch: 1; model: root.minecraft-releases; current-value <=> root.create-minecraft; selected(value) => { root.create-minecraft = value; root.create-loader-version = ""; root.create-loader-versions = []; root.minecraft-selection-changed("client", value); if root.create-loader != "Vanilla" { root.request-loader-catalog("client", root.create-loader, value); } root.recompute-create-name(); } } FavoriteToggle { version: root.create-minecraft; favorite: root.create-minecraft-favorite; enabled: root.create-minecraft != ""; toggled => { root.toggle-favorite-version(root.create-minecraft); } } } Text { text: GuiI18n.text("gui-loader"); color: Theme.text-secondary; font-size: Theme.label-size; } ComboBox { model: root.create-loaders; current-value <=> root.create-loader; selected(value) => { root.create-loader = value; root.create-loader-version = ""; root.create-loader-versions = []; if value != "Vanilla" { root.request-loader-catalog("client", value, root.create-minecraft); } root.recompute-create-name(); } } if root.create-loader != "Vanilla" : ComboBox { model: root.create-loader-versions; current-value <=> root.create-loader-version; changed current-value => { root.recompute-create-name(); } } HorizontalLayout { BodyText { text: GuiI18n.text("gui-store-persistently"); } Toggle { checked <=> root.create-persistent; } BodyText { text: root.create-persistent ? GuiI18n.text("gui-persistent-root") : GuiI18n.text("gui-temporary-root"); color: Theme.text-muted; } } if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; } ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; } } AppButton { text: GuiI18n.text("gui-create-instance"); tone: "primary"; enabled: root.minecraft-releases.length > 0 && (root.create-name != "" || root.create-name-suggestion != "") && root.create-minecraft != "" && (root.create-loader == "Vanilla" || root.create-loader-version != ""); clicked => { root.submit-create-instance(root.create-name != "" ? root.create-name : root.create-name-suggestion, root.create-minecraft, root.create-loader, root.create-loader-version, root.create-persistent); } } } }
                     if root.modal == "import" : ScrollView {
@@ -4786,6 +4904,30 @@ slint::slint! {
                             }
                         }
                     }
+                    if root.modal == "snapshot-create" : VerticalLayout { spacing: 14px;
+                        BodyText { text: GuiI18n.text("gui-snapshot-create-detail"); wrap: word-wrap; }
+                        FieldLabel { text: GuiI18n.text("gui-snapshot-label"); }
+                        TextField { text <=> root.snapshot-action-label; placeholder: root.snapshot-label-suggestion; accessible-name: GuiI18n.text("gui-snapshot-label"); }
+                        BodyText { text: GuiI18n.text("gui-snapshot-local-note"); color: Theme.text-muted; wrap: word-wrap; }
+                        ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; } } AppButton { text: GuiI18n.text("gui-snapshot-create"); tone: "primary"; enabled: root.snapshot-action-label != "" || root.snapshot-label-suggestion != ""; clicked => { root.modal = ""; root.create-snapshot(root.snapshot-host-kind, root.snapshot-host-id, root.snapshot-action-label != "" ? root.snapshot-action-label : root.snapshot-label-suggestion); } } }
+                    }
+                    if root.modal == "snapshot-restore" : VerticalLayout { spacing: 14px;
+                        BodyText { text: GuiI18n.value("gui-snapshot-restore-detail", root.snapshot-action-label); color: Theme.warning; wrap: word-wrap; }
+                        BodyText { text: GuiI18n.text("gui-snapshot-replacement-note"); wrap: word-wrap; }
+                        LabeledToggle { label: GuiI18n.text("gui-snapshot-safety-copy"); width: 100%; checked <=> root.snapshot-safety-copy; }
+                        ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; } } AppButton { text: GuiI18n.text("gui-snapshot-restore"); tone: "danger"; clicked => { root.modal = ""; root.restore-snapshot(root.snapshot-host-kind, root.snapshot-host-id, root.snapshot-action-id, root.snapshot-safety-copy); } } }
+                    }
+                    if root.modal == "snapshot-rename" : VerticalLayout { spacing: 14px;
+                        BodyText { text: GuiI18n.text("gui-snapshot-rename-detail"); wrap: word-wrap; }
+                        FieldLabel { text: GuiI18n.text("gui-snapshot-label"); }
+                        TextField { text <=> root.snapshot-action-label; accessible-name: GuiI18n.text("gui-snapshot-label"); }
+                        ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; } } AppButton { text: GuiI18n.text("gui-rename"); tone: "primary"; enabled: root.snapshot-action-label != ""; clicked => { root.modal = ""; root.rename-snapshot(root.snapshot-host-kind, root.snapshot-host-id, root.snapshot-action-id, root.snapshot-action-label); } } }
+                    }
+                    if root.modal == "snapshot-delete" : VerticalLayout { spacing: 14px;
+                        BodyText { text: GuiI18n.value("gui-snapshot-delete-detail", root.snapshot-action-label); color: Theme.warning; wrap: word-wrap; }
+                        BodyText { text: GuiI18n.text("gui-snapshot-delete-note"); wrap: word-wrap; }
+                        ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; } } AppButton { text: GuiI18n.text("gui-delete"); tone: "danger"; clicked => { root.modal = ""; root.delete-snapshot(root.snapshot-host-kind, root.snapshot-host-id, root.snapshot-action-id); } } }
+                    }
                     if root.modal == "delete-mod" : VerticalLayout { spacing: 14px; BodyText { text: GuiI18n.value("gui-delete-mod-detail", root.pending-action-name); color: Theme.warning; wrap: word-wrap; } BodyText { text: GuiI18n.text("gui-delete-mod-note"); wrap: word-wrap; } if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; } ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; root.modal-error = ""; } } AppButton { text: GuiI18n.text("gui-delete"); tone: "danger"; clicked => { root.delete-hand-placed-mod(root.pending-action-kind, root.pending-action-id, root.mod-action-path); } } } }
                     if root.modal == "remove-java-runtime" : VerticalLayout { spacing: 14px; BodyText { text: GuiI18n.value("gui-java-remove-runtime-detail", root.pending-action-name); color: Theme.warning; wrap: word-wrap; } BodyText { text: root.pending-action-id; color: Theme.text-muted; wrap: word-wrap; } BodyText { text: GuiI18n.text("gui-java-remove-runtime-note"); wrap: word-wrap; } if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; } ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; root.modal-error = ""; } } AppButton { text: GuiI18n.text("gui-remove"); tone: "danger"; clicked => { root.remove-java-runtime(root.pending-action-id); root.modal = ""; root.modal-error = ""; } } } }
                     if root.modal == "mod-clash" && root.mod-clash-index < root.mod-clashes.length : VerticalLayout { spacing: 14px; BodyText { text: GuiI18n.value("gui-mod-clash-detail", root.mod-clashes[root.mod-clash-index].file-name); wrap: word-wrap; } if root.mod-clashes[root.mod-clash-index].existing-is-disabled : BodyText { text: GuiI18n.text("gui-mod-clash-disabled"); color: Theme.warning; wrap: word-wrap; } if root.mod-clashes.length > 1 : BodyText { text: GuiI18n.values("gui-mod-clash-progress", root.mod-clash-index + 1, root.mod-clashes.length); color: Theme.text-muted; font-size: Theme.caption-size; } ActionRow { AppButton { text: GuiI18n.text("gui-skip-all"); clicked => { root.resolve-mod-clash("skip-all"); } } AppButton { text: GuiI18n.text("gui-overwrite-all"); clicked => { root.resolve-mod-clash("overwrite-all"); } } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-skip"); clicked => { root.resolve-mod-clash("skip"); } } AppButton { text: GuiI18n.text("gui-overwrite"); tone: "primary"; clicked => { root.resolve-mod-clash("overwrite"); } } } }
@@ -4825,7 +4967,7 @@ slint::slint! {
                         ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; root.modal-error = ""; } } AppButton { text: GuiI18n.text("gui-make-persistent-confirm"); tone: "primary"; clicked => { root.submit-make-persistent(root.pending-action-id); } } }
                     }
                     if root.modal == "absent-mods" : VerticalLayout { spacing: 14px; BodyText { text: GuiI18n.count("gui-absent-mods-detail", root.absent-mods.length); wrap: word-wrap; } ScrollView { height: min(140px, root.absent-mods.length * 22px); vertical-stretch: 0; viewport-width: self.width; VerticalLayout { spacing: 2px; for name in root.absent-mods : BodyText { text: "\u{2022} " + name; color: Theme.text-secondary; font-size: Theme.caption-size; overflow: elide; } } } BodyText { text: GuiI18n.text("gui-absent-mods-note"); color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; } ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; } } AppButton { text: GuiI18n.text("gui-copy-without-them"); clicked => { root.duplicate-client-deciding(root.pending-action-id, true); } } AppButton { text: GuiI18n.text("gui-copy-with-them"); tone: "primary"; clicked => { root.duplicate-client-deciding(root.pending-action-id, false); } } } }
-                    if root.modal == "delete-instance" || root.modal == "delete-server" : VerticalLayout { spacing: 14px; BodyText { text: GuiI18n.value(root.modal == "delete-instance" ? "gui-delete-instance-detail" : "gui-delete-server-detail", root.pending-action-name); color: Theme.warning; wrap: word-wrap; } BodyText { text: GuiI18n.text("gui-delete-choice-detail"); wrap: word-wrap; } if root.modal == "delete-instance" && root.pending-action-linked-servers > 0 : BodyText { text: GuiI18n.count("gui-delete-instance-linked", root.pending-action-linked-servers); color: Theme.warning; wrap: word-wrap; } if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; } ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; } } AppButton { text: GuiI18n.text("gui-remove-from-ephervex"); clicked => { if root.modal == "delete-instance" { root.delete-client(root.pending-action-id, false); } else { root.delete-server(root.pending-action-id, false); } } } AppButton { text: GuiI18n.text("gui-delete-files"); tone: "danger"; clicked => { if root.modal == "delete-instance" { root.delete-client(root.pending-action-id, true); } else { root.delete-server(root.pending-action-id, true); } } } } }
+                    if root.modal == "delete-instance" || root.modal == "delete-server" : VerticalLayout { spacing: 14px; BodyText { text: GuiI18n.value(root.modal == "delete-instance" ? "gui-delete-instance-detail" : "gui-delete-server-detail", root.pending-action-name); color: Theme.warning; wrap: word-wrap; } BodyText { text: GuiI18n.text("gui-delete-choice-detail"); wrap: word-wrap; } BodyText { text: root.pending-snapshot-deletion-note; color: Theme.warning; wrap: word-wrap; } if root.modal == "delete-instance" && root.pending-action-linked-servers > 0 : BodyText { text: GuiI18n.count("gui-delete-instance-linked", root.pending-action-linked-servers); color: Theme.warning; wrap: word-wrap; } if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; } ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; } } AppButton { text: GuiI18n.text("gui-remove-from-ephervex"); clicked => { if root.modal == "delete-instance" { root.delete-client(root.pending-action-id, false); } else { root.delete-server(root.pending-action-id, false); } } } AppButton { text: GuiI18n.text("gui-delete-files"); tone: "danger"; clicked => { if root.modal == "delete-instance" { root.delete-client(root.pending-action-id, true); } else { root.delete-server(root.pending-action-id, true); } } } } }
                     if root.modal == "license" : ScrollView { Text { text: root.license-text; color: Theme.text-secondary; font-family: Theme.mono-family; font-size: Theme.label-size; wrap: word-wrap; } }
                     if root.modal == "third-party" : VerticalLayout { spacing: 12px; BodyText { text: GuiI18n.text("gui-third-party-unavailable"); wrap: word-wrap; } BodyText { text: GuiI18n.text("gui-slint-attribution"); color: Theme.text-muted; wrap: word-wrap; } ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-close"); tone: "primary"; clicked => { root.modal = ""; } } } }
                 }

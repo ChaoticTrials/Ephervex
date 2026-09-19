@@ -231,6 +231,7 @@ fn client_workspace_with(ui: &AppWindow, row: InstanceRow) {
 
 fn temporary_instance() -> InstanceRow {
     InstanceRow {
+        snapshot_deletion_note: "Deleting files also deletes 2 retained snapshots.".into(),
         id: "repro-client".into(),
         name: "Repro Client".into(),
         minecraft: "1.21.1".into(),

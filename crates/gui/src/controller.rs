@@ -36,7 +36,7 @@ use crate::ui::{
     AccountRow, ActivityRow, AppWindow, DiagnosticRow, GuiI18n, ImpactRow, ImportBlockedRow,
     ImportDuplicateRow, ImportOptionRow, InstanceRow, JavaRow, LinkedTargetRow, LocalModClashRow,
     LogChunk, ModRow, ModSearchRow, ModVersionRow, PendingEntityRow, PromoteServerRow, RelationRow,
-    RunningRow, ServerRow, Theme, WindowSizePreview,
+    RunningRow, ServerRow, SnapshotRow, Theme, WindowSizePreview,
 };
 use crate::window_aspect;
 
@@ -2076,6 +2076,7 @@ fn register_callbacks(
     register_server_actions(ui, commands, live_viewer);
     register_mod_state_actions(ui, commands, local_mods);
     register_diagnostics(ui, commands);
+    register_snapshot_actions(ui, commands);
     register_live_viewer(ui, commands, live_viewer);
     register_settings(ui, commands);
     register_minecraft_defaults(ui, commands, minecraft, keys);
@@ -2089,6 +2090,93 @@ fn register_callbacks(
 
     let sender = commands.clone();
     ui.on_cancel_operation(move |id| send(&sender, Command::CancelOperation(id.into())));
+}
+
+/// The moment of capture, offered as a snapshot's label when none is typed.
+///
+/// Sorts chronologically as text, which is what a list of them is read in.
+const SNAPSHOT_LABEL_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
+
+fn register_snapshot_actions(ui: &AppWindow, commands: &Sender<Command>) {
+    // Local time, because the label is read next to the host's own clock.
+    let weak = ui.as_weak();
+    ui.on_recompute_snapshot_label(move || {
+        if let Some(ui) = weak.upgrade() {
+            ui.set_snapshot_label_suggestion(
+                chrono::Local::now()
+                    .format(SNAPSHOT_LABEL_FORMAT)
+                    .to_string()
+                    .into(),
+            );
+        }
+    });
+
+    let sender = commands.clone();
+    ui.on_load_snapshots(move |kind, id| {
+        if let Some(host) = backend::parse_mod_host(&kind, &id) {
+            send(&sender, Command::LoadSnapshots(host));
+        }
+    });
+
+    let sender = commands.clone();
+    ui.on_create_snapshot(move |kind, id, label| {
+        if let Some(host) = backend::parse_mod_host(&kind, &id) {
+            send(
+                &sender,
+                Command::CreateSnapshot {
+                    host,
+                    label: label.into(),
+                },
+            );
+        }
+    });
+
+    let sender = commands.clone();
+    ui.on_restore_snapshot(move |kind, id, snapshot, safety_snapshot| {
+        let Some(host) = backend::parse_mod_host(&kind, &id) else {
+            return;
+        };
+        let Some(snapshot) = backend::parse_snapshot_id(&snapshot) else {
+            return;
+        };
+        send(
+            &sender,
+            Command::RestoreSnapshot {
+                host,
+                snapshot,
+                safety_snapshot,
+            },
+        );
+    });
+
+    let sender = commands.clone();
+    ui.on_rename_snapshot(move |kind, id, snapshot, label| {
+        let Some(host) = backend::parse_mod_host(&kind, &id) else {
+            return;
+        };
+        let Some(snapshot) = backend::parse_snapshot_id(&snapshot) else {
+            return;
+        };
+        send(
+            &sender,
+            Command::RenameSnapshot {
+                host,
+                snapshot,
+                label: label.into(),
+            },
+        );
+    });
+
+    let sender = commands.clone();
+    ui.on_delete_snapshot(move |kind, id, snapshot| {
+        let Some(host) = backend::parse_mod_host(&kind, &id) else {
+            return;
+        };
+        let Some(snapshot) = backend::parse_snapshot_id(&snapshot) else {
+            return;
+        };
+        send(&sender, Command::DeleteSnapshot { host, snapshot });
+    });
 }
 
 thread_local! {
@@ -5416,6 +5504,32 @@ fn apply_event(
             ui.set_diagnostic_content(message.into());
             ui.set_status_message(lookup("gui-diagnostic-disappeared").into());
         }
+        Event::HostSnapshots(data) => {
+            let current = if data.host_kind == "server" {
+                ui.get_selected_server_id()
+            } else {
+                ui.get_selected_instance_id()
+            };
+            if presentation::result_is_current(&data.host, &current) {
+                ui.set_snapshots(model(
+                    data.rows
+                        .into_iter()
+                        .map(|snapshot| SnapshotRow {
+                            id: snapshot.id.into(),
+                            label: snapshot.label.into(),
+                            captured: snapshot.captured.into(),
+                            size: snapshot.size.into(),
+                            mods: snapshot.mods.into(),
+                            origin: snapshot.origin.into(),
+                            copy_method: snapshot.copy_method.into(),
+                            uses_full_space: snapshot.uses_full_space,
+                        })
+                        .collect(),
+                ));
+                ui.set_snapshot_total(data.total.into());
+                ui.set_snapshots_have_plain_copies(data.has_plain_copies);
+            }
+        }
         Event::JavaRuntimes(rows) => ui.set_java_runtimes(model(java_rows(rows))),
         Event::Activity(activity) => {
             upsert_activity(&mut activities.borrow_mut(), activity);
@@ -6148,6 +6262,7 @@ fn apply_instance_snapshot(
     let mut instance_rows = instances
         .into_iter()
         .map(|item| InstanceRow {
+            snapshot_deletion_note: item.snapshot_deletion_note.into(),
             id: item.id.into(),
             name: item.name.into(),
             minecraft: item.minecraft.into(),
@@ -6279,6 +6394,7 @@ fn global_selection_index(rows: &[ServerRow], previous: &str) -> Option<usize> {
 
 fn server_row(item: crate::presentation::ServerPresentation) -> ServerRow {
     ServerRow {
+        snapshot_deletion_note: item.snapshot_deletion_note.into(),
         id: item.id.into(),
         name: item.name.into(),
         minecraft: item.minecraft.into(),
@@ -8168,6 +8284,24 @@ mod tests {
         )));
         assert!(source.contains("root.load-diagnostics(\"client\""));
         assert!(source.contains("root.load-diagnostics(\"server\""));
+    }
+
+    #[test]
+    fn snapshot_management_is_contextual_for_clients_and_servers() {
+        let source = include_str!("ui.rs");
+        let replacement_note = "gui-snapshot-replacement-note";
+        assert!(source.contains("root.load-snapshots(\"client\", root.selected-instance-id)"));
+        assert!(source.contains("root.load-snapshots(\"server\", root.selected-server-id)"));
+        assert!(source.contains("root.snapshot-safety-copy = true"));
+        assert!(source.contains(&format!("GuiI18n.text(\"{replacement_note}\")")));
+        assert!(source.contains("root.snapshots-have-plain-copies"));
+        assert_eq!(
+            source
+                .matches("root.pending-snapshot-deletion-note = ")
+                .count(),
+            4
+        );
+        assert!(source.contains("text: root.pending-snapshot-deletion-note"));
     }
 
     #[test]

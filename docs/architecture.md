@@ -129,6 +129,23 @@ Non-empty `.launcher/retired/` or `.launcher/staging/` directories are always
 suspicious after restart. Reconciliation adds host attention and leaves every
 entry in place. A later operation must not silently erase that evidence.
 
+## Local safety snapshots
+
+Clients and local servers expose the same snapshot service through core. A
+snapshot captures the complete game directory, retained source state, and
+canonical host metadata under `.launcher/snapshots/`. It prefers reflinks,
+falls back to independent byte copies, preserves symlinks, and never uses hard
+links for mutable Minecraft data. Snapshot history and transaction state are
+not captured. See ADR 0035.
+
+The CLI exposes create, list, restore, rename, and delete as scriptable commands
+with structured output. Destructive commands require explicit confirmation.
+The desktop exposes the same operations on both client and server workspaces,
+including actual apparent size, copy method, origin, and mod counts. Creation
+and restoration run through the shared cancellable operation infrastructure.
+Retention is always user-managed. The host deletion dialog includes the number
+of retained snapshots that deleting its files also removes.
+
 ## Reusable artifact cache budget
 
 The cache under the XDG cache root is a disposable optimization, never a source

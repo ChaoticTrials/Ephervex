@@ -163,6 +163,7 @@ fn instances(ui: &AppWindow, rows: &[InstanceRow]) {
 
 fn connectable() -> InstanceRow {
     InstanceRow {
+        snapshot_deletion_note: "Deleting files also deletes 2 retained snapshots.".into(),
         id: "repro-client".into(),
         name: LONG_NAME.into(),
         minecraft: "1.16.5".into(),

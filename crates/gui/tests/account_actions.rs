@@ -266,6 +266,7 @@ fn account(id: &str, name: &str, is_default: bool) -> AccountRow {
 
 fn instance() -> InstanceRow {
     InstanceRow {
+        snapshot_deletion_note: "Deleting files also deletes 2 retained snapshots.".into(),
         id: "repro-client".into(),
         name: "Repro Client".into(),
         minecraft: "1.21.1".into(),
