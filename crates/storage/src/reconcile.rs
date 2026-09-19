@@ -77,6 +77,11 @@ pub struct ReconciliationReport {
     pub relocated: Vec<ReconciledRecord>,
     /// Valid canonical metadata that replaced a disagreeing SQLite copy.
     pub index_repaired: Vec<ReconciledRecord>,
+    /// Hosts whose launcher-owned staging or rollback directory is not empty.
+    ///
+    /// The files are left untouched. This report and the persisted attention
+    /// reason make the interruption visible until the user resolves it.
+    pub interrupted_hosts: Vec<ReconciledRecord>,
     /// Indexed recovery copies whose canonical metadata is unavailable or
     /// unusable. These remain visible but must not be launched or mutated.
     pub persistence_unhealthy: Vec<ReconciledRecord>,
@@ -109,6 +114,7 @@ impl ReconciliationReport {
             && self.recovered.is_empty()
             && self.relocated.is_empty()
             && self.index_repaired.is_empty()
+            && self.interrupted_hosts.is_empty()
             && self.persistence_unhealthy.is_empty()
             && self.server_conflicts.is_empty()
             && self.unfinished_instances.is_empty()
@@ -120,6 +126,7 @@ impl ReconciliationReport {
     #[must_use]
     pub fn needs_attention(&self) -> bool {
         !self.missing_persistent.is_empty()
+            || !self.interrupted_hosts.is_empty()
             || !self.persistence_unhealthy.is_empty()
             || !self.server_conflicts.is_empty()
             || !self.unfinished_instances.is_empty()
@@ -148,6 +155,7 @@ pub fn reconcile(registry: &Registry) -> Result<ReconciliationReport, RegistryEr
             recovered = report.recovered.len(),
             relocated = report.relocated.len(),
             index_repaired = report.index_repaired.len(),
+            interrupted_hosts = report.interrupted_hosts.len(),
             persistence_unhealthy = report.persistence_unhealthy.len(),
             server_conflicts = report.server_conflicts.len(),
             "startup reconciliation complete"
@@ -182,14 +190,20 @@ fn reconcile_clients(
         }
 
         if record.root.is_dir() {
+            let mut changed = false;
             // The disk came back. Clearing the warning here is what stops a
             // remounted drive from leaving a permanent "needs attention" badge.
             if record.attention.contains(&AttentionReason::MissingRoot) {
                 record
                     .attention
                     .retain(|reason| reason != &AttentionReason::MissingRoot);
+                changed = true;
+                report.recovered.push(entry.clone());
+            }
+            changed |=
+                report_interrupted_state(&record.root, &mut record.attention, &entry, report);
+            if changed {
                 registry.update_client(&mut record)?;
-                report.recovered.push(entry);
             }
             continue;
         }
@@ -294,12 +308,18 @@ fn reconcile_servers(
                     continue;
                 }
             }
+            let mut changed = false;
             if record.attention.contains(&AttentionReason::MissingRoot) {
                 record
                     .attention
                     .retain(|reason| reason != &AttentionReason::MissingRoot);
+                changed = true;
+                report.recovered.push(entry.clone());
+            }
+            changed |=
+                report_interrupted_state(&record.root, &mut record.attention, &entry, report);
+            if changed {
                 registry.update_server(&mut record)?;
-                report.recovered.push(entry);
             }
             continue;
         }
@@ -547,6 +567,42 @@ fn candidate_directories(root: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Whether launcher-owned transaction state needs a person's attention.
+///
+/// An unreadable path, a non-directory at the reserved name, or any directory
+/// entry counts. Reconciliation must fail visible rather than assume an
+/// unfamiliar shape is disposable.
+fn has_interrupted_state(root: &Path) -> bool {
+    [metadata::retired_dir(root), metadata::staging_dir(root)]
+        .into_iter()
+        .any(|path| match std::fs::symlink_metadata(&path) {
+            Ok(file_type) if file_type.is_dir() => {
+                std::fs::read_dir(path).map_or(true, |mut entries| entries.next().is_some())
+            }
+            Ok(_) => true,
+            Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+        })
+}
+
+fn report_interrupted_state(
+    root: &Path,
+    attention: &mut Vec<AttentionReason>,
+    record: &ReconciledRecord,
+    report: &mut ReconciliationReport,
+) -> bool {
+    if !has_interrupted_state(root) {
+        return false;
+    }
+
+    report.interrupted_hosts.push(record.clone());
+    if attention.contains(&AttentionReason::InterruptedMutation) {
+        false
+    } else {
+        attention.push(AttentionReason::InterruptedMutation);
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -776,6 +832,108 @@ mod tests {
 
         assert!(!reconcile(&registry).expect("first").is_empty());
         assert!(reconcile(&registry).expect("second").is_empty());
+    }
+
+    #[test]
+    fn interrupted_client_mutation_is_reported_persisted_and_left_untouched() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = registry
+            .create_published_client(NewClient::new(
+                "interrupted client",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create");
+        let retired_file = metadata::retired_dir(&client.root).join("mods/example.jar");
+        std::fs::create_dir_all(retired_file.parent().expect("parent")).expect("create retired");
+        std::fs::write(&retired_file, b"original mod").expect("write retired file");
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert_eq!(
+            report
+                .interrupted_hosts
+                .iter()
+                .map(|record| record.reference)
+                .collect::<Vec<_>>(),
+            vec![RecordRef::Client(client.id)]
+        );
+        assert!(report.needs_attention());
+        assert_eq!(
+            std::fs::read(&retired_file).expect("retired file remains"),
+            b"original mod"
+        );
+        assert!(
+            registry
+                .client(client.id)
+                .expect("client")
+                .attention
+                .contains(&AttentionReason::InterruptedMutation)
+        );
+
+        let restarted = environment.registry();
+        let after_restart = reconcile(&restarted).expect("reconcile after restart");
+        assert_eq!(after_restart.interrupted_hosts.len(), 1);
+        assert_eq!(
+            std::fs::read(&retired_file).expect("retired file remains after restart"),
+            b"original mod"
+        );
+    }
+
+    #[test]
+    fn interrupted_server_mutation_is_reported_without_deleting_staging() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let server = registry
+            .create_server(NewServer::new(
+                "interrupted server",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create");
+        let staged_file = metadata::staging_dir(&server.root).join("pending.jar");
+        std::fs::create_dir_all(staged_file.parent().expect("parent")).expect("create staging");
+        std::fs::write(&staged_file, b"pending mod").expect("write staged file");
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert_eq!(report.interrupted_hosts.len(), 1);
+        assert_eq!(
+            report.interrupted_hosts[0].reference,
+            RecordRef::Server(server.id)
+        );
+        assert_eq!(
+            std::fs::read(&staged_file).expect("staged file remains"),
+            b"pending mod"
+        );
+        assert!(
+            registry
+                .server(server.id)
+                .expect("server")
+                .attention
+                .contains(&AttentionReason::InterruptedMutation)
+        );
+    }
+
+    #[test]
+    fn empty_transaction_directories_do_not_need_attention() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = registry
+            .create_published_client(NewClient::new(
+                "clean client",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create");
+        std::fs::create_dir_all(metadata::retired_dir(&client.root)).expect("create retired");
+        std::fs::create_dir_all(metadata::staging_dir(&client.root)).expect("create staging");
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert!(report.interrupted_hosts.is_empty());
+        assert!(!report.needs_attention());
     }
 
     #[test]
