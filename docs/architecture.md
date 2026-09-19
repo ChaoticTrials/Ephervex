@@ -609,6 +609,22 @@ relations are excluded from the closure structurally, by a relation-kind
 predicate the disable path passes `Required` to, so there is no flag that widens
 it.
 
+A frontend asks the question and renders the answer; it re-derives none of it.
+A mod row's switch reports a request rather than setting its own position: the
+launcher may refuse it, or act on it and several other mods besides, so what the
+switch shows has to come from what actually happened. The rows are written into
+the model already on screen rather than replacing it, which keeps a half-finished
+double click alive, and that is exactly why a switch may not decide its own
+position - an element that had assigned to its own state would keep reporting a
+click from minutes ago, for whichever mod later occupied that row.
+The desktop application turns one mod off by asking what else that affects and
+then taking one of three paths: nothing affected applies straight away, an
+affected set with the confirmation wanted opens a dialog and changes nothing
+yet, and an affected set with the confirmation turned off applies the whole
+cascade and reports it in a toast. Deleting a jar asks the same question,
+because the loader sees the same absence either way. The dialog carries the
+preference's own switch, so the decision is recorded where it is made.
+
 Whether a change that affects other mods stops to be confirmed is one global
 preference, `[mods] warn_on_dependency_impact`, defaulting to on. It decides
 only whether a frontend asks. Off does not mean the change is made blind and does

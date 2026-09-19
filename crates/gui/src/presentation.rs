@@ -10,10 +10,10 @@ use std::time::{Duration, Instant};
 
 use ephervex_core::{
     ARTIFACT_CACHE_LIMIT_PRESETS, ArtifactCacheLimit, ArtifactCacheLimitError, BlockedProviderFile,
-    ByteUnit, ClientRecord, DEFAULT_ARTIFACT_CACHE_LIMIT_BYTES, DiagnosticKind, DiagnosticScope,
-    DuplicateFileReason, DuplicateProviderFile, LaunchAndConnectAvailability, NetworkAccess,
-    PackAnalysis, PackSide, ProviderFileIdentity, RuntimeClassification, ServerRecord,
-    ServerStatus, format_binary_bytes,
+    ByteUnit, ClientRecord, DEFAULT_ARTIFACT_CACHE_LIMIT_BYTES, DependentMods, DiagnosticKind,
+    DiagnosticScope, DuplicateFileReason, DuplicateProviderFile, ImpactedMod,
+    LaunchAndConnectAvailability, NetworkAccess, PackAnalysis, PackSide, ProviderFileIdentity,
+    RequiredMods, RuntimeClassification, ServerRecord, ServerStatus, format_binary_bytes,
 };
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use ephervex_model::{
@@ -839,9 +839,252 @@ pub const fn mod_browser_has_no_results(
     finished_successfully && visible_rows == 0 && !has_continuation
 }
 
+/// One mod named by a dependency question, as a row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImpactRowPresentation {
+    pub name: String,
+    pub logical_path: String,
+    /// How far from the mod that was asked about. One is a direct dependent.
+    pub distance: i32,
+}
+
+impl From<&ImpactedMod> for ImpactRowPresentation {
+    fn from(entry: &ImpactedMod) -> Self {
+        Self {
+            name: entry.name.clone(),
+            logical_path: entry.logical_path.to_string_lossy().into_owned(),
+            distance: i32::try_from(entry.distance).unwrap_or(i32::MAX),
+        }
+    }
+}
+
+/// What a frontend shows before a mod is turned off or its jar deleted.
+///
+/// Pure: every list and every decision is settled here, so the markup renders
+/// what it is given and decides nothing. The four groups stay apart because
+/// each one says something different and needs different words - "these stop
+/// working", "these lose a feature", "Ephervex has not asked about these", and
+/// "Ephervex cannot ask about these".
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModImpactPresentation {
+    pub host_kind: String,
+    pub host_id: String,
+    pub path: String,
+    pub name: String,
+    /// Whether the jar is being deleted rather than turned off. The dependents
+    /// are the same either way; only the wording differs.
+    pub deleting: bool,
+    pub breaks: Vec<ImpactRowPresentation>,
+    pub degrades: Vec<ImpactRowPresentation>,
+    pub unknown: Vec<ImpactRowPresentation>,
+    pub unidentifiable: Vec<ImpactRowPresentation>,
+}
+
+impl ModImpactPresentation {
+    /// Builds the view for one answered question.
+    pub fn new(host_kind: &str, host_id: &str, deleting: bool, impact: &DependentMods) -> Self {
+        Self {
+            host_kind: host_kind.to_owned(),
+            host_id: host_id.to_owned(),
+            path: impact.target.logical_path.to_string_lossy().into_owned(),
+            name: impact.target.name.clone(),
+            deleting,
+            breaks: impact.breaks.iter().map(Into::into).collect(),
+            degrades: impact.degrades.iter().map(Into::into).collect(),
+            unknown: impact.unknown.iter().map(Into::into).collect(),
+            unidentifiable: impact.unidentifiable.iter().map(Into::into).collect(),
+        }
+    }
+
+    /// Whether there is nothing here worth stopping the user for.
+    #[must_use]
+    pub fn is_silent(&self) -> bool {
+        self.breaks.is_empty()
+            && self.degrades.is_empty()
+            && self.unknown.is_empty()
+            && self.unidentifiable.is_empty()
+    }
+
+    /// Whether turning the named mod off takes other mods with it.
+    ///
+    /// The cascade offer appears only when there is something to cascade; with
+    /// nothing proven, the dialog is telling the user what it does not know.
+    #[must_use]
+    pub fn has_cascade(&self) -> bool {
+        !self.breaks.is_empty()
+    }
+
+    /// Every mod the cascade would turn off, the target last.
+    ///
+    /// The order is the one the batch applies: what everything needs goes
+    /// last, so no interrupted prefix leaves a set that cannot load.
+    #[must_use]
+    pub fn cascade_paths(&self) -> Vec<String> {
+        let mut paths: Vec<String> = self
+            .breaks
+            .iter()
+            .map(|entry| entry.logical_path.clone())
+            .collect();
+        paths.push(self.path.clone());
+        paths
+    }
+}
+
+/// What a frontend shows before a mod is turned back on.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModRequirementPresentation {
+    pub host_kind: String,
+    pub host_id: String,
+    pub path: String,
+    pub name: String,
+    /// Installed here and turned off. Turning them on is offered.
+    pub disabled: Vec<ImpactRowPresentation>,
+    /// Not installed here at all. Reported and never fetched: installing one
+    /// reaches a catalog, which a toggle must not do.
+    pub absent: Vec<ImpactRowPresentation>,
+    /// Loading now, and declared incompatible with the mod being turned on.
+    /// A warning, never a refusal.
+    pub incompatible: Vec<ImpactRowPresentation>,
+}
+
+impl ModRequirementPresentation {
+    /// Builds the view for one answered question.
+    pub fn new(host_kind: &str, host_id: &str, needs: &RequiredMods) -> Self {
+        Self {
+            host_kind: host_kind.to_owned(),
+            host_id: host_id.to_owned(),
+            path: needs.target.logical_path.to_string_lossy().into_owned(),
+            name: needs.target.name.clone(),
+            disabled: needs.disabled.iter().map(Into::into).collect(),
+            absent: needs.absent.iter().map(Into::into).collect(),
+            incompatible: needs.incompatible.iter().map(Into::into).collect(),
+        }
+    }
+
+    /// Whether there is nothing here worth stopping the user for.
+    #[must_use]
+    pub fn is_silent(&self) -> bool {
+        self.disabled.is_empty() && self.absent.is_empty() && self.incompatible.is_empty()
+    }
+
+    /// Whether turning the named mod on brings others with it.
+    #[must_use]
+    pub fn has_cascade(&self) -> bool {
+        !self.disabled.is_empty()
+    }
+
+    /// Every mod the cascade would turn on, the target last.
+    ///
+    /// Reverse of a disable: what the others need goes first, so no
+    /// interrupted prefix loads a mod before what it needs.
+    #[must_use]
+    pub fn cascade_paths(&self) -> Vec<String> {
+        let mut paths: Vec<String> = self
+            .disabled
+            .iter()
+            .map(|entry| entry.logical_path.clone())
+            .collect();
+        paths.push(self.path.clone());
+        paths
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
+
+    use ephervex_core::{DependencyKnowledge, ImpactedMod, ModOrigin, ModPresence};
+
+    fn impacted(name: &str, distance: u32) -> ImpactedMod {
+        ImpactedMod {
+            logical_path: std::path::PathBuf::from(format!("mods/{name}")),
+            name: name.to_owned(),
+            presence: ModPresence::Installed,
+            origin: ModOrigin::UserSelected,
+            project_id: None,
+            knowledge: DependencyKnowledge::Recorded,
+            distance,
+        }
+    }
+
+    fn library_impact() -> DependentMods {
+        DependentMods {
+            target: impacted("LibX.jar", 0),
+            breaks: vec![
+                impacted("SkyblockBuilder.jar", 1),
+                impacted("SkyGUIs.jar", 1),
+                impacted("UtilitiX.jar", 1),
+            ],
+            degrades: Vec::new(),
+            unknown: Vec::new(),
+            unidentifiable: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_cascade_turns_the_named_mod_off_last() {
+        // Any prefix of this list has to leave a set the loader can start, so
+        // what everything needs cannot go first.
+        let view = ModImpactPresentation::new("client", "an-id", false, &library_impact());
+        assert!(view.has_cascade());
+        assert_eq!(
+            view.cascade_paths().last().map(String::as_str),
+            Some("mods/LibX.jar")
+        );
+        assert_eq!(view.cascade_paths().len(), 4);
+    }
+
+    #[test]
+    fn enabling_turns_what_it_needs_on_first() {
+        let needs = RequiredMods {
+            target: impacted("SkyGUIs.jar", 0),
+            disabled: vec![impacted("LibX.jar", 1), impacted("SkyblockBuilder.jar", 1)],
+            absent: Vec::new(),
+            incompatible: Vec::new(),
+        };
+        let view = ModRequirementPresentation::new("client", "an-id", &needs);
+        let paths = view.cascade_paths();
+        assert_eq!(paths.first().map(String::as_str), Some("mods/LibX.jar"));
+        assert_eq!(paths.last().map(String::as_str), Some("mods/SkyGUIs.jar"));
+    }
+
+    #[test]
+    fn a_mod_nothing_depends_on_asks_nothing() {
+        let view = ModImpactPresentation::new(
+            "client",
+            "an-id",
+            false,
+            &DependentMods {
+                target: impacted("UtilitiX.jar", 0),
+                breaks: Vec::new(),
+                degrades: Vec::new(),
+                unknown: Vec::new(),
+                unidentifiable: Vec::new(),
+            },
+        );
+        assert!(view.is_silent(), "nothing to put in front of the user");
+        assert!(!view.has_cascade());
+    }
+
+    #[test]
+    fn an_unproven_list_alone_is_still_worth_showing_and_offers_no_cascade() {
+        // The dialog is telling the user what it does not know. Offering to
+        // turn off mods it cannot prove anything about would be a guess.
+        let view = ModImpactPresentation::new(
+            "client",
+            "an-id",
+            false,
+            &DependentMods {
+                target: impacted("LibX.jar", 0),
+                breaks: Vec::new(),
+                degrades: Vec::new(),
+                unknown: vec![impacted("Mystery.jar", 1)],
+                unidentifiable: Vec::new(),
+            },
+        );
+        assert!(!view.is_silent());
+        assert!(!view.has_cascade());
+    }
 
     use std::path::PathBuf;
     use std::{net::IpAddr, num::NonZeroU16};

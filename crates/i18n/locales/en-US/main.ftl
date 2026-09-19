@@ -1764,6 +1764,55 @@ gui-renamed = Renamed to { $value }.
 gui-delete = Delete
 gui-delete-mod = Delete { $value }
 gui-remove-mod = Remove { $value }
+gui-mod-impact-disable-title = { $value } is needed by other mods
+gui-mod-impact-enable-title = { $value } needs other mods
+gui-mod-impact-breaks = { $count ->
+    [one] One mod requires it and will stop loading:
+   *[other] { $count } mods require it and will stop loading:
+}
+gui-mod-impact-needs = { $count ->
+    [one] It needs one mod that is turned off:
+   *[other] It needs { $count } mods that are turned off:
+}
+gui-mod-impact-absent = { $count ->
+    [one] One mod it needs is not installed here. Add it from the mod browser:
+   *[other] { $count } mods it needs are not installed here. Add them from the mod browser:
+}
+gui-mod-impact-incompatible = { $count ->
+    [one] It says it does not work alongside one mod that is loading:
+   *[other] It says it does not work alongside { $count } mods that are loading:
+}
+gui-mod-impact-degrades = { $count ->
+    [one] One mod lists it as optional and will keep loading with less:
+   *[other] { $count } mods list it as optional and will keep loading with less:
+}
+gui-mod-impact-unknown = { $count ->
+    [one] Ephervex has not recorded what one other mod requires, so it cannot tell:
+   *[other] Ephervex has not recorded what { $count } other mods require, so it cannot tell:
+}
+gui-mod-impact-unidentifiable = { $count ->
+    [one] Ephervex cannot tell what one other jar is:
+   *[other] Ephervex cannot tell what { $count } other jars are:
+}
+gui-mod-impact-through = { $first } (through { $second } mods)
+gui-mod-impact-refresh = Refresh Dependencies
+gui-mod-impact-cascade-off = Turn those off too
+gui-mod-impact-cascade-on = Turn those on too
+gui-mod-impact-remember = Do not ask again
+gui-mod-impact-turn-off = Turn Off
+gui-mod-impact-turn-on = Turn On
+gui-mod-disabled-with-dependents = { $count ->
+    [one] Turned off one mod that required it as well.
+   *[other] Turned off { $count } mods that required it as well.
+}
+gui-mod-enabled-with-dependencies = { $count ->
+    [one] Turned on one mod it needs as well.
+   *[other] Turned on { $count } mods it needs as well.
+}
+gui-mod-dependencies-refreshed = { $count ->
+    [one] Recorded what one mod requires.
+   *[other] Recorded what { $count } mods require.
+}
 gui-modal-delete-mod = Delete Mod
 gui-delete-mod-detail = Delete { $value } from the mods folder?
 gui-delete-mod-note = You added this JAR yourself, so Ephervex cannot fetch it again. The file is removed from disk.

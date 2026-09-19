@@ -38,7 +38,8 @@ use ephervex_model::{
 
 use crate::presentation::{
     ActivityPresentation, ImportErrorKind, ImportFailure, ImportPresentation, InstancePresentation,
-    ServerPresentation, diagnostic_kind_label, diagnostic_scope_label,
+    ModImpactPresentation, ModRequirementPresentation, ServerPresentation, diagnostic_kind_label,
+    diagnostic_scope_label,
 };
 
 type CancellationRegistry = Arc<Mutex<HashMap<String, CancellationToken>>>;
@@ -315,10 +316,35 @@ pub enum Command {
         launch: Option<String>,
     },
     /// Turn one mod on or off in place, on either kind of host.
+    ///
+    /// Asks what else the change affects first. With nothing affected, or with
+    /// the confirmation turned off in settings, it applies straight away; the
+    /// answer still reaches the user, as a dialog in the first case and a
+    /// toast in the second.
     SetModEnabled {
         host: ModHost,
         path: PathBuf,
         enabled: bool,
+    },
+    /// Stop asking before a mod change that affects other mods.
+    ///
+    /// Sent from the dialog's own "do not ask again", so the decision is
+    /// recorded where the user made it rather than only in settings.
+    SaveDependencyWarning(bool),
+    /// Ask each catalog what this host's mods need, and record the answers.
+    RefreshModDependencies(ModHost),
+    /// Turn several mods on or off in one call, in dependency order.
+    ///
+    /// What the dialog sends once the user has agreed to a cascade.
+    SetModsEnabled {
+        host: ModHost,
+        changes: Vec<(PathBuf, bool)>,
+    },
+    /// Work out what deleting one mod's jar would do to the rest.
+    QueryDeleteImpact {
+        host: ModHost,
+        path: PathBuf,
+        name: String,
     },
     /// Work out what dropping these files into a host's mods folder would do.
     ///
@@ -1192,6 +1218,10 @@ pub enum Event {
         message: String,
         error: bool,
     },
+    /// What turning a mod off, or deleting its jar, would do to the rest.
+    ModImpact(Box<ModImpactPresentation>),
+    /// What turning a mod on needs first.
+    ModRequirements(Box<ModRequirementPresentation>),
     ModalError(String),
     CloseModal,
     CreationFinished {
@@ -2389,12 +2419,59 @@ fn run_worker(
                 host,
                 path,
                 enabled,
-            } => match app.set_mod_enabled(host, &path, enabled) {
+            } => {
+                set_mod_enabled(&app, host, &path, enabled, &events, &refreshed_mods);
+            }
+            Command::SaveDependencyWarning(warn) => {
+                if let Err(error) = app.set_warn_on_dependency_impact(warn) {
+                    send_error(&events, &error);
+                } else {
+                    send_snapshot(&app, &events);
+                }
+            }
+            Command::RefreshModDependencies(host) => {
+                let reporter = OperationReporter::silent("refreshing-mod-dependencies");
+                match runtime.block_on(app.refresh_mod_dependencies(
+                    host,
+                    &reporter,
+                    &CancellationToken::new(),
+                )) {
+                    Ok(report) => {
+                        let _ = events.send(Event::Toast {
+                            message: lookup_args(
+                                "gui-mod-dependencies-refreshed",
+                                [(
+                                    "count",
+                                    Arg::from(i64::try_from(report.recorded).unwrap_or(0)),
+                                )],
+                            ),
+                            error: !report.is_complete(),
+                        });
+                        send_host_mods(&app, host, &events, &refreshed_mods, false);
+                    }
+                    Err(error) => send_error(&events, &error),
+                }
+            }
+            Command::SetModsEnabled { host, changes } => match app.set_mods_enabled(host, &changes)
+            {
                 // Re-read rather than patched in place: the durable state is
                 // what the panel shows, and it has just changed.
                 Ok(_) => send_host_mods(&app, host, &events, &refreshed_mods, false),
                 Err(error) => send_error(&events, &error),
             },
+            Command::QueryDeleteImpact { host, path, name } => {
+                match app.dependents_of(host, &path) {
+                    Ok(mut impact) => {
+                        // The row's own label, which carries a provider title
+                        // the durable read does not have.
+                        impact.target.name = name;
+                        let view =
+                            ModImpactPresentation::new(host_kind(host), &host.id(), true, &impact);
+                        let _ = events.send(Event::ModImpact(Box::new(view)));
+                    }
+                    Err(error) => send_error(&events, &error),
+                }
+            }
             Command::OpenLiveLog(source) => {
                 open_live_log(&app, source, &events, &live_log_generation);
             }
@@ -5750,6 +5827,99 @@ fn server_warning_message(warning: &ephervex_core::ServerWarning) -> String {
 
 pub fn parse_instance_id(value: &str) -> Option<InstanceId> {
     InstanceId::from_str(value).ok()
+}
+/// Which kind of host this is, in the spelling the markup uses.
+const fn host_kind(host: ModHost) -> &'static str {
+    match host {
+        ModHost::Instance(_) => "client",
+        ModHost::Server(_) => "server",
+    }
+}
+
+/// Turns one mod on or off, asking first what else the change affects.
+///
+/// Three outcomes, and which one happens is decided here rather than in the
+/// markup. Nothing else affected: apply it. Something affected and the
+/// confirmation wanted: send the answer up and change nothing yet. Something
+/// affected and the confirmation turned off: apply the whole cascade and say
+/// what happened in a toast, because somebody who turned the question off has
+/// already agreed to it and leaving the other mods behind would hand them a
+/// set that does not load.
+fn set_mod_enabled(
+    app: &App,
+    host: ModHost,
+    path: &Path,
+    enabled: bool,
+    events: &Sender<Event>,
+    refreshed: &RefreshedHosts,
+) {
+    let warn = app.warn_on_dependency_impact();
+    let changes: Vec<(PathBuf, bool)> = if enabled {
+        match app.dependencies_of(host, path) {
+            Ok(needs) => {
+                let view = ModRequirementPresentation::new(host_kind(host), &host.id(), &needs);
+                if !view.is_silent() && warn {
+                    let _ = events.send(Event::ModRequirements(Box::new(view)));
+                    return;
+                }
+                if view.has_cascade() {
+                    let _ = events.send(Event::Toast {
+                        message: lookup_args(
+                            "gui-mod-enabled-with-dependencies",
+                            [(
+                                "count",
+                                Arg::from(i64::try_from(view.disabled.len()).unwrap_or(0)),
+                            )],
+                        ),
+                        error: false,
+                    });
+                }
+                view.cascade_paths()
+                    .into_iter()
+                    .map(|path| (PathBuf::from(path), true))
+                    .collect()
+            }
+            Err(error) => {
+                send_error(events, &error);
+                return;
+            }
+        }
+    } else {
+        match app.dependents_of(host, path) {
+            Ok(impact) => {
+                let view = ModImpactPresentation::new(host_kind(host), &host.id(), false, &impact);
+                if !view.is_silent() && warn {
+                    let _ = events.send(Event::ModImpact(Box::new(view)));
+                    return;
+                }
+                if view.has_cascade() {
+                    let _ = events.send(Event::Toast {
+                        message: lookup_args(
+                            "gui-mod-disabled-with-dependents",
+                            [(
+                                "count",
+                                Arg::from(i64::try_from(view.breaks.len()).unwrap_or(0)),
+                            )],
+                        ),
+                        error: false,
+                    });
+                }
+                view.cascade_paths()
+                    .into_iter()
+                    .map(|path| (PathBuf::from(path), false))
+                    .collect()
+            }
+            Err(error) => {
+                send_error(events, &error);
+                return;
+            }
+        }
+    };
+
+    match app.set_mods_enabled(host, &changes) {
+        Ok(_) => send_host_mods(app, host, events, refreshed, false),
+        Err(error) => send_error(events, &error),
+    }
 }
 
 pub fn parse_server_id(value: &str) -> Option<ServerId> {

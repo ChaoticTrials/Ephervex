@@ -29,11 +29,11 @@ use crate::minecraft_defaults::{
     self, LanguageCatalogState, MinecraftDefaultsModel, WindowAspect, WindowAxis, window_anchor,
 };
 use crate::presentation::{
-    self, ImportErrorKind, ImportFailure, ImportPresentation, ToastStack, parse_network,
-    validate_ip, validate_port,
+    self, ImportErrorKind, ImportFailure, ImportPresentation, ModImpactPresentation,
+    ModRequirementPresentation, ToastStack, parse_network, validate_ip, validate_port,
 };
 use crate::ui::{
-    AccountRow, ActivityRow, AppWindow, DiagnosticRow, GuiI18n, ImportBlockedRow,
+    AccountRow, ActivityRow, AppWindow, DiagnosticRow, GuiI18n, ImpactRow, ImportBlockedRow,
     ImportDuplicateRow, ImportOptionRow, InstanceRow, JavaRow, LinkedTargetRow, LocalModClashRow,
     LogChunk, ModRow, ModSearchRow, ModVersionRow, PendingEntityRow, PromoteServerRow, RunningRow,
     ServerRow, Theme, WindowSizePreview,
@@ -3210,6 +3210,131 @@ fn register_mod_state_actions(
             },
         );
     });
+
+    register_dependency_actions(ui, commands);
+}
+
+/// Answering the dialog that says what a mod change affects.
+///
+/// Its own registration because it is a whole conversation rather than one
+/// more toggle: what the dialog is holding decides which question was asked.
+fn register_dependency_actions(ui: &AppWindow, commands: &Sender<Command>) {
+    // Applying what the dialog asked about. The lists it is holding say which
+    // question was answered, so one callback serves both directions.
+    let sender = commands.clone();
+    let handle = ui.as_weak();
+    ui.on_apply_mod_impact(move |cascade| {
+        let Some(ui) = handle.upgrade() else {
+            return;
+        };
+        let Some(host) =
+            backend::parse_mod_host(&ui.get_mod_impact_kind(), &ui.get_mod_impact_host())
+        else {
+            return;
+        };
+        if ui.get_mod_impact_remember() {
+            send(&sender, Command::SaveDependencyWarning(false));
+        }
+        let target = PathBuf::from(ui.get_mod_impact_path().as_str());
+        if ui.get_mod_impact_deleting() {
+            send(
+                &sender,
+                Command::DeleteHandPlacedMod {
+                    host,
+                    path: target.clone(),
+                },
+            );
+        } else {
+            let enabling = ui.get_mod_requires_disabled().row_count() > 0
+                || ui.get_mod_impact_breaks().row_count() == 0;
+            let mut changes: Vec<(PathBuf, bool)> = Vec::new();
+            if cascade {
+                let others = if enabling {
+                    ui.get_mod_requires_disabled()
+                } else {
+                    ui.get_mod_impact_breaks()
+                };
+                changes.extend(
+                    others
+                        .iter()
+                        .map(|row| (PathBuf::from(row.logical_path.as_str()), enabling)),
+                );
+            }
+            changes.push((target, enabling));
+            send(&sender, Command::SetModsEnabled { host, changes });
+        }
+        ui.set_modal(SharedString::new());
+        ui.set_modal_error(SharedString::new());
+    });
+
+    let sender = commands.clone();
+    let handle = ui.as_weak();
+    ui.on_refresh_mod_dependencies(move || {
+        let Some(ui) = handle.upgrade() else {
+            return;
+        };
+        let Some(host) =
+            backend::parse_mod_host(&ui.get_mod_impact_kind(), &ui.get_mod_impact_host())
+        else {
+            return;
+        };
+        send(&sender, Command::RefreshModDependencies(host));
+        ui.set_modal(SharedString::new());
+    });
+}
+
+/// Shows what turning a mod off, or deleting its jar, would do to the rest.
+fn apply_mod_impact(ui: &AppWindow, impact: &ModImpactPresentation) {
+    ui.set_mod_impact_kind(impact.host_kind.as_str().into());
+    ui.set_mod_impact_host(impact.host_id.as_str().into());
+    ui.set_mod_impact_path(impact.path.as_str().into());
+    ui.set_mod_impact_name(impact.name.as_str().into());
+    ui.set_mod_impact_deleting(impact.deleting);
+    ui.set_mod_impact_breaks(impact_rows(&impact.breaks));
+    ui.set_mod_impact_degrades(impact_rows(&impact.degrades));
+    ui.set_mod_impact_unknown(impact_rows(&impact.unknown));
+    ui.set_mod_impact_unidentifiable(impact_rows(&impact.unidentifiable));
+    // The other question's lists are cleared, so one dialog never shows half
+    // an answer left over from the other.
+    ui.set_mod_requires_disabled(impact_rows(&[]));
+    ui.set_mod_requires_absent(impact_rows(&[]));
+    ui.set_mod_requires_incompatible(impact_rows(&[]));
+    ui.set_mod_impact_cascade(impact.has_cascade());
+    ui.set_mod_impact_remember(false);
+    ui.set_modal_error(SharedString::new());
+    ui.set_modal("mod-impact".into());
+}
+
+/// Shows what turning a mod on needs first.
+fn apply_mod_requirements(ui: &AppWindow, needs: &ModRequirementPresentation) {
+    ui.set_mod_impact_kind(needs.host_kind.as_str().into());
+    ui.set_mod_impact_host(needs.host_id.as_str().into());
+    ui.set_mod_impact_path(needs.path.as_str().into());
+    ui.set_mod_impact_name(needs.name.as_str().into());
+    ui.set_mod_impact_deleting(false);
+    ui.set_mod_impact_breaks(impact_rows(&[]));
+    ui.set_mod_impact_degrades(impact_rows(&[]));
+    ui.set_mod_impact_unknown(impact_rows(&[]));
+    ui.set_mod_impact_unidentifiable(impact_rows(&[]));
+    ui.set_mod_requires_disabled(impact_rows(&needs.disabled));
+    ui.set_mod_requires_absent(impact_rows(&needs.absent));
+    ui.set_mod_requires_incompatible(impact_rows(&needs.incompatible));
+    ui.set_mod_impact_cascade(needs.has_cascade());
+    ui.set_mod_impact_remember(false);
+    ui.set_modal_error(SharedString::new());
+    ui.set_modal("mod-impact".into());
+}
+
+fn impact_rows(rows: &[crate::presentation::ImpactRowPresentation]) -> ModelRc<ImpactRow> {
+    ModelRc::new(VecModel::from(
+        rows.iter()
+            .map(|row| ImpactRow {
+                name: row.name.as_str().into(),
+                logical_path: row.logical_path.as_str().into(),
+                distance: row.distance,
+            })
+            .collect::<Vec<_>>(),
+    ))
 }
 
 /// Opening a modpack a web page offered, and the sites agreed to serve one.
@@ -3334,17 +3459,28 @@ fn register_local_mod_actions(
     });
 
     let sender = commands.clone();
+    let handle = ui.as_weak();
     ui.on_delete_hand_placed_mod(move |kind, host, path| {
         let Some(host) = backend::parse_mod_host(&kind, &host) else {
             return;
         };
-        send(
-            &sender,
-            Command::DeleteHandPlacedMod {
-                host,
-                path: PathBuf::from(path.as_str()),
-            },
-        );
+        let path = PathBuf::from(path.as_str());
+        // Deleting a jar takes it out of the loader's view exactly as turning
+        // it off does, so it asks the same question first.
+        if let Some(ui) = handle.upgrade()
+            && ui.get_modal() == "delete-mod"
+        {
+            send(
+                &sender,
+                Command::QueryDeleteImpact {
+                    host,
+                    path,
+                    name: ui.get_mod_action_name().to_string(),
+                },
+            );
+            return;
+        }
+        send(&sender, Command::DeleteHandPlacedMod { host, path });
     });
 
     let sender = commands.clone();
@@ -5259,6 +5395,8 @@ fn apply_event(
         Event::Toast { message, error } => {
             ui.invoke_present_toast(message.into(), error);
         }
+        Event::ModImpact(impact) => apply_mod_impact(ui, &impact),
+        Event::ModRequirements(needs) => apply_mod_requirements(ui, &needs),
         Event::ModalError(message) => {
             ui.set_modal_error(message.into());
             // A refused mutation leaves its buttons usable again. Without this
