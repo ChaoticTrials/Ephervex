@@ -213,6 +213,41 @@ impl VersionCatalog {
         })
     }
 
+    /// One release's complete metadata, from what is already cached.
+    ///
+    /// Answers `None` rather than reaching for anything. That is the whole
+    /// point: it lets a caller that has promised not to touch the network ask
+    /// what a version needs, and say "not cached" when nobody has asked yet,
+    /// instead of quietly becoming an operation that needs a connection.
+    ///
+    /// The version document is addressed by its own digest, so a cached one is
+    /// read straight off disk and a tampered one is not read at all.
+    #[instrument(skip(self))]
+    pub async fn cached_metadata(&self, id: &str) -> MinecraftResult<Option<VersionMetadata>> {
+        let Some(document) = self.cache.peek(&self.manifest_key).await else {
+            return Ok(None);
+        };
+        let manifest = VersionManifest::parse(document.json())
+            .map_err(|source| MinecraftError::ManifestInvalid { source })?;
+        let Some(record) = manifest.version(id) else {
+            return Ok(None);
+        };
+
+        // The digest names the file, exactly as it does when one is fetched,
+        // so this reads the same bytes a resolve would have verified.
+        let destination =
+            self.layout
+                .content(ContentStore::Metadata, &record.sha1, Some(&self.json));
+        let Ok(json) = tokio::fs::read_to_string(&destination).await else {
+            return Ok(None);
+        };
+        Ok(Some(VersionMetadata::parse(&json).map_err(|_| {
+            MinecraftError::VersionMetadataCorrupt {
+                id: record.id.clone(),
+            }
+        })?))
+    }
+
     /// Resolves one supported release's complete metadata.
     ///
     /// Refuses an id that is not a release or that predates the floor, rather

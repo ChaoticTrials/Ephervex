@@ -1245,7 +1245,7 @@ impl App {
         &self.options
     }
 
-    fn minecraft(&self) -> CoreResult<&VersionCatalog> {
+    pub(crate) fn minecraft(&self) -> CoreResult<&VersionCatalog> {
         if let Some(catalog) = self.minecraft.get() {
             return Ok(catalog);
         }

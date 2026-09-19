@@ -20,9 +20,13 @@
 
 use std::path::{Path, PathBuf};
 
-use ephervex_download::OperationReporter;
 use ephervex_download::verify::file_matches_hashes;
-use ephervex_model::{Hash, Progress};
+use ephervex_download::{CacheLayout, DownloadManager, DownloaderConfig, OperationReporter};
+use ephervex_minecraft::{
+    LaunchFeatures, MinecraftError, PlannedArtifact, Platform, VERSION_MANIFEST_CACHE_KEY,
+    VanillaInstaller,
+};
+use ephervex_model::{Hash, InstanceId, LoaderKind, Progress};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument, warn};
 
@@ -131,6 +135,61 @@ impl VerificationReport {
     }
 }
 
+/// What checking the shared stores an instance launches from found.
+///
+/// Separate from the instance's own files because the two are different kinds
+/// of thing. A mod lives in the instance and belongs to it; a library lives in
+/// a store every instance shares, is addressed by a Maven coordinate rather
+/// than by its digest, and is therefore the one class of managed artifact that
+/// nothing re-checks once it is written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SharedArtifactReport {
+    /// Nothing could be checked, because no metadata for this release is
+    /// cached. Not a fault: nothing has asked about the version yet.
+    pub metadata_cached: bool,
+    pub files: Vec<VerifiedFile>,
+    /// Whether a loader adds libraries this pass did not cover.
+    ///
+    /// Vanilla's own artifacts are planned from the release's metadata, which
+    /// is cached; a loader's extra libraries come from its own documents, and
+    /// claiming to have checked them would be a promise this pass does not
+    /// keep.
+    pub loader_libraries_uncovered: bool,
+}
+
+impl SharedArtifactReport {
+    /// Whether anything checked is actually wrong.
+    ///
+    /// An absent shared artifact is not a fault. These stores are filled as a
+    /// launch needs them, so an instance that has been created and not yet run
+    /// is missing most of them and is in no way broken; saying otherwise would
+    /// cry wolf at the ordinary state of a fresh instance. Bytes that are
+    /// present and wrong are the fault, because nothing else will ever notice
+    /// them: a file already on a Maven path is not re-fetched, and not checked
+    /// again either.
+    #[must_use]
+    pub fn is_sound(&self) -> bool {
+        !self
+            .files
+            .iter()
+            .any(|file| matches!(file.integrity, Integrity::Corrupt | Integrity::Unreadable))
+    }
+
+    /// The files whose bytes are wrong.
+    pub fn faults(&self) -> impl Iterator<Item = &VerifiedFile> {
+        self.files
+            .iter()
+            .filter(|file| matches!(file.integrity, Integrity::Corrupt | Integrity::Unreadable))
+    }
+
+    /// The files a launch has not fetched yet.
+    pub fn not_yet_fetched(&self) -> impl Iterator<Item = &VerifiedFile> {
+        self.files
+            .iter()
+            .filter(|file| file.integrity == Integrity::Absent)
+    }
+}
+
 /// What one repair pass did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RepairReport {
@@ -218,6 +277,93 @@ impl App {
             "checked what this host holds against what it recorded"
         );
         Ok(report)
+    }
+
+    /// Checks the shared artifacts this instance launches from.
+    ///
+    /// Libraries and the client jar live on Maven-style paths rather than
+    /// being addressed by their own digests, so nothing re-checks them once
+    /// they are written. Their digests are in the release's metadata, which is
+    /// what this reads.
+    ///
+    /// Offline, like every other verification here: it reads the metadata that
+    /// is already cached and says so when none is, rather than becoming an
+    /// operation that needs a connection. Launching the instance once caches
+    /// it.
+    ///
+    /// Vanilla's own artifacts only. A loader's extra libraries come from that
+    /// loader's own documents, and the report says plainly that they were not
+    /// covered rather than leaving the omission to be discovered.
+    #[instrument(skip(self), fields(instance = %instance))]
+    pub async fn verify_shared_artifacts(
+        &self,
+        instance: InstanceId,
+    ) -> CoreResult<SharedArtifactReport> {
+        let record = self.client(instance)?;
+        let loader_libraries_uncovered = record.loader.kind != LoaderKind::Vanilla;
+        let Some(metadata) = self
+            .minecraft()?
+            .cached_metadata(&record.minecraft_version)
+            .await?
+        else {
+            return Ok(SharedArtifactReport {
+                metadata_cached: false,
+                files: Vec::new(),
+                loader_libraries_uncovered,
+            });
+        };
+
+        let installer = VanillaInstaller::new(
+            DownloadManager::new(DownloaderConfig::default()).map_err(|source| {
+                MinecraftError::ManifestUnavailable {
+                    source: ephervex_download::MetadataCacheError::Unavailable {
+                        key: VERSION_MANIFEST_CACHE_KEY.to_owned(),
+                        source: Box::new(source),
+                    },
+                }
+            })?,
+            CacheLayout::new(self.paths().cache_dir()),
+        );
+        let plan = installer.plan(
+            &metadata,
+            &LaunchFeatures::default().rule_context(Platform::host()),
+        )?;
+
+        let mut planned: Vec<&PlannedArtifact> = vec![&plan.client_jar, &plan.asset_index];
+        planned.extend(plan.libraries.iter());
+        planned.extend(plan.natives.iter().map(|natives| &natives.artifact));
+        if let Some(logging) = plan.logging.as_ref() {
+            planned.push(&logging.artifact);
+        }
+
+        let mut files = Vec::with_capacity(planned.len());
+        for artifact in planned {
+            files.push(VerifiedFile {
+                logical_path: PathBuf::from(&artifact.label),
+                integrity: check(
+                    &artifact.path,
+                    std::slice::from_ref(&artifact.artifact.sha1),
+                )
+                .await,
+                // Every one of these names an address in the release metadata,
+                // so anything wrong with one is a re-download away from right.
+                has_source: true,
+            });
+        }
+
+        info!(
+            checked = files.len(),
+            faults = files
+                .iter()
+                .filter(|file| !file.integrity.is_sound())
+                .count(),
+            "checked the shared artifacts this instance launches from"
+        );
+        Ok(SharedArtifactReport {
+            metadata_cached: true,
+            files,
+            loader_libraries_uncovered,
+        })
     }
 
     /// Replaces every file that is absent or wrong with the one recorded.
@@ -642,6 +788,66 @@ mod tests {
         assert!(
             !report.failed.contains(&PathBuf::from("mods/shipped.jar")),
             "it is not something a repair attempted and failed at"
+        );
+    }
+
+    #[tokio::test]
+    async fn shared_artifacts_are_not_checked_when_no_metadata_is_cached() {
+        // Nothing has asked about this release, so there is nothing to check
+        // against. Saying so is the answer; reaching for it would make a
+        // verification that promises to stay local into one that does not.
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, id, _root) = instance(base.path());
+
+        let report = app
+            .verify_shared_artifacts(id)
+            .await
+            .expect("an uncached release is reported, not fetched");
+        assert!(!report.metadata_cached);
+        assert!(report.files.is_empty());
+        assert!(
+            report.is_sound(),
+            "not having looked is not the same as having found something wrong"
+        );
+    }
+
+    #[test]
+    fn a_shared_artifact_that_is_merely_not_downloaded_yet_is_not_a_fault() {
+        // These stores fill as a launch needs them, so a freshly created
+        // instance is missing most of them and is in no way broken. Bytes that
+        // are present and wrong are the fault, because a file already on a
+        // Maven path is never re-fetched and never checked again.
+        let report = SharedArtifactReport {
+            metadata_cached: true,
+            files: vec![
+                VerifiedFile {
+                    logical_path: PathBuf::from("client.jar"),
+                    integrity: Integrity::Absent,
+                    has_source: true,
+                },
+                VerifiedFile {
+                    logical_path: PathBuf::from("a-library.jar"),
+                    integrity: Integrity::Intact,
+                    has_source: true,
+                },
+            ],
+            loader_libraries_uncovered: false,
+        };
+        assert!(report.is_sound());
+        assert_eq!(report.not_yet_fetched().count(), 1);
+        assert_eq!(report.faults().count(), 0);
+
+        let broken = SharedArtifactReport {
+            files: vec![VerifiedFile {
+                logical_path: PathBuf::from("a-library.jar"),
+                integrity: Integrity::Corrupt,
+                has_source: true,
+            }],
+            ..report
+        };
+        assert!(
+            !broken.is_sound(),
+            "wrong bytes are what nothing else notices"
         );
     }
 

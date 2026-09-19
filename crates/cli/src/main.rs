@@ -39,9 +39,10 @@ use ephervex_core::{
     PromotionRequest, ReconciliationReport, ReleaseListing, RequiredMods, RequirementBasis,
     RuntimeClassification, RuntimeInventory, SearchOptions, SecretString, ServerCommitWarning,
     ServerContentSource, ServerCreateOptions, ServerEvent, ServerFolder, ServerNetworkSettings,
-    ServerObserver, ServerPersistenceHealth, ServerRecord, ServerWarning, Session, SideRequirement,
-    SkipReason, SuspectConfidence, SuspectReason, TextAnchor, TextView, UnknownServerFiles,
-    VerificationReport, VersionMetadata, VersionRecord, format_binary_bytes,
+    ServerObserver, ServerPersistenceHealth, ServerRecord, ServerWarning, Session,
+    SharedArtifactReport, SideRequirement, SkipReason, SuspectConfidence, SuspectReason,
+    TextAnchor, TextView, UnknownServerFiles, VerificationReport, VersionMetadata, VersionRecord,
+    format_binary_bytes,
 };
 use ephervex_i18n::Arg as MessageArg;
 use ephervex_model::{
@@ -404,6 +405,16 @@ enum ModCommand {
     Verify {
         #[command(flatten)]
         host: ModHostArgs,
+        /// Also check the shared libraries and client JAR this instance
+        /// launches from.
+        ///
+        /// Those live in a store every instance shares, on Maven-style paths
+        /// rather than under their own digests, so nothing re-checks them once
+        /// they are written. Their digests come from the release's metadata,
+        /// which has to have been cached already - launch the instance once if
+        /// it has not.
+        #[arg(long, requires = "instance")]
+        shared: bool,
     },
     /// Replace every file this instance is missing or holding wrongly.
     ///
@@ -3366,7 +3377,9 @@ async fn run_mod_command(app: &mut App, command: &ModCommand, json: bool) -> any
             let mods = app.managed_mods(*instance)?;
             print_managed_mods(&mods, json);
         }
-        ModCommand::Verify { host } => return run_mod_verify(app, host.host()?, json).await,
+        ModCommand::Verify { host, shared } => {
+            return run_mod_verify(app, host, *shared, json).await;
+        }
         ModCommand::Repair { host } => return run_mod_repair(app, host.host()?, json).await,
         ModCommand::Refresh { host } => {
             let report = app
@@ -3685,17 +3698,33 @@ async fn run_mod_show(
 ///
 /// A fault sets the exit status, so a script asking whether an instance is
 /// sound gets its answer without parsing prose.
-async fn run_mod_verify(app: &App, host: ModHost, json: bool) -> anyhow::Result<()> {
+async fn run_mod_verify(
+    app: &App,
+    host: &ModHostArgs,
+    shared: bool,
+    json: bool,
+) -> anyhow::Result<()> {
     let report = app
         .verify_host(
-            host,
+            host.host()?,
             &OperationReporter::silent("verifying-instance"),
             &CancellationToken::new(),
         )
         .await?;
     print_verification(&report, json);
-    if report.is_sound() {
+
+    let mut shared_sound = true;
+    if let (true, Some(instance)) = (shared, host.instance) {
+        let artifacts = app.verify_shared_artifacts(instance).await?;
+        print_shared_artifacts(&artifacts, json);
+        shared_sound = artifacts.is_sound();
+    }
+
+    if report.is_sound() && shared_sound {
         return Ok(());
+    }
+    if !shared_sound {
+        anyhow::bail!("a shared file this instance launches from is missing or wrong");
     }
     let unrepairable = report.unrepairable().count();
     if unrepairable > 0 {
@@ -3746,6 +3775,47 @@ async fn run_mod_repair(app: &App, host: ModHost, json: bool) -> anyhow::Result<
         eprintln!("could not be replaced: {}", path.display());
     }
     anyhow::bail!("this instance still does not hold what it recorded")
+}
+
+/// Reports what checking the shared stores found.
+fn print_shared_artifacts(report: &SharedArtifactReport, json: bool) {
+    if json {
+        print_json(&serde_json::json!({
+            "metadata_cached": report.metadata_cached,
+            "sound": report.is_sound(),
+            "loader_libraries_uncovered": report.loader_libraries_uncovered,
+            "files": report
+                .files
+                .iter()
+                .map(|file| serde_json::json!({
+                    "artifact": file.logical_path,
+                    "integrity": file.integrity.as_str(),
+                }))
+                .collect::<Vec<_>>(),
+        }));
+        return;
+    }
+    if !report.metadata_cached {
+        outln!("shared files: not checked, no metadata cached for this release");
+        return;
+    }
+    for file in report.faults() {
+        outln!(
+            "{}  {}",
+            file.integrity.as_str(),
+            file.logical_path.display()
+        );
+    }
+    let waiting = report.not_yet_fetched().count();
+    if report.is_sound() {
+        outln!("{} shared files checked, none wrong", report.files.len());
+    }
+    if waiting > 0 {
+        outln!("{waiting} are not downloaded yet; launching fetches them");
+    }
+    if report.loader_libraries_uncovered {
+        eprintln!("the loader's own libraries were not among them");
+    }
 }
 
 /// Reports what checking an instance's recorded files found.

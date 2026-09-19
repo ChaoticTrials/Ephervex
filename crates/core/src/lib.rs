@@ -133,7 +133,7 @@ pub use server::{CaptureSnapshot, ServerCreateOptions, ServerPersistenceHealth, 
 pub use server_pack::{IdentificationOutcome, ServerContentSource, ServerPackOutcome};
 pub use single_instance::{PrimaryInstance, Startup as SingleInstanceStartup};
 pub use url_handler::{URL_HANDLER_ENTRY, UrlHandlerSource, UrlHandlerStatus, scheme_mime_type};
-pub use verify::{Integrity, RepairReport, VerificationReport, VerifiedFile};
+pub use verify::{Integrity, RepairReport, SharedArtifactReport, VerificationReport, VerifiedFile};
 
 /// Cancellation, re-exported because the services take one.
 ///

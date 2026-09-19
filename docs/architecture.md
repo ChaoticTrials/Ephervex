@@ -675,6 +675,17 @@ not abandon the rest, and the report separates what nothing could have fixed
 from what a repair tried and failed at - the first says re-import the pack, the
 second says try again.
 
+The shared stores an instance launches from are checked separately, and only on
+request. Libraries and the client JAR sit on Maven-style paths rather than under
+their own digests, so nothing re-checks them once they are written; their
+digests come from the release's metadata, read from the cache and never fetched,
+so the check stays local and says "no metadata cached" rather than reaching for
+it. An absent shared artifact is not a fault - these stores fill as a launch
+needs them, and a freshly created instance is missing most of them - while bytes
+that are present and wrong are, because nothing else will ever notice them. A
+loader's own libraries come from that loader's documents and are reported as not
+covered rather than silently omitted.
+
 Repair is offered only where replacing the file could help, which means a fault
 plus a recorded address. Telling somebody to repair an instance that repairing
 cannot mend is worse than telling them nothing, so files with no address are
