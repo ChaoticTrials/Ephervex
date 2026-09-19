@@ -455,12 +455,15 @@ impl Registry {
         // would otherwise leave a second root claiming the original's identity.
         metadata::mark_incomplete(&root)?;
 
-        let report = crate::copy::copy_tree(&original.root, &root, &[LAUNCH_LOCK_FILE]).map_err(
-            |source| RegistryError::Io {
-                path: root.clone(),
-                source,
-            },
-        )?;
+        let report = crate::copy::copy_tree(
+            &original.root,
+            &root,
+            &[LAUNCH_LOCK_FILE, metadata::SNAPSHOTS_DIR],
+        )
+        .map_err(|source| RegistryError::Io {
+            path: root.clone(),
+            source,
+        })?;
 
         let now = Utc::now();
         let record = ClientRecord {

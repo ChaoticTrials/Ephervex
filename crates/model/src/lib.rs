@@ -26,7 +26,7 @@ pub use cache::{
     MAX_ARTIFACT_CACHE_LIMIT_BYTES, MIB, TIB, format_binary_bytes,
 };
 pub use hash::{Hash, HashAlgorithm};
-pub use ids::{InstanceId, OperationId, ServerId};
+pub use ids::{InstanceId, OperationId, ServerId, SnapshotId};
 pub use instance::{AttentionReason, ImportSourceKind, InstanceKind};
 pub use java::{JavaOverride, JvmSettings};
 pub use loader::{LoaderKind, LoaderSelection, LoaderVersionMode, default_instance_name};

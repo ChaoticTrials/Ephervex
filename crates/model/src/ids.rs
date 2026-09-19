@@ -82,6 +82,11 @@ typed_id!(
     OperationId
 );
 
+typed_id!(
+    /// Identifies one local safety snapshot inside an installed host.
+    SnapshotId
+);
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]

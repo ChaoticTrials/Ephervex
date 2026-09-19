@@ -56,6 +56,7 @@ pub mod running;
 pub mod server;
 pub mod server_pack;
 pub mod single_instance;
+pub mod snapshot;
 pub mod url_handler;
 pub mod verify;
 
@@ -134,6 +135,7 @@ pub use running::{ProcessMonitor, ProcessUsage, RunningProcess};
 pub use server::{CaptureSnapshot, ServerCreateOptions, ServerPersistenceHealth, ServerStatus};
 pub use server_pack::{IdentificationOutcome, ServerContentSource, ServerPackOutcome};
 pub use single_instance::{PrimaryInstance, Startup as SingleInstanceStartup};
+pub use snapshot::{SnapshotError, SnapshotOrigin, SnapshotRecord};
 pub use url_handler::{URL_HANDLER_ENTRY, UrlHandlerSource, UrlHandlerStatus, scheme_mime_type};
 pub use verify::{Integrity, RepairReport, SharedArtifactReport, VerificationReport, VerifiedFile};
 
@@ -219,7 +221,7 @@ pub use ephervex_model::{
     ARTIFACT_CACHE_LIMIT_PRESETS, ArtifactCacheLimit, ArtifactCacheLimitError, ByteUnit,
     ConnectionTarget, DEFAULT_ARTIFACT_CACHE_LIMIT_BYTES, JavaOverride, JvmSettings,
     MAX_ARTIFACT_CACHE_LIMIT_BYTES, ModRelationKind, ServerInstallation, ServerRelativePath,
-    format_binary_bytes,
+    SnapshotId, format_binary_bytes,
 };
 pub use ephervex_options::catalog::{
     EnumValuePresentation, KeyBindingDefaultPresentation, PreferenceExclusion, PreferenceField,
@@ -251,12 +253,12 @@ pub use ephervex_server::{
 };
 pub use ephervex_storage::{
     AccountConfig, ApiConfig, ApplicationColorScheme, ApplicationDisplayConfig,
-    ApplicationTextScale, CONFIG_SCHEMA_VERSION, ClientFolder, ClientRecord, Config, CrashSummary,
-    DUPLICATE_NAME_SUFFIX, DiagnosticEntry, DiagnosticError, DiagnosticKind, DuplicateClient,
-    DuplicatedClient, EulaConfig, FileDisposition, ImportSource, JavaConfig, LaunchState,
-    MAX_SEARCH_MATCHES, MAX_VIEW_BYTES, MissingFolder, NetworkAccess, NewClient, NewServer,
-    PathError, Paths, PreferenceSetting, ReconciledRecord, ReconciliationReport, RecordRef,
-    SECRET_KEY_MARKERS, SearchMatch, SearchOptions, SearchOutcome, ServerCommit,
+    ApplicationTextScale, CONFIG_SCHEMA_VERSION, ClientFolder, ClientRecord, CloneMethod, Config,
+    CrashSummary, DUPLICATE_NAME_SUFFIX, DiagnosticEntry, DiagnosticError, DiagnosticKind,
+    DuplicateClient, DuplicatedClient, EulaConfig, FileDisposition, ImportSource, JavaConfig,
+    LaunchState, MAX_SEARCH_MATCHES, MAX_VIEW_BYTES, MissingFolder, NetworkAccess, NewClient,
+    NewServer, PathError, Paths, PreferenceSetting, ReconciledRecord, ReconciliationReport,
+    RecordRef, SECRET_KEY_MARKERS, SearchMatch, SearchOptions, SearchOutcome, ServerCommit,
     ServerCommitWarning, ServerDefaults, ServerFolder, ServerNetworkSettings,
     ServerOperatorIdentity, ServerOperatorProfile, ServerOperatorSetup, ServerPortSelection,
     ServerRecord, ServerRootConflict, StorageError, TechnicalTextSize, TextAnchor, TextView,

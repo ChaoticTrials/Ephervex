@@ -988,6 +988,20 @@ error-pack-write-failed = A file from the pack could not be written.
 error-storage-full = The storage device is full.
 .action = Free space on the device that holds the instance or Ephervex data, then try again.
 
+error-snapshot-host-running = { $host } is running, so its state cannot be captured or restored safely.
+.action = Stop the client or server, then try again.
+error-snapshot-not-found = Snapshot { $snapshot } no longer exists.
+error-snapshot-label-invalid = The snapshot label is empty, too long, or contains a control character.
+error-snapshot-unreadable = Snapshot state could not be read.
+.action = Check permissions at { $path }.
+error-snapshot-unwritable = Snapshot state could not be written.
+.action = Check permissions and free space at { $path }.
+error-snapshot-invalid = Snapshot metadata is invalid.
+.action = Review { $path }. Ephervex left the snapshot untouched.
+error-snapshot-version-newer = This snapshot was written by a newer Ephervex format ({ $found }, supported { $supported }).
+.action = Update Ephervex before using { $path }.
+error-snapshot-canceled = The snapshot operation was canceled.
+
 error-pack-recipe-unreadable = This instance's retained pack recipe could not be read.
 .action = Check that { $path } is readable. Without it, a server cannot be created from this instance's pack.
 

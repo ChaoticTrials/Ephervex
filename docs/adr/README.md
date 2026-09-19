@@ -40,3 +40,4 @@ so the reasoning trail survives.
 | [0032](0032-pack-owned-mod-versions-can-be-changed-per-instance-opt-in.md) | Pack-owned mod versions can be changed, per instance and opt-in | Accepted |
 | [0033](0033-internal-format-versions-stay-at-1-until-1.0.0.md) | Internal format versions stay at 1 until 1.0.0 | Accepted |
 | [0034](0034-a-recipe-entry-records-the-dependencies-its-provider-declared.md) | A recipe entry records the relations its provider declared | Accepted |
+| [0035](0035-local-snapshots-use-copy-on-write-clones.md) | Local snapshots use copy-on-write clones | Accepted |

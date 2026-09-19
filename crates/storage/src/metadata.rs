@@ -71,6 +71,8 @@ pub const RETIRED_DIR: &str = "retired";
 /// jar for the loader to find. Inside the instance for the same reason retiring
 /// is: a rename is only atomic within one filesystem.
 pub const STAGING_DIR: &str = "staging";
+/// `.launcher/snapshots/`, containing user-managed local safety copies.
+pub const SNAPSHOTS_DIR: &str = "snapshots";
 /// The Minecraft game directory inside a client instance root.
 ///
 /// Kept separate from `.launcher/` so that pack extraction, which writes into
@@ -169,6 +171,12 @@ pub fn metadata_dir(root: &Path) -> PathBuf {
 #[must_use]
 pub fn source_dir(root: &Path) -> PathBuf {
     metadata_dir(root).join(SOURCE_DIR)
+}
+
+/// `<root>/.launcher/snapshots/`.
+#[must_use]
+pub fn snapshots_dir(root: &Path) -> PathBuf {
+    metadata_dir(root).join(SNAPSHOTS_DIR)
 }
 
 /// `<root>/.launcher/retired/`.
