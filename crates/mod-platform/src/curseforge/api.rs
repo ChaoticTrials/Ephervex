@@ -40,9 +40,9 @@ use super::dto::{
     CurseForgeFingerprintMatches, CurseForgeGame, CurseForgePagination, CurseForgeProject,
     HASH_ALGO_SHA1,
 };
-use super::mapping::{file_declared_sides, published_at, split_declared_support};
+use super::mapping::{file_declared_sides, file_relations, published_at, split_declared_support};
 use crate::error::{ModPlatformError, ModPlatformResult};
-use crate::model::{ModFile, RecognizedFile, SideSupport};
+use crate::model::{ModDependency, ModFile, RecognizedFile, SideSupport};
 
 /// The production API root.
 pub const CURSEFORGE_API_BASE: &str = "https://api.curseforge.com/v1";
@@ -1111,6 +1111,11 @@ pub struct CurseForgeFileRelease {
     /// When CurseForge published this file. See [`published_at`] for how an
     /// absent or unparsable date is read.
     pub published_at: DateTime<Utc>,
+    /// What this file's document says it needs from other projects, read the
+    /// same way the mod browser reads it. Recorded into an imported pack's
+    /// recipe so the instance can answer dependency questions later without
+    /// asking CurseForge again (ADR 0034).
+    pub dependencies: Vec<ModDependency>,
 }
 
 /// Checks one file document against the request and normalizes it.
@@ -1182,6 +1187,7 @@ fn normalize_file(
         server_side,
         game_versions,
         published_at: published,
+        dependencies: file_relations(&document.dependencies),
     })
 }
 

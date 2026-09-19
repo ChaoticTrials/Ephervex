@@ -1887,7 +1887,7 @@ pub(crate) fn recipe_entry_for(
 /// on and is left out. That never loses a requirement: the resolver refuses a
 /// required dependency that names only a file rather than skipping it, so
 /// anything reaching here has already proven every requirement resolvable.
-fn recipe_relations(dependencies: &[ModDependency]) -> Vec<RecipeRelation> {
+pub(crate) fn recipe_relations(dependencies: &[ModDependency]) -> Vec<RecipeRelation> {
     dependencies
         .iter()
         .filter_map(|dependency| {

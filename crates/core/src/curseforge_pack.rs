@@ -283,6 +283,9 @@ impl App {
             origin: ModOrigin::PackDeclared,
             identity: Some(blocked.identity.clone()),
             original_identity: None,
+            // This file was recovered from a manual download because the
+            // provider refused to describe it. Nothing declared its relations,
+            // so nothing has asked rather than nothing is needed.
             relations: None,
         }))
     }
@@ -1044,7 +1047,7 @@ fn recipe_entry(
             file_id: Some(release.file.to_string()),
         }),
         original_identity: None,
-        relations: None,
+        relations: Some(crate::mods::recipe_relations(&release.dependencies)),
     })
 }
 
@@ -1507,6 +1510,62 @@ mod tests {
         .await;
     }
 
+    /// The same document [`file_document`] serves, plus the relations this file
+    /// declares about other projects.
+    fn file_document_with_relations(
+        server: &MockServer,
+        project: u32,
+        file: u32,
+        name: &str,
+        body: &[u8],
+        relations: &[(u32, u32)],
+    ) -> String {
+        let relations = relations
+            .iter()
+            .map(|(mod_id, relation_type)| {
+                format!(r#"{{"modId":{mod_id},"relationType":{relation_type}}}"#)
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            r#"{{"data":{{"id":{file},"gameId":432,"modId":{project},"isAvailable":true,
+                "displayName":"{name}","fileName":"{name}","releaseType":1,"fileStatus":4,
+                "fileLength":{length},
+                "downloadUrl":"{base}/files/{project}/{file}/{name}",
+                "dependencies":[{relations}],
+                "hashes":[{{"value":"{digest}","algo":1}},
+                          {{"value":"0123456789abcdef0123456789abcdef","algo":2}}]}}}}"#,
+            length = body.len(),
+            base = server.uri(),
+            digest = sha1_of(body),
+        )
+    }
+
+    async fn serve_file_with_relations(
+        server: &MockServer,
+        project: u32,
+        file: u32,
+        name: &str,
+        body: &[u8],
+        relations: &[(u32, u32)],
+    ) {
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/mods/{project}/files/{file}")))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                file_document_with_relations(server, project, file, name, body, relations),
+                "application/json",
+            ))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/files/{project}/{file}/{name}")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(body.to_vec(), "application/java-archive"),
+            )
+            .mount(server)
+            .await;
+    }
+
     async fn serve_pack(server: &MockServer) {
         serve_pack_as_mods(server).await;
         serve_file(
@@ -1628,6 +1687,78 @@ mod tests {
             optional.selected,
             Some(false),
             "the user was asked and said no"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_imported_packs_files_record_the_relations_curseforge_declared() {
+        // Two projects this pack does not itself contain: one the file does not
+        // load without, one it merely suggests.
+        const LIBRARY_PROJECT: u32 = 306_613;
+        const SUGGESTED_PROJECT: u32 = 999_111;
+        // CurseForge's own `relationType` values, as its API documents them.
+        // Spelled out here rather than reached for across the crate boundary:
+        // this is a fixture asserting against the wire format.
+        const REQUIRED_DEPENDENCY: u32 = 3;
+        const OPTIONAL_DEPENDENCY: u32 = 2;
+
+        // The file document the import already fetches carries these. Keeping
+        // them is what lets the instance answer "what breaks if this is turned
+        // off" later, offline and with no key (ADR 0034).
+        let server = MockServer::start().await;
+        serve_pack_as_mods(&server).await;
+        serve_file_with_relations(
+            &server,
+            REQUIRED_PROJECT,
+            REQUIRED_FILE,
+            "required-1.0.0.jar",
+            REQUIRED_BODY,
+            &[
+                (LIBRARY_PROJECT, REQUIRED_DEPENDENCY),
+                (SUGGESTED_PROJECT, OPTIONAL_DEPENDENCY),
+            ],
+        )
+        .await;
+        serve_file(
+            &server,
+            OPTIONAL_PROJECT,
+            OPTIONAL_FILE,
+            "optional-1.0.0.jar",
+            OPTIONAL_BODY,
+        )
+        .await;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = archive_at(dir.path(), "repro.zip");
+        let app = app_against(dir.path(), &server);
+        let imported = import(&app, &archive).await.expect("import");
+
+        let recipe = imported.recipe();
+        let required = &recipe.files[0];
+        let relations = required
+            .recorded_relations()
+            .expect("the file document declared relations");
+        assert_eq!(relations.len(), 2);
+        assert!(
+            required.requires_project(&LIBRARY_PROJECT.to_string()),
+            "a required relation is what a disable warning is built on"
+        );
+        assert!(
+            !required.requires_project(&SUGGESTED_PROJECT.to_string()),
+            "an optional relation never becomes a requirement"
+        );
+        assert!(
+            relations
+                .iter()
+                .all(|relation| relation.version_id.is_none()),
+            "CurseForge states relations project to project; no file is pinned"
+        );
+
+        let optional = &recipe.files[1];
+        assert_eq!(
+            optional.recorded_relations(),
+            Some(&[][..]),
+            "a document that declares none answered, and is not unasked"
         );
     }
 

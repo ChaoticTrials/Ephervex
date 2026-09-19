@@ -30,9 +30,10 @@ use super::api::{
     CurseForgeProjectClasses, DOCUMENTED_LOADER_NAMES, supported_hashes,
 };
 use super::dto::{
-    CurseForgeFileDocument, CurseForgeProject, CurseForgeProjectFile, RELATION_EMBEDDED_LIBRARY,
-    RELATION_INCLUDE, RELATION_INCOMPATIBLE, RELATION_OPTIONAL_DEPENDENCY,
-    RELATION_REQUIRED_DEPENDENCY, RELEASE_TYPE_BETA, RELEASE_TYPE_RELEASE,
+    CurseForgeFileDocument, CurseForgeFileRelation, CurseForgeProject, CurseForgeProjectFile,
+    RELATION_EMBEDDED_LIBRARY, RELATION_INCLUDE, RELATION_INCOMPATIBLE,
+    RELATION_OPTIONAL_DEPENDENCY, RELATION_REQUIRED_DEPENDENCY, RELEASE_TYPE_BETA,
+    RELEASE_TYPE_RELEASE,
 };
 use crate::error::{ModPlatformError, ModPlatformResult};
 use crate::model::{
@@ -213,23 +214,30 @@ pub(super) fn version(
             size: document.file_length,
             hashes,
         },
-        dependencies: document
-            .dependencies
-            .iter()
-            .filter_map(|relation| {
-                Some(ModDependency {
-                    kind: dependency_kind(relation.relation_type)?,
-                    project_id: Some(CurseForgeProjectId::new(relation.mod_id)?.to_string()),
-                    // CurseForge states relations project to project. There is
-                    // no file to pin and none is invented: the dependency is
-                    // resolved against this instance's own exact target, the
-                    // same way the mod that declared it was.
-                    version_id: None,
-                    file_name: None,
-                })
-            })
-            .collect(),
+        dependencies: file_relations(&document.dependencies),
     })
+}
+
+/// What one file document says about other projects.
+///
+/// Shared by the mod browser and by pack import, which read the same document
+/// and must agree about what it declared.
+pub(super) fn file_relations(relations: &[CurseForgeFileRelation]) -> Vec<ModDependency> {
+    relations
+        .iter()
+        .filter_map(|relation| {
+            Some(ModDependency {
+                kind: dependency_kind(relation.relation_type)?,
+                project_id: Some(CurseForgeProjectId::new(relation.mod_id)?.to_string()),
+                // CurseForge states relations project to project. There is no
+                // file to pin and none is invented: the dependency is resolved
+                // against this instance's own exact target, the same way the
+                // mod that declared it was.
+                version_id: None,
+                file_name: None,
+            })
+        })
+        .collect()
 }
 
 /// Splits one `gameVersions` array into Minecraft releases and loader names.

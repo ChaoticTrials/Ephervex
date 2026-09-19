@@ -564,6 +564,13 @@ A relation the catalog states by file name alone carries no project to key on an
 is left out rather than given an invented one, which loses no requirement: the
 resolver refuses a required dependency shaped that way rather than skipping it.
 
+Importing a CurseForge pack records them too. The exact-file document the import
+already fetches to learn a file's name, address and digest carries its relations
+in the same response, so nothing extra is requested and no credential is used
+that the import did not already need. A file recovered from a manual download
+because the provider refused to describe it has no such document, and stays
+unasked.
+
 A Modrinth pack index declares no relations at all - it states paths, hashes and
 download addresses - so its entries stay unasked until an explicit refresh. A jar
 with no catalog identity has nothing to ask about and stays unasked.
