@@ -1869,6 +1869,10 @@ gui-absent-mods-detail = { $count ->
 }
 gui-remove = Remove...
 gui-provider-detail = Provider configuration remains scoped. Stored secrets are reported only as present or absent.
+gui-mod-changes = Mod changes
+gui-mod-changes-detail = What a mod's switch does to the mods that need it.
+gui-dependency-warning = Ask before changing other mods
+gui-dependency-warning-detail = Turning a mod off takes the mods that require it with it, and turning one on brings back what it needs. This asks first. Off, the change is made and reported afterwards.
 gui-preferred-mod-catalog = Mod catalog
 gui-preferred-mod-catalog-detail = Which catalog the mod browser opens on. Individual searches and installs can still name either one.
 gui-preferred-mod-catalog-heading = Preferred catalog

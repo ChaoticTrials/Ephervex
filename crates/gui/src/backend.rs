@@ -669,6 +669,8 @@ pub struct SettingsData {
     /// Which color scheme the interface paints in, as its stable identifier.
     pub color_scheme: String,
     pub show_linked_servers: bool,
+    /// Whether a mod change that affects other mods stops to be confirmed.
+    pub warn_on_dependency_impact: bool,
     /// Minecraft releases the user pinned, in the order they should be offered.
     /// Kept exactly as recorded, including an entry no current release matches.
     pub favorite_minecraft_versions: Vec<String>,
@@ -3143,6 +3145,7 @@ fn application_settings(app: &App) -> Result<SettingsData, CoreError> {
         technical_text_size_pixels: display.technical_text_size.pixels(),
         color_scheme: display.color_scheme.as_str().to_owned(),
         show_linked_servers: display.show_linked_servers,
+        warn_on_dependency_impact: app.warn_on_dependency_impact(),
         favorite_minecraft_versions: app.favorite_minecraft_versions().to_vec(),
         make_default_account_operator: server.make_default_account_operator,
         operator_permission_level: server.operator_permission_level.value(),

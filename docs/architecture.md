@@ -631,7 +631,10 @@ affected set with the confirmation wanted opens a dialog and changes nothing
 yet, and an affected set with the confirmation turned off applies the whole
 cascade and reports it in a toast. Deleting a jar asks the same question,
 because the loader sees the same absence either way. The dialog carries the
-preference's own switch, so the decision is recorded where it is made.
+preference's own switch, so the decision is recorded where it is made, and the
+General settings page carries the same one, so it can be taken back: an answer
+given inside a dialog that only ever appears while the answer is still yes
+would otherwise be a one-way door.
 
 Whether a change that affects other mods stops to be confirmed is one global
 preference, `[mods] warn_on_dependency_impact`, defaulting to on. It decides

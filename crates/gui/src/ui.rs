@@ -3174,6 +3174,10 @@ slint::slint! {
         in-out property <bool> java-auto-detect: true;
         in-out property <bool> java-auto-download: true;
         in-out property <bool> show-linked-servers: false;
+        // Whether a mod change that affects other mods stops to be confirmed.
+        // Written from the stored value, never from the click, so a save that
+        // fails leaves the switch showing what is actually recorded.
+        in-out property <bool> warn-on-dependency-impact: true;
         in-out property <bool> make-default-account-operator: true;
         in-out property <int> operator-permission-level: 4;
         in-out property <string> server-workspace-return-client;
@@ -3338,6 +3342,9 @@ slint::slint! {
         // level it is given. One callback because the General page saves with
         // one button: two buttons on one page meant two ways to half-save it.
         callback save-general-settings(int, int, string, bool, bool, int);
+        // Applied on the click rather than on Save, like the other remembered
+        // answers on this screen: it is one recorded decision, not a form.
+        callback set-dependency-warning(bool);
         // What the Java settings page asks for when it opens, against the
         // cached inventory. `refresh-java` is the page's own button, which
         // rescans because the cache cannot notice a JDK installed since.
@@ -3918,6 +3925,18 @@ slint::slint! {
                                     }
                                 }
                                 ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-save-general-settings"); tone: "primary"; clicked => { root.save-general-settings(root.application-text-scale, root.technical-text-size, root.application-color-scheme, root.show-linked-servers, root.make-default-account-operator, root.operator-permission-level); } } }
+                                // The same decision the mod dialog's own "do
+                                // not ask again" records, somewhere it can be
+                                // taken back. Without this, turning it off is
+                                // a one-way door out of a dialog.
+                                SectionTitle { title: GuiI18n.text("gui-mod-changes"); detail: GuiI18n.text("gui-mod-changes-detail"); }
+                                SettingCard {
+                                    width: min(parent.width, 520px);
+                                    vertical-stretch: 0;
+                                    title: GuiI18n.text("gui-dependency-warning");
+                                    detail: GuiI18n.text("gui-dependency-warning-detail");
+                                    Toggle { accessible-name: GuiI18n.text("gui-dependency-warning"); sets-its-own-position: false; checked: root.warn-on-dependency-impact; toggled(value) => { root.set-dependency-warning(value); } }
+                                }
                                 // Whether the scheme is claimed at all is settled by
                                 // installing, not here (ADR 0028, ADR 0029). What this page
                                 // manages is the answers the user has given to link prompts.
