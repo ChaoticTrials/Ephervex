@@ -42,6 +42,7 @@ fn file(
         origin: ModOrigin::PackDeclared,
         identity: None,
         original_identity: None,
+        relations: None,
     }
 }
 

@@ -596,6 +596,7 @@ mod tests {
             origin: ephervex_pack::ModOrigin::PackDeclared,
             identity: Some(curseforge_identity("238222", "4712354")),
             original_identity: None,
+            relations: None,
         });
         store.write_recipe(&recipe).expect("write");
 

@@ -27,7 +27,7 @@ so the reasoning trail survives.
 | [0019](0019-one-mod-list-with-typed-ownership-and-identity.md) | An instance has one mod list, with ownership and identity as separate typed facts | Accepted |
 | [0020](0020-mod-mutation-is-one-undoable-transaction.md) | Mod mutation is one undoable transaction, and ownership decides what may be mutated | Accepted (its pack-owned refusal amended by ADR 0032) |
 | [0021](0021-linked-mod-sync-pins-the-root-and-resolves-per-target.md) | Linked mod synchronization pins the root release and resolves dependencies per target | Accepted |
-| [0022](0022-curseforge-uses-a-user-supplied-key-and-persists-nothing.md) | CurseForge uses a user-supplied API key, and its responses are never persisted | Accepted (its no-embedded-key decision amended by ADR 0030) |
+| [0022](0022-curseforge-uses-a-user-supplied-key-and-persists-nothing.md) | CurseForge uses a user-supplied API key, and its responses are never persisted | Accepted (its no-embedded-key decision amended by ADR 0030, its persists-nothing decision by ADR 0034) |
 | [0023](0023-appimage-is-the-linux-release-artifact.md) | AppImage is the Linux release artifact, on a declared glibc baseline | Accepted (its "No `.deb`" decision superseded by ADR 0026) |
 | [0024](0024-published-server-files-are-a-complete-installation.md) | Published server files are installed as a complete server, and the loader stays the launcher's | Accepted |
 | [0025](0025-storage-class-is-promoted-in-place.md) | An instance becomes persistent by moving, not by being copied | Accepted |
@@ -39,3 +39,4 @@ so the reasoning trail survives.
 | [0031](0031-a-project-declared-twice-resolves-to-one-file.md) | A project declared twice resolves to one file | Accepted |
 | [0032](0032-pack-owned-mod-versions-can-be-changed-per-instance-opt-in.md) | Pack-owned mod versions can be changed, per instance and opt-in | Accepted |
 | [0033](0033-internal-format-versions-stay-at-1-until-1.0.0.md) | Internal format versions stay at 1 until 1.0.0 | Accepted |
+| [0034](0034-a-recipe-entry-records-the-dependencies-its-provider-declared.md) | A recipe entry records the relations its provider declared | Accepted |

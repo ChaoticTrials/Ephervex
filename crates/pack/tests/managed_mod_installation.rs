@@ -117,6 +117,7 @@ fn addition(
             file_id: None,
         }),
         original_identity: None,
+        relations: None,
     }
 }
 

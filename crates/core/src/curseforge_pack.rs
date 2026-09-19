@@ -283,6 +283,7 @@ impl App {
             origin: ModOrigin::PackDeclared,
             identity: Some(blocked.identity.clone()),
             original_identity: None,
+            relations: None,
         }))
     }
 
@@ -1043,6 +1044,7 @@ fn recipe_entry(
             file_id: Some(release.file.to_string()),
         }),
         original_identity: None,
+        relations: None,
     })
 }
 
@@ -3704,6 +3706,7 @@ mod tests {
                 file_id: None,
             }),
             original_identity: None,
+            relations: None,
         }
     }
 

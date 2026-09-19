@@ -303,6 +303,9 @@ fn normalize_file(
         origin: ModOrigin::PackDeclared,
         identity,
         original_identity: None,
+        // A Modrinth index names a path, hashes and addresses. It declares no
+        // relations, so nothing has asked rather than nothing is needed.
+        relations: None,
     })
 }
 

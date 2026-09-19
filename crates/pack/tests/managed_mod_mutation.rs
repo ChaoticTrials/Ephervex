@@ -141,6 +141,7 @@ fn entry(
             file_id: None,
         }),
         original_identity: None,
+        relations: None,
     }
 }
 

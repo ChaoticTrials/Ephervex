@@ -266,6 +266,7 @@ fn record_identified(layout: &ModHostLayout, adopted: &[ManagedModEntry]) {
             origin: ModOrigin::HandPlaced,
             identity: Some(identity),
             original_identity: None,
+            relations: None,
         };
         match recipe.record_managed(file) {
             Ok(()) => changed = true,
@@ -1872,6 +1873,7 @@ pub(crate) fn recipe_entry_for(
             file_id: exact_file_id(provider, &planned.version.id),
         }),
         original_identity: None,
+        relations: None,
     })
 }
 
@@ -1965,6 +1967,7 @@ mod tests {
                 origin: ModOrigin::PackDeclared,
                 identity: ModIdentity::Unresolved,
                 original_identity: None,
+                relations: None,
                 hashes: Vec::new(),
                 size: None,
                 client: SideRequirement::Required,
@@ -2264,6 +2267,7 @@ mod tests {
             origin,
             identity,
             original_identity: None,
+            relations: None,
             hashes: vec![
                 Hash::new(
                     HashAlgorithm::Sha1,
@@ -2391,6 +2395,7 @@ mod tests {
             origin: ModOrigin::PackDeclared,
             identity: None,
             original_identity: None,
+            relations: None,
         }
     }
 

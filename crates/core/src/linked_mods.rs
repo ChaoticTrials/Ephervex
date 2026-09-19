@@ -2179,6 +2179,7 @@ mod tests {
                 file_id: None,
             }),
             original_identity: None,
+            relations: None,
         });
         store.write_recipe(&recipe).expect("write recipe");
 
@@ -2219,6 +2220,7 @@ mod tests {
                 file_id: None,
             }),
             original_identity: None,
+            relations: None,
         });
         store.write_recipe(&recipe).expect("write recipe");
 
@@ -2477,6 +2479,7 @@ mod tests {
                 file_id: None,
             }),
             original_identity: None,
+            relations: None,
         });
         store.write_recipe(&recipe).expect("write recipe");
 

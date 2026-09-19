@@ -45,7 +45,9 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use ephervex_model::{Hash, ImportSourceKind, LoaderSelection, ModOrigin, ModProvider};
+use ephervex_model::{
+    Hash, ImportSourceKind, LoaderSelection, ModOrigin, ModProvider, ModRelationKind,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{PackError, PackResult};
@@ -452,6 +454,24 @@ pub struct DuplicateProviderFile {
     pub reason: DuplicateFileReason,
 }
 
+/// One relation a catalog stated about a file, as the catalog stated it.
+///
+/// The catalog is the entry's own [`ProviderFileIdentity::provider`], not a
+/// field here: a dependency graph never crosses catalogs, so a second place to
+/// record a provider would be a second place for it to be wrong.
+///
+/// `version_id` is present only where the catalog pins one. Modrinth may;
+/// CurseForge states relations between projects and never between files.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecipeRelation {
+    /// The project this file says something about, in the catalog's own
+    /// spelling.
+    pub project_id: String,
+    pub kind: ModRelationKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version_id: Option<String>,
+}
+
 /// One file the pack declares (the project's `PackFileRecipe`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PackFileRecipe {
@@ -492,9 +512,40 @@ pub struct PackFileRecipe {
     /// than whatever it was most recently changed from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_identity: Option<ProviderFileIdentity>,
+    /// What this file's catalog said it needs (ADR 0034).
+    ///
+    /// `None` means nothing has asked the catalog yet. `Some([])` means it
+    /// answered that this file needs nothing. Collapsing the two would make an
+    /// unasked file look independent, and a warning built on that is
+    /// confidently wrong rather than merely incomplete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relations: Option<Vec<RecipeRelation>>,
 }
 
 impl PackFileRecipe {
+    /// The relations recorded for this file, or nothing when none were.
+    ///
+    /// An empty slice and an absent answer are different facts; see
+    /// [`Self::relations`].
+    #[must_use]
+    pub fn recorded_relations(&self) -> Option<&[RecipeRelation]> {
+        self.relations.as_deref()
+    }
+
+    /// Whether this file declares that it does not load without `project_id`.
+    ///
+    /// False for a file whose relations were never recorded, so a caller that
+    /// needs to tell "does not require it" from "nobody asked" checks
+    /// [`Self::recorded_relations`] first.
+    #[must_use]
+    pub fn requires_project(&self, project_id: &str) -> bool {
+        self.recorded_relations().is_some_and(|relations| {
+            relations
+                .iter()
+                .any(|relation| relation.kind.is_required() && relation.project_id == project_id)
+        })
+    }
+
     /// What this file's requirement is on one side.
     #[must_use]
     pub const fn requirement(&self, side: PackSide) -> SideRequirement {
@@ -573,6 +624,7 @@ impl PackFileRecipe {
                 .original_identity
                 .as_ref()
                 .map(ProviderFileIdentity::resolution),
+            relations: self.relations.clone(),
             hashes: self.hashes.clone(),
             size: self.size,
             client: self.client,
@@ -636,6 +688,9 @@ pub struct RecordedMod {
     /// The release the imported pack originally declared, when this mod has
     /// been moved away from it. See [`PackFileRecipe::original_identity`].
     pub original_identity: Option<ModIdentity>,
+    /// What this mod's catalog said it needs, or nothing when nothing has
+    /// asked. See [`PackFileRecipe::relations`].
+    pub relations: Option<Vec<RecipeRelation>>,
     pub hashes: Vec<Hash>,
     pub size: Option<u64>,
     pub client: SideRequirement,
@@ -977,6 +1032,24 @@ impl PackRecipe {
         }
     }
 
+    /// Every recorded file that does not load without `project_id`.
+    ///
+    /// The reverse of what each entry stores. Edges are kept forward, on the
+    /// entry the catalog described, so installing or removing one mod never has
+    /// to rewrite another mod's record; the direction a warning needs is
+    /// derived here instead (ADR 0034).
+    ///
+    /// Proven only. A file whose relations were never recorded is absent from
+    /// this list and is not thereby independent - [`PackRecipe::files`] with
+    /// [`PackFileRecipe::recorded_relations`] is what answers that.
+    #[must_use]
+    pub fn required_by(&self, project_id: &str) -> Vec<&PackFileRecipe> {
+        self.files
+            .iter()
+            .filter(|file| file.requires_project(project_id))
+            .collect()
+    }
+
     /// Every mod this instance's client actually has, in recipe order.
     ///
     /// The list a mod view is built from. It covers the pack's own mods and
@@ -1089,6 +1162,7 @@ impl PackRecipe {
             origin: ModOrigin::PackOverride,
             identity: None,
             original_identity: None,
+            relations: None,
         });
     }
 
@@ -1547,6 +1621,7 @@ mod tests {
             origin: ModOrigin::PackDeclared,
             identity: None,
             original_identity: None,
+            relations: None,
         }
     }
 
@@ -1800,6 +1875,7 @@ mod tests {
                 file_id: None,
             }),
             original_identity: None,
+            relations: None,
         }
     }
 
@@ -2077,6 +2153,133 @@ mod tests {
         }"#;
         let file: PackFileRecipe = serde_json::from_str(json).expect("deserialize");
         assert_eq!(file.original_identity, None);
+    }
+
+    /// The real shape this exists for: one library, three mods that need it.
+    fn requiring(
+        file_name: &str,
+        project: &str,
+        requires: &[(&str, ModRelationKind)],
+    ) -> PackFileRecipe {
+        PackFileRecipe {
+            relations: Some(
+                requires
+                    .iter()
+                    .map(|(project_id, kind)| RecipeRelation {
+                        project_id: (*project_id).to_owned(),
+                        kind: *kind,
+                        version_id: None,
+                    })
+                    .collect(),
+            ),
+            ..managed(project, "Orv4ObRj", file_name)
+        }
+    }
+
+    fn library_and_its_dependents() -> PackRecipe {
+        let mut recipe = PackRecipe::for_manual_instance(
+            "Dependency Aware Example",
+            "1.21.1",
+            LoaderSelection::exact(LoaderKind::NeoForge, "21.1.77"),
+        );
+        recipe.files = vec![
+            requiring("LibX.jar", "qEH6GYul", &[]),
+            requiring(
+                "SkyblockBuilder.jar",
+                "por2AZc5",
+                &[
+                    ("qEH6GYul", ModRelationKind::Required),
+                    ("3Gdi7Qgq", ModRelationKind::Optional),
+                ],
+            ),
+            requiring(
+                "SkyGUIs.jar",
+                "3Gdi7Qgq",
+                &[
+                    ("qEH6GYul", ModRelationKind::Required),
+                    ("por2AZc5", ModRelationKind::Required),
+                ],
+            ),
+            requiring(
+                "UtilitiX.jar",
+                "MMMWYsjm",
+                &[("qEH6GYul", ModRelationKind::Required)],
+            ),
+        ];
+        recipe
+    }
+
+    #[test]
+    fn the_reverse_index_names_every_file_that_requires_a_project() {
+        let names: Vec<String> = library_and_its_dependents()
+            .required_by("qEH6GYul")
+            .into_iter()
+            .map(PackFileRecipe::display_name)
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "mods/SkyblockBuilder.jar".to_owned(),
+                "mods/SkyGUIs.jar".to_owned(),
+                "mods/UtilitiX.jar".to_owned(),
+            ],
+            "forward edges are stored; the direction a warning needs is derived"
+        );
+    }
+
+    #[test]
+    fn an_optional_relation_never_appears_in_the_required_reverse_index() {
+        // Skyblock Builder declares Sky GUIs optional. Turning Sky GUIs off
+        // costs a feature, so nothing may cascade from it.
+        assert!(
+            library_and_its_dependents()
+                .required_by("3Gdi7Qgq")
+                .is_empty(),
+            "an optional relation is not a requirement"
+        );
+    }
+
+    #[test]
+    fn an_absent_relation_set_and_an_empty_one_are_told_apart_on_disk() {
+        // The whole point of the `Option`: "nobody asked the catalog" and "the
+        // catalog says it needs nothing" send a warning to opposite answers.
+        let unasked = managed("qEH6GYul", "Orv4ObRj", "LibX.jar");
+        assert_eq!(unasked.recorded_relations(), None);
+        let unasked_json = serde_json::to_string(&unasked).expect("serialize");
+        assert!(
+            !unasked_json.contains("relations"),
+            "an absent value is omitted, not written as null: {unasked_json}"
+        );
+
+        let answered = requiring("LibX.jar", "qEH6GYul", &[]);
+        assert_eq!(answered.recorded_relations(), Some(&[][..]));
+        let answered_json = serde_json::to_string(&answered).expect("serialize");
+        assert!(
+            answered_json.contains(r#""relations":[]"#),
+            "an answered-and-empty set is written, or it reads back as unasked: {answered_json}"
+        );
+
+        let back: PackFileRecipe = serde_json::from_str(&answered_json).expect("deserialize");
+        assert_eq!(back.recorded_relations(), Some(&[][..]));
+        let back: PackFileRecipe = serde_json::from_str(&unasked_json).expect("deserialize");
+        assert_eq!(back.recorded_relations(), None);
+    }
+
+    #[test]
+    fn an_entry_written_before_relations_existed_reads_as_unasked() {
+        let json = r#"{
+            "logical_path": "mods/library.jar",
+            "hashes": [],
+            "client": "required",
+            "server": "unknown",
+            "origin": "pack_declared"
+        }"#;
+        let file: PackFileRecipe = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(file.recorded_relations(), None);
+        assert!(
+            !file.requires_project("qEH6GYul"),
+            "an unrecorded entry proves nothing, so it requires nothing provably"
+        );
     }
 
     #[test]

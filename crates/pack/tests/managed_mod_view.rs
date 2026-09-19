@@ -98,6 +98,7 @@ fn browser_install(project: &str, version: &str, name: &str, origin: ModOrigin) 
             file_id: None,
         }),
         original_identity: None,
+        relations: None,
     }
 }
 

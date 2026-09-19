@@ -541,6 +541,26 @@ from that record rather than from the directory. Each target's mutation is the
 same undoable transaction; several targets are not one transaction, and the
 result is per target.
 
+## What a mod requires
+
+A recipe entry records the relations its catalog declared about that file:
+required, optional, incompatible, embedded (ADR 0034). The direction stored is
+forward, on the entry the catalog described, so installing or removing one mod
+never rewrites another mod's record and an entry copied into a linked server's
+recipe stays correct there. The direction a warning needs - which installed files
+require a given project - is derived over the recipe rather than stored.
+
+Relations and the fact that nobody has asked for them are different values. An
+absent set means no catalog has been asked about that file; an empty set means
+one answered that the file needs nothing. Anything built on this distinguishes
+them, because a mod nothing has asked about is unknown rather than independent,
+and a warning that treats it as independent is confidently wrong rather than
+merely incomplete.
+
+A Modrinth pack index declares no relations at all - it states paths, hashes and
+download addresses - so its entries stay unasked until an explicit refresh. A jar
+with no catalog identity has nothing to ask about and stays unasked.
+
 ## Security boundaries
 
 ### Untrusted paths and archives

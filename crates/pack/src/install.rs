@@ -1216,6 +1216,7 @@ mod tests {
             selected: None,
             origin: ModOrigin::PackDeclared,
             identity: None,
+            relations: None,
             original_identity: None,
         }
     }

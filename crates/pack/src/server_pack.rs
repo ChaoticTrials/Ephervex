@@ -327,6 +327,7 @@ pub fn server_pack_recipe(
                 origin: ModOrigin::PackDeclared,
                 identity: entry.identity.clone(),
                 original_identity: None,
+                relations: None,
             })
             .collect(),
         override_layers: Vec::new(),
