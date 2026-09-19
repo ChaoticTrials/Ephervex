@@ -18,13 +18,13 @@
 //! acting on it is a separate request, because "this file is wrong" and "replace
 //! this file" are different decisions and only one of them is the launcher's.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use ephervex_download::OperationReporter;
 use ephervex_download::verify::file_matches_hashes;
 use ephervex_model::{Hash, Progress};
 use tokio_util::sync::CancellationToken;
-use tracing::{info, instrument};
+use tracing::{info, instrument, warn};
 
 use crate::app::App;
 use crate::error::CoreResult;
@@ -131,6 +131,36 @@ impl VerificationReport {
     }
 }
 
+/// What one repair pass did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RepairReport {
+    /// Files replaced with the bytes the recipe records.
+    pub repaired: Vec<PathBuf>,
+    /// Files that were wrong and that nothing here can fetch again. A pack
+    /// shipped these inside itself rather than pointing at them, so there is no
+    /// address to go back to and re-importing the pack is the way out.
+    pub unrepairable: Vec<PathBuf>,
+    /// Files a repair was attempted for and did not fix.
+    ///
+    /// Kept apart from the ones nothing could have fixed, because one says the
+    /// catalog or the network was the problem and the other says the pack was.
+    pub failed: Vec<PathBuf>,
+}
+
+impl RepairReport {
+    /// Whether the instance now holds what it recorded.
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.unrepairable.is_empty() && self.failed.is_empty()
+    }
+
+    /// Whether anything about the instance changed.
+    #[must_use]
+    pub fn changed_anything(&self) -> bool {
+        !self.repaired.is_empty()
+    }
+}
+
 impl App {
     /// Checks every file this host's recipe records against its own digests.
     ///
@@ -189,10 +219,135 @@ impl App {
         );
         Ok(report)
     }
+
+    /// Replaces every file that is absent or wrong with the one recorded.
+    ///
+    /// Verification first, because repairing what is not broken would rewrite
+    /// files for nothing, and because the two answers a repair needs - what is
+    /// wrong, and whether anything can be done about it - are the ones a
+    /// verification already gives.
+    ///
+    /// Each file is fetched and verified before anything on disk is touched,
+    /// so a repair that cannot obtain a replacement leaves the broken file
+    /// exactly where it was rather than removing it and failing. One file's
+    /// failure does not abandon the rest: a pass that mended four of five and
+    /// says so is more use than one that reports only the fifth.
+    #[instrument(skip(self, reporter, cancel), fields(host = %host.id()))]
+    pub async fn repair_host(
+        &self,
+        host: ModHost,
+        reporter: &OperationReporter,
+        cancel: &CancellationToken,
+    ) -> CoreResult<RepairReport> {
+        let layout = self.mod_host_layout(host)?;
+        let found = self.verify_host(host, reporter, cancel).await?;
+        let mut report = RepairReport {
+            unrepairable: found
+                .unrepairable()
+                .map(|file| file.logical_path.clone())
+                .collect(),
+            ..RepairReport::default()
+        };
+
+        let wanted: Vec<PathBuf> = found
+            .repairable()
+            .map(|file| file.logical_path.clone())
+            .collect();
+        for path in wanted {
+            if cancel.is_cancelled() {
+                break;
+            }
+            // A file that is present, and wrong, has to move out of the way
+            // first: writing the replacement refuses to overwrite, which is
+            // the rule that keeps an install from touching a jar it did not
+            // put there. Moving rather than deleting is what makes the failure
+            // path recoverable (ADR 0020) - the bytes go back if the
+            // replacement cannot be obtained.
+            let retired = match retire(&layout, &path) {
+                Ok(retired) => retired,
+                Err(error) => {
+                    warn!(%error, path = %path.display(), "a broken file could not be moved aside");
+                    report.failed.push(path);
+                    continue;
+                }
+            };
+            match self.restore_mod_file(host, &path, reporter, cancel).await {
+                Ok(()) => {
+                    // Deleting the outgoing copy is allowed to fail: a leftover
+                    // in launcher-owned scratch is invisible to the game, and
+                    // the next mutation clears it.
+                    if let Some(retired) = retired {
+                        let _ = std::fs::remove_file(retired);
+                    }
+                    report.repaired.push(path);
+                }
+                Err(error) => {
+                    warn!(%error, path = %path.display(), "a file could not be repaired");
+                    if let Some(retired) = retired {
+                        restore_retired(&retired, &layout.game_dir.join(&path));
+                    }
+                    report.failed.push(path);
+                }
+            }
+        }
+
+        info!(
+            repaired = report.repaired.len(),
+            failed = report.failed.len(),
+            unrepairable = report.unrepairable.len(),
+            "replaced what this host was missing or holding wrongly"
+        );
+        Ok(report)
+    }
+}
+
+/// Moves a broken jar into launcher-owned scratch, out of the installer's way.
+///
+/// Returns where it went, or nothing when there was no file there to move -
+/// which is the ordinary case for a file that is simply absent.
+fn retire(
+    layout: &crate::mods::ModHostLayout,
+    logical_path: &Path,
+) -> std::io::Result<Option<PathBuf>> {
+    let installed = layout.game_dir.join(logical_path);
+    let present = if installed.is_file() {
+        installed
+    } else {
+        let disabled = ephervex_pack::disabled_path(&installed);
+        if disabled.is_file() {
+            disabled
+        } else {
+            return Ok(None);
+        }
+    };
+
+    let directory = ephervex_storage::metadata::retired_dir(&layout.root);
+    std::fs::create_dir_all(&directory)?;
+    let name = present
+        .file_name()
+        .unwrap_or(std::ffi::OsStr::new("mod.jar"));
+    let destination = directory.join(name);
+    std::fs::rename(&present, &destination)?;
+    Ok(Some(destination))
+}
+
+/// Puts a retired jar back where it came from.
+///
+/// Best effort and reported rather than returned: the repair has already
+/// failed by the time this runs, and a second failure changes only how much of
+/// the instance is intact, not whether the operation went wrong.
+fn restore_retired(retired: &Path, destination: &Path) {
+    if let Err(error) = std::fs::rename(retired, destination) {
+        warn!(
+            %error,
+            path = %destination.display(),
+            "a broken file could not be put back after a failed repair"
+        );
+    }
 }
 
 /// What one file on disk is, against the digests recorded for it.
-async fn check(path: &std::path::Path, expected: &[Hash]) -> Integrity {
+async fn check(path: &Path, expected: &[Hash]) -> Integrity {
     // A disabled jar is installed and recorded; it is renamed out of the
     // loader's way, and verifying it is still verifying the instance.
     let path = if path.is_file() {
@@ -383,6 +538,110 @@ mod tests {
         assert_eq!(
             integrity(&verify(&app, id).await, "sound.jar"),
             Integrity::Intact
+        );
+    }
+
+    #[tokio::test]
+    async fn a_repair_leaves_a_broken_file_alone_when_it_cannot_replace_it() {
+        // Nothing here can reach the loopback-free addresses these fixtures
+        // carry, which is the point: a repair that cannot obtain a replacement
+        // has to leave the broken bytes where they are rather than remove them
+        // and fail. Losing a file to a failed repair is worse than keeping a
+        // wrong one, because a wrong one can still be looked at.
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, id, root) = instance(base.path());
+        let mods = ephervex_storage::metadata::client_game_dir(&root).join("mods");
+
+        let report = app
+            .repair_host(
+                ModHost::Instance(id),
+                &OperationReporter::silent("test-repair"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("a repair reports rather than fails");
+
+        assert!(!report.is_complete());
+        assert!(report.repaired.is_empty(), "no address here can be reached");
+        assert_eq!(
+            report.failed.len(),
+            2,
+            "the truncated one and the absent one"
+        );
+        assert_eq!(
+            std::fs::read(mods.join("truncated.jar")).expect("read"),
+            b"a ja",
+            "the broken bytes are still there to look at"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_repair_puts_the_broken_file_back_rather_than_losing_it() {
+        // A corrupt file has to move out of the installer's way before its
+        // replacement can be written, which is the one step that can lose it.
+        // These fixtures can reach no address, so every repair here fails, and
+        // the bytes still have to be where they were.
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, id, root) = instance(base.path());
+        let mods = ephervex_storage::metadata::client_game_dir(&root).join("mods");
+
+        let report = app
+            .repair_host(
+                ModHost::Instance(id),
+                &OperationReporter::silent("test-repair"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("repair");
+        assert!(report.repaired.is_empty());
+
+        assert_eq!(
+            std::fs::read(mods.join("truncated.jar")).expect("the file is still there"),
+            b"a ja",
+            "a failed repair leaves the bytes it moved aside back where they were"
+        );
+        let retired = ephervex_storage::metadata::retired_dir(&root);
+        assert!(
+            !retired.is_dir()
+                || std::fs::read_dir(&retired)
+                    .expect("scratch")
+                    .next()
+                    .is_none(),
+            "nothing is left stranded in launcher scratch"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_repair_names_what_nothing_can_fetch_apart_from_what_failed() {
+        // Two different answers: the pack shipped this one inside itself so no
+        // address exists, versus the address exists and could not be reached.
+        // One says re-import the pack and the other says try again.
+        //
+        // The shipped jar has to be *gone* to be a fault at all. With no digest
+        // recorded there is nothing to prove its bytes wrong with, so corrupting
+        // it proves nothing and it stays unproven rather than becoming broken.
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, id, root) = instance(base.path());
+        let mods = ephervex_storage::metadata::client_game_dir(&root).join("mods");
+        std::fs::remove_file(mods.join("shipped.jar")).expect("remove");
+
+        let report = app
+            .repair_host(
+                ModHost::Instance(id),
+                &OperationReporter::silent("test-repair"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("repair");
+
+        assert_eq!(
+            report.unrepairable,
+            [PathBuf::from("mods/shipped.jar")],
+            "no digest and no address, so a repair was never possible for it"
+        );
+        assert!(
+            !report.failed.contains(&PathBuf::from("mods/shipped.jar")),
+            "it is not something a repair attempted and failed at"
         );
     }
 

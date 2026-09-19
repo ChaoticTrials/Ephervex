@@ -661,6 +661,20 @@ proven either way, and it is reported as unproven rather than counted sound or
 broken. A disabled jar is checked under the name it actually has, because
 turning a mod off renames it out of the loader's way and leaves it installed.
 
+Repairing replaces what is absent or wrong with what the recipe records. It
+verifies first, so nothing sound is rewritten. A file that is present and wrong
+moves into `.launcher/retired/` before its replacement is written, because
+writing one refuses to overwrite - the rule that keeps an install from touching
+a jar it did not put there - and because moving rather than deleting is what
+makes the failure path recoverable (ADR 0020): the bytes go back when the
+replacement cannot be obtained, and the outgoing copy is deleted only once the
+new one is in place. A file that cannot be obtained is therefore left exactly
+where it was: losing a file to a failed repair is worse than keeping a
+wrong one, because a wrong one can still be looked at. One file's failure does
+not abandon the rest, and the report separates what nothing could have fixed
+from what a repair tried and failed at - the first says re-import the pack, the
+second says try again.
+
 Repair is offered only where replacing the file could help, which means a fault
 plus a recorded address. Telling somebody to repair an instance that repairing
 cannot mend is worse than telling them nothing, so files with no address are

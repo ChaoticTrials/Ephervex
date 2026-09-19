@@ -405,6 +405,19 @@ enum ModCommand {
         #[command(flatten)]
         host: ModHostArgs,
     },
+    /// Replace every file this instance is missing or holding wrongly.
+    ///
+    /// Checks first, so nothing sound is rewritten, and fetches each
+    /// replacement before touching anything on disk, so a file that cannot be
+    /// obtained is left exactly where it is rather than removed.
+    ///
+    /// A file the pack shipped inside itself has no address to go back to.
+    /// Those are named separately, because re-importing the pack is the way
+    /// out for them and trying again is not.
+    Repair {
+        #[command(flatten)]
+        host: ModHostArgs,
+    },
     /// Ask each catalog what this instance's mods need, and record the answers.
     ///
     /// Ephervex records what a mod requires when it installs it, and when it
@@ -3244,6 +3257,7 @@ async fn run_mod_command(app: &mut App, command: &ModCommand, json: bool) -> any
             print_managed_mods(&mods, json);
         }
         ModCommand::Verify { host } => return run_mod_verify(app, host.host()?, json).await,
+        ModCommand::Repair { host } => return run_mod_repair(app, host.host()?, json).await,
         ModCommand::Refresh { host } => {
             let report = app
                 .refresh_mod_dependencies(
@@ -3581,6 +3595,47 @@ async fn run_mod_verify(app: &App, host: ModHost, json: bool) -> anyhow::Result<
         );
     }
     anyhow::bail!("this instance does not hold what it recorded")
+}
+
+/// Replaces what an instance is missing or holding wrongly.
+async fn run_mod_repair(app: &App, host: ModHost, json: bool) -> anyhow::Result<()> {
+    let report = app
+        .repair_host(
+            host,
+            &OperationReporter::silent("repairing-instance"),
+            &CancellationToken::new(),
+        )
+        .await?;
+
+    if json {
+        print_json(&serde_json::json!({
+            "complete": report.is_complete(),
+            "repaired": report.repaired,
+            "failed": report.failed,
+            "unrepairable": report.unrepairable,
+        }));
+    } else {
+        for path in &report.repaired {
+            outln!("repaired  {}", path.display());
+        }
+        if report.repaired.is_empty() && report.is_complete() {
+            outln!("nothing needed replacing");
+        }
+    }
+
+    if report.is_complete() {
+        return Ok(());
+    }
+    for path in &report.unrepairable {
+        eprintln!(
+            "no address recorded: {} - re-import the pack to get it back",
+            path.display()
+        );
+    }
+    for path in &report.failed {
+        eprintln!("could not be replaced: {}", path.display());
+    }
+    anyhow::bail!("this instance still does not hold what it recorded")
 }
 
 /// Reports what checking an instance's recorded files found.
