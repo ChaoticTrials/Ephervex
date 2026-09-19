@@ -167,6 +167,45 @@ impl RequiredMods {
     }
 }
 
+/// One mod named by a recorded relation, and what that relation said.
+///
+/// A relation names whatever the catalog gave. Where a jar here matches it,
+/// this carries that jar; where none does, it carries the catalog's own name
+/// and no presence, because claiming a state for a file that is not here would
+/// be inventing one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelatedMod {
+    pub kind: ModRelationKind,
+    pub name: String,
+    /// The jar this relation is about, when one is here.
+    pub logical_path: Option<PathBuf>,
+    /// How that jar stands, when one is here.
+    pub presence: Option<ModPresence>,
+    pub project_id: Option<String>,
+}
+
+/// What one mod declares, and what declares it.
+///
+/// Direct relations only. The closure a warning needs is
+/// [`App::dependents_of`]; this is the inventory behind it, and showing a
+/// mod's own edges as its own is what lets a reader check that answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModRelations {
+    pub target: ImpactedMod,
+    /// What this mod's entry declares, in the order the catalog stated it.
+    pub requires: Vec<RelatedMod>,
+    /// Mods of this host whose entries name this one.
+    pub required_by: Vec<RelatedMod>,
+}
+
+impl ModRelations {
+    /// Whether anything at all was recorded in either direction.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.requires.is_empty() && self.required_by.is_empty()
+    }
+}
+
 impl App {
     /// Whether a mod change that affects other mods stops to be confirmed.
     ///
@@ -326,6 +365,77 @@ impl App {
             disabled,
             absent,
             incompatible,
+        })
+    }
+
+    /// What this mod declares, and what declares it.
+    ///
+    /// Offline and pure like the other two, and direct rather than transitive:
+    /// it answers "what was recorded about this mod", which is the question a
+    /// reader asks of one mod's own page.
+    pub fn relations_of(&self, host: ModHost, logical_path: &Path) -> CoreResult<ModRelations> {
+        let graph = ModGraph::build(self, host)?;
+        let index = graph
+            .index_of(logical_path)
+            .ok_or_else(|| CoreError::ModFileMissing {
+                path: logical_path.to_path_buf(),
+            })?;
+        let target = graph.entries[index].mod_entry.clone();
+
+        let requires = graph.entries[index]
+            .relations
+            .iter()
+            .flatten()
+            .map(|relation| {
+                graph.target_of(relation).map_or_else(
+                    || RelatedMod {
+                        kind: relation.kind,
+                        name: relation.target.display_name().to_owned(),
+                        logical_path: None,
+                        presence: None,
+                        project_id: relation.target.project_id().map(ToOwned::to_owned),
+                    },
+                    |found| {
+                        let entry = &graph.entries[found].mod_entry;
+                        RelatedMod {
+                            kind: relation.kind,
+                            name: entry.name.clone(),
+                            logical_path: Some(entry.logical_path.clone()),
+                            presence: Some(entry.presence),
+                            project_id: entry.project_id.clone(),
+                        }
+                    },
+                )
+            })
+            .collect();
+
+        let file_name = target
+            .logical_path
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or_default();
+        let mut required_by = Vec::new();
+        for (candidate, entry) in graph.entries.iter().enumerate() {
+            if candidate == index {
+                continue;
+            }
+            for relation in entry.relations.iter().flatten() {
+                if relation.names(target.project_id.as_deref(), file_name) {
+                    required_by.push(RelatedMod {
+                        kind: relation.kind,
+                        name: entry.mod_entry.name.clone(),
+                        logical_path: Some(entry.mod_entry.logical_path.clone()),
+                        presence: Some(entry.mod_entry.presence),
+                        project_id: entry.mod_entry.project_id.clone(),
+                    });
+                }
+            }
+        }
+
+        Ok(ModRelations {
+            target,
+            requires,
+            required_by,
         })
     }
 
@@ -880,6 +990,78 @@ mod tests {
         );
         assert!(impact.is_complete(), "every other mod gave a real answer");
         assert!(!impact.is_silent());
+    }
+
+    #[test]
+    fn a_mod_names_its_own_relations_in_both_directions() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, instance, _root) = library_and_its_dependents(base.path());
+
+        let relations = app
+            .relations_of(
+                ModHost::Instance(instance),
+                Path::new("mods/SkyblockBuilder.jar"),
+            )
+            .expect("relations");
+
+        assert_eq!(
+            relations
+                .requires
+                .iter()
+                .map(|related| (related.name.as_str(), related.kind))
+                .collect::<Vec<_>>(),
+            [
+                ("LibX.jar", ModRelationKind::Required),
+                ("SkyGUIs.jar", ModRelationKind::Optional),
+            ],
+            "an optional relation is shown as its own kind rather than left out"
+        );
+        assert_eq!(
+            relations
+                .required_by
+                .iter()
+                .map(|related| (related.name.as_str(), related.kind))
+                .collect::<Vec<_>>(),
+            [("SkyGUIs.jar", ModRelationKind::Required)],
+            "direct dependents only: UtilitiX needs the library, not this"
+        );
+        assert_eq!(
+            relations.requires[0].presence,
+            Some(ModPresence::Installed),
+            "a relation the instance holds carries how that jar stands"
+        );
+    }
+
+    #[test]
+    fn a_relation_no_jar_here_matches_carries_a_name_and_no_state() {
+        // Claiming a presence for a file that is not installed would invent
+        // one. The catalog's own name is all there is to show.
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, instance, root) = library_and_its_dependents(base.path());
+        let store = SourceStore::new(ephervex_storage::metadata::source_dir(&root));
+        let mut recipe = store.read_recipe().expect("recipe");
+        recipe
+            .files
+            .iter_mut()
+            .find(|file| file.file_name() == "UtilitiX.jar")
+            .expect("the mod")
+            .relations = Some(vec![RecipeRelation {
+            kind: ModRelationKind::Required,
+            target: RelationTarget::Project {
+                project_id: "AABBCCDD".to_owned(),
+                version_id: None,
+            },
+        }]);
+        store.write_recipe(&recipe).expect("write");
+
+        let relations = app
+            .relations_of(ModHost::Instance(instance), Path::new("mods/UtilitiX.jar"))
+            .expect("relations");
+
+        assert_eq!(relations.requires.len(), 1);
+        assert_eq!(relations.requires[0].name, "AABBCCDD");
+        assert_eq!(relations.requires[0].presence, None);
+        assert_eq!(relations.requires[0].logical_path, None);
     }
 
     #[test]

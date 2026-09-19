@@ -80,7 +80,8 @@ pub use crash_analysis::{
 };
 pub use curseforge::StoredApiKey;
 pub use dependencies::{
-    DependencyKnowledge, DependencyRefreshReport, DependentMods, ImpactedMod, RequiredMods,
+    DependencyKnowledge, DependencyRefreshReport, DependentMods, ImpactedMod, ModRelations,
+    RelatedMod, RequiredMods,
 };
 pub use diagnostics::{
     ClientLogTail, DEFAULT_DIAGNOSTIC_BYTES, DiagnosticCatalog, DiagnosticRequest, DiagnosticScope,
