@@ -168,6 +168,20 @@ impl RequiredMods {
 }
 
 impl App {
+    /// Whether a mod change that affects other mods stops to be confirmed.
+    ///
+    /// The answer decides only whether a frontend asks. What the change does is
+    /// the same either way, and so is the report of what it did.
+    #[must_use]
+    pub fn warn_on_dependency_impact(&self) -> bool {
+        self.config().mods.warn_on_dependency_impact
+    }
+
+    /// Records whether that confirmation is wanted.
+    pub fn set_warn_on_dependency_impact(&mut self, warn: bool) -> CoreResult<()> {
+        self.mutate_config(|config| config.mods.warn_on_dependency_impact = warn)
+    }
+
     /// What else stops loading if this mod does.
     ///
     /// The question behind every disable and every delete: both take the jar

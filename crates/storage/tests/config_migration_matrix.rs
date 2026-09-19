@@ -402,3 +402,42 @@ fn reading_a_configuration_never_rewrites_it() {
         before
     );
 }
+
+#[test]
+fn a_file_without_the_dependency_warning_key_reads_as_warning() {
+    // Every configuration written before the setting existed, which is all of
+    // them. Silence has to mean "warn me", or upgrading would quietly stop
+    // telling a user that turning one mod off takes three more with it.
+    let base = TempDir::new().expect("temp dir");
+    let paths = paths(&base);
+    std::fs::write(paths.config_file(), CURRENT).expect("write");
+
+    let loaded = Config::load_or_default(&paths).expect("load");
+    assert!(loaded.mods.warn_on_dependency_impact);
+}
+
+#[test]
+fn turning_the_dependency_warning_off_survives_a_save_and_reload() {
+    let base = TempDir::new().expect("temp dir");
+    let paths = paths(&base);
+    // The unknown key goes in the very table this setting lives in, which is
+    // the one a save of it rewrites.
+    let document = CURRENT.replace("[mods]\n", "[mods]\nfuture_mods_key = \"mods\"\n");
+    std::fs::write(paths.config_file(), document).expect("write");
+
+    let mut loaded = Config::load_or_default(&paths).expect("load");
+    assert!(loaded.mods.warn_on_dependency_impact);
+    loaded.mods.warn_on_dependency_impact = false;
+    loaded.save(&paths).expect("save");
+
+    let reloaded = Config::load_or_default(&paths).expect("reload");
+    assert!(!reloaded.mods.warn_on_dependency_impact);
+    assert_eq!(
+        reloaded.mods.default_catalog, "curseforge",
+        "the neighbouring setting is untouched"
+    );
+    assert!(
+        reloaded.mods.unknown.contains_key("future_mods_key"),
+        "a newer build's key in this table survives a change to it"
+    );
+}

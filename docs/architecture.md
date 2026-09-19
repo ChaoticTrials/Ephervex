@@ -609,6 +609,15 @@ relations are excluded from the closure structurally, by a relation-kind
 predicate the disable path passes `Required` to, so there is no flag that widens
 it.
 
+Whether a change that affects other mods stops to be confirmed is one global
+preference, `[mods] warn_on_dependency_impact`, defaulting to on. It decides
+only whether a frontend asks. Off does not mean the change is made blind and does
+not mean the other mods are left alone: the consequence is still worked out, the
+cascade is still applied, and what happened is still reported, without blocking.
+Somebody who turned the confirmation off has already agreed to it, and applying
+the change to the named mod alone would hand them a mod set that does not load -
+the outcome the warning exists to prevent.
+
 Turning several mods on or off is one call, ordered so that any prefix of it
 leaves a mod set the loader can start: disables go dependents first, enables go
 dependencies first. A frontend issuing one rename per row cannot promise that,

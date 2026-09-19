@@ -333,7 +333,7 @@ impl PreferenceSetting {
 /// a fact about the keyring rather than a setting; neither belongs in a file
 /// users attach to bug reports. Naming CurseForge here says which catalog the
 /// user wants to browse first, not that they can.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ModsConfig {
     /// The catalog the mod browser opens on, empty for Ephervex's own default.
@@ -345,9 +345,24 @@ pub struct ModsConfig {
     /// [`DefaultModCatalog`], which can say "not this build" instead of
     /// guessing.
     pub default_catalog: String,
+    /// Whether a mod change that affects other mods stops to be confirmed.
+    ///
+    /// Off does not mean the change is made blind. The consequence is still
+    /// worked out and still reported; what it stops doing is blocking. A
+    /// cascade that would have been confirmed is simply applied, because
+    /// somebody who turned this off has already agreed to it - leaving the
+    /// dependents alone instead would hand them a mod set that does not load,
+    /// which is the outcome the warning exists to prevent.
+    #[serde(default = "warn_on_dependency_impact_default")]
+    pub warn_on_dependency_impact: bool,
     /// Keys this build does not know about. See [`Config::unknown`].
     #[serde(flatten)]
     pub unknown: toml::Table,
+}
+
+/// Warning about a mod change that affects other mods is the default.
+const fn warn_on_dependency_impact_default() -> bool {
+    true
 }
 
 /// Which hosts the user has agreed Ephervex may fetch a pack archive from.
@@ -423,6 +438,16 @@ impl ModsConfig {
             .map(ModProvider::as_str)
             .unwrap_or_default()
             .clone_into(&mut self.default_catalog);
+    }
+}
+
+impl Default for ModsConfig {
+    fn default() -> Self {
+        Self {
+            default_catalog: String::new(),
+            warn_on_dependency_impact: warn_on_dependency_impact_default(),
+            unknown: toml::Table::new(),
+        }
     }
 }
 
