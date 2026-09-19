@@ -82,6 +82,9 @@ pub struct ReconciliationReport {
     /// The files are left untouched. This report and the persisted attention
     /// reason make the interruption visible until the user resolves it.
     pub interrupted_hosts: Vec<ReconciledRecord>,
+    /// Hosts whose recognized interrupted snapshot restore was rolled back to
+    /// the complete pre-restore state.
+    pub restores_rolled_back: Vec<ReconciledRecord>,
     /// Indexed recovery copies whose canonical metadata is unavailable or
     /// unusable. These remain visible but must not be launched or mutated.
     pub persistence_unhealthy: Vec<ReconciledRecord>,
@@ -115,6 +118,7 @@ impl ReconciliationReport {
             && self.relocated.is_empty()
             && self.index_repaired.is_empty()
             && self.interrupted_hosts.is_empty()
+            && self.restores_rolled_back.is_empty()
             && self.persistence_unhealthy.is_empty()
             && self.server_conflicts.is_empty()
             && self.unfinished_instances.is_empty()
@@ -156,6 +160,7 @@ pub fn reconcile(registry: &Registry) -> Result<ReconciliationReport, RegistryEr
             relocated = report.relocated.len(),
             index_repaired = report.index_repaired.len(),
             interrupted_hosts = report.interrupted_hosts.len(),
+            restores_rolled_back = report.restores_rolled_back.len(),
             persistence_unhealthy = report.persistence_unhealthy.len(),
             server_conflicts = report.server_conflicts.len(),
             "startup reconciliation complete"
@@ -190,6 +195,16 @@ fn reconcile_clients(
         }
 
         if record.root.is_dir() {
+            if recover_restore_state(&record.root, &entry, report) {
+                let mut canonical = metadata::read_client_metadata(&record.root)?;
+                if canonical.id != record.id {
+                    report.persistence_unhealthy.push(entry);
+                    continue;
+                }
+                canonical.root.clone_from(&record.root);
+                registry.update_client(&mut canonical)?;
+                record = canonical;
+            }
             let mut changed = false;
             // The disk came back. Clearing the warning here is what stops a
             // remounted drive from leaving a permanent "needs attention" badge.
@@ -283,6 +298,7 @@ fn reconcile_servers(
         }
 
         if record.root.is_dir() {
+            recover_restore_state(&record.root, &entry, report);
             match metadata::read_server_metadata(&record.root) {
                 Ok(mut canonical) if canonical.id == record.id => {
                     canonical.root.clone_from(&record.root);
@@ -600,6 +616,28 @@ fn report_interrupted_state(
     } else {
         attention.push(AttentionReason::InterruptedMutation);
         true
+    }
+}
+
+fn recover_restore_state(
+    root: &Path,
+    record: &ReconciledRecord,
+    report: &mut ReconciliationReport,
+) -> bool {
+    match crate::restore::recover_interrupted_restores(root) {
+        Ok(0) => false,
+        Ok(_) => {
+            report.restores_rolled_back.push(record.clone());
+            true
+        }
+        Err(error) => {
+            tracing::warn!(
+                root = %root.display(),
+                %error,
+                "an interrupted restore could not be reconciled automatically"
+            );
+            false
+        }
     }
 }
 

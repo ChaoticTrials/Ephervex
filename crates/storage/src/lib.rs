@@ -41,6 +41,7 @@ pub mod reconcile;
 pub mod records;
 pub mod registry;
 pub(crate) mod relocate;
+pub mod restore;
 
 #[cfg(test)]
 mod test_support;
@@ -76,6 +77,10 @@ pub use records::{
     ServerOperatorProfile, ServerOperatorSetup, ServerPortSelection, ServerRecord,
 };
 pub use registry::{Registry, RegistryError};
+pub use restore::{
+    RestorePart, RestorePartState, RestoreTransaction, prepare_restore,
+    recover_interrupted_restores,
+};
 
 /// Anything that can go wrong bringing storage up.
 #[derive(Debug, thiserror::Error)]

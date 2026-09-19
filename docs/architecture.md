@@ -121,6 +121,7 @@ exhaustion with an actionable error.
 | Managed mod install, update, and removal | Old jars move to `.launcher/retired/`; new jars land; the retained recipe is atomically published. | Pre-publication failure removes new jars and restores retired jars. Any failed compensation is returned as a typed recovery issue and persists `InterruptedMutation` attention. Post-publication cleanup failures are also reported. |
 | Dependency-aware enable, disable, and delete | One planned batch applies ordered file changes using the same recorded dependency graph. | Failure rolls back the batch. Any launcher-owned staging or retired content left behind is reported on the next reconciliation. |
 | Verification repair | Replacement bytes are verified before they replace a managed file. | A failed repair keeps or restores the prior file; leftover transaction state remains visible for reconciliation. |
+| Snapshot restore | A durable journal names only fixed host parts. Each live part moves into the restore transaction before its staged replacement is renamed into place. | Failure rolls every published part back. On restart, reconciliation recognizes the versioned journal and restores the complete pre-restore state. Unknown or ambiguous staging is left untouched and receives host attention. |
 | Diagnostic bundle export | A caller-selected set is written to the requested local archive. | Failure is reported against the output path. Source logs are never changed or scrubbed. |
 | Launch and server process control | A durable owner record and kernel-visible process identity establish control. | Stale ownership evidence is distinguished from a live process. An orphan is reported and never adopted or signaled. |
 
@@ -941,8 +942,8 @@ layer implements file drops there and not on Wayland, and Slint's own
 drag-and-drop carries text and images between elements of one application rather
 than a path from the desktop. The file dialog remains available everywhere, and
 the same X11-only boundary already applies to the Minecraft window-size picker's
-aspect hint. Fabric, Quilt, snapshots, Windows, and macOS are outside the
-supported scope recorded in ADR 0008.
+aspect hint. Fabric, Quilt, Minecraft snapshot releases, Windows, and macOS are
+outside the supported scope recorded in ADR 0008.
 
 ## Verification
 

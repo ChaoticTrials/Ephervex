@@ -81,6 +81,28 @@ pub struct SnapshotRecord {
     pub origin: SnapshotOrigin,
 }
 
+/// Restore policy. A safety snapshot is on by default because restore replaces
+/// rather than merges live state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SnapshotRestoreOptions {
+    pub safety_snapshot: bool,
+}
+
+impl Default for SnapshotRestoreOptions {
+    fn default() -> Self {
+        Self {
+            safety_snapshot: true,
+        }
+    }
+}
+
+/// What a completed restoration applied and how to get back to the prior state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotRestore {
+    pub restored: SnapshotRecord,
+    pub safety_snapshot: Option<SnapshotRecord>,
+}
+
 #[derive(Serialize, Deserialize)]
 struct SnapshotDocument {
     snapshot_version: u32,
@@ -111,6 +133,12 @@ pub enum SnapshotError {
     HostRunning { host: String },
     #[error("snapshot {id} does not exist")]
     NotFound { id: SnapshotId },
+    #[error("snapshot {snapshot} belongs to {found}, not {expected}")]
+    HostMismatch {
+        snapshot: SnapshotId,
+        expected: String,
+        found: String,
+    },
     #[error("that snapshot label is invalid")]
     LabelInvalid,
     #[error("snapshot state at {path} could not be read")]
@@ -147,6 +175,7 @@ impl SnapshotError {
         match self {
             Self::HostRunning { .. } => "error-snapshot-host-running",
             Self::NotFound { .. } => "error-snapshot-not-found",
+            Self::HostMismatch { .. } => "error-snapshot-host-mismatch",
             Self::LabelInvalid => "error-snapshot-label-invalid",
             Self::Unreadable { .. } => "error-snapshot-unreadable",
             Self::Unwritable { .. } => "error-snapshot-unwritable",
@@ -161,6 +190,15 @@ impl SnapshotError {
         match self {
             Self::HostRunning { host } => vec![("host", host.clone())],
             Self::NotFound { id } => vec![("snapshot", id.to_string())],
+            Self::HostMismatch {
+                snapshot,
+                expected,
+                found,
+            } => vec![
+                ("snapshot", snapshot.to_string()),
+                ("expected", expected.clone()),
+                ("found", found.clone()),
+            ],
             Self::UnsupportedVersion {
                 found, supported, ..
             } => vec![
@@ -341,6 +379,89 @@ impl App {
         })
     }
 
+    /// Replaces the live host parts with a captured snapshot.
+    pub fn restore_snapshot(
+        &self,
+        host: InstalledHost,
+        id: SnapshotId,
+        options: SnapshotRestoreOptions,
+        cancel: &CancellationToken,
+    ) -> Result<SnapshotRestore, SnapshotError> {
+        self.refuse_snapshot_while_running(host)?;
+        let layout = self.host_layout(host).map_err(snapshot_core_error)?;
+        let snapshot = self.snapshot_directory(host, id)?;
+        let restored = read_manifest(&snapshot)?;
+        let expected = format!("{}:{}", host.kind(), host.id());
+        let found = format!("{}:{}", restored.host_kind, restored.host_id);
+        if restored.host_kind != host.kind() || restored.host_id != host.id() {
+            return Err(SnapshotError::HostMismatch {
+                snapshot: id,
+                expected,
+                found,
+            });
+        }
+
+        let safety_snapshot = if options.safety_snapshot {
+            Some(self.create_snapshot(
+                host,
+                "Before snapshot restore",
+                SnapshotOrigin::BeforeRestore,
+                cancel,
+            )?)
+        } else {
+            None
+        };
+        check_canceled(cancel)?;
+
+        let parts = restore_parts(host, &layout.root, &snapshot)?;
+        let transaction = ephervex_storage::prepare_restore(&layout.root, id, parts.clone())
+            .map_err(|source| SnapshotError::Unwritable {
+                path: ephervex_storage::metadata::staging_dir(&layout.root),
+                source,
+            })?;
+        if let Err(error) = stage_restore_parts(&transaction, &snapshot, &parts, cancel) {
+            if let Err(abort) = transaction.abort() {
+                return Err(SnapshotError::Unwritable {
+                    path: transaction.directory().to_path_buf(),
+                    source: std::io::Error::other(format!(
+                        "could not stage snapshot restore: {error}; cleanup failed: {abort}"
+                    )),
+                });
+            }
+            return Err(error);
+        }
+        transaction
+            .publish()
+            .map_err(|source| SnapshotError::Unwritable {
+                path: transaction.directory().to_path_buf(),
+                source,
+            })?;
+
+        if let Err(error) = self.synchronize_restored_host(host, &layout.root) {
+            let rollback = transaction.rollback();
+            let message = match rollback {
+                Ok(()) => error.to_string(),
+                Err(rollback) => {
+                    format!("could not record restored host: {error}; rollback failed: {rollback}")
+                }
+            };
+            return Err(SnapshotError::Unwritable {
+                path: transaction.directory().to_path_buf(),
+                source: std::io::Error::other(message),
+            });
+        }
+        transaction
+            .finish()
+            .map_err(|source| SnapshotError::Unwritable {
+                path: transaction.directory().to_path_buf(),
+                source,
+            })?;
+        Ok(SnapshotRestore {
+            restored,
+            safety_snapshot,
+        })
+    }
+
     fn capture_snapshot(
         &self,
         capture: SnapshotCapture<'_>,
@@ -423,6 +544,68 @@ impl App {
         } else {
             Err(SnapshotError::NotFound { id })
         }
+    }
+
+    fn synchronize_restored_host(
+        &self,
+        host: InstalledHost,
+        root: &Path,
+    ) -> Result<(), SnapshotError> {
+        match host {
+            InstalledHost::Instance(id) => {
+                let current = self.client(id).map_err(snapshot_core_error)?;
+                let path = ephervex_storage::metadata::client_metadata_path(root);
+                let mut restored =
+                    ephervex_storage::metadata::read_client_metadata(root).map_err(|error| {
+                        SnapshotError::Unreadable {
+                            path: path.clone(),
+                            source: std::io::Error::other(error),
+                        }
+                    })?;
+                if restored.id != id {
+                    return Err(SnapshotError::Unreadable {
+                        path,
+                        source: std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "restored client metadata has a different identity",
+                        ),
+                    });
+                }
+                restored.root = current.root;
+                restored.storage = current.storage;
+                self.registry()
+                    .update_client(&mut restored)
+                    .map_err(crate::CoreError::from)
+                    .map_err(snapshot_core_error)?;
+            }
+            InstalledHost::Server(id) => {
+                let current = self.server(id).map_err(snapshot_core_error)?;
+                let path = ephervex_storage::metadata::server_metadata_path(root);
+                let mut restored =
+                    ephervex_storage::metadata::read_server_metadata(root).map_err(|error| {
+                        SnapshotError::Unreadable {
+                            path: path.clone(),
+                            source: std::io::Error::other(error),
+                        }
+                    })?;
+                if restored.id != id {
+                    return Err(SnapshotError::Unreadable {
+                        path,
+                        source: std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "restored server metadata has a different identity",
+                        ),
+                    });
+                }
+                restored.root = current.root;
+                restored.storage = current.storage;
+                self.registry()
+                    .update_server(&mut restored)
+                    .map_err(crate::CoreError::from)
+                    .map_err(snapshot_core_error)?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -520,6 +703,94 @@ fn clone_snapshot_tree(
             }
         }
     })
+}
+
+fn restore_parts(
+    host: InstalledHost,
+    root: &Path,
+    snapshot: &Path,
+) -> Result<Vec<ephervex_storage::RestorePartState>, SnapshotError> {
+    use ephervex_storage::{RestorePart, RestorePartState};
+    let parts = match host {
+        InstalledHost::Instance(_) => [
+            RestorePart::ClientGame,
+            RestorePart::Source,
+            RestorePart::ClientMetadata,
+        ],
+        InstalledHost::Server(_) => [
+            RestorePart::ServerGame,
+            RestorePart::Source,
+            RestorePart::ServerMetadata,
+        ],
+    };
+    let states = parts
+        .into_iter()
+        .map(|part| RestorePartState {
+            part,
+            original_present: part_path(root, part).is_some(),
+            replacement_present: part_path(snapshot, part).is_some(),
+        })
+        .collect::<Vec<_>>();
+    if states[0].replacement_present && states[2].replacement_present {
+        Ok(states)
+    } else {
+        Err(SnapshotError::Unreadable {
+            path: snapshot.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "snapshot is missing its game directory or host metadata",
+            ),
+        })
+    }
+}
+
+fn stage_restore_parts(
+    transaction: &ephervex_storage::RestoreTransaction,
+    snapshot: &Path,
+    parts: &[ephervex_storage::RestorePartState],
+    cancel: &CancellationToken,
+) -> Result<(), SnapshotError> {
+    for state in parts.iter().filter(|state| state.replacement_present) {
+        check_canceled(cancel)?;
+        let source = part_path(snapshot, state.part).ok_or_else(|| SnapshotError::Unreadable {
+            path: snapshot.to_path_buf(),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "snapshot part vanished"),
+        })?;
+        let destination = transaction.incoming_path(state.part);
+        if source.is_dir() {
+            if let Some(parent) = destination.parent() {
+                std::fs::create_dir_all(parent).map_err(|source| SnapshotError::Unwritable {
+                    path: destination.clone(),
+                    source,
+                })?;
+            }
+            clone_snapshot_tree(&source, &destination, cancel)?;
+        } else {
+            if let Some(parent) = destination.parent() {
+                std::fs::create_dir_all(parent).map_err(|source| SnapshotError::Unwritable {
+                    path: destination.clone(),
+                    source,
+                })?;
+            }
+            clone_file(&source, &destination).map_err(|source| SnapshotError::Unwritable {
+                path: destination,
+                source,
+            })?;
+        }
+    }
+    check_canceled(cancel)
+}
+
+fn part_path(root: &Path, part: ephervex_storage::RestorePart) -> Option<PathBuf> {
+    use ephervex_storage::RestorePart;
+    let path = match part {
+        RestorePart::ClientGame => root.join("minecraft"),
+        RestorePart::ServerGame => root.join("server"),
+        RestorePart::Source => root.join(".launcher/source"),
+        RestorePart::ClientMetadata => root.join(".launcher/instance.json"),
+        RestorePart::ServerMetadata => root.join(".launcher/server.json"),
+    };
+    std::fs::symlink_metadata(&path).ok().map(|_| path)
 }
 
 fn snapshot_label(label: &str) -> Result<String, SnapshotError> {
@@ -779,6 +1050,158 @@ mod tests {
                 .expect("list")[0],
             renamed
         );
+    }
+
+    #[test]
+    fn restoring_a_snapshot_replaces_live_state_and_keeps_a_safety_snapshot() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let app = App::open_at(Paths::rooted_at(temporary.path())).expect("open app");
+        let client = app
+            .create_client_for_test(NewClient::new(
+                "restore client",
+                "1.21.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create client");
+        let game = ephervex_storage::metadata::client_game_dir(&client.root);
+        let source = ephervex_storage::metadata::source_dir(&client.root);
+        std::fs::write(game.join("state.txt"), b"captured").expect("write captured state");
+        std::fs::create_dir_all(&source).expect("create source");
+        std::fs::write(source.join("note.txt"), b"captured source").expect("write captured source");
+        let captured = app
+            .create_snapshot(
+                InstalledHost::Instance(client.id),
+                "known good",
+                SnapshotOrigin::Manual,
+                &CancellationToken::new(),
+            )
+            .expect("create snapshot");
+
+        std::fs::write(game.join("state.txt"), b"changed").expect("change state");
+        std::fs::write(game.join("new.txt"), b"must disappear").expect("write new state");
+        std::fs::write(source.join("note.txt"), b"changed source").expect("change source");
+        let restored = app
+            .restore_snapshot(
+                InstalledHost::Instance(client.id),
+                captured.id,
+                SnapshotRestoreOptions::default(),
+                &CancellationToken::new(),
+            )
+            .expect("restore snapshot");
+
+        assert_eq!(restored.restored, captured);
+        assert_eq!(
+            std::fs::read(game.join("state.txt")).expect("read"),
+            b"captured"
+        );
+        assert!(
+            !game.join("new.txt").exists(),
+            "restore is replacement, not merge"
+        );
+        assert_eq!(
+            std::fs::read(source.join("note.txt")).expect("read source"),
+            b"captured source"
+        );
+        let safety = restored.safety_snapshot.expect("safety snapshot");
+        assert_eq!(safety.origin, SnapshotOrigin::BeforeRestore);
+        assert_eq!(
+            std::fs::read(
+                ephervex_storage::metadata::snapshots_dir(&client.root)
+                    .join(safety.id.to_string())
+                    .join("minecraft/state.txt")
+            )
+            .expect("read safety state"),
+            b"changed"
+        );
+    }
+
+    #[test]
+    fn a_running_client_refuses_snapshot_restoration() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let app = App::open_at(Paths::rooted_at(temporary.path())).expect("open app");
+        let client = app
+            .create_client_for_test(NewClient::new(
+                "running client",
+                "1.21.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create client");
+        let snapshot = app
+            .create_snapshot(
+                InstalledHost::Instance(client.id),
+                "before launch",
+                SnapshotOrigin::Manual,
+                &CancellationToken::new(),
+            )
+            .expect("create snapshot");
+        let _lock = ephervex_storage::LaunchLock::acquire(&client.root).expect("launch lock");
+
+        let error = app
+            .restore_snapshot(
+                InstalledHost::Instance(client.id),
+                snapshot.id,
+                SnapshotRestoreOptions::default(),
+                &CancellationToken::new(),
+            )
+            .expect_err("running host must be refused");
+
+        assert!(matches!(error, SnapshotError::HostRunning { .. }));
+        assert_eq!(
+            app.snapshots(InstalledHost::Instance(client.id))
+                .expect("list snapshots")
+                .len(),
+            1,
+            "refusal must happen before creating a safety snapshot"
+        );
+    }
+
+    #[test]
+    fn a_fresh_app_reconciles_an_interrupted_restore_to_the_original_state() {
+        use ephervex_storage::{RestorePart, RestorePartState};
+
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let paths = Paths::rooted_at(temporary.path());
+        let app = App::open_at(paths.clone()).expect("open app");
+        let client = app
+            .create_client_for_test(NewClient::new(
+                "interrupted restore",
+                "1.21.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create client");
+        let game = ephervex_storage::metadata::client_game_dir(&client.root);
+        std::fs::write(game.join("state.txt"), b"before").expect("write original");
+        let transaction = ephervex_storage::prepare_restore(
+            &client.root,
+            ephervex_model::SnapshotId::new(),
+            vec![RestorePartState {
+                part: RestorePart::ClientGame,
+                original_present: true,
+                replacement_present: true,
+            }],
+        )
+        .expect("prepare restore");
+        let incoming = transaction.incoming_path(RestorePart::ClientGame);
+        std::fs::create_dir_all(&incoming).expect("create incoming");
+        std::fs::write(incoming.join("state.txt"), b"snapshot").expect("write snapshot state");
+        ephervex_storage::metadata::mark_incomplete(&client.root).expect("mark incomplete");
+        let replaced = transaction.directory().join("replaced/minecraft");
+        std::fs::create_dir_all(replaced.parent().expect("replaced parent"))
+            .expect("create replaced parent");
+        std::fs::rename(&game, &replaced).expect("retire live state");
+        std::fs::rename(&incoming, &game).expect("publish snapshot state");
+        drop(app);
+
+        let reopened = App::open_at(paths).expect("reopen app");
+        let report = reopened.reconcile().expect("reconcile");
+
+        assert_eq!(report.restores_rolled_back.len(), 1);
+        assert_eq!(
+            std::fs::read(game.join("state.txt")).expect("read recovered state"),
+            b"before"
+        );
+        assert!(!transaction.directory().exists());
+        assert!(!ephervex_storage::metadata::is_incomplete(&client.root));
     }
 
     #[test]

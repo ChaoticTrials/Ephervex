@@ -37,10 +37,21 @@ collector may remove snapshots.
 
 A restore replaces captured parts rather than merging them. By default it
 first creates a safety snapshot with origin `before_restore`. Restoration uses
-launcher-owned staging and retired trees so interruption is visible and can be
-reconciled without guessing.
+a versioned journal under launcher-owned staging. The journal contains only
+typed, fixed host parts rather than arbitrary paths. Each original part moves
+inside the transaction before its replacement is published. Reconciliation
+rolls a recognized interrupted restore back in full; unfamiliar or ambiguous
+state remains untouched for manual review.
 
 ## Consequences
+
+The restore journal records a durable commit decision before cleanup. Restart
+discards unpublished staging, rolls back interrupted publication, and completes
+cleanup of committed restores without replacing their live state again.
+
+Cloning checks cancellation between directory entries and byte-copy chunks.
+Special files and symlinked capture roots are refused; links inside captured
+directories are preserved without following their targets.
 
 - A filesystem without reflink support uses real space for every snapshot.
 - Deleting a host deletes the snapshots inside it.
