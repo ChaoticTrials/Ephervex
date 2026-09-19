@@ -54,7 +54,7 @@ use tracing::debug;
 
 /// Bumped when an entry's shape changes. A file written by a different version
 /// is discarded rather than guessed at.
-const CACHE_VERSION: u32 = 2;
+const CACHE_VERSION: u32 = 1;
 
 /// What a provider last said about one project.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

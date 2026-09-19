@@ -28,6 +28,9 @@ CREATE TABLE instances (
     -- columns for them would be a schema change per settings addition.
     java_override      TEXT,
     jvm_override       TEXT,
+    -- Per-instance opt-in. Existing pre-1.0 state is intentionally not
+    -- migrated across the format reset.
+    allow_pack_mod_version_changes INTEGER NOT NULL DEFAULT 0,
     attention          TEXT    NOT NULL DEFAULT '[]',
     -- RFC 3339, UTC.
     created_at         TEXT    NOT NULL,
@@ -57,6 +60,10 @@ CREATE TABLE servers (
     source_reference   TEXT,
     java_override      TEXT,
     jvm_override       TEXT,
+    -- JSON: ServerInstallation. New servers start explicitly uninstalled.
+    installation       TEXT    NOT NULL DEFAULT '{"state":"not_installed"}',
+    -- JSON: Option<ServerOperatorSetup>.
+    operator_setup     TEXT,
     attention          TEXT    NOT NULL DEFAULT '[]',
     created_at         TEXT    NOT NULL,
     updated_at         TEXT    NOT NULL,

@@ -40,28 +40,11 @@ pub struct Migration {
 /// Append only. An applied migration is a fact about databases in the wild;
 /// editing one changes what a fresh install produces without changing what an
 /// existing install has, and the two silently diverge.
-pub const MIGRATIONS: &[Migration] = &[
-    Migration {
-        version: 1,
-        name: "initial-schema",
-        sql: include_str!("migrations/0001-initial-schema.sql"),
-    },
-    Migration {
-        version: 2,
-        name: "server-installation-state",
-        sql: include_str!("migrations/0002-server-installation-state.sql"),
-    },
-    Migration {
-        version: 3,
-        name: "server-operator-setup",
-        sql: include_str!("migrations/0003-server-operator-setup.sql"),
-    },
-    Migration {
-        version: 4,
-        name: "pack-mod-version-changes",
-        sql: include_str!("migrations/0004-pack-mod-version-changes.sql"),
-    },
-];
+pub const MIGRATIONS: &[Migration] = &[Migration {
+    version: 1,
+    name: "initial-schema",
+    sql: include_str!("migrations/0001-initial-schema.sql"),
+}];
 
 /// The `user_version` a fully migrated database has.
 #[must_use]
@@ -407,31 +390,29 @@ mod tests {
     }
 
     #[test]
-    fn server_scaffolds_migrate_to_an_explicit_uninstalled_state() {
-        let mut connection = Connection::open_in_memory().expect("open");
-        apply_migrations(&mut connection, &MIGRATIONS[..1]).expect("initial schema");
-        connection
-            .execute(
-                "INSERT INTO servers
-                 (id, name, root, storage_class, minecraft_version, loader_kind, network,
-                  eula_accepted, source_kind, attention, created_at, updated_at)
-                 VALUES ('server-id', 'old scaffold', '/tmp/server', 'persistent', '1.20.1',
-                         'vanilla', '{}', 1, 'manual', '[]',
-                         '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
-                [],
-            )
-            .expect("insert old row");
+    fn the_initial_schema_contains_every_pre_one_point_zero_column() {
+        let index = Index::open_in_memory().expect("open");
+        let connection = index.connection();
 
-        apply_migrations(&mut connection, MIGRATIONS).expect("upgrade");
-        let (installation, old_eula): (String, bool) = connection
-            .query_row(
-                "SELECT installation, eula_accepted FROM servers WHERE id = 'server-id'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .expect("read migrated row");
-        assert_eq!(installation, r#"{"state":"not_installed"}"#);
-        assert!(old_eula, "the compatibility column survives but is inert");
+        let instance_columns: Vec<String> = connection
+            .prepare("PRAGMA table_info(instances)")
+            .expect("prepare instance columns")
+            .query_map([], |row| row.get(1))
+            .expect("query instance columns")
+            .collect::<Result<_, _>>()
+            .expect("read instance columns");
+        let server_columns: Vec<String> = connection
+            .prepare("PRAGMA table_info(servers)")
+            .expect("prepare server columns")
+            .query_map([], |row| row.get(1))
+            .expect("query server columns")
+            .collect::<Result<_, _>>()
+            .expect("read server columns");
+
+        assert!(instance_columns.contains(&"allow_pack_mod_version_changes".to_owned()));
+        assert!(server_columns.contains(&"installation".to_owned()));
+        assert!(server_columns.contains(&"operator_setup".to_owned()));
+        assert_eq!(index.schema_version().expect("schema version"), 1);
     }
 
     #[test]

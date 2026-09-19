@@ -12,8 +12,9 @@ the three host-facing format versions at `1` until the 1.0.0 boundary.
 | Download metadata envelope | `METADATA_ENVELOPE_VERSION` | 1 | Cache state may be discarded and fetched again. |
 | Minecraft preference catalog | `PREFERENCE_CATALOG_FORMAT_VERSION` | 1 | A document with a newer format is rejected as a whole. |
 | Minecraft options dataset | `DATASET_FORMAT_VERSION` | 1 | A document with a newer format is rejected as a whole. |
-| SQLite index | ordered migrations | 4 | Migrations are append-only. The index remains a recovery copy, not host authority. |
-| Mod display cache | `CACHE_VERSION` | 2 | Cache state may be discarded and rebuilt. |
+| SQLite index | ordered migrations | 1 | The pre-1.0 schema is one initial migration. Later migrations are append-only. The index remains a recovery copy, not host authority. |
+| Mod display cache | `CACHE_VERSION` | 1 | Cache state may be discarded and rebuilt. |
+| Minecraft analysis workspace | `ANALYSIS_SCHEMA_VERSION` | 1 | Generated analysis state may be discarded and rebuilt. |
 
 ## Persisted enum compatibility
 

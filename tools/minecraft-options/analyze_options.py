@@ -30,6 +30,7 @@ TOOL_VERSION = "2.0.0"
 PRUNE = {".git", ".gradle", "build", "cache", "caches", "node_modules", "minecraft-options-research"}
 RELEASE_RE = re.compile(r"^(?:1\.\d+(?:\.\d+)?|\d{2}\.\d+(?:\.\d+)?)$")
 FILENAME_VERSION_RE = re.compile(r"(?:^|[-_])(?:mc[-_])?((?:1\.\d+(?:\.\d+)?)|(?:\d{2}\.\d+(?:\.\d+)?))(?:\.jar)?$", re.I)
+ANALYSIS_SCHEMA_VERSION = 1
 
 CONF_ORDER = {"unknown": 0, "low": 1, "medium": 2, "high": 3}
 
@@ -2240,7 +2241,7 @@ def normalize(record: dict[str, Any]) -> dict[str, Any]:
                           "constructor_descriptor": kb["constructor_descriptor"]}]})
 
     settings.sort(key=lambda x: (x["category"], x["logical_id"], x["persisted_key"]))
-    return {"schema_version": 2, "tool_version": TOOL_VERSION, "jar_id": record["jar_id"],
+    return {"schema_version": ANALYSIS_SCHEMA_VERSION, "tool_version": TOOL_VERSION, "jar_id": record["jar_id"],
             "minecraft_version": version, "jar_sha256": sha,
             "persistence_era": analysis.get("persistence_era"),
             # The release's own data version, which it stamps into the file as
@@ -2267,7 +2268,7 @@ def make_latest_schema(latest: dict[str, Any]) -> dict[str, Any]:
     with_default = [s for s in latest["settings"] if s.get("default") is not None]
     with_domain = [s for s in latest["settings"]
                    if s.get("numeric") or (s.get("allowed_values") or {}).get("values")]
-    return {"schema_version": 2, "canonical_minecraft_version": latest["minecraft_version"],
+    return {"schema_version": ANALYSIS_SCHEMA_VERSION, "canonical_minecraft_version": latest["minecraft_version"],
             "source_jar_sha256": latest["jar_sha256"], "setting_count": len(latest["settings"]),
             "fully_typed_count": len(typed), "with_default_count": len(with_default),
             "with_domain_count": len(with_domain),
@@ -2386,7 +2387,7 @@ def compatibility(latest: dict[str, Any], versions: list[dict[str, Any]]) -> dic
                      "translation_key": canonical.get("translation_key"),
                      "ephervex_manageable": canonical.get("ephervex_manageable", True),
                      "versions": per})
-    return {"schema_version": 2, "canonical_version": latest["minecraft_version"],
+    return {"schema_version": ANALYSIS_SCHEMA_VERSION, "canonical_version": latest["minecraft_version"],
             "classifications": ["identical", "mapped", "unsupported", "unknown"],
             "safety_rule": "Only high-confidence identical/mapped entries are write-authoritative. Unknown "
                            "entries must be skipped and existing lines preserved.",
@@ -2533,7 +2534,7 @@ def schema_changes(versions: list[dict[str, Any]], canonical_keys: set[str]) -> 
                         "code space across every release in the range")
         era["confidence"] = "high"
         previous_era = (signature[0], signature[1], era["persistence_era"], era["keybinding_code_space"])
-    return {"schema_version": 2, "versions": [x["minecraft_version"] for x in versions],
+    return {"schema_version": ANALYSIS_SCHEMA_VERSION, "versions": [x["minecraft_version"] for x in versions],
             "eras": eras,
             "keybinding_eras": keybinding_eras(versions),
             "fov_eras": facet_eras(versions, "fov"),
@@ -2649,7 +2650,7 @@ def language_output(latest_rec: dict[str, Any], latest_jar: Path, latest_norm: d
             "absent_here_but_canonical": sorted(set(catalog) - set(codes)),
         }
     setting = next((s for s in latest_norm["settings"] if s["persisted_key"] == "lang"), None)
-    return {"schema_version": 2, "canonical_version": canonical_version,
+    return {"schema_version": ANALYSIS_SCHEMA_VERSION, "canonical_version": canonical_version,
             "complete": bool(entries and canonical.get("status") == "ok"),
             "count": len(entries), "languages": entries,
             "per_version_catalog": per_version,
@@ -3010,7 +3011,7 @@ def main() -> int:
               f"{len(analysis.get('keybinds') or [])} bindings, {analysis.get('javap_calls', 0)} javap calls",
               flush=True)
     inventory.sort(key=lambda x: x["path"])
-    stable_json(out / "inventory.json", {"schema_version": 2, "tool_version": TOOL_VERSION,
+    stable_json(out / "inventory.json", {"schema_version": ANALYSIS_SCHEMA_VERSION, "tool_version": TOOL_VERSION,
                                          "root": str(root), "jar_count": len(inventory), "jars": inventory})
 
     candidates = [x for x in inventory if supported(x.get("detected_version")) and x.get("stable_release")]
@@ -3018,7 +3019,7 @@ def main() -> int:
 
     normalized: list[dict[str, Any]] = []
     for rec in inventory:
-        stable_json(out / "raw" / f"{rec['jar_id']}.json", {"schema_version": 2, "tool_version": TOOL_VERSION, **rec})
+        stable_json(out / "raw" / f"{rec['jar_id']}.json", {"schema_version": ANALYSIS_SCHEMA_VERSION, "tool_version": TOOL_VERSION, **rec})
         norm = normalize(rec)
         normalized.append(norm)
         stable_json(out / "normalized" / f"{rec['jar_id']}.json", norm)

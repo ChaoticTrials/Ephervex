@@ -22,14 +22,14 @@ stamped 2 through 5 as newer than itself and refuses it, the same refusal
 
 ## Decision
 
-`RECIPE_VERSION`, `CONFIG_SCHEMA_VERSION`, and `METADATA_VERSION` stay at 1 for
-as long as Ephervex has not shipped 1.0.0, no matter how many times the format
-each one stamps changes shape in the meantime. A shape change made during the
-freeze has to stay additive - a new or changed field defaults when absent - so
-that every other pre-1.0.0 build can still read the file. There is no version
-bump available during the freeze to signal "refuse this file instead of
-misreading it," so a change that cannot be made additively is not made through
-a version bump.
+Every Ephervex-owned format version stays at 1 for as long as Ephervex has not
+shipped 1.0.0, no matter how many times the format changes shape during
+development. This includes the SQLite index, disposable caches, and generated
+analysis workspaces as well as the configuration, host metadata, and retained
+recipe. A shape change made during the freeze has to stay additive where state
+is retained. Disposable state may instead be rejected and rebuilt. There is no
+pre-1.0 version bump available to signal "refuse this file instead of misreading
+it."
 
 Re-import is the recovery path for a change that cannot be additive, or for an
 on-disk file stamped above the frozen value by an earlier pre-1.0.0 build.
@@ -42,10 +42,9 @@ cannot stay additive bumps its constant as it would have before this decision,
 and the version becomes a real compatibility boundary between released builds
 instead of a development artifact.
 
-This decision does not cover the launcher index's migration files
-(`crates/storage/src/migrations/`). Whether the existing numbered migrations
-collapse into a single initial schema before 1.0.0 remains open, as
-`docs/internal-format-versions.md` describes.
+The launcher index's pre-1.0 migrations are collapsed into one initial schema.
+Migration 2 is reserved for the first compatible schema change after the 1.0.0
+boundary.
 
 ## Consequences
 
@@ -54,6 +53,9 @@ collapse into a single initial schema before 1.0.0 remains open, as
   release through 0.7.0; the recovery path is re-import.
 - `CONFIG_SCHEMA_VERSION` and `METADATA_VERSION` were already at 1 and need no
   code change, but are equally frozen: neither may be bumped before 1.0.0.
+- The SQLite index, disposable caches, and generated analysis state also reset
+  to 1. Existing pre-1.0 copies with higher values are refused or rebuilt by
+  their existing recovery policy.
 - A recipe-shape change that cannot default cleanly, such as a new required
   field or an enum variant an older pre-1.0.0 build cannot parse at all, is
   deferred until 1.0.0 rather than shipped behind a version bump.
