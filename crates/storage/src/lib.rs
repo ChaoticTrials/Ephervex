@@ -28,6 +28,7 @@
 //! looks like one.
 
 pub mod atomic;
+pub mod clone;
 pub mod config;
 pub(crate) mod copy;
 pub mod diagnostics;
@@ -45,6 +46,7 @@ pub(crate) mod relocate;
 mod test_support;
 
 pub use atomic::{AtomicWriteOptions, sync_parent, write_atomic, write_bytes_atomic};
+pub use clone::{CloneMethod, CloneReport, clone_file, clone_tree, clone_tree_with_check};
 pub use config::{
     AccountConfig, AccountLookup, ApiConfig, ApplicationColorScheme, ApplicationDisplayConfig,
     ApplicationTextScale, ArtifactCacheLimitMode, CONFIG_SCHEMA_VERSION, CacheConfig, Config,
