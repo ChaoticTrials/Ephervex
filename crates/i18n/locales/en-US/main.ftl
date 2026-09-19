@@ -985,6 +985,9 @@ error-pack-artifact-credential-unavailable = { $file } has to be downloaded agai
 error-pack-write-failed = A file from the pack could not be written.
 .action = Check permissions and free space at { $path }.
 
+error-storage-full = The storage device is full.
+.action = Free space on the device that holds the instance or Ephervex data, then try again.
+
 error-pack-recipe-unreadable = This instance's retained pack recipe could not be read.
 .action = Check that { $path } is readable. Without it, a server cannot be created from this instance's pack.
 

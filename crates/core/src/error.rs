@@ -58,7 +58,11 @@ impl std::fmt::Display for ErrorChain<'_> {
 pub enum CoreError {
     /// Paths, configuration, the index, or the registry.
     #[error(transparent)]
-    Storage(#[from] StorageError),
+    Storage(StorageError),
+
+    /// A write reached the filesystem and the backing device had no space.
+    #[error("the storage device is full")]
+    StorageFull { path: Option<PathBuf> },
 
     /// Mojang version metadata: the manifest, the release filter, or one
     /// version's document.
@@ -340,6 +344,16 @@ pub enum CoreError {
 /// download failure it could only report as "something went wrong".
 impl From<PackError> for CoreError {
     fn from(error: PackError) -> Self {
+        if error_chain_is_storage_full(&error)
+            || error
+                .recovery_issues()
+                .iter()
+                .any(|issue| issue.error_kind == std::io::ErrorKind::StorageFull)
+        {
+            return Self::StorageFull {
+                path: error.failing_path(),
+            };
+        }
         let PackError::ArtifactCredentialUnavailable { path, source } = error else {
             return Self::Pack(error);
         };
@@ -365,6 +379,7 @@ impl CoreError {
     pub fn message_id(&self) -> &'static str {
         match self {
             Self::Storage(error) => error.message_id(),
+            Self::StorageFull { .. } => "error-storage-full",
             Self::Minecraft(error) => error.message_id(),
             Self::Java(error) => error.message_id(),
             Self::JavaSettingsInvalid { .. } => "error-java-settings-invalid",
@@ -562,6 +577,7 @@ impl CoreError {
         match self {
             Self::Java(error) => error.required_major(),
             Self::Storage(_)
+            | Self::StorageFull { .. }
             | Self::ArtifactCache(_)
             | Self::ArtifactCacheLimitInvalid(_)
             | Self::DiagnosticBundleNotWritten { .. }
@@ -620,6 +636,7 @@ impl CoreError {
     pub fn failing_path(&self) -> Option<PathBuf> {
         match self {
             Self::Storage(error) => storage_failing_path(error),
+            Self::StorageFull { path } => path.clone(),
             Self::Minecraft(error) => error.failing_path(),
             Self::Java(error) => error.failing_path(),
             Self::Loader(error) => error.failing_path(),
@@ -667,6 +684,32 @@ impl CoreError {
     }
 }
 
+impl From<StorageError> for CoreError {
+    fn from(error: StorageError) -> Self {
+        if error_chain_is_storage_full(&error) {
+            Self::StorageFull {
+                path: storage_failing_path(&error),
+            }
+        } else {
+            Self::Storage(error)
+        }
+    }
+}
+
+fn error_chain_is_storage_full(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut current = Some(error);
+    while let Some(cause) = current {
+        if cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::StorageFull)
+        {
+            return true;
+        }
+        current = cause.source();
+    }
+    false
+}
+
 /// One function per error type rather than one deep flattened match: the arms
 /// of a flattened version repeat identically across variants.
 fn storage_failing_path(error: &StorageError) -> Option<PathBuf> {
@@ -683,13 +726,13 @@ fn storage_failing_path(error: &StorageError) -> Option<PathBuf> {
 
 impl From<ephervex_storage::DiagnosticError> for CoreError {
     fn from(error: ephervex_storage::DiagnosticError) -> Self {
-        Self::Storage(StorageError::Diagnostics(error))
+        Self::from(StorageError::Diagnostics(error))
     }
 }
 
 impl From<ephervex_storage::LockError> for CoreError {
     fn from(error: ephervex_storage::LockError) -> Self {
-        Self::Storage(StorageError::Lock(error))
+        Self::from(StorageError::Lock(error))
     }
 }
 
@@ -754,19 +797,19 @@ fn path_failing_path(error: &ephervex_storage::PathError) -> Option<PathBuf> {
 
 impl From<ephervex_storage::RegistryError> for CoreError {
     fn from(error: ephervex_storage::RegistryError) -> Self {
-        Self::Storage(StorageError::Registry(error))
+        Self::from(StorageError::Registry(error))
     }
 }
 
 impl From<ephervex_storage::ConfigError> for CoreError {
     fn from(error: ephervex_storage::ConfigError) -> Self {
-        Self::Storage(StorageError::Config(error))
+        Self::from(StorageError::Config(error))
     }
 }
 
 impl From<ephervex_storage::PathError> for CoreError {
     fn from(error: ephervex_storage::PathError) -> Self {
-        Self::Storage(StorageError::Path(error))
+        Self::from(StorageError::Path(error))
     }
 }
 
@@ -784,6 +827,35 @@ mod tests {
         let expected = inner.message_id();
         let wrapped = CoreError::from(inner);
         assert_eq!(wrapped.message_id(), expected);
+    }
+
+    #[test]
+    fn an_actual_storage_full_write_is_classified_with_its_path() {
+        let path = PathBuf::from("/instance/.launcher/instance.json");
+        let error = ephervex_storage::ConfigError::Unwritable {
+            path: path.clone(),
+            source: std::io::Error::from(std::io::ErrorKind::StorageFull),
+        };
+
+        let classified = CoreError::from(error);
+
+        assert!(matches!(classified, CoreError::StorageFull { .. }));
+        assert_eq!(classified.message_id(), "error-storage-full");
+        assert_eq!(classified.failing_path(), Some(path));
+    }
+
+    #[test]
+    fn a_pack_write_that_fills_storage_uses_the_same_typed_failure() {
+        let path = PathBuf::from("/instance/minecraft/mods/example.jar");
+        let error = PackError::Unwritable {
+            path: path.clone(),
+            source: std::io::Error::from(std::io::ErrorKind::StorageFull),
+        };
+
+        let classified = CoreError::from(error);
+
+        assert!(matches!(classified, CoreError::StorageFull { .. }));
+        assert_eq!(classified.failing_path(), Some(path));
     }
 
     #[test]
