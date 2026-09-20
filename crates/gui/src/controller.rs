@@ -20,8 +20,8 @@ use slint::{
 
 use crate::backend::{
     self, AccountData, ActivityData, ArtifactCacheStatusData, Command, DiagnosticContent,
-    DiagnosticData, Event, JavaData, LiveLogLine, LiveLogSource, LiveLogUpdate, ManagedModData,
-    ModSearchData, ServerPackTarget, ServerWorkspaceData, SettingsData, Snapshot,
+    DiagnosticData, Event, IsolationData, JavaData, LiveLogLine, LiveLogSource, LiveLogUpdate,
+    ManagedModData, ModSearchData, ServerPackTarget, ServerWorkspaceData, SettingsData, Snapshot,
 };
 use crate::binding_capture::{BindingCapture, CapturedInput};
 use crate::file_drop::{FileDrop, FileDrops};
@@ -35,9 +35,10 @@ use crate::presentation::{
 };
 use crate::ui::{
     AccountRow, ActivityRow, AppWindow, BlockedFileRow, DiagnosticRow, GuiI18n, ImpactRow,
-    ImportDuplicateRow, ImportOptionRow, InstanceRow, JavaRow, LicenseRow, LinkedTargetRow,
-    LocalModClashRow, LogChunk, ModRow, ModSearchRow, ModVersionRow, PendingEntityRow,
-    PromoteServerRow, RelationRow, RunningRow, ServerRow, SnapshotRow, Theme, WindowSizePreview,
+    ImportDuplicateRow, ImportOptionRow, InstanceRow, IsolationCandidateRow, JavaRow, LicenseRow,
+    LinkedTargetRow, LocalModClashRow, LogChunk, ModRow, ModSearchRow, ModVersionRow,
+    PendingEntityRow, PromoteServerRow, RelationRow, RunningRow, ServerRow, SnapshotRow, Theme,
+    WindowSizePreview,
 };
 use crate::window_aspect;
 
@@ -1222,6 +1223,26 @@ struct PreparedImportSubmission {
     skip_blocked: Vec<ProviderFileIdentity>,
 }
 
+#[derive(Debug, Default)]
+struct IsolationFlowState {
+    generation: u64,
+    host: Option<InstalledHost>,
+    pinned: HashSet<PathBuf>,
+}
+
+impl IsolationFlowState {
+    fn begin(&mut self, host: InstalledHost) -> u64 {
+        self.generation = self.generation.wrapping_add(1);
+        self.host = Some(host);
+        self.pinned.clear();
+        self.generation
+    }
+
+    fn accepts(&self, generation: u64) -> bool {
+        generation == 0 || generation == self.generation
+    }
+}
+
 /// Tracks one archive at a time through analysis, optional resolution,
 /// optional-file selection, and submission.
 ///
@@ -1669,6 +1690,7 @@ const fn drop_overlay_kind(intent: &DropIntent) -> &'static str {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
     let backend = backend::spawn();
     let receiver = Rc::new(RefCell::new(backend.events));
@@ -1680,6 +1702,7 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
     let browser = Rc::new(ModBrowser::default());
     let mod_lists = Rc::new(RefCell::new(ModLists::default()));
     let local_mods = Rc::new(RefCell::new(LocalModDrop::default()));
+    let isolation_flow = Rc::new(RefCell::new(IsolationFlowState::default()));
     register_i18n(ui);
     register_toasts(ui);
     register_callbacks(
@@ -1692,6 +1715,7 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
         &browser,
         &mod_lists,
         &local_mods,
+        &isolation_flow,
         keys,
     );
 
@@ -1705,6 +1729,7 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
     let poll_browser = Rc::clone(&browser);
     let poll_mod_lists = Rc::clone(&mod_lists);
     let poll_local_mods = Rc::clone(&local_mods);
+    let poll_isolation_flow = Rc::clone(&isolation_flow);
     let poll_commands = backend.commands.clone();
     let poll_timer = Timer::default();
     poll_timer.start(TimerMode::Repeated, Duration::from_millis(80), move || {
@@ -1737,6 +1762,7 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
                     &poll_browser,
                     &poll_mod_lists,
                     &poll_local_mods,
+                    &poll_isolation_flow,
                     &poll_commands,
                 ),
             }
@@ -2060,6 +2086,7 @@ fn register_callbacks(
     browser: &Rc<ModBrowser>,
     mod_lists: &Rc<RefCell<ModLists>>,
     local_mods: &Rc<RefCell<LocalModDrop>>,
+    isolation_flow: &Rc<RefCell<IsolationFlowState>>,
     keys: &BindingCapture,
 ) {
     register_catalog_actions(ui, commands);
@@ -2078,6 +2105,7 @@ fn register_callbacks(
     register_mod_state_actions(ui, commands, local_mods);
     register_diagnostics(ui, commands);
     register_snapshot_actions(ui, commands);
+    register_isolation_actions(ui, commands, isolation_flow);
     register_live_viewer(ui, commands, live_viewer);
     register_settings(ui, commands);
     register_minecraft_defaults(ui, commands, minecraft, keys);
@@ -2177,6 +2205,140 @@ fn register_snapshot_actions(ui: &AppWindow, commands: &Sender<Command>) {
             return;
         };
         send(&sender, Command::DeleteSnapshot { host, snapshot });
+    });
+}
+
+#[allow(clippy::too_many_lines)]
+fn register_isolation_actions(
+    ui: &AppWindow,
+    commands: &Sender<Command>,
+    flow: &Rc<RefCell<IsolationFlowState>>,
+) {
+    let sender = commands.clone();
+    let state = Rc::clone(flow);
+    ui.on_open_isolation(move |kind, id| {
+        let Some(host) = backend::parse_mod_host(&kind, &id) else {
+            return;
+        };
+        let generation = state.borrow_mut().begin(host);
+        send(&sender, Command::OpenIsolation { host, generation });
+    });
+
+    let state = Rc::clone(flow);
+    ui.on_toggle_isolation_pin(move |path, selected| {
+        let path = PathBuf::from(path.as_str());
+        if selected {
+            state.borrow_mut().pinned.insert(path);
+        } else {
+            state.borrow_mut().pinned.remove(&path);
+        }
+    });
+
+    let sender = commands.clone();
+    let state = Rc::clone(flow);
+    ui.on_start_isolation(move |kind, id, accept_unrecorded| {
+        let Some(host) = backend::parse_mod_host(&kind, &id) else {
+            return;
+        };
+        let state = state.borrow();
+        if state.host != Some(host) {
+            return;
+        }
+        send(
+            &sender,
+            Command::BeginIsolation {
+                host,
+                generation: state.generation,
+                pinned: state.pinned.iter().cloned().collect(),
+                accept_unrecorded,
+            },
+        );
+    });
+
+    let sender = commands.clone();
+    let state = Rc::clone(flow);
+    ui.on_resume_isolation(move |kind, id| {
+        let Some(host) = backend::parse_mod_host(&kind, &id) else {
+            return;
+        };
+        let generation = state.borrow_mut().begin(host);
+        send(&sender, Command::ResumeIsolation { host, generation });
+    });
+
+    let sender = commands.clone();
+    let state = Rc::clone(flow);
+    ui.on_answer_isolation(move |kind, id, answer| {
+        let Some(host) = backend::parse_mod_host(&kind, &id) else {
+            return;
+        };
+        let state = state.borrow();
+        if state.host != Some(host) {
+            return;
+        }
+        send(
+            &sender,
+            Command::AnswerIsolation {
+                host,
+                generation: state.generation,
+                answer: if answer == "present" {
+                    ephervex_core::RoundAnswer::Reproduced
+                } else {
+                    ephervex_core::RoundAnswer::DidNotReproduce
+                },
+            },
+        );
+    });
+
+    let sender = commands.clone();
+    let state = Rc::clone(flow);
+    ui.on_undo_isolation(move |kind, id| {
+        let Some(host) = backend::parse_mod_host(&kind, &id) else {
+            return;
+        };
+        let state = state.borrow();
+        if state.host == Some(host) {
+            send(
+                &sender,
+                Command::UndoIsolation {
+                    host,
+                    generation: state.generation,
+                },
+            );
+        }
+    });
+
+    let sender = commands.clone();
+    let state = Rc::clone(flow);
+    ui.on_finish_isolation(move |kind, id| {
+        let Some(host) = backend::parse_mod_host(&kind, &id) else {
+            return;
+        };
+        let generation = {
+            let mut state = state.borrow_mut();
+            if state.host == Some(host) {
+                state.generation
+            } else {
+                state.begin(host)
+            }
+        };
+        send(&sender, Command::FinishIsolation { host, generation });
+    });
+
+    let sender = commands.clone();
+    let state = Rc::clone(flow);
+    ui.on_cancel_isolation(move |kind, id| {
+        let Some(host) = backend::parse_mod_host(&kind, &id) else {
+            return;
+        };
+        let generation = {
+            let mut state = state.borrow_mut();
+            if state.host == Some(host) {
+                state.generation
+            } else {
+                state.begin(host)
+            }
+        };
+        send(&sender, Command::CancelIsolation { host, generation });
     });
 }
 
@@ -4937,6 +5099,68 @@ fn apply_artifact_cache_event(ui: &AppWindow, event: Event) {
     }
 }
 
+fn apply_isolation_data(
+    ui: &AppWindow,
+    data: IsolationData,
+    open: bool,
+    flow: &Rc<RefCell<IsolationFlowState>>,
+) {
+    let current = if data.host_kind == "server" {
+        ui.get_selected_server_id()
+    } else {
+        ui.get_selected_instance_id()
+    };
+    if !presentation::result_is_current(&data.host, &current) {
+        return;
+    }
+    let is_setup = data.phase == "setup";
+    let is_inactive = data.phase == "none";
+    let pinned = &flow.borrow().pinned;
+    ui.set_isolation_candidates(model(
+        data.candidates
+            .into_iter()
+            .map(|candidate| IsolationCandidateRow {
+                selected: pinned.contains(&PathBuf::from(&candidate.path)),
+                path: candidate.path.into(),
+                name: candidate.name.into(),
+            })
+            .collect(),
+    ));
+    ui.set_isolation_enabled(string_model(data.enabled));
+    ui.set_isolation_disabled(string_model(data.disabled));
+    ui.set_isolation_unrecorded(string_model(data.unrecorded));
+    ui.set_isolation_unidentifiable(string_model(data.unidentifiable));
+    ui.set_isolation_missing(string_model(data.missing));
+    ui.set_isolation_linked_servers(string_model(data.linked_servers));
+    ui.set_isolation_reproducing(string_model(data.reproducing));
+    ui.set_isolation_host_kind(data.host_kind.into());
+    ui.set_isolation_host_id(data.host.into());
+    ui.set_isolation_phase(data.phase.into());
+    ui.set_isolation_summary(data.summary.into());
+    ui.set_isolation_confidence(data.confidence.into());
+    ui.set_isolation_round(to_i32(data.round));
+    ui.set_isolation_granularity(to_i32(data.granularity));
+    ui.set_isolation_active(data.active);
+    ui.set_isolation_reduced_confidence(data.reduced_confidence);
+    ui.set_modal_error(SharedString::default());
+    if is_setup {
+        // Reduced confidence is an explicit choice for each new session, not a
+        // preference that carries over from an earlier setup dialog.
+        ui.set_isolation_accept_unrecorded(false);
+    }
+    if open {
+        ui.set_modal("isolate".into());
+    } else if is_inactive && ui.get_modal() == "isolate" {
+        // Cancel reports an inactive state after the snapshot restoration. Do
+        // not leave the modal open with no matching body.
+        ui.set_modal(SharedString::default());
+    }
+}
+
+fn string_model(values: Vec<String>) -> ModelRc<SharedString> {
+    model(values.into_iter().map(SharedString::from).collect())
+}
+
 /// Renders a fresh view of everything core holds.
 ///
 /// The Minecraft defaults screen asks its two background questions again from
@@ -5362,6 +5586,7 @@ fn apply_event(
     browser: &Rc<ModBrowser>,
     mod_lists: &Rc<RefCell<ModLists>>,
     local_mods: &Rc<RefCell<LocalModDrop>>,
+    isolation_flow: &Rc<RefCell<IsolationFlowState>>,
     commands: &Sender<Command>,
 ) {
     match event {
@@ -5567,6 +5792,15 @@ fn apply_event(
                 ));
                 ui.set_snapshot_total(data.total.into());
                 ui.set_snapshots_have_plain_copies(data.has_plain_copies);
+            }
+        }
+        Event::Isolation {
+            generation,
+            open,
+            data,
+        } => {
+            if isolation_flow.borrow().accepts(generation) {
+                apply_isolation_data(ui, data, open, isolation_flow);
             }
         }
         Event::JavaRuntimes(rows) => ui.set_java_runtimes(model(java_rows(rows))),
@@ -7208,6 +7442,58 @@ mod tests {
                 },
             )));
         AppWindow::new().expect("window")
+    }
+
+    fn isolation_data(host: &str, active: bool, phase: &str) -> IsolationData {
+        IsolationData {
+            host: host.to_owned(),
+            host_kind: "client".to_owned(),
+            active,
+            phase: phase.to_owned(),
+            round: usize::from(active),
+            granularity: 2,
+            enabled: vec!["mods/a.jar".to_owned()],
+            disabled: vec!["mods/b.jar".to_owned()],
+            candidates: Vec::new(),
+            unrecorded: Vec::new(),
+            unidentifiable: Vec::new(),
+            missing: Vec::new(),
+            linked_servers: Vec::new(),
+            reduced_confidence: false,
+            confidence: String::new(),
+            reproducing: Vec::new(),
+            summary: "Waiting for an answer.".to_owned(),
+        }
+    }
+
+    #[test]
+    fn reopening_a_workspace_applies_its_durable_isolation_state_without_opening_the_modal() {
+        let ui = test_window();
+        ui.set_selected_instance_id("host".into());
+        let flow = Rc::new(RefCell::new(IsolationFlowState::default()));
+
+        assert!(flow.borrow().accepts(0));
+        apply_isolation_data(&ui, isolation_data("host", true, "round"), false, &flow);
+
+        assert!(ui.get_isolation_active());
+        assert_eq!(ui.get_isolation_phase(), "round");
+        assert_eq!(ui.get_isolation_round(), 1);
+        assert_eq!(ui.get_modal(), "");
+    }
+
+    #[test]
+    fn a_new_setup_requires_a_fresh_override_and_cancel_closes_the_isolation_modal() {
+        let ui = test_window();
+        ui.set_selected_instance_id("host".into());
+        ui.set_isolation_accept_unrecorded(true);
+        let flow = Rc::new(RefCell::new(IsolationFlowState::default()));
+
+        apply_isolation_data(&ui, isolation_data("host", false, "setup"), true, &flow);
+        assert!(!ui.get_isolation_accept_unrecorded());
+        assert_eq!(ui.get_modal(), "isolate");
+
+        apply_isolation_data(&ui, isolation_data("host", false, "none"), false, &flow);
+        assert_eq!(ui.get_modal(), "");
     }
 
     /// A standalone server is named for its exact target, the same way a new

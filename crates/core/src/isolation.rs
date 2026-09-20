@@ -355,6 +355,32 @@ impl IsolationError {
     }
 
     #[must_use]
+    pub fn message_args(&self) -> Vec<(&'static str, String)> {
+        match self {
+            Self::HostRunning { host }
+            | Self::AlreadyActive { host }
+            | Self::NotActive { host } => vec![("host", host.clone())],
+            Self::UnrecordedDependencies { paths } => {
+                vec![("count", paths.len().to_string())]
+            }
+            Self::MissingDependencies { dependencies } => {
+                vec![("count", dependencies.len().to_string())]
+            }
+            Self::HostMismatch { expected, found } => {
+                vec![("expected", expected.clone()), ("found", found.clone())]
+            }
+            Self::UnsupportedVersion {
+                found, supported, ..
+            } => vec![
+                ("found", found.to_string()),
+                ("supported", supported.to_string()),
+            ],
+            Self::Snapshot(error) => error.message_args(),
+            _ => Vec::new(),
+        }
+    }
+
+    #[must_use]
     pub fn failing_path(&self) -> Option<PathBuf> {
         match self {
             Self::Unreadable { path, .. }
@@ -364,6 +390,11 @@ impl IsolationError {
             Self::Snapshot(error) => error.failing_path(),
             _ => None,
         }
+    }
+
+    #[must_use]
+    pub const fn is_cancellation(&self) -> bool {
+        matches!(self, Self::Snapshot(error) if error.is_cancellation())
     }
 }
 

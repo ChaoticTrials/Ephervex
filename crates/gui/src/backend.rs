@@ -15,14 +15,15 @@ use ephervex_core::live_diagnostics::TailedLine;
 use ephervex_core::{
     App, AuthEvent, AuthObserver, CancellationToken, ClientFolder, ClientModOutcome, ClientModPlan,
     CoreError, CoreResult, CrashReview, DeclaredProject, DiagnosticKind, DiagnosticRequest,
-    DiagnosticScope, ErrorChain, EulaStatus, ImportRequest, InstalledHost,
-    LaunchAndConnectObserver, LaunchAndConnectOptions, LaunchEvent, LaunchObserver, LaunchOptions,
-    LinkedModOutcome, LinkedModPlan, LinkedModRequest, LinkedTargetPlan, LinkedTargetResult,
-    LinkedTargetState, LocalModOffer, LocalModPlan, LocalModReport, LoginOptions, ManagedModEntry,
-    ManagedModSnapshot, MetadataAvailability, ModInstallPlan, ModMutability, ModMutation,
-    ModMutationPlan, ModPresence, ModSearchQuery, MutationRestriction, NewClient, NewServer,
-    OperationReporter, OptionalSelection, PackAnalysis, Paths, PlannedOutcome, ProcessMonitor,
-    ProgressSink, ProviderFileIdentity, SearchOptions, ServerCommit, ServerContentSource,
+    DiagnosticScope, ErrorChain, EulaStatus, ImportRequest, InstalledHost, IsolationPlan,
+    IsolationReport, IsolationRequest, IsolationSession, LaunchAndConnectObserver,
+    LaunchAndConnectOptions, LaunchEvent, LaunchObserver, LaunchOptions, LinkedModOutcome,
+    LinkedModPlan, LinkedModRequest, LinkedTargetPlan, LinkedTargetResult, LinkedTargetState,
+    LocalModOffer, LocalModPlan, LocalModReport, LoginOptions, ManagedModEntry, ManagedModSnapshot,
+    MetadataAvailability, ModInstallPlan, ModMutability, ModMutation, ModMutationPlan, ModPresence,
+    ModSearchQuery, MutationRestriction, NewClient, NewServer, OperationReporter,
+    OptionalSelection, PackAnalysis, Paths, PlannedOutcome, ProcessMonitor, ProgressSink,
+    ProviderFileIdentity, RoundAnswer, SearchOptions, ServerCommit, ServerContentSource,
     ServerCreateOptions, ServerEvent, ServerFolder, ServerNetworkSettings, ServerObserver,
     ServerRecord, SideRequirement, SnapshotOrigin, SnapshotRestoreOptions, SuspectReason,
     WatchTarget,
@@ -227,6 +228,38 @@ pub enum Command {
     DeleteSnapshot {
         host: InstalledHost,
         snapshot: SnapshotId,
+    },
+    OpenIsolation {
+        host: InstalledHost,
+        generation: u64,
+    },
+    LoadIsolation(InstalledHost),
+    BeginIsolation {
+        host: InstalledHost,
+        generation: u64,
+        pinned: Vec<PathBuf>,
+        accept_unrecorded: bool,
+    },
+    ResumeIsolation {
+        host: InstalledHost,
+        generation: u64,
+    },
+    AnswerIsolation {
+        host: InstalledHost,
+        generation: u64,
+        answer: RoundAnswer,
+    },
+    UndoIsolation {
+        host: InstalledHost,
+        generation: u64,
+    },
+    FinishIsolation {
+        host: InstalledHost,
+        generation: u64,
+    },
+    CancelIsolation {
+        host: InstalledHost,
+        generation: u64,
     },
     LoadModVersions {
         instance: InstanceId,
@@ -1206,6 +1239,33 @@ pub struct HostSnapshotsData {
 }
 
 #[derive(Debug, Clone)]
+pub struct IsolationCandidateData {
+    pub path: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct IsolationData {
+    pub host: String,
+    pub host_kind: String,
+    pub active: bool,
+    pub phase: String,
+    pub round: usize,
+    pub granularity: usize,
+    pub enabled: Vec<String>,
+    pub disabled: Vec<String>,
+    pub candidates: Vec<IsolationCandidateData>,
+    pub unrecorded: Vec<String>,
+    pub unidentifiable: Vec<String>,
+    pub missing: Vec<String>,
+    pub linked_servers: Vec<String>,
+    pub reduced_confidence: bool,
+    pub confidence: String,
+    pub reproducing: Vec<String>,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct ServerWorkspaceData {
     pub motd: String,
     pub max_players: String,
@@ -1321,6 +1381,11 @@ pub enum Event {
     DiagnosticContent(DiagnosticContent),
     DiagnosticUnavailable(String),
     HostSnapshots(HostSnapshotsData),
+    Isolation {
+        generation: u64,
+        open: bool,
+        data: IsolationData,
+    },
     JavaRuntimes(Vec<JavaData>),
     Activity(ActivityData),
     Toast {
@@ -2149,6 +2214,7 @@ fn run_worker(
                 if let Ok(runtime) = instance_runtime_data(&app, instance) {
                     let _ = events.send(Event::InstanceRuntime(runtime));
                 }
+                send_isolation_state(&app, InstalledHost::Instance(instance), 0, false, &events);
                 refresh_enriched_mods(app.paths().clone(), &events, instance);
             }
             Command::LoadSnapshots(host) => match host_snapshots_data(&app, host) {
@@ -2281,6 +2347,108 @@ fn run_worker(
                         let data = host_snapshots_data(&app, host)?;
                         let _ = reports.send(Event::HostSnapshots(data));
                         Ok(OperationReport::Toast(lookup("gui-snapshot-deleted")))
+                    },
+                );
+            }
+            Command::OpenIsolation { host, generation } => {
+                send_isolation_state(&app, host, generation, true, &events);
+            }
+            Command::LoadIsolation(host) => {
+                send_isolation_state(&app, host, 0, false, &events);
+            }
+            Command::BeginIsolation {
+                host,
+                generation,
+                pinned,
+                accept_unrecorded,
+            } => {
+                let paths = app.paths().clone();
+                let reports = events.clone();
+                let refreshed = Arc::clone(&refreshed_mods);
+                spawn_async_operation(
+                    paths,
+                    &events,
+                    Arc::clone(&cancellations),
+                    AsyncOperationRequest {
+                        title: "operation-starting-isolation",
+                        entity: host.id(),
+                        allow_cancel: true,
+                        finished: None,
+                    },
+                    move |app, _reporter, cancel| async move {
+                        app.begin_isolation(
+                            host,
+                            IsolationRequest {
+                                pinned,
+                                accept_unrecorded,
+                            },
+                            &cancel,
+                        )?;
+                        send_isolation_state(&app, host, generation, true, &reports);
+                        send_host_mods(&app, host, &reports, &refreshed, false);
+                        Ok(OperationReport::Reported)
+                    },
+                );
+            }
+            Command::ResumeIsolation { host, generation } => match app.resume_isolation(host) {
+                Ok(_) => {
+                    send_isolation_state(&app, host, generation, true, &events);
+                    send_host_mods(&app, host, &events, &refreshed_mods, false);
+                }
+                Err(error) => send_modal_error(&events, &error),
+            },
+            Command::AnswerIsolation {
+                host,
+                generation,
+                answer,
+            } => match app.answer_isolation_round(host, answer) {
+                Ok(_) => {
+                    send_isolation_state(&app, host, generation, true, &events);
+                    send_host_mods(&app, host, &events, &refreshed_mods, false);
+                }
+                Err(error) => send_modal_error(&events, &error),
+            },
+            Command::UndoIsolation { host, generation } => match app.undo_isolation_round(host) {
+                Ok(_) => {
+                    send_isolation_state(&app, host, generation, true, &events);
+                    send_host_mods(&app, host, &events, &refreshed_mods, false);
+                }
+                Err(error) => send_modal_error(&events, &error),
+            },
+            Command::FinishIsolation { host, generation } => match app.finish_isolation(host) {
+                Ok(report) => {
+                    let _ = events.send(Event::Isolation {
+                        generation,
+                        open: true,
+                        data: isolation_report_data(host, &report),
+                    });
+                    send_host_mods(&app, host, &events, &refreshed_mods, false);
+                }
+                Err(error) => send_modal_error(&events, &error),
+            },
+            Command::CancelIsolation { host, generation } => {
+                let paths = app.paths().clone();
+                let reports = events.clone();
+                let refreshed = Arc::clone(&refreshed_mods);
+                spawn_async_operation(
+                    paths,
+                    &events,
+                    Arc::clone(&cancellations),
+                    AsyncOperationRequest {
+                        title: "operation-canceling-isolation",
+                        entity: host.id(),
+                        allow_cancel: true,
+                        finished: None,
+                    },
+                    move |app, _reporter, cancel| async move {
+                        app.cancel_isolation(host, &cancel)?;
+                        let _ = reports.send(Event::Isolation {
+                            generation,
+                            open: false,
+                            data: inactive_isolation_data(host),
+                        });
+                        send_host_mods(&app, host, &reports, &refreshed, false);
+                        Ok(OperationReport::Toast(lookup("gui-isolation-canceled")))
                     },
                 );
             }
@@ -2658,6 +2826,7 @@ fn run_worker(
                 let review = app.crash_review(host).ok().flatten();
                 let _ = events.send(Event::CrashNotice(crash_notice_data(host, review.as_ref())));
                 send_server_workspace(&app, server, &events);
+                send_isolation_state(&app, InstalledHost::Server(server), 0, false, &events);
             }
             Command::LoadServerMods(server) => {
                 send_host_mods(
@@ -3924,6 +4093,212 @@ fn host_snapshots_data(app: &App, host: InstalledHost) -> CoreResult<HostSnapsho
         total: ephervex_core::format_binary_bytes(total_bytes),
         has_plain_copies,
     })
+}
+
+fn send_isolation_state(
+    app: &App,
+    host: InstalledHost,
+    generation: u64,
+    open: bool,
+    events: &Sender<Event>,
+) {
+    let data = match app.isolation_state(host) {
+        Ok(Some(session)) => isolation_session_data(&session),
+        Ok(None) if open => match app.plan_isolation(host, &[]) {
+            Ok(plan) => isolation_plan_data(host, &plan),
+            Err(error) => {
+                send_modal_error(events, &error);
+                return;
+            }
+        },
+        Ok(None) => inactive_isolation_data(host),
+        Err(error) => {
+            send_modal_error(events, &error);
+            return;
+        }
+    };
+    let _ = events.send(Event::Isolation {
+        generation,
+        open,
+        data,
+    });
+}
+
+fn inactive_isolation_data(host: InstalledHost) -> IsolationData {
+    IsolationData {
+        host: host.id(),
+        host_kind: host_kind(host).to_owned(),
+        active: false,
+        phase: "none".to_owned(),
+        round: 0,
+        granularity: 0,
+        enabled: Vec::new(),
+        disabled: Vec::new(),
+        candidates: Vec::new(),
+        unrecorded: Vec::new(),
+        unidentifiable: Vec::new(),
+        missing: Vec::new(),
+        linked_servers: Vec::new(),
+        reduced_confidence: false,
+        confidence: String::new(),
+        reproducing: Vec::new(),
+        summary: String::new(),
+    }
+}
+
+fn isolation_plan_data(host: InstalledHost, plan: &IsolationPlan) -> IsolationData {
+    let names: HashMap<_, _> = plan
+        .candidates
+        .iter()
+        .map(|candidate| (&candidate.root, candidate.name.as_str()))
+        .collect();
+    let candidates = plan
+        .initially_enabled
+        .iter()
+        .map(|path| IsolationCandidateData {
+            path: path.to_string_lossy().into_owned(),
+            name: names.get(path).map_or_else(
+                || {
+                    path.file_name().map_or_else(
+                        || path.to_string_lossy().into_owned(),
+                        |name| name.to_string_lossy().into_owned(),
+                    )
+                },
+                |name| (*name).to_owned(),
+            ),
+        })
+        .collect();
+    let mut data = inactive_isolation_data(host);
+    "setup".clone_into(&mut data.phase);
+    data.candidates = candidates;
+    data.unrecorded = display_paths(&plan.unrecorded);
+    data.unidentifiable = display_paths(&plan.unidentifiable);
+    data.missing = plan
+        .missing
+        .iter()
+        .map(|missing| format!("{}: {}", missing.required_by.display(), missing.dependency))
+        .collect();
+    data.linked_servers = plan
+        .linked_servers
+        .iter()
+        .map(|server| format!("{} ({})", server.name, server.id))
+        .collect();
+    data.summary = lookup_args(
+        "gui-isolation-setup-summary",
+        [("count", Arg::from(plan.candidates.len()))],
+    );
+    data
+}
+
+fn isolation_session_data(session: &IsolationSession) -> IsolationData {
+    let host_kind = session.host_kind.clone();
+    let host = session.host_id.clone();
+    let (phase, round, granularity, enabled, disabled, confidence, reproducing) =
+        if let Some(round) = &session.current_round {
+            (
+                "round",
+                usize::try_from(round.index).unwrap_or(usize::MAX),
+                round.granularity,
+                display_paths(&round.enabled),
+                display_paths(&round.disabled),
+                String::new(),
+                Vec::new(),
+            )
+        } else if session.contradiction.is_some() {
+            (
+                "contradiction",
+                session.history.len(),
+                session.granularity,
+                display_paths(session.intended_enabled()),
+                Vec::new(),
+                String::new(),
+                Vec::new(),
+            )
+        } else if let Some(outcome) = &session.outcome {
+            (
+                "ready",
+                session.history.len(),
+                session.granularity,
+                display_paths(&outcome.enabled),
+                display_paths(&outcome.disabled),
+                outcome.confidence.as_str().to_owned(),
+                display_paths(&outcome.roots),
+            )
+        } else {
+            (
+                "contradiction",
+                0,
+                0,
+                Vec::new(),
+                Vec::new(),
+                String::new(),
+                Vec::new(),
+            )
+        };
+    IsolationData {
+        host,
+        host_kind,
+        active: true,
+        phase: phase.to_owned(),
+        round,
+        granularity,
+        enabled,
+        disabled,
+        candidates: Vec::new(),
+        unrecorded: display_paths(&session.plan.unrecorded),
+        unidentifiable: display_paths(&session.plan.unidentifiable),
+        missing: Vec::new(),
+        linked_servers: session
+            .plan
+            .linked_servers
+            .iter()
+            .map(|server| format!("{} ({})", server.name, server.id))
+            .collect(),
+        reduced_confidence: session.reduced_confidence,
+        confidence,
+        reproducing,
+        summary: if phase == "round" {
+            lookup_args("gui-isolation-round-summary", [("round", Arg::from(round))])
+        } else if phase == "contradiction" {
+            lookup("gui-isolation-contradiction")
+        } else {
+            lookup("gui-isolation-ready-summary")
+        },
+    }
+}
+
+fn isolation_report_data(host: InstalledHost, report: &IsolationReport) -> IsolationData {
+    let mut data = inactive_isolation_data(host);
+    "result".clone_into(&mut data.phase);
+    data.round = report.rounds;
+    data.enabled = display_paths(&report.enabled);
+    data.disabled = display_paths(&report.disabled);
+    data.reduced_confidence = report.reduced_confidence;
+    report.confidence.as_str().clone_into(&mut data.confidence);
+    data.reproducing = report
+        .reproducing
+        .iter()
+        .map(|candidate| candidate.root.to_string_lossy().into_owned())
+        .collect();
+    data.unrecorded = display_paths(&report.unrecorded);
+    data.unidentifiable = display_paths(&report.unidentifiable);
+    data.linked_servers = report
+        .linked_servers
+        .iter()
+        .map(|server| format!("{} ({})", server.name, server.id))
+        .collect();
+    data.summary = lookup_args(
+        "gui-isolation-result-summary",
+        [("count", Arg::from(report.reproducing.len()))],
+    );
+    data
+}
+
+fn display_paths(paths: &[PathBuf]) -> Vec<String> {
+    paths
+        .iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect()
 }
 
 fn snapshot_deletion_note(app: &App, host: InstalledHost) -> String {
