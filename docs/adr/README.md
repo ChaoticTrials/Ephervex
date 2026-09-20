@@ -41,4 +41,5 @@ so the reasoning trail survives.
 | [0033](0033-internal-format-versions-stay-at-1-until-1.0.0.md) | Internal format versions stay at 1 until 1.0.0 | Accepted |
 | [0034](0034-a-recipe-entry-records-the-dependencies-its-provider-declared.md) | A recipe entry records the relations its provider declared | Accepted |
 | [0035](0035-local-snapshots-use-copy-on-write-clones.md) | Local snapshots use copy-on-write clones | Accepted |
+| [0036](0036-mod-isolation-applies-recoverable-dependency-closed-rounds.md) | Mod isolation applies recoverable dependency-closed rounds | Accepted |
 | [0037](0037-a-declared-relation-is-resolved-against-the-catalog-and-never-recorded.md) | A declared relation is resolved against the catalog and never recorded | Accepted |

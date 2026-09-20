@@ -67,6 +67,8 @@ Current functionality includes:
   recipes;
 * Modrinth mod browsing, compatibility-aware dependency resolution, and managed
   mod installation;
+* dependency-aware mod enable/disable controls, local safety snapshots, and a
+  recoverable mod isolation workflow for narrowing reproducing configurations;
 * exact Vanilla, Forge, and NeoForge dedicated-server installation;
 * standalone and client-linked dedicated servers with typed properties,
   explicit EULA handling, lifecycle control, console commands, and durable
@@ -102,9 +104,11 @@ its name, its exact Minecraft version and loader build, how many files it has -
 needs no key at all. CurseForge mod browsing is planned but not yet
 implemented. See [`docs/curseforge-api-key.md`](docs/curseforge-api-key.md).
 
-Managed mod workflows currently support Modrinth browsing, dependency
-resolution, and installation. More complete pack and mod controls, including
-version changes and update workflows, are still in development.
+Managed mod workflows support Modrinth browsing, dependency resolution,
+installation, dependency-aware state changes, version selection, and durable
+mod isolation. See [`docs/mod-isolation.md`](docs/mod-isolation.md) for the
+desktop and command-line isolation workflow. Broader update workflows are still
+in development.
 
 ## Dedicated servers
 
