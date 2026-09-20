@@ -1,0 +1,85 @@
+# How each release architecture is spelled by the things that need a name.
+#
+# One table, sourced by every packaging script and read by the release
+# workflows, because the same architecture answers to four different names and
+# a disagreement between two of them is a mislabeled artifact: `uname -m` says
+# `aarch64`, Debian says `arm64`, RPM says `aarch64` again, and the dynamic
+# linker is a fifth spelling entirely. Deriving any of them a second time
+# somewhere else is how a package ends up claiming an architecture it was not
+# built for.
+#
+# A caller sources this and defines `fail`. Nothing here reads the host: which
+# architecture a build targets is `EPHERVEX_BASELINE_ARCH`, declared in
+# packaging/linux-baseline.
+#
+# Adding an architecture is a support decision. It changes what
+# packaging/linux-baseline lists, what docs/release.md promises, and what the
+# release workflows build; see docs/adr/0023-appimage-is-the-linux-release-artifact.md.
+
+# Fails unless the argument is an architecture Ephervex releases for.
+ephervex_require_known_arch() {
+    case "$1" in
+    x86_64 | aarch64) ;;
+    *) fail "no release architecture is declared for $1; packaging/linux-baseline lists the supported set" ;;
+    esac
+}
+
+# Debian's name for an architecture, which is neither `uname -m`'s nor RPM's.
+# It is the `Architecture:` control field, the `.deb` file name, and what
+# `aptly publish -architectures` is given.
+ephervex_deb_arch() {
+    ephervex_require_known_arch "$1"
+    case "$1" in
+    x86_64) printf 'amd64\n' ;;
+    aarch64) printf 'arm64\n' ;;
+    esac
+}
+
+# RPM's name for an architecture. It agrees with `uname -m` on both of ours,
+# which is exactly why it is written down rather than assumed: the agreement is
+# a fact about these two architectures, not a rule.
+ephervex_rpm_arch() {
+    ephervex_require_known_arch "$1"
+    case "$1" in
+    x86_64) printf 'x86_64\n' ;;
+    aarch64) printf 'aarch64\n' ;;
+    esac
+}
+
+# The `ARCH` appimagetool is given and the name the artifact carries. AppImage
+# uses `uname -m`'s spelling, and the runtime refuses to run an artifact whose
+# declared architecture is not the machine's.
+ephervex_appimage_arch() {
+    ephervex_require_known_arch "$1"
+    case "$1" in
+    x86_64) printf 'x86_64\n' ;;
+    aarch64) printf 'aarch64\n' ;;
+    esac
+}
+
+# The dynamic linker's soname, which every release binary names explicitly.
+#
+# Architecture-specific, so it belongs here rather than in the flat allowlist
+# in packaging/linux-shared-libraries: listing both unconditionally would let an
+# `aarch64` binary pass an `x86_64` build's check, which is precisely the
+# mistake the allowlist exists to catch.
+ephervex_dynamic_loader() {
+    ephervex_require_known_arch "$1"
+    case "$1" in
+    x86_64) printf 'ld-linux-x86-64.so.2\n' ;;
+    aarch64) printf 'ld-linux-aarch64.so.1\n' ;;
+    esac
+}
+
+# What `readelf -h` prints for `Machine:` on an ELF built for an architecture.
+#
+# The one check that reads the binary rather than a name, so a build that
+# somehow produced the wrong architecture fails here instead of shipping under
+# a name that lies about it.
+ephervex_elf_machine() {
+    ephervex_require_known_arch "$1"
+    case "$1" in
+    x86_64) printf 'Advanced Micro Devices X86-64\n' ;;
+    aarch64) printf 'AArch64\n' ;;
+    esac
+}

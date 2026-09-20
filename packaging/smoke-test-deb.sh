@@ -35,6 +35,9 @@ ARTIFACT=$(cd -- "$(dirname -- "$1")" && printf '%s/%s' "$(pwd)" "$(basename -- 
 REPO_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 # shellcheck source=packaging/linux-baseline
 source "${REPO_ROOT}/packaging/linux-baseline"
+# shellcheck source=packaging/linux-architectures
+source "${REPO_ROOT}/packaging/linux-architectures"
+ephervex_require_known_arch "${EPHERVEX_BASELINE_ARCH}"
 # shellcheck source=packaging/linux-release-artifact
 source "${REPO_ROOT}/packaging/linux-release-artifact"
 
@@ -142,6 +145,17 @@ note "glibc floor ${REQUIRED_GLIBC}, at or below the declared baseline ${EPHERVE
 enforce_shared_library_allowlist "${REPO_ROOT}/packaging" \
     "${ROOT}/usr/bin/ephervex" "${ROOT}/usr/bin/ephervex-gui"
 note "shared libraries are the declared set"
+
+# What a package manager refuses to install on the wrong machine, so a control
+# field that disagrees with the binaries is either an install that cannot work
+# or one that is allowed through and then does not run.
+DEB_ARCH=$(ephervex_deb_arch "${EPHERVEX_BASELINE_ARCH}")
+[[ $(field Architecture) == "${DEB_ARCH}" ]] ||
+    fail "the package declares $(field Architecture), but this build targets ${DEB_ARCH}"
+[[ $(basename "${ARTIFACT}") == "ephervex_${VERSION}_${DEB_ARCH}.deb" ]] ||
+    fail "$(basename "${ARTIFACT}") is not the name a ${DEB_ARCH} package carries"
+enforce_target_architecture "${ROOT}/usr/bin/ephervex" "${ROOT}/usr/bin/ephervex-gui"
+note "declared ${DEB_ARCH}, and built for it"
 
 enforce_no_build_paths "${ROOT}/usr/bin/ephervex" "${ROOT}/usr/bin/ephervex-gui"
 note "no build-machine home paths are embedded"

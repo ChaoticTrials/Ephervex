@@ -10,8 +10,9 @@
 # quietly raising the floor for everyone. There is deliberately no flag that
 # skips any of it.
 #
-# A caller sources this after `packaging/linux-baseline`, and defines `fail` and
-# `note`. It reads and updates `REQUIRED_GLIBC`, the highest floor seen so far.
+# A caller sources this after `packaging/linux-baseline` and
+# `packaging/linux-architectures`, and defines `fail` and `note`. It reads and
+# updates `REQUIRED_GLIBC`, the highest floor seen so far.
 
 # Builds the two release binaries.
 #
@@ -107,6 +108,12 @@ enforce_shared_library_allowlist() {
     [[ ${#allowed[@]} -gt 0 ]] ||
         fail "packaging/linux-shared-libraries lists no libraries"
 
+    # The dynamic linker, for the architecture this build targets and no other.
+    # It is the one allowed soname that differs per architecture, so it comes
+    # from the table rather than from the flat list, and a binary built for
+    # another architecture names a linker this list does not hold.
+    allowed+=("$(ephervex_dynamic_loader "${EPHERVEX_BASELINE_ARCH}")")
+
     for binary in "$@"; do
         needed=$(readelf -d "${binary}" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p') ||
             fail "could not read the library requirements of ${binary}"
@@ -160,5 +167,23 @@ enforce_no_build_paths() {
             fail "$(basename "${binary}") embeds a build-machine home path.
 Release builds remap them; see the RUSTFLAGS in docs/release.md."
         fi
+    done
+}
+
+# The architecture an ELF was actually built for, as `readelf` reports it.
+#
+# Every other check reads names: the artifact's file name, the package's control
+# field, the allowlist's linker soname. This reads the ELF header, so a build
+# that produced the wrong architecture fails here rather than shipping under a
+# name that describes something it is not.
+enforce_target_architecture() {
+    local binary expected found
+    expected=$(ephervex_elf_machine "${EPHERVEX_BASELINE_ARCH}")
+    for binary in "$@"; do
+        found=$(readelf -h "${binary}" 2>/dev/null | sed -n 's/^ *Machine: *//p' | head -n 1)
+        [[ -n ${found} ]] || fail "could not read the architecture of ${binary}"
+        [[ ${found} == "${expected}" ]] || fail \
+            "$(basename "${binary}") is built for ${found}, not ${expected}.
+This build targets ${EPHERVEX_BASELINE_ARCH}; see packaging/linux-baseline."
     done
 }

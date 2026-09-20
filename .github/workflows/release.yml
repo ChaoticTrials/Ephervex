@@ -76,6 +76,12 @@ jobs:
           python3 -m py_compile tools/minecraft-options/*.py
           python3 -m unittest discover -s tools/minecraft-options
 
+      - name: Verify the packaging architecture table
+        # The names Debian, RPM, AppImage, and the dynamic linker each use for
+        # an architecture. Nothing downstream can catch a wrong one: the
+        # packaging scripts ask this table what the name is.
+        run: packaging/test-linux-architectures.sh
+
       - name: Formatting
         run: cargo fmt --all --check
 
@@ -88,14 +94,20 @@ jobs:
         run: cargo test --workspace --no-fail-fast
 
       - name: Provision the pinned host tools
+        # Which architecture's assets to fetch, what they are named, and the
+        # digest each has to match all come from packaging/host-tools, so this
+        # step spells no architecture of its own and the build step below is
+        # told where they landed rather than assembling the paths a second time.
         run: |
           set -eu
+          . ./packaging/linux-baseline
           . ./packaging/host-tools
           mkdir -p host-tools
           cd host-tools
 
           fetch() {
-            url=$1; file=$2; expected=$3
+            url=$1; expected=$2
+            file=${url##*/}
             curl --proto '=https' --tlsv1.2 -sSfL -o "${file}" "${url}"
             actual=$(sha256sum "${file}" | cut -d' ' -f1)
             if [ "${actual}" != "${expected}" ]; then
@@ -107,16 +119,24 @@ jobs:
               exit 1
             fi
             chmod +x "${file}"
+            FETCHED=${file}
           }
 
-          fetch "${EPHERVEX_APPIMAGETOOL_URL}" appimagetool-x86_64.AppImage \
-                "${EPHERVEX_APPIMAGETOOL_SHA256}"
-          fetch "${EPHERVEX_APPIMAGE_RUNTIME_URL}" runtime-x86_64 \
-                "${EPHERVEX_APPIMAGE_RUNTIME_SHA256}"
+          # Each pin is one "<url> <sha256>" pair, deliberately split into the
+          # two arguments `fetch` takes. Neither field can contain a space.
+          # shellcheck disable=SC2046
+          fetch $(ephervex_appimagetool "${EPHERVEX_BASELINE_ARCH}")
+          APPIMAGETOOL_FILE=${FETCHED}
+          # shellcheck disable=SC2046
+          fetch $(ephervex_appimage_runtime "${EPHERVEX_BASELINE_ARCH}")
+          RUNTIME_FILE=${FETCHED}
 
           # appimagetool ships as an AppImage, and a container has no FUSE to
           # mount one with, so it is extracted once and run from the AppDir.
-          ./appimagetool-x86_64.AppImage --appimage-extract >/dev/null
+          "./${APPIMAGETOOL_FILE}" --appimage-extract >/dev/null
+
+          echo "APPIMAGETOOL=${PWD}/squashfs-root/AppRun" >> "$GITHUB_ENV"
+          echo "APPIMAGE_RUNTIME_FILE=${PWD}/${RUNTIME_FILE}" >> "$GITHUB_ENV"
 
       - name: Build and package the AppImage
         env:
@@ -130,8 +150,6 @@ jobs:
           EPHERVEX_CURSEFORGE_API_KEY: ${{ secrets.CURSEFORGE_API_KEY }}
         run: |
           set -eu
-          export APPIMAGETOOL="${PWD}/host-tools/squashfs-root/AppRun"
-          export APPIMAGE_RUNTIME_FILE="${PWD}/host-tools/runtime-x86_64"
           cargo fetch --locked
           packaging/build-appimage.sh dist
 

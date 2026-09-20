@@ -1,17 +1,22 @@
-# The two host dependencies a release build needs, pinned.
+# The two host dependencies a release build needs, pinned, for each release
+# architecture.
 #
 # `build-appimage.sh` never downloads either of them: packaging is not a network
 # step, and the runtime in particular is an executable prepended to every
 # AppImage, so letting `appimagetool` fetch a fresh one would let the launcher
 # change between two builds of the same source (ADR 0023). Provisioning them is
 # the caller's job. A maintainer installs them by hand; the release workflow
-# reads this file, fetches exactly what it names, and refuses anything whose
-# digest does not match.
+# reads this file, fetches exactly what it names for the architecture it is
+# building, and refuses anything whose digest does not match.
 #
 # Both are published under rolling `continuous` tags, so upstream replacing an
 # asset makes the digest below stop matching and stops the release. That is the
 # intent: check the new binary, then update the digest here deliberately. Do not
 # turn the mismatch into a warning.
+#
+# The two architectures' assets are pinned from the same upstream state, so a
+# digest that stops matching stops both rather than leaving one architecture on
+# an older launcher than the other.
 #
 # Recorded alongside each digest is what the release procedure was verified
 # against, so a discrepancy is legible rather than just a hash that changed.
@@ -20,10 +25,45 @@
 # continuous, git 8c8c91f, build 295 (2025-12-04).
 # Ships as an AppImage itself, so a host without FUSE extracts it once with
 # `--appimage-extract` and points $APPIMAGETOOL at squashfs-root/AppRun.
-EPHERVEX_APPIMAGETOOL_URL=https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
-EPHERVEX_APPIMAGETOOL_SHA256=a6d71e2b6cd66f8e8d16c37ad164658985e0cf5fcaa950c90a482890cb9d13e0
+# It runs on the machine that builds, so it is the *host's* architecture.
+EPHERVEX_APPIMAGETOOL_URL_x86_64=https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+EPHERVEX_APPIMAGETOOL_SHA256_x86_64=a6d71e2b6cd66f8e8d16c37ad164658985e0cf5fcaa950c90a482890cb9d13e0
+EPHERVEX_APPIMAGETOOL_URL_aarch64=https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-aarch64.AppImage
+EPHERVEX_APPIMAGETOOL_SHA256_aarch64=1b00524ba8c6b678dc15ef88a5c25ec24def36cdfc7e3abb32ddcd068e8007fe
 
 # The AppImage type-2 runtime, prepended to the artifact and the first thing the
-# kernel loads on a user's machine. continuous, fetched 2026-08-23.
-EPHERVEX_APPIMAGE_RUNTIME_URL=https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-x86_64
-EPHERVEX_APPIMAGE_RUNTIME_SHA256=1cc49bcf1e2ccd593c379adb17c9f85a36d619088296504de95b1d06215aebbf
+# kernel loads on a user's machine. continuous, fetched 2026-08-23 for x86_64
+# and 2026-09-20 for aarch64, with the x86_64 digest above unchanged in between.
+# It ships inside the artifact, so it is the *target's* architecture; since
+# releases are never cross-built, the two are the same architecture anyway.
+EPHERVEX_APPIMAGE_RUNTIME_URL_x86_64=https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-x86_64
+EPHERVEX_APPIMAGE_RUNTIME_SHA256_x86_64=1cc49bcf1e2ccd593c379adb17c9f85a36d619088296504de95b1d06215aebbf
+EPHERVEX_APPIMAGE_RUNTIME_URL_aarch64=https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-aarch64
+EPHERVEX_APPIMAGE_RUNTIME_SHA256_aarch64=7d5d772b7c32f0c84caf0a452a3072a5709027d7eac5856feb89a7a7a8881372
+
+# The pinned appimagetool for an architecture, as "<url> <sha256>".
+#
+# A function rather than a name a caller assembles, so no script has to know how
+# these variables are spelled and none can quietly read an empty one.
+ephervex_appimagetool() {
+    case "$1" in
+    x86_64) printf '%s %s\n' "${EPHERVEX_APPIMAGETOOL_URL_x86_64}" "${EPHERVEX_APPIMAGETOOL_SHA256_x86_64}" ;;
+    aarch64) printf '%s %s\n' "${EPHERVEX_APPIMAGETOOL_URL_aarch64}" "${EPHERVEX_APPIMAGETOOL_SHA256_aarch64}" ;;
+    *)
+        printf 'host-tools: no appimagetool is pinned for %s\n' "$1" >&2
+        return 1
+        ;;
+    esac
+}
+
+# The pinned AppImage runtime for an architecture, as "<url> <sha256>".
+ephervex_appimage_runtime() {
+    case "$1" in
+    x86_64) printf '%s %s\n' "${EPHERVEX_APPIMAGE_RUNTIME_URL_x86_64}" "${EPHERVEX_APPIMAGE_RUNTIME_SHA256_x86_64}" ;;
+    aarch64) printf '%s %s\n' "${EPHERVEX_APPIMAGE_RUNTIME_URL_aarch64}" "${EPHERVEX_APPIMAGE_RUNTIME_SHA256_aarch64}" ;;
+    *)
+        printf 'host-tools: no AppImage runtime is pinned for %s\n' "$1" >&2
+        return 1
+        ;;
+    esac
+}

@@ -37,14 +37,29 @@ source "${PACKAGING_DIR}/linux-baseline"
 : "${EPHERVEX_BASELINE_GLIBC:?the baseline file must declare a glibc version}"
 : "${EPHERVEX_BASELINE_ARCH:?the baseline file must declare an architecture}"
 
+# How the targeted architecture is spelled by everything that needs a name.
+# shellcheck source=packaging/linux-architectures
+source "${PACKAGING_DIR}/linux-architectures"
+ephervex_require_known_arch "${EPHERVEX_BASELINE_ARCH}"
+# What the artifact is named and what appimagetool is told it built. The runtime
+# refuses an artifact whose declared architecture is not the machine's, so these
+# have to be the architecture the binaries were actually built for.
+APPIMAGE_ARCH=$(ephervex_appimage_arch "${EPHERVEX_BASELINE_ARCH}")
+
 # How a release binary is built, and the checks every artifact is held to. One
 # implementation, shared with build-deb.sh.
 # shellcheck source=packaging/linux-release-artifact
 source "${PACKAGING_DIR}/linux-release-artifact"
 
+# Never a cross build. The glibc floor, the shared-library allowlist and the
+# smoke test all inspect and run the binaries this produces, and none of that
+# happens on a machine that cannot execute them.
 HOST_ARCH=$(uname -m)
-[[ ${HOST_ARCH} == "${EPHERVEX_BASELINE_ARCH}" ]] ||
-    fail "this host is ${HOST_ARCH}; releases are built for ${EPHERVEX_BASELINE_ARCH}"
+[[ ${HOST_ARCH} == "${EPHERVEX_BASELINE_ARCH}" ]] || fail \
+    "this host is ${HOST_ARCH} and this build targets ${EPHERVEX_BASELINE_ARCH}.
+Each release architecture is built on its own, because every check here reads
+and runs the built binary. Build this on ${EPHERVEX_BASELINE_ARCH}, or leave
+\$EPHERVEX_BASELINE_ARCH unset to target this host."
 
 # --- host tools --------------------------------------------------------------
 APPIMAGETOOL=${APPIMAGETOOL:-$(command -v appimagetool || true)}
@@ -107,6 +122,11 @@ note "glibc floor ${REQUIRED_GLIBC}, at or below the declared baseline ${EPHERVE
 enforce_shared_library_allowlist "${PACKAGING_DIR}" "${GUI_BINARY}" "${CLI_BINARY}"
 note "shared libraries are the declared set"
 
+# The runtime ships too, and an artifact whose launcher is built for another
+# architecture is one that cannot start at all.
+enforce_target_architecture "${GUI_BINARY}" "${CLI_BINARY}" "${APPIMAGE_RUNTIME_FILE}"
+note "built for ${EPHERVEX_BASELINE_ARCH}, runtime included"
+
 # --- assemble ----------------------------------------------------------------
 # An explicit allowlist, copied file by file. Nothing walks the working tree, so
 # `.git`, developer caches, fixtures, local configuration, and build output
@@ -158,14 +178,14 @@ VERSION=$("${PACKAGING_DIR}/workspace-version.sh")
 # the binaries themselves report, so one stable name keeps a download address,
 # a symlink, and a desktop integration valid across releases instead of
 # breaking every one of them on every publish. `AppRun` documents the same name.
-ARTIFACT="${OUTPUT_DIR}/Ephervex-${EPHERVEX_BASELINE_ARCH}.AppImage"
+ARTIFACT="${OUTPUT_DIR}/Ephervex-${APPIMAGE_ARCH}.AppImage"
 rm -f "${ARTIFACT}"
 
 note "packaging with ${APPIMAGETOOL_VERSION}"
 # `SOURCE_DATE_EPOCH` is honored by appimagetool's squashfs step, so a rebuild
 # of the same tree does not differ only in timestamps.
 SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-0} \
-    ARCH="${EPHERVEX_BASELINE_ARCH}" \
+    ARCH="${APPIMAGE_ARCH}" \
     "${APPIMAGETOOL}" --no-appstream "${RUNTIME_ARGS[@]}" "${APPDIR}" "${ARTIFACT}" >/dev/null
 
 [[ -f ${ARTIFACT} ]] || fail "appimagetool produced no artifact"

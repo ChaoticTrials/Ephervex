@@ -15,13 +15,15 @@
 # Adding a line is a support decision. Change it together with the runtime
 # requirements in docs/release.md.
 
-# The C runtime, its compiler support library, and the dynamic linker, which
-# these binaries name explicitly. The linker soname is architecture-specific,
-# like the baseline architecture itself.
+# The C runtime and its compiler support library.
+#
+# The dynamic linker belongs here too and is deliberately absent: its soname is
+# architecture-specific, so packaging/linux-architectures supplies the one the
+# build targets and the check adds it to this list. Spelling both out here
+# would let a binary built for the wrong architecture pass.
 libc.so.6
 libm.so.6
 libgcc_s.so.1
-ld-linux-x86-64.so.2
 
 # Font discovery for the desktop application. It pulls in freetype, libpng,
 # expat, zlib, bzip2, and brotli transitively; those are part of the same

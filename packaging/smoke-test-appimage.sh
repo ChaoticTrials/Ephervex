@@ -29,6 +29,9 @@ ARTIFACT=$(cd -- "$(dirname -- "$1")" && printf '%s/%s' "$(pwd)" "$(basename -- 
 REPO_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 # shellcheck source=packaging/linux-baseline
 source "${REPO_ROOT}/packaging/linux-baseline"
+# shellcheck source=packaging/linux-architectures
+source "${REPO_ROOT}/packaging/linux-architectures"
+ephervex_require_known_arch "${EPHERVEX_BASELINE_ARCH}"
 # shellcheck source=packaging/linux-release-artifact
 source "${REPO_ROOT}/packaging/linux-release-artifact"
 
@@ -90,6 +93,16 @@ for binary in "${ROOT}/usr/bin/ephervex" "${ROOT}/usr/bin/ephervex-gui"; do
 done
 note "glibc requirements are at or below the baseline ${EPHERVEX_BASELINE_GLIBC}"
 
+# --- the architecture the name claims ----------------------------------------
+# An AppImage's file name is where a user reads which machine it is for, and the
+# runtime refuses to start one whose declared architecture is not theirs. A name
+# that disagrees with the binaries inside is a download nobody can use.
+APPIMAGE_ARCH=$(ephervex_appimage_arch "${EPHERVEX_BASELINE_ARCH}")
+[[ $(basename "${ARTIFACT}") == "Ephervex-${APPIMAGE_ARCH}.AppImage" ]] ||
+    fail "$(basename "${ARTIFACT}") is not the name an ${EPHERVEX_BASELINE_ARCH} artifact carries"
+enforce_target_architecture "${ROOT}/usr/bin/ephervex" "${ROOT}/usr/bin/ephervex-gui"
+note "named for ${APPIMAGE_ARCH}, and built for it"
+
 # --- how the application is reached ------------------------------------------
 # Two ways in, and they are not the same test.
 #
@@ -142,7 +155,7 @@ note "the command-line interface answers --help and --version"
 # The common case, and the one that used to fail silently: `ln -s <artifact>
 # ~/.local/bin/` keeps the artifact's own name, so every such link reached the
 # desktop application and discarded the command line (ADR 0023's amendment).
-UNDER_OTHER_NAME=$(sandboxed ARGV0=Ephervex-x86_64.AppImage "${ROOT}/AppRun" --version) ||
+UNDER_OTHER_NAME=$(sandboxed ARGV0="$(basename "${ARTIFACT}")" "${ROOT}/AppRun" --version) ||
     fail "the artifact does not answer --version under its own file name"
 printf '%s' "${UNDER_OTHER_NAME}" | grep -qi 'ephervex' ||
     fail "--version under a non-ephervex name did not reach the command line"
@@ -154,7 +167,7 @@ note "arguments reach the command line whatever the artifact is named"
 # Deliberately a link this build cannot act on: the desktop application refuses
 # that before it builds a window, so this can never open one or hang here. A
 # link it *could* act on would do both.
-LINK_REFUSAL=$(sandboxed ARGV0=Ephervex-x86_64.AppImage "${ROOT}/AppRun" \
+LINK_REFUSAL=$(sandboxed ARGV0="$(basename "${ARTIFACT}")" "${ROOT}/AppRun" \
     'ephervex://something-this-build-does-not-do' 2>&1 || true)
 printf '%s' "${LINK_REFUSAL}" | grep -qi 'usage' &&
     fail "a launcher link was handed to the command line instead of the application"

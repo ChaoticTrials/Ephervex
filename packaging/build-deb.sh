@@ -38,21 +38,29 @@ source "${PACKAGING_DIR}/linux-baseline"
 : "${EPHERVEX_BASELINE_GLIBC:?the baseline file must declare a glibc version}"
 : "${EPHERVEX_BASELINE_ARCH:?the baseline file must declare an architecture}"
 
+# How the targeted architecture is spelled by everything that needs a name.
+# shellcheck source=packaging/linux-architectures
+source "${PACKAGING_DIR}/linux-architectures"
+ephervex_require_known_arch "${EPHERVEX_BASELINE_ARCH}"
+
 # How a release binary is built, and the checks every artifact is held to. One
 # implementation, shared with build-appimage.sh.
 # shellcheck source=packaging/linux-release-artifact
 source "${PACKAGING_DIR}/linux-release-artifact"
 
+# Never a cross build. The glibc floor, the shared-library allowlist and the
+# smoke test all inspect and run the binaries this produces, and none of that
+# happens on a machine that cannot execute them.
 HOST_ARCH=$(uname -m)
-[[ ${HOST_ARCH} == "${EPHERVEX_BASELINE_ARCH}" ]] ||
-    fail "this host is ${HOST_ARCH}; releases are built for ${EPHERVEX_BASELINE_ARCH}"
+[[ ${HOST_ARCH} == "${EPHERVEX_BASELINE_ARCH}" ]] || fail \
+    "this host is ${HOST_ARCH} and this build targets ${EPHERVEX_BASELINE_ARCH}.
+Each release architecture is built on its own, because every check here reads
+and runs the built binary. Build this on ${EPHERVEX_BASELINE_ARCH}, or leave
+\$EPHERVEX_BASELINE_ARCH unset to target this host."
 
-# Debian names the architecture differently from `uname -m`, and there is one
-# supported release architecture, so this is a lookup rather than a guess.
-case "${EPHERVEX_BASELINE_ARCH}" in
-x86_64) DEB_ARCH=amd64 ;;
-*) fail "no Debian architecture is declared for ${EPHERVEX_BASELINE_ARCH}" ;;
-esac
+# Debian names the architecture differently from `uname -m`, and the control
+# field, the file name and the apt repository all have to agree with it.
+DEB_ARCH=$(ephervex_deb_arch "${EPHERVEX_BASELINE_ARCH}")
 
 # --- host tools --------------------------------------------------------------
 for tool in cargo readelf sha256sum dpkg-deb dpkg-shlibdeps; do
@@ -83,6 +91,9 @@ note "glibc floor ${REQUIRED_GLIBC}, at or below the declared baseline ${EPHERVE
 
 enforce_shared_library_allowlist "${PACKAGING_DIR}" "${GUI_BINARY}" "${CLI_BINARY}"
 note "shared libraries are the declared set"
+
+enforce_target_architecture "${GUI_BINARY}" "${CLI_BINARY}"
+note "built for ${EPHERVEX_BASELINE_ARCH}, packaged as ${DEB_ARCH}"
 
 enforce_no_build_paths "${GUI_BINARY}" "${CLI_BINARY}"
 note "no build-machine home paths are embedded"

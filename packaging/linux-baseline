@@ -16,5 +16,15 @@ EPHERVEX_BASELINE_GLIBC=2.35
 # runs inside this; the packaging script never pulls or manages it.
 EPHERVEX_BASELINE_IMAGE=ubuntu:22.04
 
-# The only supported release architecture today.
-EPHERVEX_BASELINE_ARCH=x86_64
+# Every architecture Ephervex releases for. packaging/linux-architectures is
+# where each one's Debian, RPM, AppImage, and dynamic-linker spelling lives.
+EPHERVEX_BASELINE_ARCHITECTURES="x86_64 aarch64"
+
+# The architecture this build targets, which defaults to the host.
+#
+# Selectable rather than fixed, but never cross-compiled: the glibc floor above,
+# the shared-library allowlist, and the smoke tests all read and run the *built
+# binary*, and a build for an architecture the host cannot execute leaves every
+# one of them unverified. The packaging scripts enforce that, so naming an
+# architecture this machine is not is a hard failure rather than a cross build.
+EPHERVEX_BASELINE_ARCH=${EPHERVEX_BASELINE_ARCH:-$(uname -m)}

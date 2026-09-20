@@ -43,6 +43,12 @@ jobs:
           python3 -m py_compile tools/minecraft-options/*.py
           python3 -m unittest discover -s tools/minecraft-options
 
+      - name: Verify the packaging architecture table
+        # The names Debian, RPM, AppImage, and the dynamic linker each use for
+        # an architecture. Nothing downstream can catch a wrong one: the
+        # packaging scripts ask this table what the name is.
+        run: packaging/test-linux-architectures.sh
+
       - name: Formatting
         run: cargo fmt --all --check
 
