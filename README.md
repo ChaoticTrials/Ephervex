@@ -169,8 +169,10 @@ shell configuration files or install completion scripts automatically.
 * Complete pack and mod version-management workflows are still in development.
 * The generated Minecraft preference metadata is not yet exposed through the
   complete desktop preference interface.
-* Only `x86_64` is released, on a glibc 2.35 baseline. Distributions older than
-  Ubuntu 22.04 or Debian 12 are unsupported.
+* `x86_64` and `aarch64` are released, on a glibc 2.35 baseline. Distributions
+  older than Ubuntu 22.04 or Debian 12 are unsupported.
+* Debian packages reach the ChaoticTrials apt repository; the RPM packages are
+  downloadable release artifacts, with no repository to upgrade from.
 * Running the AppImage needs FUSE. Where it is unavailable,
   `APPIMAGE_EXTRACT_AND_RUN=1` starts it without mounting.
 * Native text selection in the virtualized live diagnostics viewer is currently
@@ -186,7 +188,24 @@ shell configuration files or install completion scripts automatically.
 
 ## Installing
 
-Ephervex is distributed as a single AppImage for Linux on `x86_64`.
+Ephervex is distributed for Linux on `x86_64` and `aarch64`, as an AppImage that
+installs nothing and as Debian and RPM packages. Every file names the
+architecture it is for; take the one matching your `uname -m`.
+
+On Debian, Ubuntu, Linux Mint and derivatives:
+
+```bash
+sudo apt install ./ephervex_<version>_amd64.deb
+```
+
+On Fedora, openSUSE, RHEL and derivatives:
+
+```bash
+sudo dnf install ./ephervex-<version>-1.x86_64.rpm
+```
+
+Either puts `ephervex` and `ephervex-gui` on `PATH` and the desktop entry in the
+system menu. Everywhere else, the AppImage runs as it is:
 
 ```bash
 chmod +x Ephervex-x86_64.AppImage
@@ -197,13 +216,13 @@ That starts the desktop application. The same artifact carries the command-line
 interface, reached by invoking it under that name:
 
 ```bash
-ln -s Ephervex-x86_64.AppImage ephervex
-./ephervex --help
-./ephervex doctor
+ln -s "$PWD/Ephervex-x86_64.AppImage" ~/.local/bin/ephervex
+ephervex --help
+ephervex doctor
 ```
 
 The supported baseline is glibc 2.35, which covers Ubuntu 22.04 LTS, Linux Mint
-21, Debian 12, and anything newer. Like every AppImage, the artifact mounts
+21, Debian 12, and anything newer, on both architectures. Like every AppImage, the artifact mounts
 itself through FUSE, which needs `/dev/fuse` and a `fusermount` helper; where
 that is unavailable,
 `APPIMAGE_EXTRACT_AND_RUN=1 ./Ephervex-x86_64.AppImage` runs it

@@ -166,3 +166,41 @@ packaging.
 - Two builds of the same source in the same environment produce the same bytes.
   This is a **reproducible release procedure**, not a claim of bit-for-bit
   reproducibility across environments, which has not been verified.
+
+## Amendment: two architectures at one glibc floor, each built on its own
+
+The baseline above named one architecture as well as one glibc version, and only
+the glibc half was a support decision. `x86_64` was simply what the maintainer's
+machine and the runner happened to be, and every place that spelled it out was a
+place the release could be wrong about which machine it was for.
+
+**The floor now covers `x86_64` and `aarch64` at glibc 2.35.** The same
+distributions reach it on both: Ubuntu 22.04 LTS ships 2.35 for arm64 as it does
+for amd64, and nothing else in the baseline varies by architecture. So the
+support commitment gains an architecture and loses nothing.
+
+**Each architecture is built natively, never cross-compiled.** Everything this
+ADR relies on reads or runs the built binary: the glibc floor reads its symbol
+versions, the shared-library allowlist reads its `DT_NEEDED` entries, and the
+smoke test executes it. A cross build leaves all three unverified, which would
+make the floor an assumption again rather than a check. The packaging scripts
+therefore refuse to build for an architecture the host is not, and
+`.github/workflows/release.yml` runs one job per architecture on a runner of its
+own. Forgejo's single self-hosted `x86_64` runner is why that workflow stays
+`x86_64`-only; ARM releases come from GitHub.
+
+**One table names each architecture.** `packaging/linux-architectures` holds the
+Debian, RPM, AppImage, dynamic-linker, and ELF-machine spelling of each, and
+every script and workflow asks it rather than deriving a name a second time. The
+dynamic linker in particular is now supplied from there rather than listed in
+`packaging/linux-shared-libraries`, because listing both linkers unconditionally
+would let a binary built for the wrong architecture pass the check that exists
+to catch exactly that. `packaging/test-linux-architectures.sh` checks the table
+against the names those systems actually use, because nothing downstream can:
+the scripts ask the table what the name is.
+
+The artifact carries its architecture in its name, so `Ephervex-x86_64.AppImage`
+and `Ephervex-aarch64.AppImage` are two stable download addresses rather than
+one. `packaging/host-tools` pins `appimagetool` and the type-2 runtime per
+architecture, from one upstream state, so a digest that stops matching stops
+both rather than leaving one architecture on an older launcher than the other.

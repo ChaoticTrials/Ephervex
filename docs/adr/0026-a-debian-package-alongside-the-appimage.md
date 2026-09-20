@@ -71,6 +71,9 @@ the baseline a property of the format rather than of the release.
 one supported release architecture. When that changes, this changes with it
 rather than ahead of it.
 
+> Amended below: the baseline names two architectures now, and both packages are
+> built for both.
+
 ## Consequences
 
 - The command-line interface works after an ordinary install, with no symlink
@@ -86,3 +89,47 @@ rather than ahead of it.
   the XDG directories the application owns (ADR 0003), which stay the user's.
 - The AppImage remains the artifact for everyone not on a Debian derivative, and
   nothing about it changes.
+
+## Amendment: an RPM package too, and both packages on both architectures
+
+Two of the decisions above have changed, and the reasoning that produced them is
+what changed them.
+
+**The architecture is no longer `amd64` only.** That sentence promised to follow
+`packaging/linux-baseline`, and the baseline now declares `x86_64` and `aarch64`
+(ADR 0023). Both packages are built for both, natively, with the Debian and RPM
+spelling of each architecture coming from `packaging/linux-architectures` rather
+than from a `case` in each script.
+
+**There is an RPM package as well.** The argument for the `.deb` was that a user
+on a Debian derivative should get a working command line from an ordinary
+install rather than from a symlink they have to be told about, and that argument
+is about package managers, not about Debian. A user on Fedora or openSUSE had
+the same problem and the same fix sitting unused.
+
+It is a third artifact rather than a switch on the second. What an RPM gets
+wrong is its own: the architecture and release fields a package manager matches
+on, license texts under `/usr/share/licenses` rather than
+`/usr/share/doc`, and dependencies produced by RPM's generator rather than by
+`dpkg-shlibdeps`. So it has its own smoke test, for the same reason the `.deb`
+did not reuse the AppImage's. What it shares is the baseline, which is one
+implementation in `packaging/linux-release-artifact`, so no format can clear a
+lower bar than another.
+
+`rpmbuild` is the archive format and the dependency generator here, nothing
+more. The payload is the same explicit file-by-file staging tree the `.deb`
+assembles, the spec is generated from it rather than kept beside it, and rpm's
+own post-install processing is turned off so it cannot strip or rewrite binaries
+this repository already checked against the baseline.
+
+**Only the `.deb` is published to a repository.** Debian packages go to the
+shared ChaoticTrials apt repository from the GitHub release workflow, for both
+architectures, because a repository is how a user gets upgrades without visiting
+a page. There is no RPM repository: publishing one means a signing key, a
+metadata layout, and a hosting commitment that nothing has asked for yet. The
+`.rpm` is a downloadable release artifact and nothing else, and no code here
+signs, indexes, or uploads one.
+
+Publishing is also one workflow's job and not the other's. The Forgejo workflow
+builds the same artifacts and attaches them to its own release; it has no path
+into the apt repository and no credentials for it.

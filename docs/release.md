@@ -10,9 +10,15 @@ reasoning behind the packaging choices is in
 Ephervex targets Linux only. Windows and macOS are outside the supported scope
 recorded in [ADR 0008](adr/0008-first-version-scope.md).
 
-**The baseline is glibc 2.35 on `x86_64`.** That is Ubuntu 22.04 LTS and Linux
-Mint 21; Debian 12 ships 2.36 and every later release clears it. Older
+**The baseline is glibc 2.35, on `x86_64` and `aarch64`.** That is Ubuntu 22.04
+LTS and Linux Mint 21; Debian 12 ships 2.36 and every later release clears it,
+and Ubuntu 22.04 reaches the same floor on arm64 as on amd64. Older
 distributions are not supported, and the artifact will not start on them.
+
+Every artifact carries the architecture it is for in its file name. Take the one
+matching your `uname -m`: `x86_64` for a normal PC, `aarch64` for an ARM machine
+such as a Raspberry Pi 4 or 5 on a 64-bit distribution, an Ampere server, or an
+ARM cloud instance.
 
 The baseline is a support commitment declared in
 [`packaging/linux-baseline`](../packaging/linux-baseline), not a description of
@@ -38,16 +44,25 @@ Secret Service provider (GNOME Keyring, KWallet, or equivalent) is optional; see
 
 ## Installing
 
-Each release publishes two artifacts. On Debian, Ubuntu, Linux Mint and their
-derivatives, the package is the easier one:
+Each release publishes three artifacts per architecture. On Debian, Ubuntu,
+Linux Mint and their derivatives, the Debian package is the easier one:
 
 ```bash
-sudo apt install ./ephervex_<version>_amd64.deb
+sudo apt install ./ephervex_<version>_amd64.deb     # x86_64
+sudo apt install ./ephervex_<version>_arm64.deb     # aarch64
 ```
 
-That installs `ephervex` and `ephervex-gui` into `/usr/bin`, so the
+On Fedora, openSUSE, RHEL and their derivatives, the RPM package is:
+
+```bash
+sudo dnf install ./ephervex-<version>-1.x86_64.rpm   # x86_64
+sudo dnf install ./ephervex-<version>-1.aarch64.rpm  # aarch64
+```
+
+Either installs `ephervex` and `ephervex-gui` into `/usr/bin`, so the
 command-line interface is on `PATH` immediately and the desktop entry appears in
-the system menu. `sudo apt remove ephervex` undoes it.
+the system menu. `sudo apt remove ephervex` or `sudo dnf remove ephervex` undoes
+it.
 
 Everywhere else, the AppImage runs without installing anything:
 
@@ -59,14 +74,19 @@ chmod +x Ephervex-x86_64.AppImage
 That starts the desktop application. Nothing is installed, nothing runs as root,
 and nothing is written outside the directories listed under
 [Where Ephervex keeps things](#where-ephervex-keeps-things) -- which is also
-true of the package, whose payload is the two binaries and their desktop data
+true of the packages, whose payload is the two binaries and their desktop data
 and nothing else.
 
-The AppImage name is the same on every release, so a download address, a
-symlink, and a desktop integration all stay valid across upgrades. The package
-carries its version in its file name, because that is what a package manager and
-an apt repository read. Which release you have is the tag it was published
-under, and what `ephervex --version` reports.
+An AppImage name is the same on every release, so a download address, a symlink,
+and a desktop integration all stay valid across upgrades. The packages carry
+their version in their file names, because that is what a package manager and an
+apt repository read. Which release you have is the tag it was published under,
+and what `ephervex --version` reports.
+
+Only the Debian packages are published to the shared ChaoticTrials apt
+repository, for both architectures. There is no RPM repository: the `.rpm` is a
+downloadable release artifact, and upgrading means downloading the next one
+(ADR 0026).
 
 ### When FUSE is unavailable
 
@@ -89,8 +109,8 @@ the window. `APPIMAGE_EXTRACT_AND_RUN=1` keeps the name, so either works.
 
 ### The command-line interface
 
-The package installs `ephervex` into `/usr/bin`, so it is an ordinary command
-with nothing further to do:
+Either package installs `ephervex` into `/usr/bin`, so it is an ordinary
+command with nothing further to do:
 
 ```bash
 ephervex --help
@@ -132,8 +152,8 @@ A site that hosts packs can offer a link that hands one straight to Ephervex:
 ephervex://import?url=<percent-encoded https address of the pack>
 ```
 
-**The Debian package sets this up for you.** It installs its own
-`ephervex-url-handler.desktop`, so links work as soon as it is installed and
+**Either package sets this up for you.** Both install their own
+`ephervex-url-handler.desktop`, so links work as soon as one is installed and
 stop working when it is removed. Nothing further to do.
 
 **The AppImage does not**, because it is not installed: there is no moment to
@@ -154,9 +174,10 @@ AppImage; `status` says when the recorded path no longer exists.
 The desktop application has no switch for this (ADR 0028). Claiming a system-wide
 scheme is an installation step, `unregister` cannot remove a file your package
 manager owns, and a control that meant different things depending on how you
-installed Ephervex was worse than no control. On a Debian system, `apt remove`
-gives the scheme back, and your desktop's own default-applications settings are
-where you would change any other association.
+installed Ephervex was worse than no control. Where a package installed it,
+removing that package gives the scheme back, and your desktop's own
+default-applications settings are where you would change any other
+association.
 
 The first time a link points at a site, Ephervex shows you the address and asks
 before downloading anything. Agreeing remembers the host, so the next pack from
@@ -361,12 +382,19 @@ running, and a machine with no usable Java is one Ephervex offers to fix.
 Two tools must already be installed. `build-appimage.sh` downloads, fetches, and
 bootstraps neither of them: a missing one is an error naming what to install.
 
-Both are pinned in [`packaging/host-tools`](../packaging/host-tools), which
-names the address each comes from and the SHA-256 the release procedure was
-verified against: `appimagetool` from the AppImage project's
-`AppImage/appimagetool` repository, the runtime (`runtime-x86_64`) from
+Both are pinned per architecture in
+[`packaging/host-tools`](../packaging/host-tools), which names the address each
+comes from and the SHA-256 the release procedure was verified against:
+`appimagetool` from the AppImage project's `AppImage/appimagetool` repository,
+the runtime (`runtime-x86_64` or `runtime-aarch64`) from
 `AppImage/type2-runtime`. Check what you install against that file before
 trusting it; the automated release checks it for you and refuses a mismatch.
+
+Both architectures are pinned from one upstream state, so a digest that stops
+matching stops both rather than leaving one architecture on an older launcher
+than the other. `ephervex_appimagetool` and `ephervex_appimage_runtime` in that
+file each take an architecture and print the address and digest for it, so
+nothing has to assemble either name by hand.
 
 Upstream publishes both under rolling `continuous` tags, so a replaced asset
 makes the pinned digest stop matching and stops the release. That is the intent.
@@ -388,9 +416,10 @@ when present, and validate the desktop entry and the AppStream component;
 packaging itself runs with `--no-appstream`, so `appstreamcli` is the only thing
 that reads the component.
 
-`build-deb.sh` needs neither host tool above. It needs `dpkg-deb` (from `dpkg`)
-and `dpkg-shlibdeps` (from `dpkg-dev`), and fails naming them when they are
-absent. It reads the package's dependencies off the built binaries rather than
+`build-deb.sh` and `build-rpm.sh` need neither host tool above. The first needs
+`dpkg-deb` (from `dpkg`) and `dpkg-shlibdeps` (from `dpkg-dev`); the second
+needs `rpmbuild` and `rpm` (both from `rpm`), and its smoke test also needs
+`rpm2cpio` and `cpio`. Each fails naming what is missing. It reads the package's dependencies off the built binaries rather than
 from a list kept by hand, so the relationships a package manager enforces and
 the allowlist in
 [`packaging/linux-shared-libraries`](../packaging/linux-shared-libraries) cannot
@@ -409,12 +438,26 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential curl ca-certificates pkg-config git file \
       python3 desktop-file-utils binutils zsync appstream \
+      dpkg-dev rpm cpio \
       libfontconfig-dev libfreetype-dev libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
       | sh -s -- -y --default-toolchain stable --profile minimal
 ENV PATH=/root/.cargo/bin:$PATH
 ```
+
+`dpkg-dev` is what `build-deb.sh` needs and `rpm` and `cpio` are what
+`build-rpm.sh` and its smoke test need. The image is the same for both release
+architectures: `ubuntu:22.04` publishes an arm64 variant at the same glibc
+version, so an aarch64 machine pulling this tag gets the same floor.
+
+**Build each architecture on a machine of that architecture.** The packaging
+scripts refuse anything else, and the reason is that every check they run reads
+or executes the binary they just produced: a cross build would leave the glibc
+floor, the shared-library allowlist, and the smoke test all unverified
+(ADR 0023). `EPHERVEX_BASELINE_ARCH` defaults to the host, so nothing has to be
+passed; setting it to something the host is not is a hard failure rather than a
+cross build.
 
 ### Building
 
@@ -459,8 +502,35 @@ docker run --rm --network none \
   bash -c 'cd /src && packaging/build-deb.sh /out'
 ```
 
-It needs no host tools beyond `dpkg-deb` and `dpkg-shlibdeps`, so add `dpkg-dev`
-to the baseline image when building packages.
+It needs no host tools beyond `dpkg-deb` and `dpkg-shlibdeps`. The RPM package
+is built the third time, the same way again:
+
+```bash
+docker run --rm --network none \
+  -v "$PWD:/src:ro" \
+  -v "$OUTPUT:/out" \
+  -v "$TARGET:/target" \
+  -v "$CARGO_CACHE:/cargo" \
+  -e CARGO_HOME=/cargo \
+  -e CARGO_TARGET_DIR=/target \
+  -e CARGO_NET_OFFLINE=true \
+  -e SOURCE_DATE_EPOCH=0 \
+  ephervex-baseline:22.04 \
+  bash -c 'cd /src && packaging/build-rpm.sh /out'
+```
+
+An RPM built on a Debian-family host is an ordinary RPM: `rpmbuild` is only the
+archive format and the dependency generator here, and the package installs and
+runs on an RPM distribution like any other. Checking that it does is worth one
+container of its own, because it exercises the package as a user meets it rather
+than only proving that `rpmbuild` accepted the spec:
+
+```bash
+docker run --rm -v "$OUTPUT:/pkg:ro" fedora:42 bash -c '
+  dnf -y install /pkg/ephervex-<version>-1.x86_64.rpm &&
+  rpm -qi ephervex && rpm -qL ephervex &&
+  ephervex --version && ephervex doctor'
+```
 
 The source tree is mounted read-only and the build output goes elsewhere, so a
 release build cannot modify the repository it is built from.
@@ -494,17 +564,22 @@ Ephervex.AppDir/
   usr/share/icons/hicolor/<size>/apps/ephervex.png  8 sizes, 16x16 to 512x512
 ```
 
-The Debian package installs the same content at real paths, with no `AppRun`,
-because there is nothing to dispatch: both binaries are files on `PATH`.
+Both packages install the same content at real paths, with no `AppRun`, because
+there is nothing to dispatch: both binaries are files on `PATH`.
 
 ```text
 /usr/bin/ephervex                                  command-line interface
 /usr/bin/ephervex-gui                              desktop application
 /usr/share/applications/ephervex.desktop
+/usr/share/applications/ephervex-url-handler.desktop
 /usr/share/metainfo/ephervex.metainfo.xml
-/usr/share/doc/ephervex/copyright
 /usr/share/icons/hicolor/<size>/apps/ephervex.png  8 sizes, 16x16 to 512x512
 ```
+
+They differ only where the two conventions do. A Debian package puts its license
+text at `/usr/share/doc/ephervex/copyright`; an RPM marks it as a license file,
+which puts it under `/usr/share/licenses/ephervex/` and keeps it even on a
+`--nodocs` installation.
 
 Everything the application reads at runtime is compiled into the binaries: the
 Minecraft options compatibility dataset, the preference catalog, the Fluent
@@ -518,18 +593,32 @@ Each packaging script runs its own, and both are repeatable by hand:
 ```bash
 packaging/smoke-test-appimage.sh Ephervex-x86_64.AppImage
 packaging/smoke-test-deb.sh ephervex_<version>_amd64.deb
+packaging/smoke-test-rpm.sh ephervex-<version>-1.x86_64.rpm
 ```
 
-They are two tests rather than one with a switch, because the artifacts fail
+They are three tests rather than one with a switch, because the artifacts fail
 differently. An AppImage is one file that must not read anything outside itself;
-a package is a tree of installed paths plus the control metadata a package
-manager reads before it will install anything. The package's test checks that
-metadata, that the payload is exactly the declared file set, and that the
-desktop entry names a binary the package actually installs. What they share is
-the baseline: the glibc floor, the shared-library allowlist, and the
-build-machine path check are one implementation in
-[`packaging/linux-release-artifact`](../packaging/linux-release-artifact), so
-neither artifact can clear a lower bar than the other.
+a package is a tree of installed paths plus the metadata a package manager reads
+before it will install anything, and the two package formats do not record that
+metadata in the same place or produce their dependencies the same way. Each
+package's test checks its own metadata, that the payload is exactly the declared
+file set, and that the desktop entry names a binary the package actually
+installs. What they share is the baseline: the glibc floor, the shared-library
+allowlist, the architecture the ELF header reports, and the build-machine path
+check are one implementation in
+[`packaging/linux-release-artifact`](../packaging/linux-release-artifact), so no
+artifact can clear a lower bar than another.
+
+The architecture table those names come from has a test of its own, which needs
+no toolchain, no build, and no network:
+
+```bash
+packaging/test-linux-architectures.sh
+```
+
+It exists because nothing downstream can catch a wrong name there: the packaging
+scripts ask the table what an architecture is called, so a `.deb` correctly built
+for arm64 and labeled `amd64` would pass every other check and install nowhere.
 
 Most of it works on an extracted copy, so it needs no FUSE and runs in the build
 container. It checks the file layout; that no repository, fixture, tooling, or
@@ -589,6 +678,7 @@ not the analysis root. See
 ```bash
 python3 -m py_compile tools/minecraft-options/*.py
 python3 -m unittest discover -s tools/minecraft-options
+packaging/test-linux-architectures.sh
 
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
@@ -616,18 +706,54 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-The job runs on the runner's own image, refuses to continue when the tag and the
-`[workspace.package]` version disagree, runs the gate above, fetches the two
-host tools and checks them against `packaging/host-tools`, then builds and
-packages both artifacts and uploads them with a `.sha256` beside each:
-`Ephervex-x86_64.AppImage` and `ephervex_<version>_amd64.deb`. The GitHub job
-then publishes the package into the shared apt repository as a second job, which
-takes it from the release rather than rebuilding it; the Forgejo job does not. Nothing pins
-that image to the baseline distribution, so the glibc floor is held by the check
-`build-appimage.sh` runs against the binaries it produced: a runner too new to
-reach the floor fails the release instead of publishing a package that will not
-start. The GitHub job pins that image instead, because its runners are well
-above the floor and its containers can run the actions a checkout needs.
+Each job refuses to continue when the tag and the `[workspace.package]` version
+disagree, runs the gate above, fetches the two host tools for the architecture
+it is building and checks them against `packaging/host-tools`, then builds and
+packages all three artifacts and publishes them with a `.sha256` beside each.
+
+**GitHub builds both release architectures**, as a matrix with one job per
+architecture on a runner of that architecture -- `ubuntu-latest` and
+`ubuntu-24.04-arm` -- so nothing is cross-compiled and every check runs against
+a binary on its own machine. Six artifacts and six checksums:
+
+```text
+Ephervex-x86_64.AppImage         Ephervex-aarch64.AppImage
+ephervex_<version>_amd64.deb     ephervex_<version>_arm64.deb
+ephervex-<version>-1.x86_64.rpm  ephervex-<version>-1.aarch64.rpm
+```
+
+Creating the release and attaching those is a separate job that builds nothing,
+so the two architectures cannot race to create the same release and the token
+that can write to the repository is held by one job rather than by every build.
+
+**Forgejo builds `x86_64` only**, and publishes the three artifacts for it. The
+runner is one self-hosted `x86_64` machine, so an aarch64 release from there
+would have to be cross-built and would arrive unverified. ARM releases come from
+GitHub; there is deliberately no ARM runner label, matrix entry, or setting in
+the Forgejo workflow to configure.
+
+**Only the GitHub workflow publishes packages to the apt repository**, as a
+third job, for both architectures. It takes the `.deb` files from the release
+rather than rebuilding them, so what lands in the repository is byte for byte
+what the release page offers, and it refuses a release that is missing either
+architecture. The Forgejo workflow has no path into that repository and no
+credentials for it, and neither workflow publishes an RPM anywhere: there is no
+RPM repository.
+
+> **One-time step when arm64 first ships.** `aptly` records a distribution's
+> architecture list when it is first published, and `aptly publish update`
+> cannot change it. A repository already published for `amd64` alone therefore
+> needs one `aptly publish drop stable` followed by a republish before arm64
+> packages reach anyone. The workflow does not do this on its own: dropping a
+> published repository shared with the organization's other projects is a
+> maintainer's decision, not a release job's.
+
+Nothing pins the Forgejo runner image to the baseline distribution, so there the
+glibc floor is held by the check the packaging scripts run against the binaries
+they produced: a runner too new to reach the floor fails the release instead of
+publishing a package that will not start. The GitHub jobs pin the baseline image
+instead, because their runners are well above the floor and their containers can
+run the actions a checkout needs.
 
 Publishing on Forgejo needs a `RELEASE_TOKEN` repository secret: a personal
 access token with repository write access, so the release is attributed to an
@@ -652,11 +778,15 @@ before telling anyone the release is there.
 
 ## Known limitations
 
-- Only `x86_64` is released. There is no `aarch64` artifact.
 - Running the artifact needs FUSE. Where it is unavailable,
   `APPIMAGE_EXTRACT_AND_RUN=1` works at the cost of unpacking on every start.
 - The glibc 2.35 baseline excludes distributions older than Ubuntu 22.04 and
-  Debian 12.
+  Debian 12, on both architectures.
+- There is no RPM repository. The `.rpm` is a downloadable artifact, so an RPM
+  installation is upgraded by downloading the next one rather than by a package
+  manager. Only the Debian packages get repository upgrades.
+- `aarch64` releases are built only by GitHub. A Forgejo release carries
+  `x86_64` artifacts alone.
 - A Wayland-only session without XWayland is untested; the desktop application
   reaches X11 through the toolkit's own backend.
 - Configuration rewrites do not preserve comments or key order, and instance and
