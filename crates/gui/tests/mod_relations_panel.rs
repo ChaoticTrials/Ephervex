@@ -14,6 +14,7 @@ use slint::{ComponentHandle, ModelRc, PhysicalSize, VecModel};
 fn row(name: &str, kind: &str, state: &str) -> RelationRow {
     RelationRow {
         name: name.into(),
+        detail: String::new().into(),
         kind: lookup(kind).into(),
         state: if state.is_empty() {
             String::new().into()
@@ -26,6 +27,14 @@ fn row(name: &str, kind: &str, state: &str) -> RelationRow {
 
 fn rows(entries: &[RelationRow]) -> ModelRc<RelationRow> {
     ModelRc::new(VecModel::from(entries.to_vec()))
+}
+
+/// A declaration the catalog has since named, with the id it resolves against.
+fn named_row(title: &str, project_id: &str, state: &str) -> RelationRow {
+    RelationRow {
+        detail: project_id.into(),
+        ..row(title, "gui-mod-relation-required", state)
+    }
 }
 
 /// The page of a mod that needs a library and is needed by another mod.
@@ -102,6 +111,43 @@ fn a_declaration_the_catalog_cannot_resolve_is_not_offered_as_something_to_insta
     assert!(
         !visible(&ui, &lookup("gui-mod-relation-absent")),
         "neither declaration is a mod that installing would supply"
+    );
+}
+
+#[test]
+fn a_resolved_declaration_leads_with_its_name_and_keeps_its_id_beside_it() {
+    let ui = window();
+    managing_a_mod(&ui);
+    ui.set_mod_action_requires(rows(&[named_row(
+        "Absent Library",
+        "200200",
+        "gui-mod-relation-no-release",
+    )]));
+
+    assert!(
+        visible(&ui, "Absent Library"),
+        "a reader scans this list by name, not by id"
+    );
+    assert!(
+        visible(&ui, "200200"),
+        "the exact id stays readable, because that is what a bug report quotes"
+    );
+}
+
+#[test]
+fn a_declaration_with_no_name_shows_its_id_once() {
+    let ui = window();
+    managing_a_mod(&ui);
+    ui.set_mod_action_requires(rows(&[row(
+        "200300",
+        "gui-mod-relation-required",
+        "gui-mod-relation-unchecked",
+    )]));
+
+    let printed = ElementHandle::find_by_accessible_label(&ui, "200300").count();
+    assert_eq!(
+        printed, 1,
+        "with nothing resolved the id is the name, and a second copy of it says nothing"
     );
 }
 

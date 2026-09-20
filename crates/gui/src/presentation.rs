@@ -998,7 +998,12 @@ impl ModRequirementPresentation {
 /// One recorded relation, as a mod's own page lists it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RelationRowPresentation {
+    /// What a reader reads: the catalog's own title where one is known, and
+    /// the bare project id only where none is.
     pub name: String,
+    /// The exact provider project id, kept beside a resolved title as the
+    /// technical identity behind it. Empty when the name is already the id.
+    pub detail: String,
     /// What the catalog called the relation.
     pub kind: String,
     /// How that jar stands here, where one is here at all. Empty when it is
@@ -1023,8 +1028,10 @@ impl RelationRowPresentation {
             // honestly say depends on what the catalog knows about it.
             None => (unmatched_state(related, declared), true),
         };
+        let (name, detail) = declared_name(related, declared);
         Self {
-            name: related.name.clone(),
+            name,
+            detail,
             kind: lookup(match related.kind {
                 ModRelationKind::Required => "gui-mod-relation-required",
                 ModRelationKind::Optional => "gui-mod-relation-optional",
@@ -1035,6 +1042,35 @@ impl RelationRowPresentation {
             attention,
         }
     }
+}
+
+/// What to call a relation, and what identity to keep beside the name.
+///
+/// A project id is what the catalog stated and what everything resolves
+/// against, but it is not what anybody recognizes a mod by. Where the catalog
+/// has since answered with a title, the title leads and the id stays as the
+/// technical detail under it. Where it has not, the id is all there is and is
+/// shown once rather than twice.
+fn declared_name(
+    related: &RelatedMod,
+    declared: &BTreeMap<String, DeclaredProject>,
+) -> (String, String) {
+    // A jar of this host answers for itself. It is already named by the mod
+    // list, and its project id is not the question the reader has here.
+    let Some(project_id) = related
+        .project_id
+        .as_deref()
+        .filter(|_| related.logical_path.is_none())
+    else {
+        return (related.name.clone(), String::new());
+    };
+    declared
+        .get(project_id)
+        .and_then(|project| project.title.clone())
+        .map_or_else(
+            || (related.name.clone(), String::new()),
+            |title| (title, project_id.to_owned()),
+        )
 }
 
 /// What to say about a declaration no jar of this host matches.
@@ -1653,6 +1689,45 @@ mod tests {
             "before a catalog answers, the row must not promise the project is there to install"
         );
         assert_ne!(view.requires[0].state, lookup("gui-mod-relation-absent"));
+    }
+
+    #[test]
+    fn a_resolved_declaration_is_named_by_its_title_and_keeps_its_id() {
+        let view = ModRelationPresentation::new(
+            &relations_requiring(vec![declares_project("200200")]),
+            &answered("200200", ProjectAvailability::NoCompatibleRelease),
+        );
+        assert_eq!(view.requires[0].name, "Absent Library");
+        assert_eq!(
+            view.requires[0].detail, "200200",
+            "the exact id the catalog stated stays beside the name it resolved to"
+        );
+
+        // Nothing answered, so the id is the whole of what is known and is
+        // shown once rather than as its own technical detail.
+        let unresolved = ModRelationPresentation::new(
+            &relations_requiring(vec![declares_project("200200")]),
+            &BTreeMap::new(),
+        );
+        assert_eq!(unresolved.requires[0].name, "200200");
+        assert!(unresolved.requires[0].detail.is_empty());
+    }
+
+    #[test]
+    fn a_jar_this_host_already_has_is_named_by_the_list_and_carries_no_id() {
+        let view = ModRelationPresentation::new(
+            &relations_requiring(vec![related(
+                "LibX.jar",
+                ModRelationKind::Required,
+                Some(ModPresence::Installed),
+            )]),
+            &BTreeMap::new(),
+        );
+        assert_eq!(view.requires[0].name, "LibX.jar");
+        assert!(
+            view.requires[0].detail.is_empty(),
+            "a jar that is here is not a project the reader has to look up"
+        );
     }
 
     #[test]

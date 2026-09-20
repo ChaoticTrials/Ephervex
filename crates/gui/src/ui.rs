@@ -216,6 +216,10 @@ slint::slint! {
     // arrives localized: the markup places these, it does not word them.
     export struct RelationRow {
         name: string,
+        // The exact provider project id, when the name above is the catalog's
+        // own title. Empty when the name is already the id, so nothing is
+        // printed twice.
+        detail: string,
         kind: string,
         // How the jar stands here, empty when it is simply loading.
         state: string,
@@ -1272,7 +1276,9 @@ slint::slint! {
         in property <[RelationRow]> rows;
         // What to show in place of an empty list.
         in property <string> note;
-        height: 76px * Theme.text-scale;
+        // Tall enough for two rows carrying a project id under the name, which
+        // is the taller of the two shapes a row takes.
+        height: 96px * Theme.text-scale;
         border-radius: 6px;
         border-width: 1px;
         border-color: Theme.border;
@@ -1287,14 +1293,25 @@ slint::slint! {
                 }
                 for entry in root.rows : HorizontalLayout {
                     spacing: 6px;
-                    height: 19px;
-                    Text {
-                        text: entry.name;
-                        color: Theme.text-secondary;
-                        font-size: Theme.label-size;
-                        overflow: elide;
+                    height: entry.detail == "" ? 19px : 32px;
+                    // The name a reader reads, with the id it resolves against
+                    // under it rather than beside it: the id is what to quote
+                    // in a bug report and never what to scan the list by.
+                    VerticalLayout {
+                        alignment: center;
                         horizontal-stretch: 1;
-                        vertical-alignment: center;
+                        Text {
+                            text: entry.name;
+                            color: Theme.text-secondary;
+                            font-size: Theme.label-size;
+                            overflow: elide;
+                        }
+                        if entry.detail != "" : Text {
+                            text: entry.detail;
+                            color: Theme.text-muted;
+                            font-size: Theme.caption-size;
+                            overflow: elide;
+                        }
                     }
                     // What the relation said, and how the jar stands, in that
                     // order: the kind is the durable fact, the state changes

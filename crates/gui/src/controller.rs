@@ -6585,6 +6585,7 @@ fn relation_rows(rows: &[presentation::RelationRowPresentation]) -> Vec<Relation
     rows.iter()
         .map(|row| RelationRow {
             name: row.name.as_str().into(),
+            detail: row.detail.as_str().into(),
             kind: row.kind.as_str().into(),
             state: row.state.as_str().into(),
             attention: row.attention,
