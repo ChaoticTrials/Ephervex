@@ -488,14 +488,18 @@ impl App {
         if path.exists() {
             return Err(IsolationError::AlreadyActive { host: host.id() }.into());
         }
-        let plan = self.plan_isolation(host, &request.pinned)?;
+        let IsolationRequest {
+            pinned,
+            accept_unrecorded,
+        } = request;
+        let plan = self.plan_isolation(host, &pinned)?;
         if !plan.missing.is_empty() {
             return Err(IsolationError::MissingDependencies {
                 dependencies: plan.missing.clone(),
             }
             .into());
         }
-        if !request.accept_unrecorded && !plan.unrecorded.is_empty() {
+        if !accept_unrecorded && !plan.unrecorded.is_empty() {
             return Err(IsolationError::UnrecordedDependencies {
                 paths: plan.unrecorded.clone(),
             }
@@ -533,9 +537,9 @@ impl App {
             host_id: host.id(),
             started_at: Utc::now(),
             safety_snapshot: snapshot.id,
-            accepted_unrecorded: request.accept_unrecorded && !plan.unrecorded.is_empty(),
+            accepted_unrecorded: accept_unrecorded && !plan.unrecorded.is_empty(),
             reduced_confidence: !plan.unidentifiable.is_empty()
-                || (request.accept_unrecorded && !plan.unrecorded.is_empty()),
+                || (accept_unrecorded && !plan.unrecorded.is_empty()),
             suspects,
             granularity: search.granularity,
             history: Vec::new(),
@@ -733,6 +737,7 @@ fn advance_search(session: &mut IsolationSession, answer: RoundAnswer) {
     let Some(current) = current else {
         return;
     };
+    let next_index = current.index.saturating_add(1);
     if session.search.phase == SearchPhase::Confirmation {
         if answer == RoundAnswer::Reproduced {
             complete_search(session, IsolationConfidence::SmallestReached);
@@ -778,8 +783,7 @@ fn advance_search(session: &mut IsolationSession, answer: RoundAnswer) {
     }
     session.suspects = session.search.suspects.clone();
     session.granularity = session.search.granularity;
-    let index = session.history.len() as u32 + 1;
-    session.current_round = Some(round_for(&session.plan, &session.search, index));
+    session.current_round = Some(round_for(&session.plan, &session.search, next_index));
 }
 
 fn complete_search(session: &mut IsolationSession, confidence: IsolationConfidence) {
@@ -793,7 +797,7 @@ fn complete_search(session: &mut IsolationSession, confidence: IsolationConfiden
         .filter(|path| !enabled_set.contains(path))
         .cloned()
         .collect();
-    session.suspects = roots.clone();
+    session.suspects.clone_from(&roots);
     session.granularity = session.search.granularity;
     session.current_round = None;
     session.outcome = Some(IsolationOutcome {
