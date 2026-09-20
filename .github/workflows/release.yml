@@ -1,17 +1,30 @@
-# Builds the Linux release artifacts and publishes them as a GitHub release
-# whenever a version tag (for example v1.0.0) is pushed.
+# Builds the Linux release artifacts for every release architecture and
+# publishes them as a GitHub release whenever a version tag (for example
+# v1.0.0) is pushed.
 #
-# Two artifacts, built from one checkout in one job: the AppImage, whose name is
-# the same on every release so a download address stays valid, and the Debian
-# package, which carries its version in its file name because that is what a
+# Three artifacts per architecture: the AppImage, whose name carries the
+# architecture but not the version so a download address stays valid, and the
+# Debian and RPM packages, which carry their version because that is what a
 # package manager and an apt repository read (ADR 0026). What identifies a
 # release is its tag and what the binaries report for `--version`, which is why
 # the tag and the workspace version have to agree before anything is built.
 #
+# Each architecture is built **natively** on a runner of its own rather than
+# cross-compiled. The glibc floor, the shared-library allowlist, and the smoke
+# test all inspect and run the binaries the job produced, and a cross build
+# leaves every one of those unverified.
+#
+# Three jobs, because they need different things. The build matrix needs a
+# toolchain and no repository access; publishing needs a token that can write
+# releases and nothing else; the apt repository needs its own credentials and a
+# key. Splitting them is also what keeps two architectures from racing to
+# create the same release.
+#
 # `appimagetool` and the AppImage type-2 runtime are host dependencies that
 # build-appimage.sh never downloads. Provisioning them is this workflow's job,
-# and it fetches exactly what packaging/host-tools pins and verifies each digest
-# before use. See docs/release.md and ADR 0023.
+# and it fetches exactly what packaging/host-tools pins for the architecture
+# being built and verifies each digest before use. See docs/release.md and
+# ADR 0023.
 
 name: Release
 
@@ -20,18 +33,40 @@ on:
     tags:
       - "v*"
 
-# For the publish step's own token. Nothing else here writes to the repository.
+# Read-only by default. Only the publish job writes, and it raises this for
+# itself.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   artifacts:
-    runs-on: ubuntu-latest
-    # The runner image is far above the glibc floor packaging/linux-baseline
-    # declares, and build-appimage.sh refuses to package binaries that require
-    # more than the floor, so the job runs in the baseline image that file
-    # names. GitHub mounts its own node into the container, so the JavaScript
-    # actions below still run.
+    strategy:
+      # An architecture that fails should not cancel the other one's build. Both
+      # have to succeed before anything is published, and seeing which of them
+      # failed is worth more than stopping a minute earlier.
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          # GitHub's hosted arm64 Linux runners. There is no `-latest` form of
+          # the label, so it names a release; the build happens in the baseline
+          # container below either way, so which one it is does not reach the
+          # artifact.
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    name: ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    env:
+      # What the packaging scripts target. They refuse to build for an
+      # architecture the host is not, so pairing an architecture with the wrong
+      # runner above fails here rather than producing a mislabeled package.
+      EPHERVEX_BASELINE_ARCH: ${{ matrix.arch }}
+    # The runner images are far above the glibc floor packaging/linux-baseline
+    # declares, and the packaging scripts refuse to package binaries that
+    # require more than the floor, so every job runs in the baseline image that
+    # file names. GitHub mounts its own node into the container, so the
+    # JavaScript actions below still run.
     container:
       image: ubuntu:22.04
     steps:
@@ -42,7 +77,7 @@ jobs:
           apt-get install -y --no-install-recommends \
             build-essential curl ca-certificates pkg-config git file jq \
             python3 desktop-file-utils binutils coreutils zsync appstream \
-            dpkg-dev \
+            dpkg-dev rpm cpio \
             libfontconfig-dev libfreetype-dev libssl-dev
 
       - name: Checkout
@@ -91,6 +126,12 @@ jobs:
       - name: Tests
         # Offline by contract: fixtures and loopback servers only, no Mojang,
         # Microsoft, Modrinth, CurseForge, Forge, or NeoForge service.
+        #
+        # Run once per architecture rather than once for the release. The whole
+        # reason each architecture is built natively is that what a binary does
+        # on its own machine is not deducible from what it does on another, and
+        # a suite that only ever ran on one of them would leave the other
+        # released untested.
         run: cargo test --workspace --no-fail-fast
 
       - name: Provision the pinned host tools
@@ -165,20 +206,86 @@ jobs:
           set -eu
           packaging/build-deb.sh dist
 
+      - name: Build the RPM package
+        env:
+          # The same value again, for the same reason.
+          EPHERVEX_CURSEFORGE_API_KEY: ${{ secrets.CURSEFORGE_API_KEY }}
+        run: |
+          set -eu
+          packaging/build-rpm.sh dist
+
+      - name: Collect what gets published
+        # The packaging scripts leave the AppDir and the two staging trees they
+        # assembled in the same output directory, so what ships is copied out by
+        # name instead of left for a glob to find. The names come from the
+        # architecture table, which is also what produced them.
+        run: |
+          set -eu
+          fail() { echo "ERROR: $*" >&2; exit 1; }
+          . ./packaging/linux-baseline
+          . ./packaging/linux-architectures
+
+          VERSION="$(packaging/workspace-version.sh)"
+          APPIMAGE_ARCH="$(ephervex_appimage_arch "${EPHERVEX_BASELINE_ARCH}")"
+          DEB_ARCH="$(ephervex_deb_arch "${EPHERVEX_BASELINE_ARCH}")"
+          RPM_ARCH="$(ephervex_rpm_arch "${EPHERVEX_BASELINE_ARCH}")"
+
+          mkdir -p upload
+          for artifact in \
+            "Ephervex-${APPIMAGE_ARCH}.AppImage" \
+            "ephervex_${VERSION}_${DEB_ARCH}.deb" \
+            "ephervex-${VERSION}-1.${RPM_ARCH}.rpm"; do
+            [ -f "dist/${artifact}" ] || fail "${artifact} was not built."
+            cp "dist/${artifact}" "upload/${artifact}"
+            # Beside each artifact, so a download can be checked without
+            # trusting the page it came from.
+            (cd upload && sha256sum "${artifact}" > "${artifact}.sha256")
+          done
+          ls -l upload
+
+      - name: Keep the artifacts for the publish job
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.arch }}
+          path: upload/
+          if-no-files-found: error
+          retention-days: 1
+
+  # Creates the release and attaches every architecture's artifacts to it.
+  #
+  # Separate from the build so the two architectures cannot race to create the
+  # same release, and so the token that can write to this repository is held by
+  # one job that builds nothing.
+  publish:
+    needs: artifacts
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Collect every architecture's artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
       - name: Publish the release
         env:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -eu
 
-          VERSION="$(packaging/workspace-version.sh)"
-          APPIMAGE=Ephervex-x86_64.AppImage
-          DEB="ephervex_${VERSION}_amd64.deb"
+          # Every file the build jobs put in their upload directory, which is
+          # only ever the artifacts and their checksums. Nothing is assembled
+          # from an architecture name here: the build that produced a file is
+          # what named it.
           cd dist
-          for artifact in "${APPIMAGE}" "${DEB}"; do
-            [ -f "${artifact}" ] || { echo "ERROR: ${artifact} was not built." >&2; exit 1; }
-            sha256sum "${artifact}" > "${artifact}.sha256"
-          done
+          ls -l
+          names="$(find . -maxdepth 1 -type f -printf '%P\n' | sort)"
+          [ -n "${names}" ] || { echo "ERROR: no artifacts were collected." >&2; exit 1; }
           cd ..
 
           API="${GITHUB_API_URL}"
@@ -194,6 +301,14 @@ jobs:
             curl -sS --fail-with-body -X "$method" -H "$AUTH" -H "$API_VERSION" "$@" "${API}${path}"
           }
 
+          # Written as ordinary text and encoded by jq. Hand-escaping a JSON
+          # string literal inside a shell double-quoted string inside YAML is
+          # three escaping rules deep, and the backticks this text wants are
+          # not a valid JSON escape at all.
+          body="Ephervex ${TAG} for Linux on x86_64 and aarch64.
+
+          The AppImage runs anywhere. The .deb installs \`ephervex\` and \`ephervex-gui\` on PATH for Debian, Ubuntu and derivatives, and the .rpm does the same for Fedora, openSUSE and derivatives. Take the file whose name matches your \`uname -m\`."
+
           # Reuse an existing release for this tag if there is one, else create it.
           existing="$(curl -sS -H "$AUTH" -H "$API_VERSION" "${API}/repos/${REPO}/releases/tags/${TAG}" || true)"
           release="$(echo "$existing" | jq -r '.id // empty')"
@@ -202,7 +317,8 @@ jobs:
             echo "Creating release for ${TAG}"
             existing="$(api POST "/repos/${REPO}/releases" \
               -H 'Content-Type: application/json' \
-              -d "{\"tag_name\":\"${TAG}\",\"name\":\"${TAG}\",\"body\":\"Ephervex ${TAG} for Linux x86_64.\\n\\nThe AppImage runs anywhere; the .deb installs \\\`ephervex\\\` and \\\`ephervex-gui\\\` on PATH for Debian, Ubuntu and derivatives.\"}")"
+              -d "$(jq -n --arg tag "${TAG}" --arg body "${body}" \
+                    '{tag_name: $tag, name: $tag, body: $body}')")"
             release="$(echo "$existing" | jq -r '.id')"
           else
             echo "Reusing existing release for ${TAG}"
@@ -212,15 +328,11 @@ jobs:
           # which it is, so the address is taken from there rather than assumed.
           uploads="$(echo "$existing" | jq -r '.upload_url' | sed 's/{?name,label}//')"
 
-          # Named one by one rather than globbed: the packaging scripts leave
-          # the AppDir and the package staging tree they assembled in the same
-          # output directory, and a glob would try to upload a directory.
-          #
           # Publishing over an existing release replaces its assets rather than
           # adding to them, so a re-run cannot leave two different files under
           # one name.
           assets="$(curl -sS -H "$AUTH" -H "$API_VERSION" "${API}/repos/${REPO}/releases/${release}/assets" || echo '[]')"
-          for name in "${APPIMAGE}" "${APPIMAGE}.sha256" "${DEB}" "${DEB}.sha256"; do
+          echo "${names}" | while read -r name; do
             for old in $(echo "$assets" | jq -r --arg n "$name" '.[] | select(.name == $n) | .id'); do
               echo "Removing the existing ${name} (asset ${old})"
               api DELETE "/repos/${REPO}/releases/assets/${old}" >/dev/null
@@ -232,16 +344,26 @@ jobs:
               "${uploads}?name=${name}" >/dev/null
           done
 
-  # Publishes the package into the shared ChaoticTrials apt repository, so a
-  # user who added that repository gets Ephervex upgrades through their package
-  # manager rather than by downloading a file.
+  # Publishes the Debian packages into the shared ChaoticTrials apt repository,
+  # so a user who added that repository gets Ephervex upgrades through their
+  # package manager rather than by downloading a file.
+  #
+  # Both architectures, because an apt repository serves whichever one the
+  # machine asking for it is. The RPM packages are downloadable release
+  # artifacts and nothing else: Ephervex publishes no RPM repository, and this
+  # job never touches them.
+  #
+  # This is the only place Ephervex publishes packages to a repository. The
+  # Forgejo release workflow builds the same artifacts and attaches them to its
+  # own release, and deliberately has no path into the apt repository and no
+  # credentials for it.
   #
   # Separate from the build because it needs different credentials and writes to
   # a different repository. It runs only after a release exists, and it takes
-  # the package from that release rather than rebuilding it, so what lands in
+  # the packages from that release rather than rebuilding them, so what lands in
   # the repository is byte for byte what the release page offers.
   apt-repo:
-    needs: artifacts
+    needs: publish
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -277,7 +399,7 @@ jobs:
           gpgconf --kill gpg-agent
           printf '%s' "${GPG_PRIVATE_KEY}" | gpg --batch --import
 
-      - name: Download the package from the release
+      - name: Download the packages from the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -285,8 +407,14 @@ jobs:
           gh release download "${GITHUB_REF_NAME}" \
             --repo "${GITHUB_REPOSITORY}" --pattern '*.deb' --dir debs
           # A release that somehow carries no package would otherwise publish an
-          # unchanged repository and report success.
-          ls debs/*.deb >/dev/null
+          # unchanged repository and report success. Every architecture the
+          # release builds has to be there, because a repository that silently
+          # dropped one serves upgrades to some machines and not others.
+          for arch in amd64 arm64; do
+            ls debs/*_"${arch}".deb >/dev/null ||
+              { echo "ERROR: the release carries no ${arch} package." >&2; exit 1; }
+          done
+          ls -l debs
 
       - name: Add the package and publish the repository
         env:
@@ -317,10 +445,17 @@ jobs:
           # not a second publish. Which one applies depends on the state of a
           # repository this job does not own, so it tries the first and falls
           # back to the second.
+          # `-architectures` is recorded when a distribution is first
+          # published and is not something `publish update` can change. A
+          # repository already published for amd64 alone therefore needs a
+          # one-time `aptly publish drop stable` and a republish before arm64
+          # packages reach anyone; see docs/release.md. Doing that from here
+          # would mean a release job dropping a published repository it shares
+          # with other projects, which is a maintainer's decision.
           aptly publish repo \
             -gpg-key="${GPG_KEY_ID}" \
             -passphrase="${GPG_PASSPHRASE}" \
-            -architectures=amd64 \
+            -architectures=amd64,arm64 \
             -distribution=stable \
             packages \
             filesystem:apt-repo: 2>/dev/null || \
