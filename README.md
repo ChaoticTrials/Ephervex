@@ -271,7 +271,8 @@ cargo test --workspace
   dependency direction, workflows, and security boundaries.
 * [`docs/release.md`](docs/release.md) covers supported Linux scope, storage
   locations, upgrade and uninstall behavior, offline expectations, and the
-  release build procedure.
+  release build procedure. `./prepare_release.sh <version>` performs that
+  preparation and stops before anything is published.
 * [`docs/curseforge-api-key.md`](docs/curseforge-api-key.md) explains why
   CurseForge access needs an API key, how to apply for one, and where Ephervex
   keeps it.

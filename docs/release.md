@@ -778,18 +778,48 @@ the smoke test on a desktop host so the mounted artifact and the desktop
 application are covered too. The Rust test suite is offline: it uses fixtures
 and loopback servers and contacts no production service.
 
+### Cutting a release
+
+One script does the whole preparation, and deliberately stops before anything
+is published:
+
+```bash
+./prepare_release.sh 1.0.0
+```
+
+It sets `[workspace.package] version`, updates `Cargo.lock` so a `--locked`
+build still works, regenerates the third-party license inventory, runs the gate
+above, commits exactly those four files as `chore: release <version>`, and tags
+`v<version>`. Then it prints the two `git push` commands and ends.
+
+Pushing is what builds and publishes, so it stays a separate deliberate act.
+Everything the script checks is something a release workflow would fail on
+anyway, run before a tag exists rather than after one has been pushed: a tag
+that disagrees with the workspace version, a stale license inventory, or a
+failing test all stop a release partway, and un-pushing a tag is worse than not
+pushing one.
+
+It refuses a version that is not three numbers, a version older than the current
+one, a tag that already exists, and a working tree with uncommitted changes to
+tracked files. It is safe to run again after a failure: setting the version
+twice is a no-op, and nothing is committed until every check has passed. To undo
+a preparation that was never pushed:
+
+```bash
+git tag -d v1.0.0 && git reset --hard HEAD~1
+```
+
 ### Publishing from a tag
 
 [`.forgejo/workflows/release.yml`](../.forgejo/workflows/release.yml) runs the
 procedure above on a pushed `v*` tag and publishes the result as a Forgejo
 release. [`.github/workflows/release.yml`](../.github/workflows/release.yml) is
 the same procedure published through GitHub's API. Announcing a release is
-therefore:
+therefore `./prepare_release.sh <version>` above, followed by:
 
 ```bash
-# with the workspace version already bumped and committed
-git tag v0.1.0
-git push origin v0.1.0
+git push origin main
+git push origin v1.0.0
 ```
 
 Each job refuses to continue when the tag and the `[workspace.package]` version
