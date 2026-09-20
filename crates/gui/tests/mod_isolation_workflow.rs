@@ -83,6 +83,16 @@ fn active_round_names_the_exact_configuration_and_records_either_answer() {
     assert!(visible(&ui, "mods/shared.jar"));
     assert!(visible(&ui, "mods/b.jar"));
     assert!(visible(&ui, &lookup("gui-isolation-test-instruction")));
+    let enabled_rows = ["mods/a.jar", "mods/shared.jar"].map(|label| {
+        ElementHandle::find_by_accessible_label(&ui, label)
+            .next()
+            .unwrap_or_else(|| panic!("no isolation row for {label}"))
+    });
+    assert!(
+        enabled_rows[1].absolute_position().y
+            >= enabled_rows[0].absolute_position().y + enabled_rows[0].size().height,
+        "enabled isolation rows must not overlap"
+    );
 
     let answer = Rc::new(RefCell::new(String::new()));
     let recorded = Rc::clone(&answer);
