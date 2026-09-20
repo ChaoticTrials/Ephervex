@@ -2954,3 +2954,84 @@ mod toast_tests {
             .collect()
     }
 }
+
+/// What the "About & Licenses" screen shows for the software Ephervex is built
+/// on.
+///
+/// Built from the inventory compiled into this build, which is generated from
+/// the real dependency graph. Nothing here decides what a dependency is
+/// licensed under; it decides how to show what was generated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThirdPartyLicenses {
+    /// One line naming how many packages and how many distinct license texts.
+    pub summary: String,
+    /// Every dependency, in the order the inventory records them.
+    pub packages: Vec<ThirdPartyPackage>,
+    /// Set only when this build's own list could not be read, which means a
+    /// damaged build rather than a missing report.
+    pub error: Option<String>,
+}
+
+/// One dependency, as a row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThirdPartyPackage {
+    pub name: String,
+    pub version: String,
+    /// The crate's own SPDX expression, shown exactly as its manifest declares
+    /// it.
+    pub license: String,
+    /// The full text or texts this package is covered by, already joined for
+    /// display. More than one is ordinary: a package offered under two
+    /// licenses ships both.
+    pub text: String,
+}
+
+impl ThirdPartyLicenses {
+    /// Reads the inventory this build carries.
+    #[must_use]
+    pub fn bundled() -> Self {
+        match ephervex_core::App::third_party_licenses() {
+            Ok(inventory) => Self::from_inventory(inventory),
+            // The technical reason belongs in the log, not on a screen: there
+            // is nothing a user can do with a parse offset, and the one thing
+            // they can do is reinstall.
+            Err(error) => {
+                tracing::error!(%error, "the bundled third-party license inventory is unusable");
+                Self {
+                    summary: String::new(),
+                    packages: Vec::new(),
+                    error: Some(lookup("gui-third-party-broken")),
+                }
+            }
+        }
+    }
+
+    fn from_inventory(inventory: &ephervex_core::LicenseInventory) -> Self {
+        let packages = inventory
+            .dependencies()
+            .iter()
+            .map(|dependency| ThirdPartyPackage {
+                name: dependency.name.clone(),
+                version: dependency.version.clone(),
+                license: dependency.license.clone(),
+                text: inventory
+                    .texts_for(dependency)
+                    .into_iter()
+                    .map(|text| text.text.trim_end().to_owned())
+                    .collect::<Vec<_>>()
+                    .join("\n\n"),
+            })
+            .collect::<Vec<_>>();
+        Self {
+            summary: lookup_args(
+                "gui-third-party-summary",
+                [
+                    ("crates", Arg::from(packages.len())),
+                    ("licenses", Arg::from(inventory.licenses().len())),
+                ],
+            ),
+            packages,
+            error: None,
+        }
+    }
+}

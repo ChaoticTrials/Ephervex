@@ -30,13 +30,14 @@ use crate::minecraft_defaults::{
 };
 use crate::presentation::{
     self, ImportErrorKind, ImportFailure, ImportPresentation, ModImpactPresentation,
-    ModRequirementPresentation, ToastStack, parse_network, validate_ip, validate_port,
+    ModRequirementPresentation, ThirdPartyLicenses, ToastStack, parse_network, validate_ip,
+    validate_port,
 };
 use crate::ui::{
     AccountRow, ActivityRow, AppWindow, DiagnosticRow, GuiI18n, ImpactRow, ImportBlockedRow,
-    ImportDuplicateRow, ImportOptionRow, InstanceRow, JavaRow, LinkedTargetRow, LocalModClashRow,
-    LogChunk, ModRow, ModSearchRow, ModVersionRow, PendingEntityRow, PromoteServerRow, RelationRow,
-    RunningRow, ServerRow, SnapshotRow, Theme, WindowSizePreview,
+    ImportDuplicateRow, ImportOptionRow, InstanceRow, JavaRow, LicenseRow, LinkedTargetRow,
+    LocalModClashRow, LogChunk, ModRow, ModSearchRow, ModVersionRow, PendingEntityRow,
+    PromoteServerRow, RelationRow, RunningRow, ServerRow, SnapshotRow, Theme, WindowSizePreview,
 };
 use crate::window_aspect;
 
@@ -3493,6 +3494,29 @@ fn register_pack_link_actions(ui: &AppWindow, commands: &Sender<Command>) {
 /// listener for a link a later launch handed over.
 pub fn open_pack_link(ui: &AppWindow, url: &str) {
     ui.invoke_deliver_pack_link(url.into());
+}
+
+/// Puts this build's third-party license inventory on the "About & Licenses"
+/// screen.
+///
+/// Compiled-in build data, so it is set once at startup and never refreshed:
+/// what Ephervex is built on cannot change while it runs.
+pub fn show_third_party_licenses(ui: &AppWindow) {
+    let licenses = ThirdPartyLicenses::bundled();
+    let rows: Vec<LicenseRow> = licenses
+        .packages
+        .iter()
+        .map(|package| LicenseRow {
+            name: package.name.as_str().into(),
+            version: package.version.as_str().into(),
+            license: package.license.as_str().into(),
+            text: package.text.as_str().into(),
+        })
+        .collect();
+    ui.set_third_party_packages(ModelRc::new(VecModel::from(rows)));
+    ui.set_third_party_summary(licenses.summary.as_str().into());
+    ui.set_third_party_error(licenses.error.as_deref().unwrap_or_default().into());
+    ui.set_third_party_open(-1);
 }
 
 /// Brings the window forward, for a link that arrived at a launcher already

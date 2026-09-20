@@ -2095,7 +2095,18 @@ gui-accept-eula = Accept EULA
 gui-force-kill-detail = Force killing "{ $value }" may lose unsaved world data. Use normal Stop whenever the server responds.
 gui-this-server = this server
 gui-force-kill-action = Force Kill
-gui-third-party-unavailable = An audited third-party license report is not bundled in this build yet. Ephervex does not invent dependency license information. The repository's Cargo metadata and lockfile remain the source inputs for a future generated license audit.
+# The list is generated from this build's own dependency graph, so it describes
+# exactly what this copy contains.
+gui-third-party-summary = { $crates ->
+    [one] 1 open-source package, under { $licenses } license texts
+   *[other] { $crates } open-source packages, under { $licenses } license texts
+}
+gui-third-party-note = Every license here also ships beside Ephervex in full, as THIRD-PARTY-LICENSES.md.
+gui-third-party-select = Select a package to read the license it is under.
+# Shown only when this build's own bundled list cannot be read, which means a
+# damaged build rather than a missing report.
+gui-third-party-broken = This build's third-party license list could not be read. Reinstall Ephervex, or download the release again.
+gui-third-party-back = Back to the list
 gui-slint-attribution = Slint attribution is available directly in About & Licenses through Slint's official AboutSlint widget.
 gui-close = Close
 gui-clipboard-copied = Copied to the clipboard.

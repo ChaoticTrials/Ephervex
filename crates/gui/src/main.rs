@@ -137,6 +137,9 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     ui.set_app_version(ephervex_model::APP_VERSION.into());
     ui.set_license_text(include_str!("../../../LICENSE").into());
+    // Build data like the two above: compiled in, the same for every run, and
+    // needed before anything a controller does.
+    ephervex_gui::controller::show_third_party_licenses(&ui);
     let controller = ephervex_gui::controller::attach(&ui, &keys);
     ephervex_gui::controller::accept_file_drops(&ui, &drops, &controller);
     if let Some(url) = link {
