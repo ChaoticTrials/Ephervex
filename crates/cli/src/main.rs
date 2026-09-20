@@ -28,8 +28,9 @@ use ephervex_core::{
     DiagnosticEntry, DiagnosticKind, DiagnosticRequest, DiagnosticScope, DiagnosticSearch,
     DirectoryState, DuplicateClient, EULA_CONFIRMATION_PHRASE, Entitlements, EulaStatus,
     FileDisposition, Freshness, ImpactedMod, ImportRequest, ImportedPack, IncompatibilityReason,
-    InstallationHealth, InstalledHost, InstalledMods, JavaHealth, JavaPathChoice, JavaPlan,
-    JavaPlanRequest, JavaRuntime, JavaTarget, LaunchAndConnectEvent, LaunchAndConnectObserver,
+    InstallationHealth, InstalledHost, InstalledMods, IsolationRequest, IsolationRound,
+    IsolationSession, IsolationStep, JavaHealth, JavaPathChoice, JavaPlan, JavaPlanRequest,
+    JavaRuntime, JavaTarget, LaunchAndConnectEvent, LaunchAndConnectObserver,
     LaunchAndConnectOptions, LaunchAndConnectOutcome, LaunchEvent, LaunchFeatures, LaunchObserver,
     LaunchOptions, LaunchOutcome, LaunchState, LoginFlow, LoginOptions, LoginRequest,
     MAX_SEARCH_MATCHES, MINECRAFT_EULA_REFERENCE, ManagedInstallation, ManagedMod,
@@ -38,11 +39,11 @@ use ephervex_core::{
     OperationReporter, OptionalSelection, OutputLine, PackAnalysis, PackRecipe, PackSide, Paths,
     PlanWarning, PlannedMod, PreferenceApplication, PreferenceId, PreferenceKey, ProcessMonitor,
     PromotionRequest, ReconciliationReport, RelatedMod, ReleaseListing, RequiredMods,
-    RequirementBasis, RuntimeClassification, RuntimeInventory, SearchOptions, SecretString,
-    ServerCommitWarning, ServerContentSource, ServerCreateOptions, ServerEvent, ServerFolder,
-    ServerNetworkSettings, ServerObserver, ServerPersistenceHealth, ServerRecord, ServerWarning,
-    Session, SharedArtifactReport, SideRequirement, SkipReason, SnapshotOrigin, SnapshotRecord,
-    SnapshotRestoreOptions, SuspectConfidence, SuspectReason, TextAnchor, TextView,
+    RequirementBasis, RoundAnswer, RuntimeClassification, RuntimeInventory, SearchOptions,
+    SecretString, ServerCommitWarning, ServerContentSource, ServerCreateOptions, ServerEvent,
+    ServerFolder, ServerNetworkSettings, ServerObserver, ServerPersistenceHealth, ServerRecord,
+    ServerWarning, Session, SharedArtifactReport, SideRequirement, SkipReason, SnapshotOrigin,
+    SnapshotRecord, SnapshotRestoreOptions, SuspectConfidence, SuspectReason, TextAnchor, TextView,
     UnknownServerFiles, VerificationReport, VersionMetadata, VersionRecord, format_binary_bytes,
 };
 use ephervex_i18n::Arg as MessageArg;
@@ -495,6 +496,11 @@ enum ModCommand {
         #[command(flatten)]
         host: HostArgs,
     },
+    /// Narrow a reproducing mod set by testing dependency-safe configurations.
+    Isolate {
+        #[command(subcommand)]
+        command: IsolateCommand,
+    },
     /// Take a mod's jar off disk, keeping the record that wants it.
     ///
     /// Not the same as removing it. The instance still says it should have
@@ -558,6 +564,75 @@ enum ModCommand {
         #[arg(long)]
         only_this: bool,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum IsolateCommand {
+    /// Capture a safety snapshot and apply the first test configuration.
+    Start {
+        #[command(flatten)]
+        host: HostArgs,
+        /// Keep this mod and everything it requires enabled in every round.
+        #[arg(long = "keep", value_name = "PATH")]
+        pinned: Vec<PathBuf>,
+        /// Continue even though refreshable dependency information is absent.
+        ///
+        /// The final result is marked as reduced confidence because a mod that
+        /// appears independent may have an unrecorded required dependency.
+        #[arg(long)]
+        accept_unrecorded: bool,
+    },
+    /// Show the durable session without changing its current configuration.
+    Status {
+        #[command(flatten)]
+        host: HostArgs,
+    },
+    /// Reapply the current round after a restart or interrupted mutation.
+    Resume {
+        #[command(flatten)]
+        host: HostArgs,
+    },
+    /// Record whether the current configuration still reproduces the issue.
+    Answer {
+        #[command(flatten)]
+        host: HostArgs,
+        #[arg(value_enum)]
+        answer: IsolationAnswerArg,
+    },
+    /// Remove the latest answer and restore that round for another test.
+    Undo {
+        #[command(flatten)]
+        host: HostArgs,
+    },
+    /// Keep the narrowed reproducing configuration and retain the safety snapshot.
+    Finish {
+        #[command(flatten)]
+        host: HostArgs,
+    },
+    /// Restore the pre-isolation snapshot and end the session.
+    Cancel {
+        #[command(flatten)]
+        host: HostArgs,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum IsolationAnswerArg {
+    /// The tested configuration still shows the issue.
+    #[value(name = "issue-still-present", alias = "reproduced")]
+    IssueStillPresent,
+    /// The issue is gone in the tested configuration.
+    #[value(name = "issue-gone", alias = "did-not-reproduce")]
+    IssueGone,
+}
+
+impl IsolationAnswerArg {
+    const fn answer(self) -> RoundAnswer {
+        match self {
+            Self::IssueStillPresent => RoundAnswer::Reproduced,
+            Self::IssueGone => RoundAnswer::DidNotReproduce,
+        }
+    }
 }
 
 /// Which installed local host an operation targets.
@@ -3750,6 +3825,7 @@ async fn run_mod_command(app: &mut App, command: &ModCommand, json: bool) -> any
             return run_mod_dependencies(app, host.host()?, of.as_deref(), json);
         }
         ModCommand::Refresh { host } => return run_mod_refresh(app, host.host()?, json).await,
+        ModCommand::Isolate { command } => return run_mod_isolate(app, command, json),
         ModCommand::Delete {
             host,
             path,
@@ -3783,6 +3859,165 @@ async fn run_mod_command(app: &mut App, command: &ModCommand, json: bool) -> any
         }
     }
     Ok(())
+}
+
+fn run_mod_isolate(app: &App, command: &IsolateCommand, json: bool) -> anyhow::Result<()> {
+    match command {
+        IsolateCommand::Start {
+            host,
+            pinned,
+            accept_unrecorded,
+        } => {
+            let round = app.begin_isolation(
+                host.host()?,
+                IsolationRequest {
+                    pinned: pinned.clone(),
+                    accept_unrecorded: *accept_unrecorded,
+                },
+                &CancellationToken::new(),
+            )?;
+            print_isolation_step(IsolationStep::AwaitingAnswer(round), json)?;
+        }
+        IsolateCommand::Status { host } => {
+            let state = app.isolation_state(host.host()?)?;
+            if json {
+                print_json(&serde_json::to_value(&state)?);
+            } else if let Some(state) = state {
+                print_isolation_status(&state);
+            } else {
+                outln!("No isolation session is active.");
+            }
+        }
+        IsolateCommand::Resume { host } => {
+            print_isolation_step(app.resume_isolation(host.host()?)?, json)?;
+        }
+        IsolateCommand::Answer { host, answer } => {
+            print_isolation_step(
+                app.answer_isolation_round(host.host()?, answer.answer())?,
+                json,
+            )?;
+        }
+        IsolateCommand::Undo { host } => {
+            let round = app.undo_isolation_round(host.host()?)?;
+            print_isolation_step(IsolationStep::AwaitingAnswer(round), json)?;
+        }
+        IsolateCommand::Finish { host } => {
+            let report = app.finish_isolation(host.host()?)?;
+            if json {
+                print_json(&serde_json::to_value(&report)?);
+            } else {
+                outln!("Isolation finished after {} rounds.", report.rounds);
+                outln!("Confidence: {}", report.confidence.as_str());
+                for candidate in &report.reproducing {
+                    outln!(
+                        "reproduces: {} ({})",
+                        candidate.name,
+                        candidate.root.display()
+                    );
+                    for dependency in &candidate.closure {
+                        if dependency != &candidate.root {
+                            outln!("  requires: {}", dependency.display());
+                        }
+                    }
+                }
+                if report.reduced_confidence {
+                    outln!("Dependency information was incomplete; treat this result as unproven.");
+                }
+                outln!("Safety snapshot retained: {}", report.safety_snapshot);
+            }
+        }
+        IsolateCommand::Cancel { host } => {
+            app.cancel_isolation(host.host()?, &CancellationToken::new())?;
+            if json {
+                print_json(&serde_json::json!({ "canceled": true }));
+            } else {
+                outln!("Isolation canceled. The pre-isolation state was restored.");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn print_isolation_step(step: IsolationStep, json: bool) -> anyhow::Result<()> {
+    if json {
+        print_json(&serde_json::to_value(&step)?);
+        return Ok(());
+    }
+    match step {
+        IsolationStep::AwaitingAnswer(round) => print_isolation_round(&round),
+        IsolationStep::Complete(outcome) => {
+            outln!(
+                "Isolation is ready to finish ({}).",
+                outcome.confidence.as_str()
+            );
+            outln!("Enabled configuration:");
+            for path in &outcome.enabled {
+                outln!("  {}", path.display());
+            }
+            outln!("Run `ephervex mod isolate finish` with the same host option to keep it.");
+        }
+        IsolationStep::Contradiction(contradiction) => {
+            outln!(
+                "Rounds {} and {} cannot both be right. Undo the latest answer and test again.",
+                contradiction.reproducing_round,
+                contradiction.conflicting_round
+            );
+        }
+    }
+    Ok(())
+}
+
+fn print_isolation_round(round: &IsolationRound) {
+    outln!(
+        "Isolation round {}: test this {} configuration ({}/{}, granularity {}).",
+        round.index,
+        round.kind.as_str(),
+        round.group_index + 1,
+        round.group_count,
+        round.granularity
+    );
+    outln!("Enabled:");
+    for path in &round.enabled {
+        outln!("  {}", path.display());
+    }
+    outln!("Disabled:");
+    for path in &round.disabled {
+        outln!("  {}", path.display());
+    }
+    outln!("Launch and test the host, then answer `issue-still-present` or `issue-gone`.");
+}
+
+fn print_isolation_status(session: &IsolationSession) {
+    outln!(
+        "Isolation session for {} {} ({} answered rounds).",
+        session.host_kind,
+        session.host_id,
+        session.history.len()
+    );
+    if session.reduced_confidence {
+        outln!("Dependency information is incomplete; the result will be unproven.");
+    }
+    if !session.plan.linked_servers.is_empty() {
+        outln!("Linked servers are not changed by this session:");
+        for server in &session.plan.linked_servers {
+            outln!("  {} ({})", server.name, server.id);
+        }
+    }
+    if let Some(round) = &session.current_round {
+        print_isolation_round(round);
+    } else if let Some(contradiction) = &session.contradiction {
+        outln!(
+            "Rounds {} and {} cannot both be right. Undo the latest answer and test again.",
+            contradiction.reproducing_round,
+            contradiction.conflicting_round
+        );
+    } else if let Some(outcome) = &session.outcome {
+        outln!(
+            "Isolation is ready to finish ({}), with {} enabled files.",
+            outcome.confidence.as_str(),
+            outcome.enabled.len()
+        );
+    }
 }
 
 /// Takes a mod's jar off disk, saying first what else goes with it.
