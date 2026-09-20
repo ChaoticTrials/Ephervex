@@ -106,7 +106,10 @@ pub use instance::{
     global_minecraft_preferences, validated_entity_name,
 };
 pub use isolation::{
-    IsolationCandidate, IsolationLinkedServer, IsolationMissingDependency, IsolationPlan,
+    IsolationCandidate, IsolationConfidence, IsolationError, IsolationLinkedServer,
+    IsolationMissingDependency, IsolationOutcome, IsolationPlan, IsolationReport, IsolationRequest,
+    IsolationResultCandidate, IsolationRound, IsolationRoundKind, IsolationRoundRecord,
+    IsolationSession, IsolationStep, RoundAnswer, RoundContradiction,
 };
 pub use launch::{LaunchOptions, LaunchOutcome};
 pub use licenses::{
