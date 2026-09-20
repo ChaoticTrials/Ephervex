@@ -1677,8 +1677,6 @@ gui-technical-size-11 = Compact (11 px)
 gui-technical-size-12 = Default (12 px)
 gui-technical-size-14 = Comfortable (14 px)
 gui-technical-size-16 = Large (16 px)
-gui-save-general-settings = Save General Settings
-gui-general-settings-saved = Saved general settings.
 # $value is a Minecraft release id and is never translated.
 gui-favorite-version = Offer Minecraft { $value } first
 gui-unfavorite-version = Stop offering Minecraft { $value } first

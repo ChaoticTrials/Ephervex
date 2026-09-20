@@ -4031,69 +4031,79 @@ slint::slint! {
                                     }
                                     SettingCard {
                                         row: 1; col: 0;
+                                        width: root.settings-two-columns ? (parent.width - 14px) / 2 : parent.width;
                                         title: GuiI18n.text("gui-show-linked-servers");
                                         detail: GuiI18n.text("gui-show-linked-servers-detail");
-                                        Toggle { accessible-name: GuiI18n.text("gui-show-linked-servers"); checked <=> root.show-linked-servers; }
+                                        Toggle { accessible-name: GuiI18n.text("gui-show-linked-servers"); checked <=> root.show-linked-servers; toggled => { root.save-general-settings(root.application-text-scale, root.technical-text-size, root.application-color-scheme, root.show-linked-servers, root.make-default-account-operator, root.operator-permission-level); } }
                                     }
                                     SettingCard {
                                         row: 2; col: 0;
+                                        width: root.settings-two-columns ? (parent.width - 14px) / 2 : parent.width;
                                         title: GuiI18n.text("gui-default-account-operator");
                                         detail: GuiI18n.text("gui-default-account-operator-detail");
-                                        Toggle { accessible-name: GuiI18n.text("gui-default-account-operator"); checked <=> root.make-default-account-operator; }
+                                        Toggle { accessible-name: GuiI18n.text("gui-default-account-operator"); checked <=> root.make-default-account-operator; toggled => { root.save-general-settings(root.application-text-scale, root.technical-text-size, root.application-color-scheme, root.show-linked-servers, root.make-default-account-operator, root.operator-permission-level); } }
                                     }
                                     SettingCard {
                                         row: 3; col: 0;
+                                        width: root.settings-two-columns ? (parent.width - 14px) / 2 : parent.width;
                                         title: GuiI18n.text("gui-default-operator-level");
                                         detail: GuiI18n.text("gui-default-operator-level-detail");
-                                        ComboBox { accessible-label: GuiI18n.text("gui-default-operator-level"); width: 220px; model: [GuiI18n.text("gui-operator-level-1"), GuiI18n.text("gui-operator-level-2"), GuiI18n.text("gui-operator-level-3"), GuiI18n.text("gui-operator-level-4")]; current-index: root.operator-permission-level - 1; selected(value) => { root.operator-permission-level = value == GuiI18n.text("gui-operator-level-1") ? 1 : value == GuiI18n.text("gui-operator-level-2") ? 2 : value == GuiI18n.text("gui-operator-level-3") ? 3 : 4; } }
+                                        ComboBox { accessible-label: GuiI18n.text("gui-default-operator-level"); width: 220px; model: [GuiI18n.text("gui-operator-level-1"), GuiI18n.text("gui-operator-level-2"), GuiI18n.text("gui-operator-level-3"), GuiI18n.text("gui-operator-level-4")]; current-index: root.operator-permission-level - 1; selected(value) => { root.operator-permission-level = value == GuiI18n.text("gui-operator-level-1") ? 1 : value == GuiI18n.text("gui-operator-level-2") ? 2 : value == GuiI18n.text("gui-operator-level-3") ? 3 : 4; root.save-general-settings(root.application-text-scale, root.technical-text-size, root.application-color-scheme, root.show-linked-servers, root.make-default-account-operator, root.operator-permission-level); } }
                                     }
                                     SettingCard {
                                         row: root.settings-two-columns ? 1 : 5;
                                         col: root.settings-two-columns ? 1 : 0;
+                                        width: root.settings-two-columns ? (parent.width - 14px) / 2 : parent.width;
                                         title: GuiI18n.text("gui-application-text-size");
                                         detail: GuiI18n.text("gui-application-text-size-detail");
-                                        ComboBox { width: 190px; model: [GuiI18n.text("gui-text-scale-90"), GuiI18n.text("gui-text-scale-100"), GuiI18n.text("gui-text-scale-110"), GuiI18n.text("gui-text-scale-125")]; current-index: root.application-text-scale == 90 ? 0 : root.application-text-scale == 110 ? 2 : root.application-text-scale == 125 ? 3 : 1; selected(value) => { root.application-text-scale = value == GuiI18n.text("gui-text-scale-90") ? 90 : value == GuiI18n.text("gui-text-scale-110") ? 110 : value == GuiI18n.text("gui-text-scale-125") ? 125 : 100; } }
+                                        ComboBox { width: 190px; model: [GuiI18n.text("gui-text-scale-90"), GuiI18n.text("gui-text-scale-100"), GuiI18n.text("gui-text-scale-110"), GuiI18n.text("gui-text-scale-125")]; current-index: root.application-text-scale == 90 ? 0 : root.application-text-scale == 110 ? 2 : root.application-text-scale == 125 ? 3 : 1; selected(value) => { root.application-text-scale = value == GuiI18n.text("gui-text-scale-90") ? 90 : value == GuiI18n.text("gui-text-scale-110") ? 110 : value == GuiI18n.text("gui-text-scale-125") ? 125 : 100; root.save-general-settings(root.application-text-scale, root.technical-text-size, root.application-color-scheme, root.show-linked-servers, root.make-default-account-operator, root.operator-permission-level); } }
                                     }
                                     SettingCard {
                                         row: root.settings-two-columns ? 2 : 6;
                                         col: root.settings-two-columns ? 1 : 0;
+                                        width: root.settings-two-columns ? (parent.width - 14px) / 2 : parent.width;
                                         title: GuiI18n.text("gui-application-color-scheme");
                                         detail: GuiI18n.text("gui-application-color-scheme-detail");
-                                        ComboBox { width: 190px; model: [GuiI18n.text("gui-color-scheme-dark"), GuiI18n.text("gui-color-scheme-light")]; current-index: root.application-color-scheme == "light" ? 1 : 0; selected(value) => { root.application-color-scheme = value == GuiI18n.text("gui-color-scheme-light") ? "light" : "dark"; } }
+                                        ComboBox { width: 190px; model: [GuiI18n.text("gui-color-scheme-dark"), GuiI18n.text("gui-color-scheme-light")]; current-index: root.application-color-scheme == "light" ? 1 : 0; selected(value) => { root.application-color-scheme = value == GuiI18n.text("gui-color-scheme-light") ? "light" : "dark"; root.save-general-settings(root.application-text-scale, root.technical-text-size, root.application-color-scheme, root.show-linked-servers, root.make-default-account-operator, root.operator-permission-level); } }
                                     }
                                     SettingCard {
                                         row: root.settings-two-columns ? 3 : 7;
                                         col: root.settings-two-columns ? 1 : 0;
+                                        width: root.settings-two-columns ? (parent.width - 14px) / 2 : parent.width;
                                         title: GuiI18n.text("gui-technical-text-size");
                                         detail: GuiI18n.text("gui-technical-text-size-detail");
-                                        ComboBox { width: 190px; model: [GuiI18n.text("gui-technical-size-11"), GuiI18n.text("gui-technical-size-12"), GuiI18n.text("gui-technical-size-14"), GuiI18n.text("gui-technical-size-16")]; current-index: root.technical-text-size == 11 ? 0 : root.technical-text-size == 14 ? 2 : root.technical-text-size == 16 ? 3 : 1; selected(value) => { root.technical-text-size = value == GuiI18n.text("gui-technical-size-11") ? 11 : value == GuiI18n.text("gui-technical-size-14") ? 14 : value == GuiI18n.text("gui-technical-size-16") ? 16 : 12; } }
+                                        ComboBox { width: 190px; model: [GuiI18n.text("gui-technical-size-11"), GuiI18n.text("gui-technical-size-12"), GuiI18n.text("gui-technical-size-14"), GuiI18n.text("gui-technical-size-16")]; current-index: root.technical-text-size == 11 ? 0 : root.technical-text-size == 14 ? 2 : root.technical-text-size == 16 ? 3 : 1; selected(value) => { root.technical-text-size = value == GuiI18n.text("gui-technical-size-11") ? 11 : value == GuiI18n.text("gui-technical-size-14") ? 14 : value == GuiI18n.text("gui-technical-size-16") ? 16 : 12; root.save-general-settings(root.application-text-scale, root.technical-text-size, root.application-color-scheme, root.show-linked-servers, root.make-default-account-operator, root.operator-permission-level); } }
                                     }
                                 }
-                                ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-save-general-settings"); tone: "primary"; clicked => { root.save-general-settings(root.application-text-scale, root.technical-text-size, root.application-color-scheme, root.show-linked-servers, root.make-default-account-operator, root.operator-permission-level); } } }
                                 // The same decision the mod dialog's own "do
                                 // not ask again" records, somewhere it can be
                                 // taken back. Without this, turning it off is
                                 // a one-way door out of a dialog.
                                 SectionTitle { title: GuiI18n.text("gui-mod-changes"); detail: GuiI18n.text("gui-mod-changes-detail"); }
-                                SettingCard {
-                                    width: min(parent.width, 520px);
-                                    vertical-stretch: 0;
-                                    title: GuiI18n.text("gui-follow-dependencies");
-                                    detail: GuiI18n.text("gui-follow-dependencies-detail");
-                                    Toggle { accessible-name: GuiI18n.text("gui-follow-dependencies"); sets-its-own-position: false; checked: root.follow-mod-dependencies; toggled(value) => { root.set-dependency-following(value); } }
-                                }
-                                // Greyed rather than hidden while nothing is
-                                // being carried along: with no other mod
-                                // changing, there is nothing for a
-                                // confirmation to be about, and a row that
-                                // vanished would read as a setting that was
-                                // lost.
-                                SettingCard {
-                                    width: min(parent.width, 520px);
-                                    vertical-stretch: 0;
-                                    title: GuiI18n.text("gui-dependency-warning");
-                                    detail: root.follow-mod-dependencies ? GuiI18n.text("gui-dependency-warning-detail") : GuiI18n.text("gui-dependency-warning-unused");
-                                    Toggle { accessible-name: GuiI18n.text("gui-dependency-warning"); enabled: root.follow-mod-dependencies; sets-its-own-position: false; checked: root.warn-on-dependency-impact && root.follow-mod-dependencies; toggled(value) => { root.set-dependency-warning(value); } }
+                                GridLayout {
+                                    spacing: 14px;
+                                    SettingCard {
+                                        row: 0;
+                                        col: 0;
+                                        width: root.settings-two-columns ? (parent.width - 14px) / 2 : parent.width;
+                                        title: GuiI18n.text("gui-follow-dependencies");
+                                        detail: GuiI18n.text("gui-follow-dependencies-detail");
+                                        Toggle { accessible-name: GuiI18n.text("gui-follow-dependencies"); sets-its-own-position: false; checked: root.follow-mod-dependencies; toggled(value) => { root.set-dependency-following(value); } }
+                                    }
+                                    // Greyed rather than hidden while nothing is
+                                    // being carried along: with no other mod
+                                    // changing, there is nothing for a
+                                    // confirmation to be about, and a row that
+                                    // vanished would read as a setting that was
+                                    // lost.
+                                    SettingCard {
+                                        row: root.settings-two-columns ? 0 : 1;
+                                        col: root.settings-two-columns ? 1 : 0;
+                                        width: root.settings-two-columns ? (parent.width - 14px) / 2 : parent.width;
+                                        title: GuiI18n.text("gui-dependency-warning");
+                                        detail: root.follow-mod-dependencies ? GuiI18n.text("gui-dependency-warning-detail") : GuiI18n.text("gui-dependency-warning-unused");
+                                        Toggle { accessible-name: GuiI18n.text("gui-dependency-warning"); enabled: root.follow-mod-dependencies; sets-its-own-position: false; checked: root.warn-on-dependency-impact && root.follow-mod-dependencies; toggled(value) => { root.set-dependency-warning(value); } }
+                                    }
                                 }
                                 // Whether the scheme is claimed at all is settled by
                                 // installing, not here (ADR 0028, ADR 0029). What this page

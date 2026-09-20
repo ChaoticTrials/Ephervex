@@ -2975,22 +2975,17 @@ fn run_worker(
                 make_operator,
                 operator_level,
             } => {
-                // Both halves, then one snapshot and one toast: the page has
-                // one button, so it reports one outcome. A failure in either
-                // is reported as itself and leaves the other where it was.
+                // Both halves, then one snapshot: each control saves as it is
+                // changed, so a confirmation per click would be noise. A
+                // failure in either is reported as itself and leaves the other
+                // where it was.
                 let saved = app
                     .set_application_display_settings(text_scale, technical_text_size, color_scheme)
                     .and_then(|()| {
                         app.set_linked_server_settings(show_globally, make_operator, operator_level)
                     });
                 match saved {
-                    Ok(()) => {
-                        let _ = events.send(Event::Toast {
-                            message: lookup("gui-general-settings-saved"),
-                            error: false,
-                        });
-                        send_snapshot(&app, &events);
-                    }
+                    Ok(()) => send_snapshot(&app, &events),
                     Err(error) => send_error(&events, &error),
                 }
             }
