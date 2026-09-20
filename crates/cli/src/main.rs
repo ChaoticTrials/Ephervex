@@ -175,6 +175,33 @@ enum Command {
     Running,
     /// Reconcile the index against what is actually on disk.
     Reconcile,
+    /// Show the open-source software Ephervex is built on, and its licenses.
+    ///
+    /// Local only: the list is built into this release, so it describes exactly
+    /// what this copy of Ephervex contains and contacts nothing.
+    ///
+    /// Ephervex's own license is Apache-2.0; this covers its dependencies. The
+    /// complete text of every one of them also ships beside the program, as
+    /// THIRD-PARTY-LICENSES.md.
+    Licenses(LicensesArgs),
+}
+
+#[derive(Debug, Args)]
+struct LicensesArgs {
+    /// List every dependency and the license it is under.
+    ///
+    /// Without this, only a count per license is shown, because a release
+    /// depends on several hundred packages.
+    #[arg(long)]
+    all: bool,
+
+    /// Print the full text of one license, named by its identifier.
+    ///
+    /// Identifiers are what the summary lists, for example `MIT` or
+    /// `Apache-2.0`. A license several packages ship under slightly different
+    /// copyright lines has one text printed per distinct version.
+    #[arg(long, value_name = "LICENSE")]
+    text: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -1538,6 +1565,9 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
             show_info(cli.json);
             Ok(())
         }
+        // No `open_app`: the inventory is compiled in, so this answers on a
+        // machine whose storage is broken or not set up yet.
+        Command::Licenses(args) => show_licenses(args, cli.json),
         Command::Paths => run_paths(cli.json),
         // Both are handled in `main`: completions before application logging is
         // initialized, and `doctor` because its report decides the exit status.
@@ -2987,6 +3017,132 @@ fn show_info(json: bool) {
         outln!("app id:     {}", ephervex_model::APP_ID);
         outln!("user agent: {}", ephervex_model::user_agent());
     }
+}
+
+fn show_licenses(args: &LicensesArgs, json: bool) -> anyhow::Result<()> {
+    // The error is borrowed from a process-wide cache, so it is described here
+    // rather than carried.
+    let inventory = App::third_party_licenses().map_err(|error| {
+        anyhow::anyhow!("this build's third-party license list could not be read: {error}")
+    })?;
+
+    if let Some(wanted) = &args.text {
+        return show_license_text(inventory, wanted, json);
+    }
+    show_license_listing(inventory, args.all, json);
+    Ok(())
+}
+
+/// Every text under one identifier.
+///
+/// More than one is the ordinary case rather than an oddity: crates under MIT
+/// ship an MIT file each, differing in the copyright line the license exists to
+/// carry, so printing one of them would be printing somebody else's notice.
+fn show_license_text(
+    inventory: &ephervex_core::LicenseInventory,
+    wanted: &str,
+    json: bool,
+) -> anyhow::Result<()> {
+    let matching: Vec<_> = inventory
+        .licenses()
+        .iter()
+        .filter(|license| license.id.eq_ignore_ascii_case(wanted))
+        .collect();
+    anyhow::ensure!(
+        !matching.is_empty(),
+        "no dependency of this build is licensed under {wanted}. \
+         Run `ephervex licenses` to see which licenses there are."
+    );
+
+    if json {
+        print_json(&serde_json::json!({
+            "licenses": matching.iter().map(|license| license_json(license))
+                .collect::<Vec<_>>(),
+        }));
+        return Ok(());
+    }
+
+    for (position, license) in matching.iter().enumerate() {
+        if position > 0 {
+            outln!();
+        }
+        // A license SPDX does not list has no name but its identifier, and
+        // printing that twice reads like a mistake.
+        if license.name == license.id {
+            outln!("{}", license.id);
+        } else {
+            outln!("{} ({})", license.name, license.id);
+        }
+        outln!();
+        outln!("{}", license.text.trim_end());
+    }
+    Ok(())
+}
+
+fn license_json(license: &ephervex_core::LicenseText) -> serde_json::Value {
+    serde_json::json!({
+        "id": license.id,
+        "name": license.name,
+        "text": license.text,
+    })
+}
+
+fn show_license_listing(inventory: &ephervex_core::LicenseInventory, all: bool, json: bool) {
+    if json {
+        // The whole inventory, texts included, because a machine-readable
+        // listing that named licenses without carrying them would send the
+        // reader back to the file this command exists to replace.
+        print_json(&serde_json::json!({
+            "licenses": inventory.licenses().iter().map(license_json).collect::<Vec<_>>(),
+            "dependencies": inventory
+                .dependencies()
+                .iter()
+                .map(|dependency| serde_json::json!({
+                    "name": dependency.name,
+                    "version": dependency.version,
+                    "license": dependency.license,
+                    "texts": dependency.texts,
+                }))
+                .collect::<Vec<_>>(),
+        }));
+        return;
+    }
+
+    outln!(
+        "{} {} is built on {} open-source packages.",
+        ephervex_model::APP_NAME,
+        ephervex_model::APP_VERSION,
+        inventory.dependencies().len()
+    );
+    outln!();
+    if all {
+        let width = inventory
+            .dependencies()
+            .iter()
+            .map(|dependency| dependency.name.len())
+            .max()
+            .unwrap_or(0);
+        for dependency in inventory.dependencies() {
+            outln!(
+                "{:width$}  {:<12}  {}",
+                dependency.name,
+                dependency.version,
+                dependency.license
+            );
+        }
+    } else {
+        for (identifier, count) in inventory.identifier_counts() {
+            outln!("{count:5}  {identifier}");
+        }
+        outln!();
+        outln!("`ephervex licenses --all` lists each package.");
+    }
+    outln!("`ephervex licenses --text <LICENSE>` prints a license in full.");
+    outln!();
+    outln!(
+        "Ephervex itself is licensed under Apache-2.0. Every license text above \
+         also ships beside the program as THIRD-PARTY-LICENSES.md."
+    );
 }
 
 fn show_paths(paths: &Paths, json: bool) {
