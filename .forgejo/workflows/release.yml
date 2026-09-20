@@ -1,15 +1,23 @@
 # Builds the Linux release artifacts and publishes them as a Forgejo release
 # whenever a version tag (for example v1.0.0) is pushed.
 #
-# Two artifacts, built from one checkout in one job: the AppImage, whose name is
-# the same on every release so a download address stays valid, and the Debian
-# package, which carries its version in its file name because that is what a
-# package manager reads (ADR 0026). What identifies a release is its tag, the
-# release page, and what the binaries report for `--version`, which is why the
-# tag and the workspace version have to agree before anything is built.
+# Three artifacts, built from one checkout in one job: the AppImage, whose name
+# is the same on every release so a download address stays valid, and the Debian
+# and RPM packages, which carry their version in their file names because that
+# is what a package manager reads (ADR 0026). What identifies a release is its
+# tag, the release page, and what the binaries report for `--version`, which is
+# why the tag and the workspace version have to agree before anything is built.
+#
+# **x86_64 only.** The GitHub workflow builds both release architectures on
+# runners of their own, because each one has to be built natively: every check
+# the packaging scripts run inspects and executes the binaries it produced.
+# Forgejo runs on one self-hosted x86_64 machine, so an aarch64 release from
+# here would have to be cross-built and would arrive unverified. ARM releases
+# belong to GitHub.
 #
 # Unlike the GitHub workflow, this one does not publish into the shared apt
-# repository. The package is attached to the release and nothing else.
+# repository, and has no credentials for it. The packages are attached to the
+# release and nothing else.
 #
 # Nothing here is cached: a release runs a few times a year, and a cargo cache
 # for this workspace is gigabytes the runner host keeps between them.
@@ -67,7 +75,7 @@ jobs:
           apt-get install -y --no-install-recommends \
             build-essential curl ca-certificates pkg-config git file jq \
             python3 desktop-file-utils binutils coreutils zsync appstream \
-            dpkg-dev \
+            dpkg-dev rpm cpio \
             libfontconfig-dev libfreetype-dev libssl-dev
 
       - name: Checkout
@@ -187,6 +195,14 @@ jobs:
           set -eu
           packaging/build-deb.sh dist
 
+      - name: Build the RPM package
+        env:
+          # The same value again, for the same reason.
+          EPHERVEX_CURSEFORGE_API_KEY: ${{ secrets.CURSEFORGE_API_KEY }}
+        run: |
+          set -eu
+          packaging/build-rpm.sh dist
+
       - name: Publish the release
         env:
           TOKEN: ${{ secrets.RELEASE_TOKEN }}
@@ -200,15 +216,31 @@ jobs:
             exit 1
           fi
 
+          # The packaging scripts leave the AppDir and the two staging trees
+          # they assembled in the same output directory, so what ships is
+          # copied out by name instead of left for a glob to find. The names
+          # come from the architecture table, which is also what produced them.
+          fail() { echo "ERROR: $*" >&2; exit 1; }
+          . ./packaging/linux-baseline
+          . ./packaging/linux-architectures
+
           VERSION="$(packaging/workspace-version.sh)"
-          APPIMAGE=Ephervex-x86_64.AppImage
-          DEB="ephervex_${VERSION}_amd64.deb"
-          cd dist
-          for artifact in "${APPIMAGE}" "${DEB}"; do
-            [ -f "${artifact}" ] || { echo "ERROR: ${artifact} was not built." >&2; exit 1; }
-            sha256sum "${artifact}" > "${artifact}.sha256"
+          APPIMAGE_ARCH="$(ephervex_appimage_arch "${EPHERVEX_BASELINE_ARCH}")"
+          DEB_ARCH="$(ephervex_deb_arch "${EPHERVEX_BASELINE_ARCH}")"
+          RPM_ARCH="$(ephervex_rpm_arch "${EPHERVEX_BASELINE_ARCH}")"
+
+          mkdir -p upload
+          for artifact in \
+            "Ephervex-${APPIMAGE_ARCH}.AppImage" \
+            "ephervex_${VERSION}_${DEB_ARCH}.deb" \
+            "ephervex-${VERSION}-1.${RPM_ARCH}.rpm"; do
+            [ -f "dist/${artifact}" ] || fail "${artifact} was not built."
+            cp "dist/${artifact}" "upload/${artifact}"
+            # Beside each artifact, so a download can be checked without
+            # trusting the page it came from.
+            (cd upload && sha256sum "${artifact}" > "${artifact}.sha256")
           done
-          cd ..
+          ls -l upload
 
           API="${GITHUB_API_URL}"
           REPO="${GITHUB_REPOSITORY}"
@@ -230,15 +262,16 @@ jobs:
             echo "Creating release for ${TAG}"
             created="$(api POST "/repos/${REPO}/releases" \
               -H 'Content-Type: application/json' \
-              -d "{\"tag_name\":\"${TAG}\",\"name\":\"${TAG}\",\"body\":\"Ephervex ${TAG} for Linux x86_64.\"}")"
+              -d "$(jq -n --arg tag "${TAG}" \
+                    '{tag_name: $tag, name: $tag,
+                      body: ("Ephervex " + $tag + " for Linux x86_64.")}')")"
             rel_id="$(echo "$created" | jq -r '.id')"
           else
             echo "Reusing existing release for ${TAG}"
           fi
 
-          # Named one by one rather than globbed: the packaging scripts leave
-          # the AppDir and the package staging tree they assembled in the same
-          # output directory, and a glob would try to upload a directory.
+          # Everything the step above put in the upload directory, which is
+          # only ever the artifacts and their checksums.
           #
           # Publishing over an existing release replaces its assets rather than
           # adding to them. Forgejo accepts a second attachment under a name it
@@ -246,12 +279,12 @@ jobs:
           # different files under one name and a download address unable to say
           # which one it means.
           assets="$(curl -sS -H "$AUTH" "${API}/repos/${REPO}/releases/${rel_id}/assets" || echo '[]')"
-          for name in "${APPIMAGE}" "${APPIMAGE}.sha256" "${DEB}" "${DEB}.sha256"; do
+          find upload -maxdepth 1 -type f -printf '%P\n' | sort | while read -r name; do
             for old in $(echo "$assets" | jq -r --arg n "$name" '.[] | select(.name == $n) | .id'); do
               echo "Removing the existing ${name} (asset ${old})"
               api DELETE "/repos/${REPO}/releases/${rel_id}/assets/${old}" >/dev/null
             done
             echo "Uploading ${name}"
             api POST "/repos/${REPO}/releases/${rel_id}/assets?name=${name}" \
-              -F "attachment=@dist/${name}"
+              -F "attachment=@upload/${name}"
           done
