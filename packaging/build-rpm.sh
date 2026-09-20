@@ -134,6 +134,8 @@ install -m 0644 "${PACKAGING_DIR}/ephervex.metainfo.xml" \
 # RPM's own place for license texts, which is where `rpm -qL ephervex` looks and
 # what `--nodocs` installations still keep.
 install -m 0644 "${REPO_ROOT}/LICENSE" "${STAGE}/usr/share/licenses/ephervex/LICENSE"
+install -m 0644 "${REPO_ROOT}/THIRD-PARTY-LICENSES.md" \
+    "${STAGE}/usr/share/licenses/ephervex/THIRD-PARTY-LICENSES.md"
 
 ICON_SOURCE="${REPO_ROOT}/assets/icons/hicolor"
 for size in 16x16 24x24 32x32 48x48 64x64 128x128 256x256 512x512; do
@@ -222,6 +224,7 @@ cp -a ${STAGE}/. %{buildroot}/
 
 %files
 %license /usr/share/licenses/ephervex/LICENSE
+%license /usr/share/licenses/ephervex/THIRD-PARTY-LICENSES.md
 /usr/bin/ephervex
 /usr/bin/ephervex-gui
 /usr/share/applications/ephervex.desktop

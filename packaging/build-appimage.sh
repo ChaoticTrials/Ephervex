@@ -140,6 +140,7 @@ note "assembling ${APPDIR}"
 install -d -m 0755 "${APPDIR}/usr/bin"
 install -d -m 0755 "${APPDIR}/usr/share/applications"
 install -d -m 0755 "${APPDIR}/usr/share/metainfo"
+install -d -m 0755 "${APPDIR}/usr/share/doc/ephervex"
 
 install -m 0755 "${GUI_BINARY}" "${APPDIR}/usr/bin/ephervex-gui"
 install -m 0755 "${CLI_BINARY}" "${APPDIR}/usr/bin/ephervex"
@@ -149,6 +150,13 @@ install -m 0644 "${PACKAGING_DIR}/ephervex.desktop" \
     "${APPDIR}/usr/share/applications/ephervex.desktop"
 install -m 0644 "${PACKAGING_DIR}/ephervex.metainfo.xml" \
     "${APPDIR}/usr/share/metainfo/ephervex.metainfo.xml"
+# The licenses travel with the binaries, because that is what satisfies them.
+# Apache-2.0 and every permissive license the dependencies use ask for their
+# text to be distributed with the software; a screen a user may never open is
+# how they find it, not how the condition is met.
+install -m 0644 "${REPO_ROOT}/LICENSE" "${APPDIR}/usr/share/doc/ephervex/LICENSE"
+install -m 0644 "${REPO_ROOT}/THIRD-PARTY-LICENSES.md" \
+    "${APPDIR}/usr/share/doc/ephervex/THIRD-PARTY-LICENSES.md"
 
 ICON_SOURCE="${REPO_ROOT}/assets/icons/hicolor"
 for size in 16x16 24x24 32x32 48x48 64x64 128x128 256x256 512x512; do

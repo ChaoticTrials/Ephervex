@@ -941,6 +941,39 @@ provider IDs remain exact technical values.
 CLI JSON output is written to stdout. Logs and human progress are written to
 stderr so machine-readable output remains valid.
 
+## Third-party licenses
+
+What Ephervex depends on, and under what terms, is generated from the real
+dependency graph and committed. `cargo-about` reads `Cargo.lock` and each
+crate's own license file; `tools/licenses/inventory.py` turns that into a
+compact inventory at `crates/core/data/third-party-licenses.json` and the
+readable `THIRD-PARTY-LICENSES.md`. Nothing in the application decides what a
+dependency is licensed under, and there is no code path that could: the only
+source is the compiled-in constant.
+
+`App::third_party_licenses` parses it once per process and both frontends read
+that one service, so `ephervex licenses` and the desktop application's "About &
+Licenses" screen cannot disagree about what a release contains. It is an
+associated function rather than a method, because compiled-in build data needs
+no storage, no network, and no open application, and an about screen should
+answer on a machine whose storage is broken.
+
+Texts are deduplicated by content rather than by identifier. Forty crates under
+MIT ship forty MIT files differing in their copyright line, and collapsing them
+would drop the attribution the license exists to require, so a crate names the
+texts that cover it and the same text is stored once.
+
+Attribution is satisfied by the documents the artifacts carry, not by the
+screen. Every artifact ships `LICENSE` and `THIRD-PARTY-LICENSES.md`; the
+screen and the command are how a user finds them. Where a license has a further
+condition, it is met where the condition says: Slint's royalty-free license
+asks for its `AboutSlint` widget on an about screen, and that widget is on the
+"About & Licenses" tab (ADR 0001).
+
+A dependency change that is not regenerated fails CI, and `cargo deny check
+licenses` refuses a license `deny.toml` does not allow, so an unexpected license
+is a review question rather than something already released.
+
 ## Supported scope and known boundaries
 
 The supported scope includes Linux, Minecraft release versions from 1.12.2

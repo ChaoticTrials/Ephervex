@@ -17,4 +17,8 @@
 # Development cache for the Minecraft options tooling: client JARs, Mojang
 # metadata, analyzer output, and the generated remote feed.
 /tools/minecraft-options/.cache/
+
+# Where tools/licenses/provision-tools.sh puts the pinned cargo-about and
+# cargo-deny binaries. What they produce is committed; they are not.
+/license-tools/
 __pycache__/

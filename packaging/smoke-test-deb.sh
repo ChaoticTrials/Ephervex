@@ -81,6 +81,7 @@ for entry in "${PAYLOAD[@]}"; do
     usr/share/applications/ephervex-url-handler.desktop) ;;
     usr/share/metainfo/ephervex.metainfo.xml) ;;
     usr/share/doc/ephervex/copyright) ;;
+    usr/share/doc/ephervex/THIRD-PARTY-LICENSES.md) ;;
     usr/share/icons/hicolor/*/apps/ephervex.png) ;;
     *) fail "the package ships ${entry}, which is not part of the declared payload" ;;
     esac
@@ -93,9 +94,14 @@ for required in \
     usr/share/applications/ephervex.desktop \
     usr/share/metainfo/ephervex.metainfo.xml \
     usr/share/doc/ephervex/copyright \
+    usr/share/doc/ephervex/THIRD-PARTY-LICENSES.md \
     usr/share/icons/hicolor/256x256/apps/ephervex.png; do
     [[ -f "${ROOT}/${required}" ]] || fail "the package is missing ${required}"
 done
+# Not merely present: a generated document that came out empty would satisfy
+# the check above while distributing none of the terms it exists to carry.
+grep -q 'Third-party licenses' "${ROOT}/usr/share/doc/ephervex/THIRD-PARTY-LICENSES.md" ||
+    fail "the installed third-party license document is not the generated one"
 for binary in usr/bin/ephervex usr/bin/ephervex-gui; do
     [[ -x "${ROOT}/${binary}" ]] || fail "${binary} is not executable"
 done

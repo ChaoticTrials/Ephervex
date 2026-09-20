@@ -103,8 +103,20 @@ jobs:
 
       - name: Verify the tooling datasets
         run: |
-          python3 -m py_compile tools/minecraft-options/*.py
+          python3 -m py_compile tools/minecraft-options/*.py tools/licenses/*.py
           python3 -m unittest discover -s tools/minecraft-options
+          python3 -m unittest discover -s tools/licenses
+
+      - name: Verify the third-party license inventory
+        # A tag must not publish artifacts carrying a THIRD-PARTY-LICENSES.md
+        # that the lockfile no longer produces, which is why this is in the
+        # release gate and not only in CI.
+        run: |
+          set -eu
+          PATH="$(tools/licenses/provision-tools.sh license-tools)":"$PATH"
+          export PATH
+          tools/licenses/generate.sh --check
+          cargo deny check licenses
 
       - name: Verify the packaging architecture table
         # The names Debian, RPM, AppImage, and the dynamic linker each use for

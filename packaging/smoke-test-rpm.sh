@@ -116,9 +116,14 @@ for required in \
     usr/share/applications/ephervex.desktop \
     usr/share/metainfo/ephervex.metainfo.xml \
     usr/share/licenses/ephervex/LICENSE \
+    usr/share/licenses/ephervex/THIRD-PARTY-LICENSES.md \
     usr/share/icons/hicolor/256x256/apps/ephervex.png; do
     [[ -f "${ROOT}/${required}" ]] || fail "the package is missing ${required}"
 done
+# Not merely present: a generated document that came out empty would satisfy
+# the check above while distributing none of the terms it exists to carry.
+grep -q 'Third-party licenses' "${ROOT}/usr/share/licenses/ephervex/THIRD-PARTY-LICENSES.md" ||
+    fail "the installed third-party license document is not the generated one"
 for binary in usr/bin/ephervex usr/bin/ephervex-gui; do
     [[ -x "${ROOT}/${binary}" ]] || fail "${binary} is not executable"
 done
@@ -130,6 +135,9 @@ note "both binaries are installed, at real paths, executable"
 LICENSE_FILES=$(rpm -qpL "${ARTIFACT}" 2>/dev/null)
 printf '%s\n' "${LICENSE_FILES}" | grep -q '^/usr/share/licenses/ephervex/LICENSE$' ||
     fail "the project's own license is not marked as a license file"
+printf '%s\n' "${LICENSE_FILES}" |
+    grep -q '^/usr/share/licenses/ephervex/THIRD-PARTY-LICENSES.md$' ||
+    fail "the dependencies' licenses are not marked as license files"
 note "the license texts survive a --nodocs installation"
 
 # --- the desktop entry points at what the package installs -------------------

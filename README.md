@@ -263,6 +263,10 @@ cargo test --workspace
 
 ## Documentation
 
+* [`THIRD-PARTY-LICENSES.md`](THIRD-PARTY-LICENSES.md) carries the full terms
+  of every open-source package Ephervex is built on, generated from the
+  dependency graph. `ephervex licenses` shows the same list, and so does the
+  desktop application's About & Licenses screen.
 * [`docs/architecture.md`](docs/architecture.md) describes crate ownership,
   dependency direction, workflows, and security boundaries.
 * [`docs/release.md`](docs/release.md) covers supported Linux scope, storage

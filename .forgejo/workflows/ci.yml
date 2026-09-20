@@ -40,8 +40,26 @@ jobs:
 
       - name: Verify the tooling datasets
         run: |
-          python3 -m py_compile tools/minecraft-options/*.py
+          python3 -m py_compile tools/minecraft-options/*.py tools/licenses/*.py
           python3 -m unittest discover -s tools/minecraft-options
+          python3 -m unittest discover -s tools/licenses
+
+      - name: Verify the third-party license inventory
+        # Two halves of one rule. The staleness check regenerates the inventory
+        # from Cargo.lock and fails if the committed files differ, which is
+        # what makes "generated from the build" true rather than aspirational.
+        # `cargo deny check licenses` is the policy half: a dependency arriving
+        # under a license nobody accepted fails review instead of shipping.
+        #
+        # about.toml declares both release architectures, so what is checked
+        # here is the union of what either artifact contains rather than what
+        # this runner happens to be.
+        run: |
+          set -eu
+          PATH="$(tools/licenses/provision-tools.sh license-tools)":"$PATH"
+          export PATH
+          tools/licenses/generate.sh --check
+          cargo deny check licenses
 
       - name: Verify the packaging architecture table
         # The names Debian, RPM, AppImage, and the dynamic linker each use for

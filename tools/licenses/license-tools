@@ -1,0 +1,30 @@
+# The two tools the license inventory is generated and enforced with, pinned.
+#
+# Same rule as packaging/host-tools: what a release contains is decided in a
+# reviewed file, not by whatever a package manager or a registry resolves on the
+# day. `cargo install` would build whatever the crate's own lockfile allows and
+# take minutes doing it; these are the upstream release binaries, checked
+# against the digest this procedure was verified with.
+#
+# Both are pinned at an exact version rather than a rolling tag, so a new
+# upstream release cannot change what the staleness check in CI compares
+# against. Moving to a newer one is a deliberate change here, followed by
+# regenerating the inventory and committing whatever actually changed.
+#
+# **x86_64 only, deliberately.** The inventory does not depend on the machine
+# that generates it: about.toml declares both release architectures, so the
+# dependency graph is the union of what either artifact contains. Checking it
+# once is checking it for both, and pinning an aarch64 binary nothing runs
+# would be configuration with no build behind it.
+
+# cargo-about, which reads Cargo.lock and each crate's own license file.
+# 0.7.1, digest confirmed against upstream's published .sha256 (2026-09-20).
+EPHERVEX_CARGO_ABOUT_VERSION=0.7.1
+EPHERVEX_CARGO_ABOUT_URL=https://github.com/EmbarkStudios/cargo-about/releases/download/0.7.1/cargo-about-0.7.1-x86_64-unknown-linux-musl.tar.gz
+EPHERVEX_CARGO_ABOUT_SHA256=395cde37f70a77f2bdb0eeaded96e294b0338482b937b0e813f61d1221f06642
+
+# cargo-deny, which enforces the license policy in deny.toml.
+# 0.20.2, digest confirmed against upstream's published .sha256 (2026-09-20).
+EPHERVEX_CARGO_DENY_VERSION=0.20.2
+EPHERVEX_CARGO_DENY_URL=https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz
+EPHERVEX_CARGO_DENY_SHA256=9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f

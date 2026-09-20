@@ -57,9 +57,17 @@ for required in \
     usr/bin/ephervex-gui \
     usr/share/applications/ephervex.desktop \
     usr/share/metainfo/ephervex.metainfo.xml \
+    usr/share/doc/ephervex/LICENSE \
+    usr/share/doc/ephervex/THIRD-PARTY-LICENSES.md \
     usr/share/icons/hicolor/256x256/apps/ephervex.png; do
     [[ -e "${ROOT}/${required}" ]] || fail "the package is missing ${required}"
 done
+# Not merely present: a generated document that came out empty would satisfy
+# the check above while distributing none of the terms it exists to carry.
+grep -q 'Third-party licenses' "${ROOT}/usr/share/doc/ephervex/THIRD-PARTY-LICENSES.md" ||
+    fail "the bundled third-party license document is not the generated one"
+grep -q 'Apache License' "${ROOT}/usr/share/doc/ephervex/LICENSE" ||
+    fail "the bundled project license is not the Apache-2.0 text"
 [[ -x "${ROOT}/AppRun" ]] || fail "AppRun is not executable"
 note "every expected file is present"
 

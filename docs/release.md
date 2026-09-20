@@ -561,6 +561,8 @@ Ephervex.AppDir/
   usr/bin/ephervex-gui                              desktop application
   usr/share/applications/ephervex.desktop
   usr/share/metainfo/ephervex.metainfo.xml
+  usr/share/doc/ephervex/LICENSE                    Ephervex's own terms
+  usr/share/doc/ephervex/THIRD-PARTY-LICENSES.md    its dependencies' terms
   usr/share/icons/hicolor/<size>/apps/ephervex.png  8 sizes, 16x16 to 512x512
 ```
 
@@ -576,10 +578,18 @@ there is nothing to dispatch: both binaries are files on `PATH`.
 /usr/share/icons/hicolor/<size>/apps/ephervex.png  8 sizes, 16x16 to 512x512
 ```
 
-They differ only where the two conventions do. A Debian package puts its license
-text at `/usr/share/doc/ephervex/copyright`; an RPM marks it as a license file,
-which puts it under `/usr/share/licenses/ephervex/` and keeps it even on a
+They differ only where the two conventions do. A Debian package puts its own
+license at `/usr/share/doc/ephervex/copyright` and the dependencies' texts
+beside it as `THIRD-PARTY-LICENSES.md`; an RPM marks both as license files,
+which puts them under `/usr/share/licenses/ephervex/` and keeps them even on a
 `--nodocs` installation.
+
+**Every artifact carries both license documents**, because that is what
+satisfies them: Apache-2.0 and every permissive license the dependencies use ask
+for their text to be distributed with the software. The desktop application's
+"About & Licenses" screen and `ephervex licenses` read the same generated data,
+but a screen a user may never open is how they find the terms, not how the
+condition is met.
 
 Everything the application reads at runtime is compiled into the binaries: the
 Minecraft options compatibility dataset, the preference catalog, the Fluent
@@ -656,6 +666,77 @@ That is a **reproducible release procedure**. It is not a claim of bit-for-bit
 reproducibility across different environments, which has not been verified and
 should not be assumed.
 
+The RPM package is reproducible the same way, and needs one thing the others do
+not: `build-rpm.sh` sets every staged file's timestamp from `SOURCE_DATE_EPOCH`
+before packaging, because rpm records file mtimes from the staging tree and
+would otherwise produce a package that differs from the last one only in when
+it was built.
+
+### The third-party license inventory
+
+What Ephervex depends on and under what terms is generated from the real
+dependency graph, never written by hand:
+
+```bash
+tools/licenses/generate.sh          # regenerate, and write the two documents
+tools/licenses/generate.sh --check  # fail if the committed ones are stale
+```
+
+`cargo-about` reads `Cargo.lock` and each crate's own license file;
+[`tools/licenses/inventory.py`](../tools/licenses/inventory.py) turns that into
+the two committed documents. [`about.toml`](../about.toml) says which licenses
+are acceptable and resolves the one dependency offered under several.
+
+Two outputs, one builder, so they cannot disagree:
+
+- `crates/core/data/third-party-licenses.json`, compact and compiled into the
+  binaries, which is what `ephervex licenses` and the desktop application's
+  "About & Licenses" screen read;
+- `THIRD-PARTY-LICENSES.md`, the readable document every artifact carries.
+
+Generation is `--locked --offline`, so the graph is the committed one and the
+license texts come from the crate sources on disk rather than from a remote
+metadata service whose answers can change between two runs. Generating,
+committing, and generating again produces no diff, which is what makes the CI
+staleness check meaningful rather than noisy.
+
+Two host dependencies, pinned in
+[`tools/licenses/license-tools`](../tools/licenses/license-tools) with the
+SHA-256 each was verified against, and provisioned the same way packaging's are:
+
+```bash
+PATH="$(tools/licenses/provision-tools.sh license-tools)":"$PATH"
+```
+
+`cargo-about` generates; `cargo deny check licenses` enforces
+[`deny.toml`](../deny.toml), so a dependency arriving under a license nobody
+accepted fails review rather than shipping. Both run in CI and in the release
+gate.
+
+**The Slint exception.** Slint is offered under GPL-3.0-only, a royalty-free
+license, and a commercial one at once. Ephervex takes the royalty-free option,
+recorded per crate in `about.toml` and `deny.toml` rather than as a blanket
+allowance, so no other dependency can arrive under those terms unnoticed. Its
+condition is attribution: the desktop application shows Slint's own `AboutSlint`
+widget on the "About & Licenses" screen, which is what a release ships under
+(ADR 0001, ADR 0018). Removing that widget would put a release outside its
+terms, and `crates/gui/tests/third_party_license_modal.rs` fails if it goes.
+
+Because Slint's license is not an SPDX identifier, `cargo-about` resolves the
+expression but has no text to attach. The clarification in `about.toml` names
+the file in the crate that carries the terms and the digest it must have, and
+the builder reads it from there. An upgrade that changes that file stops
+generation instead of silently changing what Ephervex ships under.
+
+> **Deviation from the original sketch.** The plan called for a handlebars
+> template emitting the JSON inventory directly. License texts contain quotes,
+> backslashes, and control characters, and handlebars escapes for HTML rather
+> than JSON, so that template produces invalid JSON for exactly the inputs it
+> exists to carry. The builder reads cargo-about's own `--format json` and
+> encodes with a JSON encoder instead. It also drops the absolute cargo
+> registry paths that output carries, which would otherwise put the build
+> machine's home directory in a committed file.
+
 The generated Minecraft datasets that ship in the binaries are committed to the
 repository and are never fetched during a build. Verifying that they are exactly
 what the tooling regenerates needs the maintainer's untracked development cache
@@ -678,7 +759,12 @@ not the analysis root. See
 ```bash
 python3 -m py_compile tools/minecraft-options/*.py
 python3 -m unittest discover -s tools/minecraft-options
+python3 -m unittest discover -s tools/licenses
 packaging/test-linux-architectures.sh
+
+PATH="$(tools/licenses/provision-tools.sh license-tools)":"$PATH"
+tools/licenses/generate.sh --check
+cargo deny check licenses
 
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings

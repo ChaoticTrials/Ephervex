@@ -124,6 +124,10 @@ install -m 0644 "${PACKAGING_DIR}/ephervex-url-handler.desktop" \
 install -m 0644 "${PACKAGING_DIR}/ephervex.metainfo.xml" \
     "${STAGE}/usr/share/metainfo/ephervex.metainfo.xml"
 install -m 0644 "${REPO_ROOT}/LICENSE" "${STAGE}/usr/share/doc/ephervex/copyright"
+# Beside it rather than folded into it: `copyright` is Debian's field for the
+# package's own terms, and the dependencies' texts are a different document.
+install -m 0644 "${REPO_ROOT}/THIRD-PARTY-LICENSES.md" \
+    "${STAGE}/usr/share/doc/ephervex/THIRD-PARTY-LICENSES.md"
 
 ICON_SOURCE="${REPO_ROOT}/assets/icons/hicolor"
 for size in 16x16 24x24 32x32 48x48 64x64 128x128 256x256 512x512; do
