@@ -146,6 +146,14 @@ and restoration run through the shared cancellable operation infrastructure.
 Retention is always user-managed. The host deletion dialog includes the number
 of retained snapshots that deleting its files also removes.
 
+## Dependency-aware mod isolation
+
+Isolation planning uses the same required-dependency graph as mod toggles. A
+candidate is a root and its complete required closure; shared libraries remain
+enabled whenever any selected root needs them. Pinned mods carry their own
+transitive closure. Required cycles have one deterministic representative.
+Missing jars and incomplete dependency knowledge are shown before starting.
+
 ## Reusable artifact cache budget
 
 The cache under the XDG cache root is a disposable optimization, never a source
