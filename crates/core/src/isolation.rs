@@ -230,6 +230,16 @@ pub struct IsolationResultCandidate {
     pub closure: Vec<PathBuf>,
 }
 
+/// What reconciling a host with its isolation session had to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IsolationReconciliation {
+    /// The host's mods already matched the intended configuration.
+    AlreadyApplied,
+    /// The intended configuration was reapplied through resume.
+    Reapplied,
+}
+
 /// Final report returned after the durable session marker is removed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IsolationReport {
@@ -302,8 +312,12 @@ pub enum IsolationError {
     },
     #[error("the current isolation round has already been answered")]
     NotAwaitingAnswer,
+    #[error("the mods of {host} no longer match the current isolation round")]
+    NotApplied { host: String },
     #[error("the isolation result is not ready to finish")]
     NotFinished,
+    #[error("the isolation session has no current round, contradiction, or result")]
+    InconsistentState,
     #[error("the isolation session belongs to {found}, not {expected}")]
     HostMismatch { expected: String, found: String },
     #[error("isolation state at {path} could not be read")]
@@ -344,11 +358,12 @@ impl IsolationError {
             Self::UnrecordedDependencies { .. } => "error-isolation-unrecorded",
             Self::MissingDependencies { .. } => "error-isolation-missing-dependencies",
             Self::NotAwaitingAnswer => "error-isolation-not-awaiting-answer",
+            Self::NotApplied { .. } => "error-isolation-not-applied",
             Self::NotFinished => "error-isolation-not-finished",
             Self::HostMismatch { .. } => "error-isolation-host-mismatch",
             Self::Unreadable { .. } => "error-isolation-unreadable",
             Self::Unwritable { .. } => "error-isolation-unwritable",
-            Self::Invalid { .. } => "error-isolation-invalid",
+            Self::Invalid { .. } | Self::InconsistentState => "error-isolation-invalid",
             Self::UnsupportedVersion { .. } => "error-isolation-version-newer",
             Self::Snapshot(error) => error.message_id(),
         }
@@ -359,7 +374,8 @@ impl IsolationError {
         match self {
             Self::HostRunning { host }
             | Self::AlreadyActive { host }
-            | Self::NotActive { host } => vec![("host", host.clone())],
+            | Self::NotActive { host }
+            | Self::NotApplied { host } => vec![("host", host.clone())],
             Self::UnrecordedDependencies { paths } => {
                 vec![("count", paths.len().to_string())]
             }
@@ -600,7 +616,22 @@ impl App {
         self.refuse_isolation_while_running(host)?;
         let session = self.read_required_session(host)?;
         self.apply_isolation_configuration(host, &session, session.intended_enabled())?;
-        Ok(step_for(&session))
+        Ok(step_for(&session)?)
+    }
+
+    /// Makes the host's mods match the session's intended configuration.
+    ///
+    /// The session document, not the mods folder, is authoritative. A host
+    /// that already matches is left untouched; otherwise the configuration is
+    /// reapplied through [`Self::resume_isolation`], which refuses while the
+    /// host is running and leaves the session unchanged on failure.
+    pub fn reconcile_isolation(&self, host: InstalledHost) -> CoreResult<IsolationReconciliation> {
+        let session = self.read_required_session(host)?;
+        if self.isolation_configuration_applied(host, &session)? {
+            return Ok(IsolationReconciliation::AlreadyApplied);
+        }
+        self.resume_isolation(host)?;
+        Ok(IsolationReconciliation::Reapplied)
     }
 
     /// Records an observation and advances deterministic ddmin.
@@ -616,6 +647,11 @@ impl App {
             .current_round
             .clone()
             .ok_or(IsolationError::NotAwaitingAnswer)?;
+        // An answer describes the configuration that was tested. If the host
+        // no longer has the round's mods, it was not that configuration.
+        if !self.isolation_configuration_applied(host, &session)? {
+            return Err(IsolationError::NotApplied { host: host.id() }.into());
+        }
         let contradiction = contradiction_for(&session.history, &round, answer);
         session.history.push(IsolationRoundRecord {
             round: round.clone(),
@@ -633,7 +669,7 @@ impl App {
         advance_search(&mut session, answer);
         write_session(&path, &session)?;
         self.apply_isolation_configuration(host, &session, session.intended_enabled())?;
-        Ok(step_for(&session))
+        Ok(step_for(&session)?)
     }
 
     /// Removes one answer, restores that exact round, and reapplies its configuration.
@@ -725,6 +761,25 @@ impl App {
         }
     }
 
+    /// Whether every mod the session manages is enabled exactly when intended.
+    fn isolation_configuration_applied(
+        &self,
+        host: InstalledHost,
+        session: &IsolationSession,
+    ) -> CoreResult<bool> {
+        let graph = ModGraph::build(self, host)?;
+        let intended: BTreeSet<_> = session.intended_enabled().iter().collect();
+        Ok(session.plan.available.iter().all(|path| {
+            graph.index_of(path).is_some_and(|index| {
+                match graph.entries[index].mod_entry.presence {
+                    ModPresence::Installed => intended.contains(path),
+                    ModPresence::Disabled => !intended.contains(path),
+                    ModPresence::Missing => false,
+                }
+            })
+        }))
+    }
+
     fn apply_isolation_configuration(
         &self,
         host: InstalledHost,
@@ -743,23 +798,15 @@ impl App {
     }
 }
 
-fn step_for(session: &IsolationSession) -> IsolationStep {
+fn step_for(session: &IsolationSession) -> Result<IsolationStep, IsolationError> {
     if let Some(contradiction) = &session.contradiction {
-        IsolationStep::Contradiction(contradiction.clone())
+        Ok(IsolationStep::Contradiction(contradiction.clone()))
     } else if let Some(outcome) = &session.outcome {
-        IsolationStep::Complete(outcome.clone())
+        Ok(IsolationStep::Complete(outcome.clone()))
     } else if let Some(round) = &session.current_round {
-        IsolationStep::AwaitingAnswer(round.clone())
+        Ok(IsolationStep::AwaitingAnswer(round.clone()))
     } else {
-        // A valid document always has exactly one of these states. If a newer
-        // additive document does not, treating it as a non-finishable result is
-        // safer than inventing a configuration.
-        IsolationStep::Complete(IsolationOutcome {
-            roots: Vec::new(),
-            enabled: session.intended_enabled().to_vec(),
-            disabled: Vec::new(),
-            confidence: IsolationConfidence::SmallestReached,
-        })
+        Err(IsolationError::InconsistentState)
     }
 }
 
@@ -786,13 +833,18 @@ fn advance_search(session: &mut IsolationSession, answer: RoundAnswer) {
     }
 
     if answer == RoundAnswer::Reproduced {
+        let next_granularity = if current.kind == IsolationRoundKind::Complement {
+            session.search.granularity.saturating_sub(1).max(2)
+        } else {
+            2
+        };
         session.search.suspects = current.enabled_roots;
         session.suspects = session.search.suspects.clone();
         if session.search.suspects.len() <= 1 {
             complete_search(session, IsolationConfidence::SmallestReached);
             return;
         }
-        session.search.granularity = 2;
+        session.search.granularity = next_granularity.min(session.search.suspects.len());
         session.search.phase = SearchPhase::Subsets;
         session.search.group_index = 0;
     } else {
@@ -1009,7 +1061,24 @@ fn read_session_if_present(path: &Path) -> Result<Option<IsolationSession>, Isol
             supported: ISOLATION_VERSION,
         });
     }
+    validate_session_shape(path, &document.session)?;
     Ok(Some(document.session))
+}
+
+fn validate_session_shape(path: &Path, session: &IsolationSession) -> Result<(), IsolationError> {
+    let terminal_states = usize::from(session.current_round.is_some())
+        + usize::from(session.contradiction.is_some())
+        + usize::from(session.outcome.is_some());
+    if terminal_states == 1 {
+        return Ok(());
+    }
+    Err(IsolationError::Invalid {
+        path: path.to_path_buf(),
+        source: serde_json::Error::io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "expected exactly one current round, contradiction, or outcome",
+        )),
+    })
 }
 
 fn remove_session(path: &Path) -> Result<(), IsolationError> {

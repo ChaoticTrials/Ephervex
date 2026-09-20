@@ -107,9 +107,10 @@ pub use instance::{
 };
 pub use isolation::{
     IsolationCandidate, IsolationConfidence, IsolationError, IsolationLinkedServer,
-    IsolationMissingDependency, IsolationOutcome, IsolationPlan, IsolationReport, IsolationRequest,
-    IsolationResultCandidate, IsolationRound, IsolationRoundKind, IsolationRoundRecord,
-    IsolationSession, IsolationStep, RoundAnswer, RoundContradiction,
+    IsolationMissingDependency, IsolationOutcome, IsolationPlan, IsolationReconciliation,
+    IsolationReport, IsolationRequest, IsolationResultCandidate, IsolationRound,
+    IsolationRoundKind, IsolationRoundRecord, IsolationSession, IsolationStep, RoundAnswer,
+    RoundContradiction,
 };
 pub use launch::{LaunchOptions, LaunchOutcome};
 pub use licenses::{

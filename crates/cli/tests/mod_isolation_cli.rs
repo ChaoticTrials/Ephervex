@@ -215,3 +215,42 @@ fn the_cli_cancel_restores_the_pre_isolation_configuration() {
     assert_eq!(enabled(&root), before);
     assert!(!root.join(".launcher/isolation.json").exists());
 }
+
+#[test]
+fn the_cli_refuses_an_answer_for_mods_the_host_no_longer_has_until_resumed() {
+    let sandbox = Sandbox::new();
+    let (instance, root) = create_instance(&sandbox, "Isolation CLI drift");
+    let host = ["--instance", instance.as_str()];
+    let started = sandbox.json(&[
+        "--json",
+        "mod",
+        "isolate",
+        "start",
+        host[0],
+        host[1],
+        "--keep",
+        "mods/pin.jar",
+    ]);
+    let disabled = started["value"]["disabled"][0].as_str().unwrap().to_owned();
+    let jar = root.join("minecraft").join(&disabled);
+    std::fs::rename(jar.with_extension("jar.disabled"), &jar).unwrap();
+
+    let refused = sandbox.run(&["mod", "isolate", "answer", host[0], host[1], "issue-gone"]);
+    assert!(!refused.status.success());
+    let status = sandbox.json(&["--json", "mod", "isolate", "status", host[0], host[1]]);
+    assert_eq!(status["history"], json!([]));
+
+    let resumed = sandbox.json(&["--json", "mod", "isolate", "resume", host[0], host[1]]);
+    assert_eq!(resumed, started);
+    assert!(!jar.exists());
+    let answered = sandbox.json(&[
+        "--json",
+        "mod",
+        "isolate",
+        "answer",
+        host[0],
+        host[1],
+        "issue-gone",
+    ]);
+    assert_eq!(answered["value"]["index"], 2);
+}

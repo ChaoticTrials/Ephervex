@@ -1035,6 +1035,7 @@ error-isolation-not-active = { $host } has no isolation session to resume.
 error-isolation-unrecorded = { $count } mods have refreshable dependency information that has not been recorded. Refresh dependencies or explicitly accept reduced confidence.
 error-isolation-missing-dependencies = { $count } required dependencies are missing. Repair or install them before isolation.
 error-isolation-not-awaiting-answer = This isolation session is not waiting for a round answer.
+error-isolation-not-applied = The mods of { $host } no longer match the current isolation round. Resume the session to reapply the round, then test it again.
 error-isolation-not-finished = The isolation search has not reached a result yet.
 error-isolation-host-mismatch = This isolation session belongs to { $found }, not { $expected }.
 error-isolation-unreadable = Isolation state could not be read.

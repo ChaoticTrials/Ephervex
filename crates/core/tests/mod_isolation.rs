@@ -1,7 +1,8 @@
 //! Dependency-aware isolation uses one graph and preserves complete closures.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use ephervex_core::{
-    App, InstalledHost, IsolationConfidence, IsolationRequest, IsolationStep, Paths, RoundAnswer,
+    App, CoreError, InstalledHost, IsolationConfidence, IsolationError, IsolationRequest,
+    IsolationRoundKind, IsolationStep, Paths, RoundAnswer,
 };
 use ephervex_model::LoaderSelection;
 use ephervex_storage::{LaunchLock, NewClient, NewServer, Registry};
@@ -97,7 +98,11 @@ fn enabled_files(fixture: &Fixture) -> Vec<String> {
         .unwrap()
         .filter_map(Result::ok)
         .filter_map(|entry| entry.file_name().into_string().ok())
-        .filter(|name| name.ends_with(".jar"))
+        .filter(|name| {
+            Path::new(name)
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("jar"))
+        })
         .collect::<Vec<_>>();
     names.sort();
     names
@@ -304,6 +309,39 @@ fn ddmin_grows_granularity_for_an_interacting_pair() {
 }
 
 #[test]
+fn a_reproducing_complement_reduces_granularity_by_one() {
+    let fixture = Fixture::new();
+    let app = fixture.app();
+    app.begin_isolation(fixture.host, request(&["pin"]), &CancellationToken::new())
+        .unwrap();
+
+    let mut round = None;
+    for _ in 0..8 {
+        let IsolationStep::AwaitingAnswer(next) = app
+            .answer_isolation_round(fixture.host, RoundAnswer::DidNotReproduce)
+            .unwrap()
+        else {
+            panic!("the search should still be testing four-way groups");
+        };
+        round = Some(next);
+    }
+    let complement = round.expect("a complement round");
+    assert_eq!(complement.kind, IsolationRoundKind::Complement);
+    assert_eq!(complement.granularity, 4);
+    assert_eq!(complement.enabled_roots, mods(&["c", "d", "e"]));
+
+    let IsolationStep::AwaitingAnswer(next) = app
+        .answer_isolation_round(fixture.host, RoundAnswer::Reproduced)
+        .unwrap()
+    else {
+        panic!("the reproducing complement should start another subset pass");
+    };
+    assert_eq!(next.kind, IsolationRoundKind::Subset);
+    assert_eq!(next.granularity, 3);
+    assert_eq!(next.enabled_roots, mods(&["c"]));
+}
+
+#[test]
 fn reopening_and_resuming_reapplies_the_persisted_round() {
     let fixture = Fixture::new();
     let cancel = CancellationToken::new();
@@ -325,6 +363,183 @@ fn reopening_and_resuming_reapplies_the_persisted_round() {
         IsolationStep::AwaitingAnswer(round) if round == expected
     ));
     assert!(!fixture.root.join("minecraft/mods/d.jar").exists());
+}
+
+fn interrupt_round(fixture: &Fixture) {
+    // What a batch cut short leaves: one jar of the round in the wrong state.
+    std::fs::rename(
+        fixture.root.join("minecraft/mods/d.jar.disabled"),
+        fixture.root.join("minecraft/mods/d.jar"),
+    )
+    .unwrap();
+}
+
+#[test]
+fn reconciling_after_a_restart_reapplies_an_interrupted_round() {
+    let fixture = Fixture::new();
+    let round = fixture
+        .app()
+        .begin_isolation(fixture.host, request(&["pin"]), &CancellationToken::new())
+        .unwrap();
+    let applied = enabled_files(&fixture);
+    interrupt_round(&fixture);
+
+    let reopened = fixture.app();
+    assert_eq!(
+        reopened.reconcile_isolation(fixture.host).unwrap(),
+        ephervex_core::IsolationReconciliation::Reapplied
+    );
+    assert_eq!(enabled_files(&fixture), applied);
+    assert_eq!(
+        reopened
+            .isolation_state(fixture.host)
+            .unwrap()
+            .unwrap()
+            .current_round,
+        Some(round)
+    );
+}
+
+#[test]
+fn reconciling_a_host_that_already_matches_changes_nothing() {
+    let fixture = Fixture::new();
+    let app = fixture.app();
+    app.begin_isolation(fixture.host, request(&["pin"]), &CancellationToken::new())
+        .unwrap();
+    let path = fixture.root.join(".launcher/isolation.json");
+    let session = std::fs::read(&path).unwrap();
+    let applied = enabled_files(&fixture);
+
+    for _ in 0..2 {
+        assert_eq!(
+            app.reconcile_isolation(fixture.host).unwrap(),
+            ephervex_core::IsolationReconciliation::AlreadyApplied
+        );
+    }
+    assert_eq!(enabled_files(&fixture), applied);
+    assert_eq!(std::fs::read(&path).unwrap(), session);
+}
+
+#[test]
+fn an_answer_is_refused_while_the_host_does_not_have_the_rounds_mods() {
+    let fixture = Fixture::new();
+    let app = fixture.app();
+    app.begin_isolation(fixture.host, request(&["pin"]), &CancellationToken::new())
+        .unwrap();
+    interrupt_round(&fixture);
+
+    assert!(matches!(
+        app.answer_isolation_round(fixture.host, RoundAnswer::Reproduced),
+        Err(CoreError::Isolation(IsolationError::NotApplied { .. }))
+    ));
+    let session = app.isolation_state(fixture.host).unwrap().unwrap();
+    assert!(session.history.is_empty());
+
+    app.reconcile_isolation(fixture.host).unwrap();
+    app.answer_isolation_round(fixture.host, RoundAnswer::Reproduced)
+        .unwrap();
+}
+
+#[test]
+fn a_running_host_is_not_reconciled_until_it_stops() {
+    let fixture = Fixture::new();
+    let app = fixture.app();
+    app.begin_isolation(fixture.host, request(&["pin"]), &CancellationToken::new())
+        .unwrap();
+    interrupt_round(&fixture);
+    let drifted = enabled_files(&fixture);
+    let path = fixture.root.join(".launcher/isolation.json");
+    let session = std::fs::read(&path).unwrap();
+
+    let launch = LaunchLock::acquire(&fixture.root).unwrap();
+    assert!(matches!(
+        app.reconcile_isolation(fixture.host),
+        Err(CoreError::Isolation(IsolationError::HostRunning { .. }))
+    ));
+    assert!(
+        app.answer_isolation_round(fixture.host, RoundAnswer::Reproduced)
+            .is_err()
+    );
+    assert_eq!(enabled_files(&fixture), drifted);
+    assert_eq!(std::fs::read(&path).unwrap(), session);
+
+    drop(launch);
+    assert_eq!(
+        app.reconcile_isolation(fixture.host).unwrap(),
+        ephervex_core::IsolationReconciliation::Reapplied
+    );
+}
+
+#[test]
+fn a_failed_reconciliation_keeps_the_session_and_can_be_retried() {
+    let fixture = Fixture::new();
+    let app = fixture.app();
+    let round = app
+        .begin_isolation(fixture.host, request(&["pin"]), &CancellationToken::new())
+        .unwrap();
+    let path = fixture.root.join(".launcher/isolation.json");
+    let session = std::fs::read(&path).unwrap();
+    let moved = fixture.root.join("aside.jar");
+    std::fs::rename(fixture.root.join("minecraft/mods/a.jar"), &moved).unwrap();
+
+    assert!(app.reconcile_isolation(fixture.host).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), session);
+    assert!(
+        app.answer_isolation_round(fixture.host, RoundAnswer::Reproduced)
+            .is_err()
+    );
+
+    std::fs::rename(&moved, fixture.root.join("minecraft/mods/a.jar")).unwrap();
+    app.reconcile_isolation(fixture.host).unwrap();
+    assert_eq!(
+        app.isolation_state(fixture.host)
+            .unwrap()
+            .unwrap()
+            .current_round,
+        Some(round)
+    );
+}
+
+#[test]
+fn persisted_sessions_use_compact_version_one_documents_and_reject_newer_versions() {
+    let fixture = Fixture::new();
+    let app = fixture.app();
+    app.begin_isolation(fixture.host, request(&["pin"]), &CancellationToken::new())
+        .unwrap();
+    let path = fixture.root.join(".launcher/isolation.json");
+    let bytes = std::fs::read(&path).unwrap();
+    assert!(!bytes.contains(&b'\n'));
+    let mut document: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(document["isolation_version"], 1);
+
+    document["isolation_version"] = json!(2);
+    std::fs::write(&path, serde_json::to_vec(&document).unwrap()).unwrap();
+    assert!(matches!(
+        app.isolation_state(fixture.host),
+        Err(CoreError::Isolation(IsolationError::UnsupportedVersion {
+            found: 2,
+            supported: 1,
+            ..
+        }))
+    ));
+}
+
+#[test]
+fn structurally_incomplete_persisted_sessions_are_rejected() {
+    let fixture = Fixture::new();
+    let app = fixture.app();
+    app.begin_isolation(fixture.host, request(&["pin"]), &CancellationToken::new())
+        .unwrap();
+    let path = fixture.root.join(".launcher/isolation.json");
+    let mut document: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    document.as_object_mut().unwrap().remove("current_round");
+    std::fs::write(&path, serde_json::to_vec(&document).unwrap()).unwrap();
+
+    assert!(matches!(
+        app.isolation_state(fixture.host),
+        Err(CoreError::Isolation(IsolationError::Invalid { .. }))
+    ));
 }
 
 #[test]
@@ -408,6 +623,13 @@ fn round_mutations_refuse_a_running_host_but_the_session_does_not_hold_the_lock(
     let fixture = Fixture::new();
     let app = fixture.app();
     let cancel = CancellationToken::new();
+    let launch = LaunchLock::acquire(&fixture.root).unwrap();
+    assert!(
+        app.begin_isolation(fixture.host, request(&["pin"]), &cancel)
+            .is_err()
+    );
+    assert!(app.snapshots(fixture.host).unwrap().is_empty());
+    drop(launch);
     app.begin_isolation(fixture.host, request(&["pin"]), &cancel)
         .unwrap();
     let _launch = LaunchLock::acquire(&fixture.root).unwrap();
