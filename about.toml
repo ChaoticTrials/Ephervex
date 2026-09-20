@@ -1,0 +1,172 @@
+# The licenses Ephervex is allowed to ship, and how the exceptions are resolved.
+#
+# `cargo-about` reads this, walks the dependency graph in `Cargo.lock`, and
+# collects the license text of every crate that ends up in a release binary.
+# tools/licenses/inventory.py turns that into the committed inventory and the
+# THIRD-PARTY-LICENSES.md the artifacts carry; docs/release.md describes the
+# whole procedure and `cargo deny check licenses` enforces the same policy from
+# the other direction.
+#
+# A dependency arriving under a license not listed here fails generation rather
+# than shipping. That is the point: the answer to an unexpected license is a
+# decision, not a wider allowlist.
+
+# Both release architectures, so the graph is the union of what either artifact
+# contains and does not depend on which machine generated the inventory.
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
+
+# Neither kind is distributed. A dev-dependency exists only for `cargo test`,
+# and a build-dependency runs during the build and leaves nothing in the binary,
+# so listing either would claim Ephervex ships code it does not.
+ignore-dev-dependencies = true
+ignore-build-dependencies = true
+
+# Permissive licenses whose only condition is that the text and its copyright
+# notice travel with the binary, which shipping THIRD-PARTY-LICENSES.md does.
+accepted = [
+    "0BSD",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    # zlib/libpng terms under their own name, used by libbz2-rs-sys.
+    "bzip2-1.0.6",
+    "ISC",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+
+# Ephervex's own crates. They are Apache-2.0 and `publish = false`, and this
+# inventory is about third-party terms; the project's own license is the
+# LICENSE file every artifact already carries.
+[private]
+ignore = true
+
+# --- the Slint toolkit -------------------------------------------------------
+#
+# Slint is offered under three licenses at once: GPL-3.0-only, the Royalty-free
+# Desktop, Mobile, and Web Applications License 2.0, and a commercial one.
+# Ephervex takes the royalty-free option, which is why the desktop application
+# shows Slint's own `AboutSlint` widget on its "About & Licenses" screen: that
+# widget is condition 2(a) of the license, and removing it would put Ephervex
+# outside the terms it ships under (ADR 0001, ADR 0018).
+#
+# Recorded per crate rather than in the list above, so the choice applies to
+# exactly the crates it was made for and no dependency can arrive under these
+# terms unnoticed. The clarification names the file whose text ships and the
+# digest it has to have, so a Slint upgrade that changes the license is a
+# generation failure rather than a silent change of terms.
+
+# rfd's MIT notice carries its author's name in non-ASCII, and which text
+# cargo-about resolved for it differed between machines. Pinned to the file the
+# crate ships so the inventory is the same everywhere it is generated.
+[rfd.clarify]
+license = "MIT"
+
+[[rfd.clarify.files]]
+path = "LICENSE"
+checksum = "65fc947f4bac882a2cd104ef73c246b1b037059df9f2b3a58b7f77f0b9e56071"
+
+[slint]
+accepted = ["LicenseRef-Slint-Royalty-free-2.0"]
+
+[slint.clarify]
+license = "LicenseRef-Slint-Royalty-free-2.0"
+
+[[slint.clarify.files]]
+path = "LICENSES/LicenseRef-Slint-Royalty-free-2.0.md"
+checksum = "5167f5056e850419106ab6265efbdca7cba4d99c849d1445ca0bbf6a1e2315fe"
+
+[slint-macros]
+accepted = ["LicenseRef-Slint-Royalty-free-2.0"]
+
+[slint-macros.clarify]
+license = "LicenseRef-Slint-Royalty-free-2.0"
+
+[[slint-macros.clarify.files]]
+path = "LICENSES/LicenseRef-Slint-Royalty-free-2.0.md"
+checksum = "5167f5056e850419106ab6265efbdca7cba4d99c849d1445ca0bbf6a1e2315fe"
+
+[i-slint-common]
+accepted = ["LicenseRef-Slint-Royalty-free-2.0"]
+
+[i-slint-common.clarify]
+license = "LicenseRef-Slint-Royalty-free-2.0"
+
+[[i-slint-common.clarify.files]]
+path = "LICENSES/LicenseRef-Slint-Royalty-free-2.0.md"
+checksum = "5167f5056e850419106ab6265efbdca7cba4d99c849d1445ca0bbf6a1e2315fe"
+
+[i-slint-compiler]
+accepted = ["LicenseRef-Slint-Royalty-free-2.0"]
+
+[i-slint-compiler.clarify]
+license = "LicenseRef-Slint-Royalty-free-2.0"
+
+[[i-slint-compiler.clarify.files]]
+path = "LICENSES/LicenseRef-Slint-Royalty-free-2.0.md"
+checksum = "5167f5056e850419106ab6265efbdca7cba4d99c849d1445ca0bbf6a1e2315fe"
+
+[i-slint-core]
+accepted = ["LicenseRef-Slint-Royalty-free-2.0"]
+
+[i-slint-core.clarify]
+license = "LicenseRef-Slint-Royalty-free-2.0"
+
+[[i-slint-core.clarify.files]]
+path = "LICENSES/LicenseRef-Slint-Royalty-free-2.0.md"
+checksum = "5167f5056e850419106ab6265efbdca7cba4d99c849d1445ca0bbf6a1e2315fe"
+
+[i-slint-core-macros]
+accepted = ["LicenseRef-Slint-Royalty-free-2.0"]
+
+[i-slint-core-macros.clarify]
+license = "LicenseRef-Slint-Royalty-free-2.0"
+
+[[i-slint-core-macros.clarify.files]]
+path = "LICENSES/LicenseRef-Slint-Royalty-free-2.0.md"
+checksum = "5167f5056e850419106ab6265efbdca7cba4d99c849d1445ca0bbf6a1e2315fe"
+
+[i-slint-backend-selector]
+accepted = ["LicenseRef-Slint-Royalty-free-2.0"]
+
+[i-slint-backend-selector.clarify]
+license = "LicenseRef-Slint-Royalty-free-2.0"
+
+[[i-slint-backend-selector.clarify.files]]
+path = "LICENSES/LicenseRef-Slint-Royalty-free-2.0.md"
+checksum = "5167f5056e850419106ab6265efbdca7cba4d99c849d1445ca0bbf6a1e2315fe"
+
+[i-slint-backend-winit]
+accepted = ["LicenseRef-Slint-Royalty-free-2.0"]
+
+[i-slint-backend-winit.clarify]
+license = "LicenseRef-Slint-Royalty-free-2.0"
+
+[[i-slint-backend-winit.clarify.files]]
+path = "LICENSES/LicenseRef-Slint-Royalty-free-2.0.md"
+checksum = "5167f5056e850419106ab6265efbdca7cba4d99c849d1445ca0bbf6a1e2315fe"
+
+[i-slint-renderer-femtovg]
+accepted = ["LicenseRef-Slint-Royalty-free-2.0"]
+
+[i-slint-renderer-femtovg.clarify]
+license = "LicenseRef-Slint-Royalty-free-2.0"
+
+[[i-slint-renderer-femtovg.clarify.files]]
+path = "LICENSES/LicenseRef-Slint-Royalty-free-2.0.md"
+checksum = "5167f5056e850419106ab6265efbdca7cba4d99c849d1445ca0bbf6a1e2315fe"
+
+[i-slint-renderer-software]
+accepted = ["LicenseRef-Slint-Royalty-free-2.0"]
+
+[i-slint-renderer-software.clarify]
+license = "LicenseRef-Slint-Royalty-free-2.0"
+
+[[i-slint-renderer-software.clarify.files]]
+path = "LICENSES/LicenseRef-Slint-Royalty-free-2.0.md"
+checksum = "5167f5056e850419106ab6265efbdca7cba4d99c849d1445ca0bbf6a1e2315fe"

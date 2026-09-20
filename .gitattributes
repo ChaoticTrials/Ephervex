@@ -1,0 +1,6 @@
+# The generated third-party license document carries each dependency's license
+# text exactly as that crate wrote it, and at least one of them uses CRLF. Git
+# would otherwise normalize line endings on commit or checkout depending on the
+# contributor's `core.autocrlf`, which both rewrites somebody else's license
+# text and makes the staleness check in CI fail on a tree nobody changed.
+THIRD-PARTY-LICENSES.md -text

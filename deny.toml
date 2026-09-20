@@ -1,0 +1,80 @@
+# The dependency license policy, enforced by `cargo deny check licenses`.
+#
+# The other half of about.toml. That file decides what the generated inventory
+# may contain; this one fails the build when a dependency arrives under terms
+# nobody accepted, so an unexpected license is a review question rather than
+# something already shipped. The two lists are deliberately the same set: a
+# license Ephervex will not distribute is not one the inventory should be able
+# to record either.
+#
+# Only licenses are checked here. Advisories, bans, and source policy are
+# separate decisions and are not configured, so `cargo deny check licenses` is
+# the command, not a bare `cargo deny check`.
+
+[graph]
+# Both release architectures, so the set of crates checked is the union of what
+# either artifact contains and does not depend on which machine ran the check.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+]
+# Neither kind is distributed, so neither is a license Ephervex ships.
+exclude-dev = true
+
+[licenses]
+# Permissive terms whose only condition is that the text and its copyright
+# notice travel with the binary, which shipping THIRD-PARTY-LICENSES.md does.
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "bzip2-1.0.6",
+    "ISC",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+
+# The Slint toolkit is offered under three licenses at once and Ephervex takes
+# the royalty-free one, which is why the desktop application shows Slint's own
+# AboutSlint widget on its "About & Licenses" screen (ADR 0001, ADR 0018).
+#
+# An exception per crate rather than an entry in the list above, so the choice
+# applies to the crates it was made for and a future dependency cannot arrive
+# under Slint's terms unnoticed. cargo-deny reports an allowance nothing used,
+# which is what would catch these going stale.
+[[licenses.exceptions]]
+name = "slint"
+allow = ["LicenseRef-Slint-Royalty-free-2.0"]
+[[licenses.exceptions]]
+name = "slint-macros"
+allow = ["LicenseRef-Slint-Royalty-free-2.0"]
+[[licenses.exceptions]]
+name = "i-slint-common"
+allow = ["LicenseRef-Slint-Royalty-free-2.0"]
+[[licenses.exceptions]]
+name = "i-slint-compiler"
+allow = ["LicenseRef-Slint-Royalty-free-2.0"]
+[[licenses.exceptions]]
+name = "i-slint-core"
+allow = ["LicenseRef-Slint-Royalty-free-2.0"]
+[[licenses.exceptions]]
+name = "i-slint-core-macros"
+allow = ["LicenseRef-Slint-Royalty-free-2.0"]
+[[licenses.exceptions]]
+name = "i-slint-backend-selector"
+allow = ["LicenseRef-Slint-Royalty-free-2.0"]
+[[licenses.exceptions]]
+name = "i-slint-backend-winit"
+allow = ["LicenseRef-Slint-Royalty-free-2.0"]
+[[licenses.exceptions]]
+name = "i-slint-renderer-femtovg"
+allow = ["LicenseRef-Slint-Royalty-free-2.0"]
+[[licenses.exceptions]]
+name = "i-slint-renderer-software"
+allow = ["LicenseRef-Slint-Royalty-free-2.0"]
