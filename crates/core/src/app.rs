@@ -248,6 +248,22 @@ pub struct App {
 }
 
 impl App {
+    /// Every third-party dependency this build ships, and the terms each is
+    /// under.
+    ///
+    /// Compiled in and generated from the real dependency graph, so it needs
+    /// no storage, no network, and no open application; it is an associated
+    /// function for that reason, and an "about" screen can answer before
+    /// anything else is ready.
+    ///
+    /// The error is returned rather than swallowed: an inventory this build
+    /// cannot read is a broken build, which should be reportable rather than
+    /// silently presented as "no dependencies".
+    pub fn third_party_licenses()
+    -> Result<&'static crate::LicenseInventory, &'static crate::LicenseInventoryError> {
+        crate::LicenseInventory::bundled_shared()
+    }
+
     /// Opens the application using the XDG roots resolved from the environment.
     ///
     /// This is the normal startup path for both frontends.

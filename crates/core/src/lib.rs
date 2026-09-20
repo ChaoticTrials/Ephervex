@@ -39,6 +39,7 @@ pub mod health;
 pub mod import;
 pub mod instance;
 pub mod launch;
+pub mod licenses;
 pub mod linked_mods;
 mod linked_server_list;
 pub mod live_diagnostics;
@@ -101,6 +102,10 @@ pub use instance::{
     global_minecraft_preferences, validated_entity_name,
 };
 pub use launch::{LaunchOptions, LaunchOutcome};
+pub use licenses::{
+    DependencyLicense, LICENSE_INVENTORY_FORMAT_VERSION, LicenseInventory, LicenseInventoryError,
+    LicenseText,
+};
 pub use linked_mods::{
     ClientModOutcome, ClientModPlan, LinkedModOutcome, LinkedModPlan, LinkedModRequest,
     LinkedModRoot, LinkedTargetBlock, LinkedTargetFailure, LinkedTargetOutcome, LinkedTargetPlan,
