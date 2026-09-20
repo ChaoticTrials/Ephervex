@@ -1885,6 +1885,10 @@ gui-mod-relation-incompatible = Incompatible
 gui-mod-relation-embedded = Bundled
 gui-mod-relation-disabled = turned off
 gui-mod-relation-absent = not installed here
+gui-mod-relation-no-release = no release fits here
+gui-mod-relation-unknown-project = not in this catalog
+gui-mod-relation-file-only = names a file, not a project
+gui-mod-relation-unchecked = not here, not looked up
 gui-mod-dependencies-refreshed = { $count ->
     [one] Recorded what one mod requires.
    *[other] Recorded what { $count } mods require.

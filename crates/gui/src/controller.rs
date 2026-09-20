@@ -2666,6 +2666,15 @@ fn register_mod_actions(ui: &AppWindow, commands: &Sender<Command>, browser: &Rc
                 path: PathBuf::from(path.as_str()),
             },
         );
+        // Last, because the worker takes these in order: both offline answers
+        // are already on screen by the time this one reaches a catalog.
+        send(
+            &sender,
+            Command::ResolveDeclaredRelations {
+                host: InstalledHost::Instance(instance),
+                path: PathBuf::from(path.as_str()),
+            },
+        );
     });
 }
 

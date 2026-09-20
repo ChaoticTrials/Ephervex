@@ -77,6 +77,34 @@ fn a_dependent_that_is_turned_off_says_so() {
     );
 }
 
+/// The regression this list exists to prevent: a mod declares project ids its
+/// catalog does not answer for, and wearing "not installed here" they read as
+/// mods the user merely has to go and fetch.
+#[test]
+fn a_declaration_the_catalog_cannot_resolve_is_not_offered_as_something_to_install() {
+    let ui = window();
+    managing_a_mod(&ui);
+    ui.set_mod_action_requires(rows(&[
+        row(
+            "200200",
+            "gui-mod-relation-required",
+            "gui-mod-relation-unknown-project",
+        ),
+        row(
+            "200300",
+            "gui-mod-relation-required",
+            "gui-mod-relation-no-release",
+        ),
+    ]));
+
+    assert!(visible(&ui, &lookup("gui-mod-relation-unknown-project")));
+    assert!(visible(&ui, &lookup("gui-mod-relation-no-release")));
+    assert!(
+        !visible(&ui, &lookup("gui-mod-relation-absent")),
+        "neither declaration is a mod that installing would supply"
+    );
+}
+
 #[test]
 fn an_unasked_mod_offers_the_refresh_rather_than_claiming_it_needs_nothing() {
     let ui = window();

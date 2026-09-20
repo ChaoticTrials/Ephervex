@@ -4,17 +4,17 @@
 //! behavior. They translate the application service records into stable UI
 //! states that can be tested without constructing a Slint window.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
 use ephervex_core::{
     ARTIFACT_CACHE_LIMIT_PRESETS, ArtifactCacheLimit, ArtifactCacheLimitError, BlockedProviderFile,
-    ByteUnit, ClientRecord, DEFAULT_ARTIFACT_CACHE_LIMIT_BYTES, DependencyKnowledge, DependentMods,
-    DiagnosticKind, DiagnosticScope, DuplicateFileReason, DuplicateProviderFile, ImpactedMod,
-    LaunchAndConnectAvailability, ModPresence, ModRelations, NetworkAccess, PackAnalysis, PackSide,
-    ProviderFileIdentity, RelatedMod, RequiredMods, RuntimeClassification, ServerRecord,
-    ServerStatus, format_binary_bytes,
+    ByteUnit, ClientRecord, DEFAULT_ARTIFACT_CACHE_LIMIT_BYTES, DeclaredProject,
+    DependencyKnowledge, DependentMods, DiagnosticKind, DiagnosticScope, DuplicateFileReason,
+    DuplicateProviderFile, ImpactedMod, LaunchAndConnectAvailability, ModPresence, ModRelations,
+    NetworkAccess, PackAnalysis, PackSide, ProjectAvailability, ProviderFileIdentity, RelatedMod,
+    RequiredMods, RuntimeClassification, ServerRecord, ServerStatus, format_binary_bytes,
 };
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use ephervex_model::{
@@ -1009,12 +1009,19 @@ pub struct RelationRowPresentation {
     pub attention: bool,
 }
 
-impl From<&RelatedMod> for RelationRowPresentation {
-    fn from(related: &RelatedMod) -> Self {
+impl RelationRowPresentation {
+    /// One row, given whatever the catalog has since said about the projects
+    /// no jar here matches.
+    fn new(related: &RelatedMod, declared: &BTreeMap<String, DeclaredProject>) -> Self {
         let (state, attention) = match related.presence {
             Some(ModPresence::Installed) => (String::new(), false),
             Some(ModPresence::Disabled) => (lookup("gui-mod-relation-disabled"), true),
-            Some(ModPresence::Missing) | None => (lookup("gui-mod-relation-absent"), true),
+            // A jar this host records and does not currently have. Restoring
+            // it is the answer, and the row says so.
+            Some(ModPresence::Missing) => (lookup("gui-mod-relation-absent"), true),
+            // Nothing here matches the declaration at all, so what the row may
+            // honestly say depends on what the catalog knows about it.
+            None => (unmatched_state(related, declared), true),
         };
         Self {
             name: related.name.clone(),
@@ -1028,6 +1035,32 @@ impl From<&RelatedMod> for RelationRowPresentation {
             attention,
         }
     }
+}
+
+/// What to say about a declaration no jar of this host matches.
+///
+/// "Not installed here" is reserved for the one case where installing it is
+/// the answer. A project the catalog does not know, one with no release for
+/// this host, and one nothing has been able to ask about are each named for
+/// what they are, because a reader who acts on the wrong one of them goes
+/// looking for a mod that cannot be had.
+fn unmatched_state(related: &RelatedMod, declared: &BTreeMap<String, DeclaredProject>) -> String {
+    let Some(project_id) = related.project_id.as_deref() else {
+        // The catalog named a jar and no project, so there is nothing to look
+        // up and nothing a catalog could offer.
+        return lookup("gui-mod-relation-file-only");
+    };
+    lookup(
+        match declared
+            .get(project_id)
+            .map(|project| &project.availability)
+        {
+            Some(ProjectAvailability::Installable { .. }) => "gui-mod-relation-absent",
+            Some(ProjectAvailability::NoCompatibleRelease) => "gui-mod-relation-no-release",
+            Some(ProjectAvailability::UnknownToCatalog) => "gui-mod-relation-unknown-project",
+            Some(ProjectAvailability::NotChecked) | None => "gui-mod-relation-unchecked",
+        },
+    )
 }
 
 /// What one mod's own page says about its place among the others.
@@ -1048,12 +1081,24 @@ pub struct ModRelationPresentation {
 
 impl ModRelationPresentation {
     /// Builds the view for one mod.
+    ///
+    /// `declared` is what the catalog answered about the projects this mod
+    /// names and the host does not have, keyed by project id. An empty map is
+    /// the honest state before anything has been asked, and reads as such.
     #[must_use]
-    pub fn new(relations: &ModRelations) -> Self {
+    pub fn new(relations: &ModRelations, declared: &BTreeMap<String, DeclaredProject>) -> Self {
         let knowledge = relations.target.knowledge;
         Self {
-            requires: relations.requires.iter().map(Into::into).collect(),
-            required_by: relations.required_by.iter().map(Into::into).collect(),
+            requires: relations
+                .requires
+                .iter()
+                .map(|related| RelationRowPresentation::new(related, declared))
+                .collect(),
+            required_by: relations
+                .required_by
+                .iter()
+                .map(|related| RelationRowPresentation::new(related, declared))
+                .collect(),
             // Only the outgoing side depends on this mod's catalog having been
             // asked. What other mods name is recorded on their entries, and is
             // just as true when nothing has asked about this one.
@@ -1487,25 +1532,60 @@ mod tests {
         }
     }
 
+    /// A declaration naming a project this host has no jar for.
+    fn declares_project(project_id: &str) -> RelatedMod {
+        RelatedMod {
+            kind: ModRelationKind::Required,
+            name: project_id.to_owned(),
+            logical_path: None,
+            presence: None,
+            project_id: Some(project_id.to_owned()),
+        }
+    }
+
+    fn answered(
+        project_id: &str,
+        availability: ProjectAvailability,
+    ) -> BTreeMap<String, DeclaredProject> {
+        BTreeMap::from([(
+            project_id.to_owned(),
+            DeclaredProject {
+                title: Some("Absent Library".to_owned()),
+                availability,
+            },
+        )])
+    }
+
+    fn relations_requiring(requires: Vec<RelatedMod>) -> ephervex_core::ModRelations {
+        ephervex_core::ModRelations {
+            target: impacted("MouseTweaks.jar", 0),
+            requires,
+            required_by: Vec::new(),
+        }
+    }
+
     #[test]
     fn a_relation_says_what_it_was_and_how_that_jar_stands() {
-        let view = ModRelationPresentation::new(&ephervex_core::ModRelations {
-            target: impacted("SkyblockBuilder.jar", 0),
-            requires: vec![
-                related(
-                    "LibX.jar",
-                    ModRelationKind::Required,
-                    Some(ModPresence::Installed),
-                ),
-                related(
-                    "SkyGUIs.jar",
-                    ModRelationKind::Optional,
-                    Some(ModPresence::Disabled),
-                ),
-                related("AABBCCDD", ModRelationKind::Required, None),
-            ],
-            required_by: Vec::new(),
-        });
+        let view = ModRelationPresentation::new(
+            &ephervex_core::ModRelations {
+                target: impacted("SkyblockBuilder.jar", 0),
+                requires: vec![
+                    related(
+                        "LibX.jar",
+                        ModRelationKind::Required,
+                        Some(ModPresence::Installed),
+                    ),
+                    related(
+                        "SkyGUIs.jar",
+                        ModRelationKind::Optional,
+                        Some(ModPresence::Disabled),
+                    ),
+                    related("AABBCCDD", ModRelationKind::Required, None),
+                ],
+                required_by: Vec::new(),
+            },
+            &BTreeMap::new(),
+        );
 
         assert_eq!(view.requires[0].kind, lookup("gui-mod-relation-required"));
         assert!(
@@ -1516,29 +1596,105 @@ mod tests {
         assert_eq!(view.requires[1].state, lookup("gui-mod-relation-disabled"));
         assert_eq!(
             view.requires[2].state,
-            lookup("gui-mod-relation-absent"),
-            "a relation no jar here matches is absent, not present and fine"
+            lookup("gui-mod-relation-file-only"),
+            "a relation that named a jar and no project has nothing to install"
         );
         assert!(view.requires_note.is_empty(), "the list speaks for itself");
     }
 
     #[test]
+    fn a_declared_project_says_which_kind_of_missing_it_is() {
+        let cases = [
+            (
+                ProjectAvailability::Installable {
+                    version_id: "abc".to_owned(),
+                },
+                "gui-mod-relation-absent",
+            ),
+            (
+                ProjectAvailability::NoCompatibleRelease,
+                "gui-mod-relation-no-release",
+            ),
+            (
+                ProjectAvailability::UnknownToCatalog,
+                "gui-mod-relation-unknown-project",
+            ),
+            (
+                ProjectAvailability::NotChecked,
+                "gui-mod-relation-unchecked",
+            ),
+        ];
+        for (availability, expected) in cases {
+            let view = ModRelationPresentation::new(
+                &relations_requiring(vec![declares_project("200200")]),
+                &answered("200200", availability.clone()),
+            );
+            assert_eq!(
+                view.requires[0].state,
+                lookup(expected),
+                "{availability:?} has to read as itself"
+            );
+            assert!(
+                view.requires[0].attention,
+                "every declaration without a jar here is worth noticing"
+            );
+        }
+    }
+
+    #[test]
+    fn a_declaration_nothing_has_answered_for_is_not_called_installable() {
+        let view = ModRelationPresentation::new(
+            &relations_requiring(vec![declares_project("200200")]),
+            &BTreeMap::new(),
+        );
+        assert_eq!(
+            view.requires[0].state,
+            lookup("gui-mod-relation-unchecked"),
+            "before a catalog answers, the row must not promise the project is there to install"
+        );
+        assert_ne!(view.requires[0].state, lookup("gui-mod-relation-absent"));
+    }
+
+    #[test]
+    fn a_recorded_jar_this_host_has_lost_is_still_simply_missing() {
+        let view = ModRelationPresentation::new(
+            &relations_requiring(vec![related(
+                "LibX.jar",
+                ModRelationKind::Required,
+                Some(ModPresence::Missing),
+            )]),
+            &BTreeMap::new(),
+        );
+        assert_eq!(
+            view.requires[0].state,
+            lookup("gui-mod-relation-absent"),
+            "this host records the jar and does not have it, which is exactly what restoring fixes"
+        );
+    }
+
+    #[test]
     fn an_empty_requires_list_says_which_kind_of_empty_it_is() {
-        let asked = ModRelationPresentation::new(&ephervex_core::ModRelations {
-            target: impacted("LibX.jar", 0),
-            requires: Vec::new(),
-            required_by: Vec::new(),
-        });
+        let asked = ModRelationPresentation::new(
+            &ephervex_core::ModRelations {
+                target: impacted("LibX.jar", 0),
+                requires: Vec::new(),
+                required_by: Vec::new(),
+            },
+            &BTreeMap::new(),
+        );
         assert_eq!(asked.requires_note, lookup("gui-mod-requires-nothing"));
         assert!(!asked.refreshable);
 
         let mut target = impacted("LibX.jar", 0);
         target.knowledge = DependencyKnowledge::Unrecorded;
-        let unasked = ModRelationPresentation::new(&ephervex_core::ModRelations {
-            target,
-            requires: Vec::new(),
-            required_by: Vec::new(),
-        });
+        let unasked = ModRelationPresentation::new(
+            &ephervex_core::ModRelations {
+                target,
+                requires: Vec::new(),
+                required_by: Vec::new(),
+            },
+            &BTreeMap::new(),
+        );
         assert_eq!(unasked.requires_note, lookup("gui-mod-requires-unrecorded"));
         assert!(
             unasked.refreshable,
@@ -1547,11 +1703,14 @@ mod tests {
 
         let mut target = impacted("Mystery.jar", 0);
         target.knowledge = DependencyKnowledge::Unidentifiable;
-        let unanswerable = ModRelationPresentation::new(&ephervex_core::ModRelations {
-            target,
-            requires: Vec::new(),
-            required_by: Vec::new(),
-        });
+        let unanswerable = ModRelationPresentation::new(
+            &ephervex_core::ModRelations {
+                target,
+                requires: Vec::new(),
+                required_by: Vec::new(),
+            },
+            &BTreeMap::new(),
+        );
         assert_eq!(
             unanswerable.requires_note,
             lookup("gui-mod-requires-unanswerable")

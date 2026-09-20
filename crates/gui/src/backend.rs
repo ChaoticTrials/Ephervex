@@ -1,6 +1,6 @@
 //! Non-blocking bridge from Slint callbacks to `ephervex-core` services.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::str::FromStr as _;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,17 +14,17 @@ use ephervex_core::ManagedMutationReport;
 use ephervex_core::live_diagnostics::TailedLine;
 use ephervex_core::{
     App, AuthEvent, AuthObserver, CancellationToken, ClientFolder, ClientModOutcome, ClientModPlan,
-    CoreError, CoreResult, CrashReview, DiagnosticKind, DiagnosticRequest, DiagnosticScope,
-    ErrorChain, EulaStatus, ImportRequest, InstalledHost, LaunchAndConnectObserver,
-    LaunchAndConnectOptions, LaunchEvent, LaunchObserver, LaunchOptions, LinkedModOutcome,
-    LinkedModPlan, LinkedModRequest, LinkedTargetPlan, LinkedTargetResult, LinkedTargetState,
-    LocalModOffer, LocalModPlan, LocalModReport, LoginOptions, ManagedModEntry, ManagedModSnapshot,
-    MetadataAvailability, ModInstallPlan, ModMutability, ModMutation, ModMutationPlan, ModPresence,
-    ModSearchQuery, MutationRestriction, NewClient, NewServer, OperationReporter,
-    OptionalSelection, PackAnalysis, Paths, PlannedOutcome, ProcessMonitor, ProgressSink,
-    ProviderFileIdentity, SearchOptions, ServerContentSource, ServerCreateOptions, ServerEvent,
-    ServerFolder, ServerNetworkSettings, ServerObserver, SideRequirement, SnapshotOrigin,
-    SnapshotRestoreOptions, SuspectReason, WatchTarget,
+    CoreError, CoreResult, CrashReview, DeclaredProject, DiagnosticKind, DiagnosticRequest,
+    DiagnosticScope, ErrorChain, EulaStatus, ImportRequest, InstalledHost,
+    LaunchAndConnectObserver, LaunchAndConnectOptions, LaunchEvent, LaunchObserver, LaunchOptions,
+    LinkedModOutcome, LinkedModPlan, LinkedModRequest, LinkedTargetPlan, LinkedTargetResult,
+    LinkedTargetState, LocalModOffer, LocalModPlan, LocalModReport, LoginOptions, ManagedModEntry,
+    ManagedModSnapshot, MetadataAvailability, ModInstallPlan, ModMutability, ModMutation,
+    ModMutationPlan, ModPresence, ModSearchQuery, MutationRestriction, NewClient, NewServer,
+    OperationReporter, OptionalSelection, PackAnalysis, Paths, PlannedOutcome, ProcessMonitor,
+    ProgressSink, ProviderFileIdentity, SearchOptions, ServerContentSource, ServerCreateOptions,
+    ServerEvent, ServerFolder, ServerNetworkSettings, ServerObserver, SideRequirement,
+    SnapshotOrigin, SnapshotRestoreOptions, SuspectReason, WatchTarget,
 };
 use ephervex_core::{
     ConfiguredPreferences, LanguageAvailability, LanguageEntry, MinecraftPreferencePreview,
@@ -364,6 +364,16 @@ pub enum Command {
     /// What one mod declares and what declares it. Offline, so it answers
     /// while the catalog call beside it is still in flight.
     LoadModRelations {
+        host: InstalledHost,
+        path: PathBuf,
+    },
+    /// The same answer again, once the catalog has been asked about the
+    /// projects the mod declares and the host does not have.
+    ///
+    /// Sent beside `LoadModRelations` rather than instead of it: the offline
+    /// answer paints the lists immediately, and this one replaces "not looked
+    /// up" with what the catalog actually said.
+    ResolveDeclaredRelations {
         host: InstalledHost,
         path: PathBuf,
     },
@@ -2652,7 +2662,10 @@ fn run_worker(
                 }
             }
             Command::LoadModRelations { host, path } => {
-                send_mod_relations(&app, host, &path, &events);
+                send_mod_relations(&app, host, &path, &BTreeMap::new(), &events);
+            }
+            Command::ResolveDeclaredRelations { host, path } => {
+                resolve_declared_relations(&app, &runtime, host, &path, &events);
             }
             Command::RefreshModDependencies { host, reload } => {
                 let reporter = OperationReporter::silent("refreshing-mod-dependencies");
@@ -2674,7 +2687,8 @@ fn run_worker(
                         });
                         send_host_mods(&app, host, &events, &refreshed_mods, false);
                         if let Some(path) = reload {
-                            send_mod_relations(&app, host, &path, &events);
+                            send_mod_relations(&app, host, &path, &BTreeMap::new(), &events);
+                            resolve_declared_relations(&app, &runtime, host, &path, &events);
                         }
                     }
                     Err(error) => send_error(&events, &error),
@@ -5345,13 +5359,50 @@ fn localized_value(message_id: &str, value: &str) -> String {
 /// Silent on failure: the mod page it fills is opened for other reasons too,
 /// and an instance whose recipe cannot be read has already said so through the
 /// list the page was opened from.
-fn send_mod_relations(app: &App, host: InstalledHost, path: &Path, events: &Sender<Event>) {
+/// Asks the catalog about the projects one mod declares and this host does not
+/// have, and repaints its relation lists with the answer.
+///
+/// Silent on failure for the same reason `send_mod_relations` is: the lists are
+/// already on screen with the offline answer, and a catalog that could not be
+/// reached leaves every unmatched row saying it was not looked up, which is
+/// true.
+fn resolve_declared_relations(
+    app: &App,
+    runtime: &tokio::runtime::Runtime,
+    host: InstalledHost,
+    path: &Path,
+    events: &Sender<Event>,
+) {
+    let reporter = OperationReporter::silent("resolving-declared-relations");
+    match runtime.block_on(app.declared_projects_of(
+        host,
+        path,
+        &reporter,
+        &CancellationToken::new(),
+    )) {
+        Ok(declared) if !declared.is_empty() => {
+            send_mod_relations(app, host, path, &declared, events);
+        }
+        // Nothing the offline answer did not already say, so the lists are
+        // left alone rather than repainted with the same rows.
+        Ok(_) => {}
+        Err(error) => tracing::warn!(%error, "declared projects could not be resolved"),
+    }
+}
+
+fn send_mod_relations(
+    app: &App,
+    host: InstalledHost,
+    path: &Path,
+    declared: &BTreeMap<String, DeclaredProject>,
+    events: &Sender<Event>,
+) {
     match app.relations_of(host, path) {
         Ok(relations) => {
             let _ = events.send(Event::ModRelations(ModRelationsData {
                 host: host.id(),
                 logical_path: path.display().to_string(),
-                view: crate::presentation::ModRelationPresentation::new(&relations),
+                view: crate::presentation::ModRelationPresentation::new(&relations, declared),
             }));
         }
         Err(error) => tracing::warn!(%error, "a mod's relations could not be read"),

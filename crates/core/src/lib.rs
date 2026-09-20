@@ -31,6 +31,7 @@ pub mod connection;
 pub mod crash_analysis;
 pub mod curseforge;
 pub mod curseforge_pack;
+pub mod declared_relations;
 pub mod dependencies;
 pub mod diagnostics;
 pub mod download_watch;
@@ -81,6 +82,7 @@ pub use crash_analysis::{
     analyze_crash_report,
 };
 pub use curseforge::StoredApiKey;
+pub use declared_relations::{DeclaredProject, ProjectAvailability};
 pub use dependencies::{
     DependencyKnowledge, DependencyPolicy, DependencyRefreshReport, DependentMods, ImpactedMod,
     ModRelations, RelatedMod, RequiredMods,
