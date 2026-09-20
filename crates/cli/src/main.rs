@@ -136,7 +136,7 @@ enum Command {
         #[command(subcommand)]
         command: ApiCommand,
     },
-    /// Find and install mods in a client instance.
+    /// Manage and troubleshoot mods in client instances and local servers.
     Mod {
         #[command(subcommand)]
         command: ModCommand,
