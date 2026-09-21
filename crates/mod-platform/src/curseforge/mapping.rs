@@ -7,9 +7,10 @@
 //! The judgments, in one place, because most of them are refusals:
 //!
 //! * a project this build cannot confirm is a Mod is never treated as one;
-//! * a file with no third-party download address is refused rather than
-//!   quietly dropped, because dropping it would offer a *different* release
-//!   than the newest one that fits;
+//! * a file with no third-party download address keeps every fact the API
+//!   stated about it and records that its bytes may not be fetched; dropping
+//!   it would offer a *different* release than the newest one that fits, and
+//!   refusing it would throw away metadata CurseForge did supply;
 //! * a file with no verifiable digest is refused, because verification is not
 //!   optional;
 //! * a download address is checked against the hosts CurseForge delivers from
@@ -37,7 +38,7 @@ use super::dto::{
 };
 use crate::error::{ModPlatformError, ModPlatformResult};
 use crate::model::{
-    ModDependency, ModFile, ModProject, ModVersionInfo, ReleaseChannel, SideSupport,
+    Distribution, ModDependency, ModFile, ModProject, ModVersionInfo, ReleaseChannel, SideSupport,
 };
 
 /// One project, once its class has been confirmed to be Mods.
@@ -149,37 +150,12 @@ pub(super) fn version(
         });
     }
 
-    // Parsed before the distribution check so a refusal can still name the
-    // file and its digest for a caller that offers a manual-download path.
     let hashes = supported_hashes(&document.hashes);
+    let distribution = distribution(&document, hosts)?;
 
-    // Null, absent, or blank all mean the same thing: the project's owner
-    // turned off third-party distribution. Refused rather than skipped: a
-    // skipped file would silently become "install the next one down", which is
-    // the substitution this launcher exists not to make.
-    let address = document
-        .download_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|url| !url.is_empty())
-        .ok_or_else(|| ModPlatformError::FileDistributionRestricted {
-            provider: ModProvider::CurseForge,
-            project_id: project.to_string(),
-            file_id: file.to_string(),
-            file_name: Some(document.file_name.clone()),
-            hashes: hashes.clone(),
-        })?;
-
-    // Provider data decides which machine the launcher connects to, so it is
-    // checked like any other remote address. There is no second address for a
-    // CurseForge file, which makes a refusal fatal rather than a fallback.
-    let url = hosts
-        .validate(address)
-        .map_err(|source| ModPlatformError::ResponseInvalid {
-            provider: ModProvider::CurseForge,
-            detail: source.to_string(),
-        })?;
-
+    // Verification is not optional for anything this launcher installs, and a
+    // restricted file needs a digest twice over: it is the only way to
+    // recognize the copy the user fetches by hand.
     if hashes.is_empty() {
         return Err(ModPlatformError::HashesMissing {
             version_id: file.to_string(),
@@ -210,12 +186,43 @@ pub(super) fn version(
         published_at: published_at(document.file_date.as_deref()),
         file: ModFile {
             file_name: document.file_name,
-            url: url.to_string(),
+            distribution,
             size: document.file_length,
             hashes,
         },
         dependencies: file_relations(&document.dependencies),
     })
+}
+
+/// Whether this launcher may fetch a file's bytes, and from where.
+///
+/// Null, absent, or blank all mean the same thing: the project's owner turned
+/// off third-party distribution. That is recorded rather than refused - the
+/// release is real, its metadata is real, and only its acquisition changes -
+/// and no address is assembled out of the ids to route around it.
+///
+/// An address the provider did publish decides which machine the launcher
+/// connects to, so it is checked against the hosts CurseForge delivers from
+/// like any other remote address.
+fn distribution(
+    document: &CurseForgeFileDocument,
+    hosts: &DomainAllowlist,
+) -> ModPlatformResult<Distribution> {
+    let Some(address) = document
+        .download_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+    else {
+        return Ok(Distribution::Restricted);
+    };
+    hosts
+        .validate(address)
+        .map(|url| Distribution::Download(url.to_string()))
+        .map_err(|source| ModPlatformError::ResponseInvalid {
+            provider: ModProvider::CurseForge,
+            detail: source.to_string(),
+        })
 }
 
 /// What one file document says about other projects.

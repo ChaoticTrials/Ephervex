@@ -138,11 +138,18 @@ Modrinth's full listing can. CurseForge's file metadata expresses loader
 *family*, not an exact Forge or NeoForge build, and this launcher does not claim
 otherwise.
 
-**A file with no third-party download is refused, never skipped.** Silently
+**A file with no third-party download is described, never skipped.** Silently
 leaving a restricted file out of a version list would offer a different release
 than the newest one that fits, which is the substitution this launcher exists not
-to make. Such a file fails with the same typed refusal a pack import produces,
-naming the exact project and file.
+to make. Discarding it would throw away metadata CurseForge did supply - its
+name, digests, declared Minecraft releases and loaders, release type and date,
+and the relations it declares. The restriction is therefore recorded on the
+release itself, as the absence of an address this launcher may fetch, and it
+affects acquisition alone: a release whose verified bytes are already in the
+shared artifact cache installs normally, and one whose bytes are not sends the
+user to CurseForge's own page for that file. No delivery address is assembled
+out of the ids, because that would route around exactly the decision the author
+made.
 
 What is installed is recorded the way a CurseForge pack import records it:
 provider, project id, and (because CurseForge's release identifier is its file

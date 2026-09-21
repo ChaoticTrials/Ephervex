@@ -417,6 +417,14 @@ pub struct BlockedProviderFile {
     /// The provider's own digest(s) for the file, so a hand-placed copy can
     /// be recognized without trusting anything about where it came from.
     pub hashes: Vec<Hash>,
+    /// What the provider said this file needs from other projects.
+    ///
+    /// `Some` - including `Some(vec![])` - is knowledge: the provider was
+    /// asked and answered. `None` means nothing ever described this file's
+    /// relations. A refusal to serve the bytes is not a refusal to describe
+    /// them, so a blocked file whose document was read carries `Some`, and
+    /// the recipe entry it eventually becomes records the same distinction.
+    pub relations: Option<Vec<RecipeRelation>>,
     pub client: SideRequirement,
     pub server: SideRequirement,
 }

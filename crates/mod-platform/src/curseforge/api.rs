@@ -42,7 +42,7 @@ use super::dto::{
 };
 use super::mapping::{file_declared_sides, file_relations, published_at, split_declared_support};
 use crate::error::{ModPlatformError, ModPlatformResult};
-use crate::model::{ModDependency, ModFile, RecognizedFile, SideSupport};
+use crate::model::{Distribution, ModDependency, ModFile, RecognizedFile, SideSupport};
 
 /// The production API root.
 pub const CURSEFORGE_API_BASE: &str = "https://api.curseforge.com/v1";
@@ -1142,29 +1142,25 @@ fn normalize_file(
         });
     }
 
-    // Parsed before the distribution check so a refusal can still name the
-    // file and its digest for a caller that offers a manual-download path.
     let hashes = supported_hashes(&document.hashes);
 
     // Null rather than absent, and it means the project's owner turned off
-    // third-party distribution. There is no second address to try: assembling a
-    // CDN path out of the ids would route around a decision the author made.
-    let url = document
+    // third-party distribution. Recorded rather than refused: everything else
+    // the API said about the file is still true, and a caller that already
+    // holds a verified copy - or that can ask the user for one - needs all of
+    // it. There is no second address to try either way: assembling a CDN path
+    // out of the ids would route around a decision the author made.
+    let distribution = document
         .download_url
         .map(|url| url.trim().to_owned())
         .filter(|url| !url.is_empty())
-        .ok_or_else(|| ModPlatformError::FileDistributionRestricted {
-            provider: ModProvider::CurseForge,
-            project_id: project.to_string(),
-            file_id: file.to_string(),
-            file_name: Some(document.file_name.clone()),
-            hashes: hashes.clone(),
-        })?;
+        .map_or(Distribution::Restricted, Distribution::Download);
 
     if hashes.is_empty() {
         // Verification is mandatory. A file with no digest this build can check
         // is one it will not install, rather than one it trusts because of the
-        // address it came from.
+        // address it came from - and for a restricted file the digest is also
+        // the only way to recognize a hand-placed copy.
         return Err(ModPlatformError::HashesMissing {
             version_id: file.to_string(),
         });
@@ -1179,7 +1175,7 @@ fn normalize_file(
         file,
         artifact: ModFile {
             file_name: document.file_name,
-            url,
+            distribution,
             size: document.file_length,
             hashes,
         },
@@ -1274,6 +1270,7 @@ mod tests {
 
     use super::super::credential::ConfiguredApiKey;
     use super::*;
+    use ephervex_model::ModRelationKind;
 
     const FAKE_KEY: &str = "test-curseforge-key-do-not-use";
 
@@ -1437,8 +1434,8 @@ mod tests {
         assert_eq!(release.file, file_id());
         assert_eq!(release.artifact.file_name, "jei-1.20.1-15.2.0.27.jar");
         assert_eq!(
-            release.artifact.url,
-            "https://mediafilez.forgecdn.net/files/4593/548/jei.jar"
+            release.artifact.distribution.download_url(),
+            Some("https://mediafilez.forgecdn.net/files/4593/548/jei.jar")
         );
         assert_eq!(release.artifact.size, Some(1_234_567));
     }
@@ -1513,29 +1510,78 @@ mod tests {
     }
 
     #[test]
-    fn an_unavailable_file_and_a_restricted_one_are_told_apart() {
+    fn a_file_the_provider_will_not_serve_is_still_a_file_it_described() {
         let mut unavailable = document();
         unavailable.is_available = false;
-        assert!(matches!(
-            normalize_file(project(), file_id(), unavailable).expect_err("must refuse"),
-            ModPlatformError::FileUnavailable { .. }
-        ));
-
-        let mut restricted = document();
-        restricted.download_url = None;
-        assert!(matches!(
-            normalize_file(project(), file_id(), restricted).expect_err("must refuse"),
-            ModPlatformError::FileDistributionRestricted { .. }
-        ));
-
-        let mut blank = document();
-        blank.download_url = Some("   ".to_owned());
         assert!(
             matches!(
-                normalize_file(project(), file_id(), blank).expect_err("must refuse"),
-                ModPlatformError::FileDistributionRestricted { .. }
+                normalize_file(project(), file_id(), unavailable).expect_err("must refuse"),
+                ModPlatformError::FileUnavailable { .. }
             ),
-            "an empty address is no address"
+            "a withdrawn file is a refusal; a restricted one is not"
+        );
+
+        for (label, address) in [("null", None), ("blank", Some("   ".to_owned()))] {
+            let mut restricted = document();
+            restricted.download_url = address;
+            let release =
+                normalize_file(project(), file_id(), restricted).unwrap_or_else(|error| {
+                    panic!("a {label} address must not lose the file: {error}")
+                });
+            assert!(
+                release.artifact.distribution.is_restricted(),
+                "{label}: the author's decision is recorded rather than an address invented"
+            );
+            assert_eq!(release.artifact.distribution.download_url(), None);
+            // Everything CurseForge did say survives the restriction.
+            assert_eq!(release.artifact.file_name, "jei-1.20.1-15.2.0.27.jar");
+            assert_eq!(release.artifact.size, Some(1_234_567));
+            assert_eq!(release.artifact.hashes.len(), 1);
+        }
+    }
+
+    #[test]
+    fn a_restricted_file_keeps_the_relations_its_document_declared() {
+        // The regression case: project 391382's files forbid third-party
+        // downloads, and the dependencies they declare must survive that.
+        let mut restricted: CurseForgeFileDocument = serde_json::from_str(
+            r#"{"id":7951520,"gameId":432,"modId":391382,"isAvailable":true,
+                "fileName":"restricted-1.0.0.jar","fileLength":42,
+                "fileDate":"2025-03-04T05:06:07Z","releaseType":1,
+                "gameVersions":["1.20.1","NeoForge","Client"],
+                "hashes":[{"value":"da39a3ee5e6b4b0d3255bfef95601890afd80709","algo":1}],
+                "dependencies":[{"modId":238222,"relationType":3},
+                                {"modId":306612,"relationType":2}]}"#,
+        )
+        .expect("a documented file response");
+        restricted.download_url = None;
+
+        let release = normalize_file(
+            CurseForgeProjectId::new(391_382).expect("a project id"),
+            CurseForgeFileId::new(7_951_520).expect("a file id"),
+            restricted,
+        )
+        .expect("a described file");
+
+        assert!(release.artifact.distribution.is_restricted());
+        assert_eq!(release.game_versions, vec!["1.20.1".to_owned()]);
+        assert_eq!(release.client_side, SideSupport::Required);
+        assert_eq!(
+            release.published_at.to_rfc3339(),
+            "2025-03-04T05:06:07+00:00"
+        );
+        let kinds: Vec<_> = release
+            .dependencies
+            .iter()
+            .map(|relation| (relation.kind, relation.project_id.clone()))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                (ModRelationKind::Required, Some("238222".to_owned())),
+                (ModRelationKind::Optional, Some("306612".to_owned())),
+            ],
+            "a download restriction must not turn declared relations into unknown"
         );
     }
 

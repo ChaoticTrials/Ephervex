@@ -47,6 +47,8 @@ mod credential;
 mod dto;
 mod mapping;
 
+use ephervex_model::CurseForgeFileId;
+
 pub use api::{
     CURSEFORGE_API_BASE, CURSEFORGE_API_KEY_HEADER, CurseForgeApi, CurseForgeFileRelease,
     CurseForgeOperation, CurseForgeProjectClass, CurseForgeProjectClasses, MINECRAFT_GAME_ID,
@@ -69,6 +71,22 @@ pub use dto::{CurseForgeAuthor, CurseForgeGame, CurseForgeLogo, CurseForgeProjec
 /// token is a different credential for a different service, and it is not what
 /// Ephervex asks for.
 pub const CURSEFORGE_API_KEY_HELP: &str = "https://support.curseforge.com/support/solutions/articles/9000208346-about-the-curseforge-api-and-how-to-apply-for-a-key";
+
+/// The page on CurseForge's own site that starts one exact file's download.
+///
+/// `class_segment` is the project class's own path segment (see
+/// [`CurseForgeProjectClass::browser_path_segment`]) and `slug` the project's
+/// own handle, both as CurseForge published them. This is the address a user
+/// is sent to when the author forbids third-party downloads: it is the site's
+/// own page rather than a delivery address assembled out of the ids, so it
+/// respects the author's decision instead of routing around it.
+///
+/// One definition, because a pack import and a version change both send the
+/// user to the same place and must not disagree about where that is.
+#[must_use]
+pub fn file_browser_url(class_segment: &str, slug: &str, file_id: CurseForgeFileId) -> String {
+    format!("https://www.curseforge.com/minecraft/{class_segment}/{slug}/download/{file_id}")
+}
 
 #[cfg(test)]
 mod tests {

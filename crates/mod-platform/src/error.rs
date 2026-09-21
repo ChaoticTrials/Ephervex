@@ -11,7 +11,7 @@
 //! something other than the report.
 
 use ephervex_download::MetadataCacheError;
-use ephervex_model::{Hash, LoaderKind, ModProvider};
+use ephervex_model::{LoaderKind, ModProvider};
 
 /// Anything the mod platform can fail with.
 #[derive(Debug, thiserror::Error)]
@@ -114,26 +114,6 @@ pub enum ModPlatformError {
         provider: ModProvider,
         project_id: String,
         file_id: String,
-    },
-
-    /// The project's owner has turned off third-party distribution.
-    ///
-    /// The provider answers about the file and declines to say where it is.
-    /// That is a decision by the author, not a fault and not something to work
-    /// around: there is no second address, and one assembled from the ids would
-    /// be routing around exactly that decision.
-    ///
-    /// `file_name` and `hashes` are carried for callers that can offer the
-    /// user a manual-download path (naming the file, matching a hand-placed
-    /// copy by digest) rather than only reporting the refusal; they play no
-    /// part in the localized sentence itself.
-    #[error("the author of `{project_id}` does not permit third-party downloads of `{file_id}`")]
-    FileDistributionRestricted {
-        provider: ModProvider,
-        project_id: String,
-        file_id: String,
-        file_name: Option<String>,
-        hashes: Vec<Hash>,
     },
 
     /// The provider answered about a different file than the one asked for.
@@ -276,7 +256,6 @@ impl ModPlatformError {
             Self::VersionUnknown { .. } => "error-mod-version-unknown",
             Self::FileUnknown { .. } => "error-mod-file-unknown",
             Self::FileUnavailable { .. } => "error-mod-file-unavailable",
-            Self::FileDistributionRestricted { .. } => "error-mod-file-distribution-restricted",
             Self::FileIdentityMismatch { .. } => "error-mod-file-identity-mismatch",
             Self::AmbiguousPrimaryFile { .. } => "error-mod-primary-file-ambiguous",
             Self::HashesMissing { .. } => "error-mod-hashes-missing",
@@ -344,10 +323,6 @@ impl ModPlatformError {
             Self::VersionUnknown { version_id, .. } => {
                 vec![("version_id", version_id.clone())]
             }
-            // `FileDistributionRestricted` also carries `file_name`/`hashes`,
-            // which are internal/GUI-list data rather than part of the
-            // localized sentence, so it takes the same three arguments as the
-            // other two.
             Self::FileUnknown {
                 provider,
                 project_id,
@@ -357,12 +332,6 @@ impl ModPlatformError {
                 provider,
                 project_id,
                 file_id,
-            }
-            | Self::FileDistributionRestricted {
-                provider,
-                project_id,
-                file_id,
-                ..
             } => vec![
                 ("provider", provider.to_string()),
                 ("project", project_id.clone()),
@@ -547,19 +516,6 @@ mod tests {
                 provider: ModProvider::CurseForge,
                 project_id: "238222".to_owned(),
                 file_id: "4593548".to_owned(),
-            },
-            ModPlatformError::FileDistributionRestricted {
-                provider: ModProvider::CurseForge,
-                project_id: "238222".to_owned(),
-                file_id: "4593548".to_owned(),
-                file_name: Some("jei-1.20.1.jar".to_owned()),
-                hashes: vec![
-                    ephervex_model::Hash::new(
-                        ephervex_model::HashAlgorithm::Sha1,
-                        "da39a3ee5e6b4b0d3255bfef95601890afd80709",
-                    )
-                    .expect("well-formed test digest"),
-                ],
             },
             ModPlatformError::FileIdentityMismatch {
                 provider: ModProvider::CurseForge,

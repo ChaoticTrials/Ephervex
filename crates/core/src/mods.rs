@@ -1860,7 +1860,11 @@ pub(crate) fn recipe_entry_for(
     Ok(PackFileRecipe {
         logical_path: PathBuf::from(ephervex_pack::MODS_DIR).join(name),
         hashes: file.hashes.clone(),
-        downloads: vec![file.url.clone()],
+        // Empty for a release the provider described but forbids this
+        // launcher from fetching: the entry still names the file and its
+        // digests, and installing it means finding a verified copy in the
+        // shared cache rather than inventing an address.
+        downloads: file.distribution.addresses(),
         size: file.size,
         client,
         server,
@@ -1937,7 +1941,7 @@ pub(crate) const fn side_requirement(support: SideSupport) -> SideRequirement {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-    use ephervex_mod_platform::{ModFile, ModVersionInfo, ReleaseChannel};
+    use ephervex_mod_platform::{Distribution, ModFile, ModVersionInfo, ReleaseChannel};
 
     /// One catalog's answers as the index that applies them.
     fn detail_index(
@@ -2100,7 +2104,9 @@ mod tests {
                 published_at: chrono::Utc::now(),
                 file: ModFile {
                     file_name: file_name.to_owned(),
-                    url: "https://cdn.modrinth.com/data/LIBPROJ/library.jar".to_owned(),
+                    distribution: Distribution::Download(
+                        "https://cdn.modrinth.com/data/LIBPROJ/library.jar".to_owned(),
+                    ),
                     size: Some(10),
                     hashes: vec![
                         Hash::new(
@@ -2456,8 +2462,10 @@ mod tests {
             published_at: chrono::Utc::now(),
             file: ModFile {
                 file_name: "fixture.jar".to_owned(),
-                url: "https://cdn.modrinth.com/data/AAAAAAAA/versions/BBBBBBBB/fixture.jar"
-                    .to_owned(),
+                distribution: Distribution::Download(
+                    "https://cdn.modrinth.com/data/AAAAAAAA/versions/BBBBBBBB/fixture.jar"
+                        .to_owned(),
+                ),
                 size: Some(10),
                 hashes: Vec::new(),
             },

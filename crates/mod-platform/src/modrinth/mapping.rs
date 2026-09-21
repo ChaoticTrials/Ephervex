@@ -25,7 +25,7 @@ use super::dto::{
 };
 use crate::error::{ModPlatformError, ModPlatformResult};
 use crate::model::{
-    ModDependency, ModFile, ModProject, ModVersionInfo, ReleaseChannel, SideSupport,
+    Distribution, ModDependency, ModFile, ModProject, ModVersionInfo, ReleaseChannel, SideSupport,
 };
 
 impl From<RawSide> for SideSupport {
@@ -181,7 +181,9 @@ fn select_primary_file(version_id: &str, files: Vec<RawFile>) -> ModPlatformResu
     }
     Ok(ModFile {
         file_name: chosen.filename,
-        url: chosen.url,
+        // Modrinth publishes every file's address; it has no equivalent of
+        // CurseForge's third-party distribution switch.
+        distribution: Distribution::Download(chosen.url),
         size: chosen.size,
         hashes,
     })

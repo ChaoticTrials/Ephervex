@@ -75,13 +75,59 @@ pub struct ModProject {
     pub icon_url: Option<String>,
 }
 
+/// Whether this launcher may fetch a release's bytes, and from where.
+///
+/// A CurseForge project's owner can turn third-party distribution off. That
+/// leaves the release fully described and undownloadable at the same time,
+/// which is a fact about acquisition rather than a gap in what the provider
+/// said - so it is carried here instead of by discarding the release.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Distribution {
+    /// An address this launcher is allowed to fetch, already checked against
+    /// the hosts the provider delivers from.
+    Download(String),
+    /// The provider described the file and forbids this launcher from
+    /// fetching it. The bytes can only arrive by the user's own hand, and no
+    /// address is invented to route around that.
+    Restricted,
+}
+
+impl Distribution {
+    /// The address to fetch, or `None` when there is none this launcher may
+    /// use.
+    #[must_use]
+    pub fn download_url(&self) -> Option<&str> {
+        match self {
+            Self::Download(url) => Some(url),
+            Self::Restricted => None,
+        }
+    }
+
+    /// Whether acquiring this file needs the user rather than the launcher.
+    #[must_use]
+    pub const fn is_restricted(&self) -> bool {
+        matches!(self, Self::Restricted)
+    }
+
+    /// The addresses a recipe entry records, which is none for a file this
+    /// launcher may not fetch.
+    #[must_use]
+    pub fn addresses(&self) -> Vec<String> {
+        match self {
+            Self::Download(url) => vec![url.clone()],
+            Self::Restricted => Vec::new(),
+        }
+    }
+}
+
 /// One file belonging to a version - the one this launcher would install.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModFile {
     /// The provider's own file name. Untrusted input: it is validated as a safe
     /// relative path before it is allowed to name a destination.
     pub file_name: String,
-    pub url: String,
+    /// Where the bytes come from, or that they may not be fetched at all.
+    pub distribution: Distribution,
     pub size: Option<u64>,
     /// Strongest first, so the shared cache path is derived from the best hash
     /// the provider published.

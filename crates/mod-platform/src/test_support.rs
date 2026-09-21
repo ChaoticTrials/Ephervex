@@ -9,7 +9,7 @@ use chrono::{DateTime, TimeZone as _, Utc};
 use ephervex_model::{Hash, HashAlgorithm, ModProvider, ModRelationKind};
 
 use crate::model::{
-    ModDependency, ModFile, ModProject, ModVersionInfo, ReleaseChannel, SideSupport,
+    Distribution, ModDependency, ModFile, ModProject, ModVersionInfo, ReleaseChannel, SideSupport,
 };
 
 /// A digest that is well-formed but means nothing. Tests here never hash bytes.
@@ -45,7 +45,9 @@ pub(crate) fn version(
         published_at: published(0),
         file: ModFile {
             file_name: format!("{project_id}-{id}.jar"),
-            url: format!("https://cdn.modrinth.com/data/{project_id}/{id}.jar"),
+            distribution: Distribution::Download(format!(
+                "https://cdn.modrinth.com/data/{project_id}/{id}.jar"
+            )),
             size: Some(16),
             hashes: vec![Hash::new(HashAlgorithm::Sha1, SHA1).expect("valid sha1")],
         },

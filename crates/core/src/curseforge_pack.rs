@@ -63,7 +63,7 @@ use ephervex_download::{
 };
 use ephervex_mod_platform::{
     CURSEFORGE_API_KEY_HEADER, CurseForgeFileRelease, CurseForgeOperation, CurseForgeProject,
-    CurseForgeProjectClass, MINECRAFT_GAME_ID, ModPlatformError,
+    CurseForgeProjectClass, MINECRAFT_GAME_ID, ModPlatformError, file_browser_url,
 };
 use ephervex_model::{
     AttentionReason, CurseForgeFileId, CurseForgeProjectId, Hash, ModOrigin, ModProvider,
@@ -72,7 +72,8 @@ use ephervex_model::{
 use ephervex_pack::{
     ArtifactCredentials, BlockedProviderFile, CredentialUnavailable, DuplicateFileReason,
     DuplicateProviderFile, MODS_DIR, PackAnalysis, PackError, PackFileRecipe, PackFormat,
-    PendingProviderFile, ProviderFileIdentity, RESOURCEPACKS_DIR, SHADERPACKS_DIR, safe_file_name,
+    PendingProviderFile, ProviderFileIdentity, RESOURCEPACKS_DIR, RecipeRelation, SHADERPACKS_DIR,
+    safe_file_name,
 };
 use futures_util::StreamExt as _;
 use reqwest::header::HeaderName;
@@ -283,10 +284,10 @@ impl App {
             origin: ModOrigin::PackDeclared,
             identity: Some(blocked.identity.clone()),
             original_identity: None,
-            // This file was recovered from a manual download because the
-            // provider refused to describe it. Nothing declared its relations,
-            // so nothing has asked rather than nothing is needed.
-            relations: None,
+            // The provider refused to serve this file's bytes, not to describe
+            // it. Whatever its document declared is recorded here; `None`
+            // survives only where nothing ever described the file at all.
+            relations: blocked.relations.clone(),
         }))
     }
 
@@ -656,17 +657,22 @@ struct BlockedFileDetail {
     file_name: Option<String>,
     browser_url: Option<String>,
     hashes: Vec<Hash>,
+    /// The relations the same response declared. A file the provider will not
+    /// serve is still a file it described, so this is knowledge rather than a
+    /// gap (ADR 0034).
+    relations: Vec<RecipeRelation>,
 }
 
 /// Looks up every declared file, deduplicated and with bounded concurrency.
 ///
 /// A file whose author disabled third-party downloads does not abort the
-/// batch: [`ModPlatformError::FileDistributionRestricted`] is collected into
-/// the second return value instead, one entry per pending file it applies to,
-/// so a caller can display it, offer a manual-download link, or resolve it
-/// from the shared cache rather than losing the rest of the pack over one
-/// author's decision. Every other lookup failure still propagates
-/// immediately and aborts the batch, exactly as before.
+/// batch: the provider still describes it, and it is collected into the
+/// second return value instead, one entry per pending file it applies to, so
+/// a caller can display it, offer a manual-download link, or resolve it from
+/// the shared cache rather than losing the rest of the pack over one author's
+/// decision. Everything that response declared travels with it, relations
+/// included. Every lookup failure still propagates immediately and aborts the
+/// batch, exactly as before.
 ///
 /// A project two `pending` entries both declare (ADR 0031) is resolved down
 /// to one winner - see [`pick_winner`] - before recipe entries are built; the
@@ -719,37 +725,30 @@ async fn resolve_files(
     let mut blocked_reasons: BTreeMap<(CurseForgeProjectId, CurseForgeFileId), BlockedFileDetail> =
         BTreeMap::new();
     for ((project, file), outcome) in distinct.iter().copied().zip(outcomes) {
-        match outcome {
-            Ok(release) => {
-                by_identity.insert((project, file), release);
-            }
-            Err(ModPlatformError::FileDistributionRestricted {
-                file_name, hashes, ..
-            }) => {
-                let classified = classes.get(&project);
-                blocked_reasons.insert(
-                    (project, file),
-                    BlockedFileDetail {
-                        project_name: classified.map(|classified| classified.name.clone()),
-                        file_name,
-                        // The exact file's own download link, not just the
-                        // project's page: CurseForge starts this file's
-                        // download automatically rather than requiring
-                        // another click on the file's info page.
-                        browser_url: classified.and_then(|classified| {
-                            classified.browser_path_segment.map(|segment| {
-                                format!(
-                                    "https://www.curseforge.com/minecraft/{segment}/{slug}/download/{file}",
-                                    slug = classified.slug
-                                )
-                            })
-                        }),
-                        hashes,
-                    },
-                );
-            }
-            Err(error) => return Err(CoreError::from(error)),
+        let release = outcome.map_err(CoreError::from)?;
+        if release.artifact.distribution.is_restricted() {
+            let classified = classes.get(&project);
+            blocked_reasons.insert(
+                (project, file),
+                BlockedFileDetail {
+                    project_name: classified.map(|classified| classified.name.clone()),
+                    file_name: Some(release.artifact.file_name.clone()),
+                    // The exact file's own download link, not just the
+                    // project's page: CurseForge starts this file's download
+                    // automatically rather than requiring another click on
+                    // the file's info page.
+                    browser_url: classified.and_then(|classified| {
+                        classified
+                            .browser_path_segment
+                            .map(|segment| file_browser_url(segment, &classified.slug, file))
+                    }),
+                    hashes: release.artifact.hashes.clone(),
+                    relations: crate::mods::recipe_relations(&release.dependencies),
+                },
+            );
+            continue;
         }
+        by_identity.insert((project, file), release);
     }
 
     let (winners, duplicates) =
@@ -809,6 +808,7 @@ fn assemble_resolved_files(
                 file_name: detail.file_name.clone(),
                 browser_url: detail.browser_url.clone(),
                 hashes: detail.hashes.clone(),
+                relations: Some(detail.relations.clone()),
                 client: entry.client,
                 server: entry.server,
             });
@@ -1017,19 +1017,27 @@ fn recipe_entry(
 
     // The address is provider data, and provider data decides which machine the
     // launcher connects to. It is checked like any other remote address, and a
-    // refusal is fatal: there is no second address for a CurseForge file.
-    let address =
-        hosts
-            .validate(&release.artifact.url)
-            .map_err(|source| PackError::DownloadUrlRejected {
-                path: name.to_string_lossy().into_owned(),
-                source,
-            })?;
+    // refusal is fatal: there is no second address for a CurseForge file. A
+    // file the author forbids third-party downloads of never reaches here -
+    // it is collected as a blocked file instead.
+    let address = release
+        .artifact
+        .distribution
+        .download_url()
+        .map(|url| {
+            hosts
+                .validate(url)
+                .map_err(|source| PackError::DownloadUrlRejected {
+                    path: name.to_string_lossy().into_owned(),
+                    source,
+                })
+        })
+        .transpose()?;
 
     Ok(PackFileRecipe {
         logical_path: PathBuf::from(content_class.logical_dir()).join(name),
         hashes: release.artifact.hashes.clone(),
-        downloads: vec![address.to_string()],
+        downloads: address.map(|url| url.to_string()).into_iter().collect(),
         size: release.artifact.size,
         client: entry.client,
         server: crate::mods::side_requirement(release.server_side),
@@ -1057,6 +1065,7 @@ mod tests {
     use std::io::Write as _;
     use std::path::Path;
 
+    use ephervex_model::ModRelationKind;
     use ephervex_pack::RelationTarget;
 
     use ephervex_auth::{CredentialStore, MemoryStore};
@@ -2518,7 +2527,8 @@ mod tests {
                 format!(
                     r#"{{"data":{{"id":{OPTIONAL_FILE},"gameId":432,"modId":{OPTIONAL_PROJECT},
                         "isAvailable":true,"fileName":"restricted.zip","fileLength":10,
-                        "downloadUrl":null,"hashes":[]}}}}"#
+                        "downloadUrl":null,
+                        "hashes":[{{"value":"da39a3ee5e6b4b0d3255bfef95601890afd80709","algo":1}}]}}}}"#
                 ),
                 "application/json",
             ))
@@ -2790,7 +2800,8 @@ mod tests {
                 format!(
                     r#"{{"data":{{"id":{OPTIONAL_FILE},"gameId":432,"modId":{OPTIONAL_PROJECT},
                         "isAvailable":true,"fileName":"restricted.zip","fileLength":10,
-                        "downloadUrl":null,"hashes":[]}}}}"#
+                        "downloadUrl":null,
+                        "hashes":[{{"value":"da39a3ee5e6b4b0d3255bfef95601890afd80709","algo":1}}]}}}}"#
                 ),
                 "application/json",
             ))
@@ -2963,7 +2974,8 @@ mod tests {
                 format!(
                     r#"{{"data":{{"id":{REQUIRED_FILE},"gameId":432,"modId":{REQUIRED_PROJECT},
                         "isAvailable":true,"fileName":"restricted.jar","fileLength":10,
-                        "downloadUrl":null,"hashes":[]}}}}"#
+                        "downloadUrl":null,
+                        "hashes":[{{"value":"da39a3ee5e6b4b0d3255bfef95601890afd80709","algo":1}}]}}}}"#
                 ),
                 "application/json",
             ))
@@ -3017,6 +3029,7 @@ mod tests {
                     r#"{{"data":{{"id":{OPTIONAL_FILE},"gameId":432,"modId":{OPTIONAL_PROJECT},
                         "isAvailable":true,"fileName":"restricted.jar","fileLength":10,
                         "downloadUrl":null,
+                        "dependencies":[{{"modId":{REQUIRED_PROJECT},"relationType":3}}],
                         "hashes":[{{"value":"da39a3ee5e6b4b0d3255bfef95601890afd80709","algo":1}}]}}}}"#
                 ),
                 "application/json",
@@ -3037,6 +3050,20 @@ mod tests {
         let blocked = &analysis.blocked[0];
         assert_eq!(blocked.project_name.as_deref(), Some("Optional Mod"));
         assert_eq!(blocked.file_name.as_deref(), Some("restricted.jar"));
+        // Refusing to serve the bytes is not refusing to describe the file.
+        assert_eq!(
+            blocked.relations.as_deref(),
+            Some(
+                [RecipeRelation {
+                    kind: ModRelationKind::Required,
+                    target: RelationTarget::Project {
+                        project_id: REQUIRED_PROJECT.to_string(),
+                        version_id: None,
+                    },
+                }]
+                .as_slice()
+            ),
+        );
         assert_eq!(
             blocked.browser_url.as_deref(),
             Some("https://www.curseforge.com/minecraft/mc-mods/Optional Mod/download/4593600")
@@ -3075,6 +3102,7 @@ mod tests {
                     r#"{{"data":{{"id":{OPTIONAL_FILE},"gameId":432,"modId":{OPTIONAL_PROJECT},
                         "isAvailable":true,"fileName":"restricted.jar","fileLength":{length},
                         "downloadUrl":null,
+                        "dependencies":[{{"modId":{REQUIRED_PROJECT},"relationType":3}}],
                         "hashes":[{{"value":"{digest}","algo":1}}]}}}}"#,
                     length = RESTRICTED_BODY.len(),
                 ),
@@ -3116,6 +3144,22 @@ mod tests {
         assert!(
             recovered.downloads.is_empty(),
             "nothing needs to be fetched for a file the cache already verified"
+        );
+        // A download restriction must not leave the instance unable to answer
+        // dependency questions about a file the catalog did describe.
+        assert_eq!(
+            recovered.relations.as_deref(),
+            Some(
+                [RecipeRelation {
+                    kind: ModRelationKind::Required,
+                    target: RelationTarget::Project {
+                        project_id: REQUIRED_PROJECT.to_string(),
+                        version_id: None,
+                    },
+                }]
+                .as_slice()
+            ),
+            "recorded relation knowledge, not `None` for unknown"
         );
     }
 

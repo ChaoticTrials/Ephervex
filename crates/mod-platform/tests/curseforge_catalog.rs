@@ -16,9 +16,9 @@ use std::sync::Arc;
 use ephervex_download::{DomainAllowlist, HttpConfig, OperationReporter};
 use ephervex_mod_platform::{
     ConfiguredApiKey, CurseForgeApi, CurseForgeProvider, InstanceTarget, ModPlatformError,
-    ModProviderApi, ModSearchQuery,
+    ModProviderApi, ModSearchQuery, ReleaseChannel,
 };
-use ephervex_model::{LoaderKind, ModProvider, SecretString};
+use ephervex_model::{LoaderKind, ModProvider, ModRelationKind, SecretString};
 use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{body_json, method, path, path_regex, query_param};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
@@ -702,17 +702,23 @@ async fn an_exactly_named_file_is_fetched_by_its_own_id() {
 }
 
 #[tokio::test]
-async fn a_file_whose_author_disabled_third_party_downloads_is_refused_explicitly() {
-    // Never dropped from the list: dropping it would silently offer a
-    // different release than the newest one that fits.
+async fn a_project_whose_author_disabled_third_party_downloads_still_lists_its_releases() {
+    // A download restriction is about acquisition, not about what CurseForge
+    // told us. The release stays in the list, complete, so a version picker
+    // shows it and an already-cached copy can still be installed. Shaped like
+    // project 391382's restricted file 7951520, the regression this covers.
+    const RESTRICTED_PROJECT: u32 = 391_382;
+    const RESTRICTED_FILE: u32 = 7_951_520;
+
     let server = MockServer::start().await;
     serve_categories(&server).await;
     let restricted = format!(
-        r#"{{"data":[{{"id":{JEI_FILE},"gameId":432,"modId":{JEI_PROJECT},"isAvailable":true,
-            "displayName":"JEI","fileName":"jei.jar","releaseType":1,
-            "fileDate":"2023-07-01T10:00:00Z","fileLength":10,"downloadUrl":null,
+        r#"{{"data":[{{"id":{RESTRICTED_FILE},"gameId":432,"modId":{RESTRICTED_PROJECT},
+            "isAvailable":true,"displayName":"Restricted 1.0.0","fileName":"restricted-1.0.0.jar",
+            "releaseType":1,"fileDate":"2023-07-01T10:00:00Z","fileLength":10,"downloadUrl":null,
             "hashes":[{{"value":"da39a3ee5e6b4b0d3255bfef95601890afd80709","algo":1}}],
-            "gameVersions":["1.20.1","NeoForge"],"dependencies":[]}}],
+            "gameVersions":["1.20.1","NeoForge"],
+            "dependencies":[{{"modId":{JEI_PROJECT},"relationType":3}}]}}],
             "pagination":{{"totalCount":1}}}}"#
     );
     Mock::given(method("GET"))
@@ -721,22 +727,53 @@ async fn a_file_whose_author_disabled_third_party_downloads_is_refused_explicitl
         .mount(&server)
         .await;
 
-    let error = provider_against(&server, Some(FAKE_KEY))
+    let versions = provider_against(&server, Some(FAKE_KEY))
         .versions(
-            &JEI_PROJECT.to_string(),
+            &RESTRICTED_PROJECT.to_string(),
             &target(LoaderKind::NeoForge),
             &reporter(),
             &CancellationToken::new(),
         )
         .await
-        .expect_err("a restricted file cannot be offered");
+        .expect("a restricted release is still a release");
+
+    assert_eq!(versions.len(), 1);
+    let release = &versions[0];
+    assert_eq!(release.id, RESTRICTED_FILE.to_string());
+    assert_eq!(release.name, "Restricted 1.0.0");
+    assert_eq!(release.channel, ReleaseChannel::Release);
+    assert_eq!(release.game_versions, vec!["1.20.1".to_owned()]);
+    assert_eq!(release.loaders, vec!["NeoForge".to_owned()]);
+    assert_eq!(
+        release.published_at.to_rfc3339(),
+        "2023-07-01T10:00:00+00:00"
+    );
     assert!(
-        matches!(
-            error,
-            ModPlatformError::FileDistributionRestricted { ref project_id, ref file_id, .. }
-                if project_id == &JEI_PROJECT.to_string() && file_id == &JEI_FILE.to_string()
-        ),
-        "{error:?}"
+        release.file.distribution.is_restricted(),
+        "no address may be invented for it"
+    );
+    assert_eq!(release.file.distribution.download_url(), None);
+    assert_eq!(
+        release.file.hashes.len(),
+        1,
+        "the digest is what recognizes a hand-placed copy"
+    );
+    assert_eq!(
+        release
+            .dependencies
+            .iter()
+            .map(|relation| (relation.kind, relation.project_id.as_deref()))
+            .collect::<Vec<_>>(),
+        vec![(
+            ModRelationKind::Required,
+            Some(JEI_PROJECT.to_string().as_str())
+        )],
+    );
+    assert!(
+        release
+            .compatibility(&target(LoaderKind::NeoForge), "neoforge")
+            .is_compatible(),
+        "the restriction is not an incompatibility"
     );
 }
 
