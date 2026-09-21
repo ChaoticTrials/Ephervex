@@ -2379,6 +2379,7 @@ fn run_worker(
                         app.begin_isolation(
                             host,
                             IsolationRequest {
+                                accept_missing: false,
                                 pinned,
                                 accept_unrecorded,
                             },

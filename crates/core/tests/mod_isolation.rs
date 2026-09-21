@@ -90,6 +90,7 @@ fn request(pinned: &[&str]) -> IsolationRequest {
     IsolationRequest {
         pinned: mods(pinned),
         accept_unrecorded: false,
+        accept_missing: false,
     }
 }
 
@@ -666,6 +667,7 @@ fn unrecorded_knowledge_requires_an_explicit_reduced_confidence_override() {
             IsolationRequest {
                 pinned: Vec::new(),
                 accept_unrecorded: true,
+                accept_missing: false,
             },
             &cancel,
         )
@@ -709,6 +711,30 @@ fn missing_dependencies_block_start_before_a_snapshot_or_mutation() {
     assert_eq!(enabled_files(&fixture), before);
     assert!(app.snapshots(fixture.host).unwrap().is_empty());
     assert!(!fixture.root.join(".launcher/isolation.json").exists());
+}
+
+#[test]
+fn acknowledged_missing_dependencies_mark_the_session_and_result_unproven() {
+    let fixture = Fixture::new();
+    std::fs::remove_file(fixture.root.join("minecraft/mods/base.jar")).unwrap();
+    let app = fixture.app();
+    let cancel = CancellationToken::new();
+
+    app.begin_isolation(
+        fixture.host,
+        IsolationRequest {
+            pinned: Vec::new(),
+            accept_unrecorded: false,
+            accept_missing: true,
+        },
+        &cancel,
+    )
+    .unwrap();
+
+    let session = app.isolation_state(fixture.host).unwrap().unwrap();
+    assert!(session.accepted_missing);
+    assert!(session.reduced_confidence);
+    assert!(!session.plan.missing.is_empty());
 }
 
 #[test]

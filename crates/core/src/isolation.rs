@@ -73,6 +73,12 @@ pub struct IsolationRequest {
     pub pinned: Vec<PathBuf>,
     #[serde(default)]
     pub accept_unrecorded: bool,
+    /// Continue even when a declared required dependency is unavailable.
+    ///
+    /// The missing edge cannot be included in a tested closure, so accepting
+    /// it marks the session and result as reduced confidence.
+    #[serde(default)]
+    pub accept_missing: bool,
 }
 
 /// The observation made after testing one configuration.
@@ -184,6 +190,8 @@ pub struct IsolationSession {
     pub safety_snapshot: SnapshotId,
     pub plan: IsolationPlan,
     pub accepted_unrecorded: bool,
+    #[serde(default)]
+    pub accepted_missing: bool,
     pub reduced_confidence: bool,
     pub suspects: Vec<PathBuf>,
     pub granularity: usize,
@@ -253,6 +261,7 @@ pub struct IsolationReport {
     pub reduced_confidence: bool,
     pub unrecorded: Vec<PathBuf>,
     pub unidentifiable: Vec<PathBuf>,
+    pub missing: Vec<IsolationMissingDependency>,
     pub linked_servers: Vec<IsolationLinkedServer>,
 }
 
@@ -538,9 +547,10 @@ impl App {
         let IsolationRequest {
             pinned,
             accept_unrecorded,
+            accept_missing,
         } = request;
         let plan = self.plan_isolation(host, &pinned)?;
-        if !plan.missing.is_empty() {
+        if !accept_missing && !plan.missing.is_empty() {
             return Err(IsolationError::MissingDependencies {
                 dependencies: plan.missing.clone(),
             }
@@ -585,8 +595,10 @@ impl App {
             started_at: Utc::now(),
             safety_snapshot: snapshot.id,
             accepted_unrecorded: accept_unrecorded && !plan.unrecorded.is_empty(),
+            accepted_missing: accept_missing && !plan.missing.is_empty(),
             reduced_confidence: !plan.unidentifiable.is_empty()
-                || (accept_unrecorded && !plan.unrecorded.is_empty()),
+                || (accept_unrecorded && !plan.unrecorded.is_empty())
+                || (accept_missing && !plan.missing.is_empty()),
             suspects,
             granularity: search.granularity,
             history: Vec::new(),
@@ -1006,6 +1018,7 @@ fn report_for(session: &IsolationSession, outcome: &IsolationOutcome) -> Isolati
         reduced_confidence: session.reduced_confidence,
         unrecorded: session.plan.unrecorded.clone(),
         unidentifiable: session.plan.unidentifiable.clone(),
+        missing: session.plan.missing.clone(),
         linked_servers: session.plan.linked_servers.clone(),
     }
 }

@@ -3873,6 +3873,7 @@ fn run_mod_isolate(app: &App, command: &IsolateCommand, json: bool) -> anyhow::R
                 IsolationRequest {
                     pinned: pinned.clone(),
                     accept_unrecorded: *accept_unrecorded,
+                    accept_missing: false,
                 },
                 &CancellationToken::new(),
             )?;

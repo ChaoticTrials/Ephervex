@@ -10,10 +10,11 @@ Open a client's or server's **Mods** tab and choose **Isolate mods**. Select any
 mods that must stay enabled throughout the investigation. Ephervex also keeps
 everything those mods require enabled.
 
-The setup screen blocks when a required dependency is missing. If dependency
-information can be refreshed but has not been recorded, refresh it first or
-explicitly choose **Continue with reduced confidence**. Jars that cannot be
-identified can still be tested, but the result is marked unproven.
+The setup screen requires a separate acknowledgement when a required dependency
+is missing. If dependency information can be refreshed but has not been
+recorded, refresh it first or explicitly continue with reduced confidence.
+Either acknowledgement marks the result as unproven. Jars that cannot be
+identified can still be tested, with the same caveat.
 
 For each round, launch the host using the exact enabled configuration shown in
 the dialog. Then answer **Issue still present** or **Issue gone**. The dialog can

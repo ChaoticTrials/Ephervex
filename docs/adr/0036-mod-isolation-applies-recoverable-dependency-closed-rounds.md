@@ -41,11 +41,10 @@ stopped reproduction. Reaching zero or one candidate uses a confirmation round
 and reports only that the smallest testable candidate set was reached.
 
 One session belongs to one client or one server. A client session lists linked
-servers but never changes them. Missing required dependencies block start.
-Refreshable but unrecorded dependency knowledge also blocks start unless the
-user explicitly accepts reduced confidence. Unidentifiable jars cannot be
-refreshed, so they remain independent candidates and make the result
-reduced-confidence.
+servers but never changes them. Missing required dependencies and refreshable
+but unrecorded dependency knowledge each require an explicit
+reduced-confidence acknowledgement. Unidentifiable jars cannot be refreshed,
+so they remain independent candidates and make the result reduced-confidence.
 
 The session is a compact version-1 document at
 `<host>/.launcher/isolation.json`. It records the safety snapshot, plan, search
@@ -78,8 +77,8 @@ snapshot under a dated label.
   correctness constraints, not suspects.
 - A one-minimal result need not be the globally smallest reproducing set. The UI
   and CLI distinguish it from a smallest testable zero- or one-candidate result.
-- Results based on unrecorded or unidentifiable dependency information are
-  explicitly unproven.
+- Results based on missing, unrecorded, or unidentifiable dependency
+  information are explicitly unproven.
 - The session document makes an interrupted workflow visible after restart and
   gives resume one authoritative intended configuration.
 - Cancel and finish have deliberately different recovery semantics. Cancel

@@ -154,6 +154,8 @@ candidate is a root and its complete required closure; shared libraries remain
 enabled whenever any selected root needs them. Pinned mods carry their own
 transitive closure. Required cycles have one deterministic representative.
 Missing jars and incomplete dependency knowledge are shown before starting.
+Either condition requires an explicit acknowledgement before the desktop can
+continue, and the acknowledgement is retained in the session.
 
 An active session is a compact version-1 document at
 `<host>/.launcher/isolation.json`. It records the pre-isolation snapshot, the
@@ -171,9 +173,9 @@ silently advancing.
 
 Start and round mutations refuse while the selected client or server is
 running, but a waiting session holds no launch lock. A client session reports
-its linked servers without changing them. Missing dependencies block the
-session. Unrecorded knowledge requires an explicit reduced-confidence override,
-and unidentifiable jars carry the same caveat because no catalog query can make
+its linked servers without changing them. Missing dependencies and unrecorded
+knowledge require separate explicit reduced-confidence acknowledgements.
+Unidentifiable jars carry the same caveat because no catalog query can make
 their dependency information complete.
 
 Finish leaves the narrowed configuration enabled, removes the session marker,
