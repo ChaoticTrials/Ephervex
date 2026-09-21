@@ -438,7 +438,7 @@ impl CoreError {
             Self::LoaderFamilyFixed { .. } => "error-loader-family-fixed",
             Self::LoaderChangeBlockedByMods { .. } => "error-loader-change-blocked-by-mods",
             Self::ModNotManaged { .. } => "error-mod-not-managed",
-            Self::ModAcquisitionRestricted { .. } => "error-mod-file-distribution-restricted",
+            Self::ModAcquisitionRestricted { .. } => "error-mod-acquisition-restricted",
             Self::ModMutationRestricted { restriction, .. } => restriction.message_id(),
             Self::ModIdentityIncomplete { .. } => "error-mod-identity-incomplete",
             Self::ModCatalogPreferenceUnrecognized { .. } => {
@@ -484,6 +484,16 @@ impl CoreError {
             Self::ModCatalogPreferenceUnrecognized { configured } => {
                 vec![("catalog", configured.clone())]
             }
+            // The first file named, because the sentence is a next step rather
+            // than an inventory: a frontend that can show the whole list has
+            // the list itself.
+            Self::ModAcquisitionRestricted { blocked, .. } => vec![(
+                "file",
+                blocked
+                    .first()
+                    .and_then(|file| file.file_name.clone())
+                    .unwrap_or_default(),
+            )],
             Self::Preference(error) => vec![("syntax", error.syntax.to_owned())],
             Self::EntityNameInvalid {
                 reason: NameRefusal::TooLong,

@@ -1190,6 +1190,9 @@ error-mod-file-unavailable = { $provider } is not serving that file.
 error-mod-file-distribution-restricted = That mod's author does not allow other launchers to download it.
 .action = Project { $project } has third-party downloads turned off, so Ephervex cannot fetch file { $file_id }. Download the pack through CurseForge's own app, or ask the pack author to replace the mod.
 
+error-mod-acquisition-restricted = That mod's author does not allow other launchers to download this release.
+.action = Open { $file } on CurseForge and save it to a watched download folder. Ephervex verifies the copy and finishes the change for you.
+
 error-mod-file-identity-mismatch = { $provider } answered about a different file than the one requested.
 .action = Ephervex asked for { $requested } and was told about { $returned }, so nothing was installed.
 
