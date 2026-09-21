@@ -57,10 +57,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
-use ephervex_download::{
-    ArtifactStep, AuthenticatedSource, ContentStore, DomainAllowlist, DownloadError,
-    DownloadManager, DownloaderConfig, FileExtension, file_matches_hashes,
-};
+use ephervex_download::{AuthenticatedSource, DomainAllowlist, DownloadManager, DownloaderConfig};
 use ephervex_mod_platform::{
     CURSEFORGE_API_KEY_HEADER, CurseForgeFileRelease, CurseForgeOperation, CurseForgeProject,
     CurseForgeProjectClass, MINECRAFT_GAME_ID, ModPlatformError, file_browser_url,
@@ -234,50 +231,20 @@ impl App {
         blocked: &BlockedProviderFile,
         content_class: PackContentClass,
     ) -> CoreResult<Option<PackFileRecipe>> {
-        let Some(hash) = blocked.hashes.first() else {
-            return Ok(None);
-        };
         let Some(name) = blocked.file_name.as_deref().and_then(safe_file_name) else {
             return Ok(None);
         };
-        let extension = name
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .and_then(|extension| FileExtension::new(extension).ok());
-        let path = self.artifact_cache().layout().content(
-            ContentStore::Downloads,
-            hash,
-            extension.as_ref(),
-        );
-        let download_failed = |source: DownloadError| {
-            CoreError::from(PackError::DownloadFailed {
-                path: blocked.file_name.clone().unwrap_or_default(),
-                source: Box::new(source),
-            })
-        };
-        let metadata = match tokio::fs::symlink_metadata(&path).await {
-            Ok(metadata) if metadata.is_file() => metadata,
-            Ok(_) => return Ok(None),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(source) => {
-                return Err(download_failed(DownloadError::io(
-                    ArtifactStep::ReadCached,
-                    &path,
-                    source,
-                )));
-            }
-        };
-        if !file_matches_hashes(&path, &blocked.hashes)
-            .await
-            .map_err(download_failed)?
-        {
+        let Some(bytes) = self
+            .cached_artifact_bytes(&blocked.hashes, blocked.file_name.as_deref())
+            .await?
+        else {
             return Ok(None);
-        }
+        };
         Ok(Some(PackFileRecipe {
             logical_path: PathBuf::from(content_class.logical_dir()).join(&name),
             hashes: blocked.hashes.clone(),
             downloads: Vec::new(),
-            size: Some(metadata.len()),
+            size: Some(bytes),
             client: blocked.client,
             server: blocked.server,
             selected: None,

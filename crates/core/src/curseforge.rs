@@ -290,12 +290,17 @@ mod browsing {
     const UNFITTING_PROJECT: u32 = 400;
     /// A root that requires [`UNFITTING_PROJECT`].
     const BLOCKED_PROJECT: u32 = 500;
+    /// A project whose author turned third-party downloads off. The real ids
+    /// of the regression this fixture stands in for.
+    const RESTRICTED_PROJECT: u32 = 391_382;
 
     const ROOT_NEWEST: u32 = 1001;
     const ROOT_OLDER: u32 = 1000;
     const LIBRARY_FILE: u32 = 2001;
     const OPTIONAL_FILE: u32 = 3001;
     const BLOCKED_FILE: u32 = 5001;
+    const RESTRICTED_INSTALLED: u32 = 7_951_519;
+    const RESTRICTED_NEWER: u32 = 7_951_520;
 
     /// CurseForge's documented relation types.
     const REQUIRED: u32 = 3;
@@ -332,6 +337,64 @@ mod browsing {
             base = server.uri(),
             digest = sha1_of(&body),
         )
+    }
+
+    /// The same document, as CurseForge returns it for a file whose author
+    /// turned third-party downloads off: everything but the address.
+    fn restricted_file_document(project: u32, file: u32, relations: &str) -> String {
+        let body = jar(project, file);
+        format!(
+            r#"{{"id":{file},"gameId":432,"modId":{project},"isAvailable":true,
+                "displayName":"Release {file}","fileName":"{name}","releaseType":1,
+                "fileDate":"2024-07-0{day}T10:00:00Z","fileLength":{length},
+                "downloadUrl":null,
+                "hashes":[{{"value":"{digest}","algo":1}}],
+                "gameVersions":["1.20.1","NeoForge"],
+                "dependencies":[{relations}]}}"#,
+            name = file_name(project, file),
+            day = file % 9 + 1,
+            length = body.len(),
+            digest = sha1_of(&body),
+        )
+    }
+
+    /// One restricted project's file listing and the batch endpoint an
+    /// exactly pinned release is fetched through.
+    ///
+    /// Deliberately mounts no byte endpoint for these files: nothing in the
+    /// launcher may fetch them, and a request for one would 404 loudly.
+    async fn serve_restricted_files(server: &MockServer, project: u32, files: &[u32]) {
+        let documents: Vec<String> = files
+            .iter()
+            .map(|file| restricted_file_document(project, *file, ""))
+            .collect();
+        let total = documents.len();
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/mods/{project}/files")))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                format!(
+                    r#"{{"data":[{}],"pagination":{{"totalCount":{total}}}}}"#,
+                    documents.join(",")
+                ),
+                "application/json",
+            ))
+            .mount(server)
+            .await;
+
+        for file in files {
+            Mock::given(method("POST"))
+                .and(path("/v1/mods/files"))
+                .and(body_json(serde_json::json!({ "fileIds": [file] })))
+                .respond_with(ResponseTemplate::new(200).set_body_raw(
+                    format!(
+                        r#"{{"data":[{}]}}"#,
+                        restricted_file_document(project, *file, "")
+                    ),
+                    "application/json",
+                ))
+                .mount(server)
+                .await;
+        }
     }
 
     fn project_document(project: u32, name: &str) -> String {
@@ -464,6 +527,12 @@ mod browsing {
         .await;
         // Nothing this instance can run.
         serve_files(server, UNFITTING_PROJECT, &[]).await;
+        serve_restricted_files(
+            server,
+            RESTRICTED_PROJECT,
+            &[RESTRICTED_NEWER, RESTRICTED_INSTALLED],
+        )
+        .await;
 
         // The batch file endpoint, one mock per exact file, because an exactly
         // pinned release asks for that file and must be answered about it.
@@ -497,6 +566,7 @@ mod browsing {
             (OPTIONAL_PROJECT, "Optional Extra"),
             (UNFITTING_PROJECT, "Absent Library"),
             (BLOCKED_PROJECT, "Blocked Mod"),
+            (RESTRICTED_PROJECT, "Restricted Mod"),
         ];
 
         for (project, name) in PROJECTS {
@@ -899,6 +969,366 @@ mod browsing {
                 })
             ),
             "{error:?}"
+        );
+    }
+
+    // -- releases whose author forbids third-party downloads ---------------
+
+    /// Puts one restricted file's bytes in the shared artifact cache, the way
+    /// a folder watcher or an earlier import would have.
+    fn seed_cache(app: &App, project: u32, file: u32) {
+        let body = jar(project, file);
+        let hash = ephervex_model::Hash::new(ephervex_model::HashAlgorithm::Sha1, &sha1_of(&body))
+            .expect("valid sha1");
+        let extension = ephervex_download::FileExtension::new("jar").expect("jar");
+        let path = app.artifact_cache().layout().content(
+            ephervex_download::ContentStore::Downloads,
+            &hash,
+            Some(&extension),
+        );
+        std::fs::create_dir_all(path.parent().expect("shard")).expect("shard");
+        std::fs::write(&path, body).expect("seed the cache");
+    }
+
+    /// An instance with the restricted mod installed at
+    /// [`RESTRICTED_INSTALLED`], by way of a copy already in the cache.
+    async fn instance_with_the_restricted_mod(app: &App) -> ephervex_model::InstanceId {
+        let instance = neoforge_instance(app);
+        seed_cache(app, RESTRICTED_PROJECT, RESTRICTED_INSTALLED);
+        app.install_mods(
+            instance,
+            &request(RESTRICTED_PROJECT).at_version(RESTRICTED_INSTALLED.to_string()),
+            &reporter(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("a cached restricted release installs the ordinary way");
+        instance
+    }
+
+    /// Every artifact path the loopback server was asked for.
+    async fn artifact_requests(server: &MockServer) -> Vec<String> {
+        server
+            .received_requests()
+            .await
+            .expect("recorded")
+            .iter()
+            .map(|request| request.url.path().to_owned())
+            .filter(|path| path.starts_with("/files/"))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_restricted_project_manages_like_any_other_mod() {
+        let server = catalog().await;
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_against(base.path(), &server);
+        let instance = instance_with_the_restricted_mod(&app).await;
+
+        let choices = app
+            .managed_mod_versions(
+                instance,
+                &std::path::PathBuf::from("mods")
+                    .join(file_name(RESTRICTED_PROJECT, RESTRICTED_INSTALLED)),
+                &reporter(),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("the version picker still has something to show");
+
+        assert_eq!(choices.project.title, "Restricted Mod");
+        assert_eq!(
+            choices.project_url().as_deref(),
+            Some(
+                format!("https://www.curseforge.com/minecraft/mc-mods/mod-{RESTRICTED_PROJECT}")
+                    .as_str()
+            ),
+            "the project browser link stays available"
+        );
+        let listed: Vec<&str> = choices
+            .compatible
+            .iter()
+            .map(|annotated| annotated.version.id.as_str())
+            .collect();
+        assert_eq!(
+            listed,
+            vec![
+                RESTRICTED_NEWER.to_string().as_str(),
+                RESTRICTED_INSTALLED.to_string().as_str(),
+            ],
+            "every compatible release is offered, newest first"
+        );
+        assert_eq!(
+            choices.installed_version_id.as_deref(),
+            Some(RESTRICTED_INSTALLED.to_string().as_str())
+        );
+        assert_eq!(
+            choices.newest_compatible.as_deref(),
+            Some(RESTRICTED_NEWER.to_string().as_str())
+        );
+        assert!(choices.mutability.can_change_version);
+        assert!(choices.mutability.can_update);
+        assert!(
+            choices.compatible.iter().all(|annotated| annotated
+                .version
+                .file
+                .distribution
+                .is_restricted()),
+            "the restriction is stated on the release, not by hiding it"
+        );
+        assert!(
+            choices
+                .compatible
+                .iter()
+                .all(|annotated| !annotated.version.file.hashes.is_empty()),
+            "the digest a hand-placed copy is recognized by is kept"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cached_restricted_release_is_installed_without_a_browser() {
+        let server = catalog().await;
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_against(base.path(), &server);
+        let instance = instance_with_the_restricted_mod(&app).await;
+        // The exact release the user is about to pick, already verified on
+        // this machine. The restriction is about downloading, not about using
+        // bytes Ephervex legitimately holds.
+        seed_cache(&app, RESTRICTED_PROJECT, RESTRICTED_NEWER);
+
+        let mutation = app
+            .change_managed_mod_version(
+                instance,
+                &std::path::PathBuf::from("mods")
+                    .join(file_name(RESTRICTED_PROJECT, RESTRICTED_INSTALLED)),
+                &crate::mutation::ModVersionChoice::Exact(RESTRICTED_NEWER.to_string()),
+                &reporter(),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("a cached restricted release needs no browser");
+
+        assert!(matches!(
+            mutation.plan.outcome,
+            crate::mutation::PlannedOutcome::ChangeVersion { .. }
+        ));
+        let recipe = app
+            .pack_recipe(instance)
+            .expect("a recipe")
+            .expect("one was written");
+        let entry = recipe
+            .managed_project(ModProvider::CurseForge, &RESTRICTED_PROJECT.to_string())
+            .expect("the restricted mod");
+        assert_eq!(
+            entry
+                .identity
+                .as_ref()
+                .and_then(|id| id.version_id.as_deref()),
+            Some(RESTRICTED_NEWER.to_string().as_str())
+        );
+        assert!(
+            artifact_requests(&server).await.is_empty(),
+            "nothing may fetch a file the author forbids third-party downloads of"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_uncached_restricted_release_asks_for_a_browser_download() {
+        let server = catalog().await;
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_against(base.path(), &server);
+        let instance = instance_with_the_restricted_mod(&app).await;
+
+        let error = app
+            .change_managed_mod_version(
+                instance,
+                &std::path::PathBuf::from("mods")
+                    .join(file_name(RESTRICTED_PROJECT, RESTRICTED_INSTALLED)),
+                &crate::mutation::ModVersionChoice::Exact(RESTRICTED_NEWER.to_string()),
+                &reporter(),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("the bytes are nowhere yet");
+
+        let crate::error::CoreError::ModAcquisitionRestricted { blocked, .. } = &error else {
+            panic!("a dead-end provider failure instead of the manual path: {error:?}");
+        };
+        assert_eq!(blocked.len(), 1);
+        let blocked = &blocked[0];
+        assert_eq!(
+            blocked.identity.file_id.as_deref(),
+            Some(RESTRICTED_NEWER.to_string().as_str())
+        );
+        assert_eq!(blocked.project_name.as_deref(), Some("Restricted Mod"));
+        assert_eq!(
+            blocked.file_name.as_deref(),
+            Some(file_name(RESTRICTED_PROJECT, RESTRICTED_NEWER).as_str())
+        );
+        assert_eq!(
+            blocked.browser_url.as_deref(),
+            Some(
+                format!(
+                    "https://www.curseforge.com/minecraft/mc-mods/mod-{RESTRICTED_PROJECT}/download/{RESTRICTED_NEWER}"
+                )
+                .as_str()
+            ),
+            "the provider's own page for the file, never an assembled delivery address"
+        );
+        assert!(
+            !blocked.hashes.is_empty(),
+            "a hand-placed copy has to be recognizable"
+        );
+        assert!(
+            artifact_requests(&server).await.is_empty(),
+            "no download was attempted or synthesized"
+        );
+
+        // The instance is untouched: the release it was on is still the one
+        // it is on.
+        let recipe = app
+            .pack_recipe(instance)
+            .expect("a recipe")
+            .expect("one was written");
+        let entry = recipe
+            .managed_project(ModProvider::CurseForge, &RESTRICTED_PROJECT.to_string())
+            .expect("the restricted mod");
+        assert_eq!(
+            entry
+                .identity
+                .as_ref()
+                .and_then(|id| id.version_id.as_deref()),
+            Some(RESTRICTED_INSTALLED.to_string().as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_manually_acquired_release_is_verified_before_the_update_continues() {
+        let server = catalog().await;
+        let base = tempfile::tempdir().expect("temp dir");
+        let downloads = base.path().join("manual-downloads");
+        std::fs::create_dir_all(&downloads).expect("a folder to watch");
+        let mut app = app_against(base.path(), &server);
+        app.set_watched_download_folders(Some(std::slice::from_ref(&downloads)))
+            .expect("watch the folder");
+        let instance = instance_with_the_restricted_mod(&app).await;
+        let target = std::path::PathBuf::from("mods")
+            .join(file_name(RESTRICTED_PROJECT, RESTRICTED_INSTALLED));
+        let choice = crate::mutation::ModVersionChoice::Exact(RESTRICTED_NEWER.to_string());
+
+        let error = app
+            .change_managed_mod_version(
+                instance,
+                &target,
+                &choice,
+                &reporter(),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("nothing has been acquired yet");
+        let crate::error::CoreError::ModAcquisitionRestricted { blocked, .. } = error else {
+            panic!("expected the manual path");
+        };
+        let mut watcher = app.download_watcher(
+            blocked
+                .iter()
+                .map(crate::download_watch::WatchTarget::from_blocked)
+                .collect(),
+        );
+
+        // Something with the right name and the wrong bytes is not the file.
+        std::fs::write(
+            downloads.join(file_name(RESTRICTED_PROJECT, RESTRICTED_NEWER)),
+            b"not the release, whatever it is called",
+        )
+        .expect("write an impostor");
+        assert!(
+            watcher.scan_once().await.is_none(),
+            "identity is proven by digest, never by file name"
+        );
+        app.change_managed_mod_version(
+            instance,
+            &target,
+            &choice,
+            &reporter(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("an unverified file changes nothing");
+
+        // The real thing, placed by hand.
+        std::fs::write(
+            downloads.join(file_name(RESTRICTED_PROJECT, RESTRICTED_NEWER)),
+            jar(RESTRICTED_PROJECT, RESTRICTED_NEWER),
+        )
+        .expect("write the real release");
+        let matched = watcher.scan_once().await.expect("the watcher adopts it");
+        assert_eq!(
+            matched.file_id.as_deref(),
+            Some(RESTRICTED_NEWER.to_string().as_str())
+        );
+
+        app.change_managed_mod_version(
+            instance,
+            &target,
+            &choice,
+            &reporter(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("the requested version change goes through the ordinary update path");
+
+        let recipe = app
+            .pack_recipe(instance)
+            .expect("a recipe")
+            .expect("one was written");
+        let entry = recipe
+            .managed_project(ModProvider::CurseForge, &RESTRICTED_PROJECT.to_string())
+            .expect("the restricted mod");
+        assert_eq!(
+            entry
+                .identity
+                .as_ref()
+                .and_then(|id| id.version_id.as_deref()),
+            Some(RESTRICTED_NEWER.to_string().as_str())
+        );
+        assert!(
+            artifact_requests(&server).await.is_empty(),
+            "the bytes came from the user, not from a download"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unrestricted_mod_still_downloads_the_ordinary_way() {
+        let server = catalog().await;
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_against(base.path(), &server);
+        let instance = neoforge_instance(&app);
+
+        app.install_mods(
+            instance,
+            &request(ROOT_PROJECT).at_version(ROOT_OLDER.to_string()),
+            &reporter(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("an install");
+        app.change_managed_mod_version(
+            instance,
+            &std::path::PathBuf::from("mods").join(file_name(ROOT_PROJECT, ROOT_OLDER)),
+            &crate::mutation::ModVersionChoice::Exact(ROOT_NEWEST.to_string()),
+            &reporter(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("a mod nobody restricted updates without a browser");
+
+        assert!(
+            artifact_requests(&server)
+                .await
+                .iter()
+                .any(|path| path.contains(&ROOT_NEWEST.to_string())),
+            "an unrestricted release is still fetched over the network"
         );
     }
 }

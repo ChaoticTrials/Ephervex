@@ -587,10 +587,21 @@ impl App {
             });
         }
 
-        let upserts = self.upserts_for(&context, &plan, reporter).await?;
+        let (upserts, resolved) = self.upserts_for(&context, &plan, reporter).await?;
         let removals = removals_for(&plan);
-        self.commit(&mut context, &upserts, &removals, reporter, cancel)
-            .await?;
+        let game_dir = ephervex_storage::metadata::client_game_dir(&context.record.root);
+        if let Err(error) = self
+            .commit(&mut context, &upserts, &removals, reporter, cancel)
+            .await
+        {
+            return Err(match &resolved {
+                Some(resolved) => {
+                    self.as_manual_acquisition(error, target, resolved, &game_dir)
+                        .await
+                }
+                None => error,
+            });
+        }
 
         Ok(ModMutation {
             report: context.report,
@@ -987,9 +998,9 @@ impl App {
         context: &MutationContext,
         plan: &ModMutationPlan,
         reporter: &OperationReporter,
-    ) -> CoreResult<Vec<PackFileRecipe>> {
+    ) -> CoreResult<(Vec<PackFileRecipe>, Option<ModInstallPlan>)> {
         let (Some(project_id), Some(version)) = (&plan.project_id, &plan.candidate_version) else {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), None));
         };
 
         // Pinned to the exact release the plan named. If that release has been
@@ -1002,11 +1013,12 @@ impl App {
             .resolve_replacement(&context.record, &request, reporter)
             .await?;
 
-        resolved
+        let upserts = resolved
             .all_mods()
             .into_iter()
             .map(|planned| crate::mods::recipe_entry(planned, resolved.provider))
-            .collect()
+            .collect::<CoreResult<Vec<_>>>()?;
+        Ok((upserts, Some(resolved)))
     }
 
     /// Runs the mutation transaction.

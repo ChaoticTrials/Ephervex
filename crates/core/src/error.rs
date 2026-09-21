@@ -179,6 +179,22 @@ pub enum CoreError {
     #[error("`{path}` is not one of this instance's managed mods")]
     ModNotManaged { path: std::path::PathBuf },
 
+    /// The release is right, and the provider will not let this launcher
+    /// fetch it.
+    ///
+    /// Not a download failure and not a reason to refuse the release: the
+    /// project's owner turned third-party distribution off, and the bytes are
+    /// nowhere on this machine yet. Carries every blocked file so a frontend
+    /// can offer the same user-assisted acquisition a pack import does -
+    /// the provider's own page, the exact file name, and the digest a
+    /// hand-placed copy is recognized by - and then ask for the same change
+    /// again.
+    #[error("`{path}` needs a release its provider does not permit this launcher to download")]
+    ModAcquisitionRestricted {
+        path: std::path::PathBuf,
+        blocked: Vec<ephervex_pack::BlockedProviderFile>,
+    },
+
     /// The mod exists and its ownership or identity does not allow this.
     ///
     /// Carries the reason so a frontend explains the refusal rather than
@@ -422,6 +438,7 @@ impl CoreError {
             Self::LoaderFamilyFixed { .. } => "error-loader-family-fixed",
             Self::LoaderChangeBlockedByMods { .. } => "error-loader-change-blocked-by-mods",
             Self::ModNotManaged { .. } => "error-mod-not-managed",
+            Self::ModAcquisitionRestricted { .. } => "error-mod-file-distribution-restricted",
             Self::ModMutationRestricted { restriction, .. } => restriction.message_id(),
             Self::ModIdentityIncomplete { .. } => "error-mod-identity-incomplete",
             Self::ModCatalogPreferenceUnrecognized { .. } => {
@@ -617,6 +634,7 @@ impl CoreError {
             | Self::Server(_)
             | Self::Connect(_)
             | Self::ModNotManaged { .. }
+            | Self::ModAcquisitionRestricted { .. }
             | Self::ModMutationRestricted { .. }
             | Self::ModIdentityIncomplete { .. }
             | Self::ModFileMissing { .. }
@@ -672,6 +690,7 @@ impl CoreError {
             // setting, not a file either, and a catalog failure is about a
             // project rather than anything on disk.
             Self::ModNotManaged { path }
+            | Self::ModAcquisitionRestricted { path, .. }
             | Self::ModMutationRestricted { path, .. }
             | Self::ModFileMissing { path }
             | Self::ModFileNotToggled { path, .. }

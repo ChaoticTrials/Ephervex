@@ -1045,10 +1045,11 @@ impl App {
 
         let manager = self.artifact_manager()?;
 
-        let installation = ephervex_pack::install_managed(ManagedModInstall {
+        let game_dir = ephervex_storage::metadata::client_game_dir(&record.root);
+        let installation = match ephervex_pack::install_managed(ManagedModInstall {
             recipe: &mut recipe,
             additions: &additions,
-            game_dir: &ephervex_storage::metadata::client_game_dir(&record.root),
+            game_dir: &game_dir,
             store: &store,
             fetch: ArtifactFetch {
                 manager: &manager,
@@ -1062,7 +1063,19 @@ impl App {
                 cancel,
             },
         })
-        .await?;
+        .await
+        {
+            Ok(installation) => installation,
+            Err(error) => {
+                let destination = PathBuf::from(ephervex_pack::MODS_DIR).join(
+                    ephervex_pack::safe_file_name(&plan.root.version.file.file_name)
+                        .unwrap_or_else(|| PathBuf::from(&plan.root.version.id)),
+                );
+                return Err(self
+                    .as_manual_acquisition(CoreError::from(error), &destination, &plan, &game_dir)
+                    .await);
+            }
+        };
 
         info!(
             instance_id = %record.id,

@@ -23,6 +23,7 @@
 //! to justify in review.
 
 pub mod account;
+mod acquisition;
 pub mod app;
 pub mod artifact_cache;
 mod artwork;
