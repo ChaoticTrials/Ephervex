@@ -1,0 +1,142 @@
+//! What a mod row's bin does, which depends on whose the mods are.
+//!
+//! An instance preserving an imported pack's declaration puts a jar aside so
+//! it can come back, which is how a crash gets bisected. One whose mods are
+//! the user's own takes the mod out of the instance instead, dependencies and
+//! all. A library something else needs keeps the reversible bin either way,
+//! because its release was never the user's to end.
+
+#![allow(clippy::expect_used, clippy::panic)]
+
+use std::rc::Rc;
+
+use ephervex_gui::ui::{AppWindow, GuiI18n, ModRow};
+use ephervex_i18n::{Arg, lookup, lookup_args};
+use i_slint_backend_testing::{ElementHandle, TestingBackend, TestingBackendOptions};
+use slint::{ComponentHandle, Image, ModelRc, PhysicalSize, SharedString, VecModel};
+
+const MOD: &str = "Repro Mod";
+
+#[test]
+fn an_instance_preserving_a_packs_declaration_offers_the_reversible_bin() {
+    let ui = window();
+    show(&ui, false, &[row(true, true)]);
+
+    assert!(
+        bin(&ui, "gui-delete-mod").is_some(),
+        "the jar goes aside so it can come back"
+    );
+    assert!(bin(&ui, "gui-remove-mod").is_none());
+}
+
+#[test]
+fn an_instance_whose_mods_are_the_users_takes_the_mod_out_for_good() {
+    let ui = window();
+    show(&ui, true, &[row(true, true)]);
+
+    assert!(
+        bin(&ui, "gui-remove-mod").is_some(),
+        "the bin takes the mod out of the instance, not only off disk"
+    );
+    assert!(bin(&ui, "gui-delete-mod").is_none());
+}
+
+/// Its release follows whatever required it, so removing it is not on offer
+/// however the instance is set. Putting its jar aside still is.
+#[test]
+fn a_mod_that_may_not_be_removed_keeps_the_reversible_bin() {
+    let ui = window();
+    show(&ui, true, &[row(false, true)]);
+
+    assert!(bin(&ui, "gui-delete-mod").is_some());
+    assert!(bin(&ui, "gui-remove-mod").is_none());
+}
+
+/// Nothing to put back while the jar is gone, so the row offers the one thing
+/// left instead of a second way to throw it away.
+#[test]
+fn a_jar_already_put_aside_offers_only_putting_it_back() {
+    let ui = window();
+    show(
+        &ui,
+        false,
+        &[ModRow {
+            deleted: true,
+            ..row(true, true)
+        }],
+    );
+
+    assert!(
+        ElementHandle::find_by_accessible_label(&ui, &lookup("gui-restore-mod"))
+            .any(|element| element.size().width > 0.0)
+    );
+    assert!(bin(&ui, "gui-delete-mod").is_none());
+    assert!(bin(&ui, "gui-remove-mod").is_none());
+}
+
+/// The bin belonging to the one mod on screen, when it is labeled this way.
+fn bin(ui: &AppWindow, id: &str) -> Option<ElementHandle> {
+    let label = lookup_args(id, [("value", Arg::from(MOD))]);
+    ElementHandle::find_by_accessible_label(ui, &label).find(|element| element.size().width > 0.0)
+}
+
+fn row(can_remove: bool, can_delete_file: bool) -> ModRow {
+    ModRow {
+        project_id: MOD.into(),
+        logical_path: "mods/repro.jar".into(),
+        title: MOD.into(),
+        file_name: "repro.jar".into(),
+        version: "1.0.0".into(),
+        version_known: true,
+        provider: "CurseForge".into(),
+        provider_kind: "curseforge".into(),
+        origin: "Added".into(),
+        origin_kind: "user_selected".into(),
+        compatibility: SharedString::default(),
+        author: SharedString::default(),
+        icon: Image::default(),
+        enabled: true,
+        deleted: false,
+        pack_owned: false,
+        can_manage: true,
+        can_change_version: false,
+        can_update: false,
+        can_remove,
+        can_delete_file,
+        restriction: SharedString::default(),
+        suspect_reason: SharedString::default(),
+        suspect_confidence: SharedString::default(),
+    }
+}
+
+fn show(ui: &AppWindow, mods_are_the_users: bool, rows: &[ModRow]) {
+    ui.set_page(0);
+    ui.set_workspace("instance".into());
+    ui.set_workspace_tab("Mods".into());
+    ui.set_selected_instance_id("an-id".into());
+    ui.set_instance_allow_pack_mod_changes(mods_are_the_users);
+    ui.set_managed_mods(ModelRc::from(Rc::new(VecModel::from(rows.to_vec()))));
+    slint::platform::update_timers_and_animations();
+    ui.window().take_snapshot().expect("render");
+}
+
+fn window() -> AppWindow {
+    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
+        renderer_name: Some("software".into()),
+        mock_time: true,
+        threading: false,
+    })))
+    .expect("testing backend");
+    let ui = AppWindow::new().expect("window");
+    let global = ui.global::<GuiI18n>();
+    global.on_text(|id| lookup(id.as_str()).into());
+    global.on_count(|id, count| {
+        lookup_args(id.as_str(), [("count", Arg::from(i64::from(count)))]).into()
+    });
+    global.on_value(|id, value| {
+        lookup_args(id.as_str(), [("value", Arg::from(value.as_str()))]).into()
+    });
+    ui.window().set_size(PhysicalSize::new(1480, 900));
+    ui.show().expect("show");
+    ui
+}

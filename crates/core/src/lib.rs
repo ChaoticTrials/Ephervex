@@ -130,7 +130,7 @@ pub use mods::{
 };
 pub use mutation::{
     ModMutability, ModMutation, ModMutationPlan, ModVersionChoice, ModVersionChoices,
-    MutationRestriction, PlannedFile, PlannedOutcome,
+    MutationRestriction, PlannedFile, PlannedOutcome, effective_mutability,
 };
 pub use pack_url::{
     HostConsent, LAUNCHER_URL_SCHEME, LauncherUrl, LauncherUrlError, MAX_LAUNCHER_URL_BYTES,

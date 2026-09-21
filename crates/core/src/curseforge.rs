@@ -1433,4 +1433,79 @@ mod browsing {
             "a lost source stays the missing source it is, never an author's decision: {error:?}"
         );
     }
+
+    // -- whose mods an instance's are ---------------------------------------
+
+    /// Rewrites every recorded mod as one the pack declared, which is what an
+    /// imported instance's recipe looks like.
+    fn make_pack_declared(app: &App, instance: ephervex_model::InstanceId) {
+        let record = app.client(instance).expect("the instance");
+        let store =
+            ephervex_pack::SourceStore::new(ephervex_storage::metadata::source_dir(&record.root));
+        let mut recipe = store.read_recipe().expect("a recipe");
+        for file in &mut recipe.files {
+            file.origin = ephervex_model::ModOrigin::PackDeclared;
+        }
+        store.write_recipe(&recipe).expect("rewrite");
+    }
+
+    #[tokio::test]
+    async fn a_pack_declared_mod_leaves_only_once_the_instance_says_its_mods_are_the_users() {
+        let server = catalog().await;
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_against(base.path(), &server);
+        let instance = neoforge_instance(&app);
+        app.install_mods(
+            instance,
+            &request(ROOT_PROJECT).at_version(ROOT_OLDER.to_string()),
+            &reporter(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("an install");
+        make_pack_declared(&app, instance);
+        let target = std::path::PathBuf::from("mods").join(file_name(ROOT_PROJECT, ROOT_OLDER));
+
+        // An imported instance preserves what the pack declared, so the mod is
+        // not the user's to take out of it.
+        app.set_allow_pack_mod_version_changes(instance, false)
+            .expect("preserve the declaration");
+        let error = app
+            .plan_mod_removal(instance, &target, &reporter(), &CancellationToken::new())
+            .await
+            .expect_err("the pack's declaration is a record");
+        assert!(
+            matches!(
+                error,
+                crate::error::CoreError::ModMutationRestricted {
+                    restriction: crate::mutation::MutationRestriction::PackOwned,
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+
+        // Said otherwise, moving it and taking it away are both the user's.
+        app.set_allow_pack_mod_version_changes(instance, true)
+            .expect("the mods are the user's");
+        let plan = app
+            .plan_mod_removal(instance, &target, &reporter(), &CancellationToken::new())
+            .await
+            .expect("the mod may leave");
+        assert_eq!(plan.outcome, crate::mutation::PlannedOutcome::Remove);
+
+        app.remove_managed_mod(instance, &target, &reporter(), &CancellationToken::new())
+            .await
+            .expect("and it does");
+        let recipe = app
+            .pack_recipe(instance)
+            .expect("a recipe")
+            .expect("one was written");
+        assert!(
+            recipe
+                .managed_project(ModProvider::CurseForge, &ROOT_PROJECT.to_string())
+                .is_none(),
+            "nothing is left to put back, which is what makes the bin final"
+        );
+    }
 }

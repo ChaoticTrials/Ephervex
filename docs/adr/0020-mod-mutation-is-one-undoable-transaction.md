@@ -121,9 +121,11 @@ to isolate one.
   would refuse.
 - Removing a mod can be shown honestly before it happens, including the case
   where the launcher cannot prove which dependencies are still needed.
-- Pack-owned mutation is refused by default, as this ADR describes. ADR 0032
-  is what supersedes this refusal, per instance and opt-in, by adding the local
-  deviation record this ADR named as missing.
+- Pack-owned mutation is refused while an instance is preserving the pack's
+  declaration, as this ADR describes. ADR 0032 is what supersedes that refusal,
+  per instance, by adding the local deviation record this ADR named as missing;
+  an instance that is no longer preserving a declaration may move a pack mod
+  and take one away alike.
 - Linked server synchronization is untouched. A loader-build change updates both
   the instance record and the recipe's target so the two cannot disagree; the
   pack's name, version, and every file it declared are left exactly as imported.

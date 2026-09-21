@@ -1526,8 +1526,8 @@ gui-instance-runtime-saved = Saved this instance's runtime settings.
 # $first is the global heap range, $second the globally selected Java.
 gui-instance-runtime-global = Globally: { $first }, { $second }.
 gui-allow-pack-mod-changes = Independent mod changes
-gui-allow-pack-mod-changes-detail = By default, a mod the imported pack declares can only be inspected here, not moved: the pack's declaration is treated as a historical record. Turning this on lets you update or change the version of a pack-declared mod for this instance only. "Reset to Pack's Version" always remains available to undo it.
-gui-allow-pack-mod-changes-toggle = Allow changing pack-declared mods' versions
+gui-allow-pack-mod-changes-detail = An instance you created here starts with this on, because it declared nothing to preserve. An imported one starts with it off: the pack's declaration is treated as a historical record, so a mod it declares can only be inspected, and the bin puts a jar aside so you can put it back. Turning this on lets you update or change the version of a pack-declared mod for this instance only, and makes the bin take a mod out of the instance for good, along with the dependencies nothing else needs. "Reset to Pack's Version" always remains available to undo a version change, and turning a mod off is still how you put one aside to find which one crashes.
+gui-allow-pack-mod-changes-toggle = Let me change and remove this instance's mods
 gui-instance-settings-unavailable = Instance-owned Minecraft settings
 gui-instance-settings-unavailable-detail = The current core safely applies known Vanilla defaults when an instance is created, but does not expose a typed editor for an existing instance. Unknown and mod-added options remain untouched.
 gui-open-global-defaults = Open Global Defaults

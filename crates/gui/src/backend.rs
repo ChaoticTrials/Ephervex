@@ -1633,7 +1633,20 @@ fn run_worker(
                 // No toast. The toggle itself is the confirmation; a refusal
                 // is still reported, because then nothing on screen changed.
                 match app.set_allow_pack_mod_version_changes(instance, allow) {
-                    Ok(_) => send_snapshot(&app, &events),
+                    Ok(_) => {
+                        send_snapshot(&app, &events);
+                        // The setting decides what each row may have done to
+                        // it, so the list it decides for is re-read here
+                        // rather than at the next time the tab happens to be
+                        // opened.
+                        send_host_mods(
+                            &app,
+                            InstalledHost::Instance(instance),
+                            &events,
+                            &refreshed_mods,
+                            false,
+                        );
+                    }
                     Err(error) => send_error(&events, &error),
                 }
                 // Either way, because the snapshot does not carry this flag:
@@ -6223,7 +6236,7 @@ fn managed_mods_data(
             .filter(|entry| {
                 entry.presence != ModPresence::Missing || ModMutability::of(entry).can_delete_file
             })
-            .map(|entry| managed_mod_data(entry, review))
+            .map(|entry| managed_mod_data(entry, snapshot.mods_are_the_users, review))
             .collect(),
         notice: match snapshot.metadata {
             MetadataAvailability::Unavailable => lookup("gui-mod-metadata-offline"),
@@ -6257,9 +6270,15 @@ fn suspect_reason_text(reason: &SuspectReason) -> String {
     }
 }
 
-fn managed_mod_data(entry: &ManagedModEntry, review: Option<&CrashReview>) -> ManagedModData {
+fn managed_mod_data(
+    entry: &ManagedModEntry,
+    mods_are_the_users: bool,
+    review: Option<&CrashReview>,
+) -> ManagedModData {
     let title = entry.display_name().to_owned();
-    let mutability = ModMutability::of(entry);
+    // The same reading the mutation itself will make, so a row never offers an
+    // action the operation behind it would refuse.
+    let mutability = ephervex_core::effective_mutability(entry, mods_are_the_users);
     let suspect = review.and_then(|review| {
         review
             .mods

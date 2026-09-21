@@ -655,6 +655,14 @@ pub struct ManagedModSnapshot {
     /// reader can use to find one of two hundred of them.
     pub mods: Vec<ManagedModEntry>,
     pub metadata: MetadataAvailability,
+    /// Whether this host's mods are the user's to move and take away rather
+    /// than a record of what a pack shipped.
+    ///
+    /// Carried here so every frontend reads one answer: the entries alone
+    /// cannot say it, and a frontend that went looking for the instance
+    /// record itself would be a second place to decide policy. Always false
+    /// for a server, whose mods follow the client it is linked to.
+    pub mods_are_the_users: bool,
 }
 
 impl ManagedModSnapshot {
@@ -1285,6 +1293,12 @@ impl App {
             source: layout.recipe.as_ref().map(InstancePackSource::from_recipe),
             mods,
             metadata: MetadataAvailability::Local,
+            mods_are_the_users: match host {
+                InstalledHost::Instance(instance) => self
+                    .client(instance)
+                    .is_ok_and(|record| record.allow_pack_mod_version_changes),
+                InstalledHost::Server(_) => false,
+            },
         })
     }
 
@@ -2445,6 +2459,7 @@ mod tests {
             source: None,
             mods: entries,
             metadata: MetadataAvailability::Local,
+            mods_are_the_users: false,
         }
     }
 
@@ -2778,6 +2793,7 @@ mod tests {
             source: None,
             mods: vec![answered, project_only, unanswered, unresolved],
             metadata: MetadataAvailability::Provider,
+            mods_are_the_users: false,
         };
         let remembered = remembered_display(&snapshot);
         let modrinth = &remembered[&ModProvider::Modrinth];

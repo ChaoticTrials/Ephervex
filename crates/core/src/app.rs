@@ -1652,23 +1652,44 @@ mod tests {
                 LoaderSelection::vanilla(),
             ))
             .expect("create");
-        assert!(!created.allow_pack_mod_version_changes);
+        // Nothing declared this instance's mods but the person making it, so
+        // there is no declaration to preserve and the mods are theirs.
+        assert!(created.allow_pack_mod_version_changes);
 
         let updated = app
-            .set_allow_pack_mod_version_changes(created.id, true)
-            .expect("opt in");
-        assert!(updated.allow_pack_mod_version_changes);
+            .set_allow_pack_mod_version_changes(created.id, false)
+            .expect("opt out");
+        assert!(!updated.allow_pack_mod_version_changes);
 
         // Reopened, because the point of the setting is that it survives.
         let reopened = app_rooted_at(base.path());
         let stored = reopened.client(created.id).expect("client");
-        assert!(stored.allow_pack_mod_version_changes);
+        assert!(!stored.allow_pack_mod_version_changes);
 
         let _lock = ephervex_storage::LaunchLock::acquire(&stored.root).expect("acquire lock");
         let running = reopened
-            .set_allow_pack_mod_version_changes(created.id, false)
+            .set_allow_pack_mod_version_changes(created.id, true)
             .expect("a running copy does not take the decision away");
-        assert!(!running.allow_pack_mod_version_changes);
+        assert!(running.allow_pack_mod_version_changes);
+    }
+
+    /// An imported instance's mod list is a record of what the pack shipped
+    /// until its owner says otherwise.
+    #[test]
+    fn an_imported_instance_starts_out_preserving_the_packs_declaration() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let created = app
+            .create_client_for_test(
+                NewClient::new("Imported", "1.20.1", LoaderSelection::vanilla()).with_source(
+                    ephervex_storage::ImportSource::imported(
+                        ephervex_model::ImportSourceKind::ModrinthPack,
+                        "report.mrpack",
+                    ),
+                ),
+            )
+            .expect("create");
+        assert!(!created.allow_pack_mod_version_changes);
     }
 
     /// A linked server exists to reproduce one client. Left behind it is

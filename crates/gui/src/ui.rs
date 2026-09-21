@@ -1739,6 +1739,16 @@ slint::slint! {
         // bin appears only for a jar the user placed themselves, which is
         // theirs to delete whatever is listing it.
         in property <bool> removable;
+        // Whether this host's mods are the user's, rather than a record of
+        // what a pack shipped. When they are, the bin takes a mod out of the
+        // instance for good; when they are not, it puts the jar aside so it
+        // can come back, which is how a crash gets bisected.
+        in property <bool> mods-are-the-users;
+        // Whether the bin takes this mod out of the host rather than only off
+        // disk. A mod whose release is not the user's to end - a library
+        // something else needs - keeps the reversible bin whatever the host
+        // says.
+        property <bool> bin-removes: root.removable && root.item.can-remove && root.mods-are-the-users;
         callback manage(string);
         callback toggle(string, bool);
         callback delete-file(string, string);
@@ -1816,7 +1826,7 @@ slint::slint! {
                     if !root.item.deleted && root.togglable : VerticalLayout { alignment: center; Toggle { checked: root.item.enabled; sets-its-own-position: false; accessible-name: GuiI18n.value("gui-mod-loads", root.item.title); toggled(on) => { root.toggle(root.item.logical-path, on); } } }
                     if !root.item.deleted && (root.item.can-delete-file || (root.removable && root.item.can-remove)) : IconButton {
                         icon: @image-url("../../../assets/icons/trash.svg");
-                        accessible-name: GuiI18n.value(root.item.can-delete-file ? "gui-delete-mod" : "gui-remove-mod", root.item.title);
+                        accessible-name: GuiI18n.value(root.item.can-delete-file && !root.bin-removes ? "gui-delete-mod" : "gui-remove-mod", root.item.title);
                         clicked => { root.delete-file(root.item.logical-path, root.item.title); }
                     }
                 }
@@ -2866,6 +2876,10 @@ slint::slint! {
         in-out property <bool> mod-action-pending: false;
         in-out property <string> mod-action-selected;
         in-out property <[ModVersionRow]> mod-versions;
+        // Whether the removal confirmation was opened from the Manage Mod
+        // dialog, which is what leaving it goes back to. Opened from a row's
+        // bin it goes back to the list, because that is where the reader was.
+        in-out property <bool> mod-remove-returns-to-manager;
         // The releases a pending version change still needs the user to
         // fetch, and the mod they belong to. Empty whenever no acquisition is
         // waiting.
@@ -3757,7 +3771,7 @@ slint::slint! {
                                     VerticalLayout { padding: 16px; spacing: 10px; HorizontalLayout { spacing: 8px; cross-axis-alignment: center; Heading { text: GuiI18n.text("gui-managed-mods"); horizontal-stretch: 1; } TextField { text <=> root.managed-mods-query; placeholder: GuiI18n.text("gui-filter-mods"); accessible-label: GuiI18n.text("gui-filter-mods"); input-type: InputType.search; width: 200px; edited(text) => { root.filter-mods("client", text); } } AppButton { text: GuiI18n.text("gui-add-local-mods"); clicked => { root.pick-local-mods("client", root.selected-instance-id); } } IconButton { icon: @image-url("../../../assets/icons/refresh.svg"); accessible-name: GuiI18n.text("gui-refresh-mod-details"); clicked => { root.refresh-mods("client", root.selected-instance-id); } } } BodyText { text: GuiI18n.text("gui-managed-mods-detail"); wrap: word-wrap; }
                                         if root.managed-mods-notice != "" : BodyText { text: root.managed-mods-notice; color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
                                         if root.managed-mods.length == 0 : EmptyState { icon: @image-url("../../../assets/icons/semantic-mod.svg"); title: root.managed-mods-query != "" ? GuiI18n.text("gui-no-mods-match-title") : GuiI18n.text("gui-no-managed-mods"); message: root.managed-mods-query != "" ? GuiI18n.value("gui-no-mods-match", root.managed-mods-query) : GuiI18n.text("gui-no-managed-mods-detail"); }
-                                        ScrollView { viewport-width: self.width; VerticalLayout { spacing: 8px; for mod in root.managed-mods : ModCard { item: mod; removable: true; togglable: true; restore-file(path) => { root.restore-mod-file("client", root.selected-instance-id, path); } toggle(path, on) => { root.set-mod-enabled("client", root.selected-instance-id, path, on); } manage(path) => { root.open-mod-manager(path); } delete-file(path, title) => { root.pending-action-kind = "client"; root.pending-action-id = root.selected-instance-id; root.pending-action-name = title; root.mod-action-path = path; root.mod-action-name = title; root.modal-error = ""; if mod.can-delete-file { root.modal = "delete-mod"; } else { root.plan-mod-removal(root.selected-instance-id, path); } } } } }
+                                        ScrollView { viewport-width: self.width; VerticalLayout { spacing: 8px; for mod in root.managed-mods : ModCard { item: mod; removable: true; togglable: true; mods-are-the-users: root.instance-allow-pack-mod-changes; restore-file(path) => { root.restore-mod-file("client", root.selected-instance-id, path); } toggle(path, on) => { root.set-mod-enabled("client", root.selected-instance-id, path, on); } manage(path) => { root.open-mod-manager(path); } delete-file(path, title) => { root.pending-action-kind = "client"; root.pending-action-id = root.selected-instance-id; root.pending-action-name = title; root.mod-action-path = path; root.mod-action-name = title; root.modal-error = ""; root.mod-remove-returns-to-manager = false; if mod.can-delete-file && !(root.instance-allow-pack-mod-changes && mod.can-remove) { root.modal = "delete-mod"; } else { root.plan-mod-removal(root.selected-instance-id, path); } } } } }
                                     }
                                 }
                                 Rectangle { horizontal-stretch: 1; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface;
@@ -4870,7 +4884,7 @@ slint::slint! {
                         // at one end left the dialog looking like it had run out
                         // of room, which is what it used to do.
                         HorizontalLayout { spacing: 8px;
-                            if root.mod-action-can-remove : AppButton { text: GuiI18n.text("gui-remove"); tone: "danger"; enabled: !root.mod-action-pending; clicked => { root.modal-error = ""; root.plan-mod-removal(root.selected-instance-id, root.mod-action-path); } }
+                            if root.mod-action-can-remove : AppButton { text: GuiI18n.text("gui-remove"); tone: "danger"; enabled: !root.mod-action-pending; clicked => { root.modal-error = ""; root.mod-remove-returns-to-manager = true; root.plan-mod-removal(root.selected-instance-id, root.mod-action-path); } }
                             AppButton { min-width: 124px; text: GuiI18n.text("gui-close"); clicked => { root.modal = ""; root.modal-error = ""; } }
                             Rectangle { horizontal-stretch: 1; }
                             if root.mod-action-is-pack-owned && root.mod-action-pack-original-version != "" : AppButton { text: GuiI18n.text("gui-mod-reset-to-pack-version"); enabled: !root.mod-action-pending; clicked => { root.mod-action-pending = true; root.modal-error = ""; root.plan-mod-apply(root.selected-instance-id, root.mod-action-path, root.mod-action-pack-original-version); } }
@@ -4917,7 +4931,7 @@ slint::slint! {
                         if root.linked-targets.length > 0 : LinkedTargetsPanel { vertical-stretch: 1; rows: root.linked-targets; selectable: true; toggled(index) => { root.linked-targets[index].selected = !root.linked-targets[index].selected; } }
                         if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; }
                         HorizontalLayout { spacing: 8px; Rectangle { horizontal-stretch: 1; }
-                            AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = "mod-manage"; root.modal-error = ""; } }
+                            AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = root.mod-remove-returns-to-manager ? "mod-manage" : ""; root.modal-error = ""; } }
                             AppButton { text: GuiI18n.text("gui-mod-remove-action"); tone: "danger"; enabled: !root.mod-action-pending; clicked => { root.modal-error = ""; root.remove-mod(root.selected-instance-id, root.mod-action-path); root.modal = ""; } }
                         }
                     }

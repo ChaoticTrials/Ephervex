@@ -50,6 +50,12 @@ impl ImportSource {
         }
     }
 
+    /// Whether this instance was created here rather than imported.
+    #[must_use]
+    pub fn is_manual(&self) -> bool {
+        self.kind == ImportSourceKind::Manual
+    }
+
     #[must_use]
     pub fn imported(kind: ImportSourceKind, reference: impl Into<String>) -> Self {
         Self {
@@ -120,12 +126,18 @@ pub struct ClientRecord {
     pub java_override: Option<JavaOverride>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jvm_override: Option<JvmSettings>,
-    /// Whether this instance may change or update a mod the imported pack
-    /// declares, independently of what the pack shipped.
+    /// Whether this instance's mods are the user's to move and take away,
+    /// rather than a record of what a pack shipped.
     ///
-    /// Opt-in and defaults to `false`: the pack's declaration is a historical
-    /// record, and moving a mod away from it is a per-instance decision the
-    /// pack importer never asked about.
+    /// On for an instance created here, because there is no pack declaration
+    /// to preserve: its mods were chosen by the person who made it. Off for an
+    /// imported one, where the pack's declaration is a historical record and
+    /// moving a mod away from it is a per-instance decision the importer never
+    /// asked about.
+    ///
+    /// The serde default is `false` so a document written before this existed
+    /// keeps the conservative reading; what a new instance starts with is
+    /// decided where it is created, from its own source.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub allow_pack_mod_version_changes: bool,
     /// Why this instance is not straightforwardly runnable, if it is not. The
