@@ -1927,8 +1927,11 @@ pub struct ImportOptionPresentation {
 }
 
 /// One file a provider refused to serve, translated from
-/// [`ephervex_core::BlockedProviderFile`] for the import modal's blocked-file
-/// list.
+/// [`ephervex_core::BlockedProviderFile`].
+///
+/// Shared by the import modal's blocked-file list and by a version change
+/// waiting on a release the user has to fetch: both are the same situation,
+/// the same identity, and the same folder watcher.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockedFilePresentation {
     /// The identity a skip decision or a watcher match is recorded against.
@@ -1944,7 +1947,7 @@ pub struct BlockedFilePresentation {
 
 impl BlockedFilePresentation {
     #[must_use]
-    fn from_blocked(blocked: &BlockedProviderFile) -> Self {
+    pub(crate) fn from_blocked(blocked: &BlockedProviderFile) -> Self {
         let project_id = blocked.identity.project_id.as_deref().unwrap_or_default();
         let file_id = blocked.identity.file_id.as_deref().unwrap_or_default();
         Self {

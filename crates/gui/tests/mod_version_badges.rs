@@ -171,6 +171,15 @@ fn release(number: &str, installed: bool, newest: bool) -> ModVersionRow {
         published: "2026-09-01".into(),
         installed,
         newest,
+        restricted: false,
+    }
+}
+
+/// The same release, with its author's third-party downloads turned off.
+fn restricted(number: &str, installed: bool, newest: bool) -> ModVersionRow {
+    ModVersionRow {
+        restricted: true,
+        ..release(number, installed, newest)
     }
 }
 
@@ -184,6 +193,45 @@ fn badge(ui: &AppWindow, id: &str) -> Option<ElementHandle> {
 fn settle(ui: &AppWindow) {
     slint::platform::update_timers_and_animations();
     ui.window().take_snapshot().expect("render");
+}
+
+/// A download restriction is a fact about one release, not a reason to
+/// replace the dialog: the list, the badges, the project link, and the action
+/// that takes the chosen release all stay exactly where they are.
+#[test]
+fn a_restricted_release_keeps_the_ordinary_manage_mod_dialog() {
+    let ui = window();
+    ui.set_mod_action_project_url("https://www.curseforge.com/minecraft/mc-mods/repro".into());
+    versions(
+        &ui,
+        &[
+            restricted("7951520", false, true),
+            restricted("7951519", true, false),
+        ],
+    );
+
+    assert!(
+        badge(&ui, "gui-mod-browser-download").is_some(),
+        "the restriction is said on the release"
+    );
+    assert!(
+        badge(&ui, "gui-mod-installed-version").is_some(),
+        "which release the instance runs is still shown"
+    );
+    assert!(
+        badge(&ui, "gui-mod-newest-version").is_some(),
+        "which release is the newest is still shown"
+    );
+    assert!(
+        ElementHandle::find_by_accessible_label(&ui, &lookup("gui-mod-open-project-page"))
+            .any(|element| element.size().width > 0.0),
+        "the project browser link stays available"
+    );
+    assert!(
+        ElementHandle::find_by_accessible_label(&ui, &lookup("gui-mod-change-version"))
+            .any(|element| element.size().width > 0.0),
+        "another release can still be taken"
+    );
 }
 
 fn window() -> AppWindow {

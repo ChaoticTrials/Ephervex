@@ -34,7 +34,7 @@ use crate::presentation::{
     validate_port,
 };
 use crate::ui::{
-    AccountRow, ActivityRow, AppWindow, DiagnosticRow, GuiI18n, ImpactRow, ImportBlockedRow,
+    AccountRow, ActivityRow, AppWindow, BlockedFileRow, DiagnosticRow, GuiI18n, ImpactRow,
     ImportDuplicateRow, ImportOptionRow, InstanceRow, JavaRow, LicenseRow, LinkedTargetRow,
     LocalModClashRow, LogChunk, ModRow, ModSearchRow, ModVersionRow, PendingEntityRow,
     PromoteServerRow, RelationRow, RunningRow, ServerRow, SnapshotRow, Theme, WindowSizePreview,
@@ -855,10 +855,10 @@ fn render_import_flow(ui: &AppWindow, state: &ImportFlowState) {
         .collect();
     ui.set_import_optional_items(model(rows));
 
-    let blocked_rows: Vec<ImportBlockedRow> = state
+    let blocked_rows: Vec<BlockedFileRow> = state
         .blocked
         .iter()
-        .map(|blocked| ImportBlockedRow {
+        .map(|blocked| BlockedFileRow {
             identity: blocked_identity_key(&blocked.identity).into(),
             project_line: blocked.project_line.clone().into(),
             file_line: blocked.file_line.clone().into(),
@@ -3077,6 +3077,11 @@ fn register_mod_mutations(ui: &AppWindow, commands: &Sender<Command>) {
                 },
             );
         }
+    });
+
+    let sender = commands.clone();
+    ui.on_cancel_mod_acquisition(move || {
+        send(&sender, Command::CancelModAcquisition);
     });
 
     let sender = commands.clone();
@@ -5488,6 +5493,7 @@ fn apply_event(
             )));
         }
         Event::ModVersions(data) => apply_mod_versions(ui, data),
+        Event::ModAcquisitionRequired(data) => apply_mod_acquisition(ui, &data),
         Event::ModRelations(data) => apply_mod_relations(ui, &data),
         Event::ModRemovalPlan(data) => apply_mod_removal_plan(ui, data),
         Event::ModResults(results) => apply_mod_results(ui, results, browser, commands),
@@ -6570,6 +6576,33 @@ fn apply_mod_versions(ui: &AppWindow, data: backend::ModVersionsData) {
     ui.set_mod_versions(model(mod_version_rows(data.versions)));
 }
 
+/// Opens the dialog that asks the user to fetch a release themselves.
+///
+/// The list is the same one the import modal shows for a blocked pack file,
+/// and the same folder watcher is already running over it in the backend, so
+/// nothing here has to poll or retry: the finished change arrives as an
+/// ordinary result.
+fn apply_mod_acquisition(ui: &AppWindow, data: &backend::ModAcquisitionData) {
+    if !addresses_open_mod(ui, &data.instance, &data.logical_path) {
+        return;
+    }
+    ui.set_mod_action_pending(false);
+    ui.set_modal_error(SharedString::default());
+    ui.set_mod_acquisition_name(data.name.as_str().into());
+    ui.set_mod_acquisition_items(model(
+        data.items
+            .iter()
+            .map(|item| BlockedFileRow {
+                identity: blocked_identity_key(&item.identity).into(),
+                project_line: item.project_line.as_str().into(),
+                file_line: item.file_line.as_str().into(),
+                browser_url: item.browser_url.as_str().into(),
+            })
+            .collect::<Vec<_>>(),
+    ));
+    ui.set_modal("mod-acquire".into());
+}
+
 /// Fills in what the open mod declares and what declares it.
 fn apply_mod_relations(ui: &AppWindow, data: &backend::ModRelationsData) {
     if !addresses_open_mod(ui, &data.host, &data.logical_path) {
@@ -6944,6 +6977,7 @@ fn mod_version_rows(rows: Vec<backend::ModVersionData>) -> Vec<ModVersionRow> {
             published: row.published.into(),
             installed: row.installed,
             newest: row.newest,
+            restricted: row.restricted,
         })
         .collect()
 }

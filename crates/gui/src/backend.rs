@@ -245,6 +245,10 @@ pub enum Command {
         version: String,
         servers: Vec<ServerId>,
     },
+    /// Abandons a version change that is waiting on a release the user has to
+    /// fetch themselves. Nothing has been written by the time that wait
+    /// starts, so this simply stops watching.
+    CancelModAcquisition,
     UpdateMod {
         instance: InstanceId,
         path: PathBuf,
@@ -920,6 +924,23 @@ pub struct ModVersionData {
     pub installed: bool,
     /// The release an update would move to.
     pub newest: bool,
+    /// The project's author does not allow other launchers to download this
+    /// release. Shown on the row rather than used to hide it: a copy already
+    /// in the shared cache installs the ordinary way.
+    pub restricted: bool,
+}
+
+/// The releases a version change is waiting on the user to fetch.
+///
+/// The same rows the import modal's blocked-file list shows, because it is
+/// the same situation and the same folder watcher resolves it.
+#[derive(Debug, Clone, Default)]
+pub struct ModAcquisitionData {
+    pub instance: String,
+    pub logical_path: String,
+    /// The mod the user acted on, by name.
+    pub name: String,
+    pub items: Vec<crate::presentation::BlockedFilePresentation>,
 }
 
 /// Everything the manage-a-mod view needs.
@@ -1365,6 +1386,14 @@ pub enum Event {
         generation: u64,
         result: Result<ImportPresentation, ImportFailure>,
     },
+    /// A version change needs a release the provider does not permit this
+    /// launcher to download, and no verified copy is on this machine yet.
+    ///
+    /// Nothing has been written: the operation stopped before it could be.
+    /// The same folder watcher the import modal uses is already running over
+    /// these files, and the requested change is applied by itself once one is
+    /// found and verified.
+    ModAcquisitionRequired(ModAcquisitionData),
     /// A folder watcher found and verified a hand-placed copy of one blocked
     /// file's bytes while the import modal was open on it.
     ///
@@ -1507,6 +1536,10 @@ fn run_worker(
     let refreshed_mods: RefreshedHosts = Arc::new(Mutex::new(HashSet::new()));
     // Kept between polls, because CPU is a rate rather than a reading.
     let mut process_monitor = ProcessMonitor::new();
+    // A version change waiting on a release the user has to fetch, so closing
+    // the dialog (or starting another one) stops the folder watcher it left
+    // running.
+    let mut acquisition_cancel: Option<CancellationToken> = None;
     // The still-running resolution's own cancellation, so a superseding pick
     // or a closed modal can stop wasting a network request on an answer
     // nothing will read. The attempt identity itself belongs to the
@@ -2004,37 +2037,41 @@ fn run_worker(
                 version,
                 servers,
             } => {
-                let paths = app.paths().clone();
-                spawn_detached(paths, events.clone(), move |app, events, runtime| {
-                    let result = runtime.block_on(app.apply_linked_mod_operation(
+                acquisition_cancel = Some(apply_mod_operation(
+                    app.paths().clone(),
+                    &events,
+                    acquisition_cancel.take(),
+                    ModOperation {
                         instance,
-                        &LinkedModRequest::ChangeVersion {
-                            target: path,
-                            version,
-                        },
-                        &servers,
-                        &OperationReporter::silent("changing-mod-version"),
-                        &CancellationToken::new(),
-                    ));
-                    finish_linked(&app, &events, instance, result);
-                });
+                        path,
+                        version: Some(version),
+                        servers,
+                        operation: "changing-mod-version",
+                    },
+                ));
             }
             Command::UpdateMod {
                 instance,
                 path,
                 servers,
             } => {
-                let paths = app.paths().clone();
-                spawn_detached(paths, events.clone(), move |app, events, runtime| {
-                    let result = runtime.block_on(app.apply_linked_mod_operation(
+                acquisition_cancel = Some(apply_mod_operation(
+                    app.paths().clone(),
+                    &events,
+                    acquisition_cancel.take(),
+                    ModOperation {
                         instance,
-                        &LinkedModRequest::Update { target: path },
-                        &servers,
-                        &OperationReporter::silent("updating-mod"),
-                        &CancellationToken::new(),
-                    ));
-                    finish_linked(&app, &events, instance, result);
-                });
+                        path,
+                        version: None,
+                        servers,
+                        operation: "updating-mod",
+                    },
+                ));
+            }
+            Command::CancelModAcquisition => {
+                if let Some(cancel) = acquisition_cancel.take() {
+                    cancel.cancel();
+                }
             }
             Command::PlanModRemoval { instance, path } => {
                 let paths = app.paths().clone();
@@ -4903,6 +4940,105 @@ fn kill_instance(
     }
 }
 
+/// One version change or update, as the thread that carries it out needs it.
+///
+/// `version` is the exact release to move to, or `None` for the newest that
+/// fits this client - the same two choices [`Command::ChangeModVersion`] and
+/// [`Command::UpdateMod`] name.
+struct ModOperation {
+    instance: InstanceId,
+    path: PathBuf,
+    version: Option<String>,
+    servers: Vec<ServerId>,
+    operation: &'static str,
+}
+
+impl ModOperation {
+    fn request(&self) -> LinkedModRequest {
+        match &self.version {
+            Some(version) => LinkedModRequest::ChangeVersion {
+                target: self.path.clone(),
+                version: version.clone(),
+            },
+            None => LinkedModRequest::Update {
+                target: self.path.clone(),
+            },
+        }
+    }
+}
+
+/// Carries out one mod operation, offering the user-assisted acquisition path
+/// when a release's provider does not permit this launcher to download it.
+///
+/// The second attempt is the same operation rather than a second install
+/// path: once the folder watcher has adopted the copy the user fetched, the
+/// ordinary mutation finds it in the shared cache and proceeds. Returns the
+/// token that stops the wait, which the caller keeps so closing the dialog
+/// (or starting another operation) ends it.
+fn apply_mod_operation(
+    paths: Paths,
+    events: &Sender<Event>,
+    previous: Option<CancellationToken>,
+    operation: ModOperation,
+) -> CancellationToken {
+    if let Some(previous) = previous {
+        previous.cancel();
+    }
+    let cancel = CancellationToken::new();
+    let watching = cancel.clone();
+    spawn_detached(paths, events.clone(), move |app, events, runtime| {
+        let reporter = OperationReporter::silent(operation.operation);
+        let instance = operation.instance;
+        let result = runtime.block_on(app.apply_linked_mod_operation(
+            instance,
+            &operation.request(),
+            &operation.servers,
+            &reporter,
+            &watching,
+        ));
+        let Err(CoreError::ModAcquisitionRestricted { blocked, .. }) = &result else {
+            finish_linked(&app, &events, instance, result);
+            return;
+        };
+        let _ = events.send(Event::ModAcquisitionRequired(ModAcquisitionData {
+            instance: instance.to_string(),
+            logical_path: operation.path.display().to_string(),
+            name: blocked
+                .first()
+                .and_then(|file| file.project_name.clone())
+                .unwrap_or_default(),
+            items: blocked
+                .iter()
+                .map(crate::presentation::BlockedFilePresentation::from_blocked)
+                .collect(),
+        }));
+
+        let targets = blocked.iter().map(WatchTarget::from_blocked).collect();
+        let mut watcher = app.download_watcher(targets);
+        while !watcher.is_finished() && !watching.is_cancelled() {
+            if runtime.block_on(watcher.scan_once()).is_none() {
+                thread::sleep(ephervex_core::RESCAN_INTERVAL);
+            }
+        }
+        if watching.is_cancelled() {
+            return;
+        }
+        // Everything the user was asked for is now a verified copy in the
+        // shared cache, so the requested change goes through the ordinary
+        // path - including its own re-resolution, which is what catches a
+        // release withdrawn in the meantime.
+        let result = runtime.block_on(app.apply_linked_mod_operation(
+            instance,
+            &operation.request(),
+            &operation.servers,
+            &reporter,
+            &CancellationToken::new(),
+        ));
+        finish_linked(&app, &events, instance, result);
+    });
+    cancel
+}
+
 fn spawn_detached(
     paths: Paths,
     events: Sender<Event>,
@@ -5435,6 +5571,7 @@ async fn mod_versions(app: &App, instance: InstanceId, path: &Path) -> ModVersio
                         .to_string(),
                     installed: annotated.version.id == installed,
                     newest: annotated.version.id == newest,
+                    restricted: annotated.version.file.distribution.is_restricted(),
                 })
                 .collect();
             ModVersionsData {
