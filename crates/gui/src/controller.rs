@@ -6583,7 +6583,10 @@ fn apply_mod_versions(ui: &AppWindow, data: backend::ModVersionsData) {
 /// nothing here has to poll or retry: the finished change arrives as an
 /// ordinary result.
 fn apply_mod_acquisition(ui: &AppWindow, data: &backend::ModAcquisitionData) {
-    if !addresses_open_mod(ui, &data.instance, &data.logical_path) {
+    // Addressed to the instance rather than to one open mod: installing a mod
+    // from the browser reaches this with no mod open at all, and the question
+    // it asks is about the operation the user just started here.
+    if !presentation::result_is_current(&data.instance, &ui.get_selected_instance_id()) {
         return;
     }
     ui.set_mod_action_pending(false);

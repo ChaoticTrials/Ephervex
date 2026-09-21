@@ -2385,6 +2385,14 @@ fn run_worker(
             } => {
                 let paths = app.paths().clone();
                 let reports = events.clone();
+                // A release the provider will not let this launcher download
+                // stops the install and asks the user for it instead, so the
+                // dialog that does the asking needs a way to be left.
+                let waiting = CancellationToken::new();
+                if let Some(previous) = acquisition_cancel.replace(waiting.clone()) {
+                    previous.cancel();
+                }
+                let acquisition_events = events.clone();
                 spawn_async_operation(
                     paths,
                     &events,
@@ -2408,11 +2416,44 @@ fn run_worker(
                             // place here or on any selected server.
                             version: (!version.is_empty()).then_some(version),
                         };
-                        let outcome = app
+                        // Ending the operation from the progress list ends the
+                        // wait too, so there is no dialog left over a job the
+                        // user already stopped.
+                        let stopped = waiting.clone();
+                        let operation_cancel = cancel.clone();
+                        tokio::spawn(async move {
+                            operation_cancel.cancelled().await;
+                            stopped.cancel();
+                        });
+
+                        let mut result = app
                             .apply_linked_mod_operation(
                                 instance, &request, &servers, &reporter, &cancel,
                             )
-                            .await?;
+                            .await;
+                        match await_manual_acquisition(
+                            &app,
+                            &acquisition_events,
+                            &instance.to_string(),
+                            &result,
+                            &waiting,
+                        )
+                        .await
+                        {
+                            Acquisition::Acquired => {
+                                result = app
+                                    .apply_linked_mod_operation(
+                                        instance, &request, &servers, &reporter, &cancel,
+                                    )
+                                    .await;
+                            }
+                            Acquisition::NotNeeded => {}
+                            // The user decided against fetching the release
+                            // themselves. Nothing was installed and nothing
+                            // went wrong, so there is nothing to report.
+                            Acquisition::Abandoned => return Ok(OperationReport::Reported),
+                        }
+                        let outcome = result?;
                         let message = client_outcome_message(&outcome);
                         // The Managed Mods panel may already be open on this
                         // instance, and a newly installed mod must appear on it
@@ -2631,6 +2672,22 @@ fn run_worker(
                             error: false,
                         });
                         send_host_mods(&app, host, &events, &refreshed_mods, false);
+                    }
+                    // The provider will not let this launcher fetch the jar
+                    // back, so the user is asked for it instead. The wait runs
+                    // off the command loop, which has other work to do.
+                    Err(error @ CoreError::ModAcquisitionRestricted { .. }) => {
+                        acquisition_cancel = Some(restore_after_acquisition(
+                            app.paths().clone(),
+                            &events,
+                            acquisition_cancel.take(),
+                            RestoreRequest {
+                                host,
+                                path,
+                                refusal: error,
+                                refreshed: Arc::clone(&refreshed_mods),
+                            },
+                        ));
                     }
                     Err(error) => send_error(&events, &error),
                 }
@@ -4975,6 +5032,64 @@ impl ModOperation {
 /// ordinary mutation finds it in the shared cache and proceeds. Returns the
 /// token that stops the wait, which the caller keeps so closing the dialog
 /// (or starting another operation) ends it.
+/// One restore that is waiting on a release the user has to fetch.
+struct RestoreRequest {
+    host: InstalledHost,
+    path: PathBuf,
+    /// The refusal the first attempt produced, which names the files to ask
+    /// for.
+    refusal: CoreError,
+    refreshed: RefreshedHosts,
+}
+
+/// Asks the user for the jar a restore could not fetch, then puts it back.
+///
+/// Returns the token that stops the wait, exactly as
+/// [`apply_mod_operation`] does, so leaving the dialog ends it.
+fn restore_after_acquisition(
+    paths: Paths,
+    events: &Sender<Event>,
+    previous: Option<CancellationToken>,
+    request: RestoreRequest,
+) -> CancellationToken {
+    if let Some(previous) = previous {
+        previous.cancel();
+    }
+    let cancel = CancellationToken::new();
+    let watching = cancel.clone();
+    spawn_detached(paths, events.clone(), move |app, events, runtime| {
+        let RestoreRequest {
+            host,
+            path,
+            refusal,
+            refreshed,
+        } = request;
+        let refusal: Result<(), CoreError> = Err(refusal);
+        runtime.block_on(async {
+            if await_manual_acquisition(&app, &events, &host.id(), &refusal, &watching).await
+                != Acquisition::Acquired
+            {
+                return;
+            }
+            let reporter = OperationReporter::silent("operation-restoring-mod");
+            match app
+                .restore_mod_file(host, &path, &reporter, &CancellationToken::new())
+                .await
+            {
+                Ok(()) => {
+                    let _ = events.send(Event::Toast {
+                        message: lookup("gui-mod-restored"),
+                        error: false,
+                    });
+                    send_host_mods(&app, host, &events, &refreshed, false);
+                }
+                Err(error) => send_error(&events, &error),
+            }
+        });
+    });
+    cancel
+}
+
 fn apply_mod_operation(
     paths: Paths,
     events: &Sender<Event>,
@@ -4989,54 +5104,107 @@ fn apply_mod_operation(
     spawn_detached(paths, events.clone(), move |app, events, runtime| {
         let reporter = OperationReporter::silent(operation.operation);
         let instance = operation.instance;
-        let result = runtime.block_on(app.apply_linked_mod_operation(
-            instance,
-            &operation.request(),
-            &operation.servers,
-            &reporter,
-            &watching,
-        ));
-        let Err(CoreError::ModAcquisitionRestricted { blocked, .. }) = &result else {
-            finish_linked(&app, &events, instance, result);
-            return;
-        };
-        let _ = events.send(Event::ModAcquisitionRequired(ModAcquisitionData {
-            instance: instance.to_string(),
-            logical_path: operation.path.display().to_string(),
-            name: blocked
-                .first()
-                .and_then(|file| file.project_name.clone())
-                .unwrap_or_default(),
-            items: blocked
-                .iter()
-                .map(crate::presentation::BlockedFilePresentation::from_blocked)
-                .collect(),
-        }));
-
-        let targets = blocked.iter().map(WatchTarget::from_blocked).collect();
-        let mut watcher = app.download_watcher(targets);
-        while !watcher.is_finished() && !watching.is_cancelled() {
-            if runtime.block_on(watcher.scan_once()).is_none() {
-                thread::sleep(ephervex_core::RESCAN_INTERVAL);
+        runtime.block_on(async {
+            let result = app
+                .apply_linked_mod_operation(
+                    instance,
+                    &operation.request(),
+                    &operation.servers,
+                    &reporter,
+                    &watching,
+                )
+                .await;
+            match await_manual_acquisition(&app, &events, &instance.to_string(), &result, &watching)
+                .await
+            {
+                Acquisition::Acquired => {}
+                Acquisition::NotNeeded => {
+                    finish_linked(&app, &events, instance, result);
+                    return;
+                }
+                Acquisition::Abandoned => return,
             }
-        }
-        if watching.is_cancelled() {
-            return;
-        }
-        // Everything the user was asked for is now a verified copy in the
-        // shared cache, so the requested change goes through the ordinary
-        // path - including its own re-resolution, which is what catches a
-        // release withdrawn in the meantime.
-        let result = runtime.block_on(app.apply_linked_mod_operation(
-            instance,
-            &operation.request(),
-            &operation.servers,
-            &reporter,
-            &CancellationToken::new(),
-        ));
-        finish_linked(&app, &events, instance, result);
+            // Everything the user was asked for is now a verified copy in the
+            // shared cache, so the requested change goes through the ordinary
+            // path - including its own re-resolution, which is what catches a
+            // release withdrawn in the meantime.
+            let result = app
+                .apply_linked_mod_operation(
+                    instance,
+                    &operation.request(),
+                    &operation.servers,
+                    &reporter,
+                    &CancellationToken::new(),
+                )
+                .await;
+            finish_linked(&app, &events, instance, result);
+        });
     });
     cancel
+}
+
+/// Offers the user-assisted acquisition path for a failed operation, and
+/// waits for the releases it named.
+///
+/// One implementation for every operation that needs bytes: installing a mod,
+/// changing its version, and updating it all reach a
+/// [`CoreError::ModAcquisitionRestricted`] the same way, and a second place
+/// to answer it would be a second manual-download flow.
+///
+async fn await_manual_acquisition(
+    app: &App,
+    events: &Sender<Event>,
+    host: &str,
+    result: &Result<impl Sized, CoreError>,
+    cancel: &CancellationToken,
+) -> Acquisition {
+    let Err(CoreError::ModAcquisitionRestricted { path, blocked }) = result else {
+        return Acquisition::NotNeeded;
+    };
+    let _ = events.send(Event::ModAcquisitionRequired(ModAcquisitionData {
+        instance: host.to_owned(),
+        logical_path: path.display().to_string(),
+        name: blocked
+            .first()
+            .and_then(|file| file.project_name.clone())
+            .unwrap_or_default(),
+        items: blocked
+            .iter()
+            .map(crate::presentation::BlockedFilePresentation::from_blocked)
+            .collect(),
+    }));
+
+    let targets = blocked.iter().map(WatchTarget::from_blocked).collect();
+    let mut watcher = app.download_watcher(targets);
+    while !watcher.is_finished() {
+        if cancel.is_cancelled() {
+            return Acquisition::Abandoned;
+        }
+        if watcher.scan_once().await.is_none() {
+            tokio::time::sleep(ephervex_core::RESCAN_INTERVAL).await;
+        }
+    }
+    if cancel.is_cancelled() {
+        return Acquisition::Abandoned;
+    }
+    // The dialog asked for exactly these files and has them, so it is done
+    // whatever the retry goes on to do: a failure after this is an ordinary
+    // failure, reported the ordinary way.
+    let _ = events.send(Event::CloseModal);
+    Acquisition::Acquired
+}
+
+/// What [`await_manual_acquisition`] did about one failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Acquisition {
+    /// The failure was about something else, so it is still the caller's to
+    /// report.
+    NotNeeded,
+    /// Every file is now a verified copy in the shared cache. Try again.
+    Acquired,
+    /// The user left the dialog. Nothing was written and nothing is owed: the
+    /// refusal that started this is not worth showing as a failure on top.
+    Abandoned,
 }
 
 fn spawn_detached(

@@ -974,20 +974,27 @@ mod browsing {
 
     // -- releases whose author forbids third-party downloads ---------------
 
-    /// Puts one restricted file's bytes in the shared artifact cache, the way
-    /// a folder watcher or an earlier import would have.
-    fn seed_cache(app: &App, project: u32, file: u32) {
-        let body = jar(project, file);
-        let hash = ephervex_model::Hash::new(ephervex_model::HashAlgorithm::Sha1, &sha1_of(&body))
-            .expect("valid sha1");
+    /// Where the shared artifact cache keeps one file's verified bytes.
+    fn cache_path(app: &App, project: u32, file: u32) -> std::path::PathBuf {
+        let hash = ephervex_model::Hash::new(
+            ephervex_model::HashAlgorithm::Sha1,
+            &sha1_of(&jar(project, file)),
+        )
+        .expect("valid sha1");
         let extension = ephervex_download::FileExtension::new("jar").expect("jar");
-        let path = app.artifact_cache().layout().content(
+        app.artifact_cache().layout().content(
             ephervex_download::ContentStore::Downloads,
             &hash,
             Some(&extension),
-        );
+        )
+    }
+
+    /// Puts one restricted file's bytes in the shared artifact cache, the way
+    /// a folder watcher or an earlier import would have.
+    fn seed_cache(app: &App, project: u32, file: u32) {
+        let path = cache_path(app, project, file);
         std::fs::create_dir_all(path.parent().expect("shard")).expect("shard");
-        std::fs::write(&path, body).expect("seed the cache");
+        std::fs::write(&path, jar(project, file)).expect("seed the cache");
     }
 
     /// An instance with the restricted mod installed at
@@ -1329,6 +1336,101 @@ mod browsing {
                 .iter()
                 .any(|path| path.contains(&ROOT_NEWEST.to_string())),
             "an unrestricted release is still fetched over the network"
+        );
+    }
+
+    /// Putting a deleted jar back needs its bytes just as an install does.
+    /// The launcher may not fetch them, so it asks - and once the user has
+    /// supplied them, the ordinary restore finishes.
+    #[tokio::test]
+    async fn restoring_a_restricted_jar_asks_for_it_rather_than_failing() {
+        let server = catalog().await;
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_against(base.path(), &server);
+        let instance = instance_with_the_restricted_mod(&app).await;
+        let host = crate::mods::InstalledHost::Instance(instance);
+        let logical = std::path::PathBuf::from("mods")
+            .join(file_name(RESTRICTED_PROJECT, RESTRICTED_INSTALLED));
+
+        // The jar is put aside to find out which mod crashes, and the cached
+        // copy is gone too - a pruned cache, or another machine.
+        app.delete_mod_file(host, &logical).expect("the jar goes");
+        std::fs::remove_file(cache_path(&app, RESTRICTED_PROJECT, RESTRICTED_INSTALLED))
+            .expect("empty the cache");
+
+        let error = app
+            .restore_mod_file(host, &logical, &reporter(), &CancellationToken::new())
+            .await
+            .expect_err("there are no bytes to put back");
+        let crate::error::CoreError::ModAcquisitionRestricted { blocked, .. } = &error else {
+            panic!("a bare missing-source failure instead of the manual path: {error:?}");
+        };
+        assert_eq!(blocked.len(), 1);
+        assert_eq!(
+            blocked[0].browser_url.as_deref(),
+            Some(
+                format!(
+                    "https://www.curseforge.com/minecraft/mc-mods/mod-{RESTRICTED_PROJECT}/download/{RESTRICTED_INSTALLED}"
+                )
+                .as_str()
+            )
+        );
+        assert_eq!(blocked[0].project_name.as_deref(), Some("Restricted Mod"));
+        assert!(!blocked[0].hashes.is_empty());
+
+        // The user fetched it; a watcher adopted it into the shared cache.
+        seed_cache(&app, RESTRICTED_PROJECT, RESTRICTED_INSTALLED);
+        app.restore_mod_file(host, &logical, &reporter(), &CancellationToken::new())
+            .await
+            .expect("the ordinary restore finishes once the bytes are here");
+
+        let record = app.client(instance).expect("the instance");
+        let restored = ephervex_storage::metadata::client_game_dir(&record.root).join(&logical);
+        assert!(restored.is_file(), "{} is not back", restored.display());
+        assert!(
+            artifact_requests(&server).await.is_empty(),
+            "nothing may fetch a file the author forbids third-party downloads of"
+        );
+    }
+
+    /// A pack file whose mirror simply went away is not an author's decision,
+    /// and pointing the user at a download page for it would be a guess.
+    #[tokio::test]
+    async fn a_recorded_file_with_no_catalog_identity_still_fails_plainly() {
+        let server = catalog().await;
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_against(base.path(), &server);
+        let instance = instance_with_the_restricted_mod(&app).await;
+        let host = crate::mods::InstalledHost::Instance(instance);
+        let logical = std::path::PathBuf::from("mods")
+            .join(file_name(RESTRICTED_PROJECT, RESTRICTED_INSTALLED));
+
+        // Strip the entry's identity, leaving a recorded file nothing can name.
+        let record = app.client(instance).expect("the instance");
+        let store =
+            ephervex_pack::SourceStore::new(ephervex_storage::metadata::source_dir(&record.root));
+        let mut recipe = store.read_recipe().expect("a recipe");
+        for file in &mut recipe.files {
+            file.identity = None;
+        }
+        store.write_recipe(&recipe).expect("rewrite");
+
+        app.delete_mod_file(host, &logical).expect("the jar goes");
+        std::fs::remove_file(cache_path(&app, RESTRICTED_PROJECT, RESTRICTED_INSTALLED))
+            .expect("empty the cache");
+
+        let error = app
+            .restore_mod_file(host, &logical, &reporter(), &CancellationToken::new())
+            .await
+            .expect_err("there are no bytes to put back");
+        assert!(
+            matches!(
+                error,
+                crate::error::CoreError::Pack(
+                    ephervex_pack::PackError::FileDownloadsMissing { .. }
+                )
+            ),
+            "a lost source stays the missing source it is, never an author's decision: {error:?}"
         );
     }
 }

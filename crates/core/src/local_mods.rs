@@ -453,28 +453,37 @@ impl App {
                 path: logical_path.to_path_buf(),
             })?;
 
-        self.with_artifact_cache(Box::pin(async {
-            let manager = self.artifact_manager()?;
-            let cache = CacheLayout::new(self.paths().cache_dir());
-            ephervex_pack::restore_file(
-                recipe,
-                logical_path,
-                &layout.game_dir,
-                ArtifactFetch {
-                    manager: &manager,
-                    cache: &cache,
-                    // Asked from the file's own provider identity, exactly as a
-                    // mutation asks, so a restore offers a secret only to the
-                    // artifact it belongs to.
-                    credentials: &self.provider_credentials(),
-                    reporter,
-                    cancel,
-                },
-            )
-            .await?;
-            Ok(())
-        }))
-        .await?;
+        let restored = self
+            .with_artifact_cache(Box::pin(async {
+                let manager = self.artifact_manager()?;
+                let cache = CacheLayout::new(self.paths().cache_dir());
+                ephervex_pack::restore_file(
+                    recipe,
+                    logical_path,
+                    &layout.game_dir,
+                    ArtifactFetch {
+                        manager: &manager,
+                        cache: &cache,
+                        // Asked from the file's own provider identity, exactly
+                        // as a mutation asks, so a restore offers a secret only
+                        // to the artifact it belongs to.
+                        credentials: &self.provider_credentials(),
+                        reporter,
+                        cancel,
+                    },
+                )
+                .await?;
+                Ok(())
+            }))
+            .await;
+        if let Err(error) = restored {
+            // A jar whose release forbids third-party downloads has no address
+            // to come back from, and that is something the user can act on
+            // rather than a fault.
+            return Err(self
+                .as_recorded_manual_acquisition(error, recipe, logical_path, reporter, cancel)
+                .await);
+        }
 
         info!(
             host = %host.id(),

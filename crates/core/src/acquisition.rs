@@ -18,10 +18,14 @@
 
 use std::path::Path;
 
+use ephervex_download::OperationReporter;
 use ephervex_download::{ContentStore, FileExtension, file_matches_hashes};
 use ephervex_mod_platform::{CurseForgeProjectClass, ModInstallPlan, PlannedMod, file_browser_url};
 use ephervex_model::{CurseForgeFileId, Hash, ModProvider};
-use ephervex_pack::{BlockedProviderFile, ProviderFileIdentity, SideRequirement, safe_file_name};
+use ephervex_pack::{
+    BlockedProviderFile, PackRecipe, ProviderFileIdentity, SideRequirement, safe_file_name,
+};
+use tokio_util::sync::CancellationToken;
 
 use crate::app::App;
 use crate::error::{CoreError, CoreResult};
@@ -149,6 +153,86 @@ impl App {
             // cache failed in turn. Either way the original failure is the
             // honest one to report.
             Ok(_) | Err(_) => error,
+        }
+    }
+}
+
+impl App {
+    /// The same refusal, for an operation that works from a recorded entry
+    /// rather than from a resolved plan.
+    ///
+    /// Putting a deleted jar back needs its bytes just as an install does, and
+    /// a recipe entry recording a restricted release carries no address to
+    /// fetch them from. What the entry does not carry is the project's name
+    /// and handle, so those are asked for once, here, on the failure path -
+    /// the restore itself still asks no catalog.
+    pub(crate) async fn as_recorded_manual_acquisition(
+        &self,
+        error: CoreError,
+        recipe: &PackRecipe,
+        logical_path: &Path,
+        reporter: &OperationReporter,
+        cancel: &CancellationToken,
+    ) -> CoreError {
+        if !matches!(
+            error,
+            CoreError::Pack(ephervex_pack::PackError::FileDownloadsMissing { .. })
+        ) {
+            return error;
+        }
+        let Some(entry) = recipe
+            .files
+            .iter()
+            .find(|file| file.logical_path == logical_path)
+        else {
+            return error;
+        };
+        // A pack file whose mirror is simply gone has no page to send anyone
+        // to and no digest to recognize a copy by. That is the failure it
+        // already is.
+        let Some(identity) = entry.identity.as_ref() else {
+            return error;
+        };
+        let (Some(provider), Some(project_id)) =
+            (identity.provider, identity.project_id.as_deref())
+        else {
+            return error;
+        };
+        if entry.hashes.is_empty() || !entry.downloads.is_empty() {
+            return error;
+        }
+
+        let project = match self.mod_provider(provider) {
+            Ok(catalog) => catalog.project(project_id, reporter, cancel).await.ok(),
+            Err(_) => None,
+        };
+        let version_id = identity.version_id.as_deref().unwrap_or_default();
+        let browser_url = browser_url(
+            provider,
+            project.as_ref().and_then(|it| it.slug.as_deref()),
+            version_id,
+        );
+        if browser_url.is_none() && !matches!(provider, ModProvider::CurseForge) {
+            // Nothing this build knows restricts downloads, so this is an
+            // ordinary missing source rather than an author's decision.
+            return error;
+        }
+
+        CoreError::ModAcquisitionRestricted {
+            path: logical_path.to_path_buf(),
+            blocked: vec![BlockedProviderFile {
+                identity: identity.clone(),
+                project_name: project.map(|it| it.title),
+                file_name: entry
+                    .logical_path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned()),
+                browser_url,
+                hashes: entry.hashes.clone(),
+                relations: entry.relations.clone(),
+                client: entry.client,
+                server: entry.server,
+            }],
         }
     }
 }
