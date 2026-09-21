@@ -6,9 +6,8 @@ is active, so Ephervex captures a safety snapshot before the first round.
 
 ## Desktop workflow
 
-Open a client's or server's **Mods** tab and choose **Isolate mods**. Select any
-mods that must stay enabled throughout the investigation. Ephervex also keeps
-everything those mods require enabled.
+Open a client's or server's **Isolation** tab and choose **Set up isolation**.
+Select any mods that must stay enabled throughout the investigation. Ephervex also keeps everything those mods require enabled.
 
 The setup screen requires a separate acknowledgement when a required dependency
 is missing. If dependency information can be refreshed but has not been
@@ -17,11 +16,13 @@ Either acknowledgement marks the result as unproven. Jars that cannot be
 identified can still be tested, with the same caveat.
 
 For each round, launch the host using the exact enabled configuration shown in
-the dialog. Then answer **Issue still present** or **Issue gone**. The dialog can
-be closed while testing; the workspace banner keeps the session visible and
-opens it again. **Undo answer** restores the preceding round when an answer was
-wrong. A contradiction stops the search until the latest answer is undone or
-the session is canceled.
+the Isolation tab. Then answer **Still failing** or **Issue gone**. The active
+workflow area keeps the current round and common answers available while
+switching among Isolation, Logs, Mods, and the other host surfaces. **Detailed
+view** returns to the complete Isolation surface without closing Logs or
+changing the session. **Undo answer** restores the preceding round when an
+answer was wrong. A contradiction stops the search until the latest answer is
+undone or the session is canceled.
 
 When a result is ready, **Finish** leaves that reproducing configuration enabled
 and keeps the pre-isolation snapshot in the Snapshots tab. **Cancel isolation**
@@ -29,8 +30,10 @@ restores the exact pre-isolation state instead. A client session never changes a
 linked server; isolate that server separately when its mods are also relevant.
 
 Ephervex must be stopped for the affected host before it starts, advances,
-undoes, finishes, or cancels a round. Launching while a round waits for an
-answer remains available.
+undoes, finishes, or cancels a round. The workspace header continues to provide
+the client's launch/stop action or the server's start/stop/restart actions while
+the Isolation tab is open. Launching while a round waits for an answer remains
+available.
 
 ## Command-line workflow
 

@@ -38,7 +38,7 @@ use crate::ui::{
     ImportDuplicateRow, ImportOptionRow, InstanceRow, IsolationCandidateRow, JavaRow, LicenseRow,
     LinkedTargetRow, LocalModClashRow, LogChunk, ModRow, ModSearchRow, ModVersionRow,
     PendingEntityRow, PromoteServerRow, RelationRow, RunningRow, ServerRow, SnapshotRow, Theme,
-    WindowSizePreview,
+    WindowSizePreview, WorkflowActionRow,
 };
 use crate::window_aspect;
 
@@ -1228,6 +1228,8 @@ struct IsolationFlowState {
     generation: u64,
     host: Option<InstalledHost>,
     pinned: HashSet<PathBuf>,
+    candidates: Vec<backend::IsolationCandidateData>,
+    query: String,
 }
 
 impl IsolationFlowState {
@@ -1235,11 +1237,22 @@ impl IsolationFlowState {
         self.generation = self.generation.wrapping_add(1);
         self.host = Some(host);
         self.pinned.clear();
+        self.candidates.clear();
+        self.query.clear();
         self.generation
     }
 
     fn accepts(&self, generation: u64) -> bool {
         generation == 0 || generation == self.generation
+    }
+
+    /// Forgets a setup that never started, so a late plan cannot bring it back.
+    fn discard(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.host = None;
+        self.pinned.clear();
+        self.candidates.clear();
+        self.query.clear();
     }
 }
 
@@ -2234,9 +2247,19 @@ fn register_isolation_actions(
         }
     });
 
+    let state = Rc::clone(flow);
+    let weak = ui.as_weak();
+    ui.on_filter_isolation_candidates(move |query| {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        state.borrow_mut().query = query.into();
+        render_isolation_candidates(&ui, &state.borrow());
+    });
+
     let sender = commands.clone();
     let state = Rc::clone(flow);
-    ui.on_start_isolation(move |kind, id, accept_unrecorded| {
+    ui.on_start_isolation(move |kind, id, accept_unrecorded, accept_missing| {
         let Some(host) = backend::parse_mod_host(&kind, &id) else {
             return;
         };
@@ -2251,6 +2274,7 @@ fn register_isolation_actions(
                 generation: state.generation,
                 pinned: state.pinned.iter().cloned().collect(),
                 accept_unrecorded,
+                accept_missing,
             },
         );
     });
@@ -2322,6 +2346,17 @@ fn register_isolation_actions(
             }
         };
         send(&sender, Command::FinishIsolation { host, generation });
+    });
+
+    let state = Rc::clone(flow);
+    let weak = ui.as_weak();
+    ui.on_discard_isolation_setup(move |kind, id| {
+        let (Some(ui), Some(host)) = (weak.upgrade(), backend::parse_mod_host(&kind, &id)) else {
+            return;
+        };
+        if state.borrow().host == Some(host) {
+            discard_isolation_setup(&ui, &mut state.borrow_mut());
+        }
     });
 
     let sender = commands.clone();
@@ -5115,17 +5150,16 @@ fn apply_isolation_data(
     }
     let is_setup = data.phase == "setup";
     let is_inactive = data.phase == "none";
-    let pinned = &flow.borrow().pinned;
-    ui.set_isolation_candidates(model(
-        data.candidates
-            .into_iter()
-            .map(|candidate| IsolationCandidateRow {
-                selected: pinned.contains(&PathBuf::from(&candidate.path)),
-                path: candidate.path.into(),
-                name: candidate.name.into(),
-            })
-            .collect(),
-    ));
+    if let Some(host) = backend::parse_mod_host(&data.host_kind, &data.host) {
+        let mut state = flow.borrow_mut();
+        if state.host != Some(host) {
+            state.begin(host);
+        }
+        if is_setup {
+            state.candidates = data.candidates;
+        }
+    }
+    render_isolation_candidates(ui, &flow.borrow());
     ui.set_isolation_enabled(string_model(data.enabled));
     ui.set_isolation_disabled(string_model(data.disabled));
     ui.set_isolation_unrecorded(string_model(data.unrecorded));
@@ -5133,6 +5167,8 @@ fn apply_isolation_data(
     ui.set_isolation_missing(string_model(data.missing));
     ui.set_isolation_linked_servers(string_model(data.linked_servers));
     ui.set_isolation_reproducing(string_model(data.reproducing));
+    ui.set_isolation_history(string_model(data.history));
+    apply_active_isolation_workflow(ui, data.active, &data.phase, &data.summary);
     ui.set_isolation_host_kind(data.host_kind.into());
     ui.set_isolation_host_id(data.host.into());
     ui.set_isolation_phase(data.phase.into());
@@ -5147,14 +5183,99 @@ fn apply_isolation_data(
         // Reduced confidence is an explicit choice for each new session, not a
         // preference that carries over from an earlier setup dialog.
         ui.set_isolation_accept_unrecorded(false);
+        ui.set_isolation_accept_missing(false);
+        ui.set_isolation_query(SharedString::default());
     }
     if open {
-        ui.set_modal("isolate".into());
-    } else if is_inactive && ui.get_modal() == "isolate" {
-        // Cancel reports an inactive state after the snapshot restoration. Do
-        // not leave the modal open with no matching body.
-        ui.set_modal(SharedString::default());
+        ui.set_workspace_tab("Isolation".into());
+    } else if is_inactive && ui.get_workspace_tab() == "Isolation" {
+        ui.set_workspace_tab("Mods".into());
     }
+}
+
+/// Returns the Isolation surface to its empty state without leaving it.
+fn discard_isolation_setup(ui: &AppWindow, state: &mut IsolationFlowState) {
+    state.discard();
+    render_isolation_candidates(ui, state);
+    ui.set_isolation_phase("none".into());
+    ui.set_isolation_query(SharedString::default());
+    ui.set_modal_error(SharedString::default());
+}
+
+fn render_isolation_candidates(ui: &AppWindow, state: &IsolationFlowState) {
+    let query = state.query.trim().to_lowercase();
+    ui.set_isolation_candidates(model(
+        state
+            .candidates
+            .iter()
+            .filter(|candidate| {
+                query.is_empty()
+                    || candidate.name.to_lowercase().contains(&query)
+                    || candidate.path.to_lowercase().contains(&query)
+            })
+            .map(|candidate| IsolationCandidateRow {
+                selected: state.pinned.contains(&PathBuf::from(&candidate.path)),
+                path: candidate.path.clone().into(),
+                name: candidate.name.clone().into(),
+            })
+            .collect(),
+    ));
+}
+
+fn apply_active_isolation_workflow(ui: &AppWindow, active: bool, phase: &str, summary: &str) {
+    ui.set_active_workflow_id(if active {
+        "mod-isolation".into()
+    } else {
+        SharedString::default()
+    });
+    ui.set_active_workflow_title(if active {
+        lookup("gui-isolation-active").into()
+    } else {
+        SharedString::default()
+    });
+    ui.set_active_workflow_summary(summary.into());
+    let action = |id: &'static str,
+                  message: &'static str,
+                  tone: &'static str,
+                  requires_stopped: bool| WorkflowActionRow {
+        id: id.into(),
+        label: lookup(message).into(),
+        tone: tone.into(),
+        enabled: true,
+        requires_stopped,
+    };
+    let mut actions = vec![action(
+        "details",
+        "gui-isolation-detailed-view",
+        "secondary",
+        false,
+    )];
+    match phase {
+        "round" => {
+            actions.push(action(
+                "gone",
+                "gui-isolation-issue-gone",
+                "secondary",
+                true,
+            ));
+            actions.push(action(
+                "present",
+                "gui-isolation-issue-present",
+                "primary",
+                true,
+            ));
+            if ui.get_isolation_history().row_count() > 0 {
+                actions.push(action("undo", "gui-isolation-undo", "secondary", true));
+            }
+        }
+        "contradiction" => actions.push(action("undo", "gui-isolation-undo", "primary", true)),
+        "ready" => {
+            actions.push(action("undo", "gui-isolation-undo", "secondary", true));
+            actions.push(action("finish", "gui-isolation-finish", "primary", true));
+        }
+        _ => {}
+    }
+    ui.set_active_workflow_actions(model(actions));
 }
 
 fn string_model(values: Vec<String>) -> ModelRc<SharedString> {
@@ -7462,12 +7583,13 @@ mod tests {
             reduced_confidence: false,
             confidence: String::new(),
             reproducing: Vec::new(),
+            history: Vec::new(),
             summary: "Waiting for an answer.".to_owned(),
         }
     }
 
     #[test]
-    fn reopening_a_workspace_applies_its_durable_isolation_state_without_opening_the_modal() {
+    fn reopening_a_workspace_applies_its_durable_isolation_state_without_changing_surface() {
         let ui = test_window();
         ui.set_selected_instance_id("host".into());
         let flow = Rc::new(RefCell::new(IsolationFlowState::default()));
@@ -7482,18 +7604,81 @@ mod tests {
     }
 
     #[test]
-    fn a_new_setup_requires_a_fresh_override_and_cancel_closes_the_isolation_modal() {
+    fn a_new_setup_requires_fresh_acknowledgements_and_cancel_leaves_the_surface() {
         let ui = test_window();
         ui.set_selected_instance_id("host".into());
         ui.set_isolation_accept_unrecorded(true);
+        ui.set_isolation_accept_missing(true);
         let flow = Rc::new(RefCell::new(IsolationFlowState::default()));
 
         apply_isolation_data(&ui, isolation_data("host", false, "setup"), true, &flow);
         assert!(!ui.get_isolation_accept_unrecorded());
-        assert_eq!(ui.get_modal(), "isolate");
+        assert!(!ui.get_isolation_accept_missing());
+        assert_eq!(ui.get_workspace_tab(), "Isolation");
 
         apply_isolation_data(&ui, isolation_data("host", false, "none"), false, &flow);
-        assert_eq!(ui.get_modal(), "");
+        assert_eq!(ui.get_workspace_tab(), "Mods");
+    }
+
+    #[test]
+    fn canceling_a_setup_discards_it_and_stays_on_the_isolation_surface() {
+        let ui = test_window();
+        let host = ephervex_model::InstanceId::new().to_string();
+        ui.set_selected_instance_id(host.as_str().into());
+        let (sender, commands) = std::sync::mpsc::channel();
+        let flow = Rc::new(RefCell::new(IsolationFlowState::default()));
+        register_isolation_actions(&ui, &sender, &flow);
+        let mut setup = isolation_data(&host, false, "setup");
+        setup.candidates = vec![backend::IsolationCandidateData {
+            path: "mods/a.jar".to_owned(),
+            name: "A".to_owned(),
+        }];
+        apply_isolation_data(&ui, setup, true, &flow);
+        ui.invoke_toggle_isolation_pin("mods/a.jar".into(), true);
+        let setup_generation = flow.borrow().generation;
+
+        ui.invoke_discard_isolation_setup("client".into(), host.as_str().into());
+
+        assert_eq!(ui.get_workspace_tab(), "Isolation");
+        assert_eq!(ui.get_isolation_phase(), "none");
+        assert_eq!(ui.get_isolation_candidates().row_count(), 0);
+        assert!(!flow.borrow().accepts(setup_generation));
+        assert!(flow.borrow().pinned.is_empty());
+        ui.invoke_start_isolation("client".into(), host.as_str().into(), false, false);
+        assert!(
+            commands.try_recv().is_err(),
+            "a discarded setup cannot start"
+        );
+    }
+
+    #[test]
+    fn isolation_candidate_filtering_preserves_the_pinned_selection() {
+        let ui = test_window();
+        let mut flow = IsolationFlowState {
+            candidates: vec![
+                backend::IsolationCandidateData {
+                    path: "mods/alpha.jar".to_owned(),
+                    name: "Alpha".to_owned(),
+                },
+                backend::IsolationCandidateData {
+                    path: "mods/beta.jar".to_owned(),
+                    name: "Beta Library".to_owned(),
+                },
+            ],
+            query: "beta".to_owned(),
+            ..IsolationFlowState::default()
+        };
+        flow.pinned.insert(PathBuf::from("mods/beta.jar"));
+
+        render_isolation_candidates(&ui, &flow);
+
+        let rows = ui.get_isolation_candidates();
+        assert_eq!(rows.row_count(), 1);
+        let row = rows
+            .row_data(0)
+            .expect("the matching candidate is rendered");
+        assert_eq!(row.name, "Beta Library");
+        assert!(row.selected, "filtering must not clear a pinned candidate");
     }
 
     /// A standalone server is named for its exact target, the same way a new

@@ -147,6 +147,26 @@ and restoration run through the shared cancellable operation infrastructure.
 Retention is always user-managed. The host deletion dialog includes the number
 of retained snapshots that deleting its files also removes.
 
+## Host workspaces
+
+The desktop represents an installed client or local server with one reusable
+host workspace. The workspace owns the host header, running status, launch or
+process actions, data-driven surface navigation, and a small persistent area
+for a long-running host workflow. Overview, Mods, Isolation, Logs, and
+Snapshots remain independent surfaces beneath that boundary; server-only
+surfaces are entries in the server's surface model rather than a separate
+container. Adding another host tool means adding a surface entry and its body,
+not another host header or navigation structure. More than one host workspace
+can therefore be composed by a parent without teaching its surfaces about that
+parent.
+
+The workspace does not interpret isolation state. The controller supplies a
+workflow identifier, status copy, and action rows, and routes those actions to
+the owning feature. Isolation currently uses that extension point for its
+current round, common answers, undo, finish, and detailed-view navigation. The
+same boundary can carry another durable developer workflow without moving its
+state into the visual container.
+
 ## Dependency-aware mod isolation
 
 Isolation planning uses the same required-dependency graph as mod toggles. A
@@ -161,8 +181,8 @@ An active session is a compact version-1 document at
 `<host>/.launcher/isolation.json`. It records the pre-isolation snapshot, the
 complete plan and search state, every answered round, and the exact intended
 current configuration. The document is published atomically before the mod
-batch, so reopening the application can show a persistent banner and resume can
-repair an interrupted application by applying the same batch again.
+batch, so reopening the application can show the persistent workflow state and
+resume can repair an interrupted application by applying the same batch again.
 
 The deterministic search tests subsets and then complements. Reproduction
 narrows the suspect roots; no reduction grows granularity until removing each

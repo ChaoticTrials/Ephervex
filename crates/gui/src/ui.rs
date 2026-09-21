@@ -273,6 +273,24 @@ slint::slint! {
         selected: bool,
     }
 
+    // One surface a host workspace offers. The workspace chrome only knows
+    // stable ids and labels; each host decides which surfaces it has.
+    export struct WorkspaceSurfaceRow {
+        id: string,
+        label: string,
+    }
+
+    // One action belonging to a durable workflow shown above every surface.
+    // The workspace does not interpret the id, so isolation is not privileged
+    // over another long-running developer workflow added later.
+    export struct WorkflowActionRow {
+        id: string,
+        label: string,
+        tone: string,
+        enabled: bool,
+        requires-stopped: bool,
+    }
+
     // One dropped jar whose name the mods folder already has.
     export struct LocalModClashRow {
         source: string,
@@ -1652,23 +1670,300 @@ slint::slint! {
         }
     }
 
-    component IsolationBanner inherits Rectangle {
+    // The visual boundary for one installed client or local server. It owns
+    // host status/actions, data-driven surface navigation, and durable
+    // workflow affordances. Surface bodies remain independent children that
+    // share this host context.
+    component HostWorkspace inherits Rectangle {
+        in property <string> title;
+        in property <string> back-label;
+        in property <string> status;
+        in property <string> status-kind;
+        in property <bool> host-running;
+        in property <[WorkspaceSurfaceRow]> surfaces;
+        in-out property <string> selected-surface;
+        in property <[AccountRow]> accounts;
+        in property <bool> show-launch-as;
+        in property <bool> launch-alongside;
+        in property <string> primary-label;
+        in property <string> primary-tone: "primary";
+        in property <bool> primary-enabled;
+        in property <bool> restart-visible;
+        in property <bool> restart-enabled;
+        in property <string> workflow-id;
+        in property <string> workflow-title;
+        in property <string> workflow-summary;
+        in property <[WorkflowActionRow]> workflow-actions;
+        callback back();
+        callback open-folder();
+        callback primary();
+        callback restart();
+        callback launch-as(string, bool);
+        callback add-account();
+        callback surface-selected(string);
+        callback workflow-action(string, string);
+        background: Theme.background;
+        VerticalLayout {
+            padding: 22px;
+            spacing: 14px;
+            HorizontalLayout {
+                spacing: 12px;
+                AppButton { text: root.back-label; clicked => { root.back(); } }
+                Heading { text: root.title; font-size: Theme.workspace-title-size; overflow: elide; }
+                VerticalLayout { alignment: center; Pill { text: root.status; tone-color: root.status-kind == "running" ? Theme.success : root.status-kind == "starting" ? Theme.warning : Theme.text-secondary; } }
+                Rectangle { horizontal-stretch: 1; }
+                AppButton { text: GuiI18n.text("gui-open-folder"); clicked => { root.open-folder(); } }
+                if root.show-launch-as : LaunchAsButton {
+                    accounts: root.accounts;
+                    enabled: root.primary-enabled;
+                    alongside: root.launch-alongside;
+                    launch-as(account, alongside) => { root.launch-as(account, alongside); }
+                    add-account => { root.add-account(); }
+                }
+                if root.restart-visible : AppButton { text: GuiI18n.text("gui-restart"); enabled: root.restart-enabled; clicked => { root.restart(); } }
+                AppButton { text: root.primary-label; tone: root.primary-tone; enabled: root.primary-enabled; clicked => { root.primary(); } }
+            }
+            if root.workflow-id != "" : Rectangle {
+                height: max(64px, workflow-copy.preferred-height + 24px);
+                border-radius: 7px;
+                border-width: 1px;
+                border-color: Theme.warning;
+                background: Theme.warning.with-alpha(0.08);
+                HorizontalLayout {
+                    padding: 12px; spacing: 9px; cross-axis-alignment: center;
+                    workflow-copy := VerticalLayout {
+                        horizontal-stretch: 1;
+                        Heading { text: root.workflow-title; font-size: Theme.row-heading-size; }
+                        BodyText { text: root.workflow-summary; color: Theme.text-secondary; wrap: word-wrap; }
+                    }
+                    for action in root.workflow-actions : AppButton {
+                        text: action.label;
+                        tone: action.tone;
+                        enabled: action.enabled && (!action.requires-stopped || !root.host-running);
+                        clicked => { root.workflow-action(root.workflow-id, action.id); }
+                    }
+                }
+            }
+            HorizontalLayout {
+                spacing: 4px;
+                for surface in root.surfaces : WorkspaceTab {
+                    text: surface.label;
+                    min-width: max(88px, self.preferred-width);
+                    selected: root.selected-surface == surface.id;
+                    clicked => { root.selected-surface = surface.id; root.surface-selected(surface.id); }
+                }
+                Rectangle { horizontal-stretch: 1; }
+            }
+            Divider { }
+            @children
+        }
+    }
+
+    component IsolationFilePanel inherits Rectangle {
+        in property <string> title;
+        in property <[string]> items;
+        in property <color> tone;
+        border-radius: 6px;
+        border-width: 1px;
+        border-color: root.tone;
+        background: Theme.surface;
+        VerticalLayout {
+            padding: 10px;
+            spacing: 6px;
+            Heading { text: root.title; font-size: Theme.row-heading-size; }
+            ScrollView {
+                viewport-width: self.width;
+                VerticalLayout {
+                    alignment: start;
+                    spacing: 4px;
+                    for item in root.items : BodyText { text: item; font-size: Theme.caption-size; }
+                }
+            }
+        }
+    }
+
+    component IsolationHistory inherits Rectangle {
+        in property <[string]> items;
+        visible: root.items.length > 0;
+        height: self.visible ? min(150px, root.items.length * 27px + 42px) : 0px;
+        border-radius: 6px;
+        border-width: 1px;
+        border-color: Theme.border;
+        background: Theme.surface;
+        VerticalLayout {
+            padding: 10px;
+            spacing: 5px;
+            Heading { text: GuiI18n.text("gui-isolation-history"); font-size: Theme.row-heading-size; }
+            ScrollView { viewport-width: self.width; VerticalLayout { alignment: start; spacing: 4px; for item in root.items : BodyText { text: item; font-size: Theme.caption-size; } } }
+        }
+    }
+
+    component IsolationSurface inherits Rectangle {
+        in property <string> phase;
         in property <string> summary;
-        in property <bool> can-finish;
+        in property <string> confidence;
+        in property <int> round;
+        in property <int> granularity;
+        in property <[IsolationCandidateRow]> candidates;
+        in property <[string]> enabled-items;
+        in property <[string]> disabled-items;
+        in property <[string]> unrecorded;
+        in property <[string]> unidentifiable;
+        in property <[string]> missing;
+        in property <[string]> linked-servers;
+        in property <[string]> reproducing;
+        in property <[string]> history;
+        in property <bool> reduced-confidence;
+        in-out property <string> query;
+        in-out property <bool> accept-unrecorded;
+        in-out property <bool> accept-missing;
+        in property <string> error;
+        callback filter(string);
+        callback toggle-pin(string, bool);
+        callback begin();
+        callback start-session(bool, bool);
         callback resume();
+        callback answer(string);
+        callback undo();
         callback finish();
         callback cancel();
-        height: 64px;
-        border-radius: 7px;
-        border-width: 1px;
-        border-color: Theme.warning;
-        background: Theme.warning.with-alpha(0.08);
-        HorizontalLayout {
-            padding: 12px; spacing: 9px; cross-axis-alignment: center;
-            VerticalLayout { horizontal-stretch: 1; Heading { text: GuiI18n.text("gui-isolation-active"); font-size: Theme.row-heading-size; } BodyText { text: root.summary; color: Theme.text-secondary; overflow: elide; } }
-            AppButton { text: GuiI18n.text("gui-isolation-resume"); clicked => { root.resume(); } }
-            if root.can-finish : AppButton { text: GuiI18n.text("gui-isolation-finish"); tone: "primary"; clicked => { root.finish(); } }
-            AppButton { text: GuiI18n.text("gui-isolation-cancel"); tone: "danger"; clicked => { root.cancel(); } }
+        callback discard-setup();
+        callback close();
+        background: Theme.background;
+
+        if root.phase == "none" : VerticalLayout {
+            alignment: center;
+            spacing: 10px;
+            Heading { text: GuiI18n.text("gui-isolation-title"); horizontal-alignment: center; }
+            BodyText { text: GuiI18n.text("gui-isolation-empty-detail"); color: Theme.text-muted; horizontal-alignment: center; wrap: word-wrap; }
+            HorizontalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-isolation-start-setup"); tone: "primary"; clicked => { root.begin(); } } }
+        }
+        if root.phase == "setup" : HorizontalLayout {
+            spacing: 14px;
+            Rectangle {
+                horizontal-stretch: 1;
+                border-radius: 7px;
+                border-width: 1px;
+                border-color: Theme.border;
+                background: Theme.surface;
+                VerticalLayout {
+                    padding: 14px;
+                    spacing: 9px;
+                    SectionTitle { title: GuiI18n.text("gui-isolation-candidates"); detail: GuiI18n.text("gui-isolation-pinned-detail"); }
+                    TextField {
+                        text <=> root.query;
+                        placeholder: GuiI18n.text("gui-isolation-search");
+                        accessible-label: GuiI18n.text("gui-isolation-search");
+                        input-type: InputType.search;
+                        edited(value) => { root.filter(value); }
+                    }
+                    if root.candidates.length == 0 : VerticalLayout { alignment: center; spacing: 8px; Heading { text: GuiI18n.text("gui-isolation-no-candidates"); horizontal-alignment: center; } BodyText { text: GuiI18n.text("gui-isolation-no-candidates-detail"); color: Theme.text-muted; horizontal-alignment: center; wrap: word-wrap; } }
+                    if root.candidates.length > 0 : ScrollView {
+                        viewport-width: self.width;
+                        VerticalLayout {
+                            alignment: start;
+                            spacing: 6px;
+                            for candidate in root.candidates : Rectangle {
+                                height: 52px;
+                                border-radius: 5px;
+                                border-width: 1px;
+                                border-color: candidate.selected ? Theme.accent : Theme.border;
+                                background: Theme.background;
+                                HorizontalLayout {
+                                    padding-left: 10px; padding-right: 10px; spacing: 9px; cross-axis-alignment: center;
+                                    Toggle { checked: candidate.selected; accessible-name: candidate.name; toggled(on) => { root.toggle-pin(candidate.path, on); } }
+                                    VerticalLayout { alignment: center; horizontal-stretch: 1; BodyText { text: candidate.name; overflow: elide; } BodyText { text: candidate.path; color: Theme.text-muted; font-size: Theme.caption-size; overflow: elide; } }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Rectangle {
+                width: min(390px, parent.width * 0.38);
+                border-radius: 7px;
+                border-width: 1px;
+                border-color: Theme.border;
+                background: Theme.surface;
+                VerticalLayout {
+                    padding: 14px;
+                    spacing: 10px;
+                    Heading { text: GuiI18n.text("gui-isolation-setup"); }
+                    BodyText { text: root.summary; wrap: word-wrap; }
+                    ScrollView {
+                        viewport-width: self.width;
+                        VerticalLayout {
+                            alignment: start;
+                            spacing: 7px;
+                            if root.missing.length > 0 : BodyText { text: GuiI18n.text("gui-isolation-missing"); color: Theme.danger; wrap: word-wrap; }
+                            for item in root.missing : BodyText { text: item; color: Theme.text-secondary; font-size: Theme.caption-size; wrap: word-wrap; }
+                            if root.missing.length > 0 : LabeledToggle { label: GuiI18n.text("gui-isolation-accept-missing"); width: 100%; checked <=> root.accept-missing; }
+                            if root.unrecorded.length > 0 : BodyText { text: GuiI18n.count("gui-isolation-unrecorded", root.unrecorded.length); color: Theme.warning; wrap: word-wrap; }
+                            if root.unrecorded.length > 0 : LabeledToggle { label: GuiI18n.text("gui-isolation-accept-unrecorded"); width: 100%; checked <=> root.accept-unrecorded; }
+                            if root.unidentifiable.length > 0 : BodyText { text: GuiI18n.count("gui-isolation-unidentifiable", root.unidentifiable.length); color: Theme.warning; wrap: word-wrap; }
+                            if root.linked-servers.length > 0 : BodyText { text: GuiI18n.count("gui-isolation-linked-servers", root.linked-servers.length); color: Theme.text-secondary; wrap: word-wrap; }
+                        }
+                    }
+                    if root.error != "" : BodyText { text: root.error; color: Theme.danger; wrap: word-wrap; }
+                    ActionRow {
+                        AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.discard-setup(); } }
+                        Rectangle { horizontal-stretch: 1; }
+                        AppButton {
+                            text: GuiI18n.text("gui-isolation-start");
+                            tone: "primary";
+                            enabled: (root.missing.length == 0 || root.accept-missing) && (root.unrecorded.length == 0 || root.accept-unrecorded);
+                            clicked => { root.start-session(root.accept-unrecorded, root.accept-missing); }
+                        }
+                    }
+                }
+            }
+        }
+        if root.phase == "round" : VerticalLayout {
+            spacing: 10px;
+            HorizontalLayout {
+                spacing: 10px;
+                VerticalLayout { horizontal-stretch: 1; Heading { text: GuiI18n.value("gui-isolation-round", root.round); font-size: Theme.section-size; } BodyText { text: GuiI18n.value("gui-isolation-granularity", root.granularity); color: Theme.text-muted; } }
+                VerticalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-isolation-reapply"); clicked => { root.resume(); } } }
+            }
+            BodyText { text: GuiI18n.text("gui-isolation-test-instruction"); color: Theme.warning; wrap: word-wrap; }
+            HorizontalLayout {
+                spacing: 10px;
+                IsolationFilePanel { horizontal-stretch: 1; title: GuiI18n.count("gui-isolation-enabled", root.enabled-items.length); items: root.enabled-items; tone: Theme.success; }
+                IsolationFilePanel { horizontal-stretch: 1; title: GuiI18n.count("gui-isolation-disabled", root.disabled-items.length); items: root.disabled-items; tone: Theme.border; }
+            }
+            IsolationHistory { items: root.history; }
+            if root.reduced-confidence : BodyText { text: GuiI18n.text("gui-isolation-reduced-confidence"); color: Theme.warning; wrap: word-wrap; }
+            if root.linked-servers.length > 0 : BodyText { text: GuiI18n.text("gui-isolation-linked-unchanged"); color: Theme.text-secondary; wrap: word-wrap; }
+            if root.error != "" : BodyText { text: root.error; color: Theme.danger; wrap: word-wrap; }
+            ActionRow { AppButton { text: GuiI18n.text("gui-isolation-undo"); enabled: root.history.length > 0; clicked => { root.undo(); } } AppButton { text: GuiI18n.text("gui-isolation-cancel"); tone: "danger"; clicked => { root.cancel(); } } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-isolation-issue-gone"); clicked => { root.answer("gone"); } } AppButton { text: GuiI18n.text("gui-isolation-issue-present"); tone: "primary"; clicked => { root.answer("present"); } } }
+        }
+        if root.phase == "contradiction" : VerticalLayout {
+            spacing: 12px;
+            Heading { text: GuiI18n.text("gui-isolation-contradiction"); }
+            BodyText { text: GuiI18n.text("gui-isolation-contradiction-detail"); color: Theme.danger; wrap: word-wrap; }
+            IsolationHistory { items: root.history; }
+            if root.error != "" : BodyText { text: root.error; color: Theme.danger; wrap: word-wrap; }
+            ActionRow { AppButton { text: GuiI18n.text("gui-isolation-cancel"); tone: "danger"; clicked => { root.cancel(); } } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-isolation-undo"); tone: "primary"; clicked => { root.undo(); } } }
+        }
+        if root.phase == "ready" : VerticalLayout {
+            spacing: 12px;
+            Heading { text: GuiI18n.text("gui-isolation-ready"); font-size: Theme.section-size; }
+            BodyText { text: GuiI18n.text(root.confidence == "one_minimal" ? "gui-isolation-one-minimal" : "gui-isolation-smallest"); wrap: word-wrap; }
+            ScrollView { viewport-width: self.width; VerticalLayout { alignment: start; spacing: 5px; for item in root.reproducing : BodyText { text: item; color: Theme.text-secondary; } } }
+            IsolationHistory { items: root.history; }
+            if root.reduced-confidence : BodyText { text: GuiI18n.text("gui-isolation-reduced-confidence"); color: Theme.warning; wrap: word-wrap; }
+            BodyText { text: GuiI18n.text("gui-isolation-finish-snapshot"); color: Theme.text-muted; wrap: word-wrap; }
+            if root.error != "" : BodyText { text: root.error; color: Theme.danger; wrap: word-wrap; }
+            ActionRow { AppButton { text: GuiI18n.text("gui-isolation-undo"); clicked => { root.undo(); } } AppButton { text: GuiI18n.text("gui-isolation-cancel"); tone: "danger"; clicked => { root.cancel(); } } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-isolation-finish"); tone: "primary"; clicked => { root.finish(); } } }
+        }
+        if root.phase == "result" : VerticalLayout {
+            spacing: 12px;
+            Heading { text: GuiI18n.text("gui-isolation-finished"); font-size: Theme.section-size; }
+            BodyText { text: root.summary; wrap: word-wrap; }
+            ScrollView { viewport-width: self.width; VerticalLayout { alignment: start; spacing: 5px; for item in root.reproducing : BodyText { text: item; color: Theme.text-secondary; } } }
+            if root.reduced-confidence : BodyText { text: GuiI18n.text("gui-isolation-reduced-confidence"); color: Theme.warning; wrap: word-wrap; }
+            BodyText { text: GuiI18n.text("gui-isolation-finished-detail"); color: Theme.text-muted; wrap: word-wrap; }
+            ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-close"); tone: "primary"; clicked => { root.close(); } } }
         }
     }
 
@@ -2996,6 +3291,7 @@ slint::slint! {
         in-out property <[string]> isolation-missing;
         in-out property <[string]> isolation-linked-servers;
         in-out property <[string]> isolation-reproducing;
+        in-out property <[string]> isolation-history;
         in-out property <string> isolation-host-kind;
         in-out property <string> isolation-host-id;
         in-out property <string> isolation-phase: "none";
@@ -3006,6 +3302,16 @@ slint::slint! {
         in-out property <bool> isolation-active: false;
         in-out property <bool> isolation-reduced-confidence: false;
         in-out property <bool> isolation-accept-unrecorded: false;
+        in-out property <bool> isolation-accept-missing: false;
+        in-out property <string> isolation-query;
+        // The durable workflow currently attached to the selected host. The
+        // workspace renders these fields without knowing which subsystem owns
+        // them, so another long-running developer workflow can use the same
+        // status area later.
+        in-out property <string> active-workflow-id;
+        in-out property <string> active-workflow-title;
+        in-out property <string> active-workflow-summary;
+        in-out property <[WorkflowActionRow]> active-workflow-actions;
         // Whether the Logs tab is showing saved log files rather than the one
         // being written. Beside `selected-diagnostic-kind` rather than folded
         // into it, because that value names a kind of file for the services
@@ -3538,13 +3844,15 @@ slint::slint! {
         callback rename-snapshot(string, string, string, string);
         callback delete-snapshot(string, string, string);
         callback open-isolation(string, string);
+        callback filter-isolation-candidates(string);
         callback toggle-isolation-pin(string, bool);
-        callback start-isolation(string, string, bool);
+        callback start-isolation(string, string, bool, bool);
         callback resume-isolation(string, string);
         callback answer-isolation(string, string, string);
         callback undo-isolation(string, string);
         callback finish-isolation(string, string);
         callback cancel-isolation(string, string);
+        callback discard-isolation-setup(string, string);
         callback copy-text(string);
         callback add-offline-account(string);
         callback set-default-account(string);
@@ -3772,22 +4080,50 @@ slint::slint! {
                         }
                     }
 
-                    if root.page == 0 && root.workspace == "instance" : Rectangle {
-                        horizontal-stretch: 1; background: Theme.background;
-                        VerticalLayout {
-                            padding: 22px; spacing: 14px;
-                            HorizontalLayout { spacing: 12px; AppButton { text: GuiI18n.text("gui-back-instances"); clicked => { root.close-live-log(); root.workspace = ""; } } Heading { text: root.selected-instance-index >= 0 ? root.instances[root.selected-instance-index].name : GuiI18n.text("gui-instance"); font-size: Theme.workspace-title-size; } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-open-folder"); clicked => { root.open-client-folder(root.selected-instance-id); } } LaunchAsButton { accounts: root.accounts; enabled: root.selected-instance-index >= 0 && (root.instances[root.selected-instance-index].can-launch || root.instances[root.selected-instance-index].can-kill); alongside: root.selected-instance-index >= 0 && root.instances[root.selected-instance-index].can-kill; launch-as(account, alongside) => { root.launch-client-as(root.selected-instance-id, account, alongside); } add-account => { root.page = 4; root.workspace = ""; root.workspace-tab = "Accounts"; } } AppButton { text: GuiI18n.text("gui-launch"); tone: "primary"; enabled: root.selected-instance-index >= 0 && root.instances[root.selected-instance-index].can-launch; clicked => { root.launch-client(root.selected-instance-id); } } }
-                            if root.isolation-active && root.isolation-host-kind == "client" && root.isolation-host-id == root.selected-instance-id : IsolationBanner { summary: root.isolation-summary; can-finish: root.isolation-phase == "ready"; resume => { root.resume-isolation("client", root.selected-instance-id); } finish => { root.finish-isolation("client", root.selected-instance-id); } cancel => { root.cancel-isolation("client", root.selected-instance-id); } }
-                            HorizontalLayout {
-                                spacing: 4px;
-                                WorkspaceTab { text: GuiI18n.text("gui-instance-tab-overview"); selected: root.workspace-tab == "Overview"; clicked => { root.close-live-log(); root.workspace-tab = "Overview"; } }
-                                WorkspaceTab { text: GuiI18n.text("gui-instance-tab-mods"); selected: root.workspace-tab == "Mods"; clicked => { root.close-live-log(); root.workspace-tab = "Mods"; } }
-                                WorkspaceTab { text: GuiI18n.text("gui-instance-tab-settings"); selected: root.workspace-tab == "Settings"; clicked => { root.close-live-log(); root.workspace-tab = "Settings"; } }
-                                WorkspaceTab { text: GuiI18n.text("gui-snapshots"); selected: root.workspace-tab == "Snapshots"; clicked => { root.close-live-log(); root.workspace-tab = "Snapshots"; root.snapshots = []; root.snapshot-total = ""; root.snapshots-have-plain-copies = false; root.snapshot-host-kind = "client"; root.snapshot-host-id = root.selected-instance-id; root.load-snapshots("client", root.selected-instance-id); } }
-                                WorkspaceTab { text: GuiI18n.text("gui-instance-tab-logs"); selected: root.workspace-tab == "Logs"; clicked => { root.workspace-tab = "Logs"; root.selected-diagnostic-kind = "log"; root.log-shows-files = false; root.selected-diagnostic-name = ""; root.open-live-log("client", root.selected-instance-id); } }
-                                Rectangle { horizontal-stretch: 1; }
+                    if root.page == 0 && root.workspace == "instance" : HostWorkspace {
+                            horizontal-stretch: 1;
+                            title: root.selected-instance-index >= 0 ? root.instances[root.selected-instance-index].name : GuiI18n.text("gui-instance");
+                            back-label: GuiI18n.text("gui-back-instances");
+                            status: root.selected-instance-index >= 0 ? root.instances[root.selected-instance-index].state : "";
+                            status-kind: root.selected-instance-index >= 0 ? root.instances[root.selected-instance-index].state-kind : "";
+                            host-running: root.selected-instance-index >= 0 && root.instances[root.selected-instance-index].can-kill;
+                            surfaces: [
+                                { id: "Overview", label: GuiI18n.text("gui-instance-tab-overview") },
+                                { id: "Mods", label: GuiI18n.text("gui-instance-tab-mods") },
+                                { id: "Isolation", label: GuiI18n.text("gui-isolation-tab") },
+                                { id: "Settings", label: GuiI18n.text("gui-instance-tab-settings") },
+                                { id: "Snapshots", label: GuiI18n.text("gui-snapshots") },
+                                { id: "Logs", label: GuiI18n.text("gui-instance-tab-logs") },
+                            ];
+                            selected-surface <=> root.workspace-tab;
+                            accounts: root.accounts;
+                            show-launch-as: true;
+                            launch-alongside: root.selected-instance-index >= 0 && root.instances[root.selected-instance-index].can-kill;
+                            primary-label: root.selected-instance-index >= 0 && root.instances[root.selected-instance-index].can-kill ? GuiI18n.text("gui-stop-game") : GuiI18n.text("gui-launch");
+                            primary-tone: root.selected-instance-index >= 0 && root.instances[root.selected-instance-index].can-kill ? "danger" : "primary";
+                            primary-enabled: root.selected-instance-index >= 0 && (root.instances[root.selected-instance-index].can-launch || root.instances[root.selected-instance-index].can-kill);
+                            workflow-id: root.isolation-host-kind == "client" && root.isolation-host-id == root.selected-instance-id ? root.active-workflow-id : "";
+                            workflow-title: root.active-workflow-title;
+                            workflow-summary: root.active-workflow-summary;
+                            workflow-actions: root.active-workflow-actions;
+                            back => { root.close-live-log(); root.workspace = ""; }
+                            open-folder => { root.open-client-folder(root.selected-instance-id); }
+                            primary => { if root.instances[root.selected-instance-index].can-kill { root.kill-instance(root.selected-instance-id, ""); } else { root.launch-client(root.selected-instance-id); } }
+                            launch-as(account, alongside) => { root.launch-client-as(root.selected-instance-id, account, alongside); }
+                            add-account => { root.page = 4; root.workspace = ""; root.workspace-tab = "Accounts"; }
+                            surface-selected(surface) => {
+                                if surface != "Logs" { root.close-live-log(); }
+                                if surface == "Snapshots" { root.snapshots = []; root.snapshot-total = ""; root.snapshots-have-plain-copies = false; root.snapshot-host-kind = "client"; root.snapshot-host-id = root.selected-instance-id; root.load-snapshots("client", root.selected-instance-id); }
+                                if surface == "Logs" { root.selected-diagnostic-kind = "log"; root.log-shows-files = false; root.selected-diagnostic-name = ""; root.open-live-log("client", root.selected-instance-id); }
                             }
-                            Divider { }
+                            workflow-action(workflow, action) => {
+                                if workflow == "mod-isolation" {
+                                    if action == "details" { root.workspace-tab = "Isolation"; }
+                                    if action == "gone" || action == "present" { root.answer-isolation("client", root.selected-instance-id, action); }
+                                    if action == "undo" { root.undo-isolation("client", root.selected-instance-id); }
+                                    if action == "finish" { root.finish-isolation("client", root.selected-instance-id); }
+                                }
+                            }
                             if root.workspace-tab == "Overview" : ScrollView {
                                 VerticalLayout { alignment: start; width: min(parent.width, 980px); spacing: 12px;
                                     Heading { text: GuiI18n.text("gui-reproduction-environment"); }
@@ -3848,6 +4184,26 @@ slint::slint! {
                                         } }
                                     }
                                 }
+                            }
+                            if root.workspace-tab == "Isolation" : IsolationSurface {
+                                phase: root.isolation-host-kind == "client" && root.isolation-host-id == root.selected-instance-id ? root.isolation-phase : "none";
+                                summary: root.isolation-summary; confidence: root.isolation-confidence; round: root.isolation-round; granularity: root.isolation-granularity;
+                                candidates: root.isolation-candidates; enabled-items: root.isolation-enabled; disabled-items: root.isolation-disabled;
+                                unrecorded: root.isolation-unrecorded; unidentifiable: root.isolation-unidentifiable; missing: root.isolation-missing;
+                                linked-servers: root.isolation-linked-servers; reproducing: root.isolation-reproducing; history: root.isolation-history;
+                                reduced-confidence: root.isolation-reduced-confidence; query <=> root.isolation-query;
+                                accept-unrecorded <=> root.isolation-accept-unrecorded; accept-missing <=> root.isolation-accept-missing; error: root.modal-error;
+                                begin => { root.open-isolation("client", root.selected-instance-id); }
+                                filter(query) => { root.filter-isolation-candidates(query); }
+                                toggle-pin(path, selected) => { root.toggle-isolation-pin(path, selected); }
+                                start-session(accept-unrecorded, accept-missing) => { root.start-isolation("client", root.selected-instance-id, accept-unrecorded, accept-missing); }
+                                resume => { root.resume-isolation("client", root.selected-instance-id); }
+                                answer(answer) => { root.answer-isolation("client", root.selected-instance-id, answer); }
+                                undo => { root.undo-isolation("client", root.selected-instance-id); }
+                                finish => { root.finish-isolation("client", root.selected-instance-id); }
+                                cancel => { root.cancel-isolation("client", root.selected-instance-id); }
+                                discard-setup => { root.discard-isolation-setup("client", root.selected-instance-id); }
+                                close => { root.workspace-tab = "Mods"; root.isolation-phase = "none"; root.modal-error = ""; }
                             }
                             if root.workspace-tab == "Settings" : ScrollView { viewport-width: self.width; VerticalLayout { alignment: start; width: min(parent.width, 720px); spacing: 12px;
                                 SectionTitle { title: GuiI18n.text("gui-instance-runtime"); detail: GuiI18n.text("gui-instance-runtime-detail"); }
@@ -3916,7 +4272,6 @@ slint::slint! {
                                     Rectangle { horizontal-stretch: 1; background: Theme.well; border-radius: 8px; border-width: 1px; border-color: Theme.border; VerticalLayout { if root.diagnostic-content == "" : EmptyState { icon: @image-url("../../../assets/icons/nav-logs.svg"); title: GuiI18n.text("gui-no-file-open"); message: GuiI18n.text("gui-no-file-open-detail"); } if root.diagnostic-content != "" : SelectableText { text: root.diagnostic-content; font-size: root.technical-text-size * 1px; } if root.diagnostic-content != "" : AppButton { text: GuiI18n.text("gui-copy"); clicked => { root.copy-text(root.diagnostic-content); } } } }
                                 }
                             }
-                        }
                     }
 
                     // Servers.
@@ -3964,20 +4319,50 @@ slint::slint! {
                         }
                     }
 
-                    if root.page == 1 && root.workspace == "server" : Rectangle { horizontal-stretch: 1; background: Theme.background;
-                        VerticalLayout { padding: 22px; spacing: 14px;
-                            HorizontalLayout { spacing: 12px; AppButton { text: root.server-workspace-return-client != "" ? GuiI18n.text("gui-back-instance") : GuiI18n.text("gui-back-servers"); clicked => { root.close-live-log(); if root.server-workspace-return-client != "" { root.page = 0; root.workspace = "instance"; root.workspace-tab = "Overview"; root.server-workspace-return-client = ""; } else { root.workspace = ""; } } } Heading { text: root.selected-server-index >= 0 ? root.servers[root.selected-server-index].name : GuiI18n.text("gui-server"); font-size: Theme.workspace-title-size; } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-open-folder"); clicked => { root.open-server-folder(root.selected-server-id); } } AppButton { text: GuiI18n.text("gui-restart"); enabled: root.selected-server-index >= 0 && root.servers[root.selected-server-index].can-restart; clicked => { root.server-restart(root.selected-server-id); } } AppButton { text: root.selected-server-index >= 0 && root.servers[root.selected-server-index].can-stop ? GuiI18n.text("gui-stop") : GuiI18n.text("gui-start"); tone: "primary"; enabled: root.selected-server-index >= 0 && (root.servers[root.selected-server-index].can-start || root.servers[root.selected-server-index].can-stop); clicked => { if root.servers[root.selected-server-index].can-stop { root.server-stop(root.selected-server-id); } else { root.server-start(root.selected-server-id); } } } }
-                            if root.isolation-active && root.isolation-host-kind == "server" && root.isolation-host-id == root.selected-server-id : IsolationBanner { summary: root.isolation-summary; can-finish: root.isolation-phase == "ready"; resume => { root.resume-isolation("server", root.selected-server-id); } finish => { root.finish-isolation("server", root.selected-server-id); } cancel => { root.cancel-isolation("server", root.selected-server-id); } }
-                            HorizontalLayout { spacing: 8px;
-                                WorkspaceTab { text: GuiI18n.text("gui-instance-tab-overview"); selected: root.workspace-tab == "Overview"; clicked => { root.close-live-log(); root.workspace-tab = "Overview"; } }
-                                WorkspaceTab { text: GuiI18n.text("gui-server-tab-console"); selected: root.workspace-tab == "Console"; clicked => { root.workspace-tab = "Console"; root.open-live-log("server", root.selected-server-id); } }
-                                WorkspaceTab { text: GuiI18n.text("gui-instance-tab-mods"); selected: root.workspace-tab == "Mods"; clicked => { root.close-live-log(); root.workspace-tab = "Mods"; root.load-server-mods(root.selected-server-id); } }
-                                WorkspaceTab { text: GuiI18n.text("gui-server-tab-properties"); selected: root.workspace-tab == "Properties"; clicked => { root.close-live-log(); root.workspace-tab = "Properties"; } }
-                                WorkspaceTab { text: GuiI18n.text("gui-snapshots"); selected: root.workspace-tab == "Snapshots"; clicked => { root.close-live-log(); root.workspace-tab = "Snapshots"; root.snapshots = []; root.snapshot-total = ""; root.snapshots-have-plain-copies = false; root.snapshot-host-kind = "server"; root.snapshot-host-id = root.selected-server-id; root.load-snapshots("server", root.selected-server-id); } }
-                                WorkspaceTab { text: GuiI18n.text("gui-instance-tab-logs"); selected: root.workspace-tab == "Logs"; clicked => { root.workspace-tab = "Logs"; root.selected-diagnostic-kind = "log"; root.log-shows-files = false; root.selected-diagnostic-name = ""; root.open-live-log("server", root.selected-server-id); } }
-                                Rectangle { horizontal-stretch: 1; }
+                    if root.page == 1 && root.workspace == "server" : HostWorkspace {
+                            horizontal-stretch: 1;
+                            title: root.selected-server-index >= 0 ? root.servers[root.selected-server-index].name : GuiI18n.text("gui-server");
+                            back-label: root.server-workspace-return-client != "" ? GuiI18n.text("gui-back-instance") : GuiI18n.text("gui-back-servers");
+                            status: root.selected-server-index >= 0 ? root.servers[root.selected-server-index].state : "";
+                            status-kind: root.selected-server-index >= 0 ? root.servers[root.selected-server-index].state-kind : "";
+                            host-running: root.selected-server-index >= 0 && root.servers[root.selected-server-index].can-stop;
+                            surfaces: [
+                                { id: "Overview", label: GuiI18n.text("gui-instance-tab-overview") },
+                                { id: "Console", label: GuiI18n.text("gui-server-tab-console") },
+                                { id: "Mods", label: GuiI18n.text("gui-instance-tab-mods") },
+                                { id: "Isolation", label: GuiI18n.text("gui-isolation-tab") },
+                                { id: "Properties", label: GuiI18n.text("gui-server-tab-properties") },
+                                { id: "Snapshots", label: GuiI18n.text("gui-snapshots") },
+                                { id: "Logs", label: GuiI18n.text("gui-instance-tab-logs") },
+                            ];
+                            selected-surface <=> root.workspace-tab;
+                            primary-label: root.selected-server-index >= 0 && root.servers[root.selected-server-index].can-stop ? GuiI18n.text("gui-stop") : GuiI18n.text("gui-start");
+                            primary-enabled: root.selected-server-index >= 0 && (root.servers[root.selected-server-index].can-start || root.servers[root.selected-server-index].can-stop);
+                            restart-visible: true;
+                            restart-enabled: root.selected-server-index >= 0 && root.servers[root.selected-server-index].can-restart;
+                            workflow-id: root.isolation-host-kind == "server" && root.isolation-host-id == root.selected-server-id ? root.active-workflow-id : "";
+                            workflow-title: root.active-workflow-title;
+                            workflow-summary: root.active-workflow-summary;
+                            workflow-actions: root.active-workflow-actions;
+                            back => { root.close-live-log(); if root.server-workspace-return-client != "" { root.page = 0; root.workspace = "instance"; root.workspace-tab = "Overview"; root.server-workspace-return-client = ""; } else { root.workspace = ""; } }
+                            open-folder => { root.open-server-folder(root.selected-server-id); }
+                            primary => { if root.servers[root.selected-server-index].can-stop { root.server-stop(root.selected-server-id); } else { root.server-start(root.selected-server-id); } }
+                            restart => { root.server-restart(root.selected-server-id); }
+                            surface-selected(surface) => {
+                                if surface != "Logs" && surface != "Console" { root.close-live-log(); }
+                                if surface == "Console" { root.open-live-log("server", root.selected-server-id); }
+                                if surface == "Mods" { root.load-server-mods(root.selected-server-id); }
+                                if surface == "Snapshots" { root.snapshots = []; root.snapshot-total = ""; root.snapshots-have-plain-copies = false; root.snapshot-host-kind = "server"; root.snapshot-host-id = root.selected-server-id; root.load-snapshots("server", root.selected-server-id); }
+                                if surface == "Logs" { root.selected-diagnostic-kind = "log"; root.log-shows-files = false; root.selected-diagnostic-name = ""; root.open-live-log("server", root.selected-server-id); }
                             }
-                            Divider { }
+                            workflow-action(workflow, action) => {
+                                if workflow == "mod-isolation" {
+                                    if action == "details" { root.workspace-tab = "Isolation"; }
+                                    if action == "gone" || action == "present" { root.answer-isolation("server", root.selected-server-id, action); }
+                                    if action == "undo" { root.undo-isolation("server", root.selected-server-id); }
+                                    if action == "finish" { root.finish-isolation("server", root.selected-server-id); }
+                                }
+                            }
                             if root.workspace-tab == "Overview" : ScrollView { VerticalLayout { alignment: start; width: min(parent.width, 980px); spacing: 12px; Heading { text: GuiI18n.text("gui-dedicated-server"); } BodyText { text: root.servers[root.selected-server-index].state-detail; }
                                 if root.crash-report != "" : CrashNotice { report: root.crash-report; failure: root.crash-failure; client-code-on-server: root.crash-client-code-on-server; suggested: root.crash-suggested; review => { root.close-live-log(); root.workspace-tab = "Mods"; root.load-server-mods(root.selected-server-id); } } Rectangle { height: 160px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface; VerticalLayout { padding: 18px; spacing: 7px;
                                 HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-exact-target"); } BodyText { text: GuiI18n.values("gui-target-summary", root.servers[root.selected-server-index].minecraft, root.servers[root.selected-server-index].loader); } }
@@ -4043,6 +4428,26 @@ slint::slint! {
                                 if root.server-mods.length == 0 : EmptyState { icon: @image-url("../../../assets/icons/semantic-mod.svg"); title: root.server-mods-query != "" ? GuiI18n.text("gui-no-mods-match-title") : GuiI18n.text("gui-no-managed-mods"); message: root.server-mods-query != "" ? GuiI18n.value("gui-no-mods-match", root.server-mods-query) : GuiI18n.text("gui-no-server-mods-detail"); }
                                 if root.server-mods.length > 0 : ScrollView { viewport-width: self.width; VerticalLayout { spacing: 8px; for mod in root.server-mods : ModCard { item: mod; togglable: true; restore-file(path) => { root.restore-mod-file("server", root.selected-server-id, path); } toggle(path, on) => { root.set-mod-enabled("server", root.selected-server-id, path, on); } delete-file(path, title) => { root.pending-action-kind = "server"; root.pending-action-id = root.selected-server-id; root.pending-action-name = title; root.mod-action-path = path; root.mod-action-name = title; root.mod-action-is-hand-placed = mod.origin-kind == "hand-placed"; root.modal-error = ""; root.modal = "delete-mod"; } } } }
                             }
+                            if root.workspace-tab == "Isolation" : IsolationSurface {
+                                phase: root.isolation-host-kind == "server" && root.isolation-host-id == root.selected-server-id ? root.isolation-phase : "none";
+                                summary: root.isolation-summary; confidence: root.isolation-confidence; round: root.isolation-round; granularity: root.isolation-granularity;
+                                candidates: root.isolation-candidates; enabled-items: root.isolation-enabled; disabled-items: root.isolation-disabled;
+                                unrecorded: root.isolation-unrecorded; unidentifiable: root.isolation-unidentifiable; missing: root.isolation-missing;
+                                linked-servers: root.isolation-linked-servers; reproducing: root.isolation-reproducing; history: root.isolation-history;
+                                reduced-confidence: root.isolation-reduced-confidence; query <=> root.isolation-query;
+                                accept-unrecorded <=> root.isolation-accept-unrecorded; accept-missing <=> root.isolation-accept-missing; error: root.modal-error;
+                                begin => { root.open-isolation("server", root.selected-server-id); }
+                                filter(query) => { root.filter-isolation-candidates(query); }
+                                toggle-pin(path, selected) => { root.toggle-isolation-pin(path, selected); }
+                                start-session(accept-unrecorded, accept-missing) => { root.start-isolation("server", root.selected-server-id, accept-unrecorded, accept-missing); }
+                                resume => { root.resume-isolation("server", root.selected-server-id); }
+                                answer(answer) => { root.answer-isolation("server", root.selected-server-id, answer); }
+                                undo => { root.undo-isolation("server", root.selected-server-id); }
+                                finish => { root.finish-isolation("server", root.selected-server-id); }
+                                cancel => { root.cancel-isolation("server", root.selected-server-id); }
+                                discard-setup => { root.discard-isolation-setup("server", root.selected-server-id); }
+                                close => { root.workspace-tab = "Mods"; root.isolation-phase = "none"; root.modal-error = ""; }
+                            }
                             if root.workspace-tab == "Properties" : ScrollView { VerticalLayout { alignment: start; width: min(parent.width, 1100px); spacing: 14px;
                                 Heading { text: GuiI18n.text("gui-network"); } BodyText { text: GuiI18n.text("gui-network-detail"); wrap: word-wrap; }
                                 HorizontalLayout { spacing: 12px; VerticalLayout { FieldLabel { text: GuiI18n.text("gui-access"); } ComboBox { model: [GuiI18n.text("gui-access-localhost"), GuiI18n.text("gui-access-lan"), GuiI18n.text("gui-access-custom")]; current-index: root.property-access == "LAN" ? 1 : root.property-access == "Custom" ? 2 : 0; selected(value) => { root.property-access = value == GuiI18n.text("gui-access-lan") ? "LAN" : value == GuiI18n.text("gui-access-custom") ? "Custom" : "Localhost"; root.validate-server-properties(root.property-access, root.property-address, root.property-port, root.property-max-players); } width: 190px; } Rectangle { height: 14px; } } VerticalLayout { FieldLabel { text: GuiI18n.text("gui-port"); } TextField { text <=> root.property-port; placeholder: "25565"; input-type: InputType.number; invalid: root.property-port-error != ""; width: 150px; edited => { root.validate-server-properties(root.property-access, root.property-address, root.property-port, root.property-max-players); } } Rectangle { height: 14px; Text { text: root.property-port-error; visible: root.property-port-error != ""; color: Theme.danger; font-size: Theme.caption-size; } } } VerticalLayout { horizontal-stretch: 1; FieldLabel { text: GuiI18n.text("gui-custom-bind-address"); } TextField { text <=> root.property-address; placeholder: "127.0.0.1 or ::1"; enabled: root.property-access == "Custom"; invalid: root.property-address-error != ""; edited => { root.validate-server-properties(root.property-access, root.property-address, root.property-port, root.property-max-players); } } Rectangle { height: 14px; Text { text: root.property-address-error; visible: root.property-address-error != ""; color: Theme.danger; font-size: Theme.caption-size; } } } }
@@ -4054,7 +4459,6 @@ slint::slint! {
                                 Rectangle { height: 84px; border-radius: 8px; border-width: 1px; border-color: root.eula-accepted ? Theme.success : Theme.warning; background: Theme.surface; HorizontalLayout { padding: 14px; VerticalLayout { Heading { text: GuiI18n.text("gui-server-eula"); font-size: Theme.row-heading-size; } BodyText { text: root.eula-status; wrap: word-wrap; } } AppButton { text: root.eula-accepted ? GuiI18n.text("gui-eula-review") : GuiI18n.text("gui-eula-review-accept"); clicked => { root.modal = "eula"; } } } }
                                 ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-save-changes"); tone: "primary"; enabled: root.servers[root.selected-server-index].state-kind == "stopped"; clicked => { root.save-server-properties(root.selected-server-id, root.property-motd, root.property-max-players, root.property-difficulty, root.property-gamemode, root.property-allow-flight, root.property-pvp, root.property-allowlist, root.property-online-mode, root.property-access, root.property-address, root.property-port); } } }
                             } }
-                        }
                     }
 
                     // What is running, which is a different question from what
@@ -4606,8 +5010,8 @@ slint::slint! {
             background: Theme.scrim;
             TouchArea { clicked => { } }
             Rectangle {
-                width: root.modal == "license" || root.modal == "third-party" ? min(820px, parent.width - 80px) : root.modal == "isolate" || root.modal == "mod-plan" || root.modal == "mod-apply" || root.modal == "mod-remove" || root.modal == "mod-result" || root.modal == "mod-manage" || root.modal == "mod-acquire" ? min(720px, parent.width - 80px) : min(620px, parent.width - 80px);
-                height: root.modal == "license" || root.modal == "third-party" ? min(720px, parent.height - 80px) : root.modal == "isolate" ? min(650px, parent.height - 80px) : root.modal == "import" ? min(620px, parent.height - 80px) : root.modal == "mod-plan" ? min(500px * Theme.text-scale + root.linked-targets.length * 68px + 14px, parent.height - 80px) : root.modal == "mod-manage" ? min(620px, parent.height - 80px) : root.modal == "mod-acquire" ? min(260px * Theme.text-scale + root.mod-acquisition-items.length * 64px, parent.height - 80px) : root.modal == "mod-apply" ? min(370px * Theme.text-scale + root.linked-targets.length * 68px + 14px, parent.height - 80px) : root.modal == "mod-result" ? min(300px * Theme.text-scale + root.linked-results.length * 68px + 14px, parent.height - 80px) : root.modal == "loader-change" ? 400px : root.modal == "mod-remove" ? min((root.linked-targets.length > 0 ? 424px : 300px) * Theme.text-scale + root.mod-removal-dependencies.length * 24px + root.linked-targets.length * 68px, parent.height - 80px) : root.modal == "eula" ? 440px : root.modal == "kill" ? 300px : root.modal == "delete-instance" || root.modal == "delete-server" ? 330px : root.modal == "rename" ? 300px : root.modal == "snapshot-create" || root.modal == "snapshot-restore" || root.modal == "snapshot-rename" || root.modal == "snapshot-delete" ? 330px : root.modal == "mod-impact" ? min(300px * Theme.text-scale + (root.mod-impact-breaks.length + root.mod-impact-degrades.length + root.mod-impact-unknown.length + root.mod-impact-unidentifiable.length + root.mod-requires-disabled.length + root.mod-requires-absent.length + root.mod-requires-incompatible.length) * 24px, parent.height - 80px) : root.modal == "delete-mod" ? 320px : root.modal == "remove-java-runtime" ? 320px : root.modal == "mod-clash" ? 320px : root.modal == "absent-mods" ? min(250px + root.absent-mods.length * 22px, parent.height - 80px) : root.modal == "make-persistent" ? min(290px + root.promote-servers.length * 28px, parent.height - 80px) : root.modal == "open-pack-link" ? 300px : root.modal == "create-server" ? min((root.create-server-client-id == "" ? 640px : 535px) + (root.create-server-client-id == "" && root.create-server-loader != "Vanilla" ? 44px : 0px), parent.height - 80px) : 570px;
+                width: root.modal == "license" || root.modal == "third-party" ? min(820px, parent.width - 80px) : root.modal == "mod-plan" || root.modal == "mod-apply" || root.modal == "mod-remove" || root.modal == "mod-result" || root.modal == "mod-manage" || root.modal == "mod-acquire" ? min(720px, parent.width - 80px) : min(620px, parent.width - 80px);
+                height: root.modal == "license" || root.modal == "third-party" ? min(720px, parent.height - 80px) : root.modal == "import" ? min(620px, parent.height - 80px) : root.modal == "mod-plan" ? min(500px * Theme.text-scale + root.linked-targets.length * 68px + 14px, parent.height - 80px) : root.modal == "mod-manage" ? min(620px, parent.height - 80px) : root.modal == "mod-acquire" ? min(260px * Theme.text-scale + root.mod-acquisition-items.length * 64px, parent.height - 80px) : root.modal == "mod-apply" ? min(370px * Theme.text-scale + root.linked-targets.length * 68px + 14px, parent.height - 80px) : root.modal == "mod-result" ? min(300px * Theme.text-scale + root.linked-results.length * 68px + 14px, parent.height - 80px) : root.modal == "loader-change" ? 400px : root.modal == "mod-remove" ? min((root.linked-targets.length > 0 ? 424px : 300px) * Theme.text-scale + root.mod-removal-dependencies.length * 24px + root.linked-targets.length * 68px, parent.height - 80px) : root.modal == "eula" ? 440px : root.modal == "kill" ? 300px : root.modal == "delete-instance" || root.modal == "delete-server" ? 330px : root.modal == "rename" ? 300px : root.modal == "snapshot-create" || root.modal == "snapshot-restore" || root.modal == "snapshot-rename" || root.modal == "snapshot-delete" ? 330px : root.modal == "mod-impact" ? min(300px * Theme.text-scale + (root.mod-impact-breaks.length + root.mod-impact-degrades.length + root.mod-impact-unknown.length + root.mod-impact-unidentifiable.length + root.mod-requires-disabled.length + root.mod-requires-absent.length + root.mod-requires-incompatible.length) * 24px, parent.height - 80px) : root.modal == "delete-mod" ? 320px : root.modal == "remove-java-runtime" ? 320px : root.modal == "mod-clash" ? 320px : root.modal == "absent-mods" ? min(250px + root.absent-mods.length * 22px, parent.height - 80px) : root.modal == "make-persistent" ? min(290px + root.promote-servers.length * 28px, parent.height - 80px) : root.modal == "open-pack-link" ? 300px : root.modal == "create-server" ? min((root.create-server-client-id == "" ? 640px : 535px) + (root.create-server-client-id == "" && root.create-server-loader != "Vanilla" ? 44px : 0px), parent.height - 80px) : 570px;
                 x: (parent.width - self.width) / 2;
                 y: (parent.height - self.height) / 2;
                 border-radius: 8px;
@@ -4615,7 +5019,7 @@ slint::slint! {
                 border-color: Theme.border;
                 background: Theme.elevated;
                 VerticalLayout { padding: 22px; spacing: 13px;
-                    HorizontalLayout { cross-axis-alignment: center; Heading { text: root.modal == "isolate" ? GuiI18n.text("gui-isolation-title") : root.modal == "create-instance" ? GuiI18n.text("gui-modal-new-instance") : root.modal == "import" ? GuiI18n.text("gui-modal-import") : root.modal == "create-server" ? GuiI18n.text("gui-modal-new-server") : root.modal == "mod-plan" ? GuiI18n.text("gui-modal-install-mod") : root.modal == "mod-manage" ? GuiI18n.text("gui-modal-manage-mod") : root.modal == "mod-acquire" ? GuiI18n.text("gui-modal-mod-acquire") : root.modal == "loader-change" ? GuiI18n.text("gui-modal-change-loader") : root.modal == "mod-remove" ? GuiI18n.text("gui-modal-remove-mod") : root.modal == "mod-apply" ? GuiI18n.text("gui-modal-apply-mod") : root.modal == "mod-result" ? GuiI18n.text("gui-modal-mod-result") : root.modal == "eula" ? GuiI18n.text("gui-server-eula") : root.modal == "kill" ? GuiI18n.text("gui-modal-force-kill") : root.modal == "delete-instance" ? GuiI18n.text("gui-delete-instance") : root.modal == "delete-server" ? GuiI18n.text("gui-delete-server") : root.modal == "rename" ? GuiI18n.text("gui-modal-rename") : root.modal == "snapshot-create" ? GuiI18n.text("gui-snapshot-create") : root.modal == "snapshot-restore" ? GuiI18n.text("gui-snapshot-restore") : root.modal == "snapshot-rename" ? GuiI18n.text("gui-snapshot-rename") : root.modal == "snapshot-delete" ? GuiI18n.text("gui-snapshot-delete") : root.modal == "mod-impact" ? GuiI18n.value(root.mod-requires-disabled.length > 0 || root.mod-requires-absent.length > 0 || root.mod-requires-incompatible.length > 0 ? "gui-mod-impact-enable-title" : "gui-mod-impact-disable-title", root.mod-impact-name) : root.modal == "delete-mod" ? GuiI18n.text("gui-modal-delete-mod") : root.modal == "remove-java-runtime" ? GuiI18n.text("gui-java-remove-runtime-title") : root.modal == "mod-clash" ? GuiI18n.text("gui-modal-mod-clash") : root.modal == "absent-mods" ? GuiI18n.text("gui-modal-absent-mods") : root.modal == "make-persistent" ? GuiI18n.text("gui-make-persistent") : root.modal == "open-pack-link" ? GuiI18n.text("gui-open-pack-link") : root.modal == "license" ? GuiI18n.text("gui-modal-apache-license") : root.third-party-open >= 0 ? root.third-party-packages[root.third-party-open].name + " " + root.third-party-packages[root.third-party-open].version + " | " + root.third-party-packages[root.third-party-open].license : GuiI18n.text("gui-third-party-licenses"); font-size: Theme.brand-size; } Rectangle { horizontal-stretch: 1; } IconButton { icon: @image-url("../../../assets/icons/close.svg"); accessible-name: GuiI18n.text("gui-close"); clicked => { if root.modal == "import" { root.close-import-modal(); } else { if root.modal == "mod-plan" { root.abandon-browser-install(); } if root.modal == "mod-acquire" { root.cancel-mod-acquisition(); } root.modal = ""; root.modal-error = ""; } } } }
+                    HorizontalLayout { cross-axis-alignment: center; Heading { text: root.modal == "create-instance" ? GuiI18n.text("gui-modal-new-instance") : root.modal == "import" ? GuiI18n.text("gui-modal-import") : root.modal == "create-server" ? GuiI18n.text("gui-modal-new-server") : root.modal == "mod-plan" ? GuiI18n.text("gui-modal-install-mod") : root.modal == "mod-manage" ? GuiI18n.text("gui-modal-manage-mod") : root.modal == "mod-acquire" ? GuiI18n.text("gui-modal-mod-acquire") : root.modal == "loader-change" ? GuiI18n.text("gui-modal-change-loader") : root.modal == "mod-remove" ? GuiI18n.text("gui-modal-remove-mod") : root.modal == "mod-apply" ? GuiI18n.text("gui-modal-apply-mod") : root.modal == "mod-result" ? GuiI18n.text("gui-modal-mod-result") : root.modal == "eula" ? GuiI18n.text("gui-server-eula") : root.modal == "kill" ? GuiI18n.text("gui-modal-force-kill") : root.modal == "delete-instance" ? GuiI18n.text("gui-delete-instance") : root.modal == "delete-server" ? GuiI18n.text("gui-delete-server") : root.modal == "rename" ? GuiI18n.text("gui-modal-rename") : root.modal == "snapshot-create" ? GuiI18n.text("gui-snapshot-create") : root.modal == "snapshot-restore" ? GuiI18n.text("gui-snapshot-restore") : root.modal == "snapshot-rename" ? GuiI18n.text("gui-snapshot-rename") : root.modal == "snapshot-delete" ? GuiI18n.text("gui-snapshot-delete") : root.modal == "mod-impact" ? GuiI18n.value(root.mod-requires-disabled.length > 0 || root.mod-requires-absent.length > 0 || root.mod-requires-incompatible.length > 0 ? "gui-mod-impact-enable-title" : "gui-mod-impact-disable-title", root.mod-impact-name) : root.modal == "delete-mod" ? GuiI18n.text("gui-modal-delete-mod") : root.modal == "remove-java-runtime" ? GuiI18n.text("gui-java-remove-runtime-title") : root.modal == "mod-clash" ? GuiI18n.text("gui-modal-mod-clash") : root.modal == "absent-mods" ? GuiI18n.text("gui-modal-absent-mods") : root.modal == "make-persistent" ? GuiI18n.text("gui-make-persistent") : root.modal == "open-pack-link" ? GuiI18n.text("gui-open-pack-link") : root.modal == "license" ? GuiI18n.text("gui-modal-apache-license") : root.third-party-open >= 0 ? root.third-party-packages[root.third-party-open].name + " " + root.third-party-packages[root.third-party-open].version + " | " + root.third-party-packages[root.third-party-open].license : GuiI18n.text("gui-third-party-licenses"); font-size: Theme.brand-size; } Rectangle { horizontal-stretch: 1; } IconButton { icon: @image-url("../../../assets/icons/close.svg"); accessible-name: GuiI18n.text("gui-close"); clicked => { if root.modal == "import" { root.close-import-modal(); } else { if root.modal == "mod-plan" { root.abandon-browser-install(); } if root.modal == "mod-acquire" { root.cancel-mod-acquisition(); } root.modal = ""; root.modal-error = ""; } } } }
                     Divider { }
                     if root.modal == "create-instance" : VerticalLayout { spacing: 11px; BodyText { text: GuiI18n.text("gui-create-instance-detail"); wrap: word-wrap; } Text { text: GuiI18n.text("gui-name"); color: Theme.text-secondary; font-size: Theme.label-size; } TextField { text <=> root.create-name; placeholder: root.create-name-suggestion; accessible-name: GuiI18n.text("gui-name"); } Text { text: GuiI18n.text("gui-minecraft-release"); color: Theme.text-secondary; font-size: Theme.label-size; } HorizontalLayout { spacing: 8px; ComboBox { horizontal-stretch: 1; model: root.minecraft-releases; current-value <=> root.create-minecraft; selected(value) => { root.create-minecraft = value; root.create-loader-version = ""; root.create-loader-versions = []; root.minecraft-selection-changed("client", value); if root.create-loader != "Vanilla" { root.request-loader-catalog("client", root.create-loader, value); } root.recompute-create-name(); } } FavoriteToggle { version: root.create-minecraft; favorite: root.create-minecraft-favorite; enabled: root.create-minecraft != ""; toggled => { root.toggle-favorite-version(root.create-minecraft); } } } Text { text: GuiI18n.text("gui-loader"); color: Theme.text-secondary; font-size: Theme.label-size; } ComboBox { model: root.create-loaders; current-value <=> root.create-loader; selected(value) => { root.create-loader = value; root.create-loader-version = ""; root.create-loader-versions = []; if value != "Vanilla" { root.request-loader-catalog("client", value, root.create-minecraft); } root.recompute-create-name(); } } if root.create-loader != "Vanilla" : ComboBox { model: root.create-loader-versions; current-value <=> root.create-loader-version; changed current-value => { root.recompute-create-name(); } } HorizontalLayout { BodyText { text: GuiI18n.text("gui-store-persistently"); } Toggle { checked <=> root.create-persistent; } BodyText { text: root.create-persistent ? GuiI18n.text("gui-persistent-root") : GuiI18n.text("gui-temporary-root"); color: Theme.text-muted; } } if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; } ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; } } AppButton { text: GuiI18n.text("gui-create-instance"); tone: "primary"; enabled: root.minecraft-releases.length > 0 && (root.create-name != "" || root.create-name-suggestion != "") && root.create-minecraft != "" && (root.create-loader == "Vanilla" || root.create-loader-version != ""); clicked => { root.submit-create-instance(root.create-name != "" ? root.create-name : root.create-name-suggestion, root.create-minecraft, root.create-loader, root.create-loader-version, root.create-persistent); } } } }
                     if root.modal == "import" : ScrollView {
@@ -5063,61 +5467,6 @@ slint::slint! {
                                 tone: root.mod-impact-breaks.length > 0 || root.mod-impact-deleting ? "danger" : "primary";
                                 clicked => { root.apply-mod-impact(root.mod-impact-cascade); }
                             }
-                        }
-                    }
-                    if root.modal == "isolate" : VerticalLayout { spacing: 12px;
-                        if root.isolation-phase == "setup" : VerticalLayout { spacing: 10px;
-                            BodyText { text: root.isolation-summary; wrap: word-wrap; }
-                            BodyText { text: GuiI18n.text("gui-isolation-pinned-detail"); color: Theme.text-secondary; wrap: word-wrap; }
-                            ScrollView { viewport-width: self.width; height: 250px;
-                                VerticalLayout { spacing: 6px;
-                                    for candidate[index] in root.isolation-candidates : Rectangle { height: 44px; border-radius: 5px; border-width: 1px; border-color: candidate.selected ? Theme.accent : Theme.border; background: Theme.surface;
-                                        HorizontalLayout { padding-left: 10px; padding-right: 10px; spacing: 9px; cross-axis-alignment: center;
-                                            Toggle { checked: candidate.selected; accessible-name: candidate.name; toggled(on) => { root.isolation-candidates[index].selected = on; root.toggle-isolation-pin(candidate.path, on); } }
-                                            VerticalLayout { alignment: center; horizontal-stretch: 1; BodyText { text: candidate.name; overflow: elide; } BodyText { text: candidate.path; color: Theme.text-muted; font-size: Theme.caption-size; overflow: elide; } }
-                                        }
-                                    }
-                                }
-                            }
-                            if root.isolation-missing.length > 0 : VerticalLayout { spacing: 3px; BodyText { text: GuiI18n.text("gui-isolation-missing"); color: Theme.danger; wrap: word-wrap; } for item in root.isolation-missing : BodyText { text: item; color: Theme.text-secondary; font-size: Theme.caption-size; } }
-                            if root.isolation-unrecorded.length > 0 : VerticalLayout { spacing: 5px; BodyText { text: GuiI18n.count("gui-isolation-unrecorded", root.isolation-unrecorded.length); color: Theme.warning; wrap: word-wrap; } LabeledToggle { label: GuiI18n.text("gui-isolation-accept-unrecorded"); width: 100%; checked <=> root.isolation-accept-unrecorded; } }
-                            if root.isolation-unidentifiable.length > 0 : BodyText { text: GuiI18n.count("gui-isolation-unidentifiable", root.isolation-unidentifiable.length); color: Theme.warning; wrap: word-wrap; }
-                            if root.isolation-linked-servers.length > 0 : BodyText { text: GuiI18n.count("gui-isolation-linked-servers", root.isolation-linked-servers.length); color: Theme.text-secondary; wrap: word-wrap; }
-                            if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; }
-                            ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; } } AppButton { text: GuiI18n.text("gui-isolation-start"); tone: "primary"; enabled: root.isolation-missing.length == 0 && (root.isolation-unrecorded.length == 0 || root.isolation-accept-unrecorded); clicked => { root.start-isolation(root.isolation-host-kind, root.isolation-host-id, root.isolation-accept-unrecorded); } } }
-                        }
-                        if root.isolation-phase == "round" : VerticalLayout { spacing: 10px;
-                            Heading { text: GuiI18n.value("gui-isolation-round", root.isolation-round); font-size: Theme.section-size; }
-                            BodyText { text: GuiI18n.text("gui-isolation-test-instruction"); color: Theme.warning; wrap: word-wrap; }
-                            HorizontalLayout { spacing: 10px;
-                                Rectangle { border-radius: 6px; border-width: 1px; border-color: Theme.success; background: Theme.surface; horizontal-stretch: 1; VerticalLayout { padding: 10px; spacing: 4px; Heading { text: GuiI18n.count("gui-isolation-enabled", root.isolation-enabled.length); font-size: Theme.row-heading-size; } ScrollView { viewport-width: self.width; VerticalLayout { spacing: 4px; for item in root.isolation-enabled : BodyText { text: item; font-size: Theme.caption-size; } } } } }
-                                Rectangle { border-radius: 6px; border-width: 1px; border-color: Theme.border; background: Theme.surface; horizontal-stretch: 1; VerticalLayout { padding: 10px; spacing: 4px; Heading { text: GuiI18n.count("gui-isolation-disabled", root.isolation-disabled.length); font-size: Theme.row-heading-size; } ScrollView { viewport-width: self.width; VerticalLayout { spacing: 4px; for item in root.isolation-disabled : BodyText { text: item; font-size: Theme.caption-size; } } } } }
-                            }
-                            if root.isolation-reduced-confidence : BodyText { text: GuiI18n.text("gui-isolation-reduced-confidence"); color: Theme.warning; wrap: word-wrap; }
-                            if root.isolation-linked-servers.length > 0 : BodyText { text: GuiI18n.text("gui-isolation-linked-unchanged"); color: Theme.text-secondary; wrap: word-wrap; }
-                            if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; }
-                            ActionRow { AppButton { text: GuiI18n.text("gui-isolation-undo"); enabled: root.isolation-round > 1; clicked => { root.undo-isolation(root.isolation-host-kind, root.isolation-host-id); } } AppButton { text: GuiI18n.text("gui-isolation-cancel"); tone: "danger"; clicked => { root.cancel-isolation(root.isolation-host-kind, root.isolation-host-id); } } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-isolation-issue-gone"); clicked => { root.answer-isolation(root.isolation-host-kind, root.isolation-host-id, "gone"); } } AppButton { text: GuiI18n.text("gui-isolation-issue-present"); tone: "primary"; clicked => { root.answer-isolation(root.isolation-host-kind, root.isolation-host-id, "present"); } } }
-                        }
-                        if root.isolation-phase == "contradiction" : VerticalLayout { spacing: 12px;
-                            BodyText { text: GuiI18n.text("gui-isolation-contradiction"); color: Theme.danger; wrap: word-wrap; }
-                            BodyText { text: GuiI18n.text("gui-isolation-contradiction-detail"); wrap: word-wrap; }
-                            ActionRow { AppButton { text: GuiI18n.text("gui-isolation-cancel"); tone: "danger"; clicked => { root.cancel-isolation(root.isolation-host-kind, root.isolation-host-id); } } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-isolation-undo"); tone: "primary"; clicked => { root.undo-isolation(root.isolation-host-kind, root.isolation-host-id); } } }
-                        }
-                        if root.isolation-phase == "ready" : VerticalLayout { spacing: 12px;
-                            Heading { text: GuiI18n.text("gui-isolation-ready"); font-size: Theme.section-size; }
-                            BodyText { text: GuiI18n.text(root.isolation-confidence == "one_minimal" ? "gui-isolation-one-minimal" : "gui-isolation-smallest"); wrap: word-wrap; }
-                            for item in root.isolation-reproducing : BodyText { text: item; color: Theme.text-secondary; }
-                            if root.isolation-reduced-confidence : BodyText { text: GuiI18n.text("gui-isolation-reduced-confidence"); color: Theme.warning; wrap: word-wrap; }
-                            BodyText { text: GuiI18n.text("gui-isolation-finish-snapshot"); color: Theme.text-muted; wrap: word-wrap; }
-                            ActionRow { AppButton { text: GuiI18n.text("gui-isolation-undo"); clicked => { root.undo-isolation(root.isolation-host-kind, root.isolation-host-id); } } AppButton { text: GuiI18n.text("gui-isolation-cancel"); tone: "danger"; clicked => { root.cancel-isolation(root.isolation-host-kind, root.isolation-host-id); } } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-isolation-finish"); tone: "primary"; clicked => { root.finish-isolation(root.isolation-host-kind, root.isolation-host-id); } } }
-                        }
-                        if root.isolation-phase == "result" : VerticalLayout { spacing: 12px;
-                            Heading { text: GuiI18n.text("gui-isolation-finished"); font-size: Theme.section-size; }
-                            BodyText { text: root.isolation-summary; wrap: word-wrap; }
-                            for item in root.isolation-reproducing : BodyText { text: item; color: Theme.text-secondary; }
-                            if root.isolation-reduced-confidence : BodyText { text: GuiI18n.text("gui-isolation-reduced-confidence"); color: Theme.warning; wrap: word-wrap; }
-                            BodyText { text: GuiI18n.text("gui-isolation-finished-detail"); color: Theme.text-muted; wrap: word-wrap; }
-                            ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-close"); tone: "primary"; clicked => { root.modal = ""; } } }
                         }
                     }
                     if root.modal == "snapshot-create" : VerticalLayout { spacing: 14px;

@@ -239,6 +239,7 @@ pub enum Command {
         generation: u64,
         pinned: Vec<PathBuf>,
         accept_unrecorded: bool,
+        accept_missing: bool,
     },
     ResumeIsolation {
         host: InstalledHost,
@@ -1262,6 +1263,7 @@ pub struct IsolationData {
     pub reduced_confidence: bool,
     pub confidence: String,
     pub reproducing: Vec<String>,
+    pub history: Vec<String>,
     pub summary: String,
 }
 
@@ -2361,6 +2363,7 @@ fn run_worker(
                 generation,
                 pinned,
                 accept_unrecorded,
+                accept_missing,
             } => {
                 let paths = app.paths().clone();
                 let reports = events.clone();
@@ -2379,9 +2382,9 @@ fn run_worker(
                         app.begin_isolation(
                             host,
                             IsolationRequest {
-                                accept_missing: false,
                                 pinned,
                                 accept_unrecorded,
+                                accept_missing,
                             },
                             &cancel,
                         )?;
@@ -4143,6 +4146,7 @@ fn inactive_isolation_data(host: InstalledHost) -> IsolationData {
         reduced_confidence: false,
         confidence: String::new(),
         reproducing: Vec::new(),
+        history: Vec::new(),
         summary: String::new(),
     }
 }
@@ -4153,7 +4157,7 @@ fn isolation_plan_data(host: InstalledHost, plan: &IsolationPlan) -> IsolationDa
         .iter()
         .map(|candidate| (&candidate.root, candidate.name.as_str()))
         .collect();
-    let candidates = plan
+    let mut candidates: Vec<_> = plan
         .initially_enabled
         .iter()
         .map(|path| IsolationCandidateData {
@@ -4169,6 +4173,12 @@ fn isolation_plan_data(host: InstalledHost, plan: &IsolationPlan) -> IsolationDa
             ),
         })
         .collect();
+    candidates.sort_by(|left, right| {
+        left.name
+            .to_lowercase()
+            .cmp(&right.name.to_lowercase())
+            .then_with(|| left.path.cmp(&right.path))
+    });
     let mut data = inactive_isolation_data(host);
     "setup".clone_into(&mut data.phase);
     data.candidates = candidates;
@@ -4258,6 +4268,28 @@ fn isolation_session_data(session: &IsolationSession) -> IsolationData {
         reduced_confidence: session.reduced_confidence,
         confidence,
         reproducing,
+        history: session
+            .history
+            .iter()
+            .rev()
+            .map(|record| {
+                lookup_args(
+                    "gui-isolation-history-entry",
+                    [
+                        ("round", Arg::from(record.round.index)),
+                        (
+                            "answer",
+                            Arg::from(lookup(match record.answer {
+                                RoundAnswer::Reproduced => "gui-isolation-issue-present",
+                                RoundAnswer::DidNotReproduce => "gui-isolation-issue-gone",
+                            })),
+                        ),
+                        ("kind", Arg::from(record.round.kind.as_str())),
+                        ("count", Arg::from(record.round.enabled.len())),
+                    ],
+                )
+            })
+            .collect(),
         summary: if phase == "round" {
             lookup_args("gui-isolation-round-summary", [("round", Arg::from(round))])
         } else if phase == "contradiction" {
@@ -4283,6 +4315,11 @@ fn isolation_report_data(host: InstalledHost, report: &IsolationReport) -> Isola
         .collect();
     data.unrecorded = display_paths(&report.unrecorded);
     data.unidentifiable = display_paths(&report.unidentifiable);
+    data.missing = report
+        .missing
+        .iter()
+        .map(|missing| format!("{}: {}", missing.required_by.display(), missing.dependency))
+        .collect();
     data.linked_servers = report
         .linked_servers
         .iter()
