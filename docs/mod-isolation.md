@@ -24,10 +24,17 @@ changing the session. **Undo answer** restores the preceding round when an
 answer was wrong. A contradiction stops the search until the latest answer is
 undone or the session is canceled.
 
-When a result is ready, **Finish** leaves that reproducing configuration enabled
+Every enabled mod can be isolated, including one another mod requires. A
+round never enables a mod without everything it requires, so a dependency can
+be tested without the mods requiring it, but not the other way around. The
+result lists the remaining candidates that no other remaining candidate
+requires. Mods they require are listed separately, as are mods that were
+pinned throughout and the mods those pinned mods require. Pinned mods and their
+requirements were never tested for removal, so a remaining candidate is not
+presented as the sole cause. **Finish** leaves the smallest tested configuration enabled
 and keeps the pre-isolation snapshot in the Snapshots tab. **Cancel isolation**
-restores the exact pre-isolation state instead. A client session never changes a
-linked server; isolate that server separately when its mods are also relevant.
+restores the exact pre-isolation state instead. A client session never changes
+a linked server; isolate that server separately when its mods are also relevant.
 
 Ephervex must be stopped for the affected host before it starts, advances,
 undoes, finishes, or cancels a round. The workspace header continues to provide

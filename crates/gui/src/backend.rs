@@ -1243,6 +1243,7 @@ pub struct HostSnapshotsData {
 #[derive(Debug, Clone)]
 pub struct IsolationCandidateData {
     pub path: String,
+    pub display_path: String,
     pub name: String,
 }
 
@@ -1263,7 +1264,9 @@ pub struct IsolationData {
     pub linked_servers: Vec<String>,
     pub reduced_confidence: bool,
     pub confidence: String,
-    pub reproducing: Vec<String>,
+    pub remaining_candidates: Vec<String>,
+    pub pinned: Vec<String>,
+    pub required_dependencies: Vec<String>,
     pub history: Vec<String>,
     pub summary: String,
 }
@@ -4244,7 +4247,9 @@ fn inactive_isolation_data(host: InstalledHost) -> IsolationData {
         linked_servers: Vec::new(),
         reduced_confidence: false,
         confidence: String::new(),
-        reproducing: Vec::new(),
+        remaining_candidates: Vec::new(),
+        pinned: Vec::new(),
+        required_dependencies: Vec::new(),
         history: Vec::new(),
         summary: String::new(),
     }
@@ -4261,6 +4266,7 @@ fn isolation_plan_data(host: InstalledHost, plan: &IsolationPlan) -> IsolationDa
         .iter()
         .map(|path| IsolationCandidateData {
             path: path.to_string_lossy().into_owned(),
+            display_path: isolation_mod_display(path),
             name: names.get(path).map_or_else(
                 || {
                     path.file_name().map_or_else(
@@ -4281,13 +4287,9 @@ fn isolation_plan_data(host: InstalledHost, plan: &IsolationPlan) -> IsolationDa
     let mut data = inactive_isolation_data(host);
     "setup".clone_into(&mut data.phase);
     data.candidates = candidates;
-    data.unrecorded = display_paths(&plan.unrecorded);
-    data.unidentifiable = display_paths(&plan.unidentifiable);
-    data.missing = plan
-        .missing
-        .iter()
-        .map(|missing| format!("{}: {}", missing.required_by.display(), missing.dependency))
-        .collect();
+    data.unrecorded = isolation_mod_list(&plan.unrecorded);
+    data.unidentifiable = isolation_mod_list(&plan.unidentifiable);
+    data.missing = isolation_missing_list(&plan.missing);
     data.linked_servers = plan
         .linked_servers
         .iter()
@@ -4303,14 +4305,14 @@ fn isolation_plan_data(host: InstalledHost, plan: &IsolationPlan) -> IsolationDa
 fn isolation_session_data(session: &IsolationSession) -> IsolationData {
     let host_kind = session.host_kind.clone();
     let host = session.host_id.clone();
-    let (phase, round, granularity, enabled, disabled, confidence, reproducing) =
+    let (phase, round, granularity, enabled, disabled, confidence, remaining_candidates) =
         if let Some(round) = &session.current_round {
             (
                 "round",
                 usize::try_from(round.index).unwrap_or(usize::MAX),
                 round.granularity,
-                display_paths(&round.enabled),
-                display_paths(&round.disabled),
+                isolation_mod_list(&round.enabled),
+                isolation_mod_list(&round.disabled),
                 String::new(),
                 Vec::new(),
             )
@@ -4319,7 +4321,7 @@ fn isolation_session_data(session: &IsolationSession) -> IsolationData {
                 "contradiction",
                 session.history.len(),
                 session.granularity,
-                display_paths(session.intended_enabled()),
+                isolation_mod_list(session.intended_enabled()),
                 Vec::new(),
                 String::new(),
                 Vec::new(),
@@ -4329,10 +4331,10 @@ fn isolation_session_data(session: &IsolationSession) -> IsolationData {
                 "ready",
                 session.history.len(),
                 session.granularity,
-                display_paths(&outcome.enabled),
-                display_paths(&outcome.disabled),
+                isolation_mod_list(&outcome.enabled),
+                isolation_mod_list(&outcome.disabled),
                 outcome.confidence.as_str().to_owned(),
-                display_paths(&outcome.roots),
+                Vec::new(),
             )
         } else {
             (
@@ -4345,6 +4347,17 @@ fn isolation_session_data(session: &IsolationSession) -> IsolationData {
                 Vec::new(),
             )
         };
+    let (remaining_candidates, pinned, required_dependencies) =
+        session.pending_report().map_or_else(
+            || (remaining_candidates, Vec::new(), Vec::new()),
+            |report| {
+                (
+                    isolation_remaining_candidates(&report),
+                    isolation_pinned_result(&report),
+                    isolation_mod_list(&report.required_dependencies),
+                )
+            },
+        );
     IsolationData {
         host,
         host_kind,
@@ -4355,8 +4368,8 @@ fn isolation_session_data(session: &IsolationSession) -> IsolationData {
         enabled,
         disabled,
         candidates: Vec::new(),
-        unrecorded: display_paths(&session.plan.unrecorded),
-        unidentifiable: display_paths(&session.plan.unidentifiable),
+        unrecorded: isolation_mod_list(&session.plan.unrecorded),
+        unidentifiable: isolation_mod_list(&session.plan.unidentifiable),
         missing: Vec::new(),
         linked_servers: session
             .plan
@@ -4366,29 +4379,10 @@ fn isolation_session_data(session: &IsolationSession) -> IsolationData {
             .collect(),
         reduced_confidence: session.reduced_confidence,
         confidence,
-        reproducing,
-        history: session
-            .history
-            .iter()
-            .rev()
-            .map(|record| {
-                lookup_args(
-                    "gui-isolation-history-entry",
-                    [
-                        ("round", Arg::from(record.round.index)),
-                        (
-                            "answer",
-                            Arg::from(lookup(match record.answer {
-                                RoundAnswer::Reproduced => "gui-isolation-issue-present",
-                                RoundAnswer::DidNotReproduce => "gui-isolation-issue-gone",
-                            })),
-                        ),
-                        ("kind", Arg::from(record.round.kind.as_str())),
-                        ("count", Arg::from(record.round.enabled.len())),
-                    ],
-                )
-            })
-            .collect(),
+        remaining_candidates,
+        pinned,
+        required_dependencies,
+        history: isolation_history(session),
         summary: if phase == "round" {
             lookup_args("gui-isolation-round-summary", [("round", Arg::from(round))])
         } else if phase == "contradiction" {
@@ -4399,26 +4393,45 @@ fn isolation_session_data(session: &IsolationSession) -> IsolationData {
     }
 }
 
+fn isolation_history(session: &IsolationSession) -> Vec<String> {
+    session
+        .history
+        .iter()
+        .rev()
+        .map(|record| {
+            lookup_args(
+                "gui-isolation-history-entry",
+                [
+                    ("round", Arg::from(record.round.index)),
+                    (
+                        "answer",
+                        Arg::from(lookup(match record.answer {
+                            RoundAnswer::Reproduced => "gui-isolation-issue-present",
+                            RoundAnswer::DidNotReproduce => "gui-isolation-issue-gone",
+                        })),
+                    ),
+                    ("kind", Arg::from(record.round.kind.as_str())),
+                    ("count", Arg::from(record.round.enabled.len())),
+                ],
+            )
+        })
+        .collect()
+}
+
 fn isolation_report_data(host: InstalledHost, report: &IsolationReport) -> IsolationData {
     let mut data = inactive_isolation_data(host);
     "result".clone_into(&mut data.phase);
     data.round = report.rounds;
-    data.enabled = display_paths(&report.enabled);
-    data.disabled = display_paths(&report.disabled);
+    data.enabled = isolation_mod_list(&report.enabled);
+    data.disabled = isolation_mod_list(&report.disabled);
     data.reduced_confidence = report.reduced_confidence;
     report.confidence.as_str().clone_into(&mut data.confidence);
-    data.reproducing = report
-        .reproducing
-        .iter()
-        .map(|candidate| candidate.root.to_string_lossy().into_owned())
-        .collect();
-    data.unrecorded = display_paths(&report.unrecorded);
-    data.unidentifiable = display_paths(&report.unidentifiable);
-    data.missing = report
-        .missing
-        .iter()
-        .map(|missing| format!("{}: {}", missing.required_by.display(), missing.dependency))
-        .collect();
+    data.remaining_candidates = isolation_remaining_candidates(report);
+    data.pinned = isolation_pinned_result(report);
+    data.required_dependencies = isolation_mod_list(&report.required_dependencies);
+    data.unrecorded = isolation_mod_list(&report.unrecorded);
+    data.unidentifiable = isolation_mod_list(&report.unidentifiable);
+    data.missing = isolation_missing_list(&report.missing);
     data.linked_servers = report
         .linked_servers
         .iter()
@@ -4426,16 +4439,77 @@ fn isolation_report_data(host: InstalledHost, report: &IsolationReport) -> Isola
         .collect();
     data.summary = lookup_args(
         "gui-isolation-result-summary",
-        [("count", Arg::from(report.reproducing.len()))],
+        [("count", Arg::from(report.remaining_candidates.len()))],
     );
     data
 }
 
-fn display_paths(paths: &[PathBuf]) -> Vec<String> {
-    paths
-        .iter()
-        .map(|path| path.to_string_lossy().into_owned())
+fn isolation_remaining_candidates(report: &IsolationReport) -> Vec<String> {
+    isolation_mod_list(
+        &report
+            .remaining_candidates
+            .iter()
+            .map(|candidate| candidate.root.clone())
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// Pinned roots, then the files they require, which were equally never tested for removal.
+fn isolation_pinned_result(report: &IsolationReport) -> Vec<String> {
+    isolation_mod_list(&report.pinned)
+        .into_iter()
+        .chain(
+            isolation_mod_list(&report.pinned_dependencies)
+                .into_iter()
+                .map(|path| {
+                    lookup_args(
+                        "gui-isolation-pinned-dependency",
+                        [("path", Arg::from(path))],
+                    )
+                }),
+        )
         .collect()
+}
+
+/// Isolation lists mod paths as they appear inside the host's mods directory,
+/// ordered case-insensitively with the logical path breaking ties.
+fn isolation_mod_list(paths: &[PathBuf]) -> Vec<String> {
+    let mut rows: Vec<_> = paths
+        .iter()
+        .map(|path| (isolation_mod_display(path), path))
+        .collect();
+    rows.sort_by(|(left, left_path), (right, right_path)| {
+        left.to_lowercase()
+            .cmp(&right.to_lowercase())
+            .then_with(|| left_path.cmp(right_path))
+    });
+    rows.into_iter().map(|(display, _)| display).collect()
+}
+
+/// A logical mod path without the `mods/` prefix every isolation path shares.
+/// Only for display: the logical path stays the identity everywhere else.
+fn isolation_mod_display(path: &Path) -> String {
+    path.strip_prefix("mods")
+        .ok()
+        .filter(|rest| !rest.as_os_str().is_empty())
+        .unwrap_or(path)
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn isolation_missing_list(missing: &[ephervex_core::IsolationMissingDependency]) -> Vec<String> {
+    let mut rows: Vec<_> = missing
+        .iter()
+        .map(|missing| {
+            format!(
+                "{}: {}",
+                isolation_mod_display(&missing.required_by),
+                missing.dependency
+            )
+        })
+        .collect();
+    rows.sort_by_key(|row| (row.to_lowercase(), row.clone()));
+    rows
 }
 
 fn snapshot_deletion_note(app: &App, host: InstalledHost) -> String {
@@ -7297,6 +7371,101 @@ mod tests {
     #![allow(clippy::expect_used)]
 
     use super::*;
+
+    fn logical(paths: &[&str]) -> Vec<PathBuf> {
+        paths.iter().map(PathBuf::from).collect()
+    }
+
+    #[test]
+    fn isolation_lists_drop_the_shared_mods_prefix_and_sort_case_insensitively() {
+        assert_eq!(
+            isolation_mod_list(&logical(&[
+                "mods/b.jar",
+                "mods/Apple.jar",
+                "mods/a.jar",
+                "mods/sub/C.jar",
+                "mods/A.jar",
+            ])),
+            ["A.jar", "a.jar", "Apple.jar", "b.jar", "sub/C.jar"]
+        );
+        assert_eq!(isolation_mod_display(Path::new("mods")), "mods");
+        assert_eq!(
+            isolation_mod_display(Path::new("other/x.jar")),
+            "other/x.jar"
+        );
+    }
+
+    #[test]
+    fn isolation_setup_shows_display_paths_but_keeps_logical_paths_for_pinning() {
+        let host = InstalledHost::Instance(ephervex_model::InstanceId::new());
+        let plan = IsolationPlan {
+            pinned: Vec::new(),
+            pinned_closure: Vec::new(),
+            candidates: Vec::new(),
+            available: logical(&["mods/zeta.jar", "mods/Alpha.jar"]),
+            initially_enabled: logical(&["mods/zeta.jar", "mods/Alpha.jar"]),
+            unrecorded: logical(&["mods/zeta.jar", "mods/Alpha.jar"]),
+            unidentifiable: Vec::new(),
+            missing: vec![ephervex_core::IsolationMissingDependency {
+                required_by: PathBuf::from("mods/zeta.jar"),
+                dependency: "library".to_owned(),
+            }],
+            linked_servers: Vec::new(),
+        };
+        let data = isolation_plan_data(host, &plan);
+        assert_eq!(
+            data.candidates
+                .iter()
+                .map(|candidate| (candidate.path.as_str(), candidate.display_path.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("mods/Alpha.jar", "Alpha.jar"),
+                ("mods/zeta.jar", "zeta.jar")
+            ]
+        );
+        assert_eq!(data.unrecorded, ["Alpha.jar", "zeta.jar"]);
+        assert_eq!(data.missing, ["zeta.jar: library"]);
+    }
+
+    #[test]
+    fn isolation_results_list_display_paths_in_case_insensitive_order() {
+        let host = InstalledHost::Instance(ephervex_model::InstanceId::new());
+        let report = IsolationReport {
+            safety_snapshot: ephervex_model::SnapshotId::new(),
+            remaining_candidates: Vec::new(),
+            pinned: logical(&["mods/Pin.jar"]),
+            pinned_dependencies: logical(&["mods/zlib.jar", "mods/Base.jar"]),
+            required_dependencies: logical(&["mods/shared.jar", "mods/API.jar"]),
+            excluded_roots: Vec::new(),
+            enabled: logical(&["mods/b.jar", "mods/API.jar", "mods/a.jar"]),
+            disabled: logical(&["mods/Zed.jar", "mods/ace.jar"]),
+            rounds: 3,
+            confidence: ephervex_core::IsolationConfidence::OneMinimal,
+            reduced_confidence: false,
+            unrecorded: Vec::new(),
+            unidentifiable: Vec::new(),
+            missing: Vec::new(),
+            linked_servers: Vec::new(),
+        };
+        let data = isolation_report_data(host, &report);
+        assert_eq!(data.enabled, ["a.jar", "API.jar", "b.jar"]);
+        assert_eq!(data.disabled, ["ace.jar", "Zed.jar"]);
+        assert_eq!(data.required_dependencies, ["API.jar", "shared.jar"]);
+        assert_eq!(
+            data.pinned,
+            [
+                "Pin.jar".to_owned(),
+                lookup_args(
+                    "gui-isolation-pinned-dependency",
+                    [("path", Arg::from("Base.jar"))]
+                ),
+                lookup_args(
+                    "gui-isolation-pinned-dependency",
+                    [("path", Arg::from("zlib.jar"))]
+                ),
+            ]
+        );
+    }
 
     /// A mod's title does not change while the launcher is open, so the second
     /// time a workspace is opened it repaints rather than asking again.

@@ -19,8 +19,11 @@ state and an exact way back to the state that existed before it began.
 
 The unit of isolation is a candidate root together with its complete transitive
 required-dependency closure from the same graph used by ordinary mod toggles.
-A root required by another candidate is carried as a dependency instead of
-being counted independently. A required cycle has one deterministic
+Every enabled mod outside the pinned closure is a candidate, including one that
+another candidate requires. A required edge says which configurations are
+valid, not that the required mod cannot be the cause, and Ephervex does not
+guess which mods are libraries. Only a required cycle, whose members cannot be
+separated by any valid configuration, is merged under one deterministic
 representative. Pinned mods and their complete required closure are enabled in
 every round.
 
@@ -31,14 +34,26 @@ stays enabled whenever at least one selected root needs it. The resulting
 configuration is applied through the existing dependency-aware batch mutation
 service.
 
-The search is deterministic ddmin. It starts at granularity two, tests each
-subset, and then tests each complement. A reproducing subset becomes the new
-suspect set and resets granularity to two. A reproducing complement becomes the
-new suspect set and reduces granularity by one, with a floor of two. If neither
-kind narrows the set, granularity doubles up to the suspect count. Exhausting
-that count establishes a one-minimal set: removing any one remaining candidate
-stopped reproduction. Reaching zero or one candidate uses a confirmation round
-and reports only that the smallest testable candidate set was reached.
+The search is deterministic ddmin over dependency-closed candidate sets. The
+suspect set is always closed: every candidate a suspect requires is itself a
+suspect. A subset round enables its group and every suspect the group requires.
+A complement round removes its group and every suspect that requires a removed
+candidate. Both are therefore closed, and a reproducing round's complete
+candidate set, not only its selected group, becomes the new suspect set. This
+is what keeps overlapping closures honest: when a mod and its dependency were
+both enabled, the search keeps both as suspects and can still test the
+dependency without the mod.
+
+The search starts at granularity two, tests each subset, and then tests each
+complement. A reproducing subset resets granularity to two. A reproducing
+complement reduces granularity by one, with a floor of two. If neither kind
+narrows the set, granularity doubles up to the suspect count. A configuration
+is skipped as not reproducing when it would enable no candidate, every suspect,
+or only files that an earlier non-reproducing round also enabled. Exhausting
+the count establishes a one-minimal set: removing any one remaining candidate,
+together with the candidates that require it, stopped reproduction. Reaching
+zero or one candidate uses a confirmation round and reports only that the
+smallest testable candidate set was reached.
 
 One session belongs to one client or one server. A client session lists linked
 servers but never changes them. Missing required dependencies and refreshable
@@ -68,15 +83,25 @@ the current round is the purpose of the workflow.
 Starting creates a local snapshot with origin `before_isolation` before any mod
 mutation. Cancel restores that snapshot through the snapshot service and then
 removes the session document. Finish reapplies the outcome, removes the session
-document, leaves the reproducing configuration enabled, and retains the safety
-snapshot under a dated label.
+document, leaves the smallest tested configuration enabled, and retains the
+safety snapshot under a dated label. Its report names the remaining candidates
+that no other remaining candidate requires, and separates them from the files
+they require, from pinned roots, and from the files pinned roots require. The
+last two were never tested for removal.
 
 ## Consequences
 
-- A round may enable more than half of the jar files because dependencies are
-  correctness constraints, not suspects.
+- A round may enable more than half of the jar files because required
+  dependencies are validity constraints on every configuration.
+- A mod required by a remaining candidate is reported as required by it rather
+  than as a cause, because it was tested without that candidate wherever a
+  valid configuration allowed.
+- A mod required by a pinned mod cannot be tested away. It is reported as
+  constrained by the pin, not as ruled out.
 - A one-minimal result need not be the globally smallest reproducing set. The UI
   and CLI distinguish it from a smallest testable zero- or one-candidate result.
+- A remaining candidate is not a unique culprit when pinned roots stayed in
+  every round. Result presentation names those untested pinned roots separately.
 - Results based on missing, unrecorded, or unidentifiable dependency
   information are explicitly unproven.
 - The session document makes an interrupted workflow visible after restart and

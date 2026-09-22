@@ -18,6 +18,10 @@ const ISOLATION_VERSION: u32 = 1;
 const ISOLATION_FILE: &str = "isolation.json";
 
 /// A suspect the user can test, together with everything it requires.
+///
+/// Every enabled mod outside the pinned closure is its own candidate, including
+/// one that another candidate requires. Only mods that require each other are
+/// merged, under their lexicographically first path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IsolationCandidate {
     pub root: PathBuf,
@@ -64,6 +68,66 @@ impl IsolationPlan {
             }
         }
         enabled.into_iter().collect()
+    }
+
+    /// The suspects that `selected` enables, itself included.
+    fn required_by(&self, suspects: &[PathBuf], selected: &[PathBuf]) -> Vec<PathBuf> {
+        let closures = self.closures();
+        let required: BTreeSet<&Path> = selected
+            .iter()
+            .filter_map(|root| closures.get(root.as_path()))
+            .flatten()
+            .copied()
+            .collect();
+        suspects
+            .iter()
+            .filter(|root| required.contains(root.as_path()))
+            .cloned()
+            .collect()
+    }
+
+    /// The suspects left after removing `removed` and every suspect requiring one of them.
+    fn without_dependents(&self, suspects: &[PathBuf], removed: &[PathBuf]) -> Vec<PathBuf> {
+        let closures = self.closures();
+        suspects
+            .iter()
+            .filter(|root| {
+                !removed.contains(root)
+                    && closures.get(root.as_path()).is_none_or(|closure| {
+                        !removed.iter().any(|r| closure.contains(r.as_path()))
+                    })
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// The members of `roots` that no other member requires.
+    fn outermost(&self, roots: &[PathBuf]) -> Vec<PathBuf> {
+        let closures = self.closures();
+        roots
+            .iter()
+            .filter(|root| {
+                !roots.iter().any(|other| {
+                    other != *root
+                        && closures
+                            .get(other.as_path())
+                            .is_some_and(|closure| closure.contains(root.as_path()))
+                })
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn closures(&self) -> BTreeMap<&Path, BTreeSet<&Path>> {
+        self.candidates
+            .iter()
+            .map(|candidate| {
+                (
+                    candidate.root.as_path(),
+                    candidate.closure.iter().map(PathBuf::as_path).collect(),
+                )
+            })
+            .collect()
     }
 }
 
@@ -156,7 +220,8 @@ pub struct IsolationRoundRecord {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IsolationConfidence {
-    /// Removing every remaining root was tested and stopped the issue.
+    /// Removing any one remaining candidate, together with the candidates that
+    /// require it, stopped the issue.
     OneMinimal,
     /// The search reached zero or one candidate, so no smaller candidate set exists.
     SmallestReached,
@@ -175,6 +240,7 @@ impl IsolationConfidence {
 /// The configuration ddmin has finished narrowing to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IsolationOutcome {
+    /// Every candidate still enabled, including those only required by another.
     pub roots: Vec<PathBuf>,
     pub enabled: Vec<PathBuf>,
     pub disabled: Vec<PathBuf>,
@@ -220,6 +286,14 @@ impl IsolationSession {
             &self.plan.initially_enabled
         }
     }
+
+    /// The report `finish` would return for the outcome waiting to be kept.
+    #[must_use]
+    pub fn pending_report(&self) -> Option<IsolationReport> {
+        self.outcome
+            .as_ref()
+            .map(|outcome| report_for(self, outcome))
+    }
 }
 
 /// What an operation leaves the workflow waiting for.
@@ -253,7 +327,14 @@ pub enum IsolationReconciliation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IsolationReport {
     pub safety_snapshot: SnapshotId,
-    pub reproducing: Vec<IsolationResultCandidate>,
+    /// Remaining candidates that no other remaining candidate requires.
+    pub remaining_candidates: Vec<IsolationResultCandidate>,
+    /// Roots that stayed enabled throughout and were never tested for removal.
+    pub pinned: Vec<PathBuf>,
+    /// Files the pinned roots require. They were never tested for removal.
+    pub pinned_dependencies: Vec<PathBuf>,
+    /// Files kept only because a remaining candidate requires them.
+    pub required_dependencies: Vec<PathBuf>,
     pub excluded_roots: Vec<PathBuf>,
     pub enabled: Vec<PathBuf>,
     pub disabled: Vec<PathBuf>,
@@ -593,22 +674,27 @@ impl App {
             .iter()
             .map(|candidate| candidate.root.clone())
             .collect();
-        let search = if suspects.len() <= 1 {
-            SearchState {
-                suspects: suspects.clone(),
-                granularity: suspects.len().max(1),
-                phase: SearchPhase::Confirmation,
-                group_index: 0,
-            }
-        } else {
-            SearchState {
-                suspects: suspects.clone(),
-                granularity: 2,
-                phase: SearchPhase::Subsets,
-                group_index: 0,
+        let confirmation = SearchState {
+            suspects: suspects.clone(),
+            granularity: suspects.len().max(1),
+            phase: SearchPhase::Confirmation,
+            group_index: 0,
+        };
+        let mut search = SearchState {
+            suspects: suspects.clone(),
+            granularity: 2,
+            phase: SearchPhase::Subsets,
+            group_index: 0,
+        };
+        // Two or more candidates always leave a smaller dependency-closed set
+        // to test, so settling only falls back to confirmation for zero or one.
+        let current_round = match (suspects.len() > 1).then(|| settle(&plan, &[], &mut search, 1)) {
+            Some(Settled::Round(round)) => round,
+            Some(Settled::Complete(_)) | None => {
+                search = confirmation;
+                round_for(&plan, &search, 1)
             }
         };
-        let current_round = round_for(&plan, &search, 1);
         let session = IsolationSession {
             host_kind: host.kind().to_owned(),
             host_id: host.id(),
@@ -725,7 +811,7 @@ impl App {
         Ok(record.round)
     }
 
-    /// Keeps the reproducing configuration and its safety snapshot, then
+    /// Keeps the smallest tested configuration and its safety snapshot, then
     /// removes the session marker.
     pub fn finish_isolation(&self, host: InstalledHost) -> CoreResult<IsolationReport> {
         self.refuse_isolation_while_running(host)?;
@@ -871,6 +957,8 @@ fn advance_search(session: &mut IsolationSession, answer: RoundAnswer) {
         } else {
             2
         };
+        // A round's roots are dependency-closed, so the reproducing set keeps
+        // every candidate it actually enabled rather than only the ones chosen.
         session.search.suspects = current.enabled_roots;
         session.suspects = session.search.suspects.clone();
         if session.search.suspects.len() <= 1 {
@@ -880,26 +968,87 @@ fn advance_search(session: &mut IsolationSession, answer: RoundAnswer) {
         session.search.granularity = next_granularity.min(session.search.suspects.len());
         session.search.phase = SearchPhase::Subsets;
         session.search.group_index = 0;
+    } else if !move_past_non_reproducing(&mut session.search) {
+        complete_search(session, IsolationConfidence::OneMinimal);
+        return;
+    }
+    match settle(
+        &session.plan,
+        &session.history,
+        &mut session.search,
+        next_index,
+    ) {
+        Settled::Round(round) => {
+            session.suspects = session.search.suspects.clone();
+            session.granularity = session.search.granularity;
+            session.current_round = Some(round);
+        }
+        Settled::Complete(confidence) => complete_search(session, confidence),
+    }
+}
+
+/// Moves to the next ddmin configuration after one that did not reproduce.
+/// Returns `false` once every complement at full granularity is exhausted.
+fn move_past_non_reproducing(search: &mut SearchState) -> bool {
+    let group_count = split_groups(&search.suspects, search.granularity).len();
+    if search.group_index + 1 < group_count {
+        search.group_index += 1;
+    } else if search.phase == SearchPhase::Subsets {
+        search.phase = SearchPhase::Complements;
+        search.group_index = 0;
+    } else if search.granularity < search.suspects.len() {
+        search.granularity = (search.granularity * 2).min(search.suspects.len());
+        search.phase = SearchPhase::Subsets;
+        search.group_index = 0;
     } else {
-        let group_count = split_groups(&session.search.suspects, session.search.granularity).len();
-        if session.search.group_index + 1 < group_count {
-            session.search.group_index += 1;
-        } else if session.search.phase == SearchPhase::Subsets {
-            session.search.phase = SearchPhase::Complements;
-            session.search.group_index = 0;
-        } else if session.search.granularity < session.search.suspects.len() {
-            session.search.granularity =
-                (session.search.granularity * 2).min(session.search.suspects.len());
-            session.search.phase = SearchPhase::Subsets;
-            session.search.group_index = 0;
-        } else {
-            complete_search(session, IsolationConfidence::OneMinimal);
-            return;
+        return false;
+    }
+    true
+}
+
+enum Settled {
+    Round(IsolationRound),
+    Complete(IsolationConfidence),
+}
+
+/// Advances past configurations whose answer is already known, so the user
+/// is only asked about one that can narrow the search.
+fn settle(
+    plan: &IsolationPlan,
+    history: &[IsolationRoundRecord],
+    search: &mut SearchState,
+    index: u32,
+) -> Settled {
+    loop {
+        let round = round_for(plan, search, index);
+        if round_is_informative(search, history, &round) {
+            return Settled::Round(round);
+        }
+        if !move_past_non_reproducing(search) {
+            return Settled::Complete(IsolationConfidence::OneMinimal);
         }
     }
-    session.suspects = session.search.suspects.clone();
-    session.granularity = session.search.granularity;
-    session.current_round = Some(round_for(&session.plan, &session.search, next_index));
+}
+
+/// A round is skipped, and treated as not reproducing, when it would enable no
+/// candidate (ddmin's usual assumption), every current suspect (no progress),
+/// or only files an earlier non-reproducing round already enabled.
+fn round_is_informative(
+    search: &SearchState,
+    history: &[IsolationRoundRecord],
+    round: &IsolationRound,
+) -> bool {
+    if search.phase == SearchPhase::Confirmation {
+        return true;
+    }
+    if round.enabled_roots.is_empty() || round.enabled_roots.len() >= search.suspects.len() {
+        return false;
+    }
+    let enabled: BTreeSet<_> = round.enabled.iter().collect();
+    !history.iter().any(|record| {
+        record.answer == RoundAnswer::DidNotReproduce
+            && enabled.is_subset(&record.round.enabled.iter().collect())
+    })
 }
 
 fn complete_search(session: &mut IsolationSession, confidence: IsolationConfidence) {
@@ -926,22 +1075,14 @@ fn complete_search(session: &mut IsolationSession, confidence: IsolationConfiden
 
 fn round_for(plan: &IsolationPlan, search: &SearchState, index: u32) -> IsolationRound {
     let groups = split_groups(&search.suspects, search.granularity);
+    let group = groups.get(search.group_index).cloned().unwrap_or_default();
+    // Both kinds of round stay closed under required dependencies: a subset
+    // brings in the suspects its group requires, and a complement also drops
+    // every suspect requiring something in the removed group.
     let roots = match search.phase {
         SearchPhase::Confirmation => search.suspects.clone(),
-        SearchPhase::Subsets => groups.get(search.group_index).cloned().unwrap_or_default(),
-        SearchPhase::Complements => {
-            let excluded: BTreeSet<_> = groups
-                .get(search.group_index)
-                .into_iter()
-                .flat_map(|group| group.iter())
-                .collect();
-            search
-                .suspects
-                .iter()
-                .filter(|root| !excluded.contains(root))
-                .cloned()
-                .collect()
-        }
+        SearchPhase::Subsets => plan.required_by(&search.suspects, &group),
+        SearchPhase::Complements => plan.without_dependents(&search.suspects, &group),
     };
     let enabled = plan.enabled_for(&roots);
     let enabled_set: BTreeSet<_> = enabled.iter().collect();
@@ -1010,16 +1151,32 @@ fn contradiction_for(
 
 fn report_for(session: &IsolationSession, outcome: &IsolationOutcome) -> IsolationReport {
     let roots: BTreeSet<_> = outcome.roots.iter().collect();
-    let reproducing = session
+    let outermost: BTreeSet<_> = session.plan.outermost(&outcome.roots).into_iter().collect();
+    let remaining_candidates = session
         .plan
         .candidates
         .iter()
-        .filter(|candidate| roots.contains(&candidate.root))
+        .filter(|candidate| outermost.contains(&candidate.root))
         .map(|candidate| IsolationResultCandidate {
             root: candidate.root.clone(),
             name: candidate.name.clone(),
             closure: candidate.closure.clone(),
         })
+        .collect();
+    let pinned: BTreeSet<_> = session.plan.pinned.iter().collect();
+    let pinned_closure: BTreeSet<_> = session.plan.pinned_closure.iter().collect();
+    let pinned_dependencies = session
+        .plan
+        .pinned_closure
+        .iter()
+        .filter(|path| !pinned.contains(path))
+        .cloned()
+        .collect();
+    let required_dependencies = outcome
+        .enabled
+        .iter()
+        .filter(|path| !outermost.contains(*path) && !pinned_closure.contains(path))
+        .cloned()
         .collect();
     let excluded_roots = session
         .plan
@@ -1030,7 +1187,10 @@ fn report_for(session: &IsolationSession, outcome: &IsolationOutcome) -> Isolati
         .collect();
     IsolationReport {
         safety_snapshot: session.safety_snapshot,
-        reproducing,
+        remaining_candidates,
+        pinned: session.plan.pinned.clone(),
+        pinned_dependencies,
+        required_dependencies,
         excluded_roots,
         enabled: outcome.enabled.clone(),
         disabled: outcome.disabled.clone(),
@@ -1139,13 +1299,13 @@ fn populate_candidates(
     for path in &pool {
         let (name, closure) = &closures[path];
         // Mutually required mods form an inseparable component. Its
-        // lexicographically first member represents it deterministically.
-        let required_by_other = pool.iter().any(|other| {
-            other != path
-                && closures[other].1.contains(path)
-                && (!closure.contains(other) || other < path)
+        // lexicographically first member represents it deterministically. A
+        // mod that is merely required by another stays its own candidate, so
+        // a dependency can still be tested without the mods requiring it.
+        let merged_into_other = pool.iter().any(|other| {
+            other < path && closures[other].1.contains(path) && closure.contains(other)
         });
-        if !required_by_other {
+        if !merged_into_other {
             plan.candidates.push(IsolationCandidate {
                 root: path.clone(),
                 name: name.clone(),

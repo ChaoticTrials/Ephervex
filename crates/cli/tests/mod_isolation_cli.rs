@@ -171,18 +171,27 @@ fn the_cli_resumes_undoes_and_finishes_a_complete_isolation_session() {
     let undone = sandbox.json(&["--json", "mod", "isolate", "undo", host[0], host[1]]);
     assert_eq!(undone, started);
 
-    for answer in [
-        "issue-gone",
-        "issue-still-present",
-        "issue-gone",
-        "issue-still-present",
-    ] {
-        sandbox.json(&[
+    let mut step = undone;
+    while step["state"] == "awaiting_answer" {
+        let reproduces = step["value"]["enabled"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("mods/e.jar"));
+        let answer = if reproduces {
+            "issue-still-present"
+        } else {
+            "issue-gone"
+        };
+        step = sandbox.json(&[
             "--json", "mod", "isolate", "answer", host[0], host[1], answer,
         ]);
     }
+    assert_eq!(step["state"], "complete");
     let finished = sandbox.json(&["--json", "mod", "isolate", "finish", host[0], host[1]]);
-    assert_eq!(finished["reproducing"][0]["root"], "mods/e.jar");
+    assert_eq!(finished["remaining_candidates"][0]["root"], "mods/e.jar");
+    assert_eq!(finished["pinned"], json!(["mods/pin.jar"]));
+    assert_eq!(finished["pinned_dependencies"], json!(["mods/base.jar"]));
+    assert_eq!(finished["required_dependencies"], json!([]));
     assert_eq!(finished["confidence"], "smallest_reached");
     assert_eq!(enabled(&root), ["base.jar", "e.jar", "pin.jar"]);
     assert!(!root.join(".launcher/isolation.json").exists());

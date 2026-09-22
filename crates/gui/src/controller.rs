@@ -5271,7 +5271,9 @@ fn apply_isolation_data(
     ui.set_isolation_unidentifiable(string_model(data.unidentifiable));
     ui.set_isolation_missing(string_model(data.missing));
     ui.set_isolation_linked_servers(string_model(data.linked_servers));
-    ui.set_isolation_reproducing(string_model(data.reproducing));
+    ui.set_isolation_remaining_candidates(string_model(data.remaining_candidates));
+    ui.set_isolation_pinned(string_model(data.pinned));
+    ui.set_isolation_required_dependencies(string_model(data.required_dependencies));
     ui.set_isolation_history(string_model(data.history));
     apply_active_isolation_workflow(ui, data.active, &data.phase, &data.summary);
     ui.set_isolation_host_kind(data.host_kind.into());
@@ -5370,6 +5372,7 @@ fn render_isolation_candidates(ui: &AppWindow, state: &IsolationFlowState) {
             .map(|candidate| IsolationCandidateRow {
                 selected: state.pinned.contains(&PathBuf::from(&candidate.path)),
                 path: candidate.path.clone().into(),
+                display_path: candidate.display_path.clone().into(),
                 name: candidate.name.clone().into(),
             })
             .collect(),
@@ -7742,7 +7745,9 @@ mod tests {
             linked_servers: Vec::new(),
             reduced_confidence: false,
             confidence: String::new(),
-            reproducing: Vec::new(),
+            remaining_candidates: Vec::new(),
+            pinned: Vec::new(),
+            required_dependencies: Vec::new(),
             history: Vec::new(),
             summary: "Waiting for an answer.".to_owned(),
         }
@@ -7791,6 +7796,7 @@ mod tests {
         let mut setup = isolation_data(&host, false, "setup");
         setup.candidates = vec![backend::IsolationCandidateData {
             path: "mods/a.jar".to_owned(),
+            display_path: "a.jar".to_owned(),
             name: "A".to_owned(),
         }];
         apply_isolation_data(&ui, setup, true, &flow);
@@ -7956,10 +7962,12 @@ mod tests {
             candidates: vec![
                 backend::IsolationCandidateData {
                     path: "mods/alpha.jar".to_owned(),
+                    display_path: "alpha.jar".to_owned(),
                     name: "Alpha".to_owned(),
                 },
                 backend::IsolationCandidateData {
                     path: "mods/beta.jar".to_owned(),
+                    display_path: "beta.jar".to_owned(),
                     name: "Beta Library".to_owned(),
                 },
             ],

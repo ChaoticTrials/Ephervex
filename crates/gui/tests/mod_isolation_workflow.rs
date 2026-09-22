@@ -57,11 +57,13 @@ fn setup_requires_each_reduced_confidence_acknowledgement() {
     ui.set_isolation_candidates(ModelRc::new(VecModel::from(vec![
         IsolationCandidateRow {
             path: "mods/a.jar".into(),
+            display_path: "a.jar".into(),
             name: "A".into(),
             selected: false,
         },
         IsolationCandidateRow {
             path: "mods/b.jar".into(),
+            display_path: "b.jar".into(),
             name: "B".into(),
             selected: true,
         },
@@ -72,7 +74,8 @@ fn setup_requires_each_reduced_confidence_acknowledgement() {
     settle(&ui);
 
     assert!(visible(&ui, "A"));
-    assert!(visible(&ui, "mods/b.jar"));
+    assert!(visible(&ui, "b.jar"));
+    assert!(!visible(&ui, "mods/b.jar"));
     assert!(visible(&ui, "mods/unrecorded.jar"));
     assert!(visible(&ui, "mods/unidentified.jar"));
     assert!(visible(&ui, &lookup("gui-isolation-unrecorded-detail")));
@@ -256,7 +259,7 @@ fn persistent_round_actions_answer_and_open_the_detailed_surface() {
 }
 
 #[test]
-fn contradiction_and_result_views_offer_the_safe_next_actions() {
+fn result_separates_testable_candidates_from_untested_pins_and_dependencies() {
     let ui = window();
     client_workspace(&ui);
     ui.set_workspace_tab("Isolation".into());
@@ -270,11 +273,20 @@ fn contradiction_and_result_views_offer_the_safe_next_actions() {
     );
 
     ui.set_isolation_phase("result".into());
-    ui.set_isolation_summary("One candidate root remains.".into());
-    ui.set_isolation_reproducing(strings(&["mods/a.jar"]));
+    ui.set_isolation_summary("One testable candidate root remains.".into());
+    ui.set_isolation_remaining_candidates(strings(&["mods/advancedae.jar"]));
+    ui.set_isolation_pinned(strings(&["mods/libx.jar", "mods/skyblock-builder.jar"]));
+    ui.set_isolation_required_dependencies(strings(&["mods/required-library.jar"]));
     settle(&ui);
     assert!(visible(&ui, &lookup("gui-isolation-finished")));
-    assert!(visible(&ui, "mods/a.jar"));
+    assert!(visible(&ui, &lookup("gui-isolation-remaining-candidates")));
+    assert!(visible(&ui, "mods/advancedae.jar"));
+    assert!(visible(&ui, &lookup("gui-isolation-pinned-result")));
+    assert!(visible(&ui, "mods/libx.jar"));
+    assert!(visible(&ui, "mods/skyblock-builder.jar"));
+    assert!(visible(&ui, &lookup("gui-isolation-pinned-result-detail")));
+    assert!(visible(&ui, &lookup("gui-isolation-result-dependencies")));
+    assert!(visible(&ui, "mods/required-library.jar"));
     assert!(visible(&ui, &lookup("gui-isolation-finished-detail")));
 }
 

@@ -122,7 +122,7 @@ exhaustion with an actionable error.
 | Dependency-aware enable, disable, and delete | One planned batch applies ordered file changes using the same recorded dependency graph. | Failure rolls back the batch. Any launcher-owned staging or retired content left behind is reported on the next reconciliation. |
 | Verification repair | Replacement bytes are verified before they replace a managed file. | A failed repair keeps or restores the prior file; leftover transaction state remains visible for reconciliation. |
 | Snapshot restore | A durable journal names only fixed host parts. Each live part moves into the restore transaction before its staged replacement is renamed into place. | Failure rolls every published part back. On restart, reconciliation recognizes the versioned journal and restores the complete pre-restore state. Unknown or ambiguous staging is left untouched and receives host attention. |
-| Mod isolation round | The versioned session records the next exact configuration before the dependency-aware batch applies it. | Resume reapplies the intended configuration idempotently. Cancel restores the pre-isolation snapshot; finish retains it and leaves the reproducing configuration enabled. |
+| Mod isolation round | The versioned session records the next exact configuration before the dependency-aware batch applies it. | Resume reapplies the intended configuration idempotently. Cancel restores the pre-isolation snapshot; finish retains it and leaves the smallest tested configuration enabled. |
 | Diagnostic bundle export | A caller-selected set is written to the requested local archive. | Failure is reported against the output path. Source logs are never changed or scrubbed. |
 | Launch and server process control | A durable owner record and kernel-visible process identity establish control. | Stale ownership evidence is distinguished from a live process. An orphan is reported and never adopted or signaled. |
 
@@ -169,10 +169,13 @@ state into the visual container.
 
 ## Dependency-aware mod isolation
 
-Isolation planning uses the same required-dependency graph as mod toggles. A
-candidate is a root and its complete required closure; shared libraries remain
-enabled whenever any selected root needs them. Pinned mods carry their own
-transitive closure. Required cycles have one deterministic representative.
+Isolation planning uses the same required-dependency graph as mod toggles.
+Every enabled mod outside the pinned closure is a candidate, carrying its
+complete required closure, including mods that another candidate requires; a
+required edge constrains which configurations are valid, not which mods can be
+suspects. Shared libraries remain enabled whenever any selected candidate needs
+them. Pinned mods carry their own transitive closure. Only a required cycle is
+merged, under one deterministic representative.
 Missing jars and incomplete dependency knowledge are shown before starting.
 Either condition requires an explicit acknowledgement before the desktop can
 continue, and the acknowledgement is retained in the session.
@@ -184,9 +187,15 @@ current configuration. The document is published atomically before the mod
 batch, so reopening the application can show the persistent workflow state and
 resume can repair an interrupted application by applying the same batch again.
 
-The deterministic search tests subsets and then complements. Reproduction
-narrows the suspect roots; no reduction grows granularity until removing each
-remaining candidate has been tested. Each history entry retains its pre-answer
+The deterministic search tests subsets and then complements, both closed
+under required dependencies: a subset also enables the suspects its group
+requires, and a complement also removes every suspect requiring a removed one.
+Reproduction narrows the suspects to every candidate the round enabled, not
+only the ones its group selected, so testing a mod never counts as having
+tested its dependencies. A configuration that would enable no candidate, every
+suspect, or only files an earlier non-reproducing round enabled is skipped as
+not reproducing. No reduction grows granularity until removing each remaining
+candidate, with its dependents, has been tested. Each history entry retains its pre-answer
 state so undo restores the precise prior round. A non-reproducing superset of a
 known reproducing configuration is recorded as a contradiction instead of
 silently advancing.
@@ -198,9 +207,12 @@ knowledge require separate explicit reduced-confidence acknowledgements.
 Unidentifiable jars carry the same caveat because no catalog query can make
 their dependency information complete.
 
-Finish leaves the narrowed configuration enabled, removes the session marker,
-and retains the dated safety snapshot. Cancel restores that snapshot through
-the ordinary snapshot service and removes the marker. See
+Finish leaves the smallest tested configuration enabled, removes the session
+marker, and retains the dated safety snapshot. Its result names the remaining
+candidates that no other remaining candidate requires, and keeps them separate
+from the candidates and files they require, from pinned roots, and from the
+files pinned roots require, neither of which was ever tested for removal. Cancel restores the snapshot through the
+ordinary snapshot service and removes the marker. See
 [ADR 0036](adr/0036-mod-isolation-applies-recoverable-dependency-closed-rounds.md)
 and the [mod isolation guide](mod-isolation.md).
 

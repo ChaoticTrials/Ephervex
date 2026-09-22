@@ -269,6 +269,7 @@ slint::slint! {
 
     export struct IsolationCandidateRow {
         path: string,
+        display-path: string,
         name: string,
         selected: bool,
     }
@@ -1819,6 +1820,30 @@ slint::slint! {
         }
     }
 
+    component IsolationResultGroups inherits ScrollView {
+        in property <[string]> remaining-candidates;
+        in property <[string]> pinned;
+        in property <[string]> required-dependencies;
+        viewport-width: self.width;
+        VerticalLayout {
+            alignment: start;
+            spacing: 8px;
+            SectionTitle { title: GuiI18n.text("gui-isolation-remaining-candidates"); detail: GuiI18n.text("gui-isolation-remaining-candidates-detail"); }
+            if root.remaining-candidates.length == 0 : BodyText { text: GuiI18n.text("gui-isolation-no-remaining-candidates"); color: Theme.text-secondary; wrap: word-wrap; }
+            for item in root.remaining-candidates : BodyText { text: item; color: Theme.text-secondary; }
+            if root.pinned.length > 0 : VerticalLayout {
+                spacing: 5px;
+                SectionTitle { title: GuiI18n.text("gui-isolation-pinned-result"); detail: GuiI18n.text("gui-isolation-pinned-result-detail"); }
+                for item in root.pinned : BodyText { text: item; color: Theme.text-secondary; }
+            }
+            if root.required-dependencies.length > 0 : VerticalLayout {
+                spacing: 5px;
+                SectionTitle { title: GuiI18n.text("gui-isolation-result-dependencies"); detail: GuiI18n.text("gui-isolation-result-dependencies-detail"); }
+                for item in root.required-dependencies : BodyText { text: item; color: Theme.text-secondary; }
+            }
+        }
+    }
+
     component IsolationSurface inherits Rectangle {
         in property <string> phase;
         in property <string> summary;
@@ -1832,7 +1857,9 @@ slint::slint! {
         in property <[string]> unidentifiable;
         in property <[string]> missing;
         in property <[string]> linked-servers;
-        in property <[string]> reproducing;
+        in property <[string]> remaining-candidates;
+        in property <[string]> pinned;
+        in property <[string]> required-dependencies;
         in property <[string]> history;
         in property <bool> reduced-confidence;
         in property <bool> busy;
@@ -1893,7 +1920,7 @@ slint::slint! {
                                 HorizontalLayout {
                                     padding-left: 10px; padding-right: 10px; spacing: 9px; cross-axis-alignment: center;
                                     Toggle { checked: candidate.selected; accessible-name: candidate.name; toggled(on) => { root.toggle-pin(candidate.path, on); } }
-                                    VerticalLayout { alignment: center; horizontal-stretch: 1; BodyText { text: candidate.name; overflow: elide; } BodyText { text: candidate.path; color: Theme.text-muted; font-size: Theme.caption-size; overflow: elide; } }
+                                    VerticalLayout { alignment: center; horizontal-stretch: 1; BodyText { text: candidate.name; overflow: elide; } BodyText { text: candidate.display-path; color: Theme.text-muted; font-size: Theme.caption-size; overflow: elide; } }
                                 }
                             }
                         }
@@ -1969,7 +1996,7 @@ slint::slint! {
             spacing: 12px;
             Heading { text: GuiI18n.text("gui-isolation-ready"); font-size: Theme.section-size; }
             BodyText { text: GuiI18n.text(root.confidence == "one_minimal" ? "gui-isolation-one-minimal" : "gui-isolation-smallest"); wrap: word-wrap; }
-            ScrollView { viewport-width: self.width; VerticalLayout { alignment: start; spacing: 5px; for item in root.reproducing : BodyText { text: item; color: Theme.text-secondary; } } }
+            IsolationResultGroups { remaining-candidates: root.remaining-candidates; pinned: root.pinned; required-dependencies: root.required-dependencies; }
             IsolationHistory { items: root.history; }
             if root.reduced-confidence : BodyText { text: GuiI18n.text("gui-isolation-reduced-confidence"); color: Theme.warning; wrap: word-wrap; }
             BodyText { text: GuiI18n.text("gui-isolation-finish-snapshot"); color: Theme.text-muted; wrap: word-wrap; }
@@ -1980,7 +2007,7 @@ slint::slint! {
             spacing: 12px;
             Heading { text: GuiI18n.text("gui-isolation-finished"); font-size: Theme.section-size; }
             BodyText { text: root.summary; wrap: word-wrap; }
-            ScrollView { viewport-width: self.width; VerticalLayout { alignment: start; spacing: 5px; for item in root.reproducing : BodyText { text: item; color: Theme.text-secondary; } } }
+            IsolationResultGroups { remaining-candidates: root.remaining-candidates; pinned: root.pinned; required-dependencies: root.required-dependencies; }
             if root.reduced-confidence : BodyText { text: GuiI18n.text("gui-isolation-reduced-confidence"); color: Theme.warning; wrap: word-wrap; }
             BodyText { text: GuiI18n.text("gui-isolation-finished-detail"); color: Theme.text-muted; wrap: word-wrap; }
             ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-close"); tone: "primary"; clicked => { root.close(); } } }
@@ -3310,7 +3337,9 @@ slint::slint! {
         in-out property <[string]> isolation-unidentifiable;
         in-out property <[string]> isolation-missing;
         in-out property <[string]> isolation-linked-servers;
-        in-out property <[string]> isolation-reproducing;
+        in-out property <[string]> isolation-remaining-candidates;
+        in-out property <[string]> isolation-pinned;
+        in-out property <[string]> isolation-required-dependencies;
         in-out property <[string]> isolation-history;
         in-out property <string> isolation-host-kind;
         in-out property <string> isolation-host-id;
@@ -4216,7 +4245,7 @@ slint::slint! {
                                 summary: root.isolation-summary; confidence: root.isolation-confidence; round: root.isolation-round; granularity: root.isolation-granularity;
                                 candidates: root.isolation-candidates; enabled-items: root.isolation-enabled; disabled-items: root.isolation-disabled;
                                 unrecorded: root.isolation-unrecorded; unidentifiable: root.isolation-unidentifiable; missing: root.isolation-missing;
-                                linked-servers: root.isolation-linked-servers; reproducing: root.isolation-reproducing; history: root.isolation-history;
+                                linked-servers: root.isolation-linked-servers; remaining-candidates: root.isolation-remaining-candidates; pinned: root.isolation-pinned; required-dependencies: root.isolation-required-dependencies; history: root.isolation-history;
                                 reduced-confidence: root.isolation-reduced-confidence; query <=> root.isolation-query;
                                 accept-unrecorded <=> root.isolation-accept-unrecorded; accept-missing <=> root.isolation-accept-missing; error: root.modal-error;
                                 begin => { root.open-isolation("client", root.selected-instance-id); }
@@ -4461,7 +4490,7 @@ slint::slint! {
                                 summary: root.isolation-summary; confidence: root.isolation-confidence; round: root.isolation-round; granularity: root.isolation-granularity;
                                 candidates: root.isolation-candidates; enabled-items: root.isolation-enabled; disabled-items: root.isolation-disabled;
                                 unrecorded: root.isolation-unrecorded; unidentifiable: root.isolation-unidentifiable; missing: root.isolation-missing;
-                                linked-servers: root.isolation-linked-servers; reproducing: root.isolation-reproducing; history: root.isolation-history;
+                                linked-servers: root.isolation-linked-servers; remaining-candidates: root.isolation-remaining-candidates; pinned: root.isolation-pinned; required-dependencies: root.isolation-required-dependencies; history: root.isolation-history;
                                 reduced-confidence: root.isolation-reduced-confidence; query <=> root.isolation-query;
                                 accept-unrecorded <=> root.isolation-accept-unrecorded; accept-missing <=> root.isolation-accept-missing; error: root.modal-error;
                                 begin => { root.open-isolation("server", root.selected-server-id); }

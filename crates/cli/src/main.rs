@@ -604,7 +604,7 @@ enum IsolateCommand {
         #[command(flatten)]
         host: HostArgs,
     },
-    /// Keep the narrowed reproducing configuration and retain the safety snapshot.
+    /// Keep the smallest tested configuration and retain the safety snapshot.
     Finish {
         #[command(flatten)]
         host: HostArgs,
@@ -3909,16 +3909,26 @@ fn run_mod_isolate(app: &App, command: &IsolateCommand, json: bool) -> anyhow::R
             } else {
                 outln!("Isolation finished after {} rounds.", report.rounds);
                 outln!("Confidence: {}", report.confidence.as_str());
-                for candidate in &report.reproducing {
-                    outln!(
-                        "reproduces: {} ({})",
-                        candidate.name,
-                        candidate.root.display()
-                    );
-                    for dependency in &candidate.closure {
-                        if dependency != &candidate.root {
-                            outln!("  requires: {}", dependency.display());
-                        }
+                outln!("Remaining testable candidates:");
+                for candidate in &report.remaining_candidates {
+                    outln!("  {} ({})", candidate.name, candidate.root.display());
+                }
+                if !report.pinned.is_empty() {
+                    outln!("Pinned throughout, not tested for removal:");
+                    for path in &report.pinned {
+                        outln!("  {}", path.display());
+                    }
+                }
+                if !report.pinned_dependencies.is_empty() {
+                    outln!("Required by pinned mods, not tested for removal:");
+                    for path in &report.pinned_dependencies {
+                        outln!("  {}", path.display());
+                    }
+                }
+                if !report.required_dependencies.is_empty() {
+                    outln!("Required by the remaining candidates:");
+                    for path in &report.required_dependencies {
+                        outln!("  {}", path.display());
                     }
                 }
                 if report.reduced_confidence {
