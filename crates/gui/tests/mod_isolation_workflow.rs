@@ -66,12 +66,16 @@ fn setup_requires_each_reduced_confidence_acknowledgement() {
             selected: true,
         },
     ])));
-    ui.set_isolation_unrecorded(strings(&["mods/a.jar"]));
+    ui.set_isolation_unrecorded(strings(&["mods/unrecorded.jar"]));
+    ui.set_isolation_unidentifiable(strings(&["mods/unidentified.jar"]));
     ui.set_isolation_missing(strings(&["mods/b.jar: required-library"]));
     settle(&ui);
 
     assert!(visible(&ui, "A"));
     assert!(visible(&ui, "mods/b.jar"));
+    assert!(visible(&ui, "mods/unrecorded.jar"));
+    assert!(visible(&ui, "mods/unidentified.jar"));
+    assert!(visible(&ui, &lookup("gui-isolation-unrecorded-detail")));
     assert!(visible(&ui, &lookup("gui-isolation-accept-unrecorded")));
     assert!(visible(&ui, &lookup("gui-isolation-accept-missing")));
     assert!(

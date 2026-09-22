@@ -241,10 +241,6 @@ pub enum Command {
         accept_unrecorded: bool,
         accept_missing: bool,
     },
-    ResumeIsolation {
-        host: InstalledHost,
-        generation: u64,
-    },
     AnswerIsolation {
         host: InstalledHost,
         generation: u64,
@@ -2394,13 +2390,6 @@ fn run_worker(
                     },
                 );
             }
-            Command::ResumeIsolation { host, generation } => match app.resume_isolation(host) {
-                Ok(_) => {
-                    send_isolation_state(&app, host, generation, true, &events);
-                    send_host_mods(&app, host, &events, &refreshed_mods, false);
-                }
-                Err(error) => send_modal_error(&events, &error),
-            },
             Command::AnswerIsolation {
                 host,
                 generation,

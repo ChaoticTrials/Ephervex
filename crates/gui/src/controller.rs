@@ -2281,16 +2281,6 @@ fn register_isolation_actions(
 
     let sender = commands.clone();
     let state = Rc::clone(flow);
-    ui.on_resume_isolation(move |kind, id| {
-        let Some(host) = backend::parse_mod_host(&kind, &id) else {
-            return;
-        };
-        let generation = state.borrow_mut().begin(host);
-        send(&sender, Command::ResumeIsolation { host, generation });
-    });
-
-    let sender = commands.clone();
-    let state = Rc::clone(flow);
     ui.on_answer_isolation(move |kind, id, answer| {
         let Some(host) = backend::parse_mod_host(&kind, &id) else {
             return;

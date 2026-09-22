@@ -1822,7 +1822,6 @@ slint::slint! {
         callback toggle-pin(string, bool);
         callback begin();
         callback start-session(bool, bool);
-        callback resume();
         callback answer(string);
         callback undo();
         callback finish();
@@ -1899,8 +1898,11 @@ slint::slint! {
                             for item in root.missing : BodyText { text: item; color: Theme.text-secondary; font-size: Theme.caption-size; wrap: word-wrap; }
                             if root.missing.length > 0 : LabeledToggle { label: GuiI18n.text("gui-isolation-accept-missing"); width: 100%; checked <=> root.accept-missing; }
                             if root.unrecorded.length > 0 : BodyText { text: GuiI18n.count("gui-isolation-unrecorded", root.unrecorded.length); color: Theme.warning; wrap: word-wrap; }
+                            for item in root.unrecorded : BodyText { text: item; color: Theme.text-secondary; font-size: Theme.caption-size; wrap: word-wrap; }
+                            if root.unrecorded.length > 0 : BodyText { text: GuiI18n.text("gui-isolation-unrecorded-detail"); color: Theme.text-secondary; wrap: word-wrap; }
                             if root.unrecorded.length > 0 : LabeledToggle { label: GuiI18n.text("gui-isolation-accept-unrecorded"); width: 100%; checked <=> root.accept-unrecorded; }
                             if root.unidentifiable.length > 0 : BodyText { text: GuiI18n.count("gui-isolation-unidentifiable", root.unidentifiable.length); color: Theme.warning; wrap: word-wrap; }
+                            for item in root.unidentifiable : BodyText { text: item; color: Theme.text-secondary; font-size: Theme.caption-size; wrap: word-wrap; }
                             if root.linked-servers.length > 0 : BodyText { text: GuiI18n.count("gui-isolation-linked-servers", root.linked-servers.length); color: Theme.text-secondary; wrap: word-wrap; }
                         }
                     }
@@ -1920,11 +1922,7 @@ slint::slint! {
         }
         if root.phase == "round" : VerticalLayout {
             spacing: 10px;
-            HorizontalLayout {
-                spacing: 10px;
-                VerticalLayout { horizontal-stretch: 1; Heading { text: GuiI18n.value("gui-isolation-round", root.round); font-size: Theme.section-size; } BodyText { text: GuiI18n.value("gui-isolation-granularity", root.granularity); color: Theme.text-muted; } }
-                VerticalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-isolation-reapply"); clicked => { root.resume(); } } }
-            }
+            VerticalLayout { Heading { text: GuiI18n.value("gui-isolation-round", root.round); font-size: Theme.section-size; } BodyText { text: GuiI18n.value("gui-isolation-granularity", root.granularity); color: Theme.text-muted; } }
             BodyText { text: GuiI18n.text("gui-isolation-test-instruction"); color: Theme.warning; wrap: word-wrap; }
             HorizontalLayout {
                 spacing: 10px;
@@ -3847,7 +3845,6 @@ slint::slint! {
         callback filter-isolation-candidates(string);
         callback toggle-isolation-pin(string, bool);
         callback start-isolation(string, string, bool, bool);
-        callback resume-isolation(string, string);
         callback answer-isolation(string, string, string);
         callback undo-isolation(string, string);
         callback finish-isolation(string, string);
@@ -4197,7 +4194,6 @@ slint::slint! {
                                 filter(query) => { root.filter-isolation-candidates(query); }
                                 toggle-pin(path, selected) => { root.toggle-isolation-pin(path, selected); }
                                 start-session(accept-unrecorded, accept-missing) => { root.start-isolation("client", root.selected-instance-id, accept-unrecorded, accept-missing); }
-                                resume => { root.resume-isolation("client", root.selected-instance-id); }
                                 answer(answer) => { root.answer-isolation("client", root.selected-instance-id, answer); }
                                 undo => { root.undo-isolation("client", root.selected-instance-id); }
                                 finish => { root.finish-isolation("client", root.selected-instance-id); }
@@ -4440,7 +4436,6 @@ slint::slint! {
                                 filter(query) => { root.filter-isolation-candidates(query); }
                                 toggle-pin(path, selected) => { root.toggle-isolation-pin(path, selected); }
                                 start-session(accept-unrecorded, accept-missing) => { root.start-isolation("server", root.selected-server-id, accept-unrecorded, accept-missing); }
-                                resume => { root.resume-isolation("server", root.selected-server-id); }
                                 answer(answer) => { root.answer-isolation("server", root.selected-server-id, answer); }
                                 undo => { root.undo-isolation("server", root.selected-server-id); }
                                 finish => { root.finish-isolation("server", root.selected-server-id); }
