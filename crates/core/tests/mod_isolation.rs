@@ -649,6 +649,104 @@ fn undo_restores_the_exact_round_and_configuration() {
 }
 
 #[test]
+fn a_plan_after_a_snapshot_restore_reads_the_restored_mods() {
+    let fixture = Fixture::new();
+    let app = fixture.app();
+    let cancel = CancellationToken::new();
+    let snapshot = app
+        .create_snapshot(
+            fixture.host,
+            "Everything enabled",
+            ephervex_core::SnapshotOrigin::Manual,
+            &cancel,
+        )
+        .unwrap();
+    app.set_mods_enabled(
+        fixture.host,
+        &["a", "b", "c", "d"].map(|name| (mods(&[name])[0].clone(), false)),
+    )
+    .unwrap();
+    let narrowed = app.plan_isolation(fixture.host, &[]).unwrap();
+    assert_eq!(
+        narrowed.initially_enabled,
+        mods(&["base", "e", "pin", "shared"])
+    );
+
+    app.restore_snapshot(
+        fixture.host,
+        snapshot.id,
+        ephervex_core::SnapshotRestoreOptions {
+            safety_snapshot: false,
+        },
+        &cancel,
+    )
+    .unwrap();
+    let restored = app.plan_isolation(fixture.host, &[]).unwrap();
+    assert_eq!(
+        restored.initially_enabled,
+        mods(&["a", "b", "base", "c", "d", "e", "pin", "shared"])
+    );
+}
+
+#[test]
+fn a_plan_changes_exactly_when_the_mod_state_it_describes_changes() {
+    let fixture = Fixture::new();
+    let app = fixture.app();
+    let cancel = CancellationToken::new();
+    let plan = || app.plan_isolation(fixture.host, &[]).unwrap();
+    let original = plan();
+    let snapshot = app
+        .create_snapshot(
+            fixture.host,
+            "Original",
+            ephervex_core::SnapshotOrigin::Manual,
+            &cancel,
+        )
+        .unwrap();
+
+    // Enabling what is already enabled changes nothing on disk.
+    app.set_mods_enabled(fixture.host, &[(mods(&["c"])[0].clone(), true)])
+        .unwrap();
+    assert_eq!(plan(), original);
+    assert!(
+        app.set_mods_enabled(fixture.host, &[(mods(&["gone"])[0].clone(), false)])
+            .is_err()
+    );
+    assert_eq!(plan(), original, "a refused change is not a change");
+
+    app.set_mods_enabled(fixture.host, &[(mods(&["c"])[0].clone(), false)])
+        .unwrap();
+    let disabled = plan();
+    assert_ne!(disabled, original);
+    app.set_mods_enabled(fixture.host, &[(mods(&["c"])[0].clone(), true)])
+        .unwrap();
+    assert_eq!(plan(), original);
+
+    std::fs::remove_file(fixture.root.join("minecraft/mods/d.jar")).unwrap();
+    assert_ne!(plan(), original);
+    app.restore_snapshot(
+        fixture.host,
+        snapshot.id,
+        ephervex_core::SnapshotRestoreOptions {
+            safety_snapshot: false,
+        },
+        &cancel,
+    )
+    .unwrap();
+    assert_eq!(plan(), original);
+
+    fixture.recipe(|recipe| {
+        recipe["files"][2]["relations"] =
+            json!([{"kind":"required","target":{"project":{"project_id":"d"}}}]);
+    });
+    assert_ne!(
+        fixture.app().plan_isolation(fixture.host, &[]).unwrap(),
+        original,
+        "dependency metadata is part of what a plan describes"
+    );
+}
+
+#[test]
 fn cancel_restores_the_exact_pre_isolation_mod_state_through_the_snapshot() {
     let fixture = Fixture::new();
     std::fs::rename(

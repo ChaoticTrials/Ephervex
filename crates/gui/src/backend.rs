@@ -15,18 +15,18 @@ use ephervex_core::live_diagnostics::TailedLine;
 use ephervex_core::{
     App, AuthEvent, AuthObserver, CancellationToken, ClientFolder, ClientModOutcome, ClientModPlan,
     CoreError, CoreResult, CrashReview, DeclaredProject, DiagnosticKind, DiagnosticRequest,
-    DiagnosticScope, ErrorChain, EulaStatus, ImportRequest, InstalledHost, IsolationPlan,
-    IsolationReport, IsolationRequest, IsolationSession, LaunchAndConnectObserver,
-    LaunchAndConnectOptions, LaunchEvent, LaunchObserver, LaunchOptions, LinkedModOutcome,
-    LinkedModPlan, LinkedModRequest, LinkedTargetPlan, LinkedTargetResult, LinkedTargetState,
-    LocalModOffer, LocalModPlan, LocalModReport, LoginOptions, ManagedModEntry, ManagedModSnapshot,
-    MetadataAvailability, ModInstallPlan, ModMutability, ModMutation, ModMutationPlan, ModPresence,
-    ModSearchQuery, MutationRestriction, NewClient, NewServer, OperationReporter,
-    OptionalSelection, PackAnalysis, Paths, PlannedOutcome, ProcessMonitor, ProgressSink,
-    ProviderFileIdentity, RoundAnswer, SearchOptions, ServerCommit, ServerContentSource,
-    ServerCreateOptions, ServerEvent, ServerFolder, ServerNetworkSettings, ServerObserver,
-    ServerRecord, SideRequirement, SnapshotOrigin, SnapshotRestoreOptions, SuspectReason,
-    WatchTarget,
+    DiagnosticScope, ErrorChain, EulaStatus, ImportRequest, InstalledHost, IsolationError,
+    IsolationPlan, IsolationReconciliation, IsolationReport, IsolationRequest, IsolationSession,
+    LaunchAndConnectObserver, LaunchAndConnectOptions, LaunchEvent, LaunchObserver, LaunchOptions,
+    LinkedModOutcome, LinkedModPlan, LinkedModRequest, LinkedTargetPlan, LinkedTargetResult,
+    LinkedTargetState, LocalModOffer, LocalModPlan, LocalModReport, LoginOptions, ManagedModEntry,
+    ManagedModSnapshot, MetadataAvailability, ModInstallPlan, ModMutability, ModMutation,
+    ModMutationPlan, ModPresence, ModSearchQuery, MutationRestriction, NewClient, NewServer,
+    OperationReporter, OptionalSelection, PackAnalysis, Paths, PlannedOutcome, ProcessMonitor,
+    ProgressSink, ProviderFileIdentity, RoundAnswer, SearchOptions, ServerCommit,
+    ServerContentSource, ServerCreateOptions, ServerEvent, ServerFolder, ServerNetworkSettings,
+    ServerObserver, ServerRecord, SideRequirement, SnapshotOrigin, SnapshotRestoreOptions,
+    SuspectReason, WatchTarget,
 };
 use ephervex_core::{
     ConfiguredPreferences, LanguageAvailability, LanguageEntry, MinecraftPreferencePreview,
@@ -259,6 +259,12 @@ pub enum Command {
         request: u64,
     },
     CancelIsolation {
+        host: InstalledHost,
+        generation: u64,
+        request: u64,
+    },
+    /// Tries again to give the host its session's intended mods.
+    RecoverIsolation {
         host: InstalledHost,
         generation: u64,
         request: u64,
@@ -1269,6 +1275,11 @@ pub struct IsolationData {
     pub required_dependencies: Vec<String>,
     pub history: Vec<String>,
     pub summary: String,
+    /// Why an active session cannot be answered yet: `running` or `failed`.
+    pub recovery: String,
+    pub recovery_detail: String,
+    /// The fingerprint of the plan a setup was computed from.
+    pub basis: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -1396,6 +1407,12 @@ pub enum Event {
     /// it succeeded. Sent after any state it produced.
     IsolationSettled {
         request: u64,
+    },
+    /// The plan isolation would make for the host now, as a fingerprint. A
+    /// setup planned under a different one no longer describes the host.
+    IsolationBasis {
+        host: InstalledHost,
+        basis: u64,
     },
     JavaRuntimes(Vec<JavaData>),
     Activity(ActivityData),
@@ -2291,7 +2308,14 @@ fn run_worker(
                 if let Ok(runtime) = instance_runtime_data(&app, instance) {
                     let _ = events.send(Event::InstanceRuntime(runtime));
                 }
-                send_isolation_state(&app, InstalledHost::Instance(instance), 0, false, &events);
+                send_isolation_state(
+                    &app,
+                    InstalledHost::Instance(instance),
+                    0,
+                    false,
+                    &events,
+                    &refreshed_mods,
+                );
                 refresh_enriched_mods(app.paths().clone(), &events, instance);
             }
             Command::LoadSnapshots(host) => match host_snapshots_data(&app, host) {
@@ -2355,6 +2379,10 @@ fn run_worker(
                         // the ones from before it. Forced, because a restore can
                         // bring back a mod this run has never enriched.
                         send_host_mods(&app, host, &reports, &refreshed, true);
+                        // An isolation setup was planned from the mods the
+                        // restore replaced. Reading the durable state back
+                        // retires that plan, and shows a real session as is.
+                        send_isolation_state(&app, host, 0, false, &reports, &refreshed);
                         // It replaces the host's own metadata as well, which is
                         // where a client keeps its Java and JVM overrides and a
                         // server its network settings, and `server.properties`
@@ -2428,10 +2456,18 @@ fn run_worker(
                 );
             }
             Command::OpenIsolation { host, generation } => {
-                send_isolation_state(&app, host, generation, true, &events);
+                send_isolation_state(&app, host, generation, true, &events, &refreshed_mods);
             }
             Command::LoadIsolation(host) => {
-                send_isolation_state(&app, host, 0, false, &events);
+                send_isolation_state(&app, host, 0, false, &events, &refreshed_mods);
+            }
+            Command::RecoverIsolation {
+                host,
+                generation,
+                request,
+            } => {
+                send_isolation_state(&app, host, generation, false, &events, &refreshed_mods);
+                let _ = events.send(Event::IsolationSettled { request });
             }
             Command::BeginIsolation {
                 host,
@@ -2467,7 +2503,7 @@ fn run_worker(
                             &reporter,
                             &cancel,
                         )?;
-                        send_isolation_state(&app, host, generation, true, &reports);
+                        send_isolation_state(&app, host, generation, true, &reports, &refreshed);
                         send_host_mods(&app, host, &reports, &refreshed, false);
                         Ok(OperationReport::Reported)
                     },
@@ -2481,8 +2517,27 @@ fn run_worker(
             } => {
                 match app.answer_isolation_round(host, answer) {
                     Ok(_) => {
-                        send_isolation_state(&app, host, generation, true, &events);
+                        send_isolation_state(
+                            &app,
+                            host,
+                            generation,
+                            true,
+                            &events,
+                            &refreshed_mods,
+                        );
                         send_host_mods(&app, host, &events, &refreshed_mods, false);
+                    }
+                    // The answer described mods the host no longer had, so it
+                    // is dropped and the round is reapplied to be tested again.
+                    Err(CoreError::Isolation(IsolationError::NotApplied { .. })) => {
+                        send_isolation_state(
+                            &app,
+                            host,
+                            generation,
+                            true,
+                            &events,
+                            &refreshed_mods,
+                        );
                     }
                     Err(error) => send_modal_error(&events, &error),
                 }
@@ -2495,7 +2550,14 @@ fn run_worker(
             } => {
                 match app.undo_isolation_round(host) {
                     Ok(_) => {
-                        send_isolation_state(&app, host, generation, true, &events);
+                        send_isolation_state(
+                            &app,
+                            host,
+                            generation,
+                            true,
+                            &events,
+                            &refreshed_mods,
+                        );
                         send_host_mods(&app, host, &events, &refreshed_mods, false);
                     }
                     Err(error) => send_modal_error(&events, &error),
@@ -2932,7 +2994,14 @@ fn run_worker(
                 let review = app.crash_review(host).ok().flatten();
                 let _ = events.send(Event::CrashNotice(crash_notice_data(host, review.as_ref())));
                 send_server_workspace(&app, server, &events);
-                send_isolation_state(&app, InstalledHost::Server(server), 0, false, &events);
+                send_isolation_state(
+                    &app,
+                    InstalledHost::Server(server),
+                    0,
+                    false,
+                    &events,
+                    &refreshed_mods,
+                );
             }
             Command::LoadServerMods(server) => {
                 send_host_mods(
@@ -3880,6 +3949,28 @@ const fn origin(is_override: bool) -> SettingOrigin {
 
 /// Sends one host's durable mod list, then asks a provider to decorate it.
 ///
+/// A fingerprint of a plan, compared only within this process.
+fn isolation_plan_basis(plan: &IsolationPlan) -> u64 {
+    use std::hash::{DefaultHasher, Hash as _, Hasher as _};
+    let mut hasher = DefaultHasher::new();
+    plan.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Reports the host's current isolation plan fingerprint.
+///
+/// Every path that refreshes a host's mods after changing them goes through
+/// here, so a setup planned before the change can be retired however the
+/// change was made. A refresh that changed nothing reports the same basis.
+fn send_isolation_basis(app: &App, host: InstalledHost, events: &Sender<Event>) {
+    if let Ok(plan) = app.plan_isolation(host, &[]) {
+        let _ = events.send(Event::IsolationBasis {
+            host,
+            basis: isolation_plan_basis(&plan),
+        });
+    }
+}
+
 /// Durable first and always: the list is correct without a catalog, and a
 /// server that will not start is the moment a user least wants to wait for one.
 fn send_host_mods(
@@ -3897,6 +3988,7 @@ fn send_host_mods(
                 &snapshot,
                 review.as_ref(),
             )));
+            send_isolation_basis(app, host, events);
             if claim_refresh(refreshed, host, force) {
                 refresh_enriched_host_mods(app.paths().clone(), events, host);
             }
@@ -4201,15 +4293,26 @@ fn host_snapshots_data(app: &App, host: InstalledHost) -> CoreResult<HostSnapsho
     })
 }
 
+/// Sends the host's isolation state, first making the host match an active
+/// session's intended mods.
+///
+/// Every read of an active session goes through here, so a round interrupted
+/// by a crash or an outside change is reapplied before it can be answered.
 fn send_isolation_state(
     app: &App,
     host: InstalledHost,
     generation: u64,
     open: bool,
     events: &Sender<Event>,
+    refreshed: &RefreshedHosts,
 ) {
     let data = match app.isolation_state(host) {
-        Ok(Some(session)) => isolation_session_data(&session),
+        Ok(Some(session)) => {
+            let mut data = isolation_session_data(&session);
+            (data.recovery, data.recovery_detail) =
+                reconcile_isolation(app, host, events, refreshed);
+            data
+        }
         Ok(None) if open => match app.plan_isolation(host, &[]) {
             Ok(plan) => isolation_plan_data(host, &plan),
             Err(error) => {
@@ -4228,6 +4331,31 @@ fn send_isolation_state(
         open,
         data,
     });
+}
+
+/// Reapplies an active session's round when the host's mods differ from it,
+/// and says what still blocks answering: nothing, a running host, or a failure.
+fn reconcile_isolation(
+    app: &App,
+    host: InstalledHost,
+    events: &Sender<Event>,
+    refreshed: &RefreshedHosts,
+) -> (String, String) {
+    match app.reconcile_isolation(host) {
+        Ok(IsolationReconciliation::AlreadyApplied) => (String::new(), String::new()),
+        Ok(IsolationReconciliation::Reapplied) => {
+            let _ = events.send(Event::Toast {
+                message: lookup("gui-isolation-reapplied"),
+                error: false,
+            });
+            send_host_mods(app, host, events, refreshed, false);
+            (String::new(), String::new())
+        }
+        Err(CoreError::Isolation(IsolationError::HostRunning { .. })) => {
+            ("running".to_owned(), String::new())
+        }
+        Err(error) => ("failed".to_owned(), localized_error(&error)),
+    }
 }
 
 fn inactive_isolation_data(host: InstalledHost) -> IsolationData {
@@ -4252,6 +4380,9 @@ fn inactive_isolation_data(host: InstalledHost) -> IsolationData {
         required_dependencies: Vec::new(),
         history: Vec::new(),
         summary: String::new(),
+        recovery: String::new(),
+        recovery_detail: String::new(),
+        basis: None,
     }
 }
 
@@ -4286,6 +4417,7 @@ fn isolation_plan_data(host: InstalledHost, plan: &IsolationPlan) -> IsolationDa
     });
     let mut data = inactive_isolation_data(host);
     "setup".clone_into(&mut data.phase);
+    data.basis = Some(isolation_plan_basis(plan));
     data.candidates = candidates;
     data.unrecorded = isolation_mod_list(&plan.unrecorded);
     data.unidentifiable = isolation_mod_list(&plan.unidentifiable);
@@ -4390,6 +4522,9 @@ fn isolation_session_data(session: &IsolationSession) -> IsolationData {
         } else {
             lookup("gui-isolation-ready-summary")
         },
+        recovery: String::new(),
+        recovery_detail: String::new(),
+        basis: None,
     }
 }
 
@@ -6697,6 +6832,10 @@ fn finish_linked(
             } else {
                 let _ = events.send(Event::LinkedResult(linked_result_data(&outcome)));
             }
+            send_isolation_basis(app, InstalledHost::Instance(instance), events);
+            for target in &outcome.targets {
+                send_isolation_basis(app, InstalledHost::Server(target.server), events);
+            }
             if let ClientModOutcome::Mutated(mutation) = &outcome.client {
                 let review = app
                     .crash_review(InstalledHost::Instance(instance))
@@ -7425,6 +7564,32 @@ mod tests {
         );
         assert_eq!(data.unrecorded, ["Alpha.jar", "zeta.jar"]);
         assert_eq!(data.missing, ["zeta.jar: library"]);
+    }
+
+    #[test]
+    fn a_setups_basis_follows_the_plan_it_was_computed_from() {
+        let plan = |enabled: &[&str]| IsolationPlan {
+            pinned: Vec::new(),
+            pinned_closure: Vec::new(),
+            candidates: Vec::new(),
+            available: logical(&["mods/a.jar", "mods/b.jar"]),
+            initially_enabled: logical(enabled),
+            unrecorded: Vec::new(),
+            unidentifiable: Vec::new(),
+            missing: Vec::new(),
+            linked_servers: Vec::new(),
+        };
+        let host = InstalledHost::Instance(ephervex_model::InstanceId::new());
+        let data = isolation_plan_data(host, &plan(&["mods/a.jar"]));
+        assert_eq!(
+            data.basis,
+            Some(isolation_plan_basis(&plan(&["mods/a.jar"])))
+        );
+        assert_ne!(
+            data.basis,
+            Some(isolation_plan_basis(&plan(&["mods/a.jar", "mods/b.jar"])))
+        );
+        assert_eq!(inactive_isolation_data(host).basis, None);
     }
 
     #[test]

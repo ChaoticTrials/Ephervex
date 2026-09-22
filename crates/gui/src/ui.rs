@@ -1820,6 +1820,29 @@ slint::slint! {
         }
     }
 
+    // Why the current round cannot be answered yet, with a way to try again.
+    component IsolationRecoveryNotice inherits Rectangle {
+        in property <string> recovery;
+        in property <string> detail;
+        in property <bool> busy;
+        callback retry();
+        border-radius: 7px;
+        border-width: 1px;
+        border-color: root.recovery == "failed" ? Theme.danger : Theme.warning;
+        background: Theme.surface;
+        HorizontalLayout {
+            padding: 12px;
+            spacing: 10px;
+            VerticalLayout {
+                horizontal-stretch: 1;
+                spacing: 4px;
+                BodyText { text: GuiI18n.text(root.recovery == "running" ? "gui-isolation-recovery-running" : "gui-isolation-recovery-failed"); wrap: word-wrap; }
+                if root.detail != "" : BodyText { text: root.detail; color: Theme.text-secondary; wrap: word-wrap; }
+            }
+            VerticalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-isolation-recovery-retry"); enabled: !root.busy; clicked => { root.retry(); } } }
+        }
+    }
+
     component IsolationResultGroups inherits ScrollView {
         in property <[string]> remaining-candidates;
         in property <[string]> pinned;
@@ -1863,6 +1886,8 @@ slint::slint! {
         in property <[string]> history;
         in property <bool> reduced-confidence;
         in property <bool> busy;
+        in property <string> recovery;
+        in property <string> recovery-detail;
         in-out property <string> query;
         in-out property <bool> accept-unrecorded;
         in-out property <bool> accept-missing;
@@ -1876,6 +1901,7 @@ slint::slint! {
         callback finish();
         callback cancel();
         callback discard-setup();
+        callback retry-recovery();
         callback close();
         background: Theme.background;
 
@@ -1897,16 +1923,30 @@ slint::slint! {
                 VerticalLayout {
                     padding: 14px;
                     spacing: 9px;
-                    SectionTitle { title: GuiI18n.text("gui-isolation-candidates"); detail: GuiI18n.text("gui-isolation-pinned-detail"); }
+                    SectionTitle {
+                        vertical-stretch: 0;
+                        title: GuiI18n.text("gui-isolation-candidates");
+                        detail: GuiI18n.text("gui-isolation-pinned-detail");
+                    }
                     TextField {
+                        vertical-stretch: 0;
                         text <=> root.query;
                         placeholder: GuiI18n.text("gui-isolation-search");
                         accessible-label: GuiI18n.text("gui-isolation-search");
                         input-type: InputType.search;
                         edited(value) => { root.filter(value); }
                     }
-                    if root.candidates.length == 0 : VerticalLayout { alignment: center; spacing: 8px; Heading { text: GuiI18n.text("gui-isolation-no-candidates"); horizontal-alignment: center; } BodyText { text: GuiI18n.text("gui-isolation-no-candidates-detail"); color: Theme.text-muted; horizontal-alignment: center; wrap: word-wrap; } }
+                    if root.candidates.length == 0 : Rectangle {
+                        vertical-stretch: 1;
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 8px;
+                            Heading { text: GuiI18n.text("gui-isolation-no-candidates"); horizontal-alignment: center; }
+                            BodyText { text: GuiI18n.text("gui-isolation-no-candidates-detail"); color: Theme.text-muted; horizontal-alignment: center; wrap: word-wrap; }
+                        }
+                    }
                     if root.candidates.length > 0 : ScrollView {
+                        vertical-stretch: 1;
                         viewport-width: self.width;
                         VerticalLayout {
                             alignment: start;
@@ -1972,7 +2012,8 @@ slint::slint! {
         if root.phase == "round" : VerticalLayout {
             spacing: 10px;
             VerticalLayout { Heading { text: GuiI18n.value("gui-isolation-round", root.round); font-size: Theme.section-size; } BodyText { text: GuiI18n.value("gui-isolation-granularity", root.granularity); color: Theme.text-muted; } }
-            BodyText { text: GuiI18n.text("gui-isolation-test-instruction"); color: Theme.warning; wrap: word-wrap; }
+            if root.recovery != "" : IsolationRecoveryNotice { recovery: root.recovery; detail: root.recovery-detail; busy: root.busy; retry => { root.retry-recovery(); } }
+            if root.recovery == "" : BodyText { text: GuiI18n.text("gui-isolation-test-instruction"); color: Theme.warning; wrap: word-wrap; }
             HorizontalLayout {
                 spacing: 10px;
                 IsolationFilePanel { horizontal-stretch: 1; title: GuiI18n.count("gui-isolation-enabled", root.enabled-items.length); items: root.enabled-items; tone: Theme.success; }
@@ -1982,26 +2023,28 @@ slint::slint! {
             if root.reduced-confidence : BodyText { text: GuiI18n.text("gui-isolation-reduced-confidence"); color: Theme.warning; wrap: word-wrap; }
             if root.linked-servers.length > 0 : BodyText { text: GuiI18n.text("gui-isolation-linked-unchanged"); color: Theme.text-secondary; wrap: word-wrap; }
             if root.error != "" : BodyText { text: root.error; color: Theme.danger; wrap: word-wrap; }
-            ActionRow { AppButton { text: GuiI18n.text("gui-isolation-undo"); enabled: !root.busy && root.history.length > 0; clicked => { root.undo(); } } AppButton { text: GuiI18n.text("gui-isolation-cancel"); tone: "danger"; enabled: !root.busy; clicked => { root.cancel(); } } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-isolation-issue-gone"); enabled: !root.busy; clicked => { root.answer("gone"); } } AppButton { text: GuiI18n.text("gui-isolation-issue-present"); tone: "primary"; enabled: !root.busy; clicked => { root.answer("present"); } } }
+            ActionRow { AppButton { text: GuiI18n.text("gui-isolation-undo"); enabled: !root.busy && root.recovery == "" && root.history.length > 0; clicked => { root.undo(); } } AppButton { text: GuiI18n.text("gui-isolation-cancel"); tone: "danger"; enabled: !root.busy; clicked => { root.cancel(); } } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-isolation-issue-gone"); enabled: !root.busy && root.recovery == ""; clicked => { root.answer("gone"); } } AppButton { text: GuiI18n.text("gui-isolation-issue-present"); tone: "primary"; enabled: !root.busy && root.recovery == ""; clicked => { root.answer("present"); } } }
         }
         if root.phase == "contradiction" : VerticalLayout {
             spacing: 12px;
             Heading { text: GuiI18n.text("gui-isolation-contradiction"); }
             BodyText { text: GuiI18n.text("gui-isolation-contradiction-detail"); color: Theme.danger; wrap: word-wrap; }
+            if root.recovery != "" : IsolationRecoveryNotice { recovery: root.recovery; detail: root.recovery-detail; busy: root.busy; retry => { root.retry-recovery(); } }
             IsolationHistory { items: root.history; }
             if root.error != "" : BodyText { text: root.error; color: Theme.danger; wrap: word-wrap; }
-            ActionRow { AppButton { text: GuiI18n.text("gui-isolation-cancel"); tone: "danger"; enabled: !root.busy; clicked => { root.cancel(); } } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-isolation-undo"); tone: "primary"; enabled: !root.busy; clicked => { root.undo(); } } }
+            ActionRow { AppButton { text: GuiI18n.text("gui-isolation-cancel"); tone: "danger"; enabled: !root.busy; clicked => { root.cancel(); } } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-isolation-undo"); tone: "primary"; enabled: !root.busy && root.recovery == ""; clicked => { root.undo(); } } }
         }
         if root.phase == "ready" : VerticalLayout {
             spacing: 12px;
             Heading { text: GuiI18n.text("gui-isolation-ready"); font-size: Theme.section-size; }
+            if root.recovery != "" : IsolationRecoveryNotice { recovery: root.recovery; detail: root.recovery-detail; busy: root.busy; retry => { root.retry-recovery(); } }
             BodyText { text: GuiI18n.text(root.confidence == "one_minimal" ? "gui-isolation-one-minimal" : "gui-isolation-smallest"); wrap: word-wrap; }
             IsolationResultGroups { remaining-candidates: root.remaining-candidates; pinned: root.pinned; required-dependencies: root.required-dependencies; }
             IsolationHistory { items: root.history; }
             if root.reduced-confidence : BodyText { text: GuiI18n.text("gui-isolation-reduced-confidence"); color: Theme.warning; wrap: word-wrap; }
             BodyText { text: GuiI18n.text("gui-isolation-finish-snapshot"); color: Theme.text-muted; wrap: word-wrap; }
             if root.error != "" : BodyText { text: root.error; color: Theme.danger; wrap: word-wrap; }
-            ActionRow { AppButton { text: GuiI18n.text("gui-isolation-undo"); enabled: !root.busy; clicked => { root.undo(); } } AppButton { text: GuiI18n.text("gui-isolation-cancel"); tone: "danger"; enabled: !root.busy; clicked => { root.cancel(); } } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-isolation-finish"); tone: "primary"; enabled: !root.busy; clicked => { root.finish(); } } }
+            ActionRow { AppButton { text: GuiI18n.text("gui-isolation-undo"); enabled: !root.busy && root.recovery == ""; clicked => { root.undo(); } } AppButton { text: GuiI18n.text("gui-isolation-cancel"); tone: "danger"; enabled: !root.busy; clicked => { root.cancel(); } } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-isolation-finish"); tone: "primary"; enabled: !root.busy && root.recovery == ""; clicked => { root.finish(); } } }
         }
         if root.phase == "result" : VerticalLayout {
             spacing: 12px;
@@ -3353,6 +3396,9 @@ slint::slint! {
         in-out property <string> isolation-busy-kind;
         in-out property <string> isolation-busy-id;
         in-out property <string> isolation-busy-text;
+        // Why the active session's round cannot be answered yet: "running" or "failed".
+        in-out property <string> isolation-recovery;
+        in-out property <string> isolation-recovery-detail;
         in-out property <bool> isolation-reduced-confidence: false;
         in-out property <bool> isolation-accept-unrecorded: false;
         in-out property <bool> isolation-accept-missing: false;
@@ -3905,6 +3951,7 @@ slint::slint! {
         callback finish-isolation(string, string);
         callback cancel-isolation(string, string);
         callback discard-isolation-setup(string, string);
+        callback retry-isolation-recovery(string, string);
         callback copy-text(string);
         callback add-offline-account(string);
         callback set-default-account(string);
@@ -4242,6 +4289,7 @@ slint::slint! {
                             if root.workspace-tab == "Isolation" : IsolationSurface {
                                 phase: root.isolation-host-kind == "client" && root.isolation-host-id == root.selected-instance-id ? root.isolation-phase : "none";
                                 busy: root.isolation-busy-kind == "client" && root.isolation-busy-id == root.selected-instance-id;
+                                recovery: root.isolation-recovery; recovery-detail: root.isolation-recovery-detail;
                                 summary: root.isolation-summary; confidence: root.isolation-confidence; round: root.isolation-round; granularity: root.isolation-granularity;
                                 candidates: root.isolation-candidates; enabled-items: root.isolation-enabled; disabled-items: root.isolation-disabled;
                                 unrecorded: root.isolation-unrecorded; unidentifiable: root.isolation-unidentifiable; missing: root.isolation-missing;
@@ -4257,6 +4305,7 @@ slint::slint! {
                                 finish => { root.finish-isolation("client", root.selected-instance-id); }
                                 cancel => { root.cancel-isolation("client", root.selected-instance-id); }
                                 discard-setup => { root.discard-isolation-setup("client", root.selected-instance-id); }
+                                retry-recovery => { root.retry-isolation-recovery("client", root.selected-instance-id); }
                                 close => { root.workspace-tab = "Mods"; root.isolation-phase = "none"; root.modal-error = ""; }
                             }
                             if root.workspace-tab == "Settings" : ScrollView { viewport-width: self.width; VerticalLayout { alignment: start; width: min(parent.width, 720px); spacing: 12px;
@@ -4487,6 +4536,7 @@ slint::slint! {
                             if root.workspace-tab == "Isolation" : IsolationSurface {
                                 phase: root.isolation-host-kind == "server" && root.isolation-host-id == root.selected-server-id ? root.isolation-phase : "none";
                                 busy: root.isolation-busy-kind == "server" && root.isolation-busy-id == root.selected-server-id;
+                                recovery: root.isolation-recovery; recovery-detail: root.isolation-recovery-detail;
                                 summary: root.isolation-summary; confidence: root.isolation-confidence; round: root.isolation-round; granularity: root.isolation-granularity;
                                 candidates: root.isolation-candidates; enabled-items: root.isolation-enabled; disabled-items: root.isolation-disabled;
                                 unrecorded: root.isolation-unrecorded; unidentifiable: root.isolation-unidentifiable; missing: root.isolation-missing;
@@ -4502,6 +4552,7 @@ slint::slint! {
                                 finish => { root.finish-isolation("server", root.selected-server-id); }
                                 cancel => { root.cancel-isolation("server", root.selected-server-id); }
                                 discard-setup => { root.discard-isolation-setup("server", root.selected-server-id); }
+                                retry-recovery => { root.retry-isolation-recovery("server", root.selected-server-id); }
                                 close => { root.workspace-tab = "Mods"; root.isolation-phase = "none"; root.modal-error = ""; }
                             }
                             if root.workspace-tab == "Properties" : ScrollView { VerticalLayout { alignment: start; width: min(parent.width, 1100px); spacing: 14px;

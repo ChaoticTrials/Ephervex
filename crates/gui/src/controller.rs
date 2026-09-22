@@ -1231,6 +1231,7 @@ enum IsolationMutation {
     Undo,
     Finish,
     Cancel,
+    Recover,
 }
 
 impl IsolationMutation {
@@ -1242,6 +1243,7 @@ impl IsolationMutation {
             Self::Undo => "gui-isolation-busy-undo",
             Self::Finish => "gui-isolation-busy-finish",
             Self::Cancel => "operation-canceling-isolation",
+            Self::Recover => "gui-isolation-busy-recover",
         }
     }
 
@@ -1250,7 +1252,7 @@ impl IsolationMutation {
         match self {
             Self::Start => Some("operation-starting-isolation"),
             Self::Cancel => Some("operation-canceling-isolation"),
-            Self::Answer | Self::Undo | Self::Finish => None,
+            Self::Answer | Self::Undo | Self::Finish | Self::Recover => None,
         }
     }
 }
@@ -1273,6 +1275,11 @@ struct IsolationFlowState {
     /// The one isolation change the worker has not finished. A second click
     /// is refused here, before a second command can be queued behind it.
     pending: Option<PendingIsolation>,
+    /// The session's host does not have the round's mods yet, so nothing
+    /// that depends on them may be sent.
+    unreconciled: bool,
+    /// The plan fingerprint the setup on screen was computed from.
+    setup_basis: Option<u64>,
 }
 
 impl IsolationFlowState {
@@ -1318,6 +1325,12 @@ impl IsolationFlowState {
     fn discard(&mut self) {
         self.generation = self.generation.wrapping_add(1);
         self.host = None;
+        self.forget_setup();
+    }
+
+    /// Drops the candidates and pins of a setup whose plan no longer describes the host.
+    fn forget_setup(&mut self) {
+        self.setup_basis = None;
         self.pinned.clear();
         self.candidates.clear();
         self.query.clear();
@@ -2362,7 +2375,7 @@ fn register_isolation_actions(
             return;
         };
         let mut state = state.borrow_mut();
-        if state.host != Some(host) {
+        if state.host != Some(host) || state.unreconciled {
             return;
         }
         let Some(request) =
@@ -2393,7 +2406,7 @@ fn register_isolation_actions(
             return;
         };
         let mut state = state.borrow_mut();
-        if state.host != Some(host) {
+        if state.host != Some(host) || state.unreconciled {
             return;
         }
         let Some(request) =
@@ -2419,6 +2432,9 @@ fn register_isolation_actions(
             return;
         };
         let mut state = state.borrow_mut();
+        if state.host == Some(host) && state.unreconciled {
+            return;
+        }
         let Some(request) =
             claim_isolation_change(&weak, &mut state, host, IsolationMutation::Finish)
         else {
@@ -2434,6 +2450,32 @@ fn register_isolation_actions(
             Command::FinishIsolation {
                 host,
                 generation,
+                request,
+            },
+        );
+    });
+
+    let sender = commands.clone();
+    let state = Rc::clone(flow);
+    let weak = ui.as_weak();
+    ui.on_retry_isolation_recovery(move |kind, id| {
+        let Some(host) = backend::parse_mod_host(&kind, &id) else {
+            return;
+        };
+        let mut state = state.borrow_mut();
+        if state.host != Some(host) || !state.unreconciled {
+            return;
+        }
+        let Some(request) =
+            claim_isolation_change(&weak, &mut state, host, IsolationMutation::Recover)
+        else {
+            return;
+        };
+        send(
+            &sender,
+            Command::RecoverIsolation {
+                host,
+                generation: state.generation,
                 request,
             },
         );
@@ -5260,8 +5302,14 @@ fn apply_isolation_data(
         if state.host != Some(host) {
             state.begin(host);
         }
+        state.unreconciled = !data.recovery.is_empty();
+        state.setup_basis = data.basis.filter(|_| is_setup);
         if is_setup {
             state.candidates = data.candidates;
+        } else if is_inactive {
+            // No session exists, so a setup on screen was planned from a host
+            // that has since changed, such as by a snapshot restore.
+            state.forget_setup();
         }
     }
     render_isolation_candidates(ui, &flow.borrow());
@@ -5275,7 +5323,9 @@ fn apply_isolation_data(
     ui.set_isolation_pinned(string_model(data.pinned));
     ui.set_isolation_required_dependencies(string_model(data.required_dependencies));
     ui.set_isolation_history(string_model(data.history));
-    apply_active_isolation_workflow(ui, data.active, &data.phase, &data.summary);
+    ui.set_isolation_recovery(data.recovery.clone().into());
+    ui.set_isolation_recovery_detail(data.recovery_detail.into());
+    apply_active_isolation_workflow(ui, data.active, &data.phase, &data.summary, &data.recovery);
     ui.set_isolation_host_kind(data.host_kind.into());
     ui.set_isolation_host_id(data.host.into());
     ui.set_isolation_phase(data.phase.into());
@@ -5293,10 +5343,11 @@ fn apply_isolation_data(
         ui.set_isolation_accept_missing(false);
         ui.set_isolation_query(SharedString::default());
     }
+    if is_inactive {
+        ui.set_isolation_query(SharedString::default());
+    }
     if open {
         ui.set_workspace_tab("Isolation".into());
-    } else if is_inactive && ui.get_workspace_tab() == "Isolation" {
-        ui.set_workspace_tab("Mods".into());
     }
 }
 
@@ -5349,6 +5400,27 @@ const fn isolation_host_kind(host: InstalledHost) -> &'static str {
     }
 }
 
+/// Retires a setup planned before the host's mods changed.
+///
+/// Only a setup is affected: an active session is durable and is never
+/// discarded here, and a start already sent carries the plan it was given.
+fn apply_isolation_basis(
+    ui: &AppWindow,
+    flow: &mut IsolationFlowState,
+    host: InstalledHost,
+    basis: u64,
+) {
+    let stale = flow.host == Some(host)
+        && flow.pending.is_none()
+        && flow.setup_basis.is_some_and(|planned| planned != basis);
+    let shown = ui.get_isolation_phase() == "setup"
+        && ui.get_isolation_host_kind() == isolation_host_kind(host)
+        && ui.get_isolation_host_id() == host.id().as_str();
+    if stale && shown {
+        discard_isolation_setup(ui, flow);
+    }
+}
+
 /// Returns the Isolation surface to its empty state without leaving it.
 fn discard_isolation_setup(ui: &AppWindow, state: &mut IsolationFlowState) {
     state.discard();
@@ -5379,7 +5451,13 @@ fn render_isolation_candidates(ui: &AppWindow, state: &IsolationFlowState) {
     ));
 }
 
-fn apply_active_isolation_workflow(ui: &AppWindow, active: bool, phase: &str, summary: &str) {
+fn apply_active_isolation_workflow(
+    ui: &AppWindow,
+    active: bool,
+    phase: &str,
+    summary: &str,
+    recovery: &str,
+) {
     ui.set_active_workflow_id(if active {
         "mod-isolation".into()
     } else {
@@ -5390,7 +5468,11 @@ fn apply_active_isolation_workflow(ui: &AppWindow, active: bool, phase: &str, su
     } else {
         SharedString::default()
     });
-    ui.set_active_workflow_summary(summary.into());
+    ui.set_active_workflow_summary(if recovery.is_empty() {
+        summary.into()
+    } else {
+        lookup("gui-isolation-recovery-summary").into()
+    });
     let action = |id: &'static str,
                   message: &'static str,
                   tone: &'static str,
@@ -5408,6 +5490,8 @@ fn apply_active_isolation_workflow(ui: &AppWindow, active: bool, phase: &str, su
         false,
     )];
     match phase {
+        // Until the round's mods are back, only the detailed view is offered.
+        _ if !recovery.is_empty() => {}
         "round" => {
             actions.push(action(
                 "gone",
@@ -6086,6 +6170,9 @@ fn apply_event(
             apply_isolation_stage(ui, &isolation_flow.borrow(), &activity);
             upsert_activity(&mut activities.borrow_mut(), activity);
             apply_activities(ui, &activities.borrow());
+        }
+        Event::IsolationBasis { host, basis } => {
+            apply_isolation_basis(ui, &mut isolation_flow.borrow_mut(), host, basis);
         }
         Event::IsolationSettled { request } => {
             if isolation_flow.borrow_mut().settle(request) {
@@ -7750,6 +7837,9 @@ mod tests {
             required_dependencies: Vec::new(),
             history: Vec::new(),
             summary: "Waiting for an answer.".to_owned(),
+            recovery: String::new(),
+            recovery_detail: String::new(),
+            basis: None,
         }
     }
 
@@ -7769,7 +7859,7 @@ mod tests {
     }
 
     #[test]
-    fn a_new_setup_requires_fresh_acknowledgements_and_cancel_leaves_the_surface() {
+    fn a_new_setup_requires_fresh_acknowledgements_and_an_ended_session_stays_on_the_surface() {
         let ui = test_window();
         ui.set_selected_instance_id("host".into());
         ui.set_isolation_accept_unrecorded(true);
@@ -7782,7 +7872,46 @@ mod tests {
         assert_eq!(ui.get_workspace_tab(), "Isolation");
 
         apply_isolation_data(&ui, isolation_data("host", false, "none"), false, &flow);
-        assert_eq!(ui.get_workspace_tab(), "Mods");
+        assert_eq!(ui.get_workspace_tab(), "Isolation");
+        assert_eq!(ui.get_isolation_phase(), "none");
+    }
+
+    #[test]
+    fn a_host_change_without_a_session_retires_the_setup_planned_before_it() {
+        let ui = test_window();
+        let host = ephervex_model::InstanceId::new().to_string();
+        ui.set_selected_instance_id(host.as_str().into());
+        let (sender, _commands) = std::sync::mpsc::channel();
+        let flow = Rc::new(RefCell::new(IsolationFlowState::default()));
+        register_isolation_actions(&ui, &sender, &flow);
+        let candidates = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| backend::IsolationCandidateData {
+                    path: format!("mods/{name}.jar"),
+                    display_path: format!("{name}.jar"),
+                    name: (*name).to_owned(),
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut narrowed = isolation_data(&host, false, "setup");
+        narrowed.candidates = candidates(&["e"]);
+        apply_isolation_data(&ui, narrowed, true, &flow);
+        ui.invoke_toggle_isolation_pin("mods/e.jar".into(), true);
+
+        // What the worker sends after a restore when no session exists.
+        apply_isolation_data(&ui, isolation_data(&host, false, "none"), false, &flow);
+        assert_eq!(ui.get_workspace_tab(), "Isolation");
+        assert_eq!(ui.get_isolation_phase(), "none");
+        assert!(flow.borrow().candidates.is_empty());
+        assert!(flow.borrow().pinned.is_empty());
+
+        let mut restored = isolation_data(&host, false, "setup");
+        restored.candidates = candidates(&["a", "b", "e"]);
+        apply_isolation_data(&ui, restored, true, &flow);
+        let rows = ui.get_isolation_candidates();
+        assert_eq!(rows.row_count(), 3);
+        assert!(rows.iter().all(|row| !row.selected));
     }
 
     #[test]
@@ -7844,6 +7973,78 @@ mod tests {
             ui.get_isolation_busy_text(),
             lookup("gui-isolation-busy-answer")
         );
+    }
+
+    #[test]
+    fn a_round_that_still_needs_its_mods_accepts_no_feedback_until_recovered() {
+        let ui = test_window();
+        let (sender, commands) = std::sync::mpsc::channel();
+        let flow = Rc::new(RefCell::new(IsolationFlowState::default()));
+        register_isolation_actions(&ui, &sender, &flow);
+        let host = ephervex_model::InstanceId::new().to_string();
+        ui.set_selected_instance_id(host.as_str().into());
+        let mut blocked = isolation_data(&host, true, "round");
+        blocked.recovery = "running".to_owned();
+        apply_isolation_data(&ui, blocked, false, &flow);
+
+        assert_eq!(ui.get_isolation_recovery(), "running");
+        let actions: Vec<_> = ui
+            .get_active_workflow_actions()
+            .iter()
+            .map(|action| action.id.to_string())
+            .collect();
+        assert_eq!(actions, ["details"]);
+        assert_eq!(
+            ui.get_active_workflow_summary(),
+            lookup("gui-isolation-recovery-summary")
+        );
+        ui.invoke_answer_isolation("client".into(), host.as_str().into(), "present".into());
+        ui.invoke_undo_isolation("client".into(), host.as_str().into());
+        ui.invoke_finish_isolation("client".into(), host.as_str().into());
+        assert!(
+            commands.try_recv().is_err(),
+            "no feedback against unapplied mods"
+        );
+
+        ui.invoke_retry_isolation_recovery("client".into(), host.as_str().into());
+        ui.invoke_retry_isolation_recovery("client".into(), host.as_str().into());
+        let sent: Vec<_> = commands.try_iter().collect();
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        let Command::RecoverIsolation { request, .. } = sent[0] else {
+            panic!("a retry asks the worker to reconcile: {sent:?}");
+        };
+        assert_eq!(
+            ui.get_isolation_busy_text(),
+            lookup("gui-isolation-busy-recover")
+        );
+
+        // The host was still running: the worker says so again.
+        let mut still_blocked = isolation_data(&host, true, "round");
+        still_blocked.recovery = "failed".to_owned();
+        still_blocked.recovery_detail = "The jar is missing.".to_owned();
+        apply_isolation_data(&ui, still_blocked, false, &flow);
+        assert!(flow.borrow_mut().settle(request));
+        clear_isolation_busy(&ui);
+        assert_eq!(ui.get_isolation_recovery_detail(), "The jar is missing.");
+        ui.invoke_answer_isolation("client".into(), host.as_str().into(), "present".into());
+        assert!(commands.try_recv().is_err());
+
+        // A later retry succeeds, and the round can be answered.
+        ui.invoke_retry_isolation_recovery("client".into(), host.as_str().into());
+        let Ok(Command::RecoverIsolation { request, .. }) = commands.try_recv() else {
+            panic!("a failed recovery can be retried");
+        };
+        apply_isolation_data(&ui, isolation_data(&host, true, "round"), false, &flow);
+        assert!(flow.borrow_mut().settle(request));
+        clear_isolation_busy(&ui);
+        assert_eq!(ui.get_isolation_recovery(), "");
+        ui.invoke_retry_isolation_recovery("client".into(), host.as_str().into());
+        assert!(commands.try_recv().is_err(), "nothing to recover any more");
+        ui.invoke_answer_isolation("client".into(), host.as_str().into(), "present".into());
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::AnswerIsolation { .. })
+        ));
     }
 
     #[test]
@@ -7953,6 +8154,73 @@ mod tests {
             &activity(host.id(), "operation-starting-isolation", &stage),
         );
         assert_eq!(ui.get_isolation_busy_text(), stage.as_str());
+    }
+
+    fn planned_setup(
+        ui: &AppWindow,
+        flow: &Rc<RefCell<IsolationFlowState>>,
+        basis: u64,
+    ) -> InstalledHost {
+        let id = ephervex_model::InstanceId::new();
+        ui.set_selected_instance_id(id.to_string().into());
+        ui.set_workspace_tab("Isolation".into());
+        let mut setup = isolation_data(&id.to_string(), false, "setup");
+        setup.basis = Some(basis);
+        setup.candidates = vec![backend::IsolationCandidateData {
+            path: "mods/a.jar".to_owned(),
+            display_path: "a.jar".to_owned(),
+            name: "A".to_owned(),
+        }];
+        apply_isolation_data(ui, setup, true, flow);
+        InstalledHost::Instance(id)
+    }
+
+    #[test]
+    fn a_mod_change_retires_a_setup_planned_before_it() {
+        let ui = test_window();
+        let flow = Rc::new(RefCell::new(IsolationFlowState::default()));
+        let host = planned_setup(&ui, &flow, 7);
+        flow.borrow_mut().pinned.insert(PathBuf::from("mods/a.jar"));
+
+        apply_isolation_basis(&ui, &mut flow.borrow_mut(), host, 7);
+        assert_eq!(
+            ui.get_isolation_phase(),
+            "setup",
+            "an unchanged host keeps its setup"
+        );
+        let other = InstalledHost::Instance(ephervex_model::InstanceId::new());
+        apply_isolation_basis(&ui, &mut flow.borrow_mut(), other, 8);
+        assert_eq!(
+            ui.get_isolation_phase(),
+            "setup",
+            "another host's change is not this one's"
+        );
+
+        apply_isolation_basis(&ui, &mut flow.borrow_mut(), host, 8);
+        assert_eq!(ui.get_isolation_phase(), "none");
+        assert_eq!(ui.get_workspace_tab(), "Isolation");
+        assert_eq!(ui.get_isolation_candidates().row_count(), 0);
+        assert!(flow.borrow().pinned.is_empty());
+        assert!(flow.borrow().setup_basis.is_none());
+    }
+
+    #[test]
+    fn a_mod_change_never_discards_an_active_session_or_a_start_in_flight() {
+        let ui = test_window();
+        let flow = Rc::new(RefCell::new(IsolationFlowState::default()));
+        let host = planned_setup(&ui, &flow, 7);
+        flow.borrow_mut()
+            .dispatch(host, IsolationMutation::Start)
+            .expect("a start is sent");
+        apply_isolation_basis(&ui, &mut flow.borrow_mut(), host, 8);
+        assert_eq!(ui.get_isolation_phase(), "setup");
+
+        let request = flow.borrow().pending.map(|pending| pending.request);
+        flow.borrow_mut().settle(request.unwrap_or_default());
+        apply_isolation_data(&ui, isolation_data(&host.id(), true, "round"), true, &flow);
+        apply_isolation_basis(&ui, &mut flow.borrow_mut(), host, 9);
+        assert_eq!(ui.get_isolation_phase(), "round");
+        assert!(ui.get_isolation_active());
     }
 
     #[test]

@@ -195,6 +195,76 @@ fn a_busy_isolation_change_disables_answers_and_launch_and_says_what_it_is_doing
 }
 
 #[test]
+fn a_round_awaiting_recovery_blocks_answers_and_offers_only_a_retry() {
+    let ui = window();
+    client_workspace(&ui);
+    ui.set_workspace_tab("Isolation".into());
+    ui.set_isolation_phase("round".into());
+    ui.set_isolation_history(strings(&["Round 1"]));
+    ui.set_isolation_recovery("failed".into());
+    ui.set_isolation_recovery_detail("The jar is missing.".into());
+    settle(&ui);
+
+    assert!(visible(&ui, &lookup("gui-isolation-recovery-failed")));
+    assert!(visible(&ui, "The jar is missing."));
+    assert!(!visible(&ui, &lookup("gui-isolation-test-instruction")));
+    for message in [
+        "gui-isolation-issue-gone",
+        "gui-isolation-issue-present",
+        "gui-isolation-undo",
+    ] {
+        assert!(
+            !button(&ui, message)
+                .accessible_enabled()
+                .expect("the button reports whether it is enabled"),
+            "{message} is offered before the round's mods are back"
+        );
+    }
+    assert!(
+        button(&ui, "gui-isolation-cancel")
+            .accessible_enabled()
+            .expect("the button reports whether it is enabled")
+    );
+    let retried = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&retried);
+    ui.on_retry_isolation_recovery(move |kind, id| {
+        sink.borrow_mut().push((kind.to_string(), id.to_string()));
+    });
+    button(&ui, "gui-isolation-recovery-retry").mock_single_click(PointerEventButton::Left);
+    assert_eq!(
+        retried.borrow().as_slice(),
+        &[("client".to_owned(), "host".to_owned())]
+    );
+
+    ui.set_isolation_recovery("running".into());
+    ui.set_isolation_recovery_detail("".into());
+    settle(&ui);
+    assert!(visible(&ui, &lookup("gui-isolation-recovery-running")));
+
+    ui.set_isolation_recovery("".into());
+    settle(&ui);
+    assert!(!visible(&ui, &lookup("gui-isolation-recovery-retry")));
+    assert!(visible(&ui, &lookup("gui-isolation-test-instruction")));
+    assert!(
+        button(&ui, "gui-isolation-issue-present")
+            .accessible_enabled()
+            .expect("the button reports whether it is enabled")
+    );
+}
+
+#[test]
+fn no_manual_round_restore_action_is_offered() {
+    assert!(!ephervex_i18n::has("gui-isolation-reapply"));
+    let ui = window();
+    client_workspace(&ui);
+    ui.set_workspace_tab("Isolation".into());
+    ui.set_isolation_phase("round".into());
+    settle(&ui);
+    assert!(!visible(&ui, "Restore this round's mod setup"));
+    assert!(!visible(&ui, &lookup("gui-isolation-recovery-retry")));
+}
+
+#[test]
 fn isolation_state_survives_logs_and_mods_navigation() {
     let ui = window();
     client_workspace(&ui);

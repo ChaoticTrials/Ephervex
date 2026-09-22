@@ -7,7 +7,13 @@ is active, so Ephervex captures a safety snapshot before the first round.
 ## Desktop workflow
 
 Open a client's or server's **Isolation** tab and choose **Set up isolation**.
-Select any mods that must stay enabled throughout the investigation. Ephervex also keeps everything those mods require enabled.
+Select any mods that must stay enabled throughout the investigation. Ephervex
+also keeps everything those mods require enabled. Canceling the setup returns
+to the empty Isolation tab. A setup is only valid for the mods it was planned
+from: enabling, disabling, adding, deleting, updating, or restoring mods, or
+restoring a snapshot of the host, discards a setup that has not started. Set up
+isolation again to plan from the current mods. A change that fails or leaves the
+mods as they were keeps the setup.
 
 The setup screen requires a separate acknowledgement when a required dependency
 is missing. If dependency information can be refreshed but has not been
@@ -45,6 +51,14 @@ finishing, or canceling, the Isolation tab says which step is running, and the
 answer, undo, finish, cancel, and launch controls for that host wait until it
 completes.
 
+The saved session, not the mods folder, decides what a round contains. Whenever
+the desktop shows an active session, it first checks that the host's mods match
+the round and reapplies them if they do not, for example after Ephervex closed
+in the middle of applying a round. If the host is running, or reapplying fails,
+the round cannot be answered, undone, or finished until **Try again** succeeds;
+stop the host or correct the problem first. The session and its safety snapshot
+are kept either way.
+
 ## Command-line workflow
 
 The same durable workflow is scriptable. Name exactly one host with
@@ -72,5 +86,7 @@ Pass `--json` before `mod` for structured session, round, and result output.
 
 If Ephervex or the machine stops during a session, run `status` to inspect the
 persisted round and `resume` to reapply its exact configuration before testing.
+`answer` refuses while the host's mods differ from the round, since the answer
+would describe a configuration that was not tested.
 The session lives at `.launcher/isolation.json` inside the host until finish or
 cancel succeeds.

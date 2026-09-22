@@ -22,7 +22,7 @@ const ISOLATION_FILE: &str = "isolation.json";
 /// Every enabled mod outside the pinned closure is its own candidate, including
 /// one that another candidate requires. Only mods that require each other are
 /// merged, under their lexicographically first path.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct IsolationCandidate {
     pub root: PathBuf,
     pub name: String,
@@ -30,21 +30,24 @@ pub struct IsolationCandidate {
 }
 
 /// A required dependency whose jar is unavailable.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct IsolationMissingDependency {
     pub required_by: PathBuf,
     pub dependency: String,
 }
 
 /// A linked installation that this single-host workflow does not change.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct IsolationLinkedServer {
     pub id: String,
     pub name: String,
 }
 
 /// An offline plan derived entirely from the shared dependency graph.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Two plans for one host are equal exactly when nothing the plan depends on
+/// changed, which is what lets a frontend tell that a setup has gone stale.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct IsolationPlan {
     pub pinned: Vec<PathBuf>,
     pub pinned_closure: Vec<PathBuf>,

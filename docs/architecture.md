@@ -178,7 +178,10 @@ them. Pinned mods carry their own transitive closure. Only a required cycle is
 merged, under one deterministic representative.
 Missing jars and incomplete dependency knowledge are shown before starting.
 Either condition requires an explicit acknowledgement before the desktop can
-continue, and the acknowledgement is retained in the session.
+continue, and the acknowledgement is retained in the session. A setup that has
+not started carries a fingerprint of the plan it shows. Every refresh of a
+host's mods reports the fingerprint of the plan the host would get now, and a
+different one retires the setup; an unchanged host keeps it.
 
 An active session is a compact version-1 document at
 `<host>/.launcher/isolation.json`. It records the pre-isolation snapshot, the
@@ -186,6 +189,10 @@ complete plan and search state, every answered round, and the exact intended
 current configuration. The document is published atomically before the mod
 batch, so reopening the application can show the persistent workflow state and
 resume can repair an interrupted application by applying the same batch again.
+The desktop reconciles the host with the session whenever it reads one: a
+matching host is left alone, a differing one is reapplied through resume, and a
+running host or a failed reapplication blocks round answers until a retry
+succeeds. Core refuses an answer while the host lacks the round's mods.
 
 The deterministic search tests subsets and then complements, both closed
 under required dependencies: a subset also enables the suspects its group

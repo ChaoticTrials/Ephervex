@@ -67,7 +67,13 @@ state, exact intended round, complete answered-round history, contradiction,
 and outcome. The document is atomically replaced before its intended
 configuration is applied. Resume idempotently reapplies that configuration, so
 an interruption during a batch does not make the partially changed directory
-authoritative. The version stays at 1 under ADR 0033's pre-1.0 policy, and a
+authoritative. Reconciling compares the host's mods with that configuration
+first and resumes only when they differ, so an already correct host is not
+rewritten. An answer is refused while the host does not have the round's mods,
+because it would describe a configuration that was not tested. The desktop
+reconciles whenever it reads an active session; a running host or a failed
+reapplication leaves the session untouched and blocks answers, undo, and finish
+until a retry succeeds. The version stays at 1 under ADR 0033's pre-1.0 policy, and a
 newer document is rejected.
 
 Each history entry retains the exact configuration, answer, timestamp, and
