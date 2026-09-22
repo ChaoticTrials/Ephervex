@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
+use ephervex_download::OperationReporter;
 use ephervex_model::SnapshotId;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
@@ -539,6 +540,23 @@ impl App {
         request: IsolationRequest,
         cancel: &CancellationToken,
     ) -> CoreResult<IsolationRound> {
+        self.begin_isolation_reporting(
+            host,
+            request,
+            &OperationReporter::silent("operation-starting-isolation"),
+            cancel,
+        )
+    }
+
+    /// Starts a durable session while reporting each meaningful preparation
+    /// stage to the caller's existing operation.
+    pub fn begin_isolation_reporting(
+        &self,
+        host: InstalledHost,
+        request: IsolationRequest,
+        reporter: &OperationReporter,
+        cancel: &CancellationToken,
+    ) -> CoreResult<IsolationRound> {
         self.refuse_isolation_while_running(host)?;
         let path = self.isolation_path(host)?;
         if path.exists() {
@@ -549,6 +567,7 @@ impl App {
             accept_unrecorded,
             accept_missing,
         } = request;
+        reporter.set_stage(Some("operation-stage-planning-isolation".to_owned()));
         let plan = self.plan_isolation(host, &pinned)?;
         if !accept_missing && !plan.missing.is_empty() {
             return Err(IsolationError::MissingDependencies {
@@ -562,6 +581,7 @@ impl App {
             }
             .into());
         }
+        reporter.set_stage(Some("operation-stage-snapshot-isolation".to_owned()));
         let snapshot = self.create_snapshot(
             host,
             "Before mod isolation",
@@ -609,6 +629,7 @@ impl App {
             plan,
         };
         write_session(&path, &session)?;
+        reporter.set_stage(Some("operation-stage-applying-isolation".to_owned()));
         self.apply_isolation_configuration(host, &session, &current_round.enabled)?;
         Ok(current_round)
     }

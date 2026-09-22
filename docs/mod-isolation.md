@@ -33,7 +33,10 @@ Ephervex must be stopped for the affected host before it starts, advances,
 undoes, finishes, or cancels a round. The workspace header continues to provide
 the client's launch/stop action or the server's start/stop/restart actions while
 the Isolation tab is open. Launching while a round waits for an answer remains
-available.
+available. While Ephervex is starting the session, applying or restoring a round,
+finishing, or canceling, the Isolation tab says which step is running, and the
+answer, undo, finish, cancel, and launch controls for that host wait until it
+completes.
 
 ## Command-line workflow
 

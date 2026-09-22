@@ -237,6 +237,7 @@ pub enum Command {
     BeginIsolation {
         host: InstalledHost,
         generation: u64,
+        request: u64,
         pinned: Vec<PathBuf>,
         accept_unrecorded: bool,
         accept_missing: bool,
@@ -244,19 +245,23 @@ pub enum Command {
     AnswerIsolation {
         host: InstalledHost,
         generation: u64,
+        request: u64,
         answer: RoundAnswer,
     },
     UndoIsolation {
         host: InstalledHost,
         generation: u64,
+        request: u64,
     },
     FinishIsolation {
         host: InstalledHost,
         generation: u64,
+        request: u64,
     },
     CancelIsolation {
         host: InstalledHost,
         generation: u64,
+        request: u64,
     },
     LoadModVersions {
         instance: InstanceId,
@@ -1384,6 +1389,11 @@ pub enum Event {
         open: bool,
         data: IsolationData,
     },
+    /// An isolation change the controller sent has finished, whether or not
+    /// it succeeded. Sent after any state it produced.
+    IsolationSettled {
+        request: u64,
+    },
     JavaRuntimes(Vec<JavaData>),
     Activity(ActivityData),
     Toast {
@@ -1544,6 +1554,63 @@ impl std::fmt::Debug for BackendHandle {
 /// asking again is worth it, and a user who wants it sooner has Refresh.
 type RefreshedHosts = Arc<Mutex<HashSet<String>>>;
 
+/// Hosts whose mods an asynchronous isolation start or cancel is rewriting.
+///
+/// Answers, undo, and finish run on the worker thread itself, so nothing can
+/// launch in the middle of one. Start and cancel run beside it, and a launch
+/// then would read a mods folder that is half rewritten.
+type IsolatingHosts = Arc<Mutex<HashSet<String>>>;
+
+fn isolation_key(host: InstalledHost) -> String {
+    format!("{}:{}", host.kind(), host.id())
+}
+
+/// Marks a host as being rewritten until it is dropped, including when the
+/// operation never gets to run.
+struct IsolationInFlight {
+    hosts: IsolatingHosts,
+    key: String,
+}
+
+impl IsolationInFlight {
+    fn mark(hosts: &IsolatingHosts, host: InstalledHost) -> Self {
+        let key = isolation_key(host);
+        if let Ok(mut hosts) = hosts.lock() {
+            hosts.insert(key.clone());
+        }
+        Self {
+            hosts: Arc::clone(hosts),
+            key,
+        }
+    }
+}
+
+impl Drop for IsolationInFlight {
+    fn drop(&mut self) {
+        if let Ok(mut hosts) = self.hosts.lock() {
+            hosts.remove(&self.key);
+        }
+    }
+}
+
+/// Refuses to start a host while isolation is rewriting its mods.
+fn refuse_while_isolating(
+    hosts: &IsolatingHosts,
+    host: InstalledHost,
+    events: &Sender<Event>,
+) -> bool {
+    let busy = hosts
+        .lock()
+        .is_ok_and(|hosts| hosts.contains(&isolation_key(host)));
+    if busy {
+        let _ = events.send(Event::Toast {
+            message: lookup("gui-isolation-busy-launch"),
+            error: true,
+        });
+    }
+    busy
+}
+
 pub fn spawn() -> BackendHandle {
     let (command_tx, command_rx) = mpsc::channel();
     let (event_tx, event_rx) = mpsc::channel();
@@ -1598,6 +1665,7 @@ fn run_worker(
     send_snapshot(&app, &events);
     let live_log_generation = Arc::new(AtomicU64::new(0));
     let refreshed_mods: RefreshedHosts = Arc::new(Mutex::new(HashSet::new()));
+    let isolating: IsolatingHosts = Arc::new(Mutex::new(HashSet::new()));
     // Kept between polls, because CPU is a rate rather than a reading.
     let mut process_monitor = ProcessMonitor::new();
     // A version change waiting on a release the user has to fetch, so closing
@@ -1889,6 +1957,9 @@ fn run_worker(
                 account,
                 additional,
             } => {
+                if refuse_while_isolating(&isolating, InstalledHost::Instance(instance), &events) {
+                    continue;
+                }
                 let paths = app.paths().clone();
                 let entity = app
                     .client(instance)
@@ -1904,6 +1975,11 @@ fn run_worker(
                 );
             }
             Command::LaunchAndConnect { client, server } => {
+                if refuse_while_isolating(&isolating, InstalledHost::Instance(client), &events)
+                    || refuse_while_isolating(&isolating, InstalledHost::Server(server), &events)
+                {
+                    continue;
+                }
                 let paths = app.paths().clone();
                 let entity = app
                     .client(client)
@@ -2357,6 +2433,7 @@ fn run_worker(
             Command::BeginIsolation {
                 host,
                 generation,
+                request,
                 pinned,
                 accept_unrecorded,
                 accept_missing,
@@ -2364,6 +2441,7 @@ fn run_worker(
                 let paths = app.paths().clone();
                 let reports = events.clone();
                 let refreshed = Arc::clone(&refreshed_mods);
+                let in_flight = IsolationInFlight::mark(&isolating, host);
                 spawn_async_operation(
                     paths,
                     &events,
@@ -2372,16 +2450,18 @@ fn run_worker(
                         title: "operation-starting-isolation",
                         entity: host.id(),
                         allow_cancel: true,
-                        finished: None,
+                        finished: Some(Event::IsolationSettled { request }),
                     },
-                    move |app, _reporter, cancel| async move {
-                        app.begin_isolation(
+                    move |app, reporter, cancel| async move {
+                        let _in_flight = in_flight;
+                        app.begin_isolation_reporting(
                             host,
                             IsolationRequest {
                                 pinned,
                                 accept_unrecorded,
                                 accept_missing,
                             },
+                            &reporter,
                             &cancel,
                         )?;
                         send_isolation_state(&app, host, generation, true, &reports);
@@ -2393,36 +2473,59 @@ fn run_worker(
             Command::AnswerIsolation {
                 host,
                 generation,
+                request,
                 answer,
-            } => match app.answer_isolation_round(host, answer) {
-                Ok(_) => {
-                    send_isolation_state(&app, host, generation, true, &events);
-                    send_host_mods(&app, host, &events, &refreshed_mods, false);
+            } => {
+                match app.answer_isolation_round(host, answer) {
+                    Ok(_) => {
+                        send_isolation_state(&app, host, generation, true, &events);
+                        send_host_mods(&app, host, &events, &refreshed_mods, false);
+                    }
+                    Err(error) => send_modal_error(&events, &error),
                 }
-                Err(error) => send_modal_error(&events, &error),
-            },
-            Command::UndoIsolation { host, generation } => match app.undo_isolation_round(host) {
-                Ok(_) => {
-                    send_isolation_state(&app, host, generation, true, &events);
-                    send_host_mods(&app, host, &events, &refreshed_mods, false);
+                let _ = events.send(Event::IsolationSettled { request });
+            }
+            Command::UndoIsolation {
+                host,
+                generation,
+                request,
+            } => {
+                match app.undo_isolation_round(host) {
+                    Ok(_) => {
+                        send_isolation_state(&app, host, generation, true, &events);
+                        send_host_mods(&app, host, &events, &refreshed_mods, false);
+                    }
+                    Err(error) => send_modal_error(&events, &error),
                 }
-                Err(error) => send_modal_error(&events, &error),
-            },
-            Command::FinishIsolation { host, generation } => match app.finish_isolation(host) {
-                Ok(report) => {
-                    let _ = events.send(Event::Isolation {
-                        generation,
-                        open: true,
-                        data: isolation_report_data(host, &report),
-                    });
-                    send_host_mods(&app, host, &events, &refreshed_mods, false);
+                let _ = events.send(Event::IsolationSettled { request });
+            }
+            Command::FinishIsolation {
+                host,
+                generation,
+                request,
+            } => {
+                match app.finish_isolation(host) {
+                    Ok(report) => {
+                        let _ = events.send(Event::Isolation {
+                            generation,
+                            open: true,
+                            data: isolation_report_data(host, &report),
+                        });
+                        send_host_mods(&app, host, &events, &refreshed_mods, false);
+                    }
+                    Err(error) => send_modal_error(&events, &error),
                 }
-                Err(error) => send_modal_error(&events, &error),
-            },
-            Command::CancelIsolation { host, generation } => {
+                let _ = events.send(Event::IsolationSettled { request });
+            }
+            Command::CancelIsolation {
+                host,
+                generation,
+                request,
+            } => {
                 let paths = app.paths().clone();
                 let reports = events.clone();
                 let refreshed = Arc::clone(&refreshed_mods);
+                let in_flight = IsolationInFlight::mark(&isolating, host);
                 spawn_async_operation(
                     paths,
                     &events,
@@ -2431,9 +2534,10 @@ fn run_worker(
                         title: "operation-canceling-isolation",
                         entity: host.id(),
                         allow_cancel: true,
-                        finished: None,
+                        finished: Some(Event::IsolationSettled { request }),
                     },
                     move |app, _reporter, cancel| async move {
+                        let _in_flight = in_flight;
                         app.cancel_isolation(host, &cancel)?;
                         let _ = reports.send(Event::Isolation {
                             generation,
@@ -2769,6 +2873,9 @@ fn run_worker(
                 }
             }
             Command::StartServer(server) => {
+                if refuse_while_isolating(&isolating, InstalledHost::Server(server), &events) {
+                    continue;
+                }
                 let paths = app.paths().clone();
                 let entity = app
                     .server(server)
@@ -2785,6 +2892,9 @@ fn run_worker(
                 send_snapshot(&app, &events);
             }
             Command::RestartServer(server) => {
+                if refuse_while_isolating(&isolating, InstalledHost::Server(server), &events) {
+                    continue;
+                }
                 report_async_control(
                     &runtime,
                     &events,
@@ -7471,5 +7581,25 @@ mod tests {
                 .any(|event| matches!(event, Event::Snapshot(_))),
             "nothing refreshes the view, so the chips keep showing the stored catalog"
         );
+    }
+
+    #[test]
+    fn a_host_cannot_start_while_isolation_rewrites_its_mods() {
+        let hosts: IsolatingHosts = Arc::new(Mutex::new(HashSet::new()));
+        let (events, received) = mpsc::channel();
+        let host = InstalledHost::Instance(ephervex_model::InstanceId::new());
+        let other = InstalledHost::Server(ephervex_model::ServerId::new());
+
+        let in_flight = IsolationInFlight::mark(&hosts, host);
+        assert!(refuse_while_isolating(&hosts, host, &events));
+        assert!(matches!(
+            received.try_recv(),
+            Ok(Event::Toast { error: true, .. })
+        ));
+        assert!(!refuse_while_isolating(&hosts, other, &events));
+
+        drop(in_flight);
+        assert!(!refuse_while_isolating(&hosts, host, &events));
+        assert!(received.try_recv().is_err());
     }
 }

@@ -1223,6 +1223,45 @@ struct PreparedImportSubmission {
     skip_blocked: Vec<ProviderFileIdentity>,
 }
 
+/// A change to a host's mods that isolation has asked the worker for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IsolationMutation {
+    Start,
+    Answer,
+    Undo,
+    Finish,
+    Cancel,
+}
+
+impl IsolationMutation {
+    /// What the Isolation surface says while the change runs.
+    const fn busy_message(self) -> &'static str {
+        match self {
+            Self::Start => "operation-starting-isolation",
+            Self::Answer => "gui-isolation-busy-answer",
+            Self::Undo => "gui-isolation-busy-undo",
+            Self::Finish => "gui-isolation-busy-finish",
+            Self::Cancel => "operation-canceling-isolation",
+        }
+    }
+
+    /// The reported operation whose current stage replaces the fixed message.
+    const fn operation(self) -> Option<&'static str> {
+        match self {
+            Self::Start => Some("operation-starting-isolation"),
+            Self::Cancel => Some("operation-canceling-isolation"),
+            Self::Answer | Self::Undo | Self::Finish => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PendingIsolation {
+    request: u64,
+    host: InstalledHost,
+    mutation: IsolationMutation,
+}
+
 #[derive(Debug, Default)]
 struct IsolationFlowState {
     generation: u64,
@@ -1230,6 +1269,10 @@ struct IsolationFlowState {
     pinned: HashSet<PathBuf>,
     candidates: Vec<backend::IsolationCandidateData>,
     query: String,
+    last_request: u64,
+    /// The one isolation change the worker has not finished. A second click
+    /// is refused here, before a second command can be queued behind it.
+    pending: Option<PendingIsolation>,
 }
 
 impl IsolationFlowState {
@@ -1244,6 +1287,31 @@ impl IsolationFlowState {
 
     fn accepts(&self, generation: u64) -> bool {
         generation == 0 || generation == self.generation
+    }
+
+    /// Claims the single in-flight isolation change, or refuses while one is pending.
+    fn dispatch(&mut self, host: InstalledHost, mutation: IsolationMutation) -> Option<u64> {
+        if self.pending.is_some() {
+            return None;
+        }
+        self.last_request = self.last_request.wrapping_add(1);
+        self.pending = Some(PendingIsolation {
+            request: self.last_request,
+            host,
+            mutation,
+        });
+        Some(self.last_request)
+    }
+
+    /// Releases the in-flight change the worker reports finished.
+    fn settle(&mut self, request: u64) -> bool {
+        let settled = self
+            .pending
+            .is_some_and(|pending| pending.request == request);
+        if settled {
+            self.pending = None;
+        }
+        settled
     }
 
     /// Forgets a setup that never started, so a late plan cannot bring it back.
@@ -2259,19 +2327,26 @@ fn register_isolation_actions(
 
     let sender = commands.clone();
     let state = Rc::clone(flow);
+    let weak = ui.as_weak();
     ui.on_start_isolation(move |kind, id, accept_unrecorded, accept_missing| {
         let Some(host) = backend::parse_mod_host(&kind, &id) else {
             return;
         };
-        let state = state.borrow();
+        let mut state = state.borrow_mut();
         if state.host != Some(host) {
             return;
         }
+        let Some(request) =
+            claim_isolation_change(&weak, &mut state, host, IsolationMutation::Start)
+        else {
+            return;
+        };
         send(
             &sender,
             Command::BeginIsolation {
                 host,
                 generation: state.generation,
+                request,
                 pinned: state.pinned.iter().cloned().collect(),
                 accept_unrecorded,
                 accept_missing,
@@ -2281,19 +2356,26 @@ fn register_isolation_actions(
 
     let sender = commands.clone();
     let state = Rc::clone(flow);
+    let weak = ui.as_weak();
     ui.on_answer_isolation(move |kind, id, answer| {
         let Some(host) = backend::parse_mod_host(&kind, &id) else {
             return;
         };
-        let state = state.borrow();
+        let mut state = state.borrow_mut();
         if state.host != Some(host) {
             return;
         }
+        let Some(request) =
+            claim_isolation_change(&weak, &mut state, host, IsolationMutation::Answer)
+        else {
+            return;
+        };
         send(
             &sender,
             Command::AnswerIsolation {
                 host,
                 generation: state.generation,
+                request,
                 answer: if answer == "present" {
                     ephervex_core::RoundAnswer::Reproduced
                 } else {
@@ -2305,37 +2387,56 @@ fn register_isolation_actions(
 
     let sender = commands.clone();
     let state = Rc::clone(flow);
+    let weak = ui.as_weak();
     ui.on_undo_isolation(move |kind, id| {
         let Some(host) = backend::parse_mod_host(&kind, &id) else {
             return;
         };
-        let state = state.borrow();
-        if state.host == Some(host) {
-            send(
-                &sender,
-                Command::UndoIsolation {
-                    host,
-                    generation: state.generation,
-                },
-            );
+        let mut state = state.borrow_mut();
+        if state.host != Some(host) {
+            return;
         }
+        let Some(request) =
+            claim_isolation_change(&weak, &mut state, host, IsolationMutation::Undo)
+        else {
+            return;
+        };
+        send(
+            &sender,
+            Command::UndoIsolation {
+                host,
+                generation: state.generation,
+                request,
+            },
+        );
     });
 
     let sender = commands.clone();
     let state = Rc::clone(flow);
+    let weak = ui.as_weak();
     ui.on_finish_isolation(move |kind, id| {
         let Some(host) = backend::parse_mod_host(&kind, &id) else {
             return;
         };
-        let generation = {
-            let mut state = state.borrow_mut();
-            if state.host == Some(host) {
-                state.generation
-            } else {
-                state.begin(host)
-            }
+        let mut state = state.borrow_mut();
+        let Some(request) =
+            claim_isolation_change(&weak, &mut state, host, IsolationMutation::Finish)
+        else {
+            return;
         };
-        send(&sender, Command::FinishIsolation { host, generation });
+        let generation = if state.host == Some(host) {
+            state.generation
+        } else {
+            state.begin(host)
+        };
+        send(
+            &sender,
+            Command::FinishIsolation {
+                host,
+                generation,
+                request,
+            },
+        );
     });
 
     let state = Rc::clone(flow);
@@ -2344,26 +2445,40 @@ fn register_isolation_actions(
         let (Some(ui), Some(host)) = (weak.upgrade(), backend::parse_mod_host(&kind, &id)) else {
             return;
         };
-        if state.borrow().host == Some(host) {
+        // A start in flight would be orphaned: its session would begin with
+        // nothing left on screen to show it.
+        let current = state.borrow().host == Some(host) && state.borrow().pending.is_none();
+        if current {
             discard_isolation_setup(&ui, &mut state.borrow_mut());
         }
     });
 
     let sender = commands.clone();
     let state = Rc::clone(flow);
+    let weak = ui.as_weak();
     ui.on_cancel_isolation(move |kind, id| {
         let Some(host) = backend::parse_mod_host(&kind, &id) else {
             return;
         };
-        let generation = {
-            let mut state = state.borrow_mut();
-            if state.host == Some(host) {
-                state.generation
-            } else {
-                state.begin(host)
-            }
+        let mut state = state.borrow_mut();
+        let Some(request) =
+            claim_isolation_change(&weak, &mut state, host, IsolationMutation::Cancel)
+        else {
+            return;
         };
-        send(&sender, Command::CancelIsolation { host, generation });
+        let generation = if state.host == Some(host) {
+            state.generation
+        } else {
+            state.begin(host)
+        };
+        send(
+            &sender,
+            Command::CancelIsolation {
+                host,
+                generation,
+                request,
+            },
+        );
     });
 }
 
@@ -5183,6 +5298,55 @@ fn apply_isolation_data(
     }
 }
 
+/// Claims the in-flight isolation change and shows it on that host's surfaces
+/// before the command is sent, so a second click finds it already taken.
+fn claim_isolation_change(
+    ui: &slint::Weak<AppWindow>,
+    state: &mut IsolationFlowState,
+    host: InstalledHost,
+    mutation: IsolationMutation,
+) -> Option<u64> {
+    let request = state.dispatch(host, mutation)?;
+    if let Some(ui) = ui.upgrade() {
+        ui.set_isolation_busy_kind(isolation_host_kind(host).into());
+        ui.set_isolation_busy_id(host.id().into());
+        ui.set_isolation_busy_text(lookup(mutation.busy_message()).into());
+    }
+    Some(request)
+}
+
+fn clear_isolation_busy(ui: &AppWindow) {
+    ui.set_isolation_busy_kind(SharedString::default());
+    ui.set_isolation_busy_id(SharedString::default());
+    ui.set_isolation_busy_text(SharedString::default());
+}
+
+/// Shows the pending change's reported stage, such as the safety snapshot
+/// being taken, instead of its fixed description.
+fn apply_isolation_stage(ui: &AppWindow, state: &IsolationFlowState, activity: &ActivityData) {
+    let Some(pending) = state.pending else {
+        return;
+    };
+    let Some(operation) = pending.mutation.operation() else {
+        return;
+    };
+    let running = matches!(activity.item.status_kind, "queued" | "running");
+    if running
+        && activity.entity == pending.host.id()
+        && activity.item.title == lookup(operation)
+        && !activity.item.detail.is_empty()
+    {
+        ui.set_isolation_busy_text(activity.item.detail.clone().into());
+    }
+}
+
+const fn isolation_host_kind(host: InstalledHost) -> &'static str {
+    match host {
+        InstalledHost::Instance(_) => "client",
+        InstalledHost::Server(_) => "server",
+    }
+}
+
 /// Returns the Isolation surface to its empty state without leaving it.
 fn discard_isolation_setup(ui: &AppWindow, state: &mut IsolationFlowState) {
     state.discard();
@@ -5916,8 +6080,14 @@ fn apply_event(
         }
         Event::JavaRuntimes(rows) => ui.set_java_runtimes(model(java_rows(rows))),
         Event::Activity(activity) => {
+            apply_isolation_stage(ui, &isolation_flow.borrow(), &activity);
             upsert_activity(&mut activities.borrow_mut(), activity);
             apply_activities(ui, &activities.borrow());
+        }
+        Event::IsolationSettled { request } => {
+            if isolation_flow.borrow_mut().settle(request) {
+                clear_isolation_busy(ui);
+            }
         }
         Event::Toast { message, error } => {
             ui.invoke_present_toast(message.into(), error);
@@ -7639,6 +7809,144 @@ mod tests {
             commands.try_recv().is_err(),
             "a discarded setup cannot start"
         );
+    }
+
+    fn active_round(ui: &AppWindow, flow: &Rc<RefCell<IsolationFlowState>>) -> String {
+        let host = ephervex_model::InstanceId::new().to_string();
+        ui.set_selected_instance_id(host.as_str().into());
+        apply_isolation_data(ui, isolation_data(&host, true, "round"), false, flow);
+        host
+    }
+
+    #[test]
+    fn a_repeated_answer_cannot_submit_two_answers_for_one_round() {
+        let ui = test_window();
+        let (sender, commands) = std::sync::mpsc::channel();
+        let flow = Rc::new(RefCell::new(IsolationFlowState::default()));
+        register_isolation_actions(&ui, &sender, &flow);
+        let host = active_round(&ui, &flow);
+
+        ui.invoke_answer_isolation("client".into(), host.as_str().into(), "present".into());
+        ui.invoke_answer_isolation("client".into(), host.as_str().into(), "present".into());
+        ui.invoke_answer_isolation("client".into(), host.as_str().into(), "gone".into());
+
+        let sent: Vec<_> = commands.try_iter().collect();
+        assert_eq!(sent.len(), 1, "one round answered once: {sent:?}");
+        assert!(matches!(sent[0], Command::AnswerIsolation { .. }));
+        assert_eq!(ui.get_isolation_busy_id(), host.as_str());
+        assert_eq!(
+            ui.get_isolation_busy_text(),
+            lookup("gui-isolation-busy-answer")
+        );
+    }
+
+    #[test]
+    fn a_pending_isolation_change_refuses_every_other_change_until_it_settles() {
+        let ui = test_window();
+        let (sender, commands) = std::sync::mpsc::channel();
+        let flow = Rc::new(RefCell::new(IsolationFlowState::default()));
+        register_isolation_actions(&ui, &sender, &flow);
+        let host = active_round(&ui, &flow);
+
+        ui.invoke_undo_isolation("client".into(), host.as_str().into());
+        ui.invoke_undo_isolation("client".into(), host.as_str().into());
+        ui.invoke_finish_isolation("client".into(), host.as_str().into());
+        ui.invoke_cancel_isolation("client".into(), host.as_str().into());
+        ui.invoke_answer_isolation("client".into(), host.as_str().into(), "gone".into());
+        let sent: Vec<_> = commands.try_iter().collect();
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        let Command::UndoIsolation { request, .. } = sent[0] else {
+            panic!("the first change is the one sent: {sent:?}");
+        };
+
+        assert!(!flow.borrow_mut().settle(request.wrapping_add(1)));
+        ui.invoke_cancel_isolation("client".into(), host.as_str().into());
+        assert!(
+            commands.try_recv().is_err(),
+            "an unrelated settle releases nothing"
+        );
+
+        assert!(flow.borrow_mut().settle(request));
+        clear_isolation_busy(&ui);
+        assert_eq!(ui.get_isolation_busy_id(), "");
+        ui.invoke_cancel_isolation("client".into(), host.as_str().into());
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::CancelIsolation { .. })
+        ));
+    }
+
+    #[test]
+    fn a_setup_cannot_be_discarded_while_its_start_is_pending() {
+        let ui = test_window();
+        let (sender, commands) = std::sync::mpsc::channel();
+        let flow = Rc::new(RefCell::new(IsolationFlowState::default()));
+        register_isolation_actions(&ui, &sender, &flow);
+        let host = ephervex_model::InstanceId::new().to_string();
+        ui.set_selected_instance_id(host.as_str().into());
+        apply_isolation_data(&ui, isolation_data(&host, false, "setup"), true, &flow);
+        let generation = flow.borrow().generation;
+
+        ui.invoke_start_isolation("client".into(), host.as_str().into(), false, false);
+        ui.invoke_start_isolation("client".into(), host.as_str().into(), false, false);
+        ui.invoke_discard_isolation_setup("client".into(), host.as_str().into());
+
+        assert_eq!(commands.try_iter().count(), 1);
+        assert!(
+            flow.borrow().accepts(generation),
+            "the start's result stays wanted"
+        );
+        assert_eq!(ui.get_isolation_phase(), "setup");
+        assert_eq!(
+            ui.get_isolation_busy_text(),
+            lookup("operation-starting-isolation")
+        );
+    }
+
+    #[test]
+    fn a_pending_start_shows_the_stage_its_operation_reports() {
+        let ui = test_window();
+        let host = InstalledHost::Instance(ephervex_model::InstanceId::new());
+        let mut flow = IsolationFlowState::default();
+        flow.dispatch(host, IsolationMutation::Start);
+        let activity = |entity: String, title: &str, detail: &str| ActivityData {
+            item: crate::presentation::ActivityPresentation {
+                id: "operation".to_owned(),
+                title: lookup(title),
+                status: String::new(),
+                status_kind: "running",
+                detail: detail.to_owned(),
+                progress: 0.0,
+                indeterminate: true,
+                cancellable: true,
+                failed: false,
+            },
+            entity,
+            time: String::new(),
+        };
+
+        apply_isolation_stage(
+            &ui,
+            &flow,
+            &activity(host.id(), "operation-canceling-isolation", "Elsewhere"),
+        );
+        apply_isolation_stage(
+            &ui,
+            &flow,
+            &activity(
+                "other".to_owned(),
+                "operation-starting-isolation",
+                "Elsewhere",
+            ),
+        );
+        assert_eq!(ui.get_isolation_busy_text(), "");
+        let stage = lookup("operation-stage-snapshot-isolation");
+        apply_isolation_stage(
+            &ui,
+            &flow,
+            &activity(host.id(), "operation-starting-isolation", &stage),
+        );
+        assert_eq!(ui.get_isolation_busy_text(), stage.as_str());
     }
 
     #[test]

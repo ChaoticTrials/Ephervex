@@ -4,6 +4,7 @@ use ephervex_core::{
     App, CoreError, InstalledHost, IsolationConfidence, IsolationError, IsolationRequest,
     IsolationRoundKind, IsolationStep, Paths, RoundAnswer,
 };
+use ephervex_download::{ChannelSink, OperationReporter};
 use ephervex_model::LoaderSelection;
 use ephervex_storage::{LaunchLock, NewClient, NewServer, Registry};
 use serde_json::json;
@@ -269,6 +270,35 @@ fn ddmin_progression_is_deterministic_and_preserves_dependency_closures() {
     assert_eq!(outcome.roots, mods(&["e"]));
     assert_eq!(outcome.confidence, IsolationConfidence::SmallestReached);
     assert_eq!(enabled_files(&fixture), ["base.jar", "e.jar", "pin.jar"]);
+}
+
+#[test]
+fn starting_reports_planning_snapshot_and_mod_application_stages() {
+    let fixture = Fixture::new();
+    let app = fixture.app();
+    let (sink, mut updates) = ChannelSink::new();
+    let reporter = OperationReporter::new("operation-starting-isolation", true, sink);
+    reporter.begin(None);
+
+    app.begin_isolation_reporting(
+        fixture.host,
+        request(&["pin"]),
+        &reporter,
+        &CancellationToken::new(),
+    )
+    .unwrap();
+
+    let stages = std::iter::from_fn(|| updates.try_recv().ok())
+        .filter_map(|operation| operation.stage)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        stages,
+        [
+            "operation-stage-planning-isolation",
+            "operation-stage-snapshot-isolation",
+            "operation-stage-applying-isolation",
+        ]
+    );
 }
 
 #[test]

@@ -153,6 +153,45 @@ fn detailed_round_names_the_exact_configuration_and_records_either_answer() {
 }
 
 #[test]
+fn a_busy_isolation_change_disables_answers_and_launch_and_says_what_it_is_doing() {
+    let ui = window();
+    client_workspace(&ui);
+    ui.set_workspace_tab("Isolation".into());
+    ui.set_isolation_phase("round".into());
+    ui.set_isolation_history(strings(&["Round 1"]));
+    ui.set_isolation_busy_kind("client".into());
+    ui.set_isolation_busy_id("host".into());
+    ui.set_isolation_busy_text("Applying the next mod setup".into());
+    settle(&ui);
+
+    assert!(visible(&ui, "Applying the next mod setup"));
+    for message in [
+        "gui-isolation-issue-gone",
+        "gui-isolation-issue-present",
+        "gui-isolation-undo",
+        "gui-isolation-cancel",
+        "gui-launch",
+    ] {
+        assert!(
+            !button(&ui, message)
+                .accessible_enabled()
+                .expect("the button reports whether it is enabled"),
+            "{message} stays enabled while isolation changes the host"
+        );
+    }
+
+    ui.set_isolation_busy_kind("client".into());
+    ui.set_isolation_busy_id("another".into());
+    settle(&ui);
+    assert!(!visible(&ui, "Applying the next mod setup"));
+    assert!(
+        button(&ui, "gui-isolation-issue-present")
+            .accessible_enabled()
+            .expect("the button reports whether it is enabled")
+    );
+}
+
+#[test]
 fn isolation_state_survives_logs_and_mods_navigation() {
     let ui = window();
     client_workspace(&ui);

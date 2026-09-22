@@ -1694,6 +1694,9 @@ slint::slint! {
         in property <string> workflow-title;
         in property <string> workflow-summary;
         in property <[WorkflowActionRow]> workflow-actions;
+        // A workflow is changing this host's files, so nothing may start it.
+        in property <bool> busy;
+        in property <string> busy-text;
         callback back();
         callback open-folder();
         callback primary();
@@ -1715,13 +1718,13 @@ slint::slint! {
                 AppButton { text: GuiI18n.text("gui-open-folder"); clicked => { root.open-folder(); } }
                 if root.show-launch-as : LaunchAsButton {
                     accounts: root.accounts;
-                    enabled: root.primary-enabled;
+                    enabled: root.primary-enabled && !root.busy;
                     alongside: root.launch-alongside;
                     launch-as(account, alongside) => { root.launch-as(account, alongside); }
                     add-account => { root.add-account(); }
                 }
-                if root.restart-visible : AppButton { text: GuiI18n.text("gui-restart"); enabled: root.restart-enabled; clicked => { root.restart(); } }
-                AppButton { text: root.primary-label; tone: root.primary-tone; enabled: root.primary-enabled; clicked => { root.primary(); } }
+                if root.restart-visible : AppButton { text: GuiI18n.text("gui-restart"); enabled: root.restart-enabled && !root.busy; clicked => { root.restart(); } }
+                AppButton { text: root.primary-label; tone: root.primary-tone; enabled: root.primary-enabled && !root.busy; clicked => { root.primary(); } }
             }
             if root.workflow-id != "" : Rectangle {
                 height: max(64px, workflow-copy.preferred-height + 24px);
@@ -1735,13 +1738,31 @@ slint::slint! {
                         horizontal-stretch: 1;
                         Heading { text: root.workflow-title; font-size: Theme.row-heading-size; }
                         BodyText { text: root.workflow-summary; color: Theme.text-secondary; wrap: word-wrap; }
+                        if root.busy : HorizontalLayout {
+                            spacing: 6px;
+                            Spinner { indeterminate: true; width: 14px; height: 14px; }
+                            BodyText { text: root.busy-text; horizontal-stretch: 1; wrap: word-wrap; }
+                        }
                     }
                     for action in root.workflow-actions : AppButton {
                         text: action.label;
                         tone: action.tone;
-                        enabled: action.enabled && (!action.requires-stopped || !root.host-running);
+                        enabled: action.enabled && (!action.requires-stopped || (!root.host-running && !root.busy));
                         clicked => { root.workflow-action(root.workflow-id, action.id); }
                     }
+                }
+            }
+            // Before a workflow is active, such as while one starts, its
+            // progress still belongs above the surface that asked for it.
+            if root.busy && root.workflow-id == "" : Rectangle {
+                border-radius: 7px;
+                border-width: 1px;
+                border-color: Theme.accent;
+                background: Theme.surface;
+                HorizontalLayout {
+                    padding: 10px; spacing: 9px; cross-axis-alignment: center;
+                    Spinner { indeterminate: true; width: 18px; height: 18px; }
+                    BodyText { text: root.busy-text; horizontal-stretch: 1; wrap: word-wrap; }
                 }
             }
             HorizontalLayout {
@@ -1814,6 +1835,7 @@ slint::slint! {
         in property <[string]> reproducing;
         in property <[string]> history;
         in property <bool> reduced-confidence;
+        in property <bool> busy;
         in-out property <string> query;
         in-out property <bool> accept-unrecorded;
         in-out property <bool> accept-missing;
@@ -1835,7 +1857,7 @@ slint::slint! {
             spacing: 10px;
             Heading { text: GuiI18n.text("gui-isolation-title"); horizontal-alignment: center; }
             BodyText { text: GuiI18n.text("gui-isolation-empty-detail"); color: Theme.text-muted; horizontal-alignment: center; wrap: word-wrap; }
-            HorizontalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-isolation-start-setup"); tone: "primary"; clicked => { root.begin(); } } }
+            HorizontalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-isolation-start-setup"); tone: "primary"; enabled: !root.busy; clicked => { root.begin(); } } }
         }
         if root.phase == "setup" : HorizontalLayout {
             spacing: 14px;
@@ -1908,12 +1930,12 @@ slint::slint! {
                     }
                     if root.error != "" : BodyText { text: root.error; color: Theme.danger; wrap: word-wrap; }
                     ActionRow {
-                        AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.discard-setup(); } }
+                        AppButton { text: GuiI18n.text("gui-cancel"); enabled: !root.busy; clicked => { root.discard-setup(); } }
                         Rectangle { horizontal-stretch: 1; }
                         AppButton {
                             text: GuiI18n.text("gui-isolation-start");
                             tone: "primary";
-                            enabled: (root.missing.length == 0 || root.accept-missing) && (root.unrecorded.length == 0 || root.accept-unrecorded);
+                            enabled: !root.busy && (root.missing.length == 0 || root.accept-missing) && (root.unrecorded.length == 0 || root.accept-unrecorded);
                             clicked => { root.start-session(root.accept-unrecorded, root.accept-missing); }
                         }
                     }
@@ -1933,7 +1955,7 @@ slint::slint! {
             if root.reduced-confidence : BodyText { text: GuiI18n.text("gui-isolation-reduced-confidence"); color: Theme.warning; wrap: word-wrap; }
             if root.linked-servers.length > 0 : BodyText { text: GuiI18n.text("gui-isolation-linked-unchanged"); color: Theme.text-secondary; wrap: word-wrap; }
             if root.error != "" : BodyText { text: root.error; color: Theme.danger; wrap: word-wrap; }
-            ActionRow { AppButton { text: GuiI18n.text("gui-isolation-undo"); enabled: root.history.length > 0; clicked => { root.undo(); } } AppButton { text: GuiI18n.text("gui-isolation-cancel"); tone: "danger"; clicked => { root.cancel(); } } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-isolation-issue-gone"); clicked => { root.answer("gone"); } } AppButton { text: GuiI18n.text("gui-isolation-issue-present"); tone: "primary"; clicked => { root.answer("present"); } } }
+            ActionRow { AppButton { text: GuiI18n.text("gui-isolation-undo"); enabled: !root.busy && root.history.length > 0; clicked => { root.undo(); } } AppButton { text: GuiI18n.text("gui-isolation-cancel"); tone: "danger"; enabled: !root.busy; clicked => { root.cancel(); } } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-isolation-issue-gone"); enabled: !root.busy; clicked => { root.answer("gone"); } } AppButton { text: GuiI18n.text("gui-isolation-issue-present"); tone: "primary"; enabled: !root.busy; clicked => { root.answer("present"); } } }
         }
         if root.phase == "contradiction" : VerticalLayout {
             spacing: 12px;
@@ -1941,7 +1963,7 @@ slint::slint! {
             BodyText { text: GuiI18n.text("gui-isolation-contradiction-detail"); color: Theme.danger; wrap: word-wrap; }
             IsolationHistory { items: root.history; }
             if root.error != "" : BodyText { text: root.error; color: Theme.danger; wrap: word-wrap; }
-            ActionRow { AppButton { text: GuiI18n.text("gui-isolation-cancel"); tone: "danger"; clicked => { root.cancel(); } } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-isolation-undo"); tone: "primary"; clicked => { root.undo(); } } }
+            ActionRow { AppButton { text: GuiI18n.text("gui-isolation-cancel"); tone: "danger"; enabled: !root.busy; clicked => { root.cancel(); } } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-isolation-undo"); tone: "primary"; enabled: !root.busy; clicked => { root.undo(); } } }
         }
         if root.phase == "ready" : VerticalLayout {
             spacing: 12px;
@@ -1952,7 +1974,7 @@ slint::slint! {
             if root.reduced-confidence : BodyText { text: GuiI18n.text("gui-isolation-reduced-confidence"); color: Theme.warning; wrap: word-wrap; }
             BodyText { text: GuiI18n.text("gui-isolation-finish-snapshot"); color: Theme.text-muted; wrap: word-wrap; }
             if root.error != "" : BodyText { text: root.error; color: Theme.danger; wrap: word-wrap; }
-            ActionRow { AppButton { text: GuiI18n.text("gui-isolation-undo"); clicked => { root.undo(); } } AppButton { text: GuiI18n.text("gui-isolation-cancel"); tone: "danger"; clicked => { root.cancel(); } } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-isolation-finish"); tone: "primary"; clicked => { root.finish(); } } }
+            ActionRow { AppButton { text: GuiI18n.text("gui-isolation-undo"); enabled: !root.busy; clicked => { root.undo(); } } AppButton { text: GuiI18n.text("gui-isolation-cancel"); tone: "danger"; enabled: !root.busy; clicked => { root.cancel(); } } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-isolation-finish"); tone: "primary"; enabled: !root.busy; clicked => { root.finish(); } } }
         }
         if root.phase == "result" : VerticalLayout {
             spacing: 12px;
@@ -3298,6 +3320,10 @@ slint::slint! {
         in-out property <int> isolation-round: 0;
         in-out property <int> isolation-granularity: 0;
         in-out property <bool> isolation-active: false;
+        // The host an isolation change is rewriting, and what it is doing.
+        in-out property <string> isolation-busy-kind;
+        in-out property <string> isolation-busy-id;
+        in-out property <string> isolation-busy-text;
         in-out property <bool> isolation-reduced-confidence: false;
         in-out property <bool> isolation-accept-unrecorded: false;
         in-out property <bool> isolation-accept-missing: false;
@@ -4100,6 +4126,8 @@ slint::slint! {
                             primary-tone: root.selected-instance-index >= 0 && root.instances[root.selected-instance-index].can-kill ? "danger" : "primary";
                             primary-enabled: root.selected-instance-index >= 0 && (root.instances[root.selected-instance-index].can-launch || root.instances[root.selected-instance-index].can-kill);
                             workflow-id: root.isolation-host-kind == "client" && root.isolation-host-id == root.selected-instance-id ? root.active-workflow-id : "";
+                            busy: root.isolation-busy-kind == "client" && root.isolation-busy-id == root.selected-instance-id;
+                            busy-text: root.isolation-busy-text;
                             workflow-title: root.active-workflow-title;
                             workflow-summary: root.active-workflow-summary;
                             workflow-actions: root.active-workflow-actions;
@@ -4184,6 +4212,7 @@ slint::slint! {
                             }
                             if root.workspace-tab == "Isolation" : IsolationSurface {
                                 phase: root.isolation-host-kind == "client" && root.isolation-host-id == root.selected-instance-id ? root.isolation-phase : "none";
+                                busy: root.isolation-busy-kind == "client" && root.isolation-busy-id == root.selected-instance-id;
                                 summary: root.isolation-summary; confidence: root.isolation-confidence; round: root.isolation-round; granularity: root.isolation-granularity;
                                 candidates: root.isolation-candidates; enabled-items: root.isolation-enabled; disabled-items: root.isolation-disabled;
                                 unrecorded: root.isolation-unrecorded; unidentifiable: root.isolation-unidentifiable; missing: root.isolation-missing;
@@ -4337,6 +4366,8 @@ slint::slint! {
                             restart-visible: true;
                             restart-enabled: root.selected-server-index >= 0 && root.servers[root.selected-server-index].can-restart;
                             workflow-id: root.isolation-host-kind == "server" && root.isolation-host-id == root.selected-server-id ? root.active-workflow-id : "";
+                            busy: root.isolation-busy-kind == "server" && root.isolation-busy-id == root.selected-server-id;
+                            busy-text: root.isolation-busy-text;
                             workflow-title: root.active-workflow-title;
                             workflow-summary: root.active-workflow-summary;
                             workflow-actions: root.active-workflow-actions;
@@ -4426,6 +4457,7 @@ slint::slint! {
                             }
                             if root.workspace-tab == "Isolation" : IsolationSurface {
                                 phase: root.isolation-host-kind == "server" && root.isolation-host-id == root.selected-server-id ? root.isolation-phase : "none";
+                                busy: root.isolation-busy-kind == "server" && root.isolation-busy-id == root.selected-server-id;
                                 summary: root.isolation-summary; confidence: root.isolation-confidence; round: root.isolation-round; granularity: root.isolation-granularity;
                                 candidates: root.isolation-candidates; enabled-items: root.isolation-enabled; disabled-items: root.isolation-disabled;
                                 unrecorded: root.isolation-unrecorded; unidentifiable: root.isolation-unidentifiable; missing: root.isolation-missing;
