@@ -101,6 +101,165 @@ fn setup_requires_each_reduced_confidence_acknowledgement() {
     );
 }
 
+/// Opens a setup on the client or the server workspace, the two surfaces that
+/// share the Isolation setup.
+fn setup_on(ui: &AppWindow, server_host: bool, running: bool) {
+    if server_host {
+        server_workspace(ui, server(running));
+        ui.set_isolation_host_kind("server".into());
+        ui.set_isolation_host_id("server".into());
+    } else {
+        let mut row = instance();
+        row.can_kill = running;
+        row.can_launch = !running;
+        client_workspace(ui);
+        ui.set_instances(ModelRc::new(VecModel::from(vec![row])));
+    }
+    ui.set_workspace_tab("Isolation".into());
+    ui.set_isolation_phase("setup".into());
+    ui.set_isolation_summary("261 candidate roots can be tested.".into());
+    ui.set_isolation_missing(strings(&[]));
+    ui.set_isolation_unrecorded(strings(&[]));
+    ui.set_isolation_accept_missing(false);
+    ui.set_isolation_accept_unrecorded(false);
+    ui.set_isolation_busy_kind("".into());
+    ui.set_isolation_busy_id("".into());
+    settle(ui);
+}
+
+fn start_enabled(ui: &AppWindow) -> bool {
+    button(ui, "gui-isolation-start")
+        .accessible_enabled()
+        .expect("the start button reports whether it is enabled")
+}
+
+fn blockers_shown(ui: &AppWindow) -> Vec<&'static str> {
+    [
+        "gui-isolation-start-blocked-busy",
+        "gui-isolation-start-blocked-running",
+        "gui-isolation-start-blocked-missing",
+        "gui-isolation-start-blocked-unrecorded",
+    ]
+    .into_iter()
+    .filter(|message| visible(ui, &lookup(message)))
+    .collect()
+}
+
+/// The switch for an acknowledgement, which must be on screen and usable.
+fn acknowledgement(ui: &AppWindow, message: &str) -> ElementHandle {
+    let label = lookup(message);
+    let switch = ElementHandle::find_by_accessible_label(ui, &label)
+        .find(|element| element.accessible_role() == Some(AccessibleRole::Checkbox))
+        .unwrap_or_else(|| panic!("no visible switch for {message}"));
+    let start = button(ui, "gui-isolation-start");
+    let panel_right = start.absolute_position().x + start.size().width;
+    assert!(
+        switch.absolute_position().x + switch.size().width <= panel_right,
+        "the switch for {message} is outside the setup panel"
+    );
+    assert!(
+        switch.absolute_position().y + switch.size().height <= start.absolute_position().y,
+        "the switch for {message} is not above Start"
+    );
+    assert_eq!(switch.accessible_enabled(), Some(true));
+    switch
+}
+
+#[test]
+fn start_is_enabled_for_a_setup_with_nothing_to_acknowledge() {
+    let ui = window();
+    for server_host in [false, true] {
+        setup_on(&ui, server_host, false);
+        assert!(start_enabled(&ui), "server: {server_host}");
+        assert!(blockers_shown(&ui).is_empty());
+    }
+}
+
+#[test]
+fn unrecorded_dependency_information_waits_for_a_visible_acknowledgement() {
+    let ui = window();
+    for server_host in [false, true] {
+        setup_on(&ui, server_host, false);
+        let many: Vec<String> = (0..60).map(|index| format!("mod-{index}.jar")).collect();
+        ui.set_isolation_unrecorded(strings(
+            &many.iter().map(String::as_str).collect::<Vec<_>>(),
+        ));
+        settle(&ui);
+
+        assert!(!start_enabled(&ui), "server: {server_host}");
+        assert_eq!(
+            blockers_shown(&ui),
+            ["gui-isolation-start-blocked-unrecorded"]
+        );
+        acknowledgement(&ui, "gui-isolation-accept-unrecorded").invoke_accessible_default_action();
+        settle(&ui);
+
+        assert!(ui.get_isolation_accept_unrecorded());
+        assert!(start_enabled(&ui), "server: {server_host}");
+        assert!(blockers_shown(&ui).is_empty());
+    }
+}
+
+#[test]
+fn the_acknowledgement_label_is_part_of_its_switch() {
+    let ui = window();
+    setup_on(&ui, false, false);
+    ui.set_isolation_unrecorded(strings(&["unrecorded.jar"]));
+    settle(&ui);
+    ElementHandle::find_by_accessible_label(&ui, &lookup("gui-isolation-accept-unrecorded"))
+        .find(|element| element.accessible_role() == Some(AccessibleRole::Text))
+        .expect("the acknowledgement's label is shown")
+        .mock_single_click(PointerEventButton::Left);
+    settle(&ui);
+    assert!(ui.get_isolation_accept_unrecorded());
+    assert!(start_enabled(&ui));
+}
+
+#[test]
+fn missing_dependencies_block_start_with_their_own_reason_until_acknowledged() {
+    let ui = window();
+    for server_host in [false, true] {
+        setup_on(&ui, server_host, false);
+        ui.set_isolation_missing(strings(&["feature.jar: library"]));
+        ui.set_isolation_unrecorded(strings(&["unrecorded.jar"]));
+        settle(&ui);
+        assert_eq!(blockers_shown(&ui), ["gui-isolation-start-blocked-missing"]);
+
+        acknowledgement(&ui, "gui-isolation-accept-unrecorded").invoke_accessible_default_action();
+        settle(&ui);
+        assert!(!start_enabled(&ui), "server: {server_host}");
+        assert_eq!(blockers_shown(&ui), ["gui-isolation-start-blocked-missing"]);
+
+        acknowledgement(&ui, "gui-isolation-accept-missing").invoke_accessible_default_action();
+        settle(&ui);
+        assert!(start_enabled(&ui), "server: {server_host}");
+        assert!(blockers_shown(&ui).is_empty());
+    }
+}
+
+#[test]
+fn a_busy_or_running_host_disables_start_and_says_so() {
+    let ui = window();
+    for server_host in [false, true] {
+        setup_on(&ui, server_host, true);
+        assert!(!start_enabled(&ui), "server: {server_host}");
+        assert_eq!(blockers_shown(&ui), ["gui-isolation-start-blocked-running"]);
+
+        setup_on(&ui, server_host, false);
+        let (kind, id) = if server_host {
+            ("server", "server")
+        } else {
+            ("client", "host")
+        };
+        ui.set_isolation_busy_kind(kind.into());
+        ui.set_isolation_busy_id(id.into());
+        ui.set_isolation_busy_text("Starting mod isolation".into());
+        settle(&ui);
+        assert!(!start_enabled(&ui), "server: {server_host}");
+        assert_eq!(blockers_shown(&ui), ["gui-isolation-start-blocked-busy"]);
+    }
+}
+
 #[test]
 fn canceling_setup_stays_on_the_isolation_tab() {
     let ui = window();

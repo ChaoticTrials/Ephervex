@@ -1378,6 +1378,28 @@ slint::slint! {
         }
     }
 
+    // An explicit choice a primary action waits for. The switch comes first
+    // and the label wraps, so a long label can never push the switch out of a
+    // narrow column; the label is part of the target, as a checkbox's is.
+    component AcknowledgementToggle inherits Rectangle {
+        in property <string> label;
+        in-out property <bool> checked;
+        in property <bool> enabled: true;
+        height: row.preferred-height;
+        row := HorizontalLayout {
+            spacing: 10px;
+            VerticalLayout { alignment: start; Toggle { accessible-name: root.label; checked <=> root.checked; enabled: root.enabled; } }
+            BodyText {
+                text: root.label;
+                color: root.enabled ? Theme.text : Theme.text-muted;
+                horizontal-stretch: 1;
+                vertical-alignment: top;
+                wrap: word-wrap;
+                TouchArea { clicked => { if root.enabled { root.checked = !root.checked; } } }
+            }
+        }
+    }
+
     // Launching as somebody other than the default account.
     //
     // Beside Launch rather than replacing it: the common case is one account,
@@ -1886,12 +1908,20 @@ slint::slint! {
         in property <[string]> history;
         in property <bool> reduced-confidence;
         in property <bool> busy;
+        in property <bool> host-running;
         in property <string> recovery;
         in property <string> recovery-detail;
         in-out property <string> query;
         in-out property <bool> accept-unrecorded;
         in-out property <bool> accept-missing;
         in property <string> error;
+        // The first thing Start is waiting for, which the setup names beside
+        // it: every disabled Start has a visible reason and a way past it.
+        property <string> start-blocker: root.busy ? "busy"
+            : root.host-running ? "running"
+            : root.missing.length > 0 && !root.accept-missing ? "missing"
+            : root.unrecorded.length > 0 && !root.accept-unrecorded ? "unrecorded"
+            : "";
         callback filter(string);
         callback toggle-pin(string, bool);
         callback begin();
@@ -1985,24 +2015,27 @@ slint::slint! {
                             spacing: 7px;
                             if root.missing.length > 0 : BodyText { text: GuiI18n.text("gui-isolation-missing"); color: Theme.danger; wrap: word-wrap; }
                             for item in root.missing : BodyText { text: item; color: Theme.text-secondary; font-size: Theme.caption-size; wrap: word-wrap; }
-                            if root.missing.length > 0 : LabeledToggle { label: GuiI18n.text("gui-isolation-accept-missing"); width: 100%; checked <=> root.accept-missing; }
                             if root.unrecorded.length > 0 : BodyText { text: GuiI18n.count("gui-isolation-unrecorded", root.unrecorded.length); color: Theme.warning; wrap: word-wrap; }
                             for item in root.unrecorded : BodyText { text: item; color: Theme.text-secondary; font-size: Theme.caption-size; wrap: word-wrap; }
                             if root.unrecorded.length > 0 : BodyText { text: GuiI18n.text("gui-isolation-unrecorded-detail"); color: Theme.text-secondary; wrap: word-wrap; }
-                            if root.unrecorded.length > 0 : LabeledToggle { label: GuiI18n.text("gui-isolation-accept-unrecorded"); width: 100%; checked <=> root.accept-unrecorded; }
                             if root.unidentifiable.length > 0 : BodyText { text: GuiI18n.count("gui-isolation-unidentifiable", root.unidentifiable.length); color: Theme.warning; wrap: word-wrap; }
                             for item in root.unidentifiable : BodyText { text: item; color: Theme.text-secondary; font-size: Theme.caption-size; wrap: word-wrap; }
                             if root.linked-servers.length > 0 : BodyText { text: GuiI18n.count("gui-isolation-linked-servers", root.linked-servers.length); color: Theme.text-secondary; wrap: word-wrap; }
                         }
                     }
+                    // Outside the scrolling warnings, so no list is long enough
+                    // to hide the choices Start waits for.
+                    if root.missing.length > 0 : AcknowledgementToggle { label: GuiI18n.text("gui-isolation-accept-missing"); enabled: !root.busy; checked <=> root.accept-missing; }
+                    if root.unrecorded.length > 0 : AcknowledgementToggle { label: GuiI18n.text("gui-isolation-accept-unrecorded"); enabled: !root.busy; checked <=> root.accept-unrecorded; }
                     if root.error != "" : BodyText { text: root.error; color: Theme.danger; wrap: word-wrap; }
+                    if root.start-blocker != "" : BodyText { text: GuiI18n.text(root.start-blocker == "busy" ? "gui-isolation-start-blocked-busy" : root.start-blocker == "running" ? "gui-isolation-start-blocked-running" : root.start-blocker == "missing" ? "gui-isolation-start-blocked-missing" : "gui-isolation-start-blocked-unrecorded"); color: Theme.warning; wrap: word-wrap; }
                     ActionRow {
                         AppButton { text: GuiI18n.text("gui-cancel"); enabled: !root.busy; clicked => { root.discard-setup(); } }
                         Rectangle { horizontal-stretch: 1; }
                         AppButton {
                             text: GuiI18n.text("gui-isolation-start");
                             tone: "primary";
-                            enabled: !root.busy && (root.missing.length == 0 || root.accept-missing) && (root.unrecorded.length == 0 || root.accept-unrecorded);
+                            enabled: root.start-blocker == "";
                             clicked => { root.start-session(root.accept-unrecorded, root.accept-missing); }
                         }
                     }
@@ -4290,6 +4323,7 @@ slint::slint! {
                                 phase: root.isolation-host-kind == "client" && root.isolation-host-id == root.selected-instance-id ? root.isolation-phase : "none";
                                 busy: root.isolation-busy-kind == "client" && root.isolation-busy-id == root.selected-instance-id;
                                 recovery: root.isolation-recovery; recovery-detail: root.isolation-recovery-detail;
+                                host-running: root.selected-instance-index >= 0 && root.instances[root.selected-instance-index].can-kill;
                                 summary: root.isolation-summary; confidence: root.isolation-confidence; round: root.isolation-round; granularity: root.isolation-granularity;
                                 candidates: root.isolation-candidates; enabled-items: root.isolation-enabled; disabled-items: root.isolation-disabled;
                                 unrecorded: root.isolation-unrecorded; unidentifiable: root.isolation-unidentifiable; missing: root.isolation-missing;
@@ -4537,6 +4571,7 @@ slint::slint! {
                                 phase: root.isolation-host-kind == "server" && root.isolation-host-id == root.selected-server-id ? root.isolation-phase : "none";
                                 busy: root.isolation-busy-kind == "server" && root.isolation-busy-id == root.selected-server-id;
                                 recovery: root.isolation-recovery; recovery-detail: root.isolation-recovery-detail;
+                                host-running: root.selected-server-index >= 0 && root.servers[root.selected-server-index].can-stop;
                                 summary: root.isolation-summary; confidence: root.isolation-confidence; round: root.isolation-round; granularity: root.isolation-granularity;
                                 candidates: root.isolation-candidates; enabled-items: root.isolation-enabled; disabled-items: root.isolation-disabled;
                                 unrecorded: root.isolation-unrecorded; unidentifiable: root.isolation-unidentifiable; missing: root.isolation-missing;

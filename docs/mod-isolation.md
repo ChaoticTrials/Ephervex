@@ -18,8 +18,11 @@ mods as they were keeps the setup.
 The setup screen requires a separate acknowledgement when a required dependency
 is missing. If dependency information can be refreshed but has not been
 recorded, refresh it first or explicitly continue with reduced confidence.
-Either acknowledgement marks the result as unproven. Jars that cannot be
-identified can still be tested, with the same caveat.
+Either acknowledgement marks the result as unproven. Both choices sit directly
+above **Start isolation**. While Start is unavailable, the setup names the
+reason beside it: an isolation change still running, the host running, or an
+acknowledgement that has not been given. Jars that cannot be identified can
+still be tested, with the same caveat.
 
 For each round, launch the host using the exact enabled configuration shown in
 the Isolation tab. Then answer **Still failing** or **Issue gone**. The active
