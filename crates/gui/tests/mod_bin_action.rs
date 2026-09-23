@@ -74,10 +74,72 @@ fn a_jar_already_put_aside_offers_only_putting_it_back() {
     assert!(bin(&ui, "gui-remove-mod").is_none());
 }
 
+#[test]
+fn a_hand_placed_jars_confirmation_says_the_deletion_is_permanent() {
+    let ui = window();
+    show(
+        &ui,
+        false,
+        &[ModRow {
+            origin_kind: "hand-placed".into(),
+            ..row(false, true)
+        }],
+    );
+
+    open_delete_confirmation(&ui);
+
+    assert!(visible(
+        &ui,
+        &lookup_args("gui-delete-mod-detail", [("value", Arg::from(MOD))])
+    ));
+    assert!(visible(&ui, &lookup("gui-delete-mod-note")));
+    assert!(!visible(&ui, &lookup("gui-delete-restorable-mod-note")));
+}
+
+#[test]
+fn a_recorded_mods_confirmation_says_the_jar_can_be_restored() {
+    let ui = window();
+    show(
+        &ui,
+        false,
+        &[ModRow {
+            origin_kind: "pack".into(),
+            ..row(false, true)
+        }],
+    );
+
+    open_delete_confirmation(&ui);
+
+    assert!(visible(
+        &ui,
+        &lookup_args(
+            "gui-delete-restorable-mod-detail",
+            [("value", Arg::from(MOD))]
+        )
+    ));
+    assert!(visible(&ui, &lookup("gui-delete-restorable-mod-note")));
+    assert!(!visible(&ui, &lookup("gui-delete-mod-note")));
+}
+
 /// The bin belonging to the one mod on screen, when it is labeled this way.
 fn bin(ui: &AppWindow, id: &str) -> Option<ElementHandle> {
     let label = lookup_args(id, [("value", Arg::from(MOD))]);
     ElementHandle::find_by_accessible_label(ui, &label).find(|element| element.size().width > 0.0)
+}
+
+fn open_delete_confirmation(ui: &AppWindow) {
+    bin(ui, "gui-delete-mod")
+        .expect("the row offers the reversible bin")
+        .invoke_accessible_default_action();
+    slint::platform::update_timers_and_animations();
+    ui.window()
+        .take_snapshot()
+        .expect("render the confirmation");
+    assert_eq!(ui.get_modal(), "delete-mod");
+}
+
+fn visible(ui: &AppWindow, label: &str) -> bool {
+    ElementHandle::find_by_accessible_label(ui, label).any(|element| element.size().width > 0.0)
 }
 
 fn row(can_remove: bool, can_delete_file: bool) -> ModRow {

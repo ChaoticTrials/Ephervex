@@ -1903,6 +1903,8 @@ gui-mod-dependencies-refreshed = { $count ->
 gui-modal-delete-mod = Delete Mod
 gui-delete-mod-detail = Delete { $value } from the mods folder?
 gui-delete-mod-note = You added this JAR yourself, so Ephervex cannot fetch it again. The file is removed from disk.
+gui-delete-restorable-mod-detail = Put { $value } aside?
+gui-delete-restorable-mod-note = The JAR is removed from the mods folder, but the mod stays in this list so you can restore it.
 gui-mod-deleted = Deleted { $value }.
 gui-mod-deleted-with-dependents = { $count ->
     [one] Deleted { $value } and one mod that required it.
