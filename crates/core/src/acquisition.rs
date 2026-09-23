@@ -161,11 +161,11 @@ impl App {
     /// The same refusal, for an operation that works from a recorded entry
     /// rather than from a resolved plan.
     ///
-    /// Putting a deleted jar back needs its bytes just as an install does, and
-    /// a recipe entry recording a restricted release carries no address to
-    /// fetch them from. What the entry does not carry is the project's name
-    /// and handle, so those are asked for once, here, on the failure path -
-    /// the restore itself still asks no catalog.
+    /// Putting a deleted jar back and reconstructing a linked server both need
+    /// bytes from retained desired state. A recipe entry recording a restricted
+    /// release carries no address to fetch them from. What the entry does not
+    /// carry is the project's name and handle, so those are asked for once,
+    /// here, on the failure path. Materialization itself still asks no catalog.
     pub(crate) async fn as_recorded_manual_acquisition(
         &self,
         error: CoreError,

@@ -472,6 +472,8 @@ impl App {
         cancel: &CancellationToken,
     ) -> CoreResult<Vec<PathBuf>> {
         let manager = self.artifact_manager()?;
+        let silent_reporter = OperationReporter::silent("server-content");
+        let reporter = options.reporter.as_ref().unwrap_or(&silent_reporter);
         let materialized = ephervex_pack::materialize_server_recipe(ServerMaterializeRequest {
             recipe,
             unknown_server_files: &options.unknown_server_files,
@@ -492,14 +494,31 @@ impl App {
                 // is available here and is asked for per file, only when a fetch
                 // is unavoidable.
                 credentials: &self.provider_credentials(),
-                reporter: options
-                    .reporter
-                    .as_ref()
-                    .unwrap_or(&OperationReporter::silent("server-content")),
+                reporter,
                 cancel,
             },
         })
-        .await?;
+        .await;
+        let materialized = match materialized {
+            Ok(materialized) => materialized,
+            Err(source) => {
+                let missing = match &source {
+                    PackError::FileDownloadsMissing { path } => recipe
+                        .files
+                        .iter()
+                        .find(|file| file.display_name() == *path)
+                        .map(|file| file.logical_path.clone()),
+                    _ => None,
+                };
+                let error = CoreError::from(source);
+                let Some(logical_path) = missing else {
+                    return Err(error);
+                };
+                return Err(self
+                    .as_recorded_manual_acquisition(error, recipe, &logical_path, reporter, cancel)
+                    .await);
+            }
+        };
         Ok(materialized.unconfirmed_unknown)
     }
 

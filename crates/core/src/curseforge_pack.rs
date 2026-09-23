@@ -3839,6 +3839,64 @@ mod tests {
         Ok(target)
     }
 
+    #[tokio::test]
+    async fn a_linked_server_missing_a_restricted_release_requests_manual_acquisition() {
+        let server = MockServer::start().await;
+        serve_pack_as_mods(&server).await;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let app = app_against(dir.path(), &server);
+        let mut recipe = ephervex_pack::PackRecipe::for_manual_instance(
+            "Repro",
+            "1.20.1",
+            ephervex_model::LoaderSelection::vanilla(),
+        );
+        recipe.files.push(PackFileRecipe {
+            logical_path: PathBuf::from("mods/restricted.jar"),
+            hashes: vec![
+                Hash::new(HashAlgorithm::Sha1, &sha1_of(b"restricted body")).expect("digest"),
+            ],
+            downloads: Vec::new(),
+            size: Some(15),
+            client: SideRequirement::Required,
+            server: SideRequirement::Required,
+            selected: None,
+            origin: ModOrigin::UserSelected,
+            identity: Some(ProviderFileIdentity {
+                provider: Some(ModProvider::CurseForge),
+                project_id: Some(REQUIRED_PROJECT.to_string()),
+                version_id: Some(REQUIRED_FILE.to_string()),
+                file_id: Some(REQUIRED_FILE.to_string()),
+            }),
+            original_identity: None,
+            relations: Some(Vec::new()),
+        });
+        let staging = dir.path().join("linked-server");
+
+        let error = app
+            .materialize_linked_server_recipe(
+                &recipe,
+                &dir.path().join("client"),
+                &staging.join("minecraft"),
+                &staging.join(".launcher/source"),
+                &ServerCreateOptions::default(),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("the user has to supply the restricted release");
+
+        let CoreError::ModAcquisitionRestricted { path, blocked } = error else {
+            panic!("unexpected error: {error:?}");
+        };
+        assert_eq!(path, PathBuf::from("mods/restricted.jar"));
+        assert_eq!(blocked.len(), 1);
+        assert_eq!(blocked[0].project_name.as_deref(), Some("Required Mod"));
+        assert_eq!(blocked[0].file_name.as_deref(), Some("restricted.jar"));
+        assert_eq!(
+            blocked[0].browser_url.as_deref(),
+            Some("https://www.curseforge.com/minecraft/mc-mods/Required Mod/download/4593548")
+        );
+    }
+
     /// A retained entry from the other catalog, served by the same loopback host.
     ///
     /// What makes it the other catalog is its identity, which is the only thing

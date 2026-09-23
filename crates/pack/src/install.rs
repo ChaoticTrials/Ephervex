@@ -204,8 +204,10 @@ pub async fn restore_file(
     install_selected_files(&recipe.files, &[wanted], game_dir, None, fetch).await
 }
 
-/// Reconstructs server-applicable content without reading the source archive
-/// or the mutable client game directory.
+/// Reconstructs server-applicable content without reading the source archive.
+/// An addressless entry may be copied from the mutable client game directory;
+/// every other artifact comes from the verified shared cache or its recorded
+/// source.
 ///
 /// The caller must supply a staging game directory. This function writes
 /// several ordered layers and intentionally relies on the owning server-create
@@ -333,26 +335,21 @@ async fn install_selected_files(
 
     // A jar the user put in the client themselves is recorded with no address
     // to fetch it from, because there is none: the digest lookup that named it
-    // learned what it is, not where it came from. The client has the file, and
-    // a linked server exists to run what the client runs, so it is copied
-    // across rather than treated as a pack file that lost its source.
+    // learned what it is, not where it came from. Prefer that installed copy.
+    // If it is absent, leave the entry for `fetch_all`: that shared path can
+    // still use a verified cache copy without an address, and reports the
+    // ordinary missing-source failure only when neither copy exists.
     let mut downloadable: Vec<&PackFileRecipe> = wanted.to_vec();
     if let Some(client_game_dir) = client_game_dir {
         let local: Vec<&PackFileRecipe>;
-        (downloadable, local) = wanted.iter().partition(|file| !file.downloads.is_empty());
+        (local, downloadable) = wanted.iter().partition(|file| {
+            file.downloads.is_empty() && client_game_dir.join(&file.logical_path).is_file()
+        });
         for file in local {
             if cancel.is_cancelled() {
                 return Err(PackError::Canceled);
             }
             let source = client_game_dir.join(&file.logical_path);
-            if !source.is_file() {
-                // Nothing to copy and nowhere to fetch from: the recipe
-                // describes a file that exists in neither place, which is the
-                // failure the caller has to hear about.
-                return Err(PackError::FileDownloadsMissing {
-                    path: file.display_name(),
-                });
-            }
             let destination = game_dir.join(&file.logical_path);
             copy_into_instance(&source, &destination)?;
             report.bytes = report
@@ -1491,6 +1488,44 @@ mod tests {
         assert!(
             matches!(error, PackError::FileDownloadsMissing { .. }),
             "unexpected error: {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_linked_server_uses_a_cached_downloadless_file_when_the_client_copy_is_absent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = CacheLayout::new(dir.path().join("cache"));
+        let manager =
+            DownloadManager::new(ephervex_download::DownloaderConfig::default()).expect("manager");
+        let reporter = OperationReporter::silent("test");
+        let cancel = CancellationToken::new();
+        let entry = downloadless_file("mods/a.jar");
+        let client_game = dir.path().join("client");
+        let server_game = dir.path().join("server");
+
+        let cached = cache.content(
+            ContentStore::Downloads,
+            &entry.hashes[0],
+            Some(&FileExtension::new("jar").expect("jar")),
+        );
+        std::fs::create_dir_all(cached.parent().expect("shard")).expect("shard");
+        std::fs::write(&cached, []).expect("cache fixture");
+
+        let installed = install_selected_files(
+            std::slice::from_ref(&entry),
+            &[&entry],
+            &server_game,
+            Some(&client_game),
+            offline_fetch(&manager, &cache, &reporter, &cancel),
+        )
+        .await
+        .expect("the shared cache supplies the linked server");
+
+        assert_eq!(installed.reused_from_cache, 1);
+        assert!(server_game.join("mods/a.jar").is_file());
+        assert!(
+            !client_game.join("mods/a.jar").exists(),
+            "the test must not pass by copying the client's jar"
         );
     }
 

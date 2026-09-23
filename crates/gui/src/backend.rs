@@ -22,9 +22,10 @@ use ephervex_core::{
     ManagedModSnapshot, MetadataAvailability, ModInstallPlan, ModMutability, ModMutation,
     ModMutationPlan, ModPresence, ModSearchQuery, MutationRestriction, NewClient, NewServer,
     OperationReporter, OptionalSelection, PackAnalysis, Paths, PlannedOutcome, ProcessMonitor,
-    ProgressSink, ProviderFileIdentity, SearchOptions, ServerContentSource, ServerCreateOptions,
-    ServerEvent, ServerFolder, ServerNetworkSettings, ServerObserver, SideRequirement,
-    SnapshotOrigin, SnapshotRestoreOptions, SuspectReason, WatchTarget,
+    ProgressSink, ProviderFileIdentity, SearchOptions, ServerCommit, ServerContentSource,
+    ServerCreateOptions, ServerEvent, ServerFolder, ServerNetworkSettings, ServerObserver,
+    ServerRecord, SideRequirement, SnapshotOrigin, SnapshotRestoreOptions, SuspectReason,
+    WatchTarget,
 };
 use ephervex_core::{
     ConfiguredPreferences, LanguageAvailability, LanguageEntry, MinecraftPreferencePreview,
@@ -1386,8 +1387,8 @@ pub enum Event {
         generation: u64,
         result: Result<ImportPresentation, ImportFailure>,
     },
-    /// A version change needs a release the provider does not permit this
-    /// launcher to download, and no verified copy is on this machine yet.
+    /// An operation needs a release the provider does not permit this launcher
+    /// to download, and no verified copy is on this machine yet.
     ///
     /// Nothing has been written: the operation stopped before it could be.
     /// The same folder watcher the import modal uses is already running over
@@ -1778,7 +1779,10 @@ fn run_worker(
                                 let _ = reports.send(Event::ClientCreated {
                                     instance: created.record.id.to_string(),
                                 });
-                                localized_value("gui-created-entity", &created.record.name)
+                                CreationOutcome::Created(localized_value(
+                                    "gui-created-entity",
+                                    &created.record.name,
+                                ))
                             })
                         },
                     );
@@ -2508,6 +2512,7 @@ fn run_worker(
                 port,
                 server_pack,
             } => {
+                let acquisition_host = client.as_ref().map(ToString::to_string);
                 let request = if let Some(client) = client {
                     Ok(NewServer::linked(name, client).with_storage(storage_class(persistent)))
                 } else {
@@ -2524,6 +2529,13 @@ fn run_worker(
                             request = request.with_network(network);
                         }
                         let paths = app.paths().clone();
+                        let waiting = acquisition_host.as_ref().map(|_| CancellationToken::new());
+                        if let Some(waiting) = waiting.as_ref()
+                            && let Some(previous) = acquisition_cancel.replace(waiting.clone())
+                        {
+                            previous.cancel();
+                        }
+                        let acquisition_events = events.clone();
                         spawn_creation_operation(
                             paths,
                             &events,
@@ -2535,23 +2547,57 @@ fn run_worker(
                                 report_progress: true,
                             },
                             move |app, reporter, cancel| async move {
-                                app.create_server(
-                                    request,
-                                    &ServerCreateOptions {
-                                        install_java_if_missing: true,
-                                        content: server_pack
-                                            .map_or(ServerContentSource::Recipe, |path| {
-                                                ServerContentSource::Archive { path }
-                                            }),
-                                        reporter: Some(reporter),
-                                        ..ServerCreateOptions::default()
-                                    },
-                                    &cancel,
-                                )
-                                .await
-                                .map(|commit| {
-                                    localized_value("gui-created-entity", &commit.record.name)
-                                })
+                                let options = ServerCreateOptions {
+                                    install_java_if_missing: true,
+                                    content: server_pack
+                                        .map_or(ServerContentSource::Recipe, |path| {
+                                            ServerContentSource::Archive { path }
+                                        }),
+                                    reporter: Some(reporter),
+                                    ..ServerCreateOptions::default()
+                                };
+                                if let Some(waiting) = waiting.as_ref() {
+                                    let stopped = waiting.clone();
+                                    let operation_cancel = cancel.clone();
+                                    tokio::spawn(async move {
+                                        operation_cancel.cancelled().await;
+                                        stopped.cancel();
+                                    });
+                                }
+                                let completed = |result: CoreResult<ServerCommit<ServerRecord>>| {
+                                    result.map(|commit| {
+                                        CreationOutcome::Created(localized_value(
+                                            "gui-created-entity",
+                                            &commit.record.name,
+                                        ))
+                                    })
+                                };
+                                loop {
+                                    let result =
+                                        app.create_server(request.clone(), &options, &cancel).await;
+                                    let Some((host, waiting)) =
+                                        acquisition_host.as_deref().zip(waiting.as_ref())
+                                    else {
+                                        break completed(result);
+                                    };
+                                    match await_manual_acquisition(
+                                        &app,
+                                        &acquisition_events,
+                                        host,
+                                        &result,
+                                        waiting,
+                                    )
+                                    .await
+                                    {
+                                        Acquisition::Acquired => {}
+                                        Acquisition::NotNeeded => {
+                                            break completed(result);
+                                        }
+                                        Acquisition::Abandoned => {
+                                            break Ok(CreationOutcome::Abandoned);
+                                        }
+                                    }
+                                }
                             },
                         );
                     }
@@ -4678,6 +4724,14 @@ enum OperationReport {
     Reported,
 }
 
+/// How a pending client or server creation reached its terminal state.
+enum CreationOutcome {
+    Created(String),
+    /// The user left a manual artifact-acquisition prompt. The staged server
+    /// was already discarded, so there is no error and no success to report.
+    Abandoned,
+}
+
 struct AsyncOperationRequest {
     title: &'static str,
     entity: String,
@@ -4789,7 +4843,7 @@ fn spawn_creation_operation<F, Fut>(
     operation: F,
 ) where
     F: FnOnce(App, OperationReporter, CancellationToken) -> Fut + Send + 'static,
-    Fut: std::future::Future<Output = Result<String, CoreError>> + 'static,
+    Fut: std::future::Future<Output = Result<CreationOutcome, CoreError>> + 'static,
 {
     let CreationRequest {
         id: request_id,
@@ -4821,12 +4875,15 @@ fn spawn_creation_operation<F, Fut>(
             let result = runtime.block_on(operation(app, reporter.clone(), cancel));
             remove_cancellation(&cancellations, &reporter);
             match result {
-                Ok(message) => {
+                Ok(CreationOutcome::Created(message)) => {
                     reporter.finish(OperationStatus::Completed);
                     let _ = events.send(Event::Toast {
                         message,
                         error: false,
                     });
+                }
+                Ok(CreationOutcome::Abandoned) => {
+                    reporter.finish(OperationStatus::Canceled);
                 }
                 Err(error) => {
                     reporter.finish(OperationStatus::Failed(localized_error(&error)));
