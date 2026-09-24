@@ -464,13 +464,22 @@ impl App {
                     // Deleting the outgoing copy is allowed to fail: a leftover
                     // in launcher-owned scratch is invisible to the game. It
                     // remains a typed recovery issue until reviewed.
-                    if let Some(retired) = retired {
-                        if let Err(error) = std::fs::remove_file(&retired) {
+                    if let Some(retired) = &retired {
+                        if let Err(error) = std::fs::remove_file(&retired.to) {
                             report.recovery_issues.push(MutationRecoveryIssue {
                                 action: MutationRecoveryAction::RemoveRetired,
-                                path: retired,
+                                path: retired.to.clone(),
                                 error_kind: error.kind(),
                             });
+                        }
+                    }
+                    // The replacement is written where an enabled jar goes. A
+                    // jar the user or an isolation round turned off stays off.
+                    if retired.as_ref().is_some_and(|retired| retired.was_disabled) {
+                        if let Err(error) = self.set_mod_enabled(host, &path, false) {
+                            warn!(%error, path = %path.display(), "a repaired jar could not be turned off again");
+                            report.failed.push(path);
+                            continue;
                         }
                     }
                     report.repaired.push(path);
@@ -478,8 +487,7 @@ impl App {
                 Err(error) => {
                     warn!(%error, path = %path.display(), "a file could not be repaired");
                     if let Some(retired) = retired {
-                        if let Some(issue) = restore_retired(&retired, &layout.game_dir.join(&path))
-                        {
+                        if let Some(issue) = restore_retired(&retired.to, &retired.from) {
                             report.recovery_issues.push(issue);
                         }
                     }
@@ -530,6 +538,14 @@ impl App {
     }
 }
 
+/// A broken jar moved out of the installer's way, and where it came from.
+struct Retired {
+    from: PathBuf,
+    to: PathBuf,
+    /// The jar was turned off, so its replacement has to be as well.
+    was_disabled: bool,
+}
+
 /// Moves a broken jar into launcher-owned scratch, out of the installer's way.
 ///
 /// Returns where it went, or nothing when there was no file there to move -
@@ -537,14 +553,14 @@ impl App {
 fn retire(
     layout: &crate::mods::HostLayout,
     logical_path: &Path,
-) -> std::io::Result<Option<PathBuf>> {
+) -> std::io::Result<Option<Retired>> {
     let installed = layout.game_dir.join(logical_path);
-    let present = if installed.is_file() {
-        installed
+    let (present, was_disabled) = if installed.is_file() {
+        (installed, false)
     } else {
         let disabled = ephervex_pack::disabled_path(&installed);
         if disabled.is_file() {
-            disabled
+            (disabled, true)
         } else {
             return Ok(None);
         }
@@ -557,7 +573,11 @@ fn retire(
         .unwrap_or(std::ffi::OsStr::new("mod.jar"));
     let destination = directory.join(name);
     std::fs::rename(&present, &destination)?;
-    Ok(Some(destination))
+    Ok(Some(Retired {
+        from: present,
+        to: destination,
+        was_disabled,
+    }))
 }
 
 /// Puts a retired jar back where it came from.
@@ -917,6 +937,66 @@ mod tests {
             &CancellationToken::new(),
         )
         .await
+    }
+
+    /// Puts the bytes every sound jar holds in the shared artifact cache, the
+    /// way an earlier install would have, so a repair can succeed offline.
+    fn seed_cache(app: &App) {
+        let extension = ephervex_download::FileExtension::new("jar").expect("jar");
+        let path = app.artifact_cache().layout().content(
+            ephervex_download::ContentStore::Downloads,
+            &digest_of(BODY),
+            Some(&extension),
+        );
+        std::fs::create_dir_all(path.parent().expect("shard")).expect("shard");
+        std::fs::write(&path, BODY).expect("seed the cache");
+    }
+
+    #[tokio::test]
+    async fn a_repaired_jar_that_was_turned_off_stays_off() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, id, root) = instance(base.path());
+        let mods = ephervex_storage::metadata::client_game_dir(&root).join("mods");
+        std::fs::rename(
+            mods.join("truncated.jar"),
+            mods.join("truncated.jar.disabled"),
+        )
+        .expect("disable");
+        seed_cache(&app);
+
+        let report = repair(&app, id).await.expect("repair");
+
+        assert!(report.is_complete(), "{report:?}");
+        assert_eq!(
+            std::fs::read(mods.join("truncated.jar.disabled")).expect("still turned off"),
+            BODY
+        );
+        assert!(!mods.join("truncated.jar").exists(), "not turned back on");
+        assert!(
+            mods.join("gone.jar").is_file(),
+            "an absent jar comes back enabled"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_repair_of_a_turned_off_jar_puts_it_back_turned_off() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, id, root) = instance(base.path());
+        let mods = ephervex_storage::metadata::client_game_dir(&root).join("mods");
+        std::fs::rename(
+            mods.join("truncated.jar"),
+            mods.join("truncated.jar.disabled"),
+        )
+        .expect("disable");
+
+        let report = repair(&app, id).await.expect("repair");
+
+        assert!(report.failed.contains(&PathBuf::from("mods/truncated.jar")));
+        assert_eq!(
+            std::fs::read(mods.join("truncated.jar.disabled")).expect("back where it was"),
+            b"a ja"
+        );
+        assert!(!mods.join("truncated.jar").exists());
     }
 
     #[tokio::test]
