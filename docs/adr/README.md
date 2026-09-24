@@ -43,3 +43,4 @@ so the reasoning trail survives.
 | [0035](0035-local-snapshots-use-copy-on-write-clones.md) | Local snapshots use copy-on-write clones | Accepted |
 | [0036](0036-mod-isolation-applies-recoverable-dependency-closed-rounds.md) | Mod isolation applies recoverable dependency-closed rounds | Accepted |
 | [0037](0037-a-declared-relation-is-resolved-against-the-catalog-and-never-recorded.md) | A declared relation is resolved against the catalog and never recorded | Accepted |
+| [0038](0038-a-diagnostic-bundle-is-a-chosen-verbatim-local-copy.md) | A diagnostic bundle is a chosen, verbatim, local copy | Accepted |

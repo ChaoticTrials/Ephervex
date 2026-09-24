@@ -82,6 +82,10 @@ Current functionality includes:
   filtering, search, line wrapping, bounded history, and follow controls;
 * crash-report and launcher-diagnostics browsing with bounded local reads and
   folder actions;
+* per-host verification of recorded files against their checksums, repair of
+  missing or damaged managed files, and local diagnostic bundles built from a
+  checklist of the host's logs, crash reports, and recorded state, copied
+  verbatim and never uploaded;
 * desktop management of instances, servers, accounts, Java runtimes, mods,
   Minecraft preferences, diagnostics, and application settings; and
 * shell completion generation for Bash, Zsh, Fish, Elvish, and PowerShell; and

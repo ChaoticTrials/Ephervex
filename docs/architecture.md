@@ -876,7 +876,7 @@ so.
 ## Diagnostic bundles
 
 A bundle collects diagnostics into one archive somebody can attach to a bug
-report. It is not an upload: nothing contacts a service, no paste site is
+report (ADR 0038). It is not an upload: nothing contacts a service, no paste site is
 integrated, and the archive is written to a path the user named and goes no
 further than they take it.
 
