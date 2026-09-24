@@ -175,6 +175,12 @@ slint::slint! {
         creating-server-detail: string,
         creating-server-progress: float,
         creating-server-indeterminate: bool,
+        // Where a restart of this host is: "stopping", "starting", or empty.
+        // Carried on the row every view reads, so each one shows the same.
+        restart-stage: string,
+        // Whether this run launched the running game and so knows how to start
+        // it again the same way.
+        can-restart: bool,
     }
 
     export struct ServerRow {
@@ -202,6 +208,8 @@ slint::slint! {
         can-send-command: bool,
         can-connect: bool,
         connect-reason: string,
+        // Where a restart of this host is: "stopping", "starting", or empty.
+        restart-stage: string,
     }
 
     export struct ImpactRow {
@@ -1732,6 +1740,10 @@ slint::slint! {
         in property <bool> primary-enabled;
         in property <bool> restart-visible;
         in property <bool> restart-enabled;
+        // Why Restart is unavailable while the host runs, shown on hover.
+        in property <string> restart-hint;
+        // Where a restart of this host is, read from the host's own row.
+        in property <string> restart-stage;
         in property <string> workflow-id;
         in property <string> workflow-title;
         in property <string> workflow-summary;
@@ -1739,6 +1751,12 @@ slint::slint! {
         // A workflow is changing this host's files, so nothing may start it.
         in property <bool> busy;
         in property <string> busy-text;
+        // A change or a restart is under way: the host's own actions wait, and
+        // the banner says what is happening rather than warning about it.
+        property <bool> occupied: root.busy || root.restart-stage != "";
+        property <string> occupied-text: root.busy ? root.busy-text
+            : root.restart-stage == "stopping" ? GuiI18n.text("gui-restart-stage-stopping")
+            : GuiI18n.text("gui-restart-stage-starting");
         callback back();
         callback open-folder();
         callback primary();
@@ -1755,18 +1773,18 @@ slint::slint! {
                 spacing: 12px;
                 AppButton { text: root.back-label; clicked => { root.back(); } }
                 Heading { text: root.title; font-size: Theme.workspace-title-size; overflow: elide; }
-                VerticalLayout { alignment: center; Pill { text: root.status; tone-color: root.status-kind == "running" ? Theme.success : root.status-kind == "starting" ? Theme.warning : Theme.text-secondary; } }
+                VerticalLayout { alignment: center; Pill { text: root.restart-stage != "" ? GuiI18n.text("gui-state-restarting") : root.status; tone-color: root.restart-stage != "" || root.status-kind == "starting" ? Theme.warning : root.status-kind == "running" ? Theme.success : Theme.text-secondary; } }
                 Rectangle { horizontal-stretch: 1; }
                 AppButton { text: GuiI18n.text("gui-open-folder"); clicked => { root.open-folder(); } }
                 if root.show-launch-as : LaunchAsButton {
                     accounts: root.accounts;
-                    enabled: root.primary-enabled && !root.busy;
+                    enabled: root.primary-enabled && !root.occupied;
                     alongside: root.launch-alongside;
                     launch-as(account, alongside) => { root.launch-as(account, alongside); }
                     add-account => { root.add-account(); }
                 }
-                if root.restart-visible : AppButton { text: GuiI18n.text("gui-restart"); enabled: root.restart-enabled && !root.busy; clicked => { root.restart(); } }
-                AppButton { text: root.primary-label; tone: root.primary-tone; enabled: root.primary-enabled && !root.busy; clicked => { root.primary(); } }
+                if root.restart-visible : AppButton { text: GuiI18n.text("gui-restart"); enabled: root.restart-enabled && !root.occupied; hint: root.restart-hint; clicked => { root.restart(); } }
+                AppButton { text: root.primary-label; tone: root.primary-tone; enabled: root.primary-enabled && !root.occupied; clicked => { root.primary(); } }
             }
             if root.workflow-id != "" : Rectangle {
                 height: max(64px, workflow-copy.preferred-height + 24px);
@@ -1780,23 +1798,23 @@ slint::slint! {
                         horizontal-stretch: 1;
                         Heading { text: root.workflow-title; font-size: Theme.row-heading-size; }
                         BodyText { text: root.workflow-summary; color: Theme.text-secondary; wrap: word-wrap; }
-                        if root.busy : HorizontalLayout {
+                        if root.occupied : HorizontalLayout {
                             spacing: 6px;
                             Spinner { indeterminate: true; width: 14px; height: 14px; }
-                            BodyText { text: root.busy-text; horizontal-stretch: 1; wrap: word-wrap; }
+                            BodyText { text: root.occupied-text; horizontal-stretch: 1; wrap: word-wrap; }
                         }
                     }
                     for action in root.workflow-actions : AppButton {
                         text: action.label;
                         tone: action.tone;
-                        enabled: action.enabled && (!action.requires-stopped || (!root.host-running && !root.busy));
+                        enabled: action.enabled && (!action.requires-stopped || (!root.host-running && !root.occupied));
                         clicked => { root.workflow-action(root.workflow-id, action.id); }
                     }
                 }
             }
             // Before a workflow is active, such as while one starts, its
             // progress still belongs above the surface that asked for it.
-            if root.busy && root.workflow-id == "" : Rectangle {
+            if root.occupied && root.workflow-id == "" : Rectangle {
                 border-radius: 7px;
                 border-width: 1px;
                 border-color: Theme.accent;
@@ -1804,7 +1822,7 @@ slint::slint! {
                 HorizontalLayout {
                     padding: 10px; spacing: 9px; cross-axis-alignment: center;
                     Spinner { indeterminate: true; width: 18px; height: 18px; }
-                    BodyText { text: root.busy-text; horizontal-stretch: 1; wrap: word-wrap; }
+                    BodyText { text: root.occupied-text; horizontal-stretch: 1; wrap: word-wrap; }
                 }
             }
             HorizontalLayout {
@@ -3250,7 +3268,7 @@ slint::slint! {
                 HorizontalLayout {
                     alignment: center; spacing: 7px;
                     BodyText { text: item.storage; color: item.storage-kind == "temporary" ? Theme.warning : Theme.success; font-size: Theme.caption-size; }
-                    Pill { text: item.state; tone-color: item.state-kind == "running" ? Theme.success : item.state-kind == "starting" ? Theme.warning : Theme.text-secondary; }
+                    Pill { text: item.restart-stage != "" ? GuiI18n.text("gui-state-restarting") : item.state; tone-color: item.restart-stage != "" ? Theme.warning : item.state-kind == "running" ? Theme.success : item.state-kind == "starting" ? Theme.warning : Theme.text-secondary; }
                     if item.creating-server-detail != "" : Pill { text: GuiI18n.text("gui-state-creating-server"); tone-color: Theme.accent; }
                     if item.needs-attention : Pill { text: GuiI18n.text("gui-attention"); tone-color: Theme.danger; }
                 }
@@ -3333,7 +3351,7 @@ slint::slint! {
                 HorizontalLayout {
                     alignment: center; spacing: 7px;
                     BodyText { text: item.storage; color: item.storage-kind == "temporary" ? Theme.warning : Theme.success; font-size: Theme.caption-size; }
-                    Pill { text: item.state; tone-color: item.state-kind == "running" ? Theme.success : item.state-kind == "stopped" ? Theme.text-secondary : Theme.warning; }
+                    Pill { text: item.restart-stage != "" ? GuiI18n.text("gui-state-restarting") : item.state; tone-color: item.restart-stage != "" ? Theme.warning : item.state-kind == "running" ? Theme.success : item.state-kind == "stopped" ? Theme.text-secondary : Theme.warning; }
                 }
                 HorizontalLayout { alignment: center; spacing: 7px;
                     if item.can-start || item.can-stop : AppButton {
@@ -3351,7 +3369,7 @@ slint::slint! {
             Menu {
                 MenuItem { title: GuiI18n.text("gui-open-server-workspace"); activated => { root.open-workspace(item.id); } }
                 MenuItem { title: item.can-start ? GuiI18n.text("gui-start") : GuiI18n.text("gui-stop"); enabled: item.can-start || item.can-stop; activated => { root.primary(item.id); } }
-                MenuItem { title: GuiI18n.text("gui-restart"); enabled: item.can-restart; activated => { root.restart(item.id); } }
+                MenuItem { title: GuiI18n.text("gui-restart"); enabled: item.can-restart && item.restart-stage == ""; activated => { root.restart(item.id); } }
                 MenuItem { title: GuiI18n.text("gui-open-folder"); activated => { root.open-folder(item.id); } }
                 MenuSeparator { }
                 MenuItem { title: GuiI18n.text("gui-rename"); activated => { root.rename(item.id, item.name); } }
@@ -3395,7 +3413,7 @@ slint::slint! {
             }
             Divider { }
             Eyebrow { text: GuiI18n.text("gui-overview"); }
-            HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-status"); } BodyText { text: item.needs-attention ? GuiI18n.text("gui-needs-attention") : item.state; color: item.needs-attention ? Theme.warning : item.state-kind == "running" ? Theme.success : item.state-kind == "starting" ? Theme.warning : Theme.text-secondary; } }
+            HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-status"); } BodyText { text: item.needs-attention ? GuiI18n.text("gui-needs-attention") : item.restart-stage != "" ? GuiI18n.text("gui-state-restarting") : item.state; color: item.needs-attention || item.restart-stage != "" ? Theme.warning : item.state-kind == "running" ? Theme.success : item.state-kind == "starting" ? Theme.warning : Theme.text-secondary; } }
             HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-source"); } BodyText { text: item.source; } }
             HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-mods"); } BodyText { text: GuiI18n.count("gui-managed-count", item.mods); } }
             HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-storage"); } BodyText { text: item.storage; } }
@@ -4210,6 +4228,7 @@ slint::slint! {
         callback server-start(string);
         callback server-stop(string);
         callback server-restart(string);
+        callback client-restart(string);
         callback server-kill(string);
         callback server-console(string, string);
         callback open-live-log(string, string);
@@ -4523,6 +4542,11 @@ slint::slint! {
                             primary-label: root.selected-instance-index >= 0 && root.instances[root.selected-instance-index].can-kill ? GuiI18n.text("gui-stop-game") : GuiI18n.text("gui-launch");
                             primary-tone: root.selected-instance-index >= 0 && root.instances[root.selected-instance-index].can-kill ? "danger" : "primary";
                             primary-enabled: root.selected-instance-index >= 0 && (root.instances[root.selected-instance-index].can-launch || root.instances[root.selected-instance-index].can-kill);
+                            restart-visible: true;
+                            restart-enabled: root.selected-instance-index >= 0 && root.instances[root.selected-instance-index].can-kill && root.instances[root.selected-instance-index].can-restart;
+                            restart-hint: root.selected-instance-index >= 0 && root.instances[root.selected-instance-index].can-kill && !root.instances[root.selected-instance-index].can-restart ? GuiI18n.text("gui-restart-client-unavailable") : "";
+                            restart-stage: root.selected-instance-index >= 0 ? root.instances[root.selected-instance-index].restart-stage : "";
+                            restart => { root.client-restart(root.selected-instance-id); }
                             workflow-id: root.isolation-host-kind == "client" && root.isolation-host-id == root.selected-instance-id ? root.active-workflow-id : "";
                             busy: root.host-busy-kind == "client" && root.host-busy-id == root.selected-instance-id;
                             busy-text: root.host-busy-text;
@@ -4758,7 +4782,7 @@ slint::slint! {
                                 Divider { }
                                 Eyebrow { text: GuiI18n.text("gui-actions"); }
                                 if root.global-servers[root.selected-global-server-index].can-start || root.global-servers[root.selected-global-server-index].can-stop : AppButton { text: root.global-servers[root.selected-global-server-index].can-start ? GuiI18n.text("gui-start") : GuiI18n.text("gui-stop"); tone: "primary"; clicked => { if root.global-servers[root.selected-global-server-index].can-start { root.server-start(root.selected-global-server-id); } else { root.server-stop(root.selected-global-server-id); } } }
-                                HorizontalLayout { spacing: 8px; AppButton { text: GuiI18n.text("gui-open-server-workspace"); clicked => { root.selected-server-id = root.selected-global-server-id; root.server-workspace-return-client = ""; root.workspace = "server"; root.workspace-tab = "Overview"; root.load-server-workspace(root.selected-server-id); } } AppButton { text: GuiI18n.text("gui-restart"); enabled: root.global-servers[root.selected-global-server-index].can-restart; clicked => { root.server-restart(root.selected-global-server-id); } } }
+                                HorizontalLayout { spacing: 8px; AppButton { text: GuiI18n.text("gui-open-server-workspace"); clicked => { root.selected-server-id = root.selected-global-server-id; root.server-workspace-return-client = ""; root.workspace = "server"; root.workspace-tab = "Overview"; root.load-server-workspace(root.selected-server-id); } } AppButton { text: GuiI18n.text("gui-restart"); enabled: root.global-servers[root.selected-global-server-index].can-restart && root.global-servers[root.selected-global-server-index].restart-stage == ""; clicked => { root.server-restart(root.selected-global-server-id); } } }
                                 if root.global-servers[root.selected-global-server-index].linked-client-id != "" : AppButton { text: GuiI18n.text("gui-launch-client-connect"); enabled: root.global-servers[root.selected-global-server-index].can-connect; clicked => { root.launch-and-connect(root.global-servers[root.selected-global-server-index].linked-client-id, root.selected-global-server-id); } }
                                 HorizontalLayout { spacing: 8px;
                                     AppButton { text: GuiI18n.text("gui-open-folder"); clicked => { root.open-server-folder(root.selected-global-server-id); } }
@@ -4792,6 +4816,7 @@ slint::slint! {
                             primary-enabled: root.selected-server-index >= 0 && (root.servers[root.selected-server-index].can-start || root.servers[root.selected-server-index].can-stop);
                             restart-visible: true;
                             restart-enabled: root.selected-server-index >= 0 && root.servers[root.selected-server-index].can-restart;
+                            restart-stage: root.selected-server-index >= 0 ? root.servers[root.selected-server-index].restart-stage : "";
                             workflow-id: root.isolation-host-kind == "server" && root.isolation-host-id == root.selected-server-id ? root.active-workflow-id : "";
                             busy: root.host-busy-kind == "server" && root.host-busy-id == root.selected-server-id;
                             busy-text: root.host-busy-text;
@@ -4857,7 +4882,7 @@ slint::slint! {
                                 open-bundle-folder => { root.open-bundle-folder(root.bundle-result-path); }
                             }
                             if root.workspace-tab == "Console" : VerticalLayout { spacing: 10px;
-                                ActionRow { BodyText { text: GuiI18n.value("gui-bounded-output", root.servers[root.selected-server-index].state); color: root.servers[root.selected-server-index].can-send-command ? Theme.success : Theme.text-secondary; } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-restart"); enabled: root.servers[root.selected-server-index].can-restart; clicked => { root.server-restart(root.selected-server-id); } } AppButton { text: GuiI18n.text("gui-stop"); enabled: root.servers[root.selected-server-index].can-stop; clicked => { root.server-stop(root.selected-server-id); } } AppButton { text: GuiI18n.text("gui-kill"); tone: "danger"; enabled: root.servers[root.selected-server-index].can-kill; clicked => { root.modal = "kill"; } } }
+                                ActionRow { BodyText { text: GuiI18n.value("gui-bounded-output", root.servers[root.selected-server-index].state); color: root.servers[root.selected-server-index].can-send-command ? Theme.success : Theme.text-secondary; } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-restart"); enabled: root.servers[root.selected-server-index].can-restart && root.servers[root.selected-server-index].restart-stage == ""; clicked => { root.server-restart(root.selected-server-id); } } AppButton { text: GuiI18n.text("gui-stop"); enabled: root.servers[root.selected-server-index].can-stop; clicked => { root.server-stop(root.selected-server-id); } } AppButton { text: GuiI18n.text("gui-kill"); tone: "danger"; enabled: root.servers[root.selected-server-index].can-kill; clicked => { root.modal = "kill"; } } }
                                 LiveLogViewer {
                                     chunks: root.log-chunks; has-content: root.log-has-content; status: root.log-status; history-truncated: root.log-history-truncated; pending-lines: root.log-pending-lines; content-columns: root.log-content-columns; font-size: root.technical-text-size * 1px; query <=> root.log-query; wrap-lines <=> root.log-wrap-lines; follow <=> root.log-follow; trace-enabled: root.log-trace-enabled; debug-enabled: root.log-debug-enabled; info-enabled: root.log-info-enabled; warn-enabled: root.log-warn-enabled; error-enabled: root.log-error-enabled; fatal-enabled: root.log-fatal-enabled; other-enabled: root.log-other-enabled; revision: root.log-revision; selection-start-row: root.log-selection-start-row; selection-start-offset: root.log-selection-start-offset; selection-end-row: root.log-selection-end-row; selection-end-offset: root.log-selection-end-offset; has-selection: root.log-has-selection; selection-revision: root.log-selection-revision;
                                     set-level(level, enabled) => { root.set-log-level(level, enabled); } search(query) => { root.search-live-log(query); } copy => { root.copy-live-log(); } copy-selection => { root.copy-log-selection(); } select-at(row, column, extend) => { root.select-log-at(row, column, extend); } select-word-at(row, column) => { root.select-log-word-at(row, column); } select-all => { root.select-all-log(); } follow-changed(follow) => { root.live-log-follow-changed(follow); }

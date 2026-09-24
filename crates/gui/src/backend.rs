@@ -380,7 +380,13 @@ pub enum Command {
     },
     StartServer(ServerId),
     StopServer(ServerId),
-    RestartServer(ServerId),
+    /// Stops a running client or server, waits until it has stopped, and
+    /// starts it again the way it was started. `request` identifies this
+    /// restart in the stage events it produces.
+    RestartHost {
+        host: InstalledHost,
+        request: u64,
+    },
     KillServer(ServerId),
     SendConsole {
         server: ServerId,
@@ -1503,6 +1509,20 @@ pub enum Event {
         host: InstalledHost,
         basis: u64,
     },
+    /// Where one host's restart is. `None` once it has ended, whichever way.
+    /// A `request` of 0 is a stage the server reported on its own, which
+    /// belongs to whatever restart is tracked for that host.
+    HostRestart {
+        host: InstalledHost,
+        request: u64,
+        stage: Option<RestartStage>,
+    },
+    /// Whether a client launch this run started is still running, which is
+    /// what makes it restartable: its launch request is known.
+    LaunchContext {
+        instance: InstanceId,
+        restartable: bool,
+    },
     /// What a verification found on one host.
     HostVerified {
         host: InstalledHost,
@@ -1709,6 +1729,136 @@ type RefreshedHosts = Arc<Mutex<HashSet<String>>>;
 /// second change then would read or rewrite a directory that is half done.
 type ChangingHosts = Arc<Mutex<HashMap<String, &'static str>>>;
 
+/// Where one restart is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestartStage {
+    /// Asking the running process to stop, and waiting until it has.
+    Stopping,
+    /// The old process has stopped; the replacement is being started.
+    Starting,
+}
+
+impl RestartStage {
+    /// A stable identifier for the rows every view of the host reads.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Stopping => "stopping",
+            Self::Starting => "starting",
+        }
+    }
+}
+
+/// How one restart ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RestartOutcome {
+    Restarted,
+    /// The old process was not seen to stop, so nothing was started.
+    NotStopped,
+    /// The old process stopped and its replacement could not be started.
+    StartFailed(String),
+    /// The restart ended before its start phase, such as when a stop was
+    /// asked for while it waited.
+    Interrupted(String),
+}
+
+/// The exclusive client launches this run started and still supervises, with
+/// the request each was made with.
+///
+/// Runtime only, and holding nothing secret: an account is named by reference,
+/// and its credentials stay where every launch reads them from. A launch this
+/// run did not start, one made alongside another, and one made by Launch &
+/// Connect are not here, so none of them can be restarted.
+type RunningLaunches = Arc<Mutex<HashMap<InstanceId, RunningLaunch>>>;
+
+#[derive(Debug, Clone)]
+struct RunningLaunch {
+    generation: u64,
+    account: Option<String>,
+    /// Becomes true once the launch has returned: the game has exited and its
+    /// lock is released, which is what a restart waits for.
+    finished: tokio::sync::watch::Receiver<bool>,
+}
+
+/// How long a client restart waits for the old game to be gone. Stopping kills
+/// the process, so this bounds only a supervisor that never reports back.
+const CLIENT_STOP_WAIT: Duration = Duration::from_secs(60);
+
+fn register_launch(
+    launches: &RunningLaunches,
+    events: &Sender<Event>,
+    instance: InstanceId,
+    account: Option<String>,
+) -> (u64, tokio::sync::watch::Sender<bool>) {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let generation = NEXT.fetch_add(1, Ordering::Relaxed);
+    let (sender, finished) = tokio::sync::watch::channel(false);
+    if let Ok(mut entries) = launches.lock() {
+        entries.insert(
+            instance,
+            RunningLaunch {
+                generation,
+                account,
+                finished,
+            },
+        );
+    }
+    let _ = events.send(Event::LaunchContext {
+        instance,
+        restartable: true,
+    });
+    (generation, sender)
+}
+
+fn unregister_launch(
+    launches: &RunningLaunches,
+    events: &Sender<Event>,
+    instance: InstanceId,
+    generation: u64,
+) {
+    let removed = launches.lock().is_ok_and(|mut entries| {
+        let ours = entries
+            .get(&instance)
+            .is_some_and(|entry| entry.generation == generation);
+        if ours {
+            entries.remove(&instance);
+        }
+        ours
+    });
+    if removed {
+        let _ = events.send(Event::LaunchContext {
+            instance,
+            restartable: false,
+        });
+    }
+}
+
+/// Stops, waits until the stop is observed, then starts exactly once.
+///
+/// Nothing is started unless `stopped` reports the old process gone, so a stop
+/// that fails or hangs can never leave two copies running.
+async fn restart_sequence<Start, StartFuture>(
+    stop: impl FnOnce(),
+    stopped: impl std::future::Future<Output = bool>,
+    start: Start,
+    stage: &dyn Fn(RestartStage),
+) -> RestartOutcome
+where
+    Start: FnOnce() -> StartFuture,
+    StartFuture: std::future::Future<Output = Result<(), String>>,
+{
+    stage(RestartStage::Stopping);
+    stop();
+    if !stopped.await {
+        return RestartOutcome::NotStopped;
+    }
+    stage(RestartStage::Starting);
+    match start().await {
+        Ok(()) => RestartOutcome::Restarted,
+        Err(detail) => RestartOutcome::StartFailed(detail),
+    }
+}
+
 fn host_key(host: InstalledHost) -> String {
     format!("{}:{}", host.kind(), host.id())
 }
@@ -1817,6 +1967,7 @@ fn run_worker(
     let live_log_generation = Arc::new(AtomicU64::new(0));
     let refreshed_mods: RefreshedHosts = Arc::new(Mutex::new(HashSet::new()));
     let changing: ChangingHosts = Arc::new(Mutex::new(HashMap::new()));
+    let launches: RunningLaunches = Arc::new(Mutex::new(HashMap::new()));
     // Kept between polls, because CPU is a rate rather than a reading.
     let mut process_monitor = ProcessMonitor::new();
     // A version change waiting on a release the user has to fetch, so closing
@@ -2119,10 +2270,14 @@ fn run_worker(
                     paths,
                     &events,
                     Arc::clone(&cancellations),
-                    instance,
-                    entity,
-                    account,
-                    additional,
+                    Arc::clone(&launches),
+                    ClientLaunch {
+                        instance,
+                        entity,
+                        account,
+                        additional,
+                    },
+                    None,
                 );
             }
             Command::LaunchAndConnect { client, server } => {
@@ -2607,6 +2762,10 @@ fn run_worker(
                 generation,
                 request,
             } => {
+                if refuse_while_changing(&changing, host, &events) {
+                    let _ = events.send(Event::IsolationSettled { request });
+                    continue;
+                }
                 send_isolation_state(&app, host, generation, false, &events, &refreshed_mods);
                 let _ = events.send(Event::IsolationSettled { request });
             }
@@ -2618,6 +2777,10 @@ fn run_worker(
                 accept_unrecorded,
                 accept_missing,
             } => {
+                if refuse_while_changing(&changing, host, &events) {
+                    let _ = events.send(Event::IsolationSettled { request });
+                    continue;
+                }
                 let paths = app.paths().clone();
                 let reports = events.clone();
                 let refreshed = Arc::clone(&refreshed_mods);
@@ -2656,6 +2819,10 @@ fn run_worker(
                 request,
                 answer,
             } => {
+                if refuse_while_changing(&changing, host, &events) {
+                    let _ = events.send(Event::IsolationSettled { request });
+                    continue;
+                }
                 match app.answer_isolation_round(host, answer) {
                     Ok(_) => {
                         send_isolation_state(
@@ -2689,6 +2856,10 @@ fn run_worker(
                 generation,
                 request,
             } => {
+                if refuse_while_changing(&changing, host, &events) {
+                    let _ = events.send(Event::IsolationSettled { request });
+                    continue;
+                }
                 match app.undo_isolation_round(host) {
                     Ok(_) => {
                         send_isolation_state(
@@ -2710,6 +2881,10 @@ fn run_worker(
                 generation,
                 request,
             } => {
+                if refuse_while_changing(&changing, host, &events) {
+                    let _ = events.send(Event::IsolationSettled { request });
+                    continue;
+                }
                 match app.finish_isolation(host) {
                     Ok(report) => {
                         let _ = events.send(Event::Isolation {
@@ -2728,6 +2903,10 @@ fn run_worker(
                 generation,
                 request,
             } => {
+                if refuse_while_changing(&changing, host, &events) {
+                    let _ = events.send(Event::IsolationSettled { request });
+                    continue;
+                }
                 let paths = app.paths().clone();
                 let reports = events.clone();
                 let refreshed = Arc::clone(&refreshed_mods);
@@ -3249,17 +3428,82 @@ fn run_worker(
                 );
                 send_snapshot(&app, &events);
             }
-            Command::RestartServer(server) => {
-                if refuse_while_changing(&changing, InstalledHost::Server(server), &events) {
+            Command::RestartHost { host, request } => {
+                let refused = |message: &str| {
+                    let _ = events.send(Event::Toast {
+                        message: lookup(message),
+                        error: true,
+                    });
+                    let _ = events.send(Event::HostRestart {
+                        host,
+                        request,
+                        stage: None,
+                    });
+                };
+                if refuse_while_changing(&changing, host, &events) {
+                    let _ = events.send(Event::HostRestart {
+                        host,
+                        request,
+                        stage: None,
+                    });
                     continue;
                 }
-                report_async_control(
-                    &runtime,
-                    &events,
-                    app.restart_server(server),
-                    "gui-restart-requested",
-                );
-                send_snapshot(&app, &events);
+                let paths = app.paths().clone();
+                match host {
+                    InstalledHost::Instance(instance) => {
+                        let running = launches
+                            .lock()
+                            .ok()
+                            .and_then(|entries| entries.get(&instance).cloned());
+                        let token = cancellations
+                            .lock()
+                            .ok()
+                            .and_then(|entries| entries.get(&launch_key(instance, None)).cloned());
+                        let (Some(running), Some(token)) = (running, token) else {
+                            refused("gui-restart-client-unavailable");
+                            continue;
+                        };
+                        let entity = app
+                            .client(instance)
+                            .map_or_else(|_| instance.to_string(), |record| record.name);
+                        let in_flight =
+                            HostChangeInFlight::mark(&changing, host, "gui-restart-busy");
+                        spawn_client_restart(
+                            paths,
+                            &events,
+                            LaunchTracking {
+                                cancellations: Arc::clone(&cancellations),
+                                launches: Arc::clone(&launches),
+                            },
+                            ClientRestart {
+                                instance,
+                                entity,
+                                request,
+                                running,
+                                token,
+                            },
+                            in_flight,
+                        );
+                    }
+                    InstalledHost::Server(server) => {
+                        let controlled = app.server_status(server).is_ok_and(|status| {
+                            matches!(
+                                status.runtime,
+                                ephervex_core::RuntimeClassification::Controlled { .. }
+                            )
+                        });
+                        if !controlled {
+                            refused("gui-restart-server-unavailable");
+                            continue;
+                        }
+                        let entity = app
+                            .server(server)
+                            .map_or_else(|_| server.to_string(), |record| record.name);
+                        let in_flight =
+                            HostChangeInFlight::mark(&changing, host, "gui-restart-busy");
+                        spawn_server_restart(paths, &events, server, entity, request, in_flight);
+                    }
+                }
             }
             Command::KillServer(server) => {
                 report_async_control(
@@ -5265,15 +5509,32 @@ fn send_diagnostic_content(
     }
 }
 
-fn spawn_launch(
-    paths: Paths,
-    events: &Sender<Event>,
-    cancellations: CancellationRegistry,
+/// One client launch, as the thread that supervises it needs it.
+struct ClientLaunch {
     instance: InstanceId,
     entity: String,
     account: Option<String>,
     additional: Option<String>,
+}
+
+/// Told once whether a launch reached a running game: `Ok` at its first line
+/// of output or when it ran and exited, `Err` when it failed before that.
+type LaunchStarted = tokio::sync::oneshot::Sender<Result<(), String>>;
+
+fn spawn_launch(
+    paths: Paths,
+    events: &Sender<Event>,
+    cancellations: CancellationRegistry,
+    launches: RunningLaunches,
+    launch: ClientLaunch,
+    started: Option<LaunchStarted>,
 ) {
+    let ClientLaunch {
+        instance,
+        entity,
+        account,
+        additional,
+    } = launch;
     spawn_detached(
         paths.clone(),
         events.clone(),
@@ -5298,9 +5559,19 @@ fn spawn_launch(
             let forwarded_operation = Arc::clone(&observed_operation);
             let forwarded_cancellations = Arc::clone(&cancellations);
             let forwarded_token = cancel.clone();
+            // Only an exclusive launch can be restarted: it is the one the
+            // instance's own Stop and Restart act on.
+            let registered = additional
+                .is_none()
+                .then(|| register_launch(&launches, &events, instance, account.clone()));
+            let started = Arc::new(Mutex::new(started));
+            let started_by_output = Arc::clone(&started);
             runtime.block_on(async move {
                 let forward = tokio::spawn(async move {
                     while let Some(event) = receiver.recv().await {
+                        if matches!(event, LaunchEvent::OutputLine(_)) {
+                            report_launch_started(&started_by_output, Ok(()));
+                        }
                         forward_launch_event(
                             &event_sender,
                             &entity_for_events,
@@ -5327,54 +5598,306 @@ fn spawn_launch(
                     .await;
                 drop(observer);
                 let _ = forward.await;
-                match result {
-                    Ok(outcome) => {
-                        let detail = if outcome.is_success() {
-                            lookup("gui-activity-exited-cleanly")
-                        } else {
-                            lookup("gui-activity-game-error")
-                        };
-                        send_activity_state(
-                            &events,
-                            outcome.operation.to_string(),
-                            &lookup("gui-activity-launch-minecraft"),
-                            &entity,
-                            &detail,
-                            if outcome.is_success() {
-                                "completed"
-                            } else {
-                                "failed"
-                            },
-                            false,
-                            !outcome.is_success(),
-                            false,
-                        );
-                    }
-                    Err(error) => {
-                        let id = observed_operation
-                            .lock()
-                            .ok()
-                            .and_then(|observed| observed.clone())
-                            .unwrap_or_else(|| instance.to_string());
-                        send_activity_state(
-                            &events,
-                            id,
-                            &lookup("gui-activity-launch-minecraft"),
-                            &entity,
-                            &localized_error(&error),
-                            "failed",
-                            false,
-                            true,
-                            false,
-                        );
-                        send_error(&events, &error);
-                    }
-                }
+                report_launch_started(
+                    &started,
+                    result.as_ref().map(|_| ()).map_err(localized_error),
+                );
+                report_launch_result(&events, instance, &entity, &observed_operation, &result);
                 release_launch_cancellation(&killing, instance, &observed_operation);
+                // Announced only after everything this launch held is
+                // released, so a restart waiting on it cannot start the next
+                // launch while this one still claims the instance.
+                if let Some((generation, finished)) = registered {
+                    unregister_launch(&launches, &events, instance, generation);
+                    let _ = finished.send(true);
+                }
                 if let Ok(app) = App::open_at(paths) {
                     send_snapshot(&app, &events);
                 }
             });
+        },
+    );
+}
+
+/// Says how a launch ended, on the activity row it has had since it began.
+fn report_launch_result(
+    events: &Sender<Event>,
+    instance: InstanceId,
+    entity: &str,
+    observed_operation: &Mutex<Option<String>>,
+    result: &CoreResult<ephervex_core::LaunchOutcome>,
+) {
+    match result {
+        Ok(outcome) => {
+            let detail = if outcome.is_success() {
+                lookup("gui-activity-exited-cleanly")
+            } else {
+                lookup("gui-activity-game-error")
+            };
+            send_activity_state(
+                events,
+                outcome.operation.to_string(),
+                &lookup("gui-activity-launch-minecraft"),
+                entity,
+                &detail,
+                if outcome.is_success() {
+                    "completed"
+                } else {
+                    "failed"
+                },
+                false,
+                !outcome.is_success(),
+                false,
+            );
+        }
+        Err(error) => {
+            let id = observed_operation
+                .lock()
+                .ok()
+                .and_then(|observed| observed.clone())
+                .unwrap_or_else(|| instance.to_string());
+            send_activity_state(
+                events,
+                id,
+                &lookup("gui-activity-launch-minecraft"),
+                entity,
+                &localized_error(error),
+                "failed",
+                false,
+                true,
+                false,
+            );
+            send_error(events, error);
+        }
+    }
+}
+
+fn report_launch_started(started: &Mutex<Option<LaunchStarted>>, outcome: Result<(), String>) {
+    if let Some(sender) = started.lock().ok().and_then(|mut started| started.take()) {
+        let _ = sender.send(outcome);
+    }
+}
+
+/// What the worker keeps about the client launches it started.
+struct LaunchTracking {
+    cancellations: CancellationRegistry,
+    launches: RunningLaunches,
+}
+
+/// One client restart, as its thread needs it.
+struct ClientRestart {
+    instance: InstanceId,
+    entity: String,
+    request: u64,
+    /// The launch being replaced, and the request it was made with.
+    running: RunningLaunch,
+    /// What stops it: the same token its own Stop cancels.
+    token: CancellationToken,
+}
+
+/// Reports a restart's stage to every view of the host and to the activity
+/// list, under one activity row for the whole restart.
+fn restart_stage_reporter(
+    events: &Sender<Event>,
+    host: InstalledHost,
+    request: u64,
+    entity: &str,
+) -> impl Fn(RestartStage) {
+    let events = events.clone();
+    let entity = entity.to_owned();
+    move |stage| {
+        let _ = events.send(Event::HostRestart {
+            host,
+            request,
+            stage: Some(stage),
+        });
+        send_activity_state(
+            &events,
+            restart_activity_id(host, request),
+            &lookup("gui-activity-restarting"),
+            &entity,
+            &lookup(match stage {
+                RestartStage::Stopping => "gui-restart-stage-stopping",
+                RestartStage::Starting => "gui-restart-stage-starting",
+            }),
+            "running",
+            true,
+            false,
+            false,
+        );
+    }
+}
+
+fn restart_activity_id(host: InstalledHost, request: u64) -> String {
+    format!("restart:{}:{request}", host_key(host))
+}
+
+/// Ends a restart: every view of the host stops showing a stage, and the
+/// outcome is said once, in the activity list and as a toast.
+fn report_restart_outcome(
+    events: &Sender<Event>,
+    host: InstalledHost,
+    request: u64,
+    entity: &str,
+    outcome: &RestartOutcome,
+) {
+    let _ = events.send(Event::HostRestart {
+        host,
+        request,
+        stage: None,
+    });
+    let (message, failed) = match outcome {
+        RestartOutcome::Restarted => (localized_value("gui-restart-done", entity), false),
+        RestartOutcome::NotStopped => (localized_value("gui-restart-not-stopped", entity), true),
+        RestartOutcome::StartFailed(detail) => (
+            lookup_args(
+                "gui-restart-start-failed",
+                [
+                    ("value", Arg::from(entity)),
+                    ("detail", Arg::from(detail.as_str())),
+                ],
+            ),
+            true,
+        ),
+        RestartOutcome::Interrupted(detail) => (
+            lookup_args(
+                "gui-restart-interrupted",
+                [
+                    ("value", Arg::from(entity)),
+                    ("detail", Arg::from(detail.as_str())),
+                ],
+            ),
+            true,
+        ),
+    };
+    send_activity_state(
+        events,
+        restart_activity_id(host, request),
+        &lookup("gui-activity-restarting"),
+        entity,
+        &message,
+        if failed { "failed" } else { "completed" },
+        false,
+        failed,
+        false,
+    );
+    let _ = events.send(Event::Toast {
+        message,
+        error: failed,
+    });
+}
+
+/// Restarts a client this run launched: stop it the way its own Stop does,
+/// wait until that launch has returned and nothing holds the instance, then
+/// launch it again through the ordinary path with the same account.
+///
+/// Not cancelable once accepted. The host-change claim is held until the new
+/// launch is running or has failed, so nothing rewrites the instance in the
+/// moment between the two.
+fn spawn_client_restart(
+    paths: Paths,
+    events: &Sender<Event>,
+    tracking: LaunchTracking,
+    restart: ClientRestart,
+    in_flight: HostChangeInFlight,
+) {
+    let ClientRestart {
+        instance,
+        entity,
+        request,
+        running,
+        token,
+    } = restart;
+    spawn_detached(
+        paths.clone(),
+        events.clone(),
+        move |app, events, runtime| {
+            let _in_flight = in_flight;
+            let host = InstalledHost::Instance(instance);
+            let stage = restart_stage_reporter(&events, host, request, &entity);
+            let mut finished = running.finished.clone();
+            let outcome = runtime.block_on(restart_sequence(
+                || token.cancel(),
+                async {
+                    let returned =
+                        tokio::time::timeout(CLIENT_STOP_WAIT, finished.wait_for(|done| *done))
+                            .await
+                            .is_ok();
+                    returned
+                        && app
+                            .launch_state(instance)
+                            .is_ok_and(|state| state.is_none())
+                },
+                || {
+                    let (sender, started) = tokio::sync::oneshot::channel();
+                    spawn_launch(
+                        paths.clone(),
+                        &events,
+                        tracking.cancellations,
+                        tracking.launches,
+                        ClientLaunch {
+                            instance,
+                            entity: entity.clone(),
+                            account: running.account.clone(),
+                            additional: None,
+                        },
+                        Some(sender),
+                    );
+                    async move {
+                        started
+                            .await
+                            .unwrap_or_else(|_| Err(lookup("gui-restart-launch-lost")))
+                    }
+                },
+                &stage,
+            ));
+            report_restart_outcome(&events, host, request, &entity, &outcome);
+            refresh_snapshot(&paths, &events);
+        },
+    );
+}
+
+/// What the supervisor's answer to a restart means for the restart.
+fn server_restart_outcome(response: CoreResult<ephervex_core::ControlResponse>) -> RestartOutcome {
+    use ephervex_core::ControlResponse;
+    match response {
+        Ok(ControlResponse::Restarted { .. }) => RestartOutcome::Restarted,
+        Ok(ControlResponse::StartFailed(detail)) => RestartOutcome::StartFailed(detail),
+        Ok(ControlResponse::Exited(_)) => {
+            RestartOutcome::Interrupted(lookup("gui-restart-stopped-instead"))
+        }
+        Ok(ControlResponse::Refused(detail)) => RestartOutcome::Interrupted(detail),
+        Ok(ControlResponse::Running | ControlResponse::Accepted) => {
+            RestartOutcome::Interrupted(lookup("gui-restart-unexpected-answer"))
+        }
+        Err(error) => RestartOutcome::Interrupted(localized_error(&error)),
+    }
+}
+
+/// Restarts a server through its own supervisor, which stops the child, waits
+/// for it to exit, and starts the same command once. The supervisor reports
+/// the move from stopping to starting itself.
+fn spawn_server_restart(
+    paths: Paths,
+    events: &Sender<Event>,
+    server: ServerId,
+    entity: String,
+    request: u64,
+    in_flight: HostChangeInFlight,
+) {
+    spawn_detached(
+        paths.clone(),
+        events.clone(),
+        move |app, events, runtime| {
+            let _in_flight = in_flight;
+            let host = InstalledHost::Server(server);
+            restart_stage_reporter(&events, host, request, &entity)(RestartStage::Stopping);
+            let outcome = server_restart_outcome(runtime.block_on(app.restart_server(server)));
+            report_restart_outcome(&events, host, request, &entity, &outcome);
+            refresh_snapshot(&paths, &events);
+            if let Ok(app) = App::open_at(paths) {
+                send_server_workspace(&app, server, &events);
+            }
         },
     );
 }
@@ -5597,6 +6120,15 @@ fn forward_server_event(
             let _ = events.send(Event::Toast {
                 message: server_warning_message(&warning),
                 error: false,
+            });
+        }
+        // The supervisor saw the old child exit for a restart. Stopping is
+        // over; what the restart is waiting for now is the new start.
+        ServerEvent::Restarting => {
+            let _ = events.send(Event::HostRestart {
+                host: InstalledHost::Server(server),
+                request: 0,
+                stage: Some(RestartStage::Starting),
             });
         }
         _ => {}
@@ -7878,6 +8410,8 @@ pub fn parse_diagnostic_kind(value: &str) -> Option<DiagnosticKind> {
 mod tests {
     #![allow(clippy::expect_used)]
 
+    use std::cell::RefCell;
+
     use super::*;
 
     fn logical(paths: &[&str]) -> Vec<PathBuf> {
@@ -8284,6 +8818,175 @@ mod tests {
                 .any(|event| matches!(event, Event::Snapshot(_))),
             "nothing refreshes the view, so the chips keep showing the stored catalog"
         );
+    }
+
+    fn run<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(future)
+    }
+
+    /// Records every step of one restart in the order it happened.
+    #[derive(Default)]
+    struct Journal(RefCell<Vec<String>>);
+
+    impl Journal {
+        fn note(&self, step: &str) {
+            self.0.borrow_mut().push(step.to_owned());
+        }
+        fn steps(&self) -> Vec<String> {
+            self.0.borrow().clone()
+        }
+    }
+
+    #[test]
+    fn a_restart_stops_waits_for_the_stop_and_then_starts_once() {
+        let journal = Journal::default();
+        let outcome = run(restart_sequence(
+            || journal.note("stop"),
+            async {
+                journal.note("observed stopped");
+                true
+            },
+            || {
+                journal.note("start");
+                async { Ok(()) }
+            },
+            &|stage| journal.note(stage.as_str()),
+        ));
+        assert_eq!(outcome, RestartOutcome::Restarted);
+        assert_eq!(
+            journal.steps(),
+            ["stopping", "stop", "observed stopped", "starting", "start"]
+        );
+    }
+
+    #[test]
+    fn nothing_starts_when_the_old_process_was_not_seen_to_stop() {
+        let journal = Journal::default();
+        let outcome = run(restart_sequence(
+            || journal.note("stop"),
+            async { false },
+            || {
+                journal.note("start");
+                async { Ok(()) }
+            },
+            &|stage| journal.note(stage.as_str()),
+        ));
+        assert_eq!(outcome, RestartOutcome::NotStopped);
+        assert_eq!(journal.steps(), ["stopping", "stop"], "no second copy");
+    }
+
+    #[test]
+    fn a_failed_start_after_a_clean_stop_is_reported_as_that() {
+        let outcome = run(restart_sequence(
+            || {},
+            async { true },
+            || async { Err("no Java".to_owned()) },
+            &|_| {},
+        ));
+        assert_eq!(outcome, RestartOutcome::StartFailed("no Java".to_owned()));
+    }
+
+    #[test]
+    fn a_client_restart_waits_for_the_launch_it_replaces_to_return() {
+        let launches: RunningLaunches = Arc::new(Mutex::new(HashMap::new()));
+        let (events, received) = mpsc::channel();
+        let instance = InstanceId::new();
+        let (generation, finished) = register_launch(
+            &launches,
+            &events,
+            instance,
+            Some("second-account".to_owned()),
+        );
+        let running = launches
+            .lock()
+            .expect("registry")
+            .get(&instance)
+            .cloned()
+            .expect("the launch is known");
+        assert_eq!(
+            running.account.as_deref(),
+            Some("second-account"),
+            "the replacement is made as the same account"
+        );
+
+        let mut waiting = running.finished.clone();
+        let journal = Journal::default();
+        let outcome = run(async {
+            let restart = restart_sequence(
+                || journal.note("stop"),
+                async { waiting.wait_for(|done| *done).await.is_ok() },
+                || {
+                    journal.note("start");
+                    async { Ok(()) }
+                },
+                &|_| {},
+            );
+            let old_launch_returns = async {
+                tokio::task::yield_now().await;
+                journal.note("old launch returned");
+                unregister_launch(&launches, &events, instance, generation);
+                let _ = finished.send(true);
+            };
+            tokio::join!(restart, old_launch_returns).0
+        });
+
+        assert_eq!(outcome, RestartOutcome::Restarted);
+        assert_eq!(journal.steps(), ["stop", "old launch returned", "start"]);
+        let contexts: Vec<bool> = received
+            .try_iter()
+            .filter_map(|event| match event {
+                Event::LaunchContext { restartable, .. } => Some(restartable),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(contexts, [true, false]);
+    }
+
+    #[test]
+    fn a_finished_launch_cannot_remove_the_one_that_replaced_it() {
+        let launches: RunningLaunches = Arc::new(Mutex::new(HashMap::new()));
+        let (events, _received) = mpsc::channel();
+        let instance = InstanceId::new();
+        let (old, _) = register_launch(&launches, &events, instance, None);
+        let (new, _) = register_launch(&launches, &events, instance, None);
+
+        unregister_launch(&launches, &events, instance, old);
+        assert_eq!(
+            launches
+                .lock()
+                .expect("registry")
+                .get(&instance)
+                .map(|launch| launch.generation),
+            Some(new)
+        );
+    }
+
+    #[test]
+    fn a_server_restart_that_did_not_reach_its_start_says_why() {
+        use ephervex_core::{ControlResponse, ServerExit};
+        assert_eq!(
+            server_restart_outcome(Ok(ControlResponse::Restarted { pid: 7 })),
+            RestartOutcome::Restarted
+        );
+        assert_eq!(
+            server_restart_outcome(Ok(ControlResponse::StartFailed("gone".to_owned()))),
+            RestartOutcome::StartFailed("gone".to_owned())
+        );
+        assert!(matches!(
+            server_restart_outcome(Ok(ControlResponse::Exited(ServerExit {
+                code: Some(0),
+                signal: None
+            }))),
+            RestartOutcome::Interrupted(_)
+        ));
+        assert!(matches!(
+            server_restart_outcome(Ok(ControlResponse::Refused("stopping".to_owned()))),
+            RestartOutcome::Interrupted(detail) if detail == "stopping"
+        ));
     }
 
     #[test]

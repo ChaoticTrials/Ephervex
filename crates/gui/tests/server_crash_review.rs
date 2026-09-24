@@ -252,6 +252,7 @@ fn server() -> ServerRow {
         can_send_command: false,
         can_connect: false,
         connect_reason: SharedString::default(),
+        restart_stage: SharedString::default(),
         needs_attention: false,
     }
 }

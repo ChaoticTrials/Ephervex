@@ -170,6 +170,8 @@ fn instance() -> InstanceRow {
         creating_server_detail: SharedString::default(),
         creating_server_progress: 0.0,
         creating_server_indeterminate: false,
+        restart_stage: SharedString::default(),
+        can_restart: false,
     }
 }
 

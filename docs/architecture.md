@@ -175,6 +175,37 @@ isolation start or cancel, a repair, or a snapshot capture or restore rewrites a
 host, launching or starting it and starting another of those changes on it are
 refused with a message naming the change in progress.
 
+### Restart
+
+A restart stops a running host, waits until that exact host is observed
+stopped, and starts it once. It is never a delayed second click, and a stopped
+host is started with Start or Launch, not Restart.
+
+A local server restarts inside its own supervisor: the supervisor sends
+`stop`, waits for the Java child to exit, and spawns the same command again,
+reporting the move from stopping to starting as it happens. A stop or kill that
+arrives while a restart waits ends it with the server stopped, a restart cannot
+turn a stop already asked for into a start, and a second restart joins the
+first. When the replacement cannot be spawned the server is left stopped, not
+looking like one that needs recovery, and the restart reports that its start
+failed.
+
+A client restart reuses the ordinary launch path. Only an exclusive launch this
+run of the desktop started can be restarted, because only for those is the
+launch request known: it is kept in memory for as long as the launch runs and
+holds an account reference, never a credential. A client started by another
+Ephervex process, alongside another launch, or by Launch & Connect is not
+offered a restart. The restart stops the game the way its Stop does, waits for
+that launch to return and for nothing to hold the instance, then launches it
+again as the same account; if the game is not seen to stop within a bound,
+nothing is started.
+
+Both claim the host-change state for their whole duration, so isolation,
+repair, snapshots, launching, and a second restart wait for them, and they are
+not cancelable once accepted. Their stages are carried on the host's own row,
+so every view of the host shows the same restart. A failure after the stop
+leaves the host stopped and is reported as a failed start.
+
 ## Dependency-aware mod isolation
 
 Isolation planning uses the same required-dependency graph as mod toggles.

@@ -2397,7 +2397,21 @@ gui-installed-managed-mods = { $count ->
    *[other] Installed { $count } managed mods with required dependencies.
 }
 gui-stop-requested = Stop requested.
-gui-restart-requested = Restart requested.
+gui-state-restarting = Restarting
+gui-activity-restarting = Restarting
+gui-restart-stage-stopping = Stopping, to start it again once it has stopped
+gui-restart-stage-starting = Stopped. Starting it again
+gui-restart-done = { $value } restarted.
+gui-restart-not-stopped = { $value } did not stop, so Ephervex did not start another copy.
+# $detail is the reason the new start failed, already localized.
+gui-restart-start-failed = { $value } stopped, but starting it again failed: { $detail }
+gui-restart-interrupted = { $value } was not restarted: { $detail }
+gui-restart-stopped-instead = it was stopped while the restart waited for it.
+gui-restart-unexpected-answer = the server answered in a way a restart does not expect.
+gui-restart-launch-lost = the new launch ended without saying whether it started.
+gui-restart-client-unavailable = Ephervex can restart a client it launched with Launch in this session. Stop this one and launch it again.
+gui-restart-server-unavailable = That server is not running under Ephervex, so there is nothing to restart. Start it instead.
+gui-restart-busy = This host is restarting. Try again once that finishes.
 gui-force-kill-requested = Force kill requested.
 gui-command-sent = Command sent.
 gui-server-properties-saved = Saved server properties.

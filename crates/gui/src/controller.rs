@@ -1,7 +1,7 @@
 //! Slint callback registration and UI model updates.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::mpsc::Sender;
@@ -1337,6 +1337,157 @@ impl IsolationFlowState {
     }
 }
 
+/// A restart this controller asked for, and where it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TrackedRestart {
+    request: u64,
+    stage: backend::RestartStage,
+}
+
+/// Lifecycle state that belongs to a host rather than to any view of it.
+///
+/// Every view reads it from the host's own row, so a host shown in several
+/// places shows one restart, and a second request from any of them is refused
+/// here before it can reach the worker.
+#[derive(Debug, Default)]
+struct HostLifecycle {
+    last_request: u64,
+    /// Keyed by host kind and id.
+    restarts: HashMap<String, TrackedRestart>,
+    /// Clients whose running launch this run started, and which a restart
+    /// therefore knows how to start again.
+    restartable: HashSet<String>,
+}
+
+fn lifecycle_key(host: InstalledHost) -> String {
+    format!("{}:{}", host.kind(), host.id())
+}
+
+impl HostLifecycle {
+    /// Claims a restart of `host`, or refuses while one is under way.
+    fn request(&mut self, host: InstalledHost) -> Option<u64> {
+        let key = lifecycle_key(host);
+        if self.restarts.contains_key(&key) {
+            return None;
+        }
+        self.last_request = self.last_request.wrapping_add(1);
+        self.restarts.insert(
+            key,
+            TrackedRestart {
+                request: self.last_request,
+                stage: backend::RestartStage::Stopping,
+            },
+        );
+        Some(self.last_request)
+    }
+
+    /// Takes a stage the worker reported. A stage for a restart this
+    /// controller is not tracking, or an earlier one, changes nothing.
+    fn apply(
+        &mut self,
+        host: InstalledHost,
+        request: u64,
+        stage: Option<backend::RestartStage>,
+    ) -> bool {
+        let key = lifecycle_key(host);
+        let Some(tracked) = self.restarts.get_mut(&key) else {
+            return false;
+        };
+        // Zero is the server reporting its own stage, which belongs to the
+        // restart already under way.
+        if request != 0 && request != tracked.request {
+            return false;
+        }
+        match stage {
+            Some(stage) => tracked.stage = stage,
+            None if request != 0 => {
+                self.restarts.remove(&key);
+            }
+            None => return false,
+        }
+        true
+    }
+
+    fn stage_of(&self, host: InstalledHost) -> &'static str {
+        self.restarts
+            .get(&lifecycle_key(host))
+            .map_or("", |tracked| tracked.stage.as_str())
+    }
+}
+
+/// Stamps each host row with its restart stage, and each client row with
+/// whether it can be restarted, in every list that shows one.
+fn stamp_host_lifecycle(ui: &AppWindow, lifecycle: &HostLifecycle) {
+    stamp_rows(&ui.get_instances(), |row: &mut InstanceRow| {
+        let Some(instance) = backend::parse_instance_id(&row.id) else {
+            return false;
+        };
+        let stage = lifecycle.stage_of(InstalledHost::Instance(instance));
+        let can_restart = lifecycle.restartable.contains(&instance.to_string());
+        let changed = row.restart_stage != stage || row.can_restart != can_restart;
+        row.restart_stage = stage.into();
+        row.can_restart = can_restart;
+        changed
+    });
+    for list in [
+        ui.get_servers(),
+        ui.get_global_servers(),
+        ui.get_linked_servers(),
+    ] {
+        stamp_rows(&list, |row: &mut ServerRow| {
+            let Some(server) = backend::parse_server_id(&row.id) else {
+                return false;
+            };
+            let stage = lifecycle.stage_of(InstalledHost::Server(server));
+            let changed = row.restart_stage != stage;
+            row.restart_stage = stage.into();
+            changed
+        });
+    }
+}
+
+fn stamp_rows<T: Clone + 'static>(list: &ModelRc<T>, mut stamp: impl FnMut(&mut T) -> bool) {
+    for index in 0..list.row_count() {
+        if let Some(mut row) = list.row_data(index)
+            && stamp(&mut row)
+        {
+            list.set_row_data(index, row);
+        }
+    }
+}
+
+fn register_restart_actions(
+    ui: &AppWindow,
+    commands: &Sender<Command>,
+    lifecycle: &Rc<RefCell<HostLifecycle>>,
+) {
+    let restart = {
+        let sender = commands.clone();
+        let lifecycle = Rc::clone(lifecycle);
+        let weak = ui.as_weak();
+        move |host: InstalledHost| {
+            let Some(request) = lifecycle.borrow_mut().request(host) else {
+                return;
+            };
+            if let Some(ui) = weak.upgrade() {
+                stamp_host_lifecycle(&ui, &lifecycle.borrow());
+            }
+            send(&sender, Command::RestartHost { host, request });
+        }
+    };
+    let client = restart.clone();
+    ui.on_client_restart(move |id| {
+        if let Some(instance) = backend::parse_instance_id(&id) {
+            client(InstalledHost::Instance(instance));
+        }
+    });
+    ui.on_server_restart(move |id| {
+        if let Some(server) = backend::parse_server_id(&id) {
+            restart(InstalledHost::Server(server));
+        }
+    });
+}
+
 /// Verification or repair, the work the Diagnostics surface asks the worker for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IntegrityWork {
@@ -1965,6 +2116,7 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
     let local_mods = Rc::new(RefCell::new(LocalModDrop::default()));
     let isolation_flow = Rc::new(RefCell::new(IsolationFlowState::default()));
     let integrity_flow = Rc::new(RefCell::new(IntegrityFlowState::default()));
+    let lifecycle = Rc::new(RefCell::new(HostLifecycle::default()));
     register_i18n(ui);
     register_toasts(ui);
     register_callbacks(
@@ -1979,6 +2131,7 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
         &local_mods,
         &isolation_flow,
         &integrity_flow,
+        &lifecycle,
         keys,
     );
 
@@ -1994,6 +2147,7 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
     let poll_local_mods = Rc::clone(&local_mods);
     let poll_isolation_flow = Rc::clone(&isolation_flow);
     let poll_integrity_flow = Rc::clone(&integrity_flow);
+    let poll_lifecycle = Rc::clone(&lifecycle);
     let poll_commands = backend.commands.clone();
     let poll_timer = Timer::default();
     poll_timer.start(TimerMode::Repeated, Duration::from_millis(80), move || {
@@ -2028,6 +2182,7 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
                     &poll_local_mods,
                     &poll_isolation_flow,
                     &poll_integrity_flow,
+                    &poll_lifecycle,
                     &poll_commands,
                 ),
             }
@@ -2353,6 +2508,7 @@ fn register_callbacks(
     local_mods: &Rc<RefCell<LocalModDrop>>,
     isolation_flow: &Rc<RefCell<IsolationFlowState>>,
     integrity_flow: &Rc<RefCell<IntegrityFlowState>>,
+    lifecycle: &Rc<RefCell<HostLifecycle>>,
     keys: &BindingCapture,
 ) {
     register_catalog_actions(ui, commands);
@@ -2374,6 +2530,7 @@ fn register_callbacks(
     register_isolation_actions(ui, commands, isolation_flow);
     register_integrity_actions(ui, commands, integrity_flow);
     register_bundle_actions(ui, commands, integrity_flow);
+    register_restart_actions(ui, commands, lifecycle);
     register_live_viewer(ui, commands, live_viewer);
     register_settings(ui, commands);
     register_minecraft_defaults(ui, commands, minecraft, keys);
@@ -4350,13 +4507,6 @@ fn register_server_actions(
     ui.on_server_stop(move |id| {
         if let Some(id) = backend::parse_server_id(&id) {
             send(&sender, Command::StopServer(id));
-        }
-    });
-
-    let sender = commands.clone();
-    ui.on_server_restart(move |id| {
-        if let Some(id) = backend::parse_server_id(&id) {
-            send(&sender, Command::RestartServer(id));
         }
     });
 
@@ -6745,6 +6895,7 @@ fn apply_event(
     local_mods: &Rc<RefCell<LocalModDrop>>,
     isolation_flow: &Rc<RefCell<IsolationFlowState>>,
     integrity_flow: &Rc<RefCell<IntegrityFlowState>>,
+    lifecycle: &Rc<RefCell<HostLifecycle>>,
     commands: &Sender<Command>,
 ) {
     match event {
@@ -6772,6 +6923,9 @@ fn apply_event(
         }
         Event::Snapshot(snapshot) => {
             apply_snapshot_event(ui, *snapshot, creations, minecraft, commands);
+            // A snapshot rebuilds the rows from records that know nothing of
+            // restarts, so their stages are stamped again.
+            stamp_host_lifecycle(ui, &lifecycle.borrow());
         }
         Event::MinecraftPreferencesSaveFinished { .. }
         | Event::MinecraftPreferencePreview { .. }
@@ -6975,6 +7129,27 @@ fn apply_event(
             if isolation_flow.borrow_mut().settle(request) {
                 clear_host_busy(ui);
             }
+        }
+        Event::HostRestart {
+            host,
+            request,
+            stage,
+        } => {
+            if lifecycle.borrow_mut().apply(host, request, stage) {
+                stamp_host_lifecycle(ui, &lifecycle.borrow());
+            }
+        }
+        Event::LaunchContext {
+            instance,
+            restartable,
+        } => {
+            let key = instance.to_string();
+            if restartable {
+                lifecycle.borrow_mut().restartable.insert(key);
+            } else {
+                lifecycle.borrow_mut().restartable.remove(&key);
+            }
+            stamp_host_lifecycle(ui, &lifecycle.borrow());
         }
         Event::HostVerified {
             host,
@@ -7771,6 +7946,8 @@ fn apply_instance_snapshot(
             creating_server_detail: SharedString::default(),
             creating_server_progress: 0.0,
             creating_server_indeterminate: false,
+            restart_stage: SharedString::default(),
+            can_restart: false,
         })
         .collect::<Vec<_>>();
     let storage_filter = ui.get_instance_filter();
@@ -7888,6 +8065,7 @@ fn server_row(item: crate::presentation::ServerPresentation) -> ServerRow {
         can_send_command: item.can_send_command,
         can_connect: item.can_connect,
         connect_reason: item.connect_reason.into(),
+        restart_stage: SharedString::default(),
     }
 }
 
@@ -10029,6 +10207,124 @@ mod tests {
             .map(|row| row.linked_client_id.to_string())
             .collect();
         assert_eq!(on_the_open_instance, ["client-a".to_owned()]);
+    }
+
+    /// A window listing one client and one server, as the lists and the
+    /// workspaces all read them.
+    fn restart_window() -> (
+        AppWindow,
+        std::sync::mpsc::Receiver<Command>,
+        Rc<RefCell<HostLifecycle>>,
+        ephervex_model::InstanceId,
+        ephervex_model::ServerId,
+    ) {
+        let ui = test_window();
+        let client = ephervex_model::InstanceId::new();
+        let server = ephervex_model::ServerId::new();
+        ui.set_instances(model(vec![InstanceRow {
+            id: client.to_string().into(),
+            can_kill: true,
+            ..InstanceRow::default()
+        }]));
+        let server_row = ServerRow {
+            id: server.to_string().into(),
+            can_restart: true,
+            ..ServerRow::default()
+        };
+        ui.set_servers(model(vec![server_row.clone()]));
+        ui.set_global_servers(model(vec![server_row]));
+        let (sender, commands) = std::sync::mpsc::channel();
+        let lifecycle = Rc::new(RefCell::new(HostLifecycle::default()));
+        register_restart_actions(&ui, &sender, &lifecycle);
+        (ui, commands, lifecycle, client, server)
+    }
+
+    #[test]
+    fn a_restart_is_claimed_per_host_and_a_second_request_waits() {
+        let (ui, commands, _lifecycle, client, server) = restart_window();
+        ui.invoke_client_restart(client.to_string().into());
+        ui.invoke_client_restart(client.to_string().into());
+        ui.invoke_server_restart(server.to_string().into());
+        ui.invoke_server_restart(server.to_string().into());
+
+        let sent: Vec<InstalledHost> = commands
+            .try_iter()
+            .map(|command| match command {
+                Command::RestartHost { host, .. } => host,
+                other => panic!("a restart: {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            sent,
+            [
+                InstalledHost::Instance(client),
+                InstalledHost::Server(server)
+            ],
+            "one restart per host, and hosts do not block each other"
+        );
+    }
+
+    #[test]
+    fn every_row_showing_a_host_carries_its_restart_stage() {
+        let (ui, commands, lifecycle, _client, server) = restart_window();
+        ui.invoke_server_restart(server.to_string().into());
+        let Ok(Command::RestartHost { host, request }) = commands.try_recv() else {
+            panic!("a restart");
+        };
+        let stages = |ui: &AppWindow| -> Vec<String> {
+            [ui.get_servers(), ui.get_global_servers()]
+                .iter()
+                .map(|list| list.row_data(0).expect("row").restart_stage.to_string())
+                .collect()
+        };
+        assert_eq!(stages(&ui), ["stopping", "stopping"]);
+
+        // The server reports its own move to starting, without a request.
+        assert!(
+            lifecycle
+                .borrow_mut()
+                .apply(host, 0, Some(backend::RestartStage::Starting))
+        );
+        stamp_host_lifecycle(&ui, &lifecycle.borrow());
+        assert_eq!(stages(&ui), ["starting", "starting"]);
+
+        assert!(
+            !lifecycle.borrow_mut().apply(host, request + 1, None),
+            "an ending for some other restart changes nothing"
+        );
+        assert!(!lifecycle.borrow_mut().apply(host, 0, None));
+        assert!(lifecycle.borrow_mut().apply(host, request, None));
+        stamp_host_lifecycle(&ui, &lifecycle.borrow());
+        assert_eq!(stages(&ui), ["", ""]);
+
+        ui.invoke_server_restart(server.to_string().into());
+        assert!(
+            matches!(commands.try_recv(), Ok(Command::RestartHost { .. })),
+            "a restart that ended frees the host for the next"
+        );
+    }
+
+    #[test]
+    fn a_client_is_restartable_only_while_its_launch_is_known() {
+        let (ui, _commands, lifecycle, client, _server) = restart_window();
+        let can_restart = |ui: &AppWindow| ui.get_instances().row_data(0).expect("row").can_restart;
+        assert!(!can_restart(&ui));
+
+        lifecycle
+            .borrow_mut()
+            .restartable
+            .insert(client.to_string());
+        stamp_host_lifecycle(&ui, &lifecycle.borrow());
+        assert!(can_restart(&ui));
+
+        // A snapshot rebuilds rows from records that know nothing of this.
+        ui.set_instances(model(vec![InstanceRow {
+            id: client.to_string().into(),
+            can_kill: true,
+            ..InstanceRow::default()
+        }]));
+        stamp_host_lifecycle(&ui, &lifecycle.borrow());
+        assert!(can_restart(&ui), "stamped again after a refresh");
     }
 
     /// The overview reports the work on the row of the instance it belongs to,

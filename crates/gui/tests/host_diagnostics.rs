@@ -402,6 +402,8 @@ fn instance() -> InstanceRow {
         creating_server_detail: SharedString::default(),
         creating_server_progress: 0.0,
         creating_server_indeterminate: false,
+        restart_stage: SharedString::default(),
+        can_restart: false,
     }
 }
 
@@ -435,6 +437,7 @@ fn server(running: bool) -> ServerRow {
         can_send_command: running,
         can_connect: running,
         connect_reason: SharedString::default(),
+        restart_stage: SharedString::default(),
         needs_attention: false,
     }
 }

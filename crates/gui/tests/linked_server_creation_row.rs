@@ -113,6 +113,8 @@ fn instance(id: &str, name: &str) -> InstanceRow {
         creating_server_detail: SharedString::default(),
         creating_server_progress: 0.0,
         creating_server_indeterminate: false,
+        restart_stage: SharedString::default(),
+        can_restart: false,
     }
 }
 
@@ -123,6 +125,8 @@ fn creating(id: &str, name: &str) -> InstanceRow {
         creating_server_detail: "Installing the linked server | 1.20.1 server_mappings".into(),
         creating_server_progress: 0.82,
         creating_server_indeterminate: false,
+        restart_stage: SharedString::default(),
+        can_restart: false,
         ..instance(id, name)
     }
 }
