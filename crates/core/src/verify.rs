@@ -27,7 +27,7 @@ use ephervex_minecraft::{
     VanillaInstaller,
 };
 use ephervex_model::{AttentionReason, Hash, InstanceId, LoaderKind, Progress};
-use ephervex_pack::{MutationRecoveryAction, MutationRecoveryIssue};
+use ephervex_pack::{MutationRecoveryAction, MutationRecoveryIssue, PackError};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument, warn};
 
@@ -230,7 +230,8 @@ impl App {
     /// hashes, so this is a read of the instance and nothing else.
     ///
     /// Hashing is real work on a large pack, so the operation reports progress
-    /// and honors cancellation between files.
+    /// and honors cancellation between files. A canceled pass is an error
+    /// rather than a shorter report, which would read as a complete one.
     #[instrument(skip(self, reporter, cancel), fields(host = %host.id()))]
     pub async fn verify_host(
         &self,
@@ -255,7 +256,7 @@ impl App {
         let mut files = Vec::with_capacity(recipe.files.len());
         for (index, file) in recipe.files.iter().enumerate() {
             if cancel.is_cancelled() {
-                break;
+                return Err(PackError::Canceled.into());
             }
             files.push(VerifiedFile {
                 logical_path: file.logical_path.clone(),
@@ -678,6 +679,24 @@ mod tests {
         assert_eq!(integrity(&report, "truncated.jar"), Integrity::Corrupt);
         assert_eq!(integrity(&report, "gone.jar"), Integrity::Absent);
         assert!(!report.is_sound());
+    }
+
+    #[tokio::test]
+    async fn a_canceled_verification_is_not_mistaken_for_a_complete_one() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, id, _root) = instance(base.path());
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let error = app
+            .verify_host(
+                InstalledHost::Instance(id),
+                &OperationReporter::silent("test-verify"),
+                &cancel,
+            )
+            .await
+            .expect_err("a canceled pass has no report to give");
+        assert!(error.is_cancellation());
     }
 
     #[tokio::test]
