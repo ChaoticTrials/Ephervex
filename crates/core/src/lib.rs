@@ -40,6 +40,7 @@ pub mod error;
 pub mod health;
 pub mod import;
 pub mod instance;
+pub mod isolation;
 pub mod launch;
 pub mod licenses;
 pub mod linked_mods;
@@ -103,6 +104,13 @@ pub use import::{ImportRequest, ImportedPack};
 pub use instance::{
     CreatedClient, MAX_ENTITY_NAME_CHARS, NameRefusal, PreferenceContext,
     global_minecraft_preferences, validated_entity_name,
+};
+pub use isolation::{
+    IsolationCandidate, IsolationConfidence, IsolationError, IsolationLinkedServer,
+    IsolationMissingDependency, IsolationOutcome, IsolationPlan, IsolationReconciliation,
+    IsolationReport, IsolationRequest, IsolationResultCandidate, IsolationRound,
+    IsolationRoundKind, IsolationRoundRecord, IsolationSession, IsolationStep, RoundAnswer,
+    RoundContradiction,
 };
 pub use launch::{LaunchOptions, LaunchOutcome};
 pub use licenses::{

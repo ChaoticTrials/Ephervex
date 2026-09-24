@@ -24,6 +24,7 @@ use ephervex_storage::StorageError;
 
 use crate::ConnectError;
 use crate::instance::NameRefusal;
+use crate::isolation::IsolationError;
 use crate::snapshot::SnapshotError;
 
 /// An error together with everything that caused it, for one log line.
@@ -135,6 +136,10 @@ pub enum CoreError {
     /// Local snapshot capture, listing, restoration, or removal.
     #[error(transparent)]
     Snapshot(SnapshotError),
+
+    /// A durable dependency-aware mod isolation session.
+    #[error(transparent)]
+    Isolation(IsolationError),
 
     /// Searching a mod catalog, or resolving a mod's dependencies.
     #[error(transparent)]
@@ -402,6 +407,18 @@ impl From<SnapshotError> for CoreError {
     }
 }
 
+impl From<IsolationError> for CoreError {
+    fn from(error: IsolationError) -> Self {
+        if error_chain_is_storage_full(&error) {
+            Self::StorageFull {
+                path: error.failing_path(),
+            }
+        } else {
+            Self::Isolation(error)
+        }
+    }
+}
+
 impl CoreError {
     /// The `ephervex-i18n` message id describing this failure to a user.
     ///
@@ -429,6 +446,7 @@ impl CoreError {
             Self::PreferenceCatalogUnusable { .. } => "error-options-preference-catalog-invalid",
             Self::Pack(error) => error.message_id(),
             Self::Snapshot(error) => error.message_id(),
+            Self::Isolation(error) => error.message_id(),
             Self::ModPlatform(error) => error.message_id(),
             Self::Server(error) => error.message_id(),
             Self::Connect(error) => error.message_id(),
@@ -473,6 +491,7 @@ impl CoreError {
             Self::Loader(error) => error.message_args(),
             Self::Pack(error) => error.message_args(),
             Self::Snapshot(error) => error.message_args(),
+            Self::Isolation(error) => error.message_args(),
             Self::ModPlatform(error) => error.message_args(),
             Self::Server(error) => error.message_args(),
             Self::Connect(error) => error.message_args(),
@@ -541,6 +560,7 @@ impl CoreError {
             Self::Launch(error) => error.is_cancellation(),
             Self::Pack(error) => error.is_cancellation(),
             Self::Snapshot(error) => error.is_cancellation(),
+            Self::Isolation(error) => error.is_cancellation(),
             Self::ModPlatform(error) => error.is_cancellation(),
             Self::Server(ServerError::ReadinessCanceled) => true,
             _ => false,
@@ -641,6 +661,7 @@ impl CoreError {
             | Self::ModPlatform(_)
             | Self::Pack(_)
             | Self::Snapshot(_)
+            | Self::Isolation(_)
             | Self::Server(_)
             | Self::Connect(_)
             | Self::ModNotManaged { .. }
@@ -693,6 +714,7 @@ impl CoreError {
             Self::Options(error) => error.failing_path(),
             Self::Pack(error) => error.failing_path(),
             Self::Snapshot(error) => error.failing_path(),
+            Self::Isolation(error) => error.failing_path(),
             Self::Server(error) => error.failing_path(),
             // Authentication failures are never about a file. The one thing
             // that would be — the keyring entry — is not a path the user can

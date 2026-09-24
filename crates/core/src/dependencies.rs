@@ -375,77 +375,17 @@ impl App {
             .ok_or_else(|| CoreError::ModFileMissing {
                 path: logical_path.to_path_buf(),
             })?;
-        let target = graph.entries[index].mod_entry.clone();
-
-        let mut disabled = Vec::new();
-        let mut absent = Vec::new();
-        let mut incompatible = Vec::new();
-        // Transitively, because a dependency's own dependencies are needed just
-        // as much: turning a mod on and leaving something two steps down it off
-        // produces a set that still does not load.
-        let mut seen: BTreeSet<usize> = BTreeSet::from([index]);
-        let mut frontier = vec![index];
-        let mut distance = 0;
-        while !frontier.is_empty() {
-            distance += 1;
-            let mut next = Vec::new();
-            for current in frontier {
-                for relation in graph.entries[current].relations.iter().flatten() {
-                    let found = graph.target_of(relation);
-                    match (relation.kind, found) {
-                        (ModRelationKind::Required, Some(found)) => {
-                            if !seen.insert(found) {
-                                continue;
-                            }
-                            let entry = &graph.entries[found].mod_entry;
-                            match entry.presence {
-                                // Already loading, and still walked: something
-                                // it needs may itself be turned off.
-                                ModPresence::Installed => {}
-                                ModPresence::Disabled => disabled.push(ImpactedMod {
-                                    distance,
-                                    ..entry.clone()
-                                }),
-                                ModPresence::Missing => absent.push(ImpactedMod {
-                                    distance,
-                                    ..entry.clone()
-                                }),
-                            }
-                            next.push(found);
-                        }
-                        // Named by whatever the catalog gave, because there is
-                        // no jar here to name it any better. Nothing is fetched
-                        // for it, and nothing below it can be walked.
-                        (ModRelationKind::Required, None) => absent.push(ImpactedMod {
-                            logical_path: PathBuf::new(),
-                            name: relation.target.display_name().to_owned(),
-                            presence: ModPresence::Missing,
-                            origin: ModOrigin::RequiredDependency,
-                            project_id: relation.target.project_id().map(ToOwned::to_owned),
-                            knowledge: DependencyKnowledge::Recorded,
-                            distance,
-                        }),
-                        (ModRelationKind::Incompatible, Some(found))
-                            if graph.entries[found].mod_entry.presence
-                                == ModPresence::Installed =>
-                        {
-                            incompatible.push(ImpactedMod {
-                                distance,
-                                ..graph.entries[found].mod_entry.clone()
-                            });
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            frontier = next;
-        }
-
+        let closure = graph.required_closure(index);
         Ok(RequiredMods {
-            target,
-            disabled,
-            absent,
-            incompatible,
+            target: graph.entries[index].mod_entry.clone(),
+            disabled: closure
+                .present
+                .into_iter()
+                .skip(1)
+                .filter(|entry| entry.presence == ModPresence::Disabled)
+                .collect(),
+            absent: closure.absent,
+            incompatible: closure.incompatible,
         })
     }
 
@@ -650,9 +590,9 @@ impl App {
 /// the directory says which of them are loading. Reaches no network, so a
 /// frontend may ask as often as it likes.
 #[derive(Debug)]
-struct ModGraph {
+pub(crate) struct ModGraph {
     /// Every mod of the host, in the order the snapshot listed them.
-    entries: Vec<GraphEntry>,
+    pub(crate) entries: Vec<GraphEntry>,
     /// Where a catalog project sits in `entries`.
     by_project: BTreeMap<String, usize>,
     /// Where a jar name sits, lowercased, for a relation that named only one.
@@ -660,15 +600,94 @@ struct ModGraph {
 }
 
 #[derive(Debug)]
-struct GraphEntry {
-    mod_entry: ImpactedMod,
+pub(crate) struct GraphEntry {
+    pub(crate) mod_entry: ImpactedMod,
     /// What this mod's catalog said it needs, when anything asked.
     relations: Option<Vec<RecipeRelation>>,
 }
 
+#[derive(Debug)]
+pub(crate) struct RequiredClosure {
+    pub(crate) present: Vec<ImpactedMod>,
+    pub(crate) absent: Vec<ImpactedMod>,
+    incompatible: Vec<ImpactedMod>,
+}
+
 impl ModGraph {
+    pub(crate) fn required_closure(&self, index: usize) -> RequiredClosure {
+        let mut present = vec![self.entries[index].mod_entry.clone()];
+        let mut absent = Vec::new();
+        let mut incompatible = Vec::new();
+        // Transitively, because a dependency's own dependencies are needed just
+        // as much: turning a mod on and leaving something two steps down it off
+        // produces a set that still does not load.
+        let mut seen: BTreeSet<usize> = BTreeSet::from([index]);
+        let mut frontier = vec![index];
+        let mut distance = 0;
+        while !frontier.is_empty() {
+            distance += 1;
+            let mut next = Vec::new();
+            for current in frontier {
+                for relation in self.entries[current].relations.iter().flatten() {
+                    let found = self.target_of(relation);
+                    match (relation.kind, found) {
+                        (ModRelationKind::Required, Some(found)) => {
+                            if !seen.insert(found) {
+                                continue;
+                            }
+                            let entry = &self.entries[found].mod_entry;
+                            match entry.presence {
+                                // Already loading, and still walked: something
+                                // it needs may itself be turned off.
+                                ModPresence::Installed | ModPresence::Disabled => {
+                                    present.push(ImpactedMod {
+                                        distance,
+                                        ..entry.clone()
+                                    });
+                                }
+                                ModPresence::Missing => absent.push(ImpactedMod {
+                                    distance,
+                                    ..entry.clone()
+                                }),
+                            }
+                            next.push(found);
+                        }
+                        // Named by whatever the catalog gave, because there is
+                        // no jar here to name it any better. Nothing is fetched
+                        // for it, and nothing below it can be walked.
+                        (ModRelationKind::Required, None) => absent.push(ImpactedMod {
+                            logical_path: PathBuf::new(),
+                            name: relation.target.display_name().to_owned(),
+                            presence: ModPresence::Missing,
+                            origin: ModOrigin::RequiredDependency,
+                            project_id: relation.target.project_id().map(ToOwned::to_owned),
+                            knowledge: DependencyKnowledge::Recorded,
+                            distance,
+                        }),
+                        (ModRelationKind::Incompatible, Some(found))
+                            if self.entries[found].mod_entry.presence == ModPresence::Installed =>
+                        {
+                            incompatible.push(ImpactedMod {
+                                distance,
+                                ..self.entries[found].mod_entry.clone()
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            frontier = next;
+        }
+
+        RequiredClosure {
+            present,
+            absent,
+            incompatible,
+        }
+    }
+
     /// Builds the index for one host.
-    fn build(app: &App, host: InstalledHost) -> CoreResult<Self> {
+    pub(crate) fn build(app: &App, host: InstalledHost) -> CoreResult<Self> {
         let layout = app.host_layout(host)?;
         let snapshot = app.host_mod_snapshot(host)?;
         let relations: BTreeMap<PathBuf, Option<Vec<RecipeRelation>>> = layout
@@ -725,7 +744,7 @@ impl ModGraph {
     }
 
     /// Where a mod sits, by the path a frontend named it with.
-    fn index_of(&self, logical_path: &Path) -> Option<usize> {
+    pub(crate) fn index_of(&self, logical_path: &Path) -> Option<usize> {
         self.entries
             .iter()
             .position(|entry| entry.mod_entry.logical_path == logical_path)
