@@ -35,6 +35,7 @@ pub mod curseforge_pack;
 pub mod declared_relations;
 pub mod dependencies;
 pub mod diagnostics;
+mod disk_usage;
 pub mod download_watch;
 pub mod error;
 pub mod health;
@@ -92,6 +93,9 @@ pub use dependencies::{
 pub use diagnostics::{
     ClientLogTail, DEFAULT_DIAGNOSTIC_BYTES, DiagnosticCatalog, DiagnosticRequest, DiagnosticScope,
     DiagnosticSearch, DiagnosticSection,
+};
+pub use disk_usage::{
+    CategoryUsage, DiskUsageReport, RetentionUsage, StorageCategory, StorageRetention,
 };
 pub use download_watch::{DownloadWatcher, RESCAN_INTERVAL, WatchTarget};
 pub use error::{CoreError, CoreResult, ErrorChain};

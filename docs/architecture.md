@@ -320,6 +320,44 @@ removing ones whose status is uncertain. A pass reports what it measured, what
 it freed, and what it could not, so a partial clear is never presented as an
 empty cache.
 
+## Disk usage
+
+Core measures what Ephervex's own roots hold: the persistent and temporary
+instance and server roots, and the cache, data, state, config, and temporary
+roots. It reads the file system and changes nothing; the view built on it
+offers no cleanup.
+
+Every figure is the apparent size of regular files, the length each reports.
+It is the one number that is exact on every filesystem, and it overstates
+physical use where data is shared or sparse: a copy-on-write snapshot shares
+its unchanged bytes with its host, so the Snapshots figure is what the
+snapshots would take as plain copies, not what they occupy. Attributing shared
+extents would need filesystem-specific extent queries and would still depend on
+which owner is asked first.
+
+Each file is counted once. It belongs to one category by where it sits, the
+most specific rule winning: inside a host, `.launcher/snapshots` is Snapshots,
+`.launcher/retired`, `.launcher/staging`, and `restore-*` journals are Recovery,
+and the game directory's `mods`, `logs`, and `crash-reports` are Mods and Logs;
+the rest of a host is its client or server. The cache root splits into the
+download cache and shared game files, the data root into Java runtimes, icons,
+and the rest, and the state root into logs and the index database. A file with
+several hard links is counted the first time it is met, walking hosts first; a
+symbolic link is never followed; and a root that sits inside another root is
+measured once, as itself.
+
+Each file also has one retention class: persistent, temporary (a temporary
+host, under the operating system's temporary directory), regenerable (caches
+and managed runtimes that can be fetched or derived again), or recovery. Recovery
+state is never regenerable: it is what makes an interrupted change reversible
+or reviewable. Both breakdowns sum to the total. Directories and files that
+exist and cannot be read are counted and named, and their size is missing from
+every figure; a file that disappears during the walk is simply not there.
+
+A category's folders are the directories it has of its own. One spread through
+every host, such as Mods, Snapshots, or Recovery, has none, and a frontend asks
+core to open a folder by category and position rather than by path.
+
 ## Dedicated-server data flow
 
 ```text
