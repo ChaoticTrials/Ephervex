@@ -10,7 +10,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use ephervex_download::{
     ArtifactSource, CacheLayout, ChannelSink, ContentStore, DownloadError, DownloadManager,
@@ -21,6 +21,7 @@ use ephervex_model::{Hash, HashAlgorithm, OperationStatus};
 use sha1::{Digest, Sha1};
 use sha2::Sha512;
 use tempfile::TempDir;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -886,7 +887,68 @@ async fn a_batch_downloads_every_file_and_reports_one_operation() {
     );
 }
 
-/// The name beside a batch's count has to be a name that changes.
+/// A loopback server that holds every response until the test releases it.
+///
+/// `wiremock` can only delay a response by a fixed duration, which makes the
+/// order transfers finish in likely rather than known.
+struct GatedServer {
+    base: String,
+    /// Each request's path as it arrives, with the switch that lets it finish.
+    arrivals: tokio::sync::mpsc::UnboundedReceiver<(String, tokio::sync::oneshot::Sender<()>)>,
+}
+
+impl GatedServer {
+    async fn spawn(body: &'static [u8]) -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let base = format!("http://{}", listener.local_addr().expect("local address"));
+        let (arrived, arrivals) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let arrived = arrived.clone();
+                tokio::spawn(async move {
+                    let head = read_request_head(&mut stream).await;
+                    let route = head
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap_or_default()
+                        .to_owned();
+                    let (release, released) = tokio::sync::oneshot::channel();
+                    if arrived.send((route, release)).is_err() || released.await.is_err() {
+                        return;
+                    }
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(header.as_bytes()).await;
+                    let _ = stream.write_all(body).await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+        Self { base, arrivals }
+    }
+
+    fn url(&self, route: &str) -> reqwest::Url {
+        reqwest::Url::parse(&format!("{}{route}", self.base)).expect("loopback url")
+    }
+}
+
+async fn read_request_head(stream: &mut tokio::net::TcpStream) -> String {
+    let mut head = Vec::new();
+    let mut byte = [0_u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        match stream.read(&mut byte).await {
+            Ok(0) | Err(_) => break,
+            Ok(_) => head.push(byte[0]),
+        }
+    }
+    String::from_utf8_lossy(&head).into_owned()
+}
+
+/// The name beside a batch's count has to be the file that count refers to.
 ///
 /// It was announced from inside each download's own future, and
 /// `FuturesUnordered` polls every future it holds before any of them finishes,
@@ -895,89 +957,94 @@ async fn a_batch_downloads_every_file_and_reports_one_operation() {
 /// name that had been chosen at the start and never moved.
 #[tokio::test]
 async fn the_file_named_beside_a_batch_count_advances_with_it() {
-    let server = MockServer::start().await;
-    // Staggered so the batch spans several of the reporter's publish windows.
-    // Landing eight files inside one window would prove nothing: the throttle
-    // would collapse them to a single snapshot whether or not the name moved.
-    for index in 0..8 {
-        Mock::given(method("GET"))
-            .and(path(format!("/file-{index}.jar")))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_bytes(BODY)
-                    .set_delay(Duration::from_millis(120 * (index + 1))),
-            )
-            .mount(&server)
-            .await;
-    }
+    // Deliberately not request order, so a name that follows the order the
+    // batch was submitted in cannot pass.
+    const RELEASE_ORDER: [usize; 8] = [5, 2, 7, 0, 3, 6, 1, 4];
 
+    let mut server = GatedServer::spawn(BODY).await;
     let dir = TempDir::new().expect("temp dir");
     let requests: Vec<DownloadRequest> = (0..8)
         .map(|index| {
-            request(
-                &server,
-                &format!("/file-{index}.jar"),
-                &dir.path().join(format!("file-{index}.jar")),
-            )
-            .verifying(sha1_of(BODY))
-            .sized(BODY.len() as u64)
-            .labeled(format!("file-{index}.jar"))
+            let name = format!("file-{index}.jar");
+            DownloadRequest::new(server.url(&format!("/{name}")), dir.path().join(&name))
+                .verifying(sha1_of(BODY))
+                .sized(BODY.len() as u64)
+                .labeled(name)
         })
         .collect();
 
     let (sink, mut events) = ChannelSink::new();
     let sink: Arc<dyn ProgressSink> = sink;
     let reporter = OperationReporter::new("download-batch", true, sink);
-    // Every request in flight at once, so the only thing separating the
-    // completions is the delay each one was given.
-    manager_with(RetryPolicy::none(), 8)
-        .download_all(&requests, &reporter, &CancellationToken::new())
-        .await
-        .expect("the batch succeeds");
+    let manager = manager_with(RetryPolicy::none(), 8);
+    let cancel = CancellationToken::new();
+    let batch = manager.download_all(&requests, &reporter, &cancel);
 
-    let mut snapshots = Vec::new();
-    while let Ok(operation) = events.try_recv() {
-        snapshots.push(operation);
-    }
+    let release_in_order = async {
+        let mut gates = std::collections::HashMap::new();
+        while gates.len() < RELEASE_ORDER.len() {
+            let (route, release) = server.arrivals.recv().await.expect("server is running");
+            gates.insert(route, release);
+        }
+        // Every request is in flight before any of them may finish.
+        let before = reporter.snapshot();
+        assert_eq!(before.items.current, 0);
+        assert_eq!(before.current_step, None);
 
-    // Which file a count refers to is the order they landed in, and the delays
-    // only make that order likely: a loaded machine inverts two neighbors. Each
-    // file records when it landed, so read the order rather than assume it.
-    let mut landed_order: Vec<(SystemTime, String)> = (0..8)
-        .map(|index| {
+        for (landed, index) in (1..).zip(RELEASE_ORDER) {
             let name = format!("file-{index}.jar");
-            let modified = std::fs::metadata(dir.path().join(&name))
-                .expect("every file landed")
-                .modified()
-                .expect("a modification time");
-            (modified, name)
-        })
-        .collect();
-    landed_order.sort();
+            gates
+                .remove(&format!("/{name}"))
+                .expect("every file was requested")
+                .send(())
+                .expect("the request is still waiting");
+            let snapshot = tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let snapshot = reporter.snapshot();
+                    if snapshot.items.current >= landed {
+                        break snapshot;
+                    }
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .expect("the released file is counted");
+            assert_eq!(
+                snapshot.items.current, landed,
+                "only one file was allowed to finish"
+            );
+            assert_eq!(
+                snapshot.current_step.as_deref(),
+                Some(name.as_str()),
+                "the name beside `{landed} of 8` is not the file that count refers to"
+            );
+        }
+    };
+    let (outcome, ()) = tokio::join!(batch, release_in_order);
+    outcome.expect("the batch succeeds");
 
-    // A name is published with its own count or not at all, so the two can
-    // never describe different moments.
-    let mut named_snapshots = 0;
-    for snapshot in &snapshots {
-        let Some(named) = snapshot.current_step.as_deref() else {
-            continue;
-        };
-        named_snapshots += 1;
-        let landed = usize::try_from(snapshot.items.current).expect("a count of eight files");
-        assert!(
-            landed > 0,
-            "`{named}` was named before anything had finished downloading"
-        );
-        assert_eq!(
-            named,
-            landed_order[landed - 1].1.as_str(),
-            "the name beside `{landed} of 8` is not the file that count refers to"
-        );
+    // What was published is a throttled sample of the same states, and has to
+    // agree with them.
+    let mut last = None;
+    while let Ok(operation) = events.try_recv() {
+        if let Some(named) = operation.current_step.as_deref() {
+            let landed = usize::try_from(operation.items.current).expect("a count of eight files");
+            assert!(
+                landed > 0,
+                "`{named}` was named before anything had finished downloading"
+            );
+            assert_eq!(
+                named,
+                format!("file-{}.jar", RELEASE_ORDER[landed - 1]),
+                "the name published beside `{landed} of 8` is not the file that count refers to"
+            );
+        }
+        last = Some(operation);
     }
-    assert!(
-        named_snapshots > 1,
-        "the batch never named a file it was downloading"
-    );
+    let last = last.expect("at least one snapshot");
+    assert_eq!(last.status, OperationStatus::Completed);
+    assert_eq!(last.items.current, 8);
+    assert_eq!(last.current_step.as_deref(), Some("file-4.jar"));
 }
 
 /// A batch of cached artifacts must not open all of them at once.
