@@ -148,6 +148,9 @@ impl InstancePresentation {
         >,
     ) -> Self {
         let (state, state_kind) = match launch_state {
+            // Running, and holding the instance, with nothing supervising it:
+            // the run that launched it is gone.
+            Some(state) if state.is_orphaned() => (lookup("gui-state-orphaned"), "orphaned"),
             Some(state) if state.game_pid.is_some() => (lookup("gui-state-running"), "running"),
             Some(_) => (lookup("gui-state-starting"), "starting"),
             None => (lookup("gui-state-ready"), "ready"),
@@ -1454,6 +1457,29 @@ mod tests {
         assert!(item.needs_attention);
         assert!(!item.can_launch);
         assert!(!item.can_kill);
+    }
+
+    #[test]
+    fn a_game_that_outlived_its_launcher_is_shown_orphaned_and_not_launchable() {
+        // This test process stands in for the game; its start time proves it.
+        let stat = std::fs::read_to_string("/proc/self/stat").expect("own stat");
+        let ticks = stat
+            .rsplit_once(')')
+            .and_then(|(_, tail)| tail.split_whitespace().nth(19))
+            .and_then(|field| field.parse().ok());
+        let state = ephervex_core::LaunchState {
+            owner_pid: u32::MAX,
+            owner_start_ticks: Some(1),
+            game_pid: Some(std::process::id()),
+            game_start_ticks: ticks,
+            since: chrono::Utc::now(),
+        };
+        let record = client(StorageClass::Temporary, LoaderSelection::vanilla());
+        let item = InstancePresentation::from_record(&record, 0, 0, Some(&state), []);
+        assert_eq!(item.state_kind, "orphaned");
+        assert_eq!(item.state, lookup("gui-state-orphaned"));
+        assert!(!item.can_launch, "a second game would share its directory");
+        assert!(item.can_kill, "the proven force stop can still end it");
     }
 
     #[test]

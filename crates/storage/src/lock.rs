@@ -161,23 +161,47 @@ pub struct LaunchState {
 impl LaunchState {
     /// Whether the game this lock describes is still the process it names.
     ///
-    /// `false` when there is no game recorded yet, when it has exited, or when
-    /// the pid now belongs to something else. Never a guess: a caller that is
-    /// about to signal a pid needs proof, not an assumption.
+    /// `false` when there is no game recorded yet, when it has exited, when the
+    /// pid now belongs to something else, or when no start time was recorded to
+    /// prove which process it was. Never a guess: a caller that is about to
+    /// signal a pid, or to keep an instance locked for it, needs proof.
     #[must_use]
     pub fn game_is_alive(&self) -> bool {
-        let Some(pid) = self.game_pid else {
+        let (Some(pid), Some(recorded)) = (self.game_pid, self.game_start_ticks) else {
             return false;
         };
-        if !proc_filesystem_available() {
-            return false;
+        proc_filesystem_available() && process_start_ticks(pid) == Some(recorded)
+    }
+
+    /// Whether this launch still holds its instance: its launcher run is
+    /// alive, or the game it started still is.
+    ///
+    /// A launcher that died leaves its game running, and the game still writes
+    /// to the instance's saves, options, and logs. Treating that instance as
+    /// free is how a second game ends up sharing its directory.
+    #[must_use]
+    pub fn holds_instance(&self) -> bool {
+        self.owner_is_alive() || self.game_is_alive()
+    }
+
+    /// The process that keeps this launch alive: the launcher run, or the
+    /// game when the run is gone.
+    #[must_use]
+    pub fn holder_pid(&self) -> u32 {
+        match self.game_pid {
+            Some(game) if self.is_orphaned() => game,
+            _ => self.owner_pid,
         }
-        match process_start_ticks(pid) {
-            Some(ticks) => self
-                .game_start_ticks
-                .is_none_or(|recorded| recorded == ticks),
-            None => false,
-        }
+    }
+
+    /// Whether the game outlived the launcher run that started it.
+    ///
+    /// Such a game is running and holds its instance, but nothing supervises
+    /// it: its output pipes and process handle went with that run. It can
+    /// only be ended by signaling the proven process.
+    #[must_use]
+    pub fn is_orphaned(&self) -> bool {
+        !self.owner_is_alive() && self.game_is_alive()
     }
 
     /// Whether the process that took this lock is still running.
@@ -222,8 +246,10 @@ pub struct ForcedStop {
 /// the pid is still the process the lock describes, by the start time recorded
 /// beside it. A pid that cannot be proven is skipped rather than signaled.
 ///
-/// `SIGTERM` rather than `SIGKILL`: Minecraft saves on it, and a launch that
-/// ignores it still ends up launchable because the lock is released either way.
+/// `SIGTERM` rather than `SIGKILL`: Minecraft saves on it. A game that was
+/// signaled keeps its lock until it has exited, so an instance is never offered
+/// for a second launch while its game is still writing to it; a launch with no
+/// live game has its lock released at once.
 pub fn force_release(instance_root: &Path, launch: Option<&str>) -> Result<ForcedStop, LockError> {
     let name = match launch {
         Some(id) => additional_lock_file(id).ok_or_else(|| {
@@ -251,6 +277,13 @@ pub fn force_release(instance_root: &Path, launch: Option<&str>) -> Result<Force
         outcome.signaled_owner = terminate(state.owner_pid);
     }
 
+    // A signaled game has been asked to stop, not proven stopped, and while
+    // it runs it still writes to the instance. Its lock stays until it has
+    // exited, and is then cleared like any lock nobody holds.
+    if outcome.signaled_game {
+        debug!(path = %path.display(), ?outcome, "asked a launch to end; its lock stays until it exits");
+        return Ok(outcome);
+    }
     match std::fs::remove_file(&path) {
         Ok(()) => outcome.released = true,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -312,10 +345,10 @@ impl LaunchLock {
         // id died without releasing it. It is replaced rather than refused:
         // the id is the caller's, and it has already said it does not mind
         // running alongside anything.
-        if read_state(&path)?.is_some_and(|held| held.owner_is_alive()) {
+        if let Some(held) = read_state(&path)?.filter(LaunchState::holds_instance) {
             return Err(LockError::AlreadyRunning {
-                pid: state.owner_pid,
-                since: state.since,
+                pid: held.holder_pid(),
+                since: held.since,
             });
         }
         let _ = std::fs::remove_file(&path);
@@ -359,9 +392,9 @@ impl LaunchLock {
                         // A lock file we cannot parse is not evidence of a live
                         // launch, and refusing forever on one would strand the
                         // instance. Treated exactly like a dead owner.
-                        Some(held) if held.owner_is_alive() => {
+                        Some(held) if held.holds_instance() => {
                             return Err(LockError::AlreadyRunning {
-                                pid: held.owner_pid,
+                                pid: held.holder_pid(),
                                 since: held.since,
                             });
                         }
@@ -456,9 +489,10 @@ impl Drop for LaunchLock {
 /// What is currently launching or running in an instance directory, if
 /// anything.
 ///
-/// A lock whose owner is gone reports `None`: it describes a launcher that is
-/// no longer there, and reporting it as running is how a UI ends up showing a
-/// permanently "running" instance.
+/// A lock whose owner and game are both gone reports `None`: it describes a
+/// launch that is over, and reporting it as running is how a UI ends up showing
+/// a permanently "running" instance. A game that outlived its owner is still
+/// running, and is reported.
 #[must_use]
 pub fn running_state(instance_root: &Path) -> Option<LaunchState> {
     running_launches(instance_root)
@@ -473,8 +507,10 @@ pub fn running_state(instance_root: &Path) -> Option<LaunchState> {
 /// first client is still up is what produces it. The unnamed lock sorts first
 /// and the rest by their own ids, so two readings of the same directory agree.
 ///
-/// A lock whose owner is gone is skipped rather than reported, for the same
-/// reason a single one is: a permanently "running" instance is worse than none.
+/// A lock whose owner is gone and whose game is gone too is skipped rather than
+/// reported, for the same reason a single one is: a permanently "running"
+/// instance is worse than none. One whose game outlived its owner is reported,
+/// as orphaned, because it is running.
 #[must_use]
 pub fn running_launches(instance_root: &Path) -> Vec<RunningLaunch> {
     let directory = metadata_dir(instance_root);
@@ -489,7 +525,7 @@ pub fn running_launches(instance_root: &Path) -> Vec<RunningLaunch> {
             let id = launch_id_of(&name)?.handle();
             let state = read_state(&entry.path()).ok().flatten()?;
             state
-                .owner_is_alive()
+                .holds_instance()
                 .then_some(RunningLaunch { id, state })
         })
         .collect();
@@ -579,6 +615,103 @@ mod tests {
         let root = tempfile::tempdir().expect("temp dir");
         create_dir_all(&metadata_dir(root.path())).expect("metadata dir");
         root
+    }
+
+    /// A lock left by a launcher run that is gone, naming `game` as the game
+    /// it started, with the start time `game_ticks`.
+    fn orphaned_lock(root: &Path, game: u32, game_ticks: Option<u64>) {
+        let own = process_start_ticks(std::process::id()).expect("own start time");
+        let state = LaunchState {
+            // This process's id with a start time it does not have: a run that
+            // is provably gone.
+            owner_pid: std::process::id(),
+            owner_start_ticks: Some(own.wrapping_add(1)),
+            game_pid: Some(game),
+            game_start_ticks: game_ticks,
+            since: Utc::now(),
+        };
+        write_new(&metadata_dir(root).join(LAUNCH_LOCK_FILE), &state).expect("lock file");
+    }
+
+    /// A process standing in for a game that outlived its launcher.
+    fn live_game() -> (std::process::Child, u64) {
+        let child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("a child");
+        let ticks = process_start_ticks(child.id()).expect("its start time");
+        (child, ticks)
+    }
+
+    #[test]
+    fn a_game_that_outlived_its_launcher_keeps_the_instance_locked() {
+        let root = instance();
+        let (mut game, ticks) = live_game();
+        orphaned_lock(root.path(), game.id(), Some(ticks));
+
+        let state = running_state(root.path()).expect("still running");
+        assert!(state.is_orphaned());
+        assert_eq!(state.holder_pid(), game.id());
+        let error = LaunchLock::acquire(root.path()).expect_err("a second game is refused");
+        assert!(matches!(error, LockError::AlreadyRunning { pid, .. } if pid == game.id()));
+
+        game.kill().expect("end the game");
+        game.wait().expect("reap");
+        assert!(
+            running_state(root.path()).is_none(),
+            "once the game is gone the launch is over"
+        );
+        LaunchLock::acquire(root.path()).expect("and its stale lock is cleared by the next launch");
+    }
+
+    #[test]
+    fn a_recycled_game_pid_is_not_taken_for_the_orphaned_game() {
+        let root = instance();
+        let (mut stranger, ticks) = live_game();
+        // The recorded id now belongs to a process that started at another time.
+        orphaned_lock(root.path(), stranger.id(), Some(ticks.wrapping_add(1)));
+        assert!(running_state(root.path()).is_none());
+        LaunchLock::acquire(root.path()).expect("the instance is free");
+
+        let other = instance();
+        // No start time recorded at all proves nothing either.
+        orphaned_lock(other.path(), stranger.id(), None);
+        assert!(running_state(other.path()).is_none());
+
+        stranger.kill().expect("end");
+        stranger.wait().expect("reap");
+    }
+
+    #[test]
+    fn force_stopping_an_orphan_signals_only_the_proven_game_and_keeps_its_lock() {
+        let root = instance();
+        let (mut stranger, ticks) = live_game();
+        orphaned_lock(root.path(), stranger.id(), Some(ticks.wrapping_add(1)));
+        let outcome = force_release(root.path(), None).expect("released");
+        assert!(
+            !outcome.signaled_game,
+            "a process that cannot be proven is left alone"
+        );
+        assert!(outcome.released);
+        assert!(
+            stranger.try_wait().expect("status").is_none(),
+            "still running"
+        );
+        stranger.kill().expect("end");
+        stranger.wait().expect("reap");
+
+        let (mut game, ticks) = live_game();
+        orphaned_lock(root.path(), game.id(), Some(ticks));
+        let outcome = force_release(root.path(), None).expect("signaled");
+        assert!(outcome.signaled_game);
+        assert!(!outcome.signaled_owner, "the dead owner is not signaled");
+        assert!(
+            !outcome.released,
+            "asked to stop is not stopped: the lock stays while the game may still write"
+        );
+        game.wait().expect("the game ends on the signal");
+        assert!(running_state(root.path()).is_none());
+        LaunchLock::acquire(root.path()).expect("free once the game has exited");
     }
 
     #[test]

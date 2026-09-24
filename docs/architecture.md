@@ -124,7 +124,7 @@ exhaustion with an actionable error.
 | Snapshot restore | A durable journal names only fixed host parts. Each live part moves into the restore transaction before its staged replacement is renamed into place. | Failure rolls every published part back. On restart, reconciliation recognizes the versioned journal and restores the complete pre-restore state. Unknown or ambiguous staging is left untouched and receives host attention. |
 | Mod isolation round | The versioned session records the next exact configuration before the dependency-aware batch applies it. | Resume reapplies the intended configuration idempotently. Cancel restores the pre-isolation snapshot; finish retains it and leaves the smallest tested configuration enabled. |
 | Diagnostic bundle export | A caller-selected set is written to the requested local archive. | Failure is reported against the output path. Source logs are never changed or scrubbed. |
-| Launch and server process control | A durable owner record and kernel-visible process identity establish control. | Stale ownership evidence is distinguished from a live process. An orphan is reported and never adopted or signaled. |
+| Launch and server process control | A durable owner record and kernel-visible process identity establish control. | Stale ownership evidence is distinguished from a live process. A server orphan is reported and never adopted or signaled. A client game that outlived its launcher keeps its instance locked and is reported as orphaned; only the validated force stop signals it. |
 
 Non-empty `.launcher/retired/` or `.launcher/staging/` directories are always
 suspicious after restart. Reconciliation adds host attention and leaves every
@@ -558,7 +558,18 @@ with the exact `inheritsFrom` parent before it is installable or launchable.
 
 `ephervex-storage` holds an instance launch lock for the full operation. The
 lock records the launcher process and kernel start time to distinguish a live
-owner from PID reuse, then records the game PID after process creation.
+owner from PID reuse, then records the game PID and start time after process
+creation.
+
+A launcher run can end while its game keeps running. The lock still holds the
+instance while the recorded game is alive and still has its recorded start
+time, so no second game can share its directory; the instance is shown as
+orphaned rather than stopped. Nothing supervises such a game: its output and
+process handle went with that run, so it is not restartable and its console is
+not recovered. The force stop signals it only after proving it is that process,
+and its lock stays until it has exited. A recorded id whose start time does not
+match, or that has no recorded start time, is not believed, and a lock whose
+owner and game are both gone is cleared by the next launch.
 
 Authentication and Java failures are classified in `ephervex-core`, so a
 frontend can offer sign-in, session-only login, or managed Java without

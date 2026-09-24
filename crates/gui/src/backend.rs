@@ -2048,7 +2048,30 @@ fn run_worker(
             }
             Command::CancelOperation(id) => cancel_operation(&cancellations, &events, &id),
             Command::KillInstance { instance, launch } => {
-                kill_instance(&cancellations, &events, instance, launch.as_deref());
+                let supervised = cancellations.lock().is_ok_and(|entries| {
+                    entries.contains_key(&launch_key(instance, launch.as_deref()))
+                });
+                // A game whose launcher run is gone has no supervisor to cancel.
+                // The proven force stop is the one way to end it, and it
+                // signals nothing it cannot prove is that game.
+                let orphaned = launch.is_none()
+                    && app
+                        .launch_state(instance)
+                        .is_ok_and(|state| state.is_some_and(|state| state.is_orphaned()));
+                if !supervised && orphaned {
+                    match app.force_stop_launch(instance, None) {
+                        Ok(_) => {
+                            let _ = events.send(Event::Toast {
+                                message: lookup("gui-force-stop-signaled"),
+                                error: false,
+                            });
+                            send_snapshot(&app, &events);
+                        }
+                        Err(error) => send_error(&events, &error),
+                    }
+                } else {
+                    kill_instance(&cancellations, &events, instance, launch.as_deref());
+                }
             }
             Command::SaveInstanceRuntime {
                 instance,
