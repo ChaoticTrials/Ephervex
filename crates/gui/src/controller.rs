@@ -9,7 +9,10 @@ use std::time::{Duration, Instant};
 
 use copypasta::{ClipboardContext, ClipboardProvider as _};
 use ephervex_core::live_diagnostics::{LogFilter, LogLevel, RetainedLog};
-use ephervex_core::{InstalledHost, OptionalSelection, ProviderFileIdentity, WindowSize};
+use ephervex_core::{
+    InstalledHost, OptionalSelection, ProviderFileIdentity, StorageCategory, StorageRetention,
+    WindowSize,
+};
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use ephervex_model::AbsentModPolicy;
 use ephervex_model::ModProvider;
@@ -34,8 +37,8 @@ use crate::presentation::{
     validate_port,
 };
 use crate::ui::{
-    AccountRow, ActivityRow, AppWindow, BlockedFileRow, BundlePartRow, DiagnosticRow, GuiI18n,
-    ImpactRow, ImportDuplicateRow, ImportOptionRow, InstanceRow, IntegrityFindingRow,
+    AccountRow, ActivityRow, AppWindow, BlockedFileRow, BundlePartRow, DiagnosticRow, DiskUsageRow,
+    GuiI18n, ImpactRow, ImportDuplicateRow, ImportOptionRow, InstanceRow, IntegrityFindingRow,
     IsolationCandidateRow, JavaRow, LicenseRow, LinkedTargetRow, LocalModClashRow, LogChunk,
     ModRow, ModSearchRow, ModVersionRow, PendingEntityRow, PromoteServerRow, RelationRow,
     RunningRow, ServerRow, SnapshotRow, Theme, WindowSizePreview, WorkflowActionRow,
@@ -1337,6 +1340,248 @@ impl IsolationFlowState {
     }
 }
 
+/// The one disk usage measurement the view can be waiting for.
+#[derive(Debug, Default)]
+struct DiskUsageState {
+    last_request: u64,
+    pending: Option<u64>,
+    /// The measurement's operation, once it reports, which is what Stop cancels.
+    operation: Option<String>,
+    /// Whether the view holds a finished measurement.
+    measured: bool,
+}
+
+const fn storage_category_messages(category: StorageCategory) -> (&'static str, &'static str) {
+    match category {
+        StorageCategory::ClientInstances => (
+            "gui-disk-usage-client-instances",
+            "gui-disk-usage-client-instances-detail",
+        ),
+        StorageCategory::LocalServers => (
+            "gui-disk-usage-local-servers",
+            "gui-disk-usage-local-servers-detail",
+        ),
+        StorageCategory::Mods => ("gui-disk-usage-mods", "gui-disk-usage-mods-detail"),
+        StorageCategory::Snapshots => (
+            "gui-disk-usage-snapshots",
+            "gui-disk-usage-snapshots-detail",
+        ),
+        StorageCategory::Logs => ("gui-disk-usage-logs", "gui-disk-usage-logs-detail"),
+        StorageCategory::DownloadCache => (
+            "gui-disk-usage-download-cache",
+            "gui-disk-usage-download-cache-detail",
+        ),
+        StorageCategory::SharedGameFiles => (
+            "gui-disk-usage-shared-game-files",
+            "gui-disk-usage-shared-game-files-detail",
+        ),
+        StorageCategory::JavaRuntimes => (
+            "gui-disk-usage-java-runtimes",
+            "gui-disk-usage-java-runtimes-detail",
+        ),
+        StorageCategory::LauncherState => (
+            "gui-disk-usage-launcher-state",
+            "gui-disk-usage-launcher-state-detail",
+        ),
+        StorageCategory::Recovery => ("gui-disk-usage-recovery", "gui-disk-usage-recovery-detail"),
+        StorageCategory::Other => ("gui-disk-usage-other", "gui-disk-usage-other-detail"),
+    }
+}
+
+const fn storage_retention_messages(retention: StorageRetention) -> (&'static str, &'static str) {
+    match retention {
+        StorageRetention::Persistent => (
+            "gui-disk-usage-retention-persistent",
+            "gui-disk-usage-retention-persistent-detail",
+        ),
+        StorageRetention::Temporary => (
+            "gui-disk-usage-retention-temporary",
+            "gui-disk-usage-retention-temporary-detail",
+        ),
+        StorageRetention::Regenerable => (
+            "gui-disk-usage-retention-regenerable",
+            "gui-disk-usage-retention-regenerable-detail",
+        ),
+        StorageRetention::Recovery => (
+            "gui-disk-usage-retention-recovery",
+            "gui-disk-usage-retention-recovery-detail",
+        ),
+    }
+}
+
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+fn share_of(bytes: u64, total: u64) -> f32 {
+    if total == 0 {
+        0.0
+    } else {
+        (bytes as f64 / total as f64) as f32
+    }
+}
+
+/// Shows a finished measurement, if it is the one the view last asked for.
+fn apply_disk_usage(
+    ui: &AppWindow,
+    state: &mut DiskUsageState,
+    request: u64,
+    report: &ephervex_core::DiskUsageReport,
+) {
+    if request != state.last_request {
+        return;
+    }
+    let total = report.total_bytes;
+    let size = |bytes: u64| SharedString::from(ephervex_model::format_binary_bytes(bytes));
+    let retention = report
+        .retention
+        .iter()
+        .map(|usage| {
+            let (label, detail) = storage_retention_messages(usage.retention);
+            DiskUsageRow {
+                id: usage.retention.as_str().into(),
+                label: lookup(label).into(),
+                detail: lookup(detail).into(),
+                size: size(usage.bytes),
+                fraction: share_of(usage.bytes, total),
+                locations: string_model(Vec::new()),
+            }
+        })
+        .collect();
+    // Largest first; a category holding nothing is still listed, so the list
+    // always adds up to the total above it.
+    let mut categories: Vec<&ephervex_core::CategoryUsage> = report.categories.iter().collect();
+    categories.sort_by_key(|usage| std::cmp::Reverse(usage.bytes));
+    let categories = categories
+        .into_iter()
+        .map(|usage| {
+            let (label, detail) = storage_category_messages(usage.category);
+            DiskUsageRow {
+                id: usage.category.as_str().into(),
+                label: lookup(label).into(),
+                detail: lookup(detail).into(),
+                size: size(usage.bytes),
+                fraction: share_of(usage.bytes, total),
+                locations: string_model(
+                    usage
+                        .locations
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect(),
+                ),
+            }
+        })
+        .collect();
+    state.measured = true;
+    ui.set_disk_usage_total(size(total));
+    ui.set_disk_usage_measured_at(
+        lookup_args(
+            "gui-disk-usage-measured-at",
+            [(
+                "value",
+                Arg::from(
+                    report
+                        .measured_at
+                        .with_timezone(&chrono::Local)
+                        .format("%Y-%m-%d %H:%M")
+                        .to_string(),
+                ),
+            )],
+        )
+        .into(),
+    );
+    ui.set_disk_usage_retention(model(retention));
+    ui.set_disk_usage_categories(model(categories));
+    ui.set_disk_usage_incomplete(report.is_incomplete());
+    ui.set_disk_usage_incomplete_text(
+        lookup_args(
+            "gui-disk-usage-incomplete",
+            [(
+                "count",
+                Arg::from(i64::try_from(report.unreadable).unwrap_or(i64::MAX)),
+            )],
+        )
+        .into(),
+    );
+    ui.set_disk_usage_unreadable(string_model(
+        report
+            .unreadable_examples
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect(),
+    ));
+    ui.set_disk_usage_state("measured".into());
+}
+
+fn settle_disk_usage(ui: &AppWindow, state: &mut DiskUsageState, request: u64) {
+    if state.pending != Some(request) {
+        return;
+    }
+    state.pending = None;
+    state.operation = None;
+    // A measurement that ended without a report, stopped or failed, leaves
+    // whatever was shown before it.
+    if ui.get_disk_usage_state() == "measuring" {
+        ui.set_disk_usage_state(if state.measured { "measured" } else { "idle" }.into());
+    }
+}
+
+fn apply_disk_usage_activity(ui: &AppWindow, state: &mut DiskUsageState, activity: &ActivityData) {
+    if state.pending.is_none()
+        || activity.item.title != lookup("operation-measuring-disk-usage")
+        || !matches!(activity.item.status_kind, "queued" | "running")
+    {
+        return;
+    }
+    state.operation = Some(activity.item.id.clone());
+    if !activity.item.detail.is_empty() {
+        ui.set_disk_usage_progress(activity.item.detail.clone().into());
+    }
+}
+
+fn register_disk_usage_actions(
+    ui: &AppWindow,
+    commands: &Sender<Command>,
+    state: &Rc<RefCell<DiskUsageState>>,
+) {
+    let sender = commands.clone();
+    let measuring = Rc::clone(state);
+    let weak = ui.as_weak();
+    ui.on_measure_disk_usage(move || {
+        let mut state = measuring.borrow_mut();
+        if state.pending.is_some() {
+            return;
+        }
+        state.last_request = state.last_request.wrapping_add(1);
+        state.pending = Some(state.last_request);
+        if let Some(ui) = weak.upgrade() {
+            ui.set_disk_usage_state("measuring".into());
+            ui.set_disk_usage_progress(SharedString::default());
+        }
+        send(
+            &sender,
+            Command::MeasureDiskUsage {
+                request: state.last_request,
+            },
+        );
+    });
+
+    let sender = commands.clone();
+    let stopping = Rc::clone(state);
+    ui.on_stop_disk_usage(move || {
+        if let Some(operation) = stopping.borrow().operation.clone() {
+            send(&sender, Command::CancelOperation(operation));
+        }
+    });
+
+    let sender = commands.clone();
+    ui.on_open_storage_location(move |id, index| {
+        let category = StorageCategory::ALL
+            .into_iter()
+            .find(|category| category.as_str() == id.as_str());
+        if let (Some(category), Ok(index)) = (category, usize::try_from(index)) {
+            send(&sender, Command::OpenStorageLocation { category, index });
+        }
+    });
+}
+
 /// A restart this controller asked for, and where it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct TrackedRestart {
@@ -2117,6 +2362,7 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
     let isolation_flow = Rc::new(RefCell::new(IsolationFlowState::default()));
     let integrity_flow = Rc::new(RefCell::new(IntegrityFlowState::default()));
     let lifecycle = Rc::new(RefCell::new(HostLifecycle::default()));
+    let disk_usage = Rc::new(RefCell::new(DiskUsageState::default()));
     register_i18n(ui);
     register_toasts(ui);
     register_callbacks(
@@ -2132,6 +2378,7 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
         &isolation_flow,
         &integrity_flow,
         &lifecycle,
+        &disk_usage,
         keys,
     );
 
@@ -2148,6 +2395,7 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
     let poll_isolation_flow = Rc::clone(&isolation_flow);
     let poll_integrity_flow = Rc::clone(&integrity_flow);
     let poll_lifecycle = Rc::clone(&lifecycle);
+    let poll_disk_usage = Rc::clone(&disk_usage);
     let poll_commands = backend.commands.clone();
     let poll_timer = Timer::default();
     poll_timer.start(TimerMode::Repeated, Duration::from_millis(80), move || {
@@ -2183,6 +2431,7 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
                     &poll_isolation_flow,
                     &poll_integrity_flow,
                     &poll_lifecycle,
+                    &poll_disk_usage,
                     &poll_commands,
                 ),
             }
@@ -2509,6 +2758,7 @@ fn register_callbacks(
     isolation_flow: &Rc<RefCell<IsolationFlowState>>,
     integrity_flow: &Rc<RefCell<IntegrityFlowState>>,
     lifecycle: &Rc<RefCell<HostLifecycle>>,
+    disk_usage: &Rc<RefCell<DiskUsageState>>,
     keys: &BindingCapture,
 ) {
     register_catalog_actions(ui, commands);
@@ -2531,6 +2781,7 @@ fn register_callbacks(
     register_integrity_actions(ui, commands, integrity_flow);
     register_bundle_actions(ui, commands, integrity_flow);
     register_restart_actions(ui, commands, lifecycle);
+    register_disk_usage_actions(ui, commands, disk_usage);
     register_live_viewer(ui, commands, live_viewer);
     register_settings(ui, commands);
     register_minecraft_defaults(ui, commands, minecraft, keys);
@@ -6896,6 +7147,7 @@ fn apply_event(
     isolation_flow: &Rc<RefCell<IsolationFlowState>>,
     integrity_flow: &Rc<RefCell<IntegrityFlowState>>,
     lifecycle: &Rc<RefCell<HostLifecycle>>,
+    disk_usage: &Rc<RefCell<DiskUsageState>>,
     commands: &Sender<Command>,
 ) {
     match event {
@@ -7119,6 +7371,7 @@ fn apply_event(
         Event::Activity(activity) => {
             apply_isolation_stage(ui, &isolation_flow.borrow(), &activity);
             apply_integrity_activity(ui, &mut integrity_flow.borrow_mut(), &activity);
+            apply_disk_usage_activity(ui, &mut disk_usage.borrow_mut(), &activity);
             upsert_activity(&mut activities.borrow_mut(), activity);
             apply_activities(ui, &activities.borrow());
         }
@@ -7129,6 +7382,12 @@ fn apply_event(
             if isolation_flow.borrow_mut().settle(request) {
                 clear_host_busy(ui);
             }
+        }
+        Event::DiskUsage { request, report } => {
+            apply_disk_usage(ui, &mut disk_usage.borrow_mut(), request, &report);
+        }
+        Event::DiskUsageSettled { request } => {
+            settle_disk_usage(ui, &mut disk_usage.borrow_mut(), request);
         }
         Event::HostRestart {
             host,
@@ -10207,6 +10466,205 @@ mod tests {
             .map(|row| row.linked_client_id.to_string())
             .collect();
         assert_eq!(on_the_open_instance, ["client-a".to_owned()]);
+    }
+
+    fn disk_usage_report() -> ephervex_core::DiskUsageReport {
+        use ephervex_core::{CategoryUsage, RetentionUsage};
+        let category = |category, bytes: u64, locations: Vec<&str>| CategoryUsage {
+            category,
+            bytes,
+            files: 1,
+            locations: locations.into_iter().map(PathBuf::from).collect(),
+        };
+        let categories = StorageCategory::ALL
+            .into_iter()
+            .map(|which| match which {
+                StorageCategory::ClientInstances => category(which, 600, vec!["/data/instances"]),
+                StorageCategory::DownloadCache => {
+                    category(which, 300, vec!["/cache/downloads", "/cache/metadata"])
+                }
+                StorageCategory::Recovery => category(which, 100, Vec::new()),
+                other => category(other, 0, Vec::new()),
+            })
+            .collect();
+        ephervex_core::DiskUsageReport {
+            total_bytes: 1000,
+            files: 3,
+            categories,
+            retention: vec![
+                RetentionUsage {
+                    retention: StorageRetention::Persistent,
+                    bytes: 600,
+                },
+                RetentionUsage {
+                    retention: StorageRetention::Temporary,
+                    bytes: 0,
+                },
+                RetentionUsage {
+                    retention: StorageRetention::Regenerable,
+                    bytes: 300,
+                },
+                RetentionUsage {
+                    retention: StorageRetention::Recovery,
+                    bytes: 100,
+                },
+            ],
+            unreadable: 2,
+            unreadable_examples: vec![PathBuf::from("/data/instances/x/saves")],
+            symlinks_skipped: 0,
+            hard_links_deduplicated: 0,
+            measured_at: chrono::Utc::now(),
+        }
+    }
+
+    fn disk_usage_window() -> (
+        AppWindow,
+        std::sync::mpsc::Receiver<Command>,
+        Rc<RefCell<DiskUsageState>>,
+    ) {
+        let ui = test_window();
+        let (sender, commands) = std::sync::mpsc::channel();
+        let state = Rc::new(RefCell::new(DiskUsageState::default()));
+        register_disk_usage_actions(&ui, &sender, &state);
+        (ui, commands, state)
+    }
+
+    #[test]
+    fn measuring_asks_once_and_shows_progress_until_it_settles() {
+        let (ui, commands, state) = disk_usage_window();
+        ui.invoke_measure_disk_usage();
+        ui.invoke_measure_disk_usage();
+        let sent: Vec<_> = commands.try_iter().collect();
+        assert_eq!(sent.len(), 1, "a second click waits: {sent:?}");
+        let Command::MeasureDiskUsage { request } = sent[0] else {
+            panic!("a measurement");
+        };
+        assert_eq!(ui.get_disk_usage_state(), "measuring");
+
+        settle_disk_usage(&ui, &mut state.borrow_mut(), request);
+        assert_eq!(
+            ui.get_disk_usage_state(),
+            "idle",
+            "stopped before any report, so nothing is claimed"
+        );
+        ui.invoke_measure_disk_usage();
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::MeasureDiskUsage { .. })
+        ));
+    }
+
+    #[test]
+    fn a_report_becomes_a_total_proportions_and_largest_first_categories() {
+        let (ui, commands, state) = disk_usage_window();
+        ui.invoke_measure_disk_usage();
+        let Ok(Command::MeasureDiskUsage { request }) = commands.try_recv() else {
+            panic!("a measurement");
+        };
+        apply_disk_usage(&ui, &mut state.borrow_mut(), request, &disk_usage_report());
+
+        assert_eq!(ui.get_disk_usage_state(), "measured");
+        assert_eq!(
+            ui.get_disk_usage_total(),
+            ephervex_model::format_binary_bytes(1000).as_str()
+        );
+        let retention: Vec<(String, f32)> = ui
+            .get_disk_usage_retention()
+            .iter()
+            .map(|row| (row.id.to_string(), row.fraction))
+            .collect();
+        assert_eq!(
+            retention,
+            [
+                ("persistent".to_owned(), 0.6),
+                ("temporary".to_owned(), 0.0),
+                ("regenerable".to_owned(), 0.3),
+                ("recovery".to_owned(), 0.1),
+            ]
+        );
+        let categories: Vec<String> = ui
+            .get_disk_usage_categories()
+            .iter()
+            .map(|row| row.id.to_string())
+            .collect();
+        assert_eq!(
+            categories.len(),
+            StorageCategory::ALL.len(),
+            "every category listed"
+        );
+        assert_eq!(
+            &categories[..3],
+            ["client_instances", "download_cache", "recovery"]
+        );
+        let cache = ui.get_disk_usage_categories().row_data(1).expect("row");
+        assert_eq!(cache.locations.row_count(), 2);
+        assert_eq!(
+            cache.label,
+            lookup("gui-disk-usage-download-cache").as_str()
+        );
+        assert!(ui.get_disk_usage_incomplete());
+        assert_eq!(ui.get_disk_usage_unreadable().row_count(), 1);
+    }
+
+    #[test]
+    fn a_report_for_an_earlier_request_is_not_shown() {
+        let (ui, commands, state) = disk_usage_window();
+        ui.invoke_measure_disk_usage();
+        let Ok(Command::MeasureDiskUsage { request }) = commands.try_recv() else {
+            panic!("a measurement");
+        };
+        apply_disk_usage(
+            &ui,
+            &mut state.borrow_mut(),
+            request + 1,
+            &disk_usage_report(),
+        );
+        assert_eq!(ui.get_disk_usage_state(), "measuring");
+    }
+
+    #[test]
+    fn a_category_folder_is_opened_by_category_and_position() {
+        let (ui, commands, _state) = disk_usage_window();
+        ui.invoke_open_storage_location("download_cache".into(), 1);
+        ui.invoke_open_storage_location("not-a-category".into(), 0);
+        let sent: Vec<_> = commands.try_iter().collect();
+        assert_eq!(sent.len(), 1, "an unknown category opens nothing: {sent:?}");
+        assert!(matches!(
+            sent[0],
+            Command::OpenStorageLocation {
+                category: StorageCategory::DownloadCache,
+                index: 1
+            }
+        ));
+    }
+
+    #[test]
+    fn stopping_a_measurement_cancels_its_reported_operation() {
+        let (ui, commands, state) = disk_usage_window();
+        ui.invoke_measure_disk_usage();
+        let _ = commands.try_recv();
+        let activity = ActivityData {
+            item: crate::presentation::ActivityPresentation {
+                id: "operation-9".to_owned(),
+                title: lookup("operation-measuring-disk-usage"),
+                status: String::new(),
+                status_kind: "running",
+                detail: "/cache".to_owned(),
+                progress: 0.0,
+                indeterminate: true,
+                cancellable: true,
+                failed: false,
+            },
+            entity: String::new(),
+            time: String::new(),
+        };
+        apply_disk_usage_activity(&ui, &mut state.borrow_mut(), &activity);
+        assert_eq!(ui.get_disk_usage_progress(), "/cache");
+        ui.invoke_stop_disk_usage();
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::CancelOperation(operation)) if operation == "operation-9"
+        ));
     }
 
     /// A window listing one client and one server, as the lists and the

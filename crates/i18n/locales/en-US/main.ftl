@@ -2398,6 +2398,59 @@ gui-installed-managed-mods = { $count ->
 }
 gui-stop-requested = Stop requested.
 gui-state-restarting = Restarting
+gui-settings-disk-usage = Disk usage
+gui-disk-usage-page-detail = How much space Ephervex's own directories hold, and what for.
+gui-disk-usage-title = Storage
+gui-disk-usage-detail = Measures Ephervex's instances, servers, caches, and records. Nothing is deleted or changed.
+gui-disk-usage-metric = Sizes are the files' own lengths. Copy-on-write snapshots and sparse files can take up less actual disk space than shown. A file with several hard links is counted once, and linked folders are not followed.
+gui-disk-usage-measure = Measure
+gui-disk-usage-refresh = Measure again
+gui-disk-usage-stop = Stop
+operation-measuring-disk-usage = Measuring disk usage
+gui-disk-usage-measuring = Measuring...
+gui-disk-usage-progress = { $count ->
+    [one] One file counted so far
+   *[other] { $count } files counted so far
+}
+gui-disk-usage-idle = Not measured yet. Measuring reads every file Ephervex keeps, which takes a while on a large installation.
+gui-disk-usage-total = { $value } in total
+gui-disk-usage-measured-at = Measured at { $value }
+gui-disk-usage-incomplete = { $count ->
+    [one] One place could not be read, so its size is missing from every figure:
+   *[other] { $count } places could not be read, so their size is missing from every figure:
+}
+gui-disk-usage-retention-bar = Storage by whether it can be recreated
+gui-disk-usage-open = Open { $value }
+gui-disk-usage-retention-persistent = Kept until you remove it
+gui-disk-usage-retention-persistent-detail = Persistent instances and servers, their snapshots and logs, and Ephervex's own records.
+gui-disk-usage-retention-temporary = Temporary hosts
+gui-disk-usage-retention-temporary-detail = Temporary instances and servers, in the system's temporary directory. They go when it is cleared.
+gui-disk-usage-retention-regenerable = Can be downloaded or rebuilt
+gui-disk-usage-retention-regenerable-detail = Caches and Java runtimes. A cached file can still be the only copy of a download its author has since withdrawn.
+gui-disk-usage-retention-recovery = Recovery state
+gui-disk-usage-retention-recovery-detail = Files an interrupted change left behind. They are what lets that change be reviewed or undone, so they are not disposable.
+gui-disk-usage-client-instances = Client instances
+gui-disk-usage-client-instances-detail = Game directories and their records, apart from the mods, logs, and snapshots listed on their own.
+gui-disk-usage-local-servers = Local servers
+gui-disk-usage-local-servers-detail = Server directories and their records, apart from the mods, logs, and snapshots listed on their own.
+gui-disk-usage-mods = Mods
+gui-disk-usage-mods-detail = The mods folder of every instance and server. Each one is inside its host, so there is no single folder to open.
+gui-disk-usage-snapshots = Snapshots
+gui-disk-usage-snapshots-detail = Safety snapshots inside each instance and server. A copy-on-write snapshot shares unchanged data with its host, so it usually takes up much less space than this.
+gui-disk-usage-logs = Logs and crash reports
+gui-disk-usage-logs-detail = Game logs and crash reports inside each host, Ephervex's own log, and the output it captured from servers.
+gui-disk-usage-download-cache = Download cache
+gui-disk-usage-download-cache-detail = Verified downloads, loader installers, provider metadata, and artwork.
+gui-disk-usage-shared-game-files = Shared game files
+gui-disk-usage-shared-game-files-detail = Minecraft assets, libraries, and natives, shared by every host on the same release.
+gui-disk-usage-java-runtimes = Java runtimes
+gui-disk-usage-java-runtimes-detail = Java runtimes Ephervex downloaded.
+gui-disk-usage-launcher-state = Ephervex settings and records
+gui-disk-usage-launcher-state-detail = Configuration, the instance index, and icons.
+gui-disk-usage-recovery = Recovery state
+gui-disk-usage-recovery-detail = Files moved aside, files still arriving, and snapshot-restore journals that interrupted changes left inside hosts. Kept for review.
+gui-disk-usage-other = Other
+gui-disk-usage-other-detail = Anything else in Ephervex's directories.
 gui-activity-restarting = Restarting
 gui-restart-stage-stopping = Stopping, to start it again once it has stopped
 gui-restart-stage-starting = Stopped. Starting it again

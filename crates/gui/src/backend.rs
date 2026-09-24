@@ -280,6 +280,15 @@ pub enum Command {
         host: InstalledHost,
         request: u64,
     },
+    /// Measures what Ephervex's own directories hold.
+    MeasureDiskUsage {
+        request: u64,
+    },
+    /// Shows one of a storage category's own directories.
+    OpenStorageLocation {
+        category: ephervex_core::StorageCategory,
+        index: usize,
+    },
     /// Lists what a diagnostic bundle for a host could carry.
     PlanDiagnosticBundle(InstalledHost),
     /// Asks where to save, then writes the named parts to one local archive.
@@ -1538,6 +1547,15 @@ pub enum Event {
     /// A verification or repair the controller sent has finished, whichever
     /// way it ended. Sent after any result it produced.
     IntegritySettled {
+        request: u64,
+    },
+    /// One measurement of Ephervex's storage.
+    DiskUsage {
+        request: u64,
+        report: Box<ephervex_core::DiskUsageReport>,
+    },
+    /// A measurement the controller asked for has ended, whichever way.
+    DiskUsageSettled {
         request: u64,
     },
     /// What a diagnostic bundle for a host could carry.
@@ -3001,6 +3019,38 @@ fn run_worker(
                         Ok(OperationReport::Reported)
                     },
                 );
+            }
+            Command::MeasureDiskUsage { request } => {
+                let paths = app.paths().clone();
+                let reports = events.clone();
+                spawn_async_operation(
+                    paths,
+                    &events,
+                    Arc::clone(&cancellations),
+                    AsyncOperationRequest {
+                        title: "operation-measuring-disk-usage",
+                        entity: lookup("gui-settings-disk-usage"),
+                        allow_cancel: true,
+                        finished: Some(Event::DiskUsageSettled { request }),
+                    },
+                    move |app, reporter, cancel| async move {
+                        let report = app.measure_disk_usage(&reporter, &cancel)?;
+                        let _ = reports.send(Event::DiskUsage {
+                            request,
+                            report: Box::new(report),
+                        });
+                        Ok(OperationReport::Reported)
+                    },
+                );
+            }
+            Command::OpenStorageLocation { category, index } => {
+                let _ = events.send(Event::Toast {
+                    message: app.open_storage_location(category, index).map_or_else(
+                        || lookup("gui-folder-unavailable"),
+                        |path| localized_value("gui-opened-path", &path.display().to_string()),
+                    ),
+                    error: false,
+                });
             }
             Command::PlanDiagnosticBundle(host) => {
                 let parts = match app.plan_diagnostic_bundle(diagnostic_scope(host)) {

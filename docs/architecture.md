@@ -358,6 +358,14 @@ A category's folders are the directories it has of its own. One spread through
 every host, such as Mods, Snapshots, or Recovery, has none, and a frontend asks
 core to open a folder by category and position rather than by path.
 
+The desktop shows it as a Settings page rather than a host surface, because it
+measures the launcher's roots, not one host. Opening the page measures nothing;
+Measure runs the walk as an ordinary cancelable operation that reports how many
+files it has counted. A result is a snapshot with the time it was taken, and
+Measure again takes a new one rather than anything tracking later changes. The
+page shows the total, a bar and a legend splitting it by retention class, and
+every category with its size in words beside its bar, largest first.
+
 ## Dedicated-server data flow
 
 ```text

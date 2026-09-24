@@ -301,6 +301,19 @@ slint::slint! {
         selected: bool,
     }
 
+    // One part of Ephervex's storage, as the disk usage view shows it.
+    export struct DiskUsageRow {
+        // The core category or retention identifier.
+        id: string,
+        label: string,
+        detail: string,
+        size: string,
+        // Share of the whole measurement, from 0 to 1.
+        fraction: float,
+        // Directories that are this part, where it has its own.
+        locations: [string],
+    }
+
     // One surface a host workspace offers. The workspace chrome only knows
     // stable ids and labels; each host decides which surfaces it has.
     export struct WorkspaceSurfaceRow {
@@ -2357,6 +2370,122 @@ slint::slint! {
         }
     }
 
+    // How much space Ephervex's own directories hold. Global rather than per
+    // host: it measures the launcher's roots, not one workspace.
+    component DiskUsagePanel inherits VerticalLayout {
+        // "idle", "measuring", or "measured".
+        in property <string> state;
+        in property <string> progress;
+        in property <string> total;
+        in property <string> measured-at;
+        in property <[DiskUsageRow]> retention;
+        in property <[DiskUsageRow]> categories;
+        in property <bool> incomplete;
+        in property <string> incomplete-text;
+        in property <[string]> unreadable;
+        callback refresh();
+        callback stop();
+        callback open-location(string, int);
+        // The same four tokens, in the same order, on the stacked bar and in
+        // the legend beside it, which also names each part in words.
+        function retention-color(id: string) -> color {
+            return id == "persistent" ? Theme.accent
+                : id == "temporary" ? Theme.warning
+                : id == "regenerable" ? Theme.success
+                : Theme.danger;
+        }
+        spacing: 14px;
+        HorizontalLayout {
+            spacing: 10px;
+            SectionTitle { title: GuiI18n.text("gui-disk-usage-title"); detail: GuiI18n.text("gui-disk-usage-detail"); horizontal-stretch: 1; }
+            if root.state == "measuring" : VerticalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-disk-usage-stop"); clicked => { root.stop(); } } }
+            VerticalLayout { alignment: center; AppButton { text: root.state == "idle" ? GuiI18n.text("gui-disk-usage-measure") : GuiI18n.text("gui-disk-usage-refresh"); tone: "primary"; enabled: root.state != "measuring"; clicked => { root.refresh(); } } }
+        }
+        BodyText { text: GuiI18n.text("gui-disk-usage-metric"); color: Theme.text-secondary; wrap: word-wrap; }
+        if root.state == "measuring" : HorizontalLayout {
+            spacing: 8px;
+            Spinner { indeterminate: true; width: 16px; height: 16px; }
+            BodyText { text: root.progress != "" ? root.progress : GuiI18n.text("gui-disk-usage-measuring"); horizontal-stretch: 1; wrap: word-wrap; }
+        }
+        if root.state == "idle" : BodyText { text: GuiI18n.text("gui-disk-usage-idle"); color: Theme.text-muted; wrap: word-wrap; }
+        if root.state == "measured" : VerticalLayout {
+            spacing: 14px;
+            HorizontalLayout {
+                spacing: 10px;
+                Heading { text: GuiI18n.value("gui-disk-usage-total", root.total); horizontal-stretch: 1; }
+                BodyText { text: root.measured-at; color: Theme.text-muted; vertical-alignment: center; }
+            }
+            if root.incomplete : Rectangle {
+                border-radius: 7px;
+                border-width: 1px;
+                border-color: Theme.warning;
+                background: Theme.surface;
+                height: incomplete-body.preferred-height;
+                incomplete-body := VerticalLayout {
+                    padding: 12px;
+                    spacing: 4px;
+                    BodyText { text: root.incomplete-text; color: Theme.warning; wrap: word-wrap; }
+                    for path in root.unreadable : BodyText { text: path; color: Theme.text-secondary; font-size: Theme.caption-size; wrap: word-wrap; }
+                }
+            }
+            // The whole measurement split by whether it could be recreated.
+            Rectangle {
+                height: 14px;
+                border-radius: 4px;
+                clip: true;
+                background: Theme.border;
+                accessible-role: text;
+                accessible-label: GuiI18n.text("gui-disk-usage-retention-bar");
+                HorizontalLayout {
+                    for part in root.retention : Rectangle {
+                        width: parent.width * part.fraction;
+                        background: root.retention-color(part.id);
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+            }
+            for part in root.retention : HorizontalLayout {
+                spacing: 10px;
+                VerticalLayout { alignment: center; Rectangle { width: 12px; height: 12px; border-radius: 3px; background: root.retention-color(part.id); } }
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    BodyText { text: part.label; }
+                    BodyText { text: part.detail; color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
+                }
+                BodyText { text: part.size; vertical-alignment: center; }
+            }
+            Divider { }
+            for category in root.categories : Rectangle {
+                border-radius: 8px;
+                border-width: 1px;
+                border-color: Theme.border;
+                background: Theme.surface;
+                height: category-body.preferred-height;
+                category-body := VerticalLayout {
+                    padding: 12px;
+                    spacing: 6px;
+                    HorizontalLayout {
+                        spacing: 10px;
+                        Heading { text: category.label; font-size: Theme.row-heading-size; horizontal-stretch: 1; }
+                        BodyText { text: category.size; vertical-alignment: center; }
+                    }
+                    Rectangle {
+                        height: 6px;
+                        border-radius: 3px;
+                        background: Theme.border;
+                        Rectangle { x: 0px; width: parent.width * category.fraction; height: parent.height; border-radius: 3px; background: Theme.accent; }
+                    }
+                    BodyText { text: category.detail; color: Theme.text-secondary; wrap: word-wrap; }
+                    for location[index] in category.locations : HorizontalLayout {
+                        spacing: 8px;
+                        BodyText { text: location; color: Theme.text-muted; font-size: Theme.caption-size; horizontal-stretch: 1; overflow: elide; vertical-alignment: center; }
+                        AppButton { text: GuiI18n.text("gui-open-folder"); accessible-name: GuiI18n.value("gui-disk-usage-open", location); clicked => { root.open-location(category.id, index); } }
+                    }
+                }
+            }
+        }
+    }
+
     component SnapshotPanel inherits Rectangle {
         in property <[SnapshotRow]> items;
         in property <string> total;
@@ -3718,6 +3847,16 @@ slint::slint! {
         in-out property <string> integrity-repair-result;
         in-out property <bool> integrity-repair-failed;
         in-out property <[string]> integrity-recovery;
+        // The disk usage view: one measurement of Ephervex's own storage.
+        in-out property <string> disk-usage-state: "idle";
+        in-out property <string> disk-usage-progress;
+        in-out property <string> disk-usage-total;
+        in-out property <string> disk-usage-measured-at;
+        in-out property <[DiskUsageRow]> disk-usage-retention;
+        in-out property <[DiskUsageRow]> disk-usage-categories;
+        in-out property <bool> disk-usage-incomplete;
+        in-out property <string> disk-usage-incomplete-text;
+        in-out property <[string]> disk-usage-unreadable;
         // The diagnostic bundle the Diagnostics surface is choosing for that host.
         in-out property <[BundlePartRow]> bundle-parts;
         in-out property <string> bundle-selection;
@@ -4229,6 +4368,9 @@ slint::slint! {
         callback server-stop(string);
         callback server-restart(string);
         callback client-restart(string);
+        callback measure-disk-usage();
+        callback stop-disk-usage();
+        callback open-storage-location(string, int);
         callback server-kill(string);
         callback server-console(string, string);
         callback open-live-log(string, string);
@@ -5006,14 +5148,17 @@ slint::slint! {
                             // that shows the figure is opened rather than on every
                             // refresh of everything else.
                             SettingsNavItem { label: GuiI18n.text("gui-settings-storage"); selected: root.workspace-tab == "Storage"; clicked => { root.workspace-tab = "Storage"; root.measure-artifact-cache(); } }
+                            // Measured when asked for, not on opening: a large
+                            // installation takes a while to walk.
+                            SettingsNavItem { label: GuiI18n.text("gui-settings-disk-usage"); selected: root.workspace-tab == "Disk Usage"; clicked => { root.workspace-tab = "Disk Usage"; } }
                             Rectangle { vertical-stretch: 1; }
                             Divider { }
                             SettingsNavItem { label: GuiI18n.text("gui-settings-about"); selected: root.workspace-tab == "About & Licenses"; clicked => { root.workspace-tab = "About & Licenses"; } }
                         } }
                         Rectangle { horizontal-stretch: 1; background: Theme.background; ScrollView { viewport-width: self.visible-width; VerticalLayout { x: max(0px, (parent.width - self.width) / 2); alignment: start; width: min(parent.width, root.settings-two-columns ? 1500px : 1100px); padding: 30px; spacing: 20px;
                             PageIntro {
-                                title: root.workspace-tab == "General" ? GuiI18n.text("gui-settings-general") : root.workspace-tab == "Minecraft" ? GuiI18n.text("gui-settings-minecraft") : root.workspace-tab == "Java" ? GuiI18n.text("gui-settings-java") : root.workspace-tab == "Accounts" ? GuiI18n.text("gui-settings-accounts") : root.workspace-tab == "Providers & APIs" ? GuiI18n.text("gui-settings-providers") : root.workspace-tab == "Storage" ? GuiI18n.text("gui-settings-storage") : GuiI18n.text("gui-settings-about");
-                                subtitle: root.workspace-tab == "Minecraft" ? GuiI18n.text("gui-minecraft-defaults-detail") : root.workspace-tab == "Java" ? GuiI18n.text("gui-java-detail") : root.workspace-tab == "Accounts" ? GuiI18n.text("gui-accounts-detail") : root.workspace-tab == "Providers & APIs" ? GuiI18n.text("gui-provider-detail") : root.workspace-tab == "Storage" ? GuiI18n.text("gui-storage-detail") : root.workspace-tab == "About & Licenses" ? GuiI18n.text("gui-tagline") : GuiI18n.text("gui-settings-detail");
+                                title: root.workspace-tab == "General" ? GuiI18n.text("gui-settings-general") : root.workspace-tab == "Minecraft" ? GuiI18n.text("gui-settings-minecraft") : root.workspace-tab == "Java" ? GuiI18n.text("gui-settings-java") : root.workspace-tab == "Accounts" ? GuiI18n.text("gui-settings-accounts") : root.workspace-tab == "Providers & APIs" ? GuiI18n.text("gui-settings-providers") : root.workspace-tab == "Storage" ? GuiI18n.text("gui-settings-storage") : root.workspace-tab == "Disk Usage" ? GuiI18n.text("gui-settings-disk-usage") : GuiI18n.text("gui-settings-about");
+                                subtitle: root.workspace-tab == "Minecraft" ? GuiI18n.text("gui-minecraft-defaults-detail") : root.workspace-tab == "Java" ? GuiI18n.text("gui-java-detail") : root.workspace-tab == "Accounts" ? GuiI18n.text("gui-accounts-detail") : root.workspace-tab == "Providers & APIs" ? GuiI18n.text("gui-provider-detail") : root.workspace-tab == "Storage" ? GuiI18n.text("gui-storage-detail") : root.workspace-tab == "Disk Usage" ? GuiI18n.text("gui-disk-usage-page-detail") : root.workspace-tab == "About & Licenses" ? GuiI18n.text("gui-tagline") : GuiI18n.text("gui-settings-detail");
                             }
                             if root.workspace-tab == "General" : VerticalLayout { alignment: start; spacing: 14px;
                                 // Side by side where the window is wide enough for two
@@ -5368,6 +5513,15 @@ slint::slint! {
                                     if !root.curseforge-key-configured && !root.curseforge-key-default-in-use : BodyText { text: GuiI18n.text("gui-curseforge-key-missing-detail"); color: Theme.warning; wrap: word-wrap; }
                                     HorizontalLayout { AppButton { text: GuiI18n.text("gui-curseforge-key-help"); clicked => { root.open-curseforge-key-help(); } } Rectangle { horizontal-stretch: 1; } }
                                 } }
+                            }
+                            if root.workspace-tab == "Disk Usage" : DiskUsagePanel {
+                                state: root.disk-usage-state; progress: root.disk-usage-progress;
+                                total: root.disk-usage-total; measured-at: root.disk-usage-measured-at;
+                                retention: root.disk-usage-retention; categories: root.disk-usage-categories;
+                                incomplete: root.disk-usage-incomplete; incomplete-text: root.disk-usage-incomplete-text; unreadable: root.disk-usage-unreadable;
+                                refresh => { root.measure-disk-usage(); }
+                                stop => { root.stop-disk-usage(); }
+                                open-location(category, index) => { root.open-storage-location(category, index); }
                             }
                             if root.workspace-tab == "Storage" : VerticalLayout { spacing: 14px;
                                 SectionTitle { title: GuiI18n.text("gui-persistent-storage"); detail: GuiI18n.text("gui-persistent-storage-detail"); }
