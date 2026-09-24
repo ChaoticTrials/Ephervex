@@ -22,6 +22,10 @@ use crate::runtime::{
 use crate::{ServerError, ServerResult};
 
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a restart may take to stop the old child and start the new one.
+/// Longer than a plain stop: a large world saves before the stop completes, and
+/// the answer only comes once the replacement has been spawned.
+const RESTART_TIMEOUT: Duration = Duration::from_secs(300);
 const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// A redaction-safe command for a server JVM.
@@ -59,6 +63,8 @@ pub enum ServerEvent {
         detail: String,
     },
     Exited(ServerExit),
+    /// The child exited for a restart, and its replacement is being started.
+    Restarting,
 }
 
 /// Advisory conditions that do not make a server start unsafe or impossible.
@@ -118,7 +124,12 @@ pub enum ControlResponse {
     Running,
     Accepted,
     Exited(ServerExit),
-    Restarted { pid: u32 },
+    Restarted {
+        pid: u32,
+    },
+    /// The old child stopped for a restart and the replacement could not be
+    /// started. The server is left stopped.
+    StartFailed(String),
     Refused(String),
 }
 
@@ -195,8 +206,25 @@ async fn supervise_commands(
     requests: &mut mpsc::UnboundedReceiver<ControlRequest>,
 ) -> ServerResult<ServerExit> {
     let mut restart_waiters: Vec<oneshot::Sender<ControlResponse>> = Vec::new();
+    let mut last_exit = None;
     loop {
-        let (mut child, mut stdin, readers, pid) = spawn_child(command, observer, capture)?;
+        let (mut child, mut stdin, readers, pid) = match spawn_child(command, observer, capture) {
+            Ok(spawned) => spawned,
+            // The old child is gone, which is what the runtime evidence has to
+            // say: the server is stopped, and whoever asked for the restart is
+            // told that its second half failed rather than left waiting.
+            Err(error) if !restart_waiters.is_empty() => {
+                let detail = error.to_string();
+                for waiter in restart_waiters.drain(..) {
+                    let _ = waiter.send(ControlResponse::StartFailed(detail.clone()));
+                }
+                return Ok(last_exit.unwrap_or(ServerExit {
+                    code: None,
+                    signal: None,
+                }));
+            }
+            Err(error) => return Err(error),
+        };
         evidence.child = Some(capture_java_child(pid)?);
         write_runtime_evidence(server_root, evidence)?;
         observer.emit(ServerEvent::Started { pid });
@@ -209,7 +237,9 @@ async fn supervise_commands(
             let _ = reader.await;
         }
         observer.emit(ServerEvent::Exited(exit));
+        last_exit = Some(exit);
         if restart {
+            observer.emit(ServerEvent::Restarting);
             restart_waiters = waiters;
             continue;
         }
@@ -276,6 +306,8 @@ async fn supervise_child(
 ) -> ServerResult<(ServerExit, bool, Vec<oneshot::Sender<ControlResponse>>)> {
     let mut interval = tokio::time::interval(EXIT_POLL_INTERVAL);
     let mut restart = false;
+    // A stop already asked for. A restart cannot turn it back into a start.
+    let mut stopping = false;
     let mut completion_waiters = Vec::new();
     loop {
         tokio::select! {
@@ -304,18 +336,36 @@ async fn supervise_child(
                         stdin.flush().await.map_err(ServerError::ProcessIo)?;
                         let _ = request.response.send(ControlResponse::Accepted);
                     }
+                    // An explicit stop or kill is the last word: a restart
+                    // still waiting for the old child ends with it stopped.
                     ControlAction::Stop => {
-                        stdin.write_all(b"stop\n").await.map_err(ServerError::ProcessIo)?;
-                        stdin.flush().await.map_err(ServerError::ProcessIo)?;
+                        restart = false;
+                        if !stopping {
+                            stopping = true;
+                            stdin.write_all(b"stop\n").await.map_err(ServerError::ProcessIo)?;
+                            stdin.flush().await.map_err(ServerError::ProcessIo)?;
+                        }
                         completion_waiters.push(request.response);
                     }
+                    ControlAction::Restart if stopping && !restart => {
+                        let _ = request.response.send(ControlResponse::Refused(
+                            "the server is already stopping".to_owned(),
+                        ));
+                    }
+                    // A second restart joins the first, so one stop is followed
+                    // by exactly one start.
                     ControlAction::Restart => {
-                        restart = true;
-                        stdin.write_all(b"stop\n").await.map_err(ServerError::ProcessIo)?;
-                        stdin.flush().await.map_err(ServerError::ProcessIo)?;
+                        if !stopping {
+                            stopping = true;
+                            restart = true;
+                            stdin.write_all(b"stop\n").await.map_err(ServerError::ProcessIo)?;
+                            stdin.flush().await.map_err(ServerError::ProcessIo)?;
+                        }
                         completion_waiters.push(request.response);
                     }
                     ControlAction::Kill => {
+                        restart = false;
+                        stopping = true;
                         child.start_kill().map_err(ServerError::ProcessIo)?;
                         completion_waiters.push(request.response);
                     }
@@ -485,17 +535,26 @@ pub async fn send_control(
     let mut response = Vec::new();
     let read = reader.read_until(b'\n', &mut response);
     let count = match action {
-        ControlAction::Stop | ControlAction::Restart | ControlAction::Kill => {
-            tokio::time::timeout(CONTROL_TIMEOUT, read)
+        ControlAction::Restart => {
+            tokio::time::timeout(RESTART_TIMEOUT, read)
                 .await
                 .map_err(|_| ServerError::ControlUnavailable {
                     path,
                     source: std::io::Error::new(
                         std::io::ErrorKind::TimedOut,
-                        "server did not exit within 30 seconds",
+                        "server did not restart within 5 minutes",
                     ),
                 })?
         }
+        ControlAction::Stop | ControlAction::Kill => tokio::time::timeout(CONTROL_TIMEOUT, read)
+            .await
+            .map_err(|_| ServerError::ControlUnavailable {
+                path,
+                source: std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "server did not exit within 30 seconds",
+                ),
+            })?,
         ControlAction::Status | ControlAction::Console(_) => read.await,
     }
     .map_err(ServerError::ProcessIo)?;
@@ -665,6 +724,200 @@ mod tests {
             .await
             .expect("stop");
         assert_eq!(task.await.expect("join").expect("supervise").code, Some(0));
+    }
+
+    /// A synthetic server that records each start and each stop in a journal
+    /// and exits a moment after it is asked to stop, the way a real one saves
+    /// its world first.
+    fn journaled_server(root: &Path, java: PathBuf) -> (ServerCommand, PathBuf) {
+        let journal = root.join("journal");
+        let script = format!(
+            "echo start >> '{journal}'; while read -r line; do [ \"$line\" = stop ] && {{ sleep 0.3; echo stop >> '{journal}'; exit 0; }}; done",
+            journal = journal.display()
+        );
+        (
+            ServerCommand {
+                java,
+                arguments: vec!["-c".to_owned(), script],
+                working_directory: root.join("server"),
+            },
+            journal,
+        )
+    }
+
+    fn journal(path: &Path) -> Vec<String> {
+        std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .lines()
+            .map(ToOwned::to_owned)
+            .collect()
+    }
+
+    struct Supervised {
+        root: tempfile::TempDir,
+        _capture: tempfile::TempDir,
+        journal: PathBuf,
+        events: mpsc::UnboundedReceiver<ServerEvent>,
+        task: tokio::task::JoinHandle<ServerResult<ServerExit>>,
+    }
+
+    /// Starts a journaled server and waits until its first child is running.
+    async fn supervise_journaled(java: Option<PathBuf>) -> Supervised {
+        let root = tempfile::tempdir().expect("root");
+        std::fs::create_dir_all(root.path().join(".launcher")).expect("launcher");
+        let capture = tempfile::tempdir().expect("capture");
+        let (command, journal) = journaled_server(
+            root.path(),
+            java.unwrap_or_else(|| PathBuf::from("/bin/sh")),
+        );
+        let (observer, mut events) = ServerObserver::channel();
+        let server_root = root.path().to_path_buf();
+        let capture_path = capture.path().to_path_buf();
+        let task = tokio::spawn(async move {
+            ServerSupervisor::run(&command, &server_root, &capture_path, &observer).await
+        });
+        while let Some(event) = events.recv().await {
+            if matches!(event, ServerEvent::Started { .. }) {
+                break;
+            }
+        }
+        Supervised {
+            root,
+            _capture: capture,
+            journal,
+            events,
+            task,
+        }
+    }
+
+    fn lifecycle(events: &mut mpsc::UnboundedReceiver<ServerEvent>) -> Vec<&'static str> {
+        let mut seen = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            seen.push(match event {
+                ServerEvent::Started { .. } => "started",
+                ServerEvent::Exited(_) => "exited",
+                ServerEvent::Restarting => "restarting",
+                _ => continue,
+            });
+        }
+        seen
+    }
+
+    #[tokio::test]
+    async fn a_restart_stops_the_child_first_and_starts_exactly_one_replacement() {
+        let mut server = supervise_journaled(None).await;
+        let first = classify_runtime(server.root.path()).expect("runtime");
+        let RuntimeClassification::Controlled {
+            child: Some(old), ..
+        } = first
+        else {
+            panic!("a running child: {first:?}");
+        };
+
+        let (a, b) = tokio::join!(
+            send_control(server.root.path(), &ControlAction::Restart),
+            send_control(server.root.path(), &ControlAction::Restart),
+        );
+        let (a, b) = (a.expect("restart"), b.expect("restart"));
+        assert!(matches!(a, ControlResponse::Restarted { .. }), "{a:?}");
+        assert_eq!(a, b, "a second restart joins the first");
+        let ControlResponse::Restarted { pid } = a else {
+            unreachable!()
+        };
+        assert_ne!(pid, old.pid, "a new process");
+        assert_eq!(
+            journal(&server.journal),
+            ["start", "stop", "start"],
+            "the old child had stopped before the replacement started, once"
+        );
+        assert_eq!(
+            lifecycle(&mut server.events),
+            ["exited", "restarting", "started"]
+        );
+
+        send_control(server.root.path(), &ControlAction::Stop)
+            .await
+            .expect("stop");
+        server.task.await.expect("join").expect("supervise");
+    }
+
+    #[tokio::test]
+    async fn a_stop_while_a_restart_waits_leaves_the_server_stopped() {
+        let server = supervise_journaled(None).await;
+        let restart = tokio::spawn({
+            let root = server.root.path().to_path_buf();
+            async move { send_control(&root, &ControlAction::Restart).await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let stopped = send_control(server.root.path(), &ControlAction::Stop)
+            .await
+            .expect("stop");
+
+        assert!(matches!(stopped, ControlResponse::Exited(_)));
+        assert!(matches!(
+            restart.await.expect("join").expect("restart"),
+            ControlResponse::Exited(_)
+        ));
+        server.task.await.expect("join").expect("supervise");
+        assert_eq!(
+            journal(&server.journal),
+            ["start", "stop"],
+            "nothing started again"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_restart_cannot_turn_a_requested_stop_into_a_start() {
+        let server = supervise_journaled(None).await;
+        let stop = tokio::spawn({
+            let root = server.root.path().to_path_buf();
+            async move { send_control(&root, &ControlAction::Stop).await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let restart = send_control(server.root.path(), &ControlAction::Restart)
+            .await
+            .expect("answered");
+
+        assert!(
+            matches!(restart, ControlResponse::Refused(_)),
+            "{restart:?}"
+        );
+        assert!(matches!(
+            stop.await.expect("join").expect("stop"),
+            ControlResponse::Exited(_)
+        ));
+        server.task.await.expect("join").expect("supervise");
+        assert_eq!(journal(&server.journal), ["start", "stop"]);
+    }
+
+    #[tokio::test]
+    async fn a_replacement_that_cannot_start_leaves_the_server_stopped_and_says_so() {
+        let bin = tempfile::tempdir().expect("bin");
+        let java = bin.path().join("java");
+        std::fs::copy("/bin/sh", &java).expect("a java stand-in");
+        let server = supervise_journaled(Some(java.clone())).await;
+        // The executable goes away while the first child runs, so only the
+        // replacement's start can fail.
+        std::fs::remove_file(&java).expect("remove");
+
+        let restart = send_control(server.root.path(), &ControlAction::Restart)
+            .await
+            .expect("answered");
+
+        assert!(
+            matches!(restart, ControlResponse::StartFailed(_)),
+            "{restart:?}"
+        );
+        server
+            .task
+            .await
+            .expect("join")
+            .expect("the old child stopped cleanly");
+        assert_eq!(journal(&server.journal), ["start", "stop"]);
+        assert!(
+            !runtime_path(server.root.path()).exists(),
+            "stopped, not left looking like a server that needs recovery"
+        );
     }
 
     #[tokio::test]

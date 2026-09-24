@@ -7164,6 +7164,9 @@ fn print_control_response(response: ControlResponse, json: bool) {
             ControlResponse::Accepted => outln!("accepted"),
             ControlResponse::Exited(exit) => outln!("exited: {exit:?}"),
             ControlResponse::Restarted { pid } => outln!("restarted as pid {pid}"),
+            ControlResponse::StartFailed(detail) => {
+                outln!("stopped; starting it again failed: {detail}");
+            }
             ControlResponse::Refused(detail) => outln!("refused: {detail}"),
         }
     }
