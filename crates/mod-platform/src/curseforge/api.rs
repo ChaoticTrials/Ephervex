@@ -715,6 +715,7 @@ impl CurseForgeOperation<'_> {
         let expected: BTreeSet<&str> = wanted.iter().map(|(_, hash)| hash.digest()).collect();
         let mut recognized = BTreeMap::new();
         for matched in matches.exact_matches {
+            let dependencies = file_relations(&matched.file.dependencies);
             for digest in supported_hashes(&matched.file.hashes) {
                 if !expected.contains(digest.digest()) {
                     continue;
@@ -726,6 +727,7 @@ impl CurseForgeOperation<'_> {
                         project_id: matched.id.to_string(),
                         version_id: matched.file.id.to_string(),
                         file_id: Some(matched.file.id.to_string()),
+                        dependencies: dependencies.clone(),
                     },
                 );
             }

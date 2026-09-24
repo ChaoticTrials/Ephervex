@@ -315,8 +315,11 @@ ordinary recipe listing every installed jar with a digest the launcher
 computed and no download address. Those jars are then identified by digest --
 the linked client's retained recipe first, which costs no request, then
 CurseForge by its own file fingerprint, then Modrinth by SHA-1 -- and a file
-nothing recognizes keeps its digest and no provider. No catalog failure can
-fail the installation.
+nothing recognizes keeps its digest and no provider. The answer that identifies
+a jar also records what that exact file declares (ADR 0034): a catalog match
+records its relations, a client record's relations are copied as they stand,
+and a jar nothing answered for stays unasked. No catalog failure can fail the
+installation.
 
 A linked server reads the client's retained recipe and retained override
 layers. It never scans or copies the mutable client game directory, so manually

@@ -15,10 +15,10 @@ use ephervex_download::{
     CacheLayout, DownloadManager, DownloaderConfig, HttpConfig, OperationReporter, RetryPolicy,
 };
 use ephervex_mod_platform::{
-    InstallSelection, InstanceTarget, ModProviderApi, ModSearchQuery, ModrinthProvider,
-    ResolveRequest, resolve,
+    InstallSelection, InstanceTarget, ModDependency, ModProviderApi, ModSearchQuery,
+    ModrinthProvider, ResolveRequest, resolve,
 };
-use ephervex_model::{Hash, HashAlgorithm, LoaderKind, ModProvider};
+use ephervex_model::{Hash, HashAlgorithm, LoaderKind, ModProvider, ModRelationKind};
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{method, path, query_param};
@@ -638,6 +638,54 @@ async fn installed_files_are_recognized_by_digest_in_one_request() {
             .len(),
         1,
         "a batch is one request however many files it asks about"
+    );
+}
+
+/// The version that identified a file also says what it declares, and a
+/// version declaring nothing is an answer, not a missing one.
+#[tokio::test]
+async fn a_recognized_file_carries_what_its_version_declares() {
+    let catalog = Catalog::start().await;
+    let feature = "a".repeat(40);
+    let library = "b".repeat(40);
+    Mock::given(method("POST"))
+        .and(path("/v2/version_files"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+            r#"{{"{feature}":{{"id":"vFeature","project_id":"FEATURE1","date_published":"2024-01-01T00:00:00Z","files":[],"dependencies":[{{"project_id":"LIBRARY1","version_id":"vLibrary","dependency_type":"required"}},{{"file_name":"extras.jar","dependency_type":"optional"}}]}},"{library}":{{"id":"vLibrary","project_id":"LIBRARY1","date_published":"2024-01-01T00:00:00Z","files":[],"dependencies":[]}}}}"#
+        )))
+        .mount(&catalog.server)
+        .await;
+
+    let digests = vec![
+        Hash::new(HashAlgorithm::Sha1, &feature).expect("sha1"),
+        Hash::new(HashAlgorithm::Sha1, &library).expect("sha1"),
+    ];
+    let recognized = catalog
+        .provider
+        .recognize(&digests, &CancellationToken::new())
+        .await
+        .expect("the lookup answers");
+
+    assert_eq!(
+        recognized.get(&feature).expect("recognized").dependencies,
+        [
+            ModDependency {
+                kind: ModRelationKind::Required,
+                project_id: Some("LIBRARY1".to_owned()),
+                version_id: Some("vLibrary".to_owned()),
+                file_name: None,
+            },
+            ModDependency {
+                kind: ModRelationKind::Optional,
+                project_id: None,
+                version_id: None,
+                file_name: Some("extras.jar".to_owned()),
+            },
+        ]
+    );
+    assert_eq!(
+        recognized.get(&library).expect("recognized").dependencies,
+        []
     );
 }
 

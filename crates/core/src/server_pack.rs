@@ -28,8 +28,9 @@ use ephervex_model::{
     Hash, HashAlgorithm, ImportSourceKind, LoaderSelection, ModProvider, ServerLaunch,
 };
 use ephervex_pack::{
-    ExtractionLimits, InstalledServerPack, PackError, ProviderFileIdentity, ServerPackInstall,
-    ServerPackMod, SourceStore, install_server_pack, measure_installed_mods, server_pack_recipe,
+    ExtractionLimits, InstalledServerPack, PackError, ProviderFileIdentity, RecipeRelation,
+    ServerPackInstall, ServerPackMod, SourceStore, install_server_pack, measure_installed_mods,
+    server_pack_recipe,
 };
 use ephervex_storage::ImportSource;
 use tokio_util::sync::CancellationToken;
@@ -37,6 +38,7 @@ use tracing::{debug, info, instrument};
 
 use crate::CoreResult;
 use crate::app::App;
+use crate::mods::recipe_relations;
 
 /// Where a new server's content comes from.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -349,7 +351,8 @@ fn sha1_of(entry: &ServerPackMod) -> Option<Hash> {
 ///
 /// Reading the client's recipe here is a lookup, not a source of content: what
 /// the server contains was decided by the archive and is already on disk
-/// (ADR 0024).
+/// (ADR 0024). The matched entry's relation knowledge is copied as it stands,
+/// so a client that never asked still reads as unasked on the server.
 fn apply_local_records(mods: &mut [ServerPackMod], client_source: Option<&Path>) -> usize {
     let Some(source) = client_source else {
         return 0;
@@ -362,7 +365,8 @@ fn apply_local_records(mods: &mut [ServerPackMod], client_source: Option<&Path>)
         return 0;
     };
 
-    let mut known: BTreeMap<String, ProviderFileIdentity> = BTreeMap::new();
+    let mut known: BTreeMap<String, (ProviderFileIdentity, Option<Vec<RecipeRelation>>)> =
+        BTreeMap::new();
     for file in &recipe.files {
         let Some(identity) = file
             .identity
@@ -373,7 +377,10 @@ fn apply_local_records(mods: &mut [ServerPackMod], client_source: Option<&Path>)
         };
         for hash in &file.hashes {
             if hash.algorithm == HashAlgorithm::Sha1 {
-                known.insert(hash.digest().to_owned(), identity.clone());
+                known.insert(
+                    hash.digest().to_owned(),
+                    (identity.clone(), file.relations.clone()),
+                );
             }
         }
     }
@@ -383,8 +390,9 @@ fn apply_local_records(mods: &mut [ServerPackMod], client_source: Option<&Path>)
         let Some(digest) = sha1_of(entry) else {
             continue;
         };
-        if let Some(identity) = known.get(digest.digest()) {
+        if let Some((identity, relations)) = known.get(digest.digest()) {
             entry.identity = Some(identity.clone());
+            entry.relations.clone_from(relations);
             matched += 1;
         }
     }
@@ -392,6 +400,9 @@ fn apply_local_records(mods: &mut [ServerPackMod], client_source: Option<&Path>)
 }
 
 /// Writes a catalog's answers onto the entries they are about.
+///
+/// The answer that identified a jar is about that exact file, so what it
+/// declared is recorded with it, including a declaration of nothing.
 fn apply_recognized(
     mods: &mut [ServerPackMod],
     recognized: &BTreeMap<String, RecognizedFile>,
@@ -410,6 +421,7 @@ fn apply_recognized(
             version_id: Some(found.version_id.clone()),
             file_id: found.file_id.clone(),
         });
+        entry.relations = Some(recipe_relations(&found.dependencies));
         matched += 1;
     }
     matched
@@ -434,10 +446,17 @@ pub(crate) fn archive_import_source(archive: &Path) -> ImportSource {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use std::io::Write as _;
+    use std::sync::Arc;
 
-    use ephervex_model::{LoaderKind, LoaderSelection, ServerRelativePath};
+    use ephervex_auth::MemoryStore;
+    use ephervex_mod_platform::ModDependency;
+    use ephervex_model::{
+        LoaderKind, LoaderSelection, ModRelationKind, SecretString, ServerRelativePath,
+    };
     use ephervex_pack::{PackRecipe, SideRequirement};
     use ephervex_storage::Paths;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
     use crate::app::App;
@@ -563,6 +582,7 @@ mod tests {
             hashes: vec![Hash::new(HashAlgorithm::Sha1, digest).expect("sha1")],
             size: Some(3),
             identity: None,
+            relations: None,
         }
     }
 
@@ -642,11 +662,16 @@ mod tests {
                 project_id: "wrong".to_owned(),
                 version_id: "wrong".to_owned(),
                 file_id: None,
+                dependencies: Vec::new(),
             },
         )]);
 
         assert_eq!(apply_recognized(&mut mods, &recognized), 0);
         assert_eq!(mods[0].identity, Some(curseforge_identity("1", "2")));
+        assert_eq!(
+            mods[0].relations, None,
+            "an answer about another release says nothing about this one"
+        );
     }
 
     /// A catalog's answer is written onto the entry whose digest it is about,
@@ -664,6 +689,7 @@ mod tests {
                 project_id: "AABBCCDD".to_owned(),
                 version_id: "vvvv".to_owned(),
                 file_id: None,
+                dependencies: Vec::new(),
             },
         )]);
 
@@ -677,6 +703,244 @@ mod tests {
                 version_id: Some("vvvv".to_owned()),
                 file_id: None,
             })
+        );
+    }
+
+    fn sha1_hex(bytes: &[u8]) -> String {
+        use sha1::{Digest as _, Sha1};
+        hex::encode(Sha1::digest(bytes))
+    }
+
+    /// An application whose catalogs both answer from `server`. CurseForge
+    /// holds a key only when `keyed`, which is the no-credential case otherwise.
+    fn app_against(base: &Path, server: &MockServer, keyed: bool) -> App {
+        let mut app = test_app(base);
+        app.use_loopback_catalog(&format!("{}/v2", server.uri()))
+            .expect("a loopback modrinth");
+        let store = MemoryStore::new();
+        if keyed {
+            ephervex_auth::set_curseforge_api_key(
+                &store,
+                &SecretString::new("test-curseforge-key-do-not-use"),
+            )
+            .expect("store the key");
+        }
+        app.use_loopback_curseforge(&format!("{}/v1", server.uri()), Arc::new(store))
+            .expect("a loopback curseforge");
+        app
+    }
+
+    /// Installs an archive of `jars` and returns the recipe the server keeps.
+    async fn server_recipe(
+        app: &App,
+        dir: &Path,
+        jars: &[(&str, &[u8])],
+        client_source: Option<&Path>,
+    ) -> PackRecipe {
+        let archive = dir.join("pack-server.zip");
+        zip_file(&archive, jars);
+        let server_source = dir.join("server-source");
+        app.install_server_archive(ServerArchiveInstall {
+            archive: &archive,
+            name: "Repro Server",
+            minecraft_version: "1.21.1",
+            loader: &neoforge(),
+            launch: None,
+            game_dir: &dir.join("server"),
+            server_source: &server_source,
+            client_source,
+            reporter: None,
+            cancel: &CancellationToken::new(),
+        })
+        .await
+        .expect("install");
+        SourceStore::new(&server_source)
+            .read_recipe()
+            .expect("the written recipe")
+    }
+
+    fn relations_of<'a>(recipe: &'a PackRecipe, name: &str) -> Option<&'a [RecipeRelation]> {
+        recipe
+            .files
+            .iter()
+            .find(|file| file.file_name() == name)
+            .unwrap_or_else(|| panic!("{name} is recorded"))
+            .recorded_relations()
+    }
+
+    fn declared(kind: ModRelationKind, project: &str) -> ModDependency {
+        ModDependency {
+            kind,
+            project_id: Some(project.to_owned()),
+            version_id: None,
+            file_name: None,
+        }
+    }
+
+    const FEATURE: &[u8] = b"feature";
+    const LIBRARY: &[u8] = b"library";
+    const MODDED: &[u8] = b"modded";
+    const MYSTERY: &[u8] = b"mystery";
+
+    fn archive_jars() -> [(&'static str, &'static [u8]); 4] {
+        [
+            ("mods/feature.jar", FEATURE),
+            ("mods/library.jar", LIBRARY),
+            ("mods/modded.jar", MODDED),
+            ("mods/mystery.jar", MYSTERY),
+        ]
+    }
+
+    async fn curseforge_recognizes_feature_and_library(server: &MockServer) {
+        let (feature, library) = (sha1_hex(FEATURE), sha1_hex(LIBRARY));
+        Mock::given(method("POST"))
+            .and(path("/v1/fingerprints"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+                r#"{{"data":{{"exactMatches":[{{"id":238222,"file":{{"id":4712354,"modId":238222,"isAvailable":true,"fileName":"feature.jar","hashes":[{{"value":"{feature}","algo":1}}],"dependencies":[{{"modId":306612,"relationType":3}},{{"modId":32274,"relationType":2}}]}}}},{{"id":306612,"file":{{"id":4593548,"modId":306612,"isAvailable":true,"fileName":"library.jar","hashes":[{{"value":"{library}","algo":1}}],"dependencies":[]}}}}]}}}}"#
+            )))
+            .mount(server)
+            .await;
+    }
+
+    async fn modrinth_recognizes_modded(server: &MockServer, dependencies: &str) {
+        let modded = sha1_hex(MODDED);
+        Mock::given(method("POST"))
+            .and(path("/v2/version_files"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+                r#"{{"{modded}":{{"id":"vModded","project_id":"MODDED01","date_published":"2024-01-01T00:00:00Z","files":[],"dependencies":[{dependencies}]}}}}"#
+            )))
+            .mount(server)
+            .await;
+    }
+
+    /// The answers that identify a server archive's jars already say what each
+    /// exact file declares, so the recipe records it without another request.
+    #[tokio::test]
+    async fn a_server_recipe_records_what_each_identifying_answer_declared() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let server = MockServer::start().await;
+        curseforge_recognizes_feature_and_library(&server).await;
+        modrinth_recognizes_modded(
+            &server,
+            r#"{"project_id":"FEATURE1","dependency_type":"required"}"#,
+        )
+        .await;
+        let app = app_against(directory.path(), &server, true);
+
+        let recipe = server_recipe(&app, directory.path(), &archive_jars(), None).await;
+
+        assert_eq!(
+            relations_of(&recipe, "feature.jar"),
+            Some(
+                &recipe_relations(&[
+                    declared(ModRelationKind::Required, "306612"),
+                    declared(ModRelationKind::Optional, "32274"),
+                ])[..]
+            )
+        );
+        assert_eq!(
+            relations_of(&recipe, "library.jar"),
+            Some(&[][..]),
+            "curseforge answered that this file declares nothing"
+        );
+        assert_eq!(
+            relations_of(&recipe, "modded.jar"),
+            Some(&recipe_relations(&[declared(ModRelationKind::Required, "FEATURE1")])[..])
+        );
+        assert_eq!(
+            relations_of(&recipe, "mystery.jar"),
+            None,
+            "nothing answered for this jar, so nothing is known about it"
+        );
+        assert_eq!(
+            server.received_requests().await.unwrap_or_default().len(),
+            2,
+            "one request per catalog, the same ones that identify the jars"
+        );
+    }
+
+    /// A catalog that cannot be asked leaves its jars unasked rather than
+    /// declaring nothing, and costs no other catalog's answers.
+    #[tokio::test]
+    async fn an_unavailable_catalog_leaves_its_jars_unasked() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let server = MockServer::start().await;
+        curseforge_recognizes_feature_and_library(&server).await;
+        modrinth_recognizes_modded(&server, "").await;
+        let app = app_against(directory.path(), &server, false);
+
+        let recipe = server_recipe(&app, directory.path(), &archive_jars(), None).await;
+
+        assert_eq!(relations_of(&recipe, "feature.jar"), None);
+        assert_eq!(relations_of(&recipe, "library.jar"), None);
+        assert_eq!(relations_of(&recipe, "mystery.jar"), None);
+        assert_eq!(
+            relations_of(&recipe, "modded.jar"),
+            Some(&[][..]),
+            "modrinth still answered for its own jar"
+        );
+    }
+
+    /// A linked client's record is copied as it stands: what it recorded,
+    /// what it recorded as nothing, and what it never asked.
+    #[tokio::test]
+    async fn a_linked_clients_relation_knowledge_is_copied_as_it_stands() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let server = MockServer::start().await;
+        let app = app_against(directory.path(), &server, true);
+        let requires = recipe_relations(&[declared(ModRelationKind::Required, "306612")]);
+        let client_source = directory.path().join("client-source");
+        let mut client =
+            PackRecipe::for_manual_instance("Repro", "1.21.1", LoaderSelection::vanilla());
+        for (name, bytes, relations) in [
+            ("feature", FEATURE, Some(requires.clone())),
+            ("library", LIBRARY, Some(Vec::new())),
+            ("modded", MODDED, None),
+        ] {
+            client.files.push(ephervex_pack::PackFileRecipe {
+                logical_path: PathBuf::from(format!("mods/{name}.jar")),
+                hashes: vec![Hash::new(HashAlgorithm::Sha1, &sha1_hex(bytes)).expect("sha1")],
+                downloads: Vec::new(),
+                size: None,
+                client: SideRequirement::Required,
+                server: SideRequirement::Required,
+                selected: None,
+                origin: ephervex_pack::ModOrigin::PackDeclared,
+                identity: Some(curseforge_identity("238222", name)),
+                original_identity: None,
+                relations,
+            });
+        }
+        SourceStore::new(&client_source)
+            .write_recipe(&client)
+            .expect("write the client recipe");
+
+        let recipe = server_recipe(
+            &app,
+            directory.path(),
+            &[
+                ("mods/feature.jar", FEATURE),
+                ("mods/library.jar", LIBRARY),
+                ("mods/modded.jar", MODDED),
+            ],
+            Some(&client_source),
+        )
+        .await;
+
+        assert_eq!(relations_of(&recipe, "feature.jar"), Some(&requires[..]));
+        assert_eq!(relations_of(&recipe, "library.jar"), Some(&[][..]));
+        assert_eq!(
+            relations_of(&recipe, "modded.jar"),
+            None,
+            "the client never asked, and the server does not pretend it did"
+        );
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty(),
+            "every jar was answered offline"
         );
     }
 

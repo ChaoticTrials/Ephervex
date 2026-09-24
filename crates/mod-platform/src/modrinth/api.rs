@@ -168,6 +168,7 @@ impl ModrinthApi {
                         project_id: version.project_id,
                         version_id: version.id,
                         file_id: None,
+                        dependencies: version.dependencies.into_iter().map(Into::into).collect(),
                     },
                 )
             })

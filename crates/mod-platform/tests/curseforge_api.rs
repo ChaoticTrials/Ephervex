@@ -14,11 +14,12 @@ use std::sync::Arc;
 
 use ephervex_download::HttpConfig;
 use ephervex_mod_platform::{
-    ConfiguredApiKey, CurseForgeApi, CurseForgeCredentialSource, MINECRAFT_GAME_ID,
+    ConfiguredApiKey, CurseForgeApi, CurseForgeCredentialSource, MINECRAFT_GAME_ID, ModDependency,
     ModPlatformError,
 };
 use ephervex_model::{
-    CurseForgeFileId, CurseForgeProjectId, Hash, HashAlgorithm, ModProvider, SecretString,
+    CurseForgeFileId, CurseForgeProjectId, Hash, HashAlgorithm, ModProvider, ModRelationKind,
+    SecretString,
 };
 use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{body_json, header, method, path};
@@ -484,6 +485,58 @@ async fn a_fingerprint_lookup_identifies_a_file_by_its_bytes() {
     assert_eq!(found.provider, ModProvider::CurseForge);
     assert_eq!(found.project_id, "238222");
     assert_eq!(found.file_id.as_deref(), Some("4712354"));
+}
+
+/// The file document that identified a jar also says what that exact file
+/// declares, and a file declaring nothing is an answer, not a missing one.
+#[tokio::test]
+async fn a_fingerprint_match_carries_what_its_file_declares() {
+    let feature = "a".repeat(40);
+    let library = "b".repeat(40);
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/fingerprints"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+            r#"{{"data":{{"exactMatches":[{{"id":238222,"file":{{"id":4712354,"modId":238222,"isAvailable":true,"fileName":"feature.jar","hashes":[{{"value":"{feature}","algo":1}}],"dependencies":[{{"modId":306612,"relationType":3}},{{"modId":32274,"relationType":2}}]}}}},{{"id":306612,"file":{{"id":4593548,"modId":306612,"isAvailable":true,"fileName":"library.jar","hashes":[{{"value":"{library}","algo":1}}],"dependencies":[]}}}}]}}}}"#
+        )))
+        .mount(&server)
+        .await;
+
+    let api = configured(&server);
+    let operation = api.begin_operation().expect("an operation begins");
+    let wanted = vec![
+        (
+            1_u32,
+            Hash::new(HashAlgorithm::Sha1, &feature).expect("sha1"),
+        ),
+        (
+            2_u32,
+            Hash::new(HashAlgorithm::Sha1, &library).expect("sha1"),
+        ),
+    ];
+
+    let recognized = operation
+        .fingerprints(&wanted, &CancellationToken::new())
+        .await
+        .expect("the lookup answers");
+
+    let declared = |kind, project: &str| ModDependency {
+        kind,
+        project_id: Some(project.to_owned()),
+        version_id: None,
+        file_name: None,
+    };
+    assert_eq!(
+        recognized.get(&feature).expect("recognized").dependencies,
+        [
+            declared(ModRelationKind::Required, "306612"),
+            declared(ModRelationKind::Optional, "32274"),
+        ]
+    );
+    assert_eq!(
+        recognized.get(&library).expect("recognized").dependencies,
+        []
+    );
 }
 
 /// A fingerprint is a lookup key, not a digest. An answer whose own SHA-1 is

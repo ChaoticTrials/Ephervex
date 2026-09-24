@@ -34,7 +34,7 @@ use crate::error::{PackError, PackResult};
 use crate::managed::MODS_DIR;
 use crate::recipe::{
     PackFileRecipe, PackRecipe, ProviderFileIdentity, ProviderRecipeMetadata, RECIPE_VERSION,
-    SideRequirement,
+    RecipeRelation, SideRequirement,
 };
 
 /// The loader installation's own library tree, which is a link into the shared
@@ -250,6 +250,10 @@ pub struct ServerPackMod {
     /// recognized it. `None` is a real answer: a file nothing knows about is
     /// recorded as one rather than given an invented identity.
     pub identity: Option<ProviderFileIdentity>,
+    /// What the answer that identified this jar declared about other projects.
+    /// `None` when nothing answered for this exact file, which is not the same
+    /// as an answer declaring nothing; see [`PackFileRecipe::relations`].
+    pub relations: Option<Vec<RecipeRelation>>,
 }
 
 /// Gives each installed jar the digest it needs to be recorded at all.
@@ -279,6 +283,7 @@ pub async fn measure_installed_mods(
             hashes: vec![hash],
             size,
             identity: None,
+            relations: None,
         });
     }
     debug!(mods = measured.len(), "measured a server archive's mods");
@@ -327,7 +332,7 @@ pub fn server_pack_recipe(
                 origin: ModOrigin::PackDeclared,
                 identity: entry.identity.clone(),
                 original_identity: None,
-                relations: None,
+                relations: entry.relations.clone(),
             })
             .collect(),
         override_layers: Vec::new(),
@@ -678,6 +683,7 @@ mod tests {
                 version_id: Some("4712354".to_owned()),
                 file_id: Some("4712354".to_owned()),
             }),
+            relations: None,
         };
         let unidentified = ServerPackMod {
             logical_path: PathBuf::from("mods/mystery.jar"),
@@ -686,6 +692,7 @@ mod tests {
             ],
             size: Some(3),
             identity: None,
+            relations: None,
         };
 
         let recipe = server_pack_recipe(
@@ -710,6 +717,42 @@ mod tests {
             Some(ephervex_model::ModProvider::CurseForge)
         );
         assert_eq!(recorded[1].identity.provider(), None);
+    }
+
+    /// The relations an identifying answer declared are recorded with the
+    /// entry, and an answer declaring nothing stays distinct from no answer.
+    #[test]
+    fn each_jars_relation_knowledge_reaches_the_recipe_unchanged() {
+        let requires = RecipeRelation {
+            kind: ephervex_model::ModRelationKind::Required,
+            target: crate::recipe::RelationTarget::Project {
+                project_id: "306612".to_owned(),
+                version_id: None,
+            },
+        };
+        let jar = |name: &str, relations: Option<Vec<RecipeRelation>>| ServerPackMod {
+            logical_path: PathBuf::from(format!("mods/{name}.jar")),
+            hashes: Vec::new(),
+            size: Some(3),
+            identity: None,
+            relations,
+        };
+
+        let recipe = server_pack_recipe(
+            "Repro Server",
+            "1.21.1",
+            LoaderSelection::vanilla(),
+            None,
+            &[
+                jar("feature", Some(vec![requires.clone()])),
+                jar("library", Some(Vec::new())),
+                jar("mystery", None),
+            ],
+        );
+
+        assert_eq!(recipe.files[0].recorded_relations(), Some(&[requires][..]));
+        assert_eq!(recipe.files[1].recorded_relations(), Some(&[][..]));
+        assert_eq!(recipe.files[2].recorded_relations(), None);
     }
 
     #[tokio::test]

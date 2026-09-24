@@ -138,9 +138,10 @@ pub struct ModFile {
 ///
 /// The answer to "what is this jar?" for a file that arrived without any
 /// identity of its own -- out of a published server archive, most of all. It
-/// carries only what identifies the release, because that is all a recipe entry
-/// needs: an address can always be resolved from it later, and one recorded now
-/// would be a second copy of something the catalog already owns.
+/// carries what identifies the release and what that release declares about
+/// other projects, because that is what a recipe entry records. No address is
+/// kept: one can always be resolved from the identity later, and one recorded
+/// now would be a second copy of something the catalog already owns.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecognizedFile {
     pub provider: ModProvider,
@@ -151,6 +152,9 @@ pub struct RecognizedFile {
     /// CurseForge's separate file id, where the provider has one distinct from
     /// the version. Modrinth does not.
     pub file_id: Option<String>,
+    /// What this exact release declares, read the same way the mod browser
+    /// reads it. Empty when the catalog answered that it declares nothing.
+    pub dependencies: Vec<ModDependency>,
 }
 
 /// How stable a release claims to be.
