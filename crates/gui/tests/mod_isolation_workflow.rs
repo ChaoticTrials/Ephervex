@@ -122,8 +122,8 @@ fn setup_on(ui: &AppWindow, server_host: bool, running: bool) {
     ui.set_isolation_unrecorded(strings(&[]));
     ui.set_isolation_accept_missing(false);
     ui.set_isolation_accept_unrecorded(false);
-    ui.set_isolation_busy_kind("".into());
-    ui.set_isolation_busy_id("".into());
+    ui.set_host_busy_kind("".into());
+    ui.set_host_busy_id("".into());
     settle(ui);
 }
 
@@ -293,9 +293,9 @@ fn a_start_in_progress_disables_start_and_shows_only_its_progress() {
         } else {
             ("client", "host")
         };
-        ui.set_isolation_busy_kind(kind.into());
-        ui.set_isolation_busy_id(id.into());
-        ui.set_isolation_busy_text("Creating the safety snapshot".into());
+        ui.set_host_busy_kind(kind.into());
+        ui.set_host_busy_id(id.into());
+        ui.set_host_busy_text("Creating the safety snapshot".into());
         settle(&ui);
 
         assert!(!start_enabled(&ui), "server: {server_host}");
@@ -312,8 +312,8 @@ fn a_start_in_progress_disables_start_and_shows_only_its_progress() {
             "server: {server_host}"
         );
 
-        ui.set_isolation_busy_kind("".into());
-        ui.set_isolation_busy_id("".into());
+        ui.set_host_busy_kind("".into());
+        ui.set_host_busy_id("".into());
         settle(&ui);
         assert!(start_enabled(&ui), "server: {server_host}");
         assert!(!visible(&ui, "Creating the safety snapshot"));
@@ -381,9 +381,9 @@ fn a_busy_isolation_change_disables_answers_and_launch_and_says_what_it_is_doing
     ui.set_workspace_tab("Isolation".into());
     ui.set_isolation_phase("round".into());
     ui.set_isolation_history(strings(&["Round 1"]));
-    ui.set_isolation_busy_kind("client".into());
-    ui.set_isolation_busy_id("host".into());
-    ui.set_isolation_busy_text("Applying the next mod setup".into());
+    ui.set_host_busy_kind("client".into());
+    ui.set_host_busy_id("host".into());
+    ui.set_host_busy_text("Applying the next mod setup".into());
     settle(&ui);
 
     assert!(visible(&ui, "Applying the next mod setup"));
@@ -402,8 +402,8 @@ fn a_busy_isolation_change_disables_answers_and_launch_and_says_what_it_is_doing
         );
     }
 
-    ui.set_isolation_busy_kind("client".into());
-    ui.set_isolation_busy_id("another".into());
+    ui.set_host_busy_kind("client".into());
+    ui.set_host_busy_id("another".into());
     settle(&ui);
     assert!(!visible(&ui, "Applying the next mod setup"));
     assert!(

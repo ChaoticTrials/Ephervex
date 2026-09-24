@@ -274,6 +274,17 @@ slint::slint! {
         selected: bool,
     }
 
+    // One recorded file a verification found something to say about.
+    export struct IntegrityFindingRow {
+        path: string,
+        // The core answer: "absent", "corrupt", "unreadable", or "unverifiable".
+        integrity: string,
+        label: string,
+        // "repair" when a repair replaces it, "manual" when it is wrong and
+        // nothing can fetch it again, "info" when nothing proves it either way.
+        handling: string,
+    }
+
     // One surface a host workspace offers. The workspace chrome only knows
     // stable ids and labels; each host decides which surfaces it has.
     export struct WorkspaceSurfaceRow {
@@ -2091,6 +2102,148 @@ slint::slint! {
         }
     }
 
+    component IntegrityFindingList inherits Rectangle {
+        in property <[IntegrityFindingRow]> items;
+        border-radius: 6px;
+        border-width: 1px;
+        border-color: Theme.border;
+        background: Theme.background;
+        height: min(280px, list.preferred-height + 2px);
+        ScrollView {
+            viewport-width: self.width;
+            list := VerticalLayout {
+                padding: 8px;
+                spacing: 6px;
+                alignment: start;
+                for item in root.items : HorizontalLayout {
+                    spacing: 10px;
+                    BodyText { text: item.path; horizontal-stretch: 1; wrap: word-wrap; font-size: Theme.caption-size; }
+                    VerticalLayout { alignment: center; Pill { text: item.label; tone-color: item.handling == "info" ? Theme.text-secondary : item.handling == "repair" ? Theme.warning : Theme.danger; } }
+                }
+            }
+        }
+    }
+
+    // Verification and repair for one host, from the files core records for
+    // it. The state it shows belongs to the controller; this only lays it out.
+    component DiagnosticsSurface inherits Rectangle {
+        in property <bool> shared-supported;
+        in property <bool> host-running;
+        // A change is rewriting this host, such as the repair this started.
+        in property <bool> busy;
+        in property <bool> isolation-active;
+        // "unchecked", "verifying", "checked", or "stale".
+        in property <string> state;
+        in property <string> progress;
+        in property <string> summary;
+        in property <bool> healthy;
+        in property <string> counts;
+        in property <string> checked-at;
+        in property <[IntegrityFindingRow]> findings;
+        in property <int> finding-total;
+        in-out property <string> query;
+        in property <[string]> repair-targets;
+        in property <[string]> unrepairable;
+        in property <string> shared-summary;
+        in property <[IntegrityFindingRow]> shared-faults;
+        in property <[string]> shared-notes;
+        in property <string> repair-result;
+        in property <bool> repair-failed;
+        in property <[string]> recovery;
+        callback verify();
+        callback stop();
+        callback repair();
+        callback filter(string);
+        callback open-logs();
+        // What Repair waits for the user to do. A repair already running is
+        // progress, which the workspace banner shows, not a requirement.
+        property <string> repair-requirement: root.busy ? ""
+            : root.host-running ? "running"
+            : root.isolation-active ? "isolation"
+            : "";
+        property <bool> working: root.state == "verifying" || root.busy;
+        ScrollView {
+            viewport-width: self.width;
+            VerticalLayout {
+                alignment: start;
+                width: min(parent.width, 980px);
+                spacing: 12px;
+                HorizontalLayout {
+                    spacing: 10px;
+                    SectionTitle { title: GuiI18n.text("gui-integrity-title"); detail: GuiI18n.text("gui-integrity-detail"); horizontal-stretch: 1; }
+                    VerticalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-integrity-open-logs"); clicked => { root.open-logs(); } } }
+                    if root.working : VerticalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-integrity-stop"); clicked => { root.stop(); } } }
+                    VerticalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-integrity-verify"); tone: "primary"; enabled: !root.working; clicked => { root.verify(); } } }
+                }
+                if root.state == "verifying" : HorizontalLayout {
+                    spacing: 8px;
+                    Spinner { indeterminate: true; width: 16px; height: 16px; }
+                    BodyText { text: root.progress != "" ? root.progress : GuiI18n.text("operation-verifying-host"); horizontal-stretch: 1; wrap: word-wrap; }
+                }
+                if root.state == "unchecked" : BodyText { text: GuiI18n.text("gui-integrity-unchecked"); color: Theme.text-secondary; wrap: word-wrap; }
+                if root.state == "checked" || root.state == "stale" : Rectangle {
+                    border-radius: 8px;
+                    border-width: 1px;
+                    border-color: root.state == "stale" ? Theme.border : root.healthy ? Theme.success : Theme.warning;
+                    background: Theme.surface;
+                    height: outcome.preferred-height;
+                    outcome := VerticalLayout {
+                        padding: 14px;
+                        spacing: 5px;
+                        Heading { text: root.summary; font-size: Theme.row-heading-size; color: root.state == "stale" ? Theme.text-secondary : root.healthy ? Theme.success : Theme.warning; wrap: word-wrap; }
+                        if root.counts != "" : BodyText { text: root.counts; color: Theme.text-secondary; wrap: word-wrap; }
+                        if root.checked-at != "" : BodyText { text: root.checked-at; color: Theme.text-muted; font-size: Theme.caption-size; }
+                        if root.state == "stale" : BodyText { text: GuiI18n.text("gui-integrity-stale"); color: Theme.text-secondary; wrap: word-wrap; }
+                    }
+                }
+                if root.repair-result != "" : Rectangle {
+                    border-radius: 8px;
+                    border-width: 1px;
+                    border-color: root.repair-failed || root.recovery.length > 0 ? Theme.danger : Theme.border;
+                    background: Theme.surface;
+                    height: result.preferred-height;
+                    result := VerticalLayout {
+                        padding: 12px;
+                        spacing: 5px;
+                        BodyText { text: root.repair-result; wrap: word-wrap; }
+                        if root.recovery.length > 0 : BodyText { text: GuiI18n.text("gui-integrity-recovery"); color: Theme.danger; wrap: word-wrap; }
+                        for path in root.recovery : BodyText { text: path; color: Theme.text-secondary; font-size: Theme.caption-size; wrap: word-wrap; }
+                    }
+                }
+                if root.state == "checked" && root.finding-total > 0 : VerticalLayout {
+                    spacing: 8px;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Heading { text: GuiI18n.text("gui-integrity-findings"); font-size: Theme.row-heading-size; horizontal-stretch: 1; vertical-alignment: center; }
+                        TextField { text <=> root.query; placeholder: GuiI18n.text("gui-integrity-filter"); accessible-label: GuiI18n.text("gui-integrity-filter"); input-type: InputType.search; width: 220px; edited(text) => { root.filter(text); } }
+                    }
+                    if root.findings.length == 0 : BodyText { text: GuiI18n.value("gui-integrity-no-match", root.query); color: Theme.text-muted; wrap: word-wrap; }
+                    if root.findings.length > 0 : IntegrityFindingList { items: root.findings; }
+                }
+                if root.state == "checked" && (root.repair-targets.length > 0 || root.unrepairable.length > 0) : VerticalLayout {
+                    spacing: 8px;
+                    Divider { }
+                    SectionTitle { title: GuiI18n.text("gui-integrity-repair-title"); detail: GuiI18n.text("gui-integrity-repair-detail"); }
+                    if root.repair-targets.length > 0 : BodyText { text: GuiI18n.count("gui-integrity-repair-targets", root.repair-targets.length); wrap: word-wrap; }
+                    for path in root.repair-targets : BodyText { text: path; color: Theme.text-secondary; font-size: Theme.caption-size; wrap: word-wrap; }
+                    if root.unrepairable.length > 0 : BodyText { text: GuiI18n.count("gui-integrity-unrepairable", root.unrepairable.length); color: Theme.warning; wrap: word-wrap; }
+                    for path in root.unrepairable : BodyText { text: path; color: Theme.text-secondary; font-size: Theme.caption-size; wrap: word-wrap; }
+                    if root.repair-targets.length > 0 && root.repair-requirement != "" : BodyText { text: GuiI18n.text(root.repair-requirement == "running" ? "gui-integrity-repair-blocked-running" : "gui-integrity-repair-blocked-isolation"); color: Theme.warning; wrap: word-wrap; }
+                    if root.repair-targets.length > 0 : HorizontalLayout {
+                        Rectangle { horizontal-stretch: 1; }
+                        AppButton { text: GuiI18n.text("gui-integrity-repair"); tone: "primary"; enabled: !root.working && root.repair-requirement == ""; clicked => { root.repair(); } }
+                    }
+                }
+                Divider { }
+                SectionTitle { title: GuiI18n.text("gui-integrity-shared-title"); detail: root.shared-supported ? GuiI18n.text("gui-integrity-shared-detail") : GuiI18n.text("gui-integrity-shared-servers"); }
+                if root.shared-supported && root.shared-summary != "" : BodyText { text: root.shared-summary; wrap: word-wrap; }
+                if root.shared-supported && root.shared-faults.length > 0 : IntegrityFindingList { items: root.shared-faults; }
+                for note in root.shared-notes : BodyText { text: note; color: Theme.text-secondary; wrap: word-wrap; }
+                @children
+            }
+        }
+    }
+
     component SnapshotPanel inherits Rectangle {
         in property <[SnapshotRow]> items;
         in property <string> total;
@@ -3426,10 +3579,32 @@ slint::slint! {
         in-out property <int> isolation-round: 0;
         in-out property <int> isolation-granularity: 0;
         in-out property <bool> isolation-active: false;
-        // The host an isolation change is rewriting, and what it is doing.
-        in-out property <string> isolation-busy-kind;
-        in-out property <string> isolation-busy-id;
-        in-out property <string> isolation-busy-text;
+        // The one host whose files a change is rewriting, and what it is
+        // doing. Isolation and repair both claim it, so every surface of that
+        // host reads a single answer to "is something changing it".
+        in-out property <string> host-busy-kind;
+        in-out property <string> host-busy-id;
+        in-out property <string> host-busy-text;
+        // What the Diagnostics surface shows for the host it was opened on.
+        in-out property <string> integrity-host-kind;
+        in-out property <string> integrity-host-id;
+        in-out property <string> integrity-state: "unchecked";
+        in-out property <string> integrity-progress;
+        in-out property <string> integrity-summary;
+        in-out property <bool> integrity-healthy;
+        in-out property <string> integrity-counts;
+        in-out property <string> integrity-checked-at;
+        in-out property <[IntegrityFindingRow]> integrity-findings;
+        in-out property <int> integrity-finding-total;
+        in-out property <string> integrity-query;
+        in-out property <[string]> integrity-repair-targets;
+        in-out property <[string]> integrity-unrepairable;
+        in-out property <string> integrity-shared-summary;
+        in-out property <[IntegrityFindingRow]> integrity-shared-faults;
+        in-out property <[string]> integrity-shared-notes;
+        in-out property <string> integrity-repair-result;
+        in-out property <bool> integrity-repair-failed;
+        in-out property <[string]> integrity-recovery;
         // Why the active session's round cannot be answered yet: "running" or "failed".
         in-out property <string> isolation-recovery;
         in-out property <string> isolation-recovery-detail;
@@ -3986,6 +4161,11 @@ slint::slint! {
         callback cancel-isolation(string, string);
         callback discard-isolation-setup(string, string);
         callback retry-isolation-recovery(string, string);
+        callback open-integrity(string, string);
+        callback verify-host(string, string);
+        callback repair-host(string, string);
+        callback stop-integrity-work();
+        callback filter-integrity-findings(string);
         callback copy-text(string);
         callback add-offline-account(string);
         callback set-default-account(string);
@@ -4227,6 +4407,7 @@ slint::slint! {
                                 { id: "Settings", label: GuiI18n.text("gui-instance-tab-settings") },
                                 { id: "Snapshots", label: GuiI18n.text("gui-snapshots") },
                                 { id: "Logs", label: GuiI18n.text("gui-instance-tab-logs") },
+                                { id: "Diagnostics", label: GuiI18n.text("gui-diagnostics-tab") },
                             ];
                             selected-surface <=> root.workspace-tab;
                             accounts: root.accounts;
@@ -4236,8 +4417,8 @@ slint::slint! {
                             primary-tone: root.selected-instance-index >= 0 && root.instances[root.selected-instance-index].can-kill ? "danger" : "primary";
                             primary-enabled: root.selected-instance-index >= 0 && (root.instances[root.selected-instance-index].can-launch || root.instances[root.selected-instance-index].can-kill);
                             workflow-id: root.isolation-host-kind == "client" && root.isolation-host-id == root.selected-instance-id ? root.active-workflow-id : "";
-                            busy: root.isolation-busy-kind == "client" && root.isolation-busy-id == root.selected-instance-id;
-                            busy-text: root.isolation-busy-text;
+                            busy: root.host-busy-kind == "client" && root.host-busy-id == root.selected-instance-id;
+                            busy-text: root.host-busy-text;
                             workflow-title: root.active-workflow-title;
                             workflow-summary: root.active-workflow-summary;
                             workflow-actions: root.active-workflow-actions;
@@ -4250,6 +4431,7 @@ slint::slint! {
                                 if surface != "Logs" { root.close-live-log(); }
                                 if surface == "Snapshots" { root.snapshots = []; root.snapshot-total = ""; root.snapshots-have-plain-copies = false; root.snapshot-host-kind = "client"; root.snapshot-host-id = root.selected-instance-id; root.load-snapshots("client", root.selected-instance-id); }
                                 if surface == "Logs" { root.selected-diagnostic-kind = "log"; root.log-shows-files = false; root.selected-diagnostic-name = ""; root.open-live-log("client", root.selected-instance-id); }
+                                if surface == "Diagnostics" { root.open-integrity("client", root.selected-instance-id); }
                             }
                             workflow-action(workflow, action) => {
                                 if workflow == "mod-isolation" {
@@ -4322,7 +4504,7 @@ slint::slint! {
                             }
                             if root.workspace-tab == "Isolation" : IsolationSurface {
                                 phase: root.isolation-host-kind == "client" && root.isolation-host-id == root.selected-instance-id ? root.isolation-phase : "none";
-                                busy: root.isolation-busy-kind == "client" && root.isolation-busy-id == root.selected-instance-id;
+                                busy: root.host-busy-kind == "client" && root.host-busy-id == root.selected-instance-id;
                                 recovery: root.isolation-recovery; recovery-detail: root.isolation-recovery-detail;
                                 host-running: root.selected-instance-index >= 0 && root.instances[root.selected-instance-index].can-kill;
                                 summary: root.isolation-summary; confidence: root.isolation-confidence; round: root.isolation-round; granularity: root.isolation-granularity;
@@ -4374,6 +4556,24 @@ slint::slint! {
                                 restore(id, label) => { root.snapshot-action-id = id; root.snapshot-action-label = label; root.snapshot-safety-copy = true; root.modal-error = ""; root.modal = "snapshot-restore"; }
                                 rename(id, label) => { root.snapshot-action-id = id; root.snapshot-action-label = label; root.modal-error = ""; root.modal = "snapshot-rename"; }
                                 delete(id, label) => { root.snapshot-action-id = id; root.snapshot-action-label = label; root.modal-error = ""; root.modal = "snapshot-delete"; }
+                            }
+                            if root.workspace-tab == "Diagnostics" : DiagnosticsSurface {
+                                property <bool> current: root.integrity-host-kind == "client" && root.integrity-host-id == root.selected-instance-id;
+                                shared-supported: true;
+                                host-running: root.selected-instance-index >= 0 && root.instances[root.selected-instance-index].can-kill;
+                                busy: root.host-busy-kind == "client" && root.host-busy-id == root.selected-instance-id;
+                                isolation-active: root.isolation-host-kind == "client" && root.isolation-host-id == root.selected-instance-id && root.active-workflow-id != "";
+                                state: self.current ? root.integrity-state : "unchecked";
+                                progress: root.integrity-progress; summary: root.integrity-summary; healthy: root.integrity-healthy; counts: root.integrity-counts; checked-at: root.integrity-checked-at;
+                                findings: root.integrity-findings; finding-total: root.integrity-finding-total; query <=> root.integrity-query;
+                                repair-targets: root.integrity-repair-targets; unrepairable: root.integrity-unrepairable;
+                                shared-summary: root.integrity-shared-summary; shared-faults: root.integrity-shared-faults; shared-notes: root.integrity-shared-notes;
+                                repair-result: self.current ? root.integrity-repair-result : ""; repair-failed: root.integrity-repair-failed; recovery: root.integrity-recovery;
+                                verify => { root.verify-host("client", root.selected-instance-id); }
+                                stop => { root.stop-integrity-work(); }
+                                repair => { root.repair-host("client", root.selected-instance-id); }
+                                filter(query) => { root.filter-integrity-findings(query); }
+                                open-logs => { root.workspace-tab = "Logs"; root.selected-diagnostic-kind = "log"; root.log-shows-files = false; root.selected-diagnostic-name = ""; root.open-live-log("client", root.selected-instance-id); }
                             }
                             if root.workspace-tab == "Logs" : VerticalLayout { spacing: 9px;
                                 HorizontalLayout { spacing: 8px;
@@ -4472,6 +4672,7 @@ slint::slint! {
                                 { id: "Properties", label: GuiI18n.text("gui-server-tab-properties") },
                                 { id: "Snapshots", label: GuiI18n.text("gui-snapshots") },
                                 { id: "Logs", label: GuiI18n.text("gui-instance-tab-logs") },
+                                { id: "Diagnostics", label: GuiI18n.text("gui-diagnostics-tab") },
                             ];
                             selected-surface <=> root.workspace-tab;
                             primary-label: root.selected-server-index >= 0 && root.servers[root.selected-server-index].can-stop ? GuiI18n.text("gui-stop") : GuiI18n.text("gui-start");
@@ -4479,8 +4680,8 @@ slint::slint! {
                             restart-visible: true;
                             restart-enabled: root.selected-server-index >= 0 && root.servers[root.selected-server-index].can-restart;
                             workflow-id: root.isolation-host-kind == "server" && root.isolation-host-id == root.selected-server-id ? root.active-workflow-id : "";
-                            busy: root.isolation-busy-kind == "server" && root.isolation-busy-id == root.selected-server-id;
-                            busy-text: root.isolation-busy-text;
+                            busy: root.host-busy-kind == "server" && root.host-busy-id == root.selected-server-id;
+                            busy-text: root.host-busy-text;
                             workflow-title: root.active-workflow-title;
                             workflow-summary: root.active-workflow-summary;
                             workflow-actions: root.active-workflow-actions;
@@ -4494,6 +4695,7 @@ slint::slint! {
                                 if surface == "Mods" { root.load-server-mods(root.selected-server-id); }
                                 if surface == "Snapshots" { root.snapshots = []; root.snapshot-total = ""; root.snapshots-have-plain-copies = false; root.snapshot-host-kind = "server"; root.snapshot-host-id = root.selected-server-id; root.load-snapshots("server", root.selected-server-id); }
                                 if surface == "Logs" { root.selected-diagnostic-kind = "log"; root.log-shows-files = false; root.selected-diagnostic-name = ""; root.open-live-log("server", root.selected-server-id); }
+                                if surface == "Diagnostics" { root.open-integrity("server", root.selected-server-id); }
                             }
                             workflow-action(workflow, action) => {
                                 if workflow == "mod-isolation" {
@@ -4517,6 +4719,23 @@ slint::slint! {
                                 restore(id, label) => { root.snapshot-action-id = id; root.snapshot-action-label = label; root.snapshot-safety-copy = true; root.modal-error = ""; root.modal = "snapshot-restore"; }
                                 rename(id, label) => { root.snapshot-action-id = id; root.snapshot-action-label = label; root.modal-error = ""; root.modal = "snapshot-rename"; }
                                 delete(id, label) => { root.snapshot-action-id = id; root.snapshot-action-label = label; root.modal-error = ""; root.modal = "snapshot-delete"; }
+                            }
+                            if root.workspace-tab == "Diagnostics" : DiagnosticsSurface {
+                                property <bool> current: root.integrity-host-kind == "server" && root.integrity-host-id == root.selected-server-id;
+                                shared-supported: false;
+                                host-running: root.selected-server-index >= 0 && root.servers[root.selected-server-index].can-stop;
+                                busy: root.host-busy-kind == "server" && root.host-busy-id == root.selected-server-id;
+                                isolation-active: root.isolation-host-kind == "server" && root.isolation-host-id == root.selected-server-id && root.active-workflow-id != "";
+                                state: self.current ? root.integrity-state : "unchecked";
+                                progress: root.integrity-progress; summary: root.integrity-summary; healthy: root.integrity-healthy; counts: root.integrity-counts; checked-at: root.integrity-checked-at;
+                                findings: root.integrity-findings; finding-total: root.integrity-finding-total; query <=> root.integrity-query;
+                                repair-targets: root.integrity-repair-targets; unrepairable: root.integrity-unrepairable;
+                                repair-result: self.current ? root.integrity-repair-result : ""; repair-failed: root.integrity-repair-failed; recovery: root.integrity-recovery;
+                                verify => { root.verify-host("server", root.selected-server-id); }
+                                stop => { root.stop-integrity-work(); }
+                                repair => { root.repair-host("server", root.selected-server-id); }
+                                filter(query) => { root.filter-integrity-findings(query); }
+                                open-logs => { root.workspace-tab = "Logs"; root.selected-diagnostic-kind = "log"; root.log-shows-files = false; root.selected-diagnostic-name = ""; root.open-live-log("server", root.selected-server-id); }
                             }
                             if root.workspace-tab == "Console" : VerticalLayout { spacing: 10px;
                                 ActionRow { BodyText { text: GuiI18n.value("gui-bounded-output", root.servers[root.selected-server-index].state); color: root.servers[root.selected-server-index].can-send-command ? Theme.success : Theme.text-secondary; } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-restart"); enabled: root.servers[root.selected-server-index].can-restart; clicked => { root.server-restart(root.selected-server-id); } } AppButton { text: GuiI18n.text("gui-stop"); enabled: root.servers[root.selected-server-index].can-stop; clicked => { root.server-stop(root.selected-server-id); } } AppButton { text: GuiI18n.text("gui-kill"); tone: "danger"; enabled: root.servers[root.selected-server-index].can-kill; clicked => { root.modal = "kill"; } } }
@@ -4570,7 +4789,7 @@ slint::slint! {
                             }
                             if root.workspace-tab == "Isolation" : IsolationSurface {
                                 phase: root.isolation-host-kind == "server" && root.isolation-host-id == root.selected-server-id ? root.isolation-phase : "none";
-                                busy: root.isolation-busy-kind == "server" && root.isolation-busy-id == root.selected-server-id;
+                                busy: root.host-busy-kind == "server" && root.host-busy-id == root.selected-server-id;
                                 recovery: root.isolation-recovery; recovery-detail: root.isolation-recovery-detail;
                                 host-running: root.selected-server-index >= 0 && root.servers[root.selected-server-index].can-stop;
                                 summary: root.isolation-summary; confidence: root.isolation-confidence; round: root.isolation-round; granularity: root.isolation-granularity;

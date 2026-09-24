@@ -269,6 +269,17 @@ pub enum Command {
         generation: u64,
         request: u64,
     },
+    /// Checks a host's recorded files against their recorded digests, and a
+    /// client's shared launch files as well.
+    VerifyHost {
+        host: InstalledHost,
+        request: u64,
+    },
+    /// Replaces what a host is missing or holding wrongly, then checks again.
+    RepairHost {
+        host: InstalledHost,
+        request: u64,
+    },
     LoadModVersions {
         instance: InstanceId,
         path: PathBuf,
@@ -1246,6 +1257,54 @@ pub struct HostSnapshotsData {
     pub has_plain_copies: bool,
 }
 
+/// One recorded file, as a verification found it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedFileData {
+    pub path: String,
+    /// The core answer, by its stable identifier.
+    pub integrity: &'static str,
+    /// Nothing is wrong with it, which includes having nothing to prove.
+    pub sound: bool,
+    /// A repair would replace it, because it is wrong and has an address.
+    pub repairable: bool,
+}
+
+/// What checking a client's shared launch files found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SharedArtifactData {
+    /// Nothing is cached for the release yet, so nothing could be checked.
+    pub metadata_cached: bool,
+    pub checked: usize,
+    /// Present with the wrong bytes, or unreadable.
+    pub faults: Vec<VerifiedFileData>,
+    /// Not downloaded yet, which a launch does and which is not damage.
+    pub not_yet_fetched: usize,
+    pub loader_libraries_uncovered: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerificationData {
+    /// Every file the host records, in the order core checked them.
+    pub files: Vec<VerifiedFileData>,
+    /// `None` for a server, whose shared files core does not check; an error
+    /// message when the check itself could not run.
+    pub shared: Option<Result<SharedArtifactData, String>>,
+}
+
+/// What one repair did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RepairData {
+    pub repaired: Vec<String>,
+    /// Attempted and not fixed, so trying again can help.
+    pub failed: Vec<String>,
+    /// Wrong, with no address to fetch it from again.
+    pub unrepairable: Vec<String>,
+    /// Launcher scratch a failed rollback left behind for review.
+    pub recovery: Vec<String>,
+    /// The repair was canceled before it reached every file.
+    pub stopped: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct IsolationCandidateData {
     pub path: String,
@@ -1414,6 +1473,23 @@ pub enum Event {
         host: InstalledHost,
         basis: u64,
     },
+    /// What a verification found on one host.
+    HostVerified {
+        host: InstalledHost,
+        request: u64,
+        data: VerificationData,
+    },
+    /// What a repair did. The verification after it says what is on disk now.
+    HostRepaired {
+        host: InstalledHost,
+        request: u64,
+        data: RepairData,
+    },
+    /// A verification or repair the controller sent has finished, whichever
+    /// way it ended. Sent after any result it produced.
+    IntegritySettled {
+        request: u64,
+    },
     JavaRuntimes(Vec<JavaData>),
     Activity(ActivityData),
     Toast {
@@ -1574,29 +1650,32 @@ impl std::fmt::Debug for BackendHandle {
 /// asking again is worth it, and a user who wants it sooner has Refresh.
 type RefreshedHosts = Arc<Mutex<HashSet<String>>>;
 
-/// Hosts whose mods an asynchronous isolation start or cancel is rewriting.
+/// Hosts whose files an asynchronous change is rewriting, each with the
+/// message that says which change it is.
 ///
-/// Answers, undo, and finish run on the worker thread itself, so nothing can
-/// launch in the middle of one. Start and cancel run beside it, and a launch
-/// then would read a mods folder that is half rewritten.
-type IsolatingHosts = Arc<Mutex<HashSet<String>>>;
+/// Isolation answers, undo, and finish run on the worker thread itself, so
+/// nothing can start in the middle of one. An isolation start or cancel, a
+/// repair, and a snapshot capture or restore run beside it, and a launch or a
+/// second change then would read or rewrite a directory that is half done.
+type ChangingHosts = Arc<Mutex<HashMap<String, &'static str>>>;
 
-fn isolation_key(host: InstalledHost) -> String {
+fn host_key(host: InstalledHost) -> String {
     format!("{}:{}", host.kind(), host.id())
 }
 
 /// Marks a host as being rewritten until it is dropped, including when the
 /// operation never gets to run.
-struct IsolationInFlight {
-    hosts: IsolatingHosts,
+struct HostChangeInFlight {
+    hosts: ChangingHosts,
     key: String,
 }
 
-impl IsolationInFlight {
-    fn mark(hosts: &IsolatingHosts, host: InstalledHost) -> Self {
-        let key = isolation_key(host);
+impl HostChangeInFlight {
+    /// `refusal` is the message anything refused meanwhile is told.
+    fn mark(hosts: &ChangingHosts, host: InstalledHost, refusal: &'static str) -> Self {
+        let key = host_key(host);
         if let Ok(mut hosts) = hosts.lock() {
-            hosts.insert(key.clone());
+            hosts.insert(key.clone(), refusal);
         }
         Self {
             hosts: Arc::clone(hosts),
@@ -1605,7 +1684,7 @@ impl IsolationInFlight {
     }
 }
 
-impl Drop for IsolationInFlight {
+impl Drop for HostChangeInFlight {
     fn drop(&mut self) {
         if let Ok(mut hosts) = self.hosts.lock() {
             hosts.remove(&self.key);
@@ -1613,22 +1692,24 @@ impl Drop for IsolationInFlight {
     }
 }
 
-/// Refuses to start a host while isolation is rewriting its mods.
-fn refuse_while_isolating(
-    hosts: &IsolatingHosts,
+/// Refuses to start a host, or to change it again, while a change is
+/// rewriting its files.
+fn refuse_while_changing(
+    hosts: &ChangingHosts,
     host: InstalledHost,
     events: &Sender<Event>,
 ) -> bool {
-    let busy = hosts
+    let refusal = hosts
         .lock()
-        .is_ok_and(|hosts| hosts.contains(&isolation_key(host)));
-    if busy {
+        .ok()
+        .and_then(|hosts| hosts.get(&host_key(host)).copied());
+    if let Some(refusal) = refusal {
         let _ = events.send(Event::Toast {
-            message: lookup("gui-isolation-busy-launch"),
+            message: lookup(refusal),
             error: true,
         });
     }
-    busy
+    refusal.is_some()
 }
 
 pub fn spawn() -> BackendHandle {
@@ -1685,7 +1766,7 @@ fn run_worker(
     send_snapshot(&app, &events);
     let live_log_generation = Arc::new(AtomicU64::new(0));
     let refreshed_mods: RefreshedHosts = Arc::new(Mutex::new(HashSet::new()));
-    let isolating: IsolatingHosts = Arc::new(Mutex::new(HashSet::new()));
+    let changing: ChangingHosts = Arc::new(Mutex::new(HashMap::new()));
     // Kept between polls, because CPU is a rate rather than a reading.
     let mut process_monitor = ProcessMonitor::new();
     // A version change waiting on a release the user has to fetch, so closing
@@ -1977,7 +2058,7 @@ fn run_worker(
                 account,
                 additional,
             } => {
-                if refuse_while_isolating(&isolating, InstalledHost::Instance(instance), &events) {
+                if refuse_while_changing(&changing, InstalledHost::Instance(instance), &events) {
                     continue;
                 }
                 let paths = app.paths().clone();
@@ -1995,8 +2076,8 @@ fn run_worker(
                 );
             }
             Command::LaunchAndConnect { client, server } => {
-                if refuse_while_isolating(&isolating, InstalledHost::Instance(client), &events)
-                    || refuse_while_isolating(&isolating, InstalledHost::Server(server), &events)
+                if refuse_while_changing(&changing, InstalledHost::Instance(client), &events)
+                    || refuse_while_changing(&changing, InstalledHost::Server(server), &events)
                 {
                     continue;
                 }
@@ -2325,8 +2406,12 @@ fn run_worker(
                 Err(error) => send_error(&events, &error),
             },
             Command::CreateSnapshot { host, label } => {
+                if refuse_while_changing(&changing, host, &events) {
+                    continue;
+                }
                 let paths = app.paths().clone();
                 let reports = events.clone();
+                let in_flight = HostChangeInFlight::mark(&changing, host, "gui-snapshot-busy");
                 spawn_async_operation(
                     paths,
                     &events,
@@ -2338,6 +2423,7 @@ fn run_worker(
                         finished: None,
                     },
                     move |app, _reporter, cancel| async move {
+                        let _in_flight = in_flight;
                         app.create_snapshot(host, &label, SnapshotOrigin::Manual, &cancel)
                             .map_err(CoreError::from)?;
                         let data = host_snapshots_data(&app, host)?;
@@ -2351,9 +2437,13 @@ fn run_worker(
                 snapshot,
                 safety_snapshot,
             } => {
+                if refuse_while_changing(&changing, host, &events) {
+                    continue;
+                }
                 let paths = app.paths().clone();
                 let reports = events.clone();
                 let refreshed = Arc::clone(&refreshed_mods);
+                let in_flight = HostChangeInFlight::mark(&changing, host, "gui-snapshot-busy");
                 spawn_async_operation(
                     paths,
                     &events,
@@ -2365,6 +2455,7 @@ fn run_worker(
                         finished: None,
                     },
                     move |app, _reporter, cancel| async move {
+                        let _in_flight = in_flight;
                         app.restore_snapshot(
                             host,
                             snapshot,
@@ -2480,7 +2571,7 @@ fn run_worker(
                 let paths = app.paths().clone();
                 let reports = events.clone();
                 let refreshed = Arc::clone(&refreshed_mods);
-                let in_flight = IsolationInFlight::mark(&isolating, host);
+                let in_flight = HostChangeInFlight::mark(&changing, host, "gui-isolation-busy");
                 spawn_async_operation(
                     paths,
                     &events,
@@ -2590,7 +2681,7 @@ fn run_worker(
                 let paths = app.paths().clone();
                 let reports = events.clone();
                 let refreshed = Arc::clone(&refreshed_mods);
-                let in_flight = IsolationInFlight::mark(&isolating, host);
+                let in_flight = HostChangeInFlight::mark(&changing, host, "gui-isolation-busy");
                 spawn_async_operation(
                     paths,
                     &events,
@@ -2611,6 +2702,74 @@ fn run_worker(
                         });
                         send_host_mods(&app, host, &reports, &refreshed, false);
                         Ok(OperationReport::Toast(lookup("gui-isolation-canceled")))
+                    },
+                );
+            }
+            Command::VerifyHost { host, request } => {
+                let paths = app.paths().clone();
+                let reports = events.clone();
+                spawn_async_operation(
+                    paths,
+                    &events,
+                    Arc::clone(&cancellations),
+                    AsyncOperationRequest {
+                        title: "operation-verifying-host",
+                        entity: host.id(),
+                        allow_cancel: true,
+                        finished: Some(Event::IntegritySettled { request }),
+                    },
+                    move |app, reporter, cancel| async move {
+                        let data = verification_data(&app, host, &reporter, &cancel).await?;
+                        let _ = reports.send(Event::HostVerified {
+                            host,
+                            request,
+                            data,
+                        });
+                        Ok(OperationReport::Reported)
+                    },
+                );
+            }
+            Command::RepairHost { host, request } => {
+                if refuse_while_changing(&changing, host, &events) {
+                    let _ = events.send(Event::IntegritySettled { request });
+                    continue;
+                }
+                let paths = app.paths().clone();
+                let reports = events.clone();
+                let refreshed = Arc::clone(&refreshed_mods);
+                let in_flight = HostChangeInFlight::mark(&changing, host, "gui-repair-busy");
+                spawn_async_operation(
+                    paths,
+                    &events,
+                    Arc::clone(&cancellations),
+                    AsyncOperationRequest {
+                        title: "operation-repairing-host",
+                        entity: host.id(),
+                        allow_cancel: true,
+                        finished: Some(Event::IntegritySettled { request }),
+                    },
+                    move |app, reporter, cancel| async move {
+                        let _in_flight = in_flight;
+                        let report = app.repair_host(host, &reporter, &cancel).await?;
+                        let stopped = cancel.is_cancelled();
+                        let _ = reports.send(Event::HostRepaired {
+                            host,
+                            request,
+                            data: repair_data(&report, stopped),
+                        });
+                        send_host_mods(&app, host, &reports, &refreshed, false);
+                        // What the repair meant to do is not evidence of what
+                        // is on disk now; only checking again is.
+                        if !stopped {
+                            reporter.set_stage(Some("operation-stage-rechecking-host".to_owned()));
+                            let data = verification_data(&app, host, &reporter, &cancel).await?;
+                            let _ = reports.send(Event::HostVerified {
+                                host,
+                                request,
+                                data,
+                            });
+                        }
+                        Ok(OperationReport::Reported)
                     },
                 );
             }
@@ -2938,7 +3097,7 @@ fn run_worker(
                 }
             }
             Command::StartServer(server) => {
-                if refuse_while_isolating(&isolating, InstalledHost::Server(server), &events) {
+                if refuse_while_changing(&changing, InstalledHost::Server(server), &events) {
                     continue;
                 }
                 let paths = app.paths().clone();
@@ -2957,7 +3116,7 @@ fn run_worker(
                 send_snapshot(&app, &events);
             }
             Command::RestartServer(server) => {
-                if refuse_while_isolating(&isolating, InstalledHost::Server(server), &events) {
+                if refuse_while_changing(&changing, InstalledHost::Server(server), &events) {
                     continue;
                 }
                 report_async_control(
@@ -3950,6 +4109,65 @@ const fn origin(is_override: bool) -> SettingOrigin {
 /// Sends one host's durable mod list, then asks a provider to decorate it.
 ///
 /// A fingerprint of a plan, compared only within this process.
+/// Checks a host, and a client's shared launch files, for the Diagnostics surface.
+async fn verification_data(
+    app: &App,
+    host: InstalledHost,
+    reporter: &OperationReporter,
+    cancel: &CancellationToken,
+) -> CoreResult<VerificationData> {
+    let report = app.verify_host(host, reporter, cancel).await?;
+    let files = report.files.iter().map(verified_file_data).collect();
+    let shared = match host {
+        InstalledHost::Instance(instance) => {
+            reporter.set_stage(Some("operation-stage-checking-shared-files".to_owned()));
+            Some(
+                app.verify_shared_artifacts(instance)
+                    .await
+                    .map(|shared| SharedArtifactData {
+                        metadata_cached: shared.metadata_cached,
+                        checked: shared.files.len(),
+                        faults: shared.faults().map(verified_file_data).collect(),
+                        not_yet_fetched: shared.not_yet_fetched().count(),
+                        loader_libraries_uncovered: shared.loader_libraries_uncovered,
+                    })
+                    .map_err(|error| localized_error(&error)),
+            )
+        }
+        InstalledHost::Server(_) => None,
+    };
+    Ok(VerificationData { files, shared })
+}
+
+fn verified_file_data(file: &ephervex_core::VerifiedFile) -> VerifiedFileData {
+    VerifiedFileData {
+        path: file.logical_path.display().to_string(),
+        integrity: file.integrity.as_str(),
+        sound: file.integrity.is_sound(),
+        repairable: file.integrity.is_repairable() && file.has_source,
+    }
+}
+
+fn repair_data(report: &ephervex_core::RepairReport, stopped: bool) -> RepairData {
+    let paths = |paths: &[PathBuf]| {
+        paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect()
+    };
+    RepairData {
+        repaired: paths(&report.repaired),
+        failed: paths(&report.failed),
+        unrepairable: paths(&report.unrepairable),
+        recovery: report
+            .recovery_issues
+            .iter()
+            .map(|issue| issue.path.display().to_string())
+            .collect(),
+        stopped,
+    }
+}
+
 fn isolation_plan_basis(plan: &IsolationPlan) -> u64 {
     use std::hash::{DefaultHasher, Hash as _, Hasher as _};
     let mut hasher = DefaultHasher::new();
@@ -7918,22 +8136,50 @@ mod tests {
     }
 
     #[test]
-    fn a_host_cannot_start_while_isolation_rewrites_its_mods() {
-        let hosts: IsolatingHosts = Arc::new(Mutex::new(HashSet::new()));
+    fn only_a_damaged_file_with_an_address_is_offered_to_repair() {
+        use ephervex_core::{Integrity, VerifiedFile};
+        let file = |integrity, has_source| {
+            verified_file_data(&VerifiedFile {
+                logical_path: PathBuf::from("mods/a.jar"),
+                integrity,
+                has_source,
+            })
+        };
+
+        assert!(file(Integrity::Absent, true).repairable);
+        assert!(file(Integrity::Corrupt, true).repairable);
+        assert!(file(Integrity::Unreadable, true).repairable);
+        let shipped = file(Integrity::Corrupt, false);
+        assert!(
+            !shipped.repairable && !shipped.sound,
+            "wrong, with nowhere to fetch it from"
+        );
+        let unproven = file(Integrity::Unverifiable, false);
+        assert!(
+            !unproven.repairable && unproven.sound,
+            "nothing proves it wrong"
+        );
+        assert!(!file(Integrity::Intact, true).repairable);
+    }
+
+    #[test]
+    fn a_host_cannot_start_while_a_change_rewrites_its_files() {
+        let hosts: ChangingHosts = Arc::new(Mutex::new(HashMap::new()));
         let (events, received) = mpsc::channel();
         let host = InstalledHost::Instance(ephervex_model::InstanceId::new());
         let other = InstalledHost::Server(ephervex_model::ServerId::new());
 
-        let in_flight = IsolationInFlight::mark(&hosts, host);
-        assert!(refuse_while_isolating(&hosts, host, &events));
-        assert!(matches!(
-            received.try_recv(),
-            Ok(Event::Toast { error: true, .. })
-        ));
-        assert!(!refuse_while_isolating(&hosts, other, &events));
+        let in_flight = HostChangeInFlight::mark(&hosts, host, "gui-repair-busy");
+        assert!(refuse_while_changing(&hosts, host, &events));
+        let refusal = received.try_recv().expect("a refusal");
+        assert!(
+            matches!(&refusal, Event::Toast { error: true, message } if *message == lookup("gui-repair-busy")),
+            "the change in flight is named: {refusal:?}"
+        );
+        assert!(!refuse_while_changing(&hosts, other, &events));
 
         drop(in_flight);
-        assert!(!refuse_while_isolating(&hosts, host, &events));
+        assert!(!refuse_while_changing(&hosts, host, &events));
         assert!(received.try_recv().is_err());
     }
 }

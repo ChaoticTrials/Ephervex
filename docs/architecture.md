@@ -152,8 +152,8 @@ of retained snapshots that deleting its files also removes.
 The desktop represents an installed client or local server with one reusable
 host workspace. The workspace owns the host header, running status, launch or
 process actions, data-driven surface navigation, and a small persistent area
-for a long-running host workflow. Overview, Mods, Isolation, Logs, and
-Snapshots remain independent surfaces beneath that boundary; server-only
+for a long-running host workflow. Overview, Mods, Isolation, Logs, Snapshots,
+and Diagnostics remain independent surfaces beneath that boundary; server-only
 surfaces are entries in the server's surface model rather than a separate
 container. Adding another host tool means adding a surface entry and its body,
 not another host header or navigation structure. More than one host workspace
@@ -166,6 +166,14 @@ the owning feature. Isolation currently uses that extension point for its
 current round, common answers, undo, finish, and detailed-view navigation. The
 same boundary can carry another durable developer workflow without moving its
 state into the visual container.
+
+One host-change state says which host a change is rewriting and what it is
+doing. An isolation change and a repair both claim it, so the workspace header,
+the Isolation answers, and Diagnostics read one answer, and each refuses to
+start while the other holds it. The worker keeps the matching guard: while an
+isolation start or cancel, a repair, or a snapshot capture or restore rewrites a
+host, launching or starting it and starting another of those changes on it are
+refused with a message naming the change in progress.
 
 ## Dependency-aware mod isolation
 
@@ -845,6 +853,24 @@ plus a recorded address. Telling somebody to repair an instance that repairing
 cannot mend is worse than telling them nothing, so files with no address are
 reported separately. Acting on a report is a separate request: "this file is
 wrong" and "replace this file" are different decisions.
+
+A repair is refused while the host runs, because it moves jars the game may
+have open, and while an isolation session is active, because it would put back
+files the current round turned off. A jar that was turned off stays off: its
+replacement is renamed back out of the loader's way, and a failed repair puts
+the broken copy back under the name it had. A canceled verification is reported
+as canceled rather than as a shorter report that reads as complete.
+
+The desktop exposes both on each host workspace's Diagnostics surface.
+Verification runs as an ordinary cancellable operation and shows its current
+file; the result separates what a repair replaces, what nothing can fetch again,
+and what has no checksum to prove it either way. Repair shows those lists before
+it runs, claims the host-change state while it runs, and checks the host again
+afterwards, so what the surface shows is what is on disk. When a failed rollback
+leaves files in launcher scratch, the surface names them and the host keeps its
+recorded attention. Shared launch files are checked for clients only, because
+core checks them against a client's release metadata; a server's surface says
+so.
 
 
 ## Diagnostic bundles

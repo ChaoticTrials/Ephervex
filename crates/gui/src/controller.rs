@@ -35,10 +35,10 @@ use crate::presentation::{
 };
 use crate::ui::{
     AccountRow, ActivityRow, AppWindow, BlockedFileRow, DiagnosticRow, GuiI18n, ImpactRow,
-    ImportDuplicateRow, ImportOptionRow, InstanceRow, IsolationCandidateRow, JavaRow, LicenseRow,
-    LinkedTargetRow, LocalModClashRow, LogChunk, ModRow, ModSearchRow, ModVersionRow,
-    PendingEntityRow, PromoteServerRow, RelationRow, RunningRow, ServerRow, SnapshotRow, Theme,
-    WindowSizePreview, WorkflowActionRow,
+    ImportDuplicateRow, ImportOptionRow, InstanceRow, IntegrityFindingRow, IsolationCandidateRow,
+    JavaRow, LicenseRow, LinkedTargetRow, LocalModClashRow, LogChunk, ModRow, ModSearchRow,
+    ModVersionRow, PendingEntityRow, PromoteServerRow, RelationRow, RunningRow, ServerRow,
+    SnapshotRow, Theme, WindowSizePreview, WorkflowActionRow,
 };
 use crate::window_aspect;
 
@@ -1337,6 +1337,104 @@ impl IsolationFlowState {
     }
 }
 
+/// Verification or repair, the work the Diagnostics surface asks the worker for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IntegrityWork {
+    Verify,
+    Repair,
+}
+
+impl IntegrityWork {
+    /// The reported operation whose stage the surface shows, and which
+    /// stopping the work cancels.
+    const fn operation(self) -> &'static str {
+        match self {
+            Self::Verify => "operation-verifying-host",
+            Self::Repair => "operation-repairing-host",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PendingIntegrity {
+    request: u64,
+    host: InstalledHost,
+    work: IntegrityWork,
+    /// The operation's id once it first reports, which is what Stop cancels.
+    operation: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct IntegrityFlowState {
+    /// The host the Diagnostics surface was last opened on. A result about any
+    /// other host arrived too late to show.
+    host: Option<InstalledHost>,
+    last_request: u64,
+    /// The one verification or repair the worker has not finished. A second
+    /// request is refused here, before a second command can queue behind it.
+    pending: Option<PendingIntegrity>,
+    /// Whether the surface holds a finished verification of `host`.
+    checked: bool,
+    /// Every finding worth listing, kept whole for the filter.
+    findings: Vec<backend::VerifiedFileData>,
+    query: String,
+}
+
+impl IntegrityFlowState {
+    /// Points the surface at a host. Returns whether it changed, in which case
+    /// the previous host's findings are forgotten.
+    fn open(&mut self, host: InstalledHost) -> bool {
+        if self.host == Some(host) {
+            return false;
+        }
+        self.host = Some(host);
+        self.checked = false;
+        self.findings.clear();
+        self.query.clear();
+        true
+    }
+
+    /// Claims the single in-flight integrity work, or refuses while one runs.
+    fn dispatch(&mut self, host: InstalledHost, work: IntegrityWork) -> Option<u64> {
+        if self.pending.is_some() {
+            return None;
+        }
+        self.last_request = self.last_request.wrapping_add(1);
+        self.pending = Some(PendingIntegrity {
+            request: self.last_request,
+            host,
+            work,
+            operation: None,
+        });
+        Some(self.last_request)
+    }
+
+    /// Releases the work the worker reports finished.
+    fn settle(&mut self, request: u64) -> Option<PendingIntegrity> {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.request == request)
+        {
+            self.pending.take()
+        } else {
+            None
+        }
+    }
+
+    /// Whether a result belongs on the surface as it is now.
+    fn accepts(&self, host: InstalledHost, request: u64) -> bool {
+        self.host == Some(host) && request == self.last_request
+    }
+
+    fn working_on(&self, host: InstalledHost) -> Option<IntegrityWork> {
+        self.pending
+            .as_ref()
+            .filter(|pending| pending.host == host)
+            .map(|pending| pending.work)
+    }
+}
+
 /// Tracks one archive at a time through analysis, optional resolution,
 /// optional-file selection, and submission.
 ///
@@ -1797,6 +1895,7 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
     let mod_lists = Rc::new(RefCell::new(ModLists::default()));
     let local_mods = Rc::new(RefCell::new(LocalModDrop::default()));
     let isolation_flow = Rc::new(RefCell::new(IsolationFlowState::default()));
+    let integrity_flow = Rc::new(RefCell::new(IntegrityFlowState::default()));
     register_i18n(ui);
     register_toasts(ui);
     register_callbacks(
@@ -1810,6 +1909,7 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
         &mod_lists,
         &local_mods,
         &isolation_flow,
+        &integrity_flow,
         keys,
     );
 
@@ -1824,6 +1924,7 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
     let poll_mod_lists = Rc::clone(&mod_lists);
     let poll_local_mods = Rc::clone(&local_mods);
     let poll_isolation_flow = Rc::clone(&isolation_flow);
+    let poll_integrity_flow = Rc::clone(&integrity_flow);
     let poll_commands = backend.commands.clone();
     let poll_timer = Timer::default();
     poll_timer.start(TimerMode::Repeated, Duration::from_millis(80), move || {
@@ -1857,6 +1958,7 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
                     &poll_mod_lists,
                     &poll_local_mods,
                     &poll_isolation_flow,
+                    &poll_integrity_flow,
                     &poll_commands,
                 ),
             }
@@ -2181,6 +2283,7 @@ fn register_callbacks(
     mod_lists: &Rc<RefCell<ModLists>>,
     local_mods: &Rc<RefCell<LocalModDrop>>,
     isolation_flow: &Rc<RefCell<IsolationFlowState>>,
+    integrity_flow: &Rc<RefCell<IntegrityFlowState>>,
     keys: &BindingCapture,
 ) {
     register_catalog_actions(ui, commands);
@@ -2200,6 +2303,7 @@ fn register_callbacks(
     register_diagnostics(ui, commands);
     register_snapshot_actions(ui, commands);
     register_isolation_actions(ui, commands, isolation_flow);
+    register_integrity_actions(ui, commands, integrity_flow);
     register_live_viewer(ui, commands, live_viewer);
     register_settings(ui, commands);
     register_minecraft_defaults(ui, commands, minecraft, keys);
@@ -5359,19 +5463,22 @@ fn claim_isolation_change(
     host: InstalledHost,
     mutation: IsolationMutation,
 ) -> Option<u64> {
+    if state.pending.is_none() && refuse_while_host_changes(ui) {
+        return None;
+    }
     let request = state.dispatch(host, mutation)?;
     if let Some(ui) = ui.upgrade() {
-        ui.set_isolation_busy_kind(isolation_host_kind(host).into());
-        ui.set_isolation_busy_id(host.id().into());
-        ui.set_isolation_busy_text(lookup(mutation.busy_message()).into());
+        ui.set_host_busy_kind(isolation_host_kind(host).into());
+        ui.set_host_busy_id(host.id().into());
+        ui.set_host_busy_text(lookup(mutation.busy_message()).into());
     }
     Some(request)
 }
 
-fn clear_isolation_busy(ui: &AppWindow) {
-    ui.set_isolation_busy_kind(SharedString::default());
-    ui.set_isolation_busy_id(SharedString::default());
-    ui.set_isolation_busy_text(SharedString::default());
+fn clear_host_busy(ui: &AppWindow) {
+    ui.set_host_busy_kind(SharedString::default());
+    ui.set_host_busy_id(SharedString::default());
+    ui.set_host_busy_text(SharedString::default());
 }
 
 /// Shows the pending change's reported stage, such as the safety snapshot
@@ -5389,8 +5496,413 @@ fn apply_isolation_stage(ui: &AppWindow, state: &IsolationFlowState, activity: &
         && activity.item.title == lookup(operation)
         && !activity.item.detail.is_empty()
     {
-        ui.set_isolation_busy_text(activity.item.detail.clone().into());
+        ui.set_host_busy_text(activity.item.detail.clone().into());
     }
+}
+
+/// Refuses a new host change while another one owns the host-change state,
+/// saying so, because every surface reads that one state.
+fn refuse_while_host_changes(ui: &slint::Weak<AppWindow>) -> bool {
+    let Some(ui) = ui.upgrade() else {
+        return false;
+    };
+    if ui.get_host_busy_id().is_empty() {
+        return false;
+    }
+    ui.invoke_present_toast(lookup("gui-host-change-wait").into(), true);
+    true
+}
+
+/// Shows the Diagnostics surface for the host it was just opened on.
+fn show_integrity_host(ui: &AppWindow, state: &IntegrityFlowState, host: InstalledHost) {
+    ui.set_integrity_host_kind(isolation_host_kind(host).into());
+    ui.set_integrity_host_id(host.id().into());
+    let shown = match state.working_on(host) {
+        Some(IntegrityWork::Verify) => "verifying",
+        _ if state.checked => "checked",
+        _ => "unchecked",
+    };
+    ui.set_integrity_state(shown.into());
+    if state.checked {
+        return;
+    }
+    ui.set_integrity_progress(SharedString::default());
+    ui.set_integrity_summary(SharedString::default());
+    ui.set_integrity_counts(SharedString::default());
+    ui.set_integrity_checked_at(SharedString::default());
+    ui.set_integrity_query(SharedString::default());
+    ui.set_integrity_repair_targets(string_model(Vec::new()));
+    ui.set_integrity_unrepairable(string_model(Vec::new()));
+    ui.set_integrity_shared_summary(SharedString::default());
+    ui.set_integrity_shared_faults(model(Vec::new()));
+    ui.set_integrity_shared_notes(string_model(Vec::new()));
+    ui.set_integrity_repair_result(SharedString::default());
+    ui.set_integrity_repair_failed(false);
+    ui.set_integrity_recovery(string_model(Vec::new()));
+    render_integrity_findings(ui, state);
+}
+
+/// The word for one core integrity answer.
+fn integrity_label(integrity: &str) -> &'static str {
+    match integrity {
+        "absent" => "gui-integrity-absent",
+        "corrupt" => "gui-integrity-corrupt",
+        "unreadable" => "gui-integrity-unreadable",
+        _ => "gui-integrity-unverifiable",
+    }
+}
+
+fn integrity_row(file: &backend::VerifiedFileData) -> IntegrityFindingRow {
+    IntegrityFindingRow {
+        path: file.path.clone().into(),
+        integrity: file.integrity.into(),
+        label: lookup(integrity_label(file.integrity)).into(),
+        handling: if file.repairable {
+            "repair"
+        } else if file.sound {
+            "info"
+        } else {
+            "manual"
+        }
+        .into(),
+    }
+}
+
+fn render_integrity_findings(ui: &AppWindow, state: &IntegrityFlowState) {
+    let query = state.query.trim().to_lowercase();
+    ui.set_integrity_finding_total(i32::try_from(state.findings.len()).unwrap_or(i32::MAX));
+    ui.set_integrity_findings(model(
+        state
+            .findings
+            .iter()
+            .filter(|file| query.is_empty() || file.path.to_lowercase().contains(&query))
+            .map(integrity_row)
+            .collect(),
+    ));
+}
+
+/// Shows what a verification found, if it is still about the host on screen.
+fn apply_host_verified(
+    ui: &AppWindow,
+    state: &mut IntegrityFlowState,
+    host: InstalledHost,
+    request: u64,
+    data: &backend::VerificationData,
+) {
+    if !state.accepts(host, request) {
+        return;
+    }
+    let count = |integrity: &str| {
+        data.files
+            .iter()
+            .filter(|file| file.integrity == integrity)
+            .count()
+    };
+    let problems = data.files.iter().filter(|file| !file.sound).count();
+    let shared_faults = match &data.shared {
+        Some(Ok(shared)) => shared.faults.len(),
+        _ => 0,
+    };
+    let summary = if problems > 0 {
+        lookup_args("gui-integrity-problems", [("count", Arg::from(problems))])
+    } else if shared_faults > 0 {
+        lookup_args(
+            "gui-integrity-shared-faults",
+            [("count", Arg::from(shared_faults))],
+        )
+    } else if data.files.is_empty() {
+        lookup("gui-integrity-nothing-recorded")
+    } else {
+        lookup("gui-integrity-healthy")
+    };
+    let counts: Vec<String> = [
+        ("intact", "gui-integrity-count-intact"),
+        ("absent", "gui-integrity-count-absent"),
+        ("corrupt", "gui-integrity-count-corrupt"),
+        ("unreadable", "gui-integrity-count-unreadable"),
+        ("unverifiable", "gui-integrity-count-unverifiable"),
+    ]
+    .into_iter()
+    .filter_map(|(integrity, message)| {
+        let found = count(integrity);
+        (found > 0).then(|| lookup_args(message, [("count", Arg::from(found))]))
+    })
+    .collect();
+
+    // What a repair would act on comes first, then what it cannot fix, then
+    // what nothing proves either way.
+    let mut findings: Vec<backend::VerifiedFileData> = data
+        .files
+        .iter()
+        .filter(|file| file.integrity != "intact")
+        .cloned()
+        .collect();
+    let rank = |file: &backend::VerifiedFileData| {
+        if file.repairable {
+            0
+        } else if !file.sound {
+            1
+        } else {
+            2
+        }
+    };
+    findings.sort_by(|left, right| {
+        rank(left)
+            .cmp(&rank(right))
+            .then_with(|| left.path.to_lowercase().cmp(&right.path.to_lowercase()))
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    let repair_targets = findings
+        .iter()
+        .filter(|file| file.repairable)
+        .map(|file| file.path.clone())
+        .collect();
+    let unrepairable = findings
+        .iter()
+        .filter(|file| !file.sound && !file.repairable)
+        .map(|file| file.path.clone())
+        .collect();
+    state.checked = true;
+    state.findings = findings;
+
+    let (shared_summary, shared_faults_rows, shared_notes) =
+        shared_integrity_view(data.shared.as_ref());
+
+    ui.set_integrity_summary(summary.into());
+    ui.set_integrity_healthy(problems == 0 && shared_faults == 0);
+    ui.set_integrity_counts(counts.join(", ").into());
+    ui.set_integrity_checked_at(
+        lookup_args(
+            "gui-integrity-checked-at",
+            [(
+                "value",
+                Arg::from(chrono::Local::now().format("%H:%M").to_string()),
+            )],
+        )
+        .into(),
+    );
+    ui.set_integrity_repair_targets(string_model(repair_targets));
+    ui.set_integrity_unrepairable(string_model(unrepairable));
+    ui.set_integrity_shared_summary(shared_summary.into());
+    ui.set_integrity_shared_faults(model(shared_faults_rows));
+    ui.set_integrity_shared_notes(string_model(shared_notes));
+    ui.set_integrity_state("checked".into());
+    render_integrity_findings(ui, state);
+}
+
+/// The shared launch files section: a summary, the damaged files, and notes
+/// about what was not checked or not fetched yet. Empty for a server.
+fn shared_integrity_view(
+    shared: Option<&Result<backend::SharedArtifactData, String>>,
+) -> (String, Vec<IntegrityFindingRow>, Vec<String>) {
+    let shared = match shared {
+        None => return (String::new(), Vec::new(), Vec::new()),
+        Some(Err(message)) => return (message.clone(), Vec::new(), Vec::new()),
+        Some(Ok(shared)) => shared,
+    };
+    let summary = if !shared.metadata_cached {
+        lookup("gui-integrity-shared-not-cached")
+    } else if shared.faults.is_empty() {
+        lookup_args(
+            "gui-integrity-shared-sound",
+            [("count", Arg::from(shared.checked))],
+        )
+    } else {
+        lookup_args(
+            "gui-integrity-shared-faults",
+            [("count", Arg::from(shared.faults.len()))],
+        )
+    };
+    let mut notes = Vec::new();
+    if shared.not_yet_fetched > 0 {
+        notes.push(lookup_args(
+            "gui-integrity-shared-waiting",
+            [("count", Arg::from(shared.not_yet_fetched))],
+        ));
+    }
+    if shared.loader_libraries_uncovered {
+        notes.push(lookup("gui-integrity-shared-loader"));
+    }
+    (
+        summary,
+        shared.faults.iter().map(integrity_row).collect(),
+        notes,
+    )
+}
+
+/// Shows what a repair did. Its findings are out of date until the check
+/// that follows it arrives.
+fn apply_host_repaired(
+    ui: &AppWindow,
+    state: &IntegrityFlowState,
+    host: InstalledHost,
+    request: u64,
+    data: &backend::RepairData,
+) {
+    if !state.accepts(host, request) {
+        return;
+    }
+    let repaired = Arg::from(data.repaired.len());
+    let mut result = if data.stopped {
+        lookup_args("gui-integrity-repair-stopped", [("count", repaired)])
+    } else {
+        lookup_args("gui-integrity-repaired", [("count", repaired)])
+    };
+    if !data.failed.is_empty() {
+        result.push(' ');
+        result.push_str(&lookup_args(
+            "gui-integrity-repair-failed",
+            [("count", Arg::from(data.failed.len()))],
+        ));
+    }
+    ui.set_integrity_repair_result(result.into());
+    ui.set_integrity_repair_failed(!data.failed.is_empty());
+    ui.set_integrity_recovery(string_model(data.recovery.clone()));
+    ui.set_integrity_state("stale".into());
+}
+
+/// Releases finished integrity work and whatever it held on screen.
+fn settle_integrity(ui: &AppWindow, state: &mut IntegrityFlowState, request: u64) {
+    let Some(pending) = state.settle(request) else {
+        return;
+    };
+    if pending.work == IntegrityWork::Repair && ui.get_host_busy_id() == pending.host.id() {
+        clear_host_busy(ui);
+    }
+    // A verification that ended without a result, canceled or failed, leaves
+    // what was on screen before it.
+    if state.host == Some(pending.host) && ui.get_integrity_state() == "verifying" {
+        ui.set_integrity_state(
+            if state.checked {
+                "checked"
+            } else {
+                "unchecked"
+            }
+            .into(),
+        );
+    }
+}
+
+/// Records the running work's operation, so it can be stopped, and shows the
+/// stage it reports.
+fn apply_integrity_activity(
+    ui: &AppWindow,
+    state: &mut IntegrityFlowState,
+    activity: &ActivityData,
+) {
+    let shown = state.host;
+    let Some(pending) = state.pending.as_mut() else {
+        return;
+    };
+    if activity.entity != pending.host.id()
+        || activity.item.title != lookup(pending.work.operation())
+        || !matches!(activity.item.status_kind, "queued" | "running")
+    {
+        return;
+    }
+    pending.operation = Some(activity.item.id.clone());
+    if activity.item.detail.is_empty() {
+        return;
+    }
+    match pending.work {
+        IntegrityWork::Verify if shown == Some(pending.host) => {
+            ui.set_integrity_progress(activity.item.detail.clone().into());
+        }
+        IntegrityWork::Repair if ui.get_host_busy_id() == pending.host.id() => {
+            ui.set_host_busy_text(activity.item.detail.clone().into());
+        }
+        _ => {}
+    }
+}
+
+fn register_integrity_actions(
+    ui: &AppWindow,
+    commands: &Sender<Command>,
+    flow: &Rc<RefCell<IntegrityFlowState>>,
+) {
+    let state = Rc::clone(flow);
+    let weak = ui.as_weak();
+    ui.on_open_integrity(move |kind, id| {
+        let (Some(host), Some(ui)) = (backend::parse_mod_host(&kind, &id), weak.upgrade()) else {
+            return;
+        };
+        let mut state = state.borrow_mut();
+        state.open(host);
+        show_integrity_host(&ui, &state, host);
+    });
+
+    let sender = commands.clone();
+    let state = Rc::clone(flow);
+    let weak = ui.as_weak();
+    ui.on_verify_host(move |kind, id| {
+        let (Some(host), Some(ui)) = (backend::parse_mod_host(&kind, &id), weak.upgrade()) else {
+            return;
+        };
+        let mut state = state.borrow_mut();
+        if state.host != Some(host) {
+            return;
+        }
+        let Some(request) = state.dispatch(host, IntegrityWork::Verify) else {
+            ui.invoke_present_toast(lookup("gui-integrity-wait").into(), true);
+            return;
+        };
+        ui.set_integrity_state("verifying".into());
+        ui.set_integrity_progress(SharedString::default());
+        ui.set_integrity_repair_result(SharedString::default());
+        ui.set_integrity_repair_failed(false);
+        ui.set_integrity_recovery(string_model(Vec::new()));
+        send(&sender, Command::VerifyHost { host, request });
+    });
+
+    let sender = commands.clone();
+    let state = Rc::clone(flow);
+    let weak = ui.as_weak();
+    ui.on_repair_host(move |kind, id| {
+        let (Some(host), Some(ui)) = (backend::parse_mod_host(&kind, &id), weak.upgrade()) else {
+            return;
+        };
+        let mut state = state.borrow_mut();
+        if state.host != Some(host) {
+            return;
+        }
+        if state.pending.is_some() {
+            ui.invoke_present_toast(lookup("gui-integrity-wait").into(), true);
+            return;
+        }
+        if refuse_while_host_changes(&weak) {
+            return;
+        }
+        let Some(request) = state.dispatch(host, IntegrityWork::Repair) else {
+            return;
+        };
+        ui.set_host_busy_kind(isolation_host_kind(host).into());
+        ui.set_host_busy_id(host.id().into());
+        ui.set_host_busy_text(lookup("operation-repairing-host").into());
+        send(&sender, Command::RepairHost { host, request });
+    });
+
+    let sender = commands.clone();
+    let state = Rc::clone(flow);
+    ui.on_stop_integrity_work(move || {
+        let operation = state
+            .borrow()
+            .pending
+            .as_ref()
+            .and_then(|pending| pending.operation.clone());
+        if let Some(operation) = operation {
+            send(&sender, Command::CancelOperation(operation));
+        }
+    });
+
+    let state = Rc::clone(flow);
+    let weak = ui.as_weak();
+    ui.on_filter_integrity_findings(move |query| {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        state.borrow_mut().query = query.into();
+        render_integrity_findings(&ui, &state.borrow());
+    });
 }
 
 const fn isolation_host_kind(host: InstalledHost) -> &'static str {
@@ -5949,6 +6461,7 @@ fn apply_event(
     mod_lists: &Rc<RefCell<ModLists>>,
     local_mods: &Rc<RefCell<LocalModDrop>>,
     isolation_flow: &Rc<RefCell<IsolationFlowState>>,
+    integrity_flow: &Rc<RefCell<IntegrityFlowState>>,
     commands: &Sender<Command>,
 ) {
     match event {
@@ -6168,6 +6681,7 @@ fn apply_event(
         Event::JavaRuntimes(rows) => ui.set_java_runtimes(model(java_rows(rows))),
         Event::Activity(activity) => {
             apply_isolation_stage(ui, &isolation_flow.borrow(), &activity);
+            apply_integrity_activity(ui, &mut integrity_flow.borrow_mut(), &activity);
             upsert_activity(&mut activities.borrow_mut(), activity);
             apply_activities(ui, &activities.borrow());
         }
@@ -6176,8 +6690,21 @@ fn apply_event(
         }
         Event::IsolationSettled { request } => {
             if isolation_flow.borrow_mut().settle(request) {
-                clear_isolation_busy(ui);
+                clear_host_busy(ui);
             }
+        }
+        Event::HostVerified {
+            host,
+            request,
+            data,
+        } => apply_host_verified(ui, &mut integrity_flow.borrow_mut(), host, request, &data),
+        Event::HostRepaired {
+            host,
+            request,
+            data,
+        } => apply_host_repaired(ui, &integrity_flow.borrow(), host, request, &data),
+        Event::IntegritySettled { request } => {
+            settle_integrity(ui, &mut integrity_flow.borrow_mut(), request);
         }
         Event::Toast { message, error } => {
             ui.invoke_present_toast(message.into(), error);
@@ -7968,11 +8495,8 @@ mod tests {
         let sent: Vec<_> = commands.try_iter().collect();
         assert_eq!(sent.len(), 1, "one round answered once: {sent:?}");
         assert!(matches!(sent[0], Command::AnswerIsolation { .. }));
-        assert_eq!(ui.get_isolation_busy_id(), host.as_str());
-        assert_eq!(
-            ui.get_isolation_busy_text(),
-            lookup("gui-isolation-busy-answer")
-        );
+        assert_eq!(ui.get_host_busy_id(), host.as_str());
+        assert_eq!(ui.get_host_busy_text(), lookup("gui-isolation-busy-answer"));
     }
 
     #[test]
@@ -8014,7 +8538,7 @@ mod tests {
             panic!("a retry asks the worker to reconcile: {sent:?}");
         };
         assert_eq!(
-            ui.get_isolation_busy_text(),
+            ui.get_host_busy_text(),
             lookup("gui-isolation-busy-recover")
         );
 
@@ -8024,7 +8548,7 @@ mod tests {
         still_blocked.recovery_detail = "The jar is missing.".to_owned();
         apply_isolation_data(&ui, still_blocked, false, &flow);
         assert!(flow.borrow_mut().settle(request));
-        clear_isolation_busy(&ui);
+        clear_host_busy(&ui);
         assert_eq!(ui.get_isolation_recovery_detail(), "The jar is missing.");
         ui.invoke_answer_isolation("client".into(), host.as_str().into(), "present".into());
         assert!(commands.try_recv().is_err());
@@ -8036,7 +8560,7 @@ mod tests {
         };
         apply_isolation_data(&ui, isolation_data(&host, true, "round"), false, &flow);
         assert!(flow.borrow_mut().settle(request));
-        clear_isolation_busy(&ui);
+        clear_host_busy(&ui);
         assert_eq!(ui.get_isolation_recovery(), "");
         ui.invoke_retry_isolation_recovery("client".into(), host.as_str().into());
         assert!(commands.try_recv().is_err(), "nothing to recover any more");
@@ -8074,8 +8598,8 @@ mod tests {
         );
 
         assert!(flow.borrow_mut().settle(request));
-        clear_isolation_busy(&ui);
-        assert_eq!(ui.get_isolation_busy_id(), "");
+        clear_host_busy(&ui);
+        assert_eq!(ui.get_host_busy_id(), "");
         ui.invoke_cancel_isolation("client".into(), host.as_str().into());
         assert!(matches!(
             commands.try_recv(),
@@ -8105,9 +8629,335 @@ mod tests {
         );
         assert_eq!(ui.get_isolation_phase(), "setup");
         assert_eq!(
-            ui.get_isolation_busy_text(),
+            ui.get_host_busy_text(),
             lookup("operation-starting-isolation")
         );
+    }
+
+    fn verified(
+        path: &str,
+        integrity: &'static str,
+        repairable: bool,
+    ) -> backend::VerifiedFileData {
+        backend::VerifiedFileData {
+            path: path.to_owned(),
+            integrity,
+            sound: matches!(integrity, "intact" | "unverifiable"),
+            repairable,
+        }
+    }
+
+    /// A window with the Diagnostics surface opened on one client.
+    fn integrity_surface() -> (
+        AppWindow,
+        std::sync::mpsc::Receiver<Command>,
+        Rc<RefCell<IntegrityFlowState>>,
+        InstalledHost,
+    ) {
+        let ui = test_window();
+        let (sender, commands) = std::sync::mpsc::channel();
+        let flow = Rc::new(RefCell::new(IntegrityFlowState::default()));
+        register_integrity_actions(&ui, &sender, &flow);
+        let host = InstalledHost::Instance(ephervex_model::InstanceId::new());
+        ui.invoke_open_integrity("client".into(), host.id().into());
+        (ui, commands, flow, host)
+    }
+
+    fn sent_request(commands: &std::sync::mpsc::Receiver<Command>) -> u64 {
+        match commands.try_recv() {
+            Ok(Command::VerifyHost { request, .. } | Command::RepairHost { request, .. }) => {
+                request
+            }
+            other => panic!("expected integrity work, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn each_integrity_answer_stays_distinct_and_repairs_are_listed_first() {
+        let (ui, commands, flow, host) = integrity_surface();
+        ui.invoke_verify_host("client".into(), host.id().into());
+        let request = sent_request(&commands);
+        assert_eq!(ui.get_integrity_state(), "verifying");
+
+        let data = backend::VerificationData {
+            files: vec![
+                verified("mods/sound.jar", "intact", false),
+                verified("mods/shipped.jar", "unverifiable", false),
+                verified("mods/Zeta.jar", "corrupt", true),
+                verified("mods/gone.jar", "absent", true),
+                verified("mods/locked.jar", "unreadable", false),
+            ],
+            shared: None,
+        };
+        apply_host_verified(&ui, &mut flow.borrow_mut(), host, request, &data);
+
+        assert_eq!(ui.get_integrity_state(), "checked");
+        assert!(!ui.get_integrity_healthy());
+        assert_eq!(
+            ui.get_integrity_summary(),
+            lookup_args("gui-integrity-problems", [("count", Arg::from(3))]).as_str()
+        );
+        let rows: Vec<(String, String, String)> = ui
+            .get_integrity_findings()
+            .iter()
+            .map(|row| {
+                (
+                    row.path.to_string(),
+                    row.integrity.to_string(),
+                    row.handling.to_string(),
+                )
+            })
+            .collect();
+        let expected = [
+            ("mods/gone.jar", "absent", "repair"),
+            ("mods/Zeta.jar", "corrupt", "repair"),
+            ("mods/locked.jar", "unreadable", "manual"),
+            ("mods/shipped.jar", "unverifiable", "info"),
+        ];
+        assert_eq!(
+            rows,
+            expected.map(|(path, integrity, handling)| (
+                path.to_owned(),
+                integrity.to_owned(),
+                handling.to_owned()
+            ))
+        );
+        let targets: Vec<String> = ui
+            .get_integrity_repair_targets()
+            .iter()
+            .map(|path| path.to_string())
+            .collect();
+        assert_eq!(
+            targets,
+            ["mods/gone.jar", "mods/Zeta.jar"],
+            "only what a repair can fetch"
+        );
+        let unrepairable: Vec<String> = ui
+            .get_integrity_unrepairable()
+            .iter()
+            .map(|path| path.to_string())
+            .collect();
+        assert_eq!(unrepairable, ["mods/locked.jar"]);
+        for message in [
+            "gui-integrity-count-intact",
+            "gui-integrity-count-absent",
+            "gui-integrity-count-corrupt",
+            "gui-integrity-count-unreadable",
+            "gui-integrity-count-unverifiable",
+        ] {
+            let part = lookup_args(message, [("count", Arg::from(1))]);
+            assert!(
+                ui.get_integrity_counts().contains(part.as_str()),
+                "{message}"
+            );
+        }
+
+        ui.invoke_filter_integrity_findings("zeta".into());
+        assert_eq!(ui.get_integrity_findings().row_count(), 1);
+        assert_eq!(
+            ui.get_integrity_finding_total(),
+            4,
+            "the filter hides, it does not drop"
+        );
+    }
+
+    #[test]
+    fn a_host_with_nothing_wrong_is_reported_healthy_with_nothing_to_repair() {
+        let (ui, commands, flow, host) = integrity_surface();
+        ui.invoke_verify_host("client".into(), host.id().into());
+        let request = sent_request(&commands);
+        let data = backend::VerificationData {
+            files: vec![
+                verified("mods/sound.jar", "intact", false),
+                verified("mods/shipped.jar", "unverifiable", false),
+            ],
+            shared: Some(Ok(backend::SharedArtifactData {
+                metadata_cached: true,
+                checked: 40,
+                faults: Vec::new(),
+                not_yet_fetched: 3,
+                loader_libraries_uncovered: true,
+            })),
+        };
+        apply_host_verified(&ui, &mut flow.borrow_mut(), host, request, &data);
+
+        assert!(ui.get_integrity_healthy());
+        assert_eq!(
+            ui.get_integrity_summary(),
+            lookup("gui-integrity-healthy").as_str()
+        );
+        assert_eq!(ui.get_integrity_repair_targets().row_count(), 0);
+        assert_eq!(ui.get_integrity_unrepairable().row_count(), 0);
+        let notes: Vec<String> = ui
+            .get_integrity_shared_notes()
+            .iter()
+            .map(|note| note.to_string())
+            .collect();
+        assert_eq!(
+            notes,
+            [
+                lookup_args("gui-integrity-shared-waiting", [("count", Arg::from(3))]),
+                lookup("gui-integrity-shared-loader"),
+            ],
+            "a shared file not downloaded yet is reported as that, not as damage"
+        );
+    }
+
+    #[test]
+    fn a_late_verification_of_another_host_is_not_shown() {
+        let (ui, commands, flow, first) = integrity_surface();
+        ui.invoke_verify_host("client".into(), first.id().into());
+        let request = sent_request(&commands);
+        let second = InstalledHost::Server(ephervex_model::ServerId::new());
+        ui.invoke_open_integrity("server".into(), second.id().into());
+        assert_eq!(ui.get_integrity_state(), "unchecked");
+
+        let data = backend::VerificationData {
+            files: vec![verified("mods/gone.jar", "absent", true)],
+            shared: None,
+        };
+        apply_host_verified(&ui, &mut flow.borrow_mut(), first, request, &data);
+        assert_eq!(ui.get_integrity_state(), "unchecked");
+        assert_eq!(ui.get_integrity_repair_targets().row_count(), 0);
+
+        ui.invoke_open_integrity("client".into(), first.id().into());
+        assert_eq!(
+            ui.get_integrity_state(),
+            "verifying",
+            "coming back finds the verification still running"
+        );
+    }
+
+    #[test]
+    fn one_verification_or_repair_runs_at_a_time() {
+        let (ui, commands, flow, host) = integrity_surface();
+        ui.invoke_verify_host("client".into(), host.id().into());
+        ui.invoke_verify_host("client".into(), host.id().into());
+        ui.invoke_repair_host("client".into(), host.id().into());
+        let request = sent_request(&commands);
+        assert!(commands.try_recv().is_err(), "a second request waits");
+
+        settle_integrity(&ui, &mut flow.borrow_mut(), request);
+        assert_eq!(
+            ui.get_integrity_state(),
+            "unchecked",
+            "a verification that ended without a result leaves the earlier state"
+        );
+        ui.invoke_verify_host("client".into(), host.id().into());
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::VerifyHost { .. })
+        ));
+    }
+
+    #[test]
+    fn a_repair_claims_the_host_and_waits_for_a_change_already_running() {
+        let (ui, commands, flow, host) = integrity_surface();
+        ui.set_host_busy_kind("client".into());
+        ui.set_host_busy_id("elsewhere".into());
+        ui.invoke_repair_host("client".into(), host.id().into());
+        assert!(
+            commands.try_recv().is_err(),
+            "an isolation change owns the host state"
+        );
+
+        clear_host_busy(&ui);
+        ui.invoke_repair_host("client".into(), host.id().into());
+        let request = sent_request(&commands);
+        assert_eq!(ui.get_host_busy_id(), host.id().as_str());
+        assert_eq!(
+            ui.get_host_busy_text(),
+            lookup("operation-repairing-host").as_str()
+        );
+
+        // Isolation reads the same state, so it waits for the repair.
+        let (isolation_sender, isolation_commands) = std::sync::mpsc::channel();
+        let isolation = Rc::new(RefCell::new(IsolationFlowState::default()));
+        register_isolation_actions(&ui, &isolation_sender, &isolation);
+        isolation.borrow_mut().host = Some(host);
+        ui.invoke_start_isolation("client".into(), host.id().into(), false, false);
+        assert!(isolation_commands.try_recv().is_err());
+
+        settle_integrity(&ui, &mut flow.borrow_mut(), request);
+        assert_eq!(ui.get_host_busy_id(), "");
+    }
+
+    #[test]
+    fn a_repair_leaves_its_findings_stale_until_the_check_after_it() {
+        let (ui, commands, flow, host) = integrity_surface();
+        ui.invoke_repair_host("client".into(), host.id().into());
+        let request = sent_request(&commands);
+
+        apply_host_repaired(
+            &ui,
+            &flow.borrow(),
+            host,
+            request,
+            &backend::RepairData {
+                repaired: vec!["mods/gone.jar".to_owned()],
+                failed: vec!["mods/far.jar".to_owned()],
+                recovery: vec!["/instance/.launcher/retired/far.jar".to_owned()],
+                ..backend::RepairData::default()
+            },
+        );
+        assert_eq!(ui.get_integrity_state(), "stale");
+        assert!(ui.get_integrity_repair_failed());
+        assert_eq!(
+            ui.get_integrity_recovery().row_count(),
+            1,
+            "what a failed rollback left behind stays named"
+        );
+        assert!(
+            ui.get_integrity_repair_result().contains(
+                lookup_args("gui-integrity-repaired", [("count", Arg::from(1))]).as_str()
+            )
+        );
+
+        let data = backend::VerificationData {
+            files: vec![verified("mods/gone.jar", "intact", false)],
+            shared: None,
+        };
+        apply_host_verified(&ui, &mut flow.borrow_mut(), host, request, &data);
+        assert_eq!(ui.get_integrity_state(), "checked");
+        assert!(
+            ui.get_integrity_healthy(),
+            "no stale damaged row survives the repair"
+        );
+        assert_eq!(ui.get_integrity_findings().row_count(), 0);
+        assert!(
+            !ui.get_integrity_repair_result().is_empty(),
+            "the repair's own result stays"
+        );
+    }
+
+    #[test]
+    fn stopping_integrity_work_cancels_its_reported_operation() {
+        let (ui, commands, flow, host) = integrity_surface();
+        ui.invoke_verify_host("client".into(), host.id().into());
+        let _ = sent_request(&commands);
+        let activity = ActivityData {
+            item: crate::presentation::ActivityPresentation {
+                id: "operation-7".to_owned(),
+                title: lookup("operation-verifying-host"),
+                status: String::new(),
+                status_kind: "running",
+                detail: "mods/big.jar".to_owned(),
+                progress: 0.5,
+                indeterminate: false,
+                cancellable: true,
+                failed: false,
+            },
+            entity: host.id(),
+            time: String::new(),
+        };
+        apply_integrity_activity(&ui, &mut flow.borrow_mut(), &activity);
+        assert_eq!(ui.get_integrity_progress(), "mods/big.jar");
+
+        ui.invoke_stop_integrity_work();
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::CancelOperation(operation)) if operation == "operation-7"
+        ));
     }
 
     #[test]
@@ -8146,14 +8996,14 @@ mod tests {
                 "Elsewhere",
             ),
         );
-        assert_eq!(ui.get_isolation_busy_text(), "");
+        assert_eq!(ui.get_host_busy_text(), "");
         let stage = lookup("operation-stage-snapshot-isolation");
         apply_isolation_stage(
             &ui,
             &flow,
             &activity(host.id(), "operation-starting-isolation", &stage),
         );
-        assert_eq!(ui.get_isolation_busy_text(), stage.as_str());
+        assert_eq!(ui.get_host_busy_text(), stage.as_str());
     }
 
     fn planned_setup(

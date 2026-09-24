@@ -1112,7 +1112,9 @@ gui-isolation-canceled = Isolation canceled. The pre-isolation state was restore
 gui-isolation-busy-answer = Recording the answer and applying the next mod setup
 gui-isolation-busy-undo = Restoring the previous round's mod setup
 gui-isolation-busy-finish = Finishing isolation and keeping the tested setup
-gui-isolation-busy-launch = Isolation is still changing this host's mods. Launch it again once that finishes.
+gui-isolation-busy = Isolation is still changing this host's mods. Try again once that finishes.
+gui-snapshot-busy = A snapshot of this host is still being taken or restored. Try again once that finishes.
+gui-repair-busy = A repair is still replacing this host's files. Try again once it finishes.
 gui-isolation-busy-recover = Reapplying the current round's mod setup
 gui-isolation-reapplied = This host's mods did not match the current isolation round, so Ephervex reapplied the round's mod setup. Test the round before answering.
 gui-isolation-recovery-summary = The current round's mod setup must be reapplied before it can be answered.
@@ -1124,6 +1126,87 @@ gui-snapshot-created = Snapshot created.
 gui-snapshot-restored = Snapshot restored.
 gui-snapshot-renamed = Snapshot renamed.
 gui-snapshot-deleted = Snapshot deleted.
+## Diagnostics: verification and repair
+
+gui-diagnostics-tab = Diagnostics
+operation-verifying-host = Verifying files
+operation-repairing-host = Repairing files
+operation-stage-checking-shared-files = Checking shared launch files
+operation-stage-rechecking-host = Checking the files again
+gui-integrity-title = Files
+gui-integrity-detail = Checks every file this host records against the checksum recorded for it. Nothing is changed or downloaded.
+gui-integrity-verify = Verify files
+gui-integrity-stop = Stop
+gui-integrity-open-logs = Open logs
+gui-integrity-unchecked = Not checked yet. Verifying reads every recorded file, which can take a while for a large pack.
+gui-integrity-nothing-recorded = Nothing is recorded for this host, so there is nothing to check.
+gui-integrity-healthy = No problems found.
+gui-integrity-problems = { $count ->
+    [one] One recorded file is missing or damaged.
+   *[other] { $count } recorded files are missing or damaged.
+}
+gui-integrity-count-intact = { $count } intact
+gui-integrity-count-absent = { $count } missing
+gui-integrity-count-corrupt = { $count } damaged
+gui-integrity-count-unreadable = { $count } unreadable
+gui-integrity-count-unverifiable = { $count } with no checksum to check against
+gui-integrity-checked-at = Checked at { $value }
+gui-integrity-stale = The files may have changed since this check. Verify again to see what is on disk now.
+gui-integrity-findings = Findings
+gui-integrity-filter = Filter findings
+gui-integrity-no-match = No findings match "{ $value }".
+gui-integrity-absent = Missing
+gui-integrity-corrupt = Damaged
+gui-integrity-unreadable = Unreadable
+gui-integrity-unverifiable = No checksum
+gui-integrity-repair-title = Repair
+gui-integrity-repair-detail = Repair fetches each file below from its recorded source and checks it before replacing the broken copy. A file that cannot be fetched is left exactly where it was, and a mod that was turned off stays off.
+gui-integrity-repair-targets = { $count ->
+    [one] Repair will replace this file:
+   *[other] Repair will replace these { $count } files:
+}
+gui-integrity-unrepairable = { $count ->
+    [one] This file cannot be repaired here. The pack shipped it inside itself, so there is no address to fetch it from. Re-import the pack to get it back:
+   *[other] These { $count } files cannot be repaired here. The pack shipped them inside itself, so there is no address to fetch them from. Re-import the pack to get them back:
+}
+gui-integrity-repair = Repair files
+gui-integrity-repair-blocked-running = Stop this host to repair it. A repair moves jars the game may have open.
+gui-integrity-repair-blocked-isolation = Finish or cancel mod isolation to repair this host. A repair would put back mods the current round turned off.
+gui-integrity-repaired = { $count ->
+    [0] Nothing needed replacing.
+    [one] Repaired one file.
+   *[other] Repaired { $count } files.
+}
+gui-integrity-repair-stopped = { $count ->
+    [0] Repair stopped before replacing anything.
+    [one] Repair stopped after replacing one file.
+   *[other] Repair stopped after replacing { $count } files.
+}
+gui-integrity-repair-failed = { $count ->
+    [one] One file could not be replaced. Check the network connection and try again.
+   *[other] { $count } files could not be replaced. Check the network connection and try again.
+}
+gui-integrity-recovery = A broken file could not be put back after its repair failed. What was moved aside is kept here for review, and this host needs attention before it is changed again:
+gui-integrity-shared-title = Shared launch files
+gui-integrity-shared-detail = The Minecraft client JAR and libraries every instance of this release shares. Repair does not replace these.
+gui-integrity-shared-servers = Shared launch files are checked for clients only. This server's own recorded files are checked above.
+gui-integrity-shared-not-cached = Not checked: this Minecraft release has not been launched yet, so there is nothing cached to check against.
+gui-integrity-shared-sound = { $count ->
+    [one] One shared file checked, and it is intact.
+   *[other] { $count } shared files checked, none damaged.
+}
+gui-integrity-shared-faults = { $count ->
+    [one] One shared file is damaged or unreadable. Removing it from the shared library store makes the next launch download it again.
+   *[other] { $count } shared files are damaged or unreadable. Removing them from the shared library store makes the next launch download them again.
+}
+gui-integrity-shared-waiting = { $count ->
+    [one] One is not downloaded yet. Launching downloads it, so this is not damage.
+   *[other] { $count } are not downloaded yet. Launching downloads them, so this is not damage.
+}
+gui-integrity-shared-loader = The loader's own libraries are not part of this check.
+gui-host-change-wait = Another host's files are still being changed. Try again once that finishes.
+gui-integrity-wait = Another verification or repair is still running. Stop it or wait for it to finish.
+
 operation-creating-snapshot = Creating snapshot
 operation-restoring-snapshot = Restoring snapshot
 operation-renaming-snapshot = Renaming snapshot
