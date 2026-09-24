@@ -5,7 +5,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use ephervex_gui::ui::{AppWindow, GuiI18n, InstanceRow, ServerRow};
+use ephervex_gui::ui::{AppWindow, BundlePartRow, GuiI18n, InstanceRow, ServerRow};
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use i_slint_backend_testing::{
     AccessibleRole, ElementHandle, TestingBackend, TestingBackendOptions,
@@ -260,6 +260,102 @@ fn diagnostics_links_to_the_logs_surface() {
     }
 }
 
+fn bundle_rows(selected: bool) -> ModelRc<BundlePartRow> {
+    ModelRc::new(VecModel::from(vec![
+        BundlePartRow {
+            name: "logs/latest.log".into(),
+            kind: lookup("gui-bundle-kind-game-log").into(),
+            size: "2.0 KiB".into(),
+            selected,
+        },
+        BundlePartRow {
+            name: "crash-reports/crash-new.txt".into(),
+            kind: lookup("gui-bundle-kind-crash-report").into(),
+            size: "4.0 KiB".into(),
+            selected: false,
+        },
+    ]))
+}
+
+#[test]
+fn offered_bundle_parts_are_choices_and_export_waits_for_one() {
+    let ui = window();
+    let toggles = Rc::new(RefCell::new(Vec::new()));
+    let toggle_sink = Rc::clone(&toggles);
+    ui.on_toggle_bundle_part(move |name, selected| {
+        toggle_sink.borrow_mut().push((name.to_string(), selected));
+    });
+    let exports = Rc::new(RefCell::new(Vec::new()));
+    let export_sink = Rc::clone(&exports);
+    ui.on_export_bundle(move |kind, id| {
+        export_sink
+            .borrow_mut()
+            .push((kind.to_string(), id.to_string()));
+    });
+    for (server_host, kind, id) in host_kinds() {
+        checked_surface(&ui, server_host, false);
+        ui.set_bundle_parts(bundle_rows(true));
+        ui.set_bundle_selected_count(1);
+        settle(&ui);
+
+        assert!(visible(&ui, &lookup("gui-bundle-privacy")), "{kind}");
+        let switch = ElementHandle::find_by_accessible_label(&ui, "logs/latest.log")
+            .find(|element| element.accessible_role() == Some(AccessibleRole::Checkbox))
+            .expect("each offered part has its own switch");
+        assert_eq!(switch.accessible_checked(), Some(true));
+        switch.invoke_accessible_default_action();
+        assert_eq!(
+            toggles.borrow().last(),
+            Some(&("logs/latest.log".to_owned(), false))
+        );
+
+        assert!(enabled(&ui, "gui-bundle-export"));
+        button(&ui, "gui-bundle-export").mock_single_click(PointerEventButton::Left);
+        assert_eq!(
+            exports.borrow().last(),
+            Some(&(kind.to_owned(), id.to_owned()))
+        );
+
+        ui.set_bundle_parts(bundle_rows(false));
+        ui.set_bundle_selected_count(0);
+        settle(&ui);
+        assert!(!enabled(&ui, "gui-bundle-export"));
+        assert!(visible(&ui, &lookup("gui-bundle-choose-one")));
+    }
+}
+
+#[test]
+fn an_exported_bundle_says_where_it_went_and_can_be_shown() {
+    let ui = window();
+    let opened = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&opened);
+    ui.on_open_bundle_folder(move |path| sink.borrow_mut().push(path.to_string()));
+    for (server_host, _, _) in host_kinds() {
+        checked_surface(&ui, server_host, false);
+        ui.set_bundle_parts(bundle_rows(true));
+        ui.set_bundle_selected_count(1);
+        ui.set_bundle_result("Saved one file to /home/user/bundle.zip.".into());
+        ui.set_bundle_result_path("/home/user/bundle.zip".into());
+        settle(&ui);
+        assert!(visible(&ui, "Saved one file to /home/user/bundle.zip."));
+        button(&ui, "gui-bundle-show-folder").mock_single_click(PointerEventButton::Left);
+        assert_eq!(
+            opened.borrow().last().map(String::as_str),
+            Some("/home/user/bundle.zip")
+        );
+
+        ui.set_bundle_result(SharedString::default());
+        ui.set_bundle_result_path(SharedString::default());
+        ui.set_bundle_error("The disk is full.".into());
+        settle(&ui);
+        assert!(
+            visible(&ui, "The disk is full."),
+            "a failed export stays on screen"
+        );
+        ui.set_bundle_error(SharedString::default());
+    }
+}
+
 fn client_workspace(ui: &AppWindow, row: InstanceRow) {
     ui.set_loading(false);
     ui.set_page(0);
@@ -374,7 +470,10 @@ fn window() -> AppWindow {
         )
         .into()
     });
-    ui.window().set_size(PhysicalSize::new(1480, 900));
+    // Tall enough that the whole surface is on screen: the testing backend
+    // finds only what is within the window, and the bundle choice sits below
+    // the verification results.
+    ui.window().set_size(PhysicalSize::new(1480, 1400));
     ui.show().expect("show");
     ui
 }

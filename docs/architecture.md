@@ -896,6 +896,16 @@ taken, what was declined, and what was asked for and could not be read - a log
 that rotated away between choosing and writing is said out loud rather than
 quietly missing. One unreadable part never abandons the rest.
 
+The desktop builds its checklist on each host's Diagnostics surface from the
+planner's own offer, so nothing can be chosen that the planner did not list.
+It starts with the newest game log, the newest crash report, and the host's
+recorded contents and record chosen; older logs and reports are offered and left
+out until chosen. An empty choice cannot be exported. The destination comes
+from the desktop's save dialog, the export runs as an ordinary operation, and
+the result names the written file and what could not be read, with a way to
+show its folder. A bundle holds one host's files: the launcher's own logs are
+a separate scope the command line bundles with `ephervex logs bundle --launcher`.
+
 
 ## Security boundaries
 

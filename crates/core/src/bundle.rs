@@ -408,6 +408,58 @@ mod tests {
     }
 
     #[test]
+    fn only_diagnostic_files_and_the_hosts_own_record_are_ever_offered() {
+        // A game directory and the launcher's own directories hold settings,
+        // saves, and account state beside the logs. None of that is a choice
+        // a bundle offers, whatever it is called.
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, scope) = instance(base.path());
+        let crate::diagnostics::DiagnosticScope::Client(id) = scope else {
+            panic!("a client scope");
+        };
+        let game =
+            ephervex_storage::metadata::client_game_dir(&app.client(id).expect("client").root);
+        for name in [
+            "options.txt",
+            "servers.dat",
+            "config.toml",
+            "credentials.json",
+        ] {
+            std::fs::write(game.join(name), b"not diagnostics").expect("write");
+        }
+        std::fs::write(game.join("logs").join("launcher_accounts.json"), b"{}").expect("write");
+        std::fs::create_dir_all(app.paths().config_dir()).expect("config dir");
+        std::fs::write(app.paths().config_file(), b"[auth]").expect("config");
+        std::fs::create_dir_all(app.paths().logs_dir()).expect("launcher logs");
+        std::fs::write(
+            app.paths().logs_dir().join("ephervex.log"),
+            b"a launcher log",
+        )
+        .expect("log");
+
+        for scope in [scope, crate::diagnostics::DiagnosticScope::Launcher] {
+            for part in app.plan_diagnostic_bundle(scope).expect("plan").parts {
+                let allowed = match part.kind {
+                    BundlePartKind::GameLog | BundlePartKind::LauncherLog => {
+                        std::path::Path::new(&part.name)
+                            .extension()
+                            .is_some_and(|extension| extension == "log" || extension == "gz")
+                    }
+                    BundlePartKind::CrashReport => part.name.starts_with("crash-reports/"),
+                    BundlePartKind::Recipe => part.name == "instance/recipe.json",
+                    BundlePartKind::Record => part.name == "instance/instance.json",
+                };
+                assert!(allowed, "{scope:?} offered {}", part.name);
+                assert!(
+                    !part.path.starts_with(app.paths().config_dir()),
+                    "{}",
+                    part.name
+                );
+            }
+        }
+    }
+
+    #[test]
     fn only_what_was_chosen_goes_in_and_the_rest_is_named() {
         let base = tempfile::tempdir().expect("temp dir");
         let (app, scope) = instance(base.path());

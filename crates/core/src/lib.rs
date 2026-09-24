@@ -186,6 +186,24 @@ pub fn open_in_browser(url: &str) -> bool {
     }
 }
 
+/// Shows the folder holding a file in the desktop's file manager.
+///
+/// For a file Ephervex itself just wrote to a place the user chose, such as a
+/// diagnostic bundle, so the user can find it. Returns whether the desktop
+/// accepted it; the caller has the path to show either way.
+pub fn open_containing_folder(path: &std::path::Path) -> bool {
+    let Some(folder) = path.parent() else {
+        return false;
+    };
+    match open::that_detached(folder) {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(%error, folder = %folder.display(), "could not hand the folder to a file manager");
+            false
+        }
+    }
+}
+
 /// Data types that cross the frontend boundary.
 ///
 /// These are plain records and requests, not services: a frontend needs to

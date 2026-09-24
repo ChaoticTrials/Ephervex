@@ -1204,6 +1204,33 @@ gui-integrity-shared-waiting = { $count ->
    *[other] { $count } are not downloaded yet. Launching downloads them, so this is not damage.
 }
 gui-integrity-shared-loader = The loader's own libraries are not part of this check.
+operation-exporting-diagnostic-bundle = Writing the diagnostic bundle
+gui-bundle-title = Diagnostic bundle
+gui-bundle-detail = Collects the files you choose into one zip file saved on this computer, to attach to a bug report yourself. Nothing is uploaded.
+gui-bundle-privacy = Files are copied exactly as they are. Logs and crash reports contain whatever the game and its mods wrote, which can include server addresses, player names, or file paths, so choose only what you are willing to share. Ephervex never offers its configuration file, credentials, or tokens.
+gui-bundle-empty = This host has no logs, crash reports, or recorded state to bundle yet.
+gui-bundle-selection = { $count ->
+    [0] Nothing chosen
+    [one] One file chosen, { $size }
+   *[other] { $count } files chosen, { $size }
+}
+gui-bundle-select-all = Choose all
+gui-bundle-select-none = Choose none
+gui-bundle-choose-one = Choose at least one file to export.
+gui-bundle-export = Export bundle
+gui-bundle-save-title = Save diagnostic bundle
+gui-bundle-archives = Zip archives
+gui-bundle-show-folder = Show in folder
+gui-bundle-exported = { $count ->
+    [one] Saved one file, { $size }, to { $path }.
+   *[other] Saved { $count } files, { $size }, to { $path }.
+}
+gui-bundle-unreadable = These were chosen and could not be read, and the bundle's manifest says so: { $value }
+gui-bundle-kind-game-log = Game log
+gui-bundle-kind-crash-report = Crash report
+gui-bundle-kind-launcher-log = Ephervex log
+gui-bundle-kind-recipe = Recorded contents
+gui-bundle-kind-record = Host record
 gui-host-change-wait = Another host's files are still being changed. Try again once that finishes.
 gui-integrity-wait = Another verification or repair is still running. Stop it or wait for it to finish.
 

@@ -285,6 +285,14 @@ slint::slint! {
         handling: string,
     }
 
+    // One thing a diagnostic bundle could carry, as the core planner offers it.
+    export struct BundlePartRow {
+        name: string,
+        kind: string,
+        size: string,
+        selected: bool,
+    }
+
     // One surface a host workspace offers. The workspace chrome only knows
     // stable ids and labels; each host decides which surfaces it has.
     export struct WorkspaceSurfaceRow {
@@ -2124,6 +2132,69 @@ slint::slint! {
         }
     }
 
+    // The choice of what goes into one local diagnostic archive. Every row is
+    // one the core planner offered; nothing else can be added here.
+    component DiagnosticBundlePanel inherits VerticalLayout {
+        in property <[BundlePartRow]> parts;
+        in property <string> selection;
+        in property <int> selected-count;
+        in property <bool> exporting;
+        in property <string> result;
+        in property <string> result-path;
+        in property <string> error;
+        callback toggle(string, bool);
+        callback select-all(bool);
+        callback export();
+        callback open-folder();
+        spacing: 8px;
+        SectionTitle { title: GuiI18n.text("gui-bundle-title"); detail: GuiI18n.text("gui-bundle-detail"); }
+        BodyText { text: GuiI18n.text("gui-bundle-privacy"); color: Theme.text-secondary; wrap: word-wrap; }
+        if root.parts.length == 0 : BodyText { text: GuiI18n.text("gui-bundle-empty"); color: Theme.text-muted; wrap: word-wrap; }
+        if root.parts.length > 0 : HorizontalLayout {
+            spacing: 8px;
+            BodyText { text: root.selection; color: Theme.text-secondary; horizontal-stretch: 1; vertical-alignment: center; }
+            AppButton { text: GuiI18n.text("gui-bundle-select-all"); enabled: !root.exporting; clicked => { root.select-all(true); } }
+            AppButton { text: GuiI18n.text("gui-bundle-select-none"); enabled: !root.exporting; clicked => { root.select-all(false); } }
+        }
+        if root.parts.length > 0 : Rectangle {
+            border-radius: 6px;
+            border-width: 1px;
+            border-color: Theme.border;
+            background: Theme.background;
+            height: min(300px, part-list.preferred-height + 2px);
+            ScrollView {
+                viewport-width: self.width;
+                part-list := VerticalLayout {
+                    padding: 8px;
+                    spacing: 6px;
+                    alignment: start;
+                    for part in root.parts : HorizontalLayout {
+                        spacing: 10px;
+                        VerticalLayout { alignment: center; Toggle { accessible-name: part.name; checked: part.selected; sets-its-own-position: false; enabled: !root.exporting; toggled(value) => { root.toggle(part.name, value); } } }
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            BodyText { text: part.name; wrap: word-wrap; }
+                            BodyText { text: part.kind; color: Theme.text-muted; font-size: Theme.caption-size; }
+                        }
+                        BodyText { text: part.size; color: Theme.text-secondary; vertical-alignment: center; }
+                    }
+                }
+            }
+        }
+        if root.parts.length > 0 && root.selected-count == 0 : BodyText { text: GuiI18n.text("gui-bundle-choose-one"); color: Theme.warning; wrap: word-wrap; }
+        if root.error != "" : BodyText { text: root.error; color: Theme.danger; wrap: word-wrap; }
+        if root.result != "" : HorizontalLayout {
+            spacing: 8px;
+            BodyText { text: root.result; horizontal-stretch: 1; wrap: word-wrap; vertical-alignment: center; }
+            if root.result-path != "" : AppButton { text: GuiI18n.text("gui-bundle-show-folder"); clicked => { root.open-folder(); } }
+        }
+        if root.parts.length > 0 : HorizontalLayout {
+            if root.exporting : Spinner { indeterminate: true; width: 16px; height: 16px; }
+            Rectangle { horizontal-stretch: 1; }
+            AppButton { text: GuiI18n.text("gui-bundle-export"); tone: "primary"; enabled: root.selected-count > 0 && !root.exporting; clicked => { root.export(); } }
+        }
+    }
+
     // Verification and repair for one host, from the files core records for
     // it. The state it shows belongs to the controller; this only lays it out.
     component DiagnosticsSurface inherits Rectangle {
@@ -2150,11 +2221,22 @@ slint::slint! {
         in property <string> repair-result;
         in property <bool> repair-failed;
         in property <[string]> recovery;
+        in property <[BundlePartRow]> bundle-parts;
+        in property <string> bundle-selection;
+        in property <int> bundle-selected-count;
+        in property <bool> bundle-exporting;
+        in property <string> bundle-result;
+        in property <string> bundle-result-path;
+        in property <string> bundle-error;
         callback verify();
         callback stop();
         callback repair();
         callback filter(string);
         callback open-logs();
+        callback toggle-bundle-part(string, bool);
+        callback select-all-bundle-parts(bool);
+        callback export-bundle();
+        callback open-bundle-folder();
         // What Repair waits for the user to do. A repair already running is
         // progress, which the workspace banner shows, not a requirement.
         property <string> repair-requirement: root.busy ? ""
@@ -2239,7 +2321,20 @@ slint::slint! {
                 if root.shared-supported && root.shared-summary != "" : BodyText { text: root.shared-summary; wrap: word-wrap; }
                 if root.shared-supported && root.shared-faults.length > 0 : IntegrityFindingList { items: root.shared-faults; }
                 for note in root.shared-notes : BodyText { text: note; color: Theme.text-secondary; wrap: word-wrap; }
-                @children
+                Divider { }
+                DiagnosticBundlePanel {
+                    parts: root.bundle-parts;
+                    selection: root.bundle-selection;
+                    selected-count: root.bundle-selected-count;
+                    exporting: root.bundle-exporting;
+                    result: root.bundle-result;
+                    result-path: root.bundle-result-path;
+                    error: root.bundle-error;
+                    toggle(name, value) => { root.toggle-bundle-part(name, value); }
+                    select-all(value) => { root.select-all-bundle-parts(value); }
+                    export => { root.export-bundle(); }
+                    open-folder => { root.open-bundle-folder(); }
+                }
             }
         }
     }
@@ -3605,6 +3700,14 @@ slint::slint! {
         in-out property <string> integrity-repair-result;
         in-out property <bool> integrity-repair-failed;
         in-out property <[string]> integrity-recovery;
+        // The diagnostic bundle the Diagnostics surface is choosing for that host.
+        in-out property <[BundlePartRow]> bundle-parts;
+        in-out property <string> bundle-selection;
+        in-out property <int> bundle-selected-count;
+        in-out property <bool> bundle-exporting;
+        in-out property <string> bundle-result;
+        in-out property <string> bundle-result-path;
+        in-out property <string> bundle-error;
         // Why the active session's round cannot be answered yet: "running" or "failed".
         in-out property <string> isolation-recovery;
         in-out property <string> isolation-recovery-detail;
@@ -4166,6 +4269,10 @@ slint::slint! {
         callback repair-host(string, string);
         callback stop-integrity-work();
         callback filter-integrity-findings(string);
+        callback toggle-bundle-part(string, bool);
+        callback select-all-bundle-parts(bool);
+        callback export-bundle(string, string);
+        callback open-bundle-folder(string);
         callback copy-text(string);
         callback add-offline-account(string);
         callback set-default-account(string);
@@ -4574,6 +4681,12 @@ slint::slint! {
                                 repair => { root.repair-host("client", root.selected-instance-id); }
                                 filter(query) => { root.filter-integrity-findings(query); }
                                 open-logs => { root.workspace-tab = "Logs"; root.selected-diagnostic-kind = "log"; root.log-shows-files = false; root.selected-diagnostic-name = ""; root.open-live-log("client", root.selected-instance-id); }
+                                bundle-parts: self.current ? root.bundle-parts : []; bundle-selection: root.bundle-selection; bundle-selected-count: root.bundle-selected-count;
+                                bundle-exporting: self.current && root.bundle-exporting; bundle-result: self.current ? root.bundle-result : ""; bundle-result-path: root.bundle-result-path; bundle-error: self.current ? root.bundle-error : "";
+                                toggle-bundle-part(name, value) => { root.toggle-bundle-part(name, value); }
+                                select-all-bundle-parts(value) => { root.select-all-bundle-parts(value); }
+                                export-bundle => { root.export-bundle("client", root.selected-instance-id); }
+                                open-bundle-folder => { root.open-bundle-folder(root.bundle-result-path); }
                             }
                             if root.workspace-tab == "Logs" : VerticalLayout { spacing: 9px;
                                 HorizontalLayout { spacing: 8px;
@@ -4736,6 +4849,12 @@ slint::slint! {
                                 repair => { root.repair-host("server", root.selected-server-id); }
                                 filter(query) => { root.filter-integrity-findings(query); }
                                 open-logs => { root.workspace-tab = "Logs"; root.selected-diagnostic-kind = "log"; root.log-shows-files = false; root.selected-diagnostic-name = ""; root.open-live-log("server", root.selected-server-id); }
+                                bundle-parts: self.current ? root.bundle-parts : []; bundle-selection: root.bundle-selection; bundle-selected-count: root.bundle-selected-count;
+                                bundle-exporting: self.current && root.bundle-exporting; bundle-result: self.current ? root.bundle-result : ""; bundle-result-path: root.bundle-result-path; bundle-error: self.current ? root.bundle-error : "";
+                                toggle-bundle-part(name, value) => { root.toggle-bundle-part(name, value); }
+                                select-all-bundle-parts(value) => { root.select-all-bundle-parts(value); }
+                                export-bundle => { root.export-bundle("server", root.selected-server-id); }
+                                open-bundle-folder => { root.open-bundle-folder(root.bundle-result-path); }
                             }
                             if root.workspace-tab == "Console" : VerticalLayout { spacing: 10px;
                                 ActionRow { BodyText { text: GuiI18n.value("gui-bounded-output", root.servers[root.selected-server-index].state); color: root.servers[root.selected-server-index].can-send-command ? Theme.success : Theme.text-secondary; } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-restart"); enabled: root.servers[root.selected-server-index].can-restart; clicked => { root.server-restart(root.selected-server-id); } } AppButton { text: GuiI18n.text("gui-stop"); enabled: root.servers[root.selected-server-index].can-stop; clicked => { root.server-stop(root.selected-server-id); } } AppButton { text: GuiI18n.text("gui-kill"); tone: "danger"; enabled: root.servers[root.selected-server-index].can-kill; clicked => { root.modal = "kill"; } } }

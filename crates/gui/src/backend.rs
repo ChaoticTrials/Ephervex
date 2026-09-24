@@ -280,6 +280,16 @@ pub enum Command {
         host: InstalledHost,
         request: u64,
     },
+    /// Lists what a diagnostic bundle for a host could carry.
+    PlanDiagnosticBundle(InstalledHost),
+    /// Asks where to save, then writes the named parts to one local archive.
+    ExportDiagnosticBundle {
+        host: InstalledHost,
+        request: u64,
+        names: Vec<String>,
+    },
+    /// Shows the folder an exported bundle was written to.
+    OpenBundleFolder(PathBuf),
     LoadModVersions {
         instance: InstanceId,
         path: PathBuf,
@@ -1291,6 +1301,26 @@ pub struct VerificationData {
     pub shared: Option<Result<SharedArtifactData, String>>,
 }
 
+/// One thing a diagnostic bundle could carry, as the core planner offers it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BundlePartData {
+    /// What to call it, and the handle a selection passes back.
+    pub name: String,
+    /// The core kind, by its stable identifier.
+    pub kind: &'static str,
+    pub size_bytes: u64,
+}
+
+/// What one bundle export wrote.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BundleExportData {
+    pub path: PathBuf,
+    pub included: usize,
+    /// Chosen and could not be read, such as a log that rotated away.
+    pub unreadable: Vec<String>,
+    pub bytes: u64,
+}
+
 /// What one repair did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RepairData {
@@ -1488,6 +1518,26 @@ pub enum Event {
     /// A verification or repair the controller sent has finished, whichever
     /// way it ended. Sent after any result it produced.
     IntegritySettled {
+        request: u64,
+    },
+    /// What a diagnostic bundle for a host could carry.
+    BundlePlanned {
+        host: InstalledHost,
+        parts: Vec<BundlePartData>,
+    },
+    BundleExported {
+        host: InstalledHost,
+        request: u64,
+        report: BundleExportData,
+    },
+    BundleExportFailed {
+        host: InstalledHost,
+        request: u64,
+        message: String,
+    },
+    /// An export the controller sent has finished, including when the save
+    /// dialog was closed without choosing a file.
+    BundleSettled {
         request: u64,
     },
     JavaRuntimes(Vec<JavaData>),
@@ -2772,6 +2822,90 @@ fn run_worker(
                         Ok(OperationReport::Reported)
                     },
                 );
+            }
+            Command::PlanDiagnosticBundle(host) => {
+                let parts = match app.plan_diagnostic_bundle(diagnostic_scope(host)) {
+                    Ok(contents) => contents
+                        .parts
+                        .iter()
+                        .map(|part| BundlePartData {
+                            name: part.name.clone(),
+                            kind: part.kind.as_str(),
+                            size_bytes: part.size_bytes,
+                        })
+                        .collect(),
+                    Err(error) => {
+                        send_error(&events, &error);
+                        Vec::new()
+                    }
+                };
+                let _ = events.send(Event::BundlePlanned { host, parts });
+            }
+            Command::ExportDiagnosticBundle {
+                host,
+                request,
+                names,
+            } => {
+                let Some(destination) = rfd::FileDialog::new()
+                    .set_title(lookup("gui-bundle-save-title"))
+                    .add_filter(lookup("gui-bundle-archives"), &["zip"])
+                    .set_file_name(bundle_file_name(host))
+                    .save_file()
+                else {
+                    let _ = events.send(Event::BundleSettled { request });
+                    continue;
+                };
+                let paths = app.paths().clone();
+                let reports = events.clone();
+                spawn_async_operation(
+                    paths,
+                    &events,
+                    Arc::clone(&cancellations),
+                    AsyncOperationRequest {
+                        title: "operation-exporting-diagnostic-bundle",
+                        entity: host.id(),
+                        allow_cancel: false,
+                        finished: Some(Event::BundleSettled { request }),
+                    },
+                    move |app, _reporter, _cancel| async move {
+                        let exported = app.export_diagnostic_bundle(
+                            diagnostic_scope(host),
+                            &ephervex_core::BundleSelection { names },
+                            &destination,
+                        );
+                        match exported {
+                            Ok(report) => {
+                                let _ = reports.send(Event::BundleExported {
+                                    host,
+                                    request,
+                                    report: BundleExportData {
+                                        path: report.path,
+                                        included: report.included.len(),
+                                        unreadable: report.unreadable,
+                                        bytes: report.bytes,
+                                    },
+                                });
+                                Ok(OperationReport::Reported)
+                            }
+                            Err(error) => {
+                                let _ = reports.send(Event::BundleExportFailed {
+                                    host,
+                                    request,
+                                    message: localized_error(&error),
+                                });
+                                Err(error)
+                            }
+                        }
+                    },
+                );
+            }
+            Command::OpenBundleFolder(path) => {
+                if !ephervex_core::open_containing_folder(&path) {
+                    let _ = events.send(Event::Toast {
+                        message: lookup("gui-folder-unavailable"),
+                        error: true,
+                    });
+                }
             }
             Command::SearchMods {
                 instance,
@@ -4109,6 +4243,23 @@ const fn origin(is_override: bool) -> SettingOrigin {
 /// Sends one host's durable mod list, then asks a provider to decorate it.
 ///
 /// A fingerprint of a plan, compared only within this process.
+const fn diagnostic_scope(host: InstalledHost) -> DiagnosticScope {
+    match host {
+        InstalledHost::Instance(instance) => DiagnosticScope::Client(instance),
+        InstalledHost::Server(server) => DiagnosticScope::Server(server),
+    }
+}
+
+/// A name the save dialog suggests, which says what the archive is and when it
+/// was made without naming anything the user did not choose to share.
+fn bundle_file_name(host: InstalledHost) -> String {
+    format!(
+        "ephervex-{}-diagnostics-{}.zip",
+        host.kind(),
+        chrono::Local::now().format("%Y%m%d-%H%M%S")
+    )
+}
+
 /// Checks a host, and a client's shared launch files, for the Diagnostics surface.
 async fn verification_data(
     app: &App,

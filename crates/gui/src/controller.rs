@@ -34,11 +34,11 @@ use crate::presentation::{
     validate_port,
 };
 use crate::ui::{
-    AccountRow, ActivityRow, AppWindow, BlockedFileRow, DiagnosticRow, GuiI18n, ImpactRow,
-    ImportDuplicateRow, ImportOptionRow, InstanceRow, IntegrityFindingRow, IsolationCandidateRow,
-    JavaRow, LicenseRow, LinkedTargetRow, LocalModClashRow, LogChunk, ModRow, ModSearchRow,
-    ModVersionRow, PendingEntityRow, PromoteServerRow, RelationRow, RunningRow, ServerRow,
-    SnapshotRow, Theme, WindowSizePreview, WorkflowActionRow,
+    AccountRow, ActivityRow, AppWindow, BlockedFileRow, BundlePartRow, DiagnosticRow, GuiI18n,
+    ImpactRow, ImportDuplicateRow, ImportOptionRow, InstanceRow, IntegrityFindingRow,
+    IsolationCandidateRow, JavaRow, LicenseRow, LinkedTargetRow, LocalModClashRow, LogChunk,
+    ModRow, ModSearchRow, ModVersionRow, PendingEntityRow, PromoteServerRow, RelationRow,
+    RunningRow, ServerRow, SnapshotRow, Theme, WindowSizePreview, WorkflowActionRow,
 };
 use crate::window_aspect;
 
@@ -1378,6 +1378,67 @@ struct IntegrityFlowState {
     /// Every finding worth listing, kept whole for the filter.
     findings: Vec<backend::VerifiedFileData>,
     query: String,
+    bundle: BundleChoice,
+}
+
+/// What the Diagnostics surface is choosing to put in a bundle for its host.
+#[derive(Debug, Default)]
+struct BundleChoice {
+    /// Everything the core planner offered, in its order.
+    parts: Vec<backend::BundlePartData>,
+    /// Chosen by name, which is the handle the planner gave each part.
+    selected: HashSet<String>,
+    /// Whether `parts` came from a plan yet, so a later plan of the same
+    /// host keeps the user's choices rather than the defaults.
+    planned: bool,
+    last_request: u64,
+    /// The export the worker has not finished.
+    pending: Option<u64>,
+}
+
+impl BundleChoice {
+    /// Takes a fresh plan. The first one chooses the newest game log, the
+    /// newest crash report, and the host's own recorded state, rather than
+    /// every file there is; a later one keeps whatever is still offered.
+    fn plan(&mut self, parts: Vec<backend::BundlePartData>) {
+        if self.planned {
+            self.selected
+                .retain(|name| parts.iter().any(|part| &part.name == name));
+        } else {
+            let mut newest_log = false;
+            let mut newest_crash = false;
+            self.selected = parts
+                .iter()
+                .filter(|part| match part.kind {
+                    "game_log" => !std::mem::replace(&mut newest_log, true),
+                    "crash_report" => !std::mem::replace(&mut newest_crash, true),
+                    "recipe" | "record" => true,
+                    _ => false,
+                })
+                .map(|part| part.name.clone())
+                .collect();
+        }
+        self.parts = parts;
+        self.planned = true;
+    }
+
+    /// The chosen names, in the order the planner offered them.
+    fn chosen(&self) -> Vec<String> {
+        self.parts
+            .iter()
+            .filter(|part| self.selected.contains(&part.name))
+            .map(|part| part.name.clone())
+            .collect()
+    }
+
+    fn dispatch(&mut self) -> Option<u64> {
+        if self.pending.is_some() || self.selected.is_empty() {
+            return None;
+        }
+        self.last_request = self.last_request.wrapping_add(1);
+        self.pending = Some(self.last_request);
+        Some(self.last_request)
+    }
 }
 
 impl IntegrityFlowState {
@@ -1391,6 +1452,14 @@ impl IntegrityFlowState {
         self.checked = false;
         self.findings.clear();
         self.query.clear();
+        // An export already running still finishes; its result is about the
+        // host it was chosen for and is not shown here.
+        let pending = self.bundle.pending;
+        self.bundle = BundleChoice {
+            pending,
+            last_request: self.bundle.last_request,
+            ..BundleChoice::default()
+        };
         true
     }
 
@@ -2304,6 +2373,7 @@ fn register_callbacks(
     register_snapshot_actions(ui, commands);
     register_isolation_actions(ui, commands, isolation_flow);
     register_integrity_actions(ui, commands, integrity_flow);
+    register_bundle_actions(ui, commands, integrity_flow);
     register_live_viewer(ui, commands, live_viewer);
     register_settings(ui, commands);
     register_minecraft_defaults(ui, commands, minecraft, keys);
@@ -5815,11 +5885,129 @@ fn apply_integrity_activity(
     }
 }
 
+/// Shows the bundle choice as it stands.
+fn render_bundle(ui: &AppWindow, bundle: &BundleChoice) {
+    let chosen: Vec<&backend::BundlePartData> = bundle
+        .parts
+        .iter()
+        .filter(|part| bundle.selected.contains(&part.name))
+        .collect();
+    let bytes: u64 = chosen.iter().map(|part| part.size_bytes).sum();
+    ui.set_bundle_selected_count(i32::try_from(chosen.len()).unwrap_or(i32::MAX));
+    ui.set_bundle_selection(
+        lookup_args(
+            "gui-bundle-selection",
+            [
+                ("count", Arg::from(chosen.len())),
+                (
+                    "size",
+                    Arg::from(ephervex_model::format_binary_bytes(bytes)),
+                ),
+            ],
+        )
+        .into(),
+    );
+    ui.set_bundle_parts(model(
+        bundle
+            .parts
+            .iter()
+            .map(|part| BundlePartRow {
+                name: part.name.clone().into(),
+                kind: lookup(bundle_kind_label(part.kind)).into(),
+                size: ephervex_model::format_binary_bytes(part.size_bytes).into(),
+                selected: bundle.selected.contains(&part.name),
+            })
+            .collect(),
+    ));
+}
+
+/// The word for one core bundle part kind.
+fn bundle_kind_label(kind: &str) -> &'static str {
+    match kind {
+        "game_log" => "gui-bundle-kind-game-log",
+        "crash_report" => "gui-bundle-kind-crash-report",
+        "launcher_log" => "gui-bundle-kind-launcher-log",
+        "recipe" => "gui-bundle-kind-recipe",
+        _ => "gui-bundle-kind-record",
+    }
+}
+
+/// Takes the planner's offer for the host on screen.
+fn apply_bundle_plan(
+    ui: &AppWindow,
+    state: &mut IntegrityFlowState,
+    host: InstalledHost,
+    parts: Vec<backend::BundlePartData>,
+) {
+    if state.host != Some(host) {
+        return;
+    }
+    state.bundle.plan(parts);
+    render_bundle(ui, &state.bundle);
+}
+
+fn apply_bundle_exported(
+    ui: &AppWindow,
+    state: &IntegrityFlowState,
+    host: InstalledHost,
+    request: u64,
+    report: &backend::BundleExportData,
+) {
+    if state.host != Some(host) || request != state.bundle.last_request {
+        return;
+    }
+    let path = report.path.display().to_string();
+    let mut result = lookup_args(
+        "gui-bundle-exported",
+        [
+            ("count", Arg::from(report.included)),
+            (
+                "size",
+                Arg::from(ephervex_model::format_binary_bytes(report.bytes)),
+            ),
+            ("path", Arg::from(path.as_str())),
+        ],
+    );
+    if !report.unreadable.is_empty() {
+        result.push(' ');
+        result.push_str(&lookup_args(
+            "gui-bundle-unreadable",
+            [("value", Arg::from(report.unreadable.join(", ")))],
+        ));
+    }
+    ui.set_bundle_error(SharedString::default());
+    ui.set_bundle_result(result.into());
+    ui.set_bundle_result_path(path.into());
+}
+
+fn apply_bundle_export_failed(
+    ui: &AppWindow,
+    state: &IntegrityFlowState,
+    host: InstalledHost,
+    request: u64,
+    message: &str,
+) {
+    if state.host != Some(host) || request != state.bundle.last_request {
+        return;
+    }
+    ui.set_bundle_result(SharedString::default());
+    ui.set_bundle_result_path(SharedString::default());
+    ui.set_bundle_error(message.into());
+}
+
+fn settle_bundle(ui: &AppWindow, state: &mut IntegrityFlowState, request: u64) {
+    if state.bundle.pending == Some(request) {
+        state.bundle.pending = None;
+        ui.set_bundle_exporting(false);
+    }
+}
+
 fn register_integrity_actions(
     ui: &AppWindow,
     commands: &Sender<Command>,
     flow: &Rc<RefCell<IntegrityFlowState>>,
 ) {
+    let sender = commands.clone();
     let state = Rc::clone(flow);
     let weak = ui.as_weak();
     ui.on_open_integrity(move |kind, id| {
@@ -5827,8 +6015,17 @@ fn register_integrity_actions(
             return;
         };
         let mut state = state.borrow_mut();
-        state.open(host);
+        if state.open(host) {
+            ui.set_bundle_result(SharedString::default());
+            ui.set_bundle_result_path(SharedString::default());
+            ui.set_bundle_error(SharedString::default());
+            ui.set_bundle_exporting(false);
+        }
         show_integrity_host(&ui, &state, host);
+        render_bundle(&ui, &state.bundle);
+        // The logs a bundle can carry change whenever the game runs, so the
+        // offer is asked for each time the surface opens.
+        send(&sender, Command::PlanDiagnosticBundle(host));
     });
 
     let sender = commands.clone();
@@ -5902,6 +6099,92 @@ fn register_integrity_actions(
         };
         state.borrow_mut().query = query.into();
         render_integrity_findings(&ui, &state.borrow());
+    });
+}
+
+/// The diagnostic bundle choice on the Diagnostics surface.
+fn register_bundle_actions(
+    ui: &AppWindow,
+    commands: &Sender<Command>,
+    flow: &Rc<RefCell<IntegrityFlowState>>,
+) {
+    let state = Rc::clone(flow);
+    let weak = ui.as_weak();
+    ui.on_toggle_bundle_part(move |name, selected| {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        let mut state = state.borrow_mut();
+        if state.bundle.pending.is_some() {
+            return;
+        }
+        if selected {
+            state.bundle.selected.insert(name.into());
+        } else {
+            state.bundle.selected.remove(name.as_str());
+        }
+        render_bundle(&ui, &state.bundle);
+    });
+
+    let state = Rc::clone(flow);
+    let weak = ui.as_weak();
+    ui.on_select_all_bundle_parts(move |selected| {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        let mut state = state.borrow_mut();
+        if state.bundle.pending.is_some() {
+            return;
+        }
+        state.bundle.selected = if selected {
+            state
+                .bundle
+                .parts
+                .iter()
+                .map(|part| part.name.clone())
+                .collect()
+        } else {
+            HashSet::new()
+        };
+        render_bundle(&ui, &state.bundle);
+    });
+
+    let sender = commands.clone();
+    let state = Rc::clone(flow);
+    let weak = ui.as_weak();
+    ui.on_export_bundle(move |kind, id| {
+        let (Some(host), Some(ui)) = (backend::parse_mod_host(&kind, &id), weak.upgrade()) else {
+            return;
+        };
+        let mut state = state.borrow_mut();
+        if state.host != Some(host) {
+            return;
+        }
+        // An empty selection is refused rather than written as an archive
+        // holding nothing but its manifest.
+        let Some(request) = state.bundle.dispatch() else {
+            return;
+        };
+        ui.set_bundle_exporting(true);
+        ui.set_bundle_error(SharedString::default());
+        send(
+            &sender,
+            Command::ExportDiagnosticBundle {
+                host,
+                request,
+                names: state.bundle.chosen(),
+            },
+        );
+    });
+
+    let sender = commands.clone();
+    ui.on_open_bundle_folder(move |path| {
+        if !path.is_empty() {
+            send(
+                &sender,
+                Command::OpenBundleFolder(PathBuf::from(path.as_str())),
+            );
+        }
     });
 }
 
@@ -6705,6 +6988,22 @@ fn apply_event(
         } => apply_host_repaired(ui, &integrity_flow.borrow(), host, request, &data),
         Event::IntegritySettled { request } => {
             settle_integrity(ui, &mut integrity_flow.borrow_mut(), request);
+        }
+        Event::BundlePlanned { host, parts } => {
+            apply_bundle_plan(ui, &mut integrity_flow.borrow_mut(), host, parts);
+        }
+        Event::BundleExported {
+            host,
+            request,
+            report,
+        } => apply_bundle_exported(ui, &integrity_flow.borrow(), host, request, &report),
+        Event::BundleExportFailed {
+            host,
+            request,
+            message,
+        } => apply_bundle_export_failed(ui, &integrity_flow.borrow(), host, request, &message),
+        Event::BundleSettled { request } => {
+            settle_bundle(ui, &mut integrity_flow.borrow_mut(), request);
         }
         Event::Toast { message, error } => {
             ui.invoke_present_toast(message.into(), error);
@@ -8660,6 +8959,10 @@ mod tests {
         register_integrity_actions(&ui, &sender, &flow);
         let host = InstalledHost::Instance(ephervex_model::InstanceId::new());
         ui.invoke_open_integrity("client".into(), host.id().into());
+        assert!(
+            matches!(commands.try_recv(), Ok(Command::PlanDiagnosticBundle(planned)) if planned == host),
+            "opening the surface asks what a bundle could carry"
+        );
         (ui, commands, flow, host)
     }
 
@@ -8927,6 +9230,172 @@ mod tests {
         assert!(
             !ui.get_integrity_repair_result().is_empty(),
             "the repair's own result stays"
+        );
+    }
+
+    fn bundle_part(name: &str, kind: &'static str) -> backend::BundlePartData {
+        backend::BundlePartData {
+            name: name.to_owned(),
+            kind,
+            size_bytes: 2048,
+        }
+    }
+
+    /// Diagnostics opened on a client, with the planner's usual offer.
+    fn planned_bundle() -> (
+        AppWindow,
+        std::sync::mpsc::Receiver<Command>,
+        Rc<RefCell<IntegrityFlowState>>,
+        InstalledHost,
+    ) {
+        let (ui, commands, flow, host) = integrity_surface();
+        let (sender, bundle_commands) = std::sync::mpsc::channel();
+        register_bundle_actions(&ui, &sender, &flow);
+        drop(commands);
+        apply_bundle_plan(
+            &ui,
+            &mut flow.borrow_mut(),
+            host,
+            vec![
+                bundle_part("logs/latest.log", "game_log"),
+                bundle_part("logs/2026-01-01-1.log.gz", "game_log"),
+                bundle_part("crash-reports/crash-new.txt", "crash_report"),
+                bundle_part("crash-reports/crash-old.txt", "crash_report"),
+                bundle_part("instance/recipe.json", "recipe"),
+                bundle_part("instance/instance.json", "record"),
+            ],
+        );
+        (ui, bundle_commands, flow, host)
+    }
+
+    fn chosen_rows(ui: &AppWindow) -> Vec<String> {
+        ui.get_bundle_parts()
+            .iter()
+            .filter(|row| row.selected)
+            .map(|row| row.name.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn a_bundle_plan_becomes_rows_with_only_the_newest_files_chosen() {
+        let (ui, _commands, _flow, _host) = planned_bundle();
+        assert_eq!(
+            ui.get_bundle_parts().row_count(),
+            6,
+            "every offered part is a row"
+        );
+        assert_eq!(
+            chosen_rows(&ui),
+            [
+                "logs/latest.log",
+                "crash-reports/crash-new.txt",
+                "instance/recipe.json",
+                "instance/instance.json",
+            ],
+            "older logs and reports are offered, not taken"
+        );
+        assert_eq!(ui.get_bundle_selected_count(), 4);
+        assert_eq!(
+            ui.get_bundle_parts().row_data(0).expect("row").kind,
+            lookup("gui-bundle-kind-game-log").as_str()
+        );
+    }
+
+    #[test]
+    fn the_chosen_parts_are_what_the_export_asks_for() {
+        let (ui, commands, flow, host) = planned_bundle();
+        ui.invoke_toggle_bundle_part("instance/recipe.json".into(), false);
+        ui.invoke_toggle_bundle_part("logs/2026-01-01-1.log.gz".into(), true);
+        ui.invoke_export_bundle("client".into(), host.id().into());
+        ui.invoke_export_bundle("client".into(), host.id().into());
+
+        let sent: Vec<_> = commands.try_iter().collect();
+        assert_eq!(sent.len(), 1, "a second export waits: {sent:?}");
+        let Command::ExportDiagnosticBundle { request, names, .. } = &sent[0] else {
+            panic!("an export: {sent:?}");
+        };
+        assert_eq!(
+            names,
+            &[
+                "logs/latest.log",
+                "logs/2026-01-01-1.log.gz",
+                "crash-reports/crash-new.txt",
+                "instance/instance.json",
+            ]
+        );
+        assert!(ui.get_bundle_exporting());
+        ui.invoke_toggle_bundle_part("instance/recipe.json".into(), true);
+        assert_eq!(
+            ui.get_bundle_selected_count(),
+            4,
+            "the choice is fixed while it is written"
+        );
+
+        settle_bundle(&ui, &mut flow.borrow_mut(), *request);
+        assert!(!ui.get_bundle_exporting());
+    }
+
+    #[test]
+    fn an_empty_bundle_choice_is_never_exported() {
+        let (ui, commands, _flow, host) = planned_bundle();
+        ui.invoke_select_all_bundle_parts(false);
+        assert_eq!(ui.get_bundle_selected_count(), 0);
+        ui.invoke_export_bundle("client".into(), host.id().into());
+        assert!(commands.try_recv().is_err());
+        assert!(!ui.get_bundle_exporting());
+
+        ui.invoke_select_all_bundle_parts(true);
+        assert_eq!(ui.get_bundle_selected_count(), 6);
+    }
+
+    #[test]
+    fn a_new_plan_of_the_same_host_keeps_the_users_choice() {
+        let (ui, _commands, flow, host) = planned_bundle();
+        ui.invoke_toggle_bundle_part("logs/latest.log".into(), false);
+        apply_bundle_plan(
+            &ui,
+            &mut flow.borrow_mut(),
+            host,
+            vec![
+                bundle_part("logs/latest.log", "game_log"),
+                bundle_part("instance/recipe.json", "recipe"),
+            ],
+        );
+        assert_eq!(chosen_rows(&ui), ["instance/recipe.json"]);
+    }
+
+    #[test]
+    fn an_export_outcome_is_shown_only_for_its_own_host() {
+        let (ui, commands, flow, host) = planned_bundle();
+        ui.invoke_export_bundle("client".into(), host.id().into());
+        let Ok(Command::ExportDiagnosticBundle { request, .. }) = commands.try_recv() else {
+            panic!("an export");
+        };
+        let report = backend::BundleExportData {
+            path: PathBuf::from("/home/user/bundle.zip"),
+            included: 4,
+            unreadable: vec!["logs/latest.log".to_owned()],
+            bytes: 4096,
+        };
+        apply_bundle_exported(&ui, &flow.borrow(), host, request, &report);
+        assert_eq!(ui.get_bundle_result_path(), "/home/user/bundle.zip");
+        assert!(ui.get_bundle_result().contains("/home/user/bundle.zip"));
+        assert!(
+            ui.get_bundle_result().contains("logs/latest.log"),
+            "what could not be read is named"
+        );
+
+        apply_bundle_export_failed(&ui, &flow.borrow(), host, request, "The disk is full.");
+        assert_eq!(ui.get_bundle_error(), "The disk is full.");
+        assert_eq!(ui.get_bundle_result(), "");
+
+        let other = InstalledHost::Server(ephervex_model::ServerId::new());
+        ui.invoke_open_integrity("server".into(), other.id().into());
+        apply_bundle_exported(&ui, &flow.borrow(), host, request, &report);
+        assert_eq!(
+            ui.get_bundle_result(),
+            "",
+            "another host's export is not shown here"
         );
     }
 
