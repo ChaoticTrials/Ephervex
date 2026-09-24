@@ -1069,7 +1069,6 @@ gui-isolation-accept-missing = Ignore missing dependencies and continue
 gui-isolation-unrecorded = { $count } mods have incomplete dependency information that Ephervex can refresh:
 gui-isolation-unrecorded-detail = Ephervex can still run the search, but it cannot account for relationships it does not know about. The result may leave related mods out.
 gui-isolation-accept-unrecorded = Run anyway with the dependency information available now
-gui-isolation-start-blocked-busy = Start is unavailable while an isolation change for this host is still running.
 gui-isolation-start-blocked-running = Start is unavailable while this host is running. Stop it first.
 gui-isolation-start-blocked-missing = Start is unavailable until you choose to ignore the missing dependencies, or install them.
 gui-isolation-start-blocked-unrecorded = Start is unavailable until you choose to run with the dependency information available now, or refresh it from the Mods tab.

@@ -9,7 +9,7 @@ use ephervex_gui::ui::{
 };
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use i_slint_backend_testing::{
-    AccessibleRole, ElementHandle, TestingBackend, TestingBackendOptions,
+    AccessibleRole, ElementHandle, ElementQuery, TestingBackend, TestingBackendOptions,
 };
 use slint::platform::PointerEventButton;
 use slint::{ComponentHandle, ModelRc, PhysicalSize, SharedString, VecModel};
@@ -135,7 +135,6 @@ fn start_enabled(ui: &AppWindow) -> bool {
 
 fn blockers_shown(ui: &AppWindow) -> Vec<&'static str> {
     [
-        "gui-isolation-start-blocked-busy",
         "gui-isolation-start-blocked-running",
         "gui-isolation-start-blocked-missing",
         "gui-isolation-start-blocked-unrecorded",
@@ -143,6 +142,36 @@ fn blockers_shown(ui: &AppWindow) -> Vec<&'static str> {
     .into_iter()
     .filter(|message| visible(ui, &lookup(message)))
     .collect()
+}
+
+/// Every text shown between the given acknowledgement and the Start row, where
+/// the setup tells the user what Start is waiting for.
+fn notes_beside_start(ui: &AppWindow, acknowledgement: &str) -> Vec<String> {
+    let label = lookup(acknowledgement);
+    let top = ElementHandle::find_by_accessible_label(ui, &label)
+        .map(|element| element.absolute_position().y + element.size().height)
+        .fold(f32::MIN, f32::max);
+    let start = button(ui, "gui-isolation-start");
+    let cancel = button(ui, "gui-cancel");
+    let (left, right) = (
+        cancel.absolute_position().x,
+        start.absolute_position().x + start.size().width,
+    );
+    ElementQuery::from_root(ui)
+        .match_accessible_role(AccessibleRole::Text)
+        .find_all()
+        .into_iter()
+        .filter(|text| {
+            let (position, size) = (text.absolute_position(), text.size());
+            size.width > 0.0
+                && position.y >= top
+                && position.y + size.height <= start.absolute_position().y
+                && position.x >= left
+                && position.x + size.width <= right
+        })
+        .filter_map(|text| text.accessible_label().map(|label| label.to_string()))
+        .filter(|label| !label.is_empty())
+        .collect()
 }
 
 /// The switch for an acknowledgement, which must be on screen and usable.
@@ -238,14 +267,27 @@ fn missing_dependencies_block_start_with_their_own_reason_until_acknowledged() {
 }
 
 #[test]
-fn a_busy_or_running_host_disables_start_and_says_so() {
+fn a_running_host_disables_start_and_says_to_stop_it() {
     let ui = window();
     for server_host in [false, true] {
         setup_on(&ui, server_host, true);
         assert!(!start_enabled(&ui), "server: {server_host}");
         assert_eq!(blockers_shown(&ui), ["gui-isolation-start-blocked-running"]);
+    }
+}
 
+#[test]
+fn a_start_in_progress_disables_start_and_shows_only_its_progress() {
+    let ui = window();
+    for server_host in [false, true] {
         setup_on(&ui, server_host, false);
+        ui.set_isolation_unrecorded(strings(&["unrecorded.jar"]));
+        settle(&ui);
+        assert_eq!(
+            notes_beside_start(&ui, "gui-isolation-accept-unrecorded"),
+            [lookup("gui-isolation-start-blocked-unrecorded")]
+        );
+        ui.set_isolation_accept_unrecorded(true);
         let (kind, id) = if server_host {
             ("server", "server")
         } else {
@@ -253,10 +295,28 @@ fn a_busy_or_running_host_disables_start_and_says_so() {
         };
         ui.set_isolation_busy_kind(kind.into());
         ui.set_isolation_busy_id(id.into());
-        ui.set_isolation_busy_text("Starting mod isolation".into());
+        ui.set_isolation_busy_text("Creating the safety snapshot".into());
         settle(&ui);
+
         assert!(!start_enabled(&ui), "server: {server_host}");
-        assert_eq!(blockers_shown(&ui), ["gui-isolation-start-blocked-busy"]);
+        assert!(
+            !button(&ui, "gui-cancel")
+                .accessible_enabled()
+                .expect("the cancel button reports whether it is enabled")
+        );
+        assert!(visible(&ui, "Creating the safety snapshot"));
+        assert!(blockers_shown(&ui).is_empty(), "server: {server_host}");
+        assert_eq!(
+            notes_beside_start(&ui, "gui-isolation-accept-unrecorded"),
+            Vec::<String>::new(),
+            "server: {server_host}"
+        );
+
+        ui.set_isolation_busy_kind("".into());
+        ui.set_isolation_busy_id("".into());
+        settle(&ui);
+        assert!(start_enabled(&ui), "server: {server_host}");
+        assert!(!visible(&ui, "Creating the safety snapshot"));
     }
 }
 

@@ -1915,9 +1915,10 @@ slint::slint! {
         in-out property <bool> accept-unrecorded;
         in-out property <bool> accept-missing;
         in property <string> error;
-        // The first thing Start is waiting for, which the setup names beside
-        // it: every disabled Start has a visible reason and a way past it.
-        property <string> start-blocker: root.busy ? "busy"
+        // The first thing Start waits for the user to do, named beside it.
+        // An isolation change in flight is progress, not a requirement: the
+        // workspace's progress banner already says what it is doing.
+        property <string> start-requirement: root.busy ? ""
             : root.host-running ? "running"
             : root.missing.length > 0 && !root.accept-missing ? "missing"
             : root.unrecorded.length > 0 && !root.accept-unrecorded ? "unrecorded"
@@ -2028,14 +2029,14 @@ slint::slint! {
                     if root.missing.length > 0 : AcknowledgementToggle { label: GuiI18n.text("gui-isolation-accept-missing"); enabled: !root.busy; checked <=> root.accept-missing; }
                     if root.unrecorded.length > 0 : AcknowledgementToggle { label: GuiI18n.text("gui-isolation-accept-unrecorded"); enabled: !root.busy; checked <=> root.accept-unrecorded; }
                     if root.error != "" : BodyText { text: root.error; color: Theme.danger; wrap: word-wrap; }
-                    if root.start-blocker != "" : BodyText { text: GuiI18n.text(root.start-blocker == "busy" ? "gui-isolation-start-blocked-busy" : root.start-blocker == "running" ? "gui-isolation-start-blocked-running" : root.start-blocker == "missing" ? "gui-isolation-start-blocked-missing" : "gui-isolation-start-blocked-unrecorded"); color: Theme.warning; wrap: word-wrap; }
+                    if root.start-requirement != "" : BodyText { text: GuiI18n.text(root.start-requirement == "running" ? "gui-isolation-start-blocked-running" : root.start-requirement == "missing" ? "gui-isolation-start-blocked-missing" : "gui-isolation-start-blocked-unrecorded"); color: Theme.warning; wrap: word-wrap; }
                     ActionRow {
                         AppButton { text: GuiI18n.text("gui-cancel"); enabled: !root.busy; clicked => { root.discard-setup(); } }
                         Rectangle { horizontal-stretch: 1; }
                         AppButton {
                             text: GuiI18n.text("gui-isolation-start");
                             tone: "primary";
-                            enabled: root.start-blocker == "";
+                            enabled: !root.busy && root.start-requirement == "";
                             clicked => { root.start-session(root.accept-unrecorded, root.accept-missing); }
                         }
                     }

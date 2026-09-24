@@ -19,9 +19,10 @@ The setup screen requires a separate acknowledgement when a required dependency
 is missing. If dependency information can be refreshed but has not been
 recorded, refresh it first or explicitly continue with reduced confidence.
 Either acknowledgement marks the result as unproven. Both choices sit directly
-above **Start isolation**. While Start is unavailable, the setup names the
-reason beside it: an isolation change still running, the host running, or an
-acknowledgement that has not been given. Jars that cannot be identified can
+above **Start isolation**. While Start waits on the user, the setup names what
+it needs beside it: stopping the host or giving an acknowledgement. While a
+requested start is in progress, Start stays disabled and the workspace's
+progress banner names the current stage. Jars that cannot be identified can
 still be tested, with the same caveat.
 
 For each round, launch the host using the exact enabled configuration shown in
