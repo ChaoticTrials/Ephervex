@@ -459,6 +459,8 @@ enum ModCommand {
     /// A file the pack shipped inside itself has no address to go back to.
     /// Those are named separately, because re-importing the pack is the way
     /// out for them and trying again is not.
+    ///
+    /// Refused while the host is running or an isolation session is active.
     Repair {
         #[command(flatten)]
         host: HostArgs,

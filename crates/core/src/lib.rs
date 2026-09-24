@@ -155,7 +155,9 @@ pub use snapshot::{
     SnapshotError, SnapshotOrigin, SnapshotRecord, SnapshotRestore, SnapshotRestoreOptions,
 };
 pub use url_handler::{URL_HANDLER_ENTRY, UrlHandlerSource, UrlHandlerStatus, scheme_mime_type};
-pub use verify::{Integrity, RepairReport, SharedArtifactReport, VerificationReport, VerifiedFile};
+pub use verify::{
+    Integrity, RepairRefusal, RepairReport, SharedArtifactReport, VerificationReport, VerifiedFile,
+};
 
 /// Cancellation, re-exported because the services take one.
 ///

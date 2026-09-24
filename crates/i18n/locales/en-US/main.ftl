@@ -868,6 +868,10 @@ error-diagnostic-bundle-not-written = The diagnostic bundle could not be written
     .action = Check that there is room and that you can write to { $path }.
 error-mod-file-not-added = That file could not be copied into the mods folder. Check that there is room and that the folder is writable.
 
+error-repair-host-running = This host cannot be repaired while it is running.
+.action = Stop it first. A repair moves jars the game may have open.
+error-repair-isolation-active = This host cannot be repaired while an isolation session is active.
+.action = Finish or cancel the isolation session first. A repair would put back mods the current round turned off.
 error-name-empty = A name cannot be blank.
 error-name-too-long = That name is too long. Use at most { $limit } characters.
 error-name-control-characters = A name cannot contain control characters.

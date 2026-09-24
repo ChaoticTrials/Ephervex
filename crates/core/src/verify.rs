@@ -32,7 +32,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument, warn};
 
 use crate::app::App;
-use crate::error::CoreResult;
+use crate::error::{CoreError, CoreResult};
 use crate::mods::InstalledHost;
 
 /// What checking one recorded file found.
@@ -188,6 +188,40 @@ impl SharedArtifactReport {
         self.files
             .iter()
             .filter(|file| file.integrity == Integrity::Absent)
+    }
+}
+
+/// Why a repair was refused before it touched anything.
+///
+/// Each is something the user can end and then repair, which is what separates
+/// these from a repair that ran and could not fix a file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RepairRefusal {
+    /// The host is running, and a repair moves jars it may have open.
+    HostRunning,
+    /// An isolation session owns which of the host's mods are enabled, and a
+    /// repair would put back files its current round took away.
+    IsolationActive,
+}
+
+impl RepairRefusal {
+    /// The `ephervex-i18n` message id explaining this to a user.
+    #[must_use]
+    pub const fn message_id(self) -> &'static str {
+        match self {
+            Self::HostRunning => "error-repair-host-running",
+            Self::IsolationActive => "error-repair-isolation-active",
+        }
+    }
+}
+
+impl std::fmt::Display for RepairRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::HostRunning => "the host is running",
+            Self::IsolationActive => "an isolation session is active",
+        })
     }
 }
 
@@ -382,6 +416,9 @@ impl App {
     /// exactly where it was rather than removing it and failing. One file's
     /// failure does not abandon the rest: a pass that mended four of five and
     /// says so is more use than one that reports only the fifth.
+    ///
+    /// Refused while the host runs or an isolation session is active, the same
+    /// states that refuse a snapshot restore and an isolation start.
     #[instrument(skip(self, reporter, cancel), fields(host = %host.id()))]
     pub async fn repair_host(
         &self,
@@ -389,6 +426,7 @@ impl App {
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<RepairReport> {
+        self.refuse_repair(host)?;
         let layout = self.host_layout(host)?;
         let found = self.verify_host(host, reporter, cancel).await?;
         let mut report = RepairReport {
@@ -472,6 +510,23 @@ impl App {
             "replaced what this host was missing or holding wrongly"
         );
         Ok(report)
+    }
+}
+
+impl App {
+    fn refuse_repair(&self, host: InstalledHost) -> CoreResult<()> {
+        let running = match host {
+            InstalledHost::Instance(id) => self.launch_state(id)?.is_some(),
+            InstalledHost::Server(id) => self.server_status(id)?.runtime.may_be_running(),
+        };
+        let reason = if running {
+            RepairRefusal::HostRunning
+        } else if self.isolation_state(host)?.is_some() {
+            RepairRefusal::IsolationActive
+        } else {
+            return Ok(());
+        };
+        Err(CoreError::RepairRefused { reason })
     }
 }
 
@@ -853,6 +908,64 @@ mod tests {
             !report.failed.contains(&PathBuf::from("mods/shipped.jar")),
             "it is not something a repair attempted and failed at"
         );
+    }
+
+    async fn repair(app: &App, instance: InstanceId) -> CoreResult<RepairReport> {
+        app.repair_host(
+            InstalledHost::Instance(instance),
+            &OperationReporter::silent("test-repair"),
+            &CancellationToken::new(),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn a_running_host_is_not_repaired_under_the_game() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, id, root) = instance(base.path());
+        let _lock = ephervex_storage::LaunchLock::acquire(&root).expect("launch lock");
+
+        let error = repair(&app, id)
+            .await
+            .expect_err("a running host is refused");
+        assert!(matches!(
+            error,
+            CoreError::RepairRefused {
+                reason: RepairRefusal::HostRunning
+            }
+        ));
+        let mods = ephervex_storage::metadata::client_game_dir(&root).join("mods");
+        assert_eq!(
+            std::fs::read(mods.join("truncated.jar")).expect("read"),
+            b"a ja",
+            "nothing was moved aside"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_repair_does_not_undo_an_isolation_round() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, id, _root) = instance(base.path());
+        app.begin_isolation(
+            InstalledHost::Instance(id),
+            crate::isolation::IsolationRequest {
+                pinned: Vec::new(),
+                accept_unrecorded: true,
+                accept_missing: true,
+            },
+            &CancellationToken::new(),
+        )
+        .expect("an isolation session starts");
+
+        let error = repair(&app, id)
+            .await
+            .expect_err("the session owns which mods are enabled");
+        assert!(matches!(
+            error,
+            CoreError::RepairRefused {
+                reason: RepairRefusal::IsolationActive
+            }
+        ));
     }
 
     #[tokio::test]

@@ -26,6 +26,7 @@ use crate::ConnectError;
 use crate::instance::NameRefusal;
 use crate::isolation::IsolationError;
 use crate::snapshot::SnapshotError;
+use crate::verify::RepairRefusal;
 
 /// An error together with everything that caused it, for one log line.
 ///
@@ -348,6 +349,10 @@ pub enum CoreError {
     #[error("that name cannot be used: {reason}")]
     EntityNameInvalid { reason: NameRefusal },
 
+    /// A repair that would rewrite mods something else is using right now.
+    #[error("this host cannot be repaired while {reason}")]
+    RepairRefused { reason: RepairRefusal },
+
     /// Working out which dependencies are still needed requires every root's
     /// project, and one of them has none.
     ///
@@ -476,6 +481,7 @@ impl CoreError {
             Self::DiagnosticBundleNotWritten { .. } => "error-diagnostic-bundle-not-written",
             Self::ModFileNotAdded { .. } => "error-mod-file-not-added",
             Self::EntityNameInvalid { reason } => reason.message_id(),
+            Self::RepairRefused { reason } => reason.message_id(),
         }
     }
 
@@ -684,6 +690,7 @@ impl CoreError {
             | Self::LoaderFamilyFixed { .. }
             | Self::LoaderChangeBlockedByMods { .. }
             | Self::ModCatalogPreferenceUnrecognized { .. }
+            | Self::RepairRefused { .. }
             | Self::ArtworkUnusable { .. } => None,
         }
     }
@@ -752,6 +759,7 @@ impl CoreError {
             | Self::UrlHandlerUnavailable { .. }
             | Self::SingleInstanceUnavailable { .. }
             | Self::EntityNameInvalid { .. }
+            | Self::RepairRefused { .. }
             | Self::ArtworkUnusable { .. } => None,
         }
     }
