@@ -198,7 +198,12 @@ Ephervex process, alongside another launch, or by Launch & Connect is not
 offered a restart. The restart stops the game the way its Stop does, waits for
 that launch to return and for nothing to hold the instance, then launches it
 again as the same account; if the game is not seen to stop within a bound,
-nothing is started.
+nothing is started. The replacement counts as started only once the instance's
+lock records its game, with the start time that proves the process, and that
+game is still the one recorded a few seconds later. A JVM that prints an error
+and exits, or exits before it is recorded, is a failed start, whatever it
+printed. Stopping a client kills its game: Minecraft offers no request to quit
+from outside the game.
 
 Both claim the host-change state for their whole duration, so isolation,
 repair, snapshots, launching, and a second restart wait for them, and they are

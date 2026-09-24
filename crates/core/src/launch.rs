@@ -304,6 +304,7 @@ impl App {
 
         let process = GameProcess::start(&outcome.command, observer)?;
         lock.record_game_pid(process.pid())?;
+        observer.emit(LaunchEvent::Running { pid: process.pid() });
 
         // Recorded before the wait, so a launch that never returns - a game
         // that hangs, a machine that loses power - still shows as having been

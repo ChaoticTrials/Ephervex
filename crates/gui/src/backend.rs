@@ -5590,8 +5590,8 @@ struct ClientLaunch {
     additional: Option<String>,
 }
 
-/// Told once whether a launch reached a running game: `Ok` at its first line
-/// of output or when it ran and exited, `Err` when it failed before that.
+/// Told once whether a launch became the instance's running game; see
+/// [`confirm_replacement`].
 type LaunchStarted = tokio::sync::oneshot::Sender<Result<(), String>>;
 
 fn spawn_launch(
@@ -5637,13 +5637,23 @@ fn spawn_launch(
             let registered = additional
                 .is_none()
                 .then(|| register_launch(&launches, &events, instance, account.clone()));
-            let started = Arc::new(Mutex::new(started));
-            let started_by_output = Arc::clone(&started);
+            // Whether this launch became the instance's running game, for a
+            // restart waiting to find out. The recorded game is the evidence,
+            // not the first line it prints.
+            let (running_sender, running) = tokio::sync::oneshot::channel::<u32>();
+            let (ended_sender, ended) = tokio::sync::oneshot::channel::<String>();
+            let mut running_sender = Some(running_sender);
+            let confirmation_paths = paths.clone();
             runtime.block_on(async move {
+                let confirming = started.map(|started| {
+                    spawn_confirmation(started, running, ended, confirmation_paths, instance)
+                });
                 let forward = tokio::spawn(async move {
                     while let Some(event) = receiver.recv().await {
-                        if matches!(event, LaunchEvent::OutputLine(_)) {
-                            report_launch_started(&started_by_output, Ok(()));
+                        if let LaunchEvent::Running { pid } = event
+                            && let Some(sender) = running_sender.take()
+                        {
+                            let _ = sender.send(pid);
                         }
                         forward_launch_event(
                             &event_sender,
@@ -5671,10 +5681,10 @@ fn spawn_launch(
                     .await;
                 drop(observer);
                 let _ = forward.await;
-                report_launch_started(
-                    &started,
-                    result.as_ref().map(|_| ()).map_err(localized_error),
-                );
+                let _ = ended_sender.send(replacement_end_reason(&result));
+                if let Some(confirming) = confirming {
+                    let _ = confirming.await;
+                }
                 report_launch_result(&events, instance, &entity, &observed_operation, &result);
                 release_launch_cancellation(&killing, instance, &observed_operation);
                 // Announced only after everything this launch held is
@@ -5745,10 +5755,88 @@ fn report_launch_result(
     }
 }
 
-fn report_launch_started(started: &Mutex<Option<LaunchStarted>>, outcome: Result<(), String>) {
-    if let Some(sender) = started.lock().ok().and_then(|mut started| started.take()) {
-        let _ = sender.send(outcome);
+/// How long a replacement's game must stay the instance's running game before
+/// a restart counts it as started. Long enough for a JVM that cannot start to
+/// have exited; a crash after it is the game's own, not a failed restart.
+const RESTART_CONFIRMATION: Duration = Duration::from_secs(3);
+
+/// Decides whether a replacement launch became the instance's running game.
+///
+/// `running` resolves with the game's pid once the launch has recorded it in
+/// the instance's lock, or `None` when the launch ended first. `ended` resolves
+/// when the launch returns, with why it is no longer running. The game has to
+/// outlast `window` and still be the process the lock names: a JVM that prints
+/// an error and exits, or exits without a word, is a failed start.
+async fn confirm_replacement(
+    running: impl std::future::Future<Output = Option<u32>>,
+    ended: impl std::future::Future<Output = String>,
+    still_recorded: impl FnOnce(u32) -> bool,
+    window: Duration,
+) -> Result<(), String> {
+    let ended = std::pin::pin!(ended);
+    let mut ended = ended;
+    let pid = tokio::select! {
+        biased;
+        reason = &mut ended => return Err(reason),
+        pid = running => match pid {
+            Some(pid) => pid,
+            None => return Err(ended.await),
+        },
+    };
+    tokio::select! {
+        biased;
+        reason = &mut ended => Err(reason),
+        () = tokio::time::sleep(window) => {
+            if still_recorded(pid) {
+                Ok(())
+            } else {
+                Err(lookup("gui-restart-exited-at-once"))
+            }
+        }
     }
+}
+
+/// Watches a launch a restart is waiting on, and tells the restart once whether
+/// it became the instance's running game.
+fn spawn_confirmation(
+    started: LaunchStarted,
+    running: tokio::sync::oneshot::Receiver<u32>,
+    ended: tokio::sync::oneshot::Receiver<String>,
+    paths: Paths,
+    instance: InstanceId,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let outcome = confirm_replacement(
+            async { running.await.ok() },
+            async {
+                ended
+                    .await
+                    .unwrap_or_else(|_| lookup("gui-restart-launch-lost"))
+            },
+            |pid| recorded_game_is(&paths, instance, pid),
+            RESTART_CONFIRMATION,
+        )
+        .await;
+        let _ = started.send(outcome);
+    })
+}
+
+/// Why a launch that has returned is not a running replacement.
+fn replacement_end_reason(result: &CoreResult<ephervex_core::LaunchOutcome>) -> String {
+    match result {
+        Ok(outcome) if outcome.is_success() => lookup("gui-restart-exited-at-once"),
+        Ok(_) => lookup("gui-restart-game-failed"),
+        Err(error) => localized_error(error),
+    }
+}
+
+/// Whether the instance's lock still names `pid` as its live, proven game.
+fn recorded_game_is(paths: &Paths, instance: InstanceId, pid: u32) -> bool {
+    App::open_at(paths.clone())
+        .and_then(|app| app.launch_state(instance))
+        .is_ok_and(|state| {
+            state.is_some_and(|state| state.game_pid == Some(pid) && state.game_is_alive())
+        })
 }
 
 /// What the worker keeps about the client launches it started.
@@ -9036,6 +9124,70 @@ mod tests {
                 .map(|launch| launch.generation),
             Some(new)
         );
+    }
+
+    const WINDOW: Duration = Duration::from_millis(50);
+
+    #[test]
+    fn a_replacement_that_prints_an_error_and_exits_is_not_a_restart() {
+        // Recorded as the instance's game, then gone before the window ends:
+        // the first line it printed proves nothing.
+        let checked = std::cell::Cell::new(false);
+        let outcome = run(confirm_replacement(
+            async { Some(7) },
+            async {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                "the game exited with an error".to_owned()
+            },
+            |_| {
+                checked.set(true);
+                true
+            },
+            WINDOW,
+        ));
+        assert_eq!(outcome, Err("the game exited with an error".to_owned()));
+        assert!(
+            !checked.get(),
+            "the launch ended, so nothing was left to confirm"
+        );
+    }
+
+    #[test]
+    fn a_replacement_that_exits_before_it_is_recorded_is_not_a_restart() {
+        let outcome = run(confirm_replacement(
+            async { None },
+            async { "no Java".to_owned() },
+            |_| true,
+            WINDOW,
+        ));
+        assert_eq!(outcome, Err("no Java".to_owned()));
+    }
+
+    #[test]
+    fn a_replacement_still_recorded_after_the_window_is_a_restart_once() {
+        let checks = std::cell::Cell::new(0);
+        let outcome = run(confirm_replacement(
+            async { Some(7) },
+            std::future::pending::<String>(),
+            |pid| {
+                checks.set(checks.get() + 1);
+                pid == 7
+            },
+            WINDOW,
+        ));
+        assert_eq!(outcome, Ok(()));
+        assert_eq!(checks.get(), 1, "decided exactly once");
+    }
+
+    #[test]
+    fn a_replacement_the_lock_no_longer_names_is_not_a_restart() {
+        let outcome = run(confirm_replacement(
+            async { Some(7) },
+            std::future::pending::<String>(),
+            |_| false,
+            WINDOW,
+        ));
+        assert!(outcome.is_err());
     }
 
     #[test]

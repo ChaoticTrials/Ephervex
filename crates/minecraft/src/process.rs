@@ -112,6 +112,9 @@ pub enum LaunchEvent {
     /// `Display` are redacted; `redacted_arguments` is the only form that may
     /// be printed.
     Starting(Box<LaunchCommand>),
+    /// The game process is running and recorded as the instance's game, with
+    /// the start time that proves which process it is.
+    Running { pid: u32 },
     /// One line of the game's output.
     OutputLine(OutputLine),
     /// The game ended.
