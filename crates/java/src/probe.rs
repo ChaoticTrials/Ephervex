@@ -27,8 +27,9 @@
 //! ([`crate::discovery`]). A JVM that hangs is bounded by [`PROBE_TIMEOUT`]:
 //! discovery must not be able to wedge the launcher's startup.
 
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Output, Stdio};
 use std::time::Duration;
 
 use tokio::process::Command;
@@ -42,6 +43,12 @@ use crate::version::JavaVersion;
 /// Generous: a cold JDK on a spinning disk can take a second or two. The point
 /// is only that a broken runtime cannot block discovery forever.
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// How many times a busy executable is retried before the probe gives up.
+const BUSY_RETRIES: u32 = 6;
+
+/// The first wait before retrying a busy executable. Each later wait doubles.
+const BUSY_BACKOFF: Duration = Duration::from_millis(10);
 
 /// Arguments that make a JVM print its system properties and exit.
 const PROPERTY_ARGS: [&str; 2] = ["-XshowSettings:properties", "-version"];
@@ -113,7 +120,7 @@ async fn run(executable: &Path, args: &[&str]) -> Result<String, ProbeError> {
         .env_remove("JDK_JAVA_OPTIONS")
         .kill_on_drop(true);
 
-    let output = tokio::time::timeout(PROBE_TIMEOUT, command.output())
+    let output = tokio::time::timeout(PROBE_TIMEOUT, output_once_not_busy(&mut command))
         .await
         .map_err(|_| ProbeError::TimedOut {
             path: executable.to_path_buf(),
@@ -135,6 +142,26 @@ async fn run(executable: &Path, args: &[&str]) -> Result<String, ProbeError> {
     text.push('\n');
     text.push_str(&String::from_utf8_lossy(&output.stdout));
     Ok(text)
+}
+
+/// Runs the command, retrying while the executable is busy.
+///
+/// `ETXTBSY` is transient: a just-written executable, such as a fresh managed
+/// install, stays busy until every process forked during the write has exec'd
+/// and dropped its inherited copy of the write descriptor.
+async fn output_once_not_busy(command: &mut Command) -> std::io::Result<Output> {
+    let mut backoff = BUSY_BACKOFF;
+    for _ in 0..BUSY_RETRIES {
+        match command.output().await {
+            Err(error) if error.kind() == ErrorKind::ExecutableFileBusy => {
+                trace!(?backoff, "java executable is busy; retrying");
+                tokio::time::sleep(backoff).await;
+                backoff *= 2;
+            }
+            result => return result,
+        }
+    }
+    command.output().await
 }
 
 /// Builds a report from `-XshowSettings:properties` output.
@@ -295,5 +322,36 @@ openjdk version "1.8.0_492"
             report.arch.is_empty(),
             "an unknown architecture must not be invented"
         );
+    }
+
+    /// Linux refuses to exec a file while any descriptor holds it open for
+    /// writing, so the open writer here makes the first attempt fail with
+    /// `ETXTBSY` exactly as a just-written executable can.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn an_executable_still_open_for_writing_is_probed_once_it_is_released() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("temp");
+        let executable = temp.path().join("java");
+        let mut writer = std::fs::File::create(&executable).expect("create java");
+        writer
+            .write_all(
+                b"#!/bin/sh\ncat >&2 <<'EOF'\nProperty settings:\n    java.version = 21.0.12\nEOF\n",
+            )
+            .expect("write java");
+        writer
+            .set_permissions(std::fs::Permissions::from_mode(0o755))
+            .expect("chmod");
+
+        let release = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            drop(writer);
+        });
+        let report = probe(&executable).await.expect("probe after release");
+        release.await.expect("release writer");
+
+        assert_eq!(report.version.major, 21);
     }
 }

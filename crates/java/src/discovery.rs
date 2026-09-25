@@ -699,6 +699,8 @@ mod tests {
         set_executable(executable);
     }
 
+    /// One JDK 8 install is one runtime, whose origins are both paths it was
+    /// found under and whose identity is the top-level `bin/java`.
     #[tokio::test]
     async fn a_managed_jdk8_with_separate_jre_and_bin_executables_is_reported_once() {
         // Some managed Temurin JDK 8 archives ship `bin/java` and
@@ -709,8 +711,10 @@ mod tests {
         let managed = temp.path().join("java");
         let home = managed.join("8").join("eclipse-jdk8u312-b07");
         let jre = home.join("jre");
-        for executable in [home.join("bin").join("java"), jre.join("bin").join("java")] {
-            fake_java_at(&executable, &jre, "1.8.0_312", "1.8.0_312-b07", "Temurin");
+        let bin_java = home.join("bin").join("java");
+        let jre_java = jre.join("bin").join("java");
+        for executable in [&bin_java, &jre_java] {
+            fake_java_at(executable, &jre, "1.8.0_312", "1.8.0_312-b07", "Temurin");
         }
 
         let inventory = JavaDiscovery::isolated()
@@ -718,6 +722,11 @@ mod tests {
             .discover()
             .await;
 
+        assert!(
+            inventory.failures.is_empty(),
+            "both executables must probe: {:?}",
+            inventory.failures
+        );
         assert_eq!(
             inventory.runtimes.len(),
             1,
@@ -729,16 +738,73 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert_eq!(
-            inventory.runtimes[0].origins.len(),
-            2,
-            "{:?}",
-            inventory.runtimes[0].origins
+            inventory.runtimes[0].origins,
+            vec![
+                JavaOrigin {
+                    kind: JavaSourceKind::Managed,
+                    path: bin_java.clone(),
+                },
+                JavaOrigin {
+                    kind: JavaSourceKind::Managed,
+                    path: jre_java,
+                },
+            ]
         );
         assert_eq!(
-            inventory.runtimes[0].executable,
-            home.join("bin").join("java"),
+            inventory.runtimes[0].executable, bin_java,
             "the top-level entry point is preferred as the runtime's identity"
         );
+        assert_eq!(inventory.runtimes[0].home, Some(jre));
+    }
+
+    fn split_jdk8_runtime(executable: &Path, home: &Path) -> JavaRuntime {
+        JavaRuntime {
+            executable: executable.to_path_buf(),
+            home: Some(home.join("jre")),
+            version: JavaVersion::parse("1.8.0_312").expect("version"),
+            version_string: "1.8.0_312".to_owned(),
+            runtime_version: "1.8.0_312-b07".to_owned(),
+            vendor: "Temurin".to_owned(),
+            arch: "amd64".to_owned(),
+            origins: vec![JavaOrigin {
+                kind: JavaSourceKind::Managed,
+                path: executable.to_path_buf(),
+            }],
+        }
+    }
+
+    #[test]
+    fn a_split_jdk8_home_merges_the_same_way_in_either_order() {
+        let home = Path::new("/managed/8/eclipse-jdk8u312-b07");
+        let bin_java = home.join("bin").join("java");
+        let jre_java = home.join("jre").join("bin").join("java");
+        let bin = split_jdk8_runtime(&bin_java, home);
+        let jre = split_jdk8_runtime(&jre_java, home);
+
+        let forward = merge_split_jdk_homes(vec![bin.clone(), jre.clone()]);
+        let reverse = merge_split_jdk_homes(vec![jre, bin]);
+
+        assert_eq!(forward, reverse);
+        assert_eq!(forward.len(), 1);
+        assert_eq!(forward[0].executable, bin_java);
+        assert_eq!(
+            forward[0]
+                .origins
+                .iter()
+                .map(|origin| &origin.path)
+                .collect::<Vec<_>>(),
+            vec![&bin_java, &jre_java]
+        );
+    }
+
+    #[test]
+    fn split_jdk8_executables_that_disagree_are_not_merged() {
+        let home = Path::new("/managed/8/eclipse-jdk8u312-b07");
+        let bin = split_jdk8_runtime(&home.join("bin").join("java"), home);
+        let mut jre = split_jdk8_runtime(&home.join("jre").join("bin").join("java"), home);
+        jre.runtime_version = "1.8.0_312-b08".to_owned();
+
+        assert_eq!(merge_split_jdk_homes(vec![bin, jre]).len(), 2);
     }
 
     #[tokio::test]
