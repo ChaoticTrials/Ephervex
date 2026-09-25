@@ -122,9 +122,6 @@ fn a_server_restart_shows_on_its_card_as_well_as_in_its_workspace() {
     ui.set_loading(false);
     ui.set_page(1);
     ui.set_workspace_open(false);
-    ui.set_servers(ModelRc::new(VecModel::from(vec![restarting_server(
-        "stopping",
-    )])));
     ui.set_global_servers(ModelRc::new(VecModel::from(vec![restarting_server(
         "stopping",
     )])));

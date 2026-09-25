@@ -4058,7 +4058,6 @@ slint::slint! {
         private property <bool> settings-two-columns: root.width >= 1440px;
         in-out property <int> page: 0;
         in-out property <[InstanceRow]> instances;
-        in-out property <[ServerRow]> servers;
         in-out property <[ServerRow]> global-servers;
         // What the launcher is running right now. Polled only while the page
         // showing it is open.
@@ -4227,10 +4226,8 @@ slint::slint! {
         // One viewer per Logs or Console pane, indexed by the pane's `log`.
         in-out property <[LogView]> log-views;
         in-out property <string> selected-instance-id;
-        in-out property <string> selected-server-id;
         in-out property <string> selected-global-server-id;
         in-out property <int> selected-instance-index: -1;
-        in-out property <int> selected-server-index: -1;
         in-out property <int> selected-global-server-index: -1;
         in-out property <string> instance-filter: "all";
         in-out property <string> instance-query;

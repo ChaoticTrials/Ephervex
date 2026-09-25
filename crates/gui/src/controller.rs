@@ -1530,9 +1530,9 @@ fn stamp_host_lifecycle(ui: &AppWindow, lifecycle: &HostLifecycle) {
     stamp_rows(&ui.get_instances(), |row: &mut InstanceRow| {
         lifecycle.stamp_client(row)
     });
-    for list in [ui.get_servers(), ui.get_global_servers()] {
-        stamp_rows(&list, |row: &mut ServerRow| lifecycle.stamp_server(row));
-    }
+    stamp_rows(&ui.get_global_servers(), |row: &mut ServerRow| {
+        lifecycle.stamp_server(row)
+    });
     let views = ui.get_host_views();
     stamp_rows(&views, |view: &mut HostView| {
         if view.kind == "client" {
@@ -8343,12 +8343,6 @@ fn apply_server_snapshot(
         ui.set_selected_global_server_id(SharedString::default());
         ui.set_selected_global_server_index(-1);
     }
-    let workspace_server = ui.get_selected_server_id();
-    let workspace_index = server_rows
-        .iter()
-        .position(|row| row.id == workspace_server);
-    ui.set_selected_server_index(workspace_index.map_or(-1, to_i32));
-    ui.set_servers(reconciled(&ui.get_servers(), server_rows.clone()));
     ui.set_global_servers(reconciled(&ui.get_global_servers(), global_rows));
     server_rows
 }
@@ -11259,7 +11253,6 @@ mod tests {
             can_restart: true,
             ..ServerRow::default()
         };
-        ui.set_servers(model(vec![server_row.clone()]));
         ui.set_global_servers(model(vec![server_row]));
         let (sender, commands) = std::sync::mpsc::channel();
         let lifecycle = Rc::new(RefCell::new(HostLifecycle::default()));
@@ -11295,15 +11288,23 @@ mod tests {
     #[test]
     fn every_row_showing_a_host_carries_its_restart_stage() {
         let (ui, commands, lifecycle, _client, server) = restart_window();
+        ui.set_host_views(model(vec![HostView {
+            kind: "server".into(),
+            server: ui.get_global_servers().row_data(0).expect("row"),
+            ..HostView::default()
+        }]));
         ui.invoke_server_restart(server.to_string().into());
         let Ok(Command::RestartHost { host, request }) = commands.try_recv() else {
             panic!("a restart");
         };
         let stages = |ui: &AppWindow| -> Vec<String> {
-            [ui.get_servers(), ui.get_global_servers()]
-                .iter()
-                .map(|list| list.row_data(0).expect("row").restart_stage.to_string())
-                .collect()
+            [
+                ui.get_global_servers().row_data(0).expect("row"),
+                ui.get_host_views().row_data(0).expect("view").server,
+            ]
+            .iter()
+            .map(|row| row.restart_stage.to_string())
+            .collect()
         };
         assert_eq!(stages(&ui), ["stopping", "stopping"]);
 
