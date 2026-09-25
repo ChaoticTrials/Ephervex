@@ -353,6 +353,8 @@ slint::slint! {
         id: int,
         // Index into the window's host views.
         host: int,
+        // Index into the window's log views, or -1 for a pane not on Logs or Console.
+        log: int,
         surface: string,
         column: int,
         row: int,
@@ -506,6 +508,43 @@ slint::slint! {
     export struct LogChunk {
         text: string,
         level: string,
+    }
+
+    // What one pane's log viewer shows. Each Logs or Console pane has its own.
+    export struct LogView {
+        // "live", "files", or "crashes".
+        mode: string,
+        // The saved log or crash report open, by its listed name.
+        file: string,
+        files: [DiagnosticRow],
+        // The open crash report's text.
+        report: string,
+        chunks: [LogChunk],
+        has-content: bool,
+        status: string,
+        history-truncated: bool,
+        pending-lines: int,
+        content-columns: int,
+        // The search the rows are narrowed by.
+        query: string,
+        wrap-lines: bool,
+        follow: bool,
+        trace-enabled: bool,
+        debug-enabled: bool,
+        info-enabled: bool,
+        warn-enabled: bool,
+        error-enabled: bool,
+        fatal-enabled: bool,
+        other-enabled: bool,
+        revision: int,
+        // The selection in reading order, as byte offsets into each end's own
+        // row. -1 is no selection.
+        selection-start-row: int,
+        selection-start-offset: int,
+        selection-end-row: int,
+        selection-end-offset: int,
+        has-selection: bool,
+        selection-revision: int,
     }
 
     export struct ActivityRow {
@@ -983,9 +1022,11 @@ slint::slint! {
         in property <int> pending-lines;
         in property <int> content-columns: 80;
         in property <length> font-size: Theme.label-size;
-        in-out property <string> query;
-        in-out property <bool> wrap-lines;
-        in-out property <bool> follow;
+        // The search the rows are narrowed by. The field starts from it and is
+        // reset whenever it changes, such as when another log is opened.
+        in property <string> query;
+        in property <bool> wrap-lines;
+        in property <bool> follow;
         in property <bool> trace-enabled;
         in property <bool> debug-enabled;
         in property <bool> info-enabled;
@@ -1012,6 +1053,8 @@ slint::slint! {
         callback select-word-at(int, int);
         callback select-all();
         callback follow-changed(bool);
+        callback wrap-changed(bool);
+        changed query => { search-field.text = root.query; }
         // Ten characters wide divided by ten. Exact in a fixed-width family,
         // and the reason the monospace family has to resolve before a column
         // can be worked out from a pointer position.
@@ -1053,10 +1096,10 @@ slint::slint! {
                 background: Theme.surface;
                 HorizontalLayout {
                     padding-left: 10px; padding-right: 10px; spacing: 8px; cross-axis-alignment: center;
-                    TextField { text <=> root.query; placeholder: GuiI18n.text("gui-search-retained-logs"); input-type: InputType.search; width: 230px; accepted => { root.search(root.query); } accessible-label: GuiI18n.text("gui-search-retained-logs"); }
-                    AppButton { text: GuiI18n.text("gui-find"); clicked => { root.search(root.query); } }
-                    FilterChip { text: GuiI18n.text("gui-wrap-lines"); accessible-name: GuiI18n.text("gui-wrap-lines"); selected: root.wrap-lines; clicked => { root.wrap-lines = !root.wrap-lines; } }
-                    FilterChip { text: root.follow ? GuiI18n.text("gui-following") : GuiI18n.text("gui-jump-latest"); accessible-name: root.follow ? GuiI18n.text("gui-pause-following") : GuiI18n.text("gui-jump-latest"); selected: root.follow; clicked => { root.follow = !root.follow; root.follow-changed(root.follow); } }
+                    search-field := TextField { placeholder: GuiI18n.text("gui-search-retained-logs"); input-type: InputType.search; width: 230px; init => { self.text = root.query; } accepted => { root.search(self.text); } accessible-label: GuiI18n.text("gui-search-retained-logs"); }
+                    AppButton { text: GuiI18n.text("gui-find"); clicked => { root.search(search-field.text); } }
+                    FilterChip { text: GuiI18n.text("gui-wrap-lines"); accessible-name: GuiI18n.text("gui-wrap-lines"); selected: root.wrap-lines; clicked => { root.wrap-changed(!root.wrap-lines); } }
+                    FilterChip { text: root.follow ? GuiI18n.text("gui-following") : GuiI18n.text("gui-jump-latest"); accessible-name: root.follow ? GuiI18n.text("gui-pause-following") : GuiI18n.text("gui-jump-latest"); selected: root.follow; clicked => { root.follow-changed(!root.follow); } }
                     AppButton { text: GuiI18n.text("gui-copy-selection"); enabled: root.has-selection; clicked => { root.copy-selection(); } }
                     AppButton { text: GuiI18n.text("gui-copy-retained"); enabled: root.has-content; clicked => { root.copy(); } }
                     Rectangle { horizontal-stretch: 1; }
@@ -1233,7 +1276,6 @@ slint::slint! {
                   clicked => {
                       output.viewport-y = min(0px, output.visible-height - output.viewport-height);
                       if !root.follow {
-                          root.follow = true;
                           root.follow-changed(true);
                       }
                   }
@@ -3822,7 +3864,6 @@ slint::slint! {
         callback remove-mod(string, string);
         callback open-mod-project-page(string);
         in-out property <[ModSearchRow]> mod-results;
-        in-out property <[DiagnosticRow]> diagnostics;
         in-out property <[SnapshotRow]> snapshots;
         in-out property <string> snapshot-total;
         in-out property <bool> snapshots-have-plain-copies;
@@ -3911,11 +3952,6 @@ slint::slint! {
         in-out property <string> active-workflow-title;
         in-out property <string> active-workflow-summary;
         in-out property <[WorkflowActionRow]> active-workflow-actions;
-        // Whether the Logs tab is showing saved log files rather than the one
-        // being written. Beside `selected-diagnostic-kind` rather than folded
-        // into it, because that value names a kind of file for the services
-        // that read one and must stay exactly "log" or "crash-report".
-        in-out property <bool> log-shows-files;
         in-out property <[ActivityRow]> activities;
         in-out property <[AccountRow]> accounts;
         in-out property <[JavaRow]> java-runtimes;
@@ -3952,31 +3988,8 @@ slint::slint! {
         // expression, and a `for` that hides most of what it renders still
         // reserves the room for it.
         in-out property <[PendingEntityRow]> selected-instance-pending-servers;
-        in-out property <[LogChunk]> log-chunks;
-        in-out property <bool> log-has-content: false;
-        in-out property <string> log-status;
-        in-out property <string> log-query;
-        in-out property <bool> log-wrap-lines: false;
-        in-out property <bool> log-follow: true;
-        in-out property <bool> log-history-truncated: false;
-        in-out property <int> log-pending-lines: 0;
-        in-out property <int> log-content-columns: 80;
-        in-out property <int> log-revision: 0;
-        // What the pointer has selected across the console's rows, in reading
-        // order, as byte offsets into each end's own row. -1 is no selection.
-        in-out property <int> log-selection-start-row: -1;
-        in-out property <int> log-selection-start-offset;
-        in-out property <int> log-selection-end-row: -1;
-        in-out property <int> log-selection-end-offset;
-        in-out property <bool> log-has-selection;
-        in-out property <int> log-selection-revision: 0;
-        in-out property <bool> log-trace-enabled: true;
-        in-out property <bool> log-debug-enabled: true;
-        in-out property <bool> log-info-enabled: true;
-        in-out property <bool> log-warn-enabled: true;
-        in-out property <bool> log-error-enabled: true;
-        in-out property <bool> log-fatal-enabled: true;
-        in-out property <bool> log-other-enabled: true;
+        // One viewer per Logs or Console pane, indexed by the pane's `log`.
+        in-out property <[LogView]> log-views;
         in-out property <string> selected-instance-id;
         in-out property <string> selected-server-id;
         in-out property <string> selected-global-server-id;
@@ -4040,14 +4053,6 @@ slint::slint! {
         // is already shown.
         in-out property <int> mod-results-target: 10;
         in-out property <string> mod-search-notice;
-        in-out property <string> diagnostic-query;
-        in-out property <string> diagnostic-content;
-        in-out property <string> diagnostic-path;
-        in-out property <string> diagnostic-title;
-        in-out property <string> selected-diagnostic-name;
-        in-out property <string> selected-diagnostic-scope;
-        in-out property <string> selected-diagnostic-id;
-        in-out property <string> selected-diagnostic-kind;
         // Which Settings page is open.
         in-out property <string> settings-tab: "General";
         // Whether the host workspace is on screen instead of the page's list.
@@ -4205,7 +4210,6 @@ slint::slint! {
         // one session and neither is the other's default.
         in-out property <string> import-server-pack;
         in-out property <string> import-server-pack-name;
-        in-out property <string> console-command;
         in-out property <string> property-motd;
         in-out property <string> property-max-players: "20";
         in-out property <string> property-difficulty: "normal";
@@ -4418,21 +4422,25 @@ slint::slint! {
         callback open-storage-location(string, int);
         callback server-kill(string);
         callback server-console(string, string);
-        callback open-live-log(string, string);
-        // Reads one saved log file into the same filterable view the live log uses.
-        callback open-log-file(string, string, string);
-        callback close-live-log();
-        callback copy-live-log();
-        callback set-log-level(string, bool);
-        // Moves one end of the console's selection to a character column on a
-        // row, extending from the existing anchor when asked.
-        callback select-log-at(int, int, bool);
+        // A pane's log viewer, every callback naming the pane first.
+        // (pane, "live" | "files" | "crashes")
+        callback log-show(int, string);
+        // Opens a saved log or crash report by its listed name.
+        callback log-open-file(int, string);
+        callback log-search-report(int, string);
+        callback log-open-folder(int);
+        callback log-set-level(int, string, bool);
+        callback log-search(int, string);
+        callback log-follow(int, bool);
+        callback log-wrap(int, bool);
+        callback log-copy(int);
+        callback log-copy-selection(int);
+        // Moves one end of the selection to a character column on a row,
+        // extending from the existing anchor when asked.
+        callback log-select-at(int, int, int, bool);
         // Selects the whole word under a double click.
-        callback select-log-word-at(int, int);
-        callback copy-log-selection();
-        callback select-all-log();
-        callback search-live-log(string);
-        callback live-log-follow-changed(bool);
+        callback log-select-word-at(int, int, int);
+        callback log-select-all(int);
         callback load-server-workspace(string);
         callback load-server-mods(string);
         callback load-running();
@@ -4448,11 +4456,6 @@ slint::slint! {
         callback accept-eula();
         callback revoke-eula();
         callback open-eula-reference();
-        callback load-diagnostics(string, string, string);
-        callback open-diagnostic(string, string, string, string);
-        callback search-diagnostic(string, string, string, string, string);
-        callback refresh-diagnostic(string, string, string, string);
-        callback open-diagnostic-folder(string, string, string);
         callback load-snapshots(string, string);
         callback create-snapshot(string, string, string);
         in-out property <string> snapshot-label-suggestion;
@@ -4761,6 +4764,7 @@ slint::slint! {
                         background: Theme.background;
                         for pane in root.workspace-panes : HostWorkspace {
                             property <HostView> host: root.host-views[pane.host];
+                            property <LogView> log-view: root.log-views[pane.log];
                             property <bool> is-client: host.kind == "client";
                             x: 0px;
                             y: 0px;
@@ -4955,39 +4959,42 @@ slint::slint! {
                                 export-bundle => { root.export-bundle("client", host.id); }
                                 open-bundle-folder => { root.open-bundle-folder(root.bundle-result-path); }
                             }
-                            if host.available && host.kind == "client" && pane.surface == "Logs" : VerticalLayout { spacing: 9px;
+                            // The pane's own log viewer: what it reads, how it
+                            // is filtered, and what is selected belong to this
+                            // pane alone.
+                            if host.available && pane.surface == "Logs" : VerticalLayout { spacing: 9px;
                                 HorizontalLayout { spacing: 8px;
-                                    FilterChip { text: GuiI18n.text("gui-live-latest-log"); accessible-name: GuiI18n.text("gui-live-latest-log"); selected: root.selected-diagnostic-kind != "crash-report" && !root.log-shows-files; clicked => { root.selected-diagnostic-kind = "log"; root.log-shows-files = false; root.selected-diagnostic-name = ""; root.open-live-log("client", host.id); } }
-                                    FilterChip { text: GuiI18n.text("gui-log-files"); accessible-name: GuiI18n.text("gui-log-files"); selected: root.selected-diagnostic-kind != "crash-report" && root.log-shows-files; clicked => { root.close-live-log(); root.selected-diagnostic-kind = "log"; root.log-shows-files = true; root.selected-diagnostic-name = ""; root.load-diagnostics("client", host.id, "log"); } }
-                                    FilterChip { text: GuiI18n.text("gui-crash-reports"); accessible-name: GuiI18n.text("gui-crash-reports"); selected: root.selected-diagnostic-kind == "crash-report"; clicked => { root.close-live-log(); root.selected-diagnostic-kind = "crash-report"; root.log-shows-files = false; root.selected-diagnostic-name = ""; root.load-diagnostics("client", host.id, "crash-report"); } }
+                                    FilterChip { text: GuiI18n.text("gui-live-latest-log"); accessible-name: GuiI18n.text("gui-live-latest-log"); selected: log-view.mode == "live"; clicked => { root.log-show(pane.id, "live"); } }
+                                    FilterChip { text: GuiI18n.text("gui-log-files"); accessible-name: GuiI18n.text("gui-log-files"); selected: log-view.mode == "files"; clicked => { root.log-show(pane.id, "files"); } }
+                                    FilterChip { text: GuiI18n.text("gui-crash-reports"); accessible-name: GuiI18n.text("gui-crash-reports"); selected: log-view.mode == "crashes"; clicked => { root.log-show(pane.id, "crashes"); } }
                                     Rectangle { horizontal-stretch: 1; }
                                     // Only the crash reports carry one. A log file is read
                                     // through the console, which has a search of its own.
-                                    if root.selected-diagnostic-kind == "crash-report" : HorizontalLayout { spacing: 8px; horizontal-stretch: 0; TextField { text <=> root.diagnostic-query; placeholder: GuiI18n.text("gui-search-open-report"); input-type: InputType.search; width: 250px; accepted => { root.search-diagnostic("client", host.id, "crash-report", root.selected-diagnostic-name, root.diagnostic-query); } } AppButton { text: GuiI18n.text("gui-find"); enabled: root.selected-diagnostic-name != ""; clicked => { root.search-diagnostic("client", host.id, "crash-report", root.selected-diagnostic-name, root.diagnostic-query); } } }
-                                    AppButton { text: GuiI18n.text("gui-folder"); clicked => { root.open-diagnostic-folder("client", host.id, root.selected-diagnostic-kind); } }
+                                    if log-view.mode == "crashes" : HorizontalLayout { spacing: 8px; horizontal-stretch: 0; report-search := TextField { placeholder: GuiI18n.text("gui-search-open-report"); input-type: InputType.search; width: 250px; accepted => { root.log-search-report(pane.id, self.text); } } AppButton { text: GuiI18n.text("gui-find"); enabled: log-view.file != ""; clicked => { root.log-search-report(pane.id, report-search.text); } } }
+                                    AppButton { text: GuiI18n.text("gui-folder"); clicked => { root.log-open-folder(pane.id); } }
                                 }
                                 // The log being written to, followed as it grows.
-                                if root.selected-diagnostic-kind != "crash-report" && !root.log-shows-files : LiveLogViewer {
-                                    chunks: root.log-chunks; has-content: root.log-has-content; status: root.log-status; history-truncated: root.log-history-truncated; pending-lines: root.log-pending-lines; content-columns: root.log-content-columns; font-size: root.technical-text-size * 1px; query <=> root.log-query; wrap-lines <=> root.log-wrap-lines; follow <=> root.log-follow; trace-enabled: root.log-trace-enabled; debug-enabled: root.log-debug-enabled; info-enabled: root.log-info-enabled; warn-enabled: root.log-warn-enabled; error-enabled: root.log-error-enabled; fatal-enabled: root.log-fatal-enabled; other-enabled: root.log-other-enabled; revision: root.log-revision; selection-start-row: root.log-selection-start-row; selection-start-offset: root.log-selection-start-offset; selection-end-row: root.log-selection-end-row; selection-end-offset: root.log-selection-end-offset; has-selection: root.log-has-selection; selection-revision: root.log-selection-revision;
-                                    set-level(level, enabled) => { root.set-log-level(level, enabled); } search(query) => { root.search-live-log(query); } copy => { root.copy-live-log(); } copy-selection => { root.copy-log-selection(); } select-at(row, column, extend) => { root.select-log-at(row, column, extend); } select-word-at(row, column) => { root.select-log-word-at(row, column); } select-all => { root.select-all-log(); } follow-changed(follow) => { root.live-log-follow-changed(follow); }
+                                if log-view.mode == "live" : LiveLogViewer {
+                                    chunks: log-view.chunks; has-content: log-view.has-content; status: log-view.status; history-truncated: log-view.history-truncated; pending-lines: log-view.pending-lines; content-columns: log-view.content-columns; font-size: root.technical-text-size * 1px; query: log-view.query; wrap-lines: log-view.wrap-lines; follow: log-view.follow; trace-enabled: log-view.trace-enabled; debug-enabled: log-view.debug-enabled; info-enabled: log-view.info-enabled; warn-enabled: log-view.warn-enabled; error-enabled: log-view.error-enabled; fatal-enabled: log-view.fatal-enabled; other-enabled: log-view.other-enabled; revision: log-view.revision; selection-start-row: log-view.selection-start-row; selection-start-offset: log-view.selection-start-offset; selection-end-row: log-view.selection-end-row; selection-end-offset: log-view.selection-end-offset; has-selection: log-view.has-selection; selection-revision: log-view.selection-revision;
+                                    set-level(level, enabled) => { root.log-set-level(pane.id, level, enabled); } search(query) => { root.log-search(pane.id, query); } copy => { root.log-copy(pane.id); } copy-selection => { root.log-copy-selection(pane.id); } select-at(row, column, extend) => { root.log-select-at(pane.id, row, column, extend); } select-word-at(row, column) => { root.log-select-word-at(pane.id, row, column); } select-all => { root.log-select-all(pane.id); } follow-changed(follow) => { root.log-follow(pane.id, follow); } wrap-changed(wrap) => { root.log-wrap(pane.id, wrap); }
                                 }
                                 // A saved log, read through the same view: a
                                 // finished log has the same levels as a live
                                 // one and is read for the same reasons.
-                                if root.selected-diagnostic-kind != "crash-report" && root.log-shows-files : HorizontalLayout { spacing: 10px;
-                                    DiagnosticFileList { items: root.diagnostics; selected: root.selected-diagnostic-name; opened(name) => { root.selected-diagnostic-name = name; root.open-log-file("client", host.id, name); } }
-                                    if root.selected-diagnostic-name == "" : Rectangle { horizontal-stretch: 1; background: Theme.well; border-radius: 8px; border-width: 1px; border-color: Theme.border; EmptyState { icon: @image-url("../../../assets/icons/nav-logs.svg"); title: GuiI18n.text("gui-no-file-open"); message: GuiI18n.text("gui-no-file-open-detail"); } }
-                                    if root.selected-diagnostic-name != "" : LiveLogViewer {
-                                    chunks: root.log-chunks; has-content: root.log-has-content; status: root.log-status; history-truncated: root.log-history-truncated; pending-lines: root.log-pending-lines; content-columns: root.log-content-columns; font-size: root.technical-text-size * 1px; query <=> root.log-query; wrap-lines <=> root.log-wrap-lines; follow <=> root.log-follow; trace-enabled: root.log-trace-enabled; debug-enabled: root.log-debug-enabled; info-enabled: root.log-info-enabled; warn-enabled: root.log-warn-enabled; error-enabled: root.log-error-enabled; fatal-enabled: root.log-fatal-enabled; other-enabled: root.log-other-enabled; revision: root.log-revision; selection-start-row: root.log-selection-start-row; selection-start-offset: root.log-selection-start-offset; selection-end-row: root.log-selection-end-row; selection-end-offset: root.log-selection-end-offset; has-selection: root.log-has-selection; selection-revision: root.log-selection-revision;
-                                    set-level(level, enabled) => { root.set-log-level(level, enabled); } search(query) => { root.search-live-log(query); } copy => { root.copy-live-log(); } copy-selection => { root.copy-log-selection(); } select-at(row, column, extend) => { root.select-log-at(row, column, extend); } select-word-at(row, column) => { root.select-log-word-at(row, column); } select-all => { root.select-all-log(); } follow-changed(follow) => { root.live-log-follow-changed(follow); }
+                                if log-view.mode == "files" : HorizontalLayout { spacing: 10px;
+                                    DiagnosticFileList { items: log-view.files; selected: log-view.file; opened(name) => { root.log-open-file(pane.id, name); } }
+                                    if log-view.file == "" : Rectangle { horizontal-stretch: 1; background: Theme.well; border-radius: 8px; border-width: 1px; border-color: Theme.border; EmptyState { icon: @image-url("../../../assets/icons/nav-logs.svg"); title: GuiI18n.text("gui-no-file-open"); message: GuiI18n.text("gui-no-file-open-detail"); } }
+                                    if log-view.file != "" : LiveLogViewer {
+                                    chunks: log-view.chunks; has-content: log-view.has-content; status: log-view.status; history-truncated: log-view.history-truncated; pending-lines: log-view.pending-lines; content-columns: log-view.content-columns; font-size: root.technical-text-size * 1px; query: log-view.query; wrap-lines: log-view.wrap-lines; follow: log-view.follow; trace-enabled: log-view.trace-enabled; debug-enabled: log-view.debug-enabled; info-enabled: log-view.info-enabled; warn-enabled: log-view.warn-enabled; error-enabled: log-view.error-enabled; fatal-enabled: log-view.fatal-enabled; other-enabled: log-view.other-enabled; revision: log-view.revision; selection-start-row: log-view.selection-start-row; selection-start-offset: log-view.selection-start-offset; selection-end-row: log-view.selection-end-row; selection-end-offset: log-view.selection-end-offset; has-selection: log-view.has-selection; selection-revision: log-view.selection-revision;
+                                    set-level(level, enabled) => { root.log-set-level(pane.id, level, enabled); } search(query) => { root.log-search(pane.id, query); } copy => { root.log-copy(pane.id); } copy-selection => { root.log-copy-selection(pane.id); } select-at(row, column, extend) => { root.log-select-at(pane.id, row, column, extend); } select-word-at(row, column) => { root.log-select-word-at(pane.id, row, column); } select-all => { root.log-select-all(pane.id); } follow-changed(follow) => { root.log-follow(pane.id, follow); } wrap-changed(wrap) => { root.log-wrap(pane.id, wrap); }
                                 }
                                 }
                                 // A crash report stays a plain document. It is
                                 // one stack dump, and a level filter over it
                                 // would hide the report rather than narrow it.
-                                if root.selected-diagnostic-kind == "crash-report" : HorizontalLayout { spacing: 10px;
-                                    DiagnosticFileList { items: root.diagnostics; selected: root.selected-diagnostic-name; crash: true; opened(name) => { root.selected-diagnostic-name = name; root.open-diagnostic("client", host.id, "crash-report", name); } }
-                                    Rectangle { horizontal-stretch: 1; background: Theme.well; border-radius: 8px; border-width: 1px; border-color: Theme.border; VerticalLayout { if root.diagnostic-content == "" : EmptyState { icon: @image-url("../../../assets/icons/nav-logs.svg"); title: GuiI18n.text("gui-no-file-open"); message: GuiI18n.text("gui-no-file-open-detail"); } if root.diagnostic-content != "" : SelectableText { text: root.diagnostic-content; font-size: root.technical-text-size * 1px; } if root.diagnostic-content != "" : AppButton { text: GuiI18n.text("gui-copy"); clicked => { root.copy-text(root.diagnostic-content); } } } }
+                                if log-view.mode == "crashes" : HorizontalLayout { spacing: 10px;
+                                    DiagnosticFileList { items: log-view.files; selected: log-view.file; crash: true; opened(name) => { root.log-open-file(pane.id, name); } }
+                                    Rectangle { horizontal-stretch: 1; background: Theme.well; border-radius: 8px; border-width: 1px; border-color: Theme.border; VerticalLayout { if log-view.report == "" : EmptyState { icon: @image-url("../../../assets/icons/nav-logs.svg"); title: GuiI18n.text("gui-no-file-open"); message: GuiI18n.text("gui-no-file-open-detail"); } if log-view.report != "" : SelectableText { text: log-view.report; font-size: root.technical-text-size * 1px; } if log-view.report != "" : AppButton { text: GuiI18n.text("gui-copy"); clicked => { root.copy-text(log-view.report); } } } }
                                 }
                             }
                             if host.available && host.kind == "server" && pane.surface == "Overview" : ScrollView { VerticalLayout { alignment: start; width: min(parent.width, 980px); spacing: 12px; Heading { text: GuiI18n.text("gui-dedicated-server"); } BodyText { text: host.server.state-detail; }
@@ -5031,45 +5038,10 @@ slint::slint! {
                             if host.available && host.kind == "server" && pane.surface == "Console" : VerticalLayout { spacing: 10px;
                                 ActionRow { BodyText { text: GuiI18n.value("gui-bounded-output", host.server.state); color: host.server.can-send-command ? Theme.success : Theme.text-secondary; } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-restart"); enabled: host.server.can-restart && host.server.restart-stage == ""; clicked => { root.server-restart(host.id); } } AppButton { text: GuiI18n.text("gui-stop"); enabled: host.server.can-stop; clicked => { root.server-stop(host.id); } } AppButton { text: GuiI18n.text("gui-kill"); tone: "danger"; enabled: host.server.can-kill; clicked => { root.pending-action-id = host.id; root.pending-action-name = host.server.name; root.modal = "kill"; } } }
                                 LiveLogViewer {
-                                    chunks: root.log-chunks; has-content: root.log-has-content; status: root.log-status; history-truncated: root.log-history-truncated; pending-lines: root.log-pending-lines; content-columns: root.log-content-columns; font-size: root.technical-text-size * 1px; query <=> root.log-query; wrap-lines <=> root.log-wrap-lines; follow <=> root.log-follow; trace-enabled: root.log-trace-enabled; debug-enabled: root.log-debug-enabled; info-enabled: root.log-info-enabled; warn-enabled: root.log-warn-enabled; error-enabled: root.log-error-enabled; fatal-enabled: root.log-fatal-enabled; other-enabled: root.log-other-enabled; revision: root.log-revision; selection-start-row: root.log-selection-start-row; selection-start-offset: root.log-selection-start-offset; selection-end-row: root.log-selection-end-row; selection-end-offset: root.log-selection-end-offset; has-selection: root.log-has-selection; selection-revision: root.log-selection-revision;
-                                    set-level(level, enabled) => { root.set-log-level(level, enabled); } search(query) => { root.search-live-log(query); } copy => { root.copy-live-log(); } copy-selection => { root.copy-log-selection(); } select-at(row, column, extend) => { root.select-log-at(row, column, extend); } select-word-at(row, column) => { root.select-log-word-at(row, column); } select-all => { root.select-all-log(); } follow-changed(follow) => { root.live-log-follow-changed(follow); }
+                                    chunks: log-view.chunks; has-content: log-view.has-content; status: log-view.status; history-truncated: log-view.history-truncated; pending-lines: log-view.pending-lines; content-columns: log-view.content-columns; font-size: root.technical-text-size * 1px; query: log-view.query; wrap-lines: log-view.wrap-lines; follow: log-view.follow; trace-enabled: log-view.trace-enabled; debug-enabled: log-view.debug-enabled; info-enabled: log-view.info-enabled; warn-enabled: log-view.warn-enabled; error-enabled: log-view.error-enabled; fatal-enabled: log-view.fatal-enabled; other-enabled: log-view.other-enabled; revision: log-view.revision; selection-start-row: log-view.selection-start-row; selection-start-offset: log-view.selection-start-offset; selection-end-row: log-view.selection-end-row; selection-end-offset: log-view.selection-end-offset; has-selection: log-view.has-selection; selection-revision: log-view.selection-revision;
+                                    set-level(level, enabled) => { root.log-set-level(pane.id, level, enabled); } search(query) => { root.log-search(pane.id, query); } copy => { root.log-copy(pane.id); } copy-selection => { root.log-copy-selection(pane.id); } select-at(row, column, extend) => { root.log-select-at(pane.id, row, column, extend); } select-word-at(row, column) => { root.log-select-word-at(pane.id, row, column); } select-all => { root.log-select-all(pane.id); } follow-changed(follow) => { root.log-follow(pane.id, follow); } wrap-changed(wrap) => { root.log-wrap(pane.id, wrap); }
                                 }
-                                ActionRow { TextField { text <=> root.console-command; placeholder: host.server.can-send-command ? GuiI18n.text("gui-enter-server-command") : GuiI18n.text("gui-start-server-command"); enabled: host.server.can-send-command; horizontal-stretch: 1; accepted => { root.server-console(host.id, root.console-command); root.console-command = ""; } } AppButton { text: GuiI18n.text("gui-send"); tone: "primary"; enabled: host.server.can-send-command && root.console-command != ""; clicked => { root.server-console(host.id, root.console-command); root.console-command = ""; } } }
-                            }
-                            if host.available && host.kind == "server" && pane.surface == "Logs" : VerticalLayout { spacing: 9px;
-                                HorizontalLayout { spacing: 8px;
-                                    FilterChip { text: GuiI18n.text("gui-live-latest-log"); accessible-name: GuiI18n.text("gui-live-latest-log"); selected: root.selected-diagnostic-kind != "crash-report" && !root.log-shows-files; clicked => { root.selected-diagnostic-kind = "log"; root.log-shows-files = false; root.selected-diagnostic-name = ""; root.open-live-log("server", host.id); } }
-                                    FilterChip { text: GuiI18n.text("gui-log-files"); accessible-name: GuiI18n.text("gui-log-files"); selected: root.selected-diagnostic-kind != "crash-report" && root.log-shows-files; clicked => { root.close-live-log(); root.selected-diagnostic-kind = "log"; root.log-shows-files = true; root.selected-diagnostic-name = ""; root.load-diagnostics("server", host.id, "log"); } }
-                                    FilterChip { text: GuiI18n.text("gui-crash-reports"); accessible-name: GuiI18n.text("gui-crash-reports"); selected: root.selected-diagnostic-kind == "crash-report"; clicked => { root.close-live-log(); root.selected-diagnostic-kind = "crash-report"; root.log-shows-files = false; root.selected-diagnostic-name = ""; root.load-diagnostics("server", host.id, "crash-report"); } }
-                                    Rectangle { horizontal-stretch: 1; }
-                                    // Only the crash reports carry one. A log file is read
-                                    // through the console, which has a search of its own.
-                                    if root.selected-diagnostic-kind == "crash-report" : HorizontalLayout { spacing: 8px; horizontal-stretch: 0; TextField { text <=> root.diagnostic-query; placeholder: GuiI18n.text("gui-search-open-report"); input-type: InputType.search; width: 250px; accepted => { root.search-diagnostic("server", host.id, "crash-report", root.selected-diagnostic-name, root.diagnostic-query); } } AppButton { text: GuiI18n.text("gui-find"); enabled: root.selected-diagnostic-name != ""; clicked => { root.search-diagnostic("server", host.id, "crash-report", root.selected-diagnostic-name, root.diagnostic-query); } } }
-                                    AppButton { text: GuiI18n.text("gui-folder"); clicked => { root.open-diagnostic-folder("server", host.id, root.selected-diagnostic-kind); } }
-                                }
-                                // The log being written to, followed as it grows.
-                                if root.selected-diagnostic-kind != "crash-report" && !root.log-shows-files : LiveLogViewer {
-                                    chunks: root.log-chunks; has-content: root.log-has-content; status: root.log-status; history-truncated: root.log-history-truncated; pending-lines: root.log-pending-lines; content-columns: root.log-content-columns; font-size: root.technical-text-size * 1px; query <=> root.log-query; wrap-lines <=> root.log-wrap-lines; follow <=> root.log-follow; trace-enabled: root.log-trace-enabled; debug-enabled: root.log-debug-enabled; info-enabled: root.log-info-enabled; warn-enabled: root.log-warn-enabled; error-enabled: root.log-error-enabled; fatal-enabled: root.log-fatal-enabled; other-enabled: root.log-other-enabled; revision: root.log-revision; selection-start-row: root.log-selection-start-row; selection-start-offset: root.log-selection-start-offset; selection-end-row: root.log-selection-end-row; selection-end-offset: root.log-selection-end-offset; has-selection: root.log-has-selection; selection-revision: root.log-selection-revision;
-                                    set-level(level, enabled) => { root.set-log-level(level, enabled); } search(query) => { root.search-live-log(query); } copy => { root.copy-live-log(); } copy-selection => { root.copy-log-selection(); } select-at(row, column, extend) => { root.select-log-at(row, column, extend); } select-word-at(row, column) => { root.select-log-word-at(row, column); } select-all => { root.select-all-log(); } follow-changed(follow) => { root.live-log-follow-changed(follow); }
-                                }
-                                // A saved log, read through the same view: a
-                                // finished log has the same levels as a live
-                                // one and is read for the same reasons.
-                                if root.selected-diagnostic-kind != "crash-report" && root.log-shows-files : HorizontalLayout { spacing: 10px;
-                                    DiagnosticFileList { items: root.diagnostics; selected: root.selected-diagnostic-name; opened(name) => { root.selected-diagnostic-name = name; root.open-log-file("server", host.id, name); } }
-                                    if root.selected-diagnostic-name == "" : Rectangle { horizontal-stretch: 1; background: Theme.well; border-radius: 8px; border-width: 1px; border-color: Theme.border; EmptyState { icon: @image-url("../../../assets/icons/nav-logs.svg"); title: GuiI18n.text("gui-no-file-open"); message: GuiI18n.text("gui-no-file-open-detail"); } }
-                                    if root.selected-diagnostic-name != "" : LiveLogViewer {
-                                    chunks: root.log-chunks; has-content: root.log-has-content; status: root.log-status; history-truncated: root.log-history-truncated; pending-lines: root.log-pending-lines; content-columns: root.log-content-columns; font-size: root.technical-text-size * 1px; query <=> root.log-query; wrap-lines <=> root.log-wrap-lines; follow <=> root.log-follow; trace-enabled: root.log-trace-enabled; debug-enabled: root.log-debug-enabled; info-enabled: root.log-info-enabled; warn-enabled: root.log-warn-enabled; error-enabled: root.log-error-enabled; fatal-enabled: root.log-fatal-enabled; other-enabled: root.log-other-enabled; revision: root.log-revision; selection-start-row: root.log-selection-start-row; selection-start-offset: root.log-selection-start-offset; selection-end-row: root.log-selection-end-row; selection-end-offset: root.log-selection-end-offset; has-selection: root.log-has-selection; selection-revision: root.log-selection-revision;
-                                    set-level(level, enabled) => { root.set-log-level(level, enabled); } search(query) => { root.search-live-log(query); } copy => { root.copy-live-log(); } copy-selection => { root.copy-log-selection(); } select-at(row, column, extend) => { root.select-log-at(row, column, extend); } select-word-at(row, column) => { root.select-log-word-at(row, column); } select-all => { root.select-all-log(); } follow-changed(follow) => { root.live-log-follow-changed(follow); }
-                                }
-                                }
-                                // A crash report stays a plain document. It is
-                                // one stack dump, and a level filter over it
-                                // would hide the report rather than narrow it.
-                                if root.selected-diagnostic-kind == "crash-report" : HorizontalLayout { spacing: 10px;
-                                    DiagnosticFileList { items: root.diagnostics; selected: root.selected-diagnostic-name; crash: true; opened(name) => { root.selected-diagnostic-name = name; root.open-diagnostic("server", host.id, "crash-report", name); } }
-                                    Rectangle { horizontal-stretch: 1; background: Theme.well; border-radius: 8px; border-width: 1px; border-color: Theme.border; VerticalLayout { if root.diagnostic-content == "" : EmptyState { icon: @image-url("../../../assets/icons/nav-logs.svg"); title: GuiI18n.text("gui-no-file-open"); message: GuiI18n.text("gui-no-file-open-detail"); } if root.diagnostic-content != "" : SelectableText { text: root.diagnostic-content; font-size: root.technical-text-size * 1px; } if root.diagnostic-content != "" : AppButton { text: GuiI18n.text("gui-copy"); clicked => { root.copy-text(root.diagnostic-content); } } } }
-                                }
+                                ActionRow { command-field := TextField { placeholder: host.server.can-send-command ? GuiI18n.text("gui-enter-server-command") : GuiI18n.text("gui-start-server-command"); enabled: host.server.can-send-command; horizontal-stretch: 1; accepted => { root.server-console(host.id, self.text); self.text = ""; } } AppButton { text: GuiI18n.text("gui-send"); tone: "primary"; enabled: host.server.can-send-command && command-field.text != ""; clicked => { root.server-console(host.id, command-field.text); command-field.text = ""; } } }
                             }
                             if host.available && host.kind == "server" && pane.surface == "Mods" : VerticalLayout { spacing: 10px;
                                 HorizontalLayout { spacing: 8px; SectionTitle { title: GuiI18n.text("gui-server-mods"); detail: GuiI18n.text("gui-server-mods-detail"); horizontal-stretch: 1; } VerticalLayout { alignment: center; TextField { text <=> root.server-mods-query; placeholder: GuiI18n.text("gui-filter-mods"); accessible-label: GuiI18n.text("gui-filter-mods"); input-type: InputType.search; width: 200px; edited(text) => { root.filter-mods("server", text); } } } VerticalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-add-local-mods"); clicked => { root.pick-local-mods("server", host.id); } } } VerticalLayout { alignment: center; IconButton { icon: @image-url("../../../assets/icons/refresh.svg"); accessible-name: GuiI18n.text("gui-refresh-mod-details"); clicked => { root.refresh-mods("server", host.id); } } } }

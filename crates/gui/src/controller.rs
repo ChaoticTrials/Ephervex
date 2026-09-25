@@ -47,8 +47,10 @@ use crate::ui::{
 use crate::window_aspect;
 use crate::workspace_layout::{PaneId, Surface, WorkspaceLayout};
 
+mod log_views;
 mod workspace;
 
+use log_views::LogViews;
 use workspace::{PaneChange, WorkspaceState};
 
 pub struct Controller {
@@ -356,114 +358,6 @@ impl LiveLogChange {
     }
 }
 
-fn register_live_viewer(
-    ui: &AppWindow,
-    commands: &Sender<Command>,
-    live_viewer: &Rc<RefCell<LiveViewerState>>,
-) {
-    ui.set_log_chunks(ModelRc::from(Rc::clone(&live_viewer.borrow().chunks)));
-
-    let sender = commands.clone();
-    let weak = ui.as_weak();
-    let open_state = Rc::clone(live_viewer);
-    ui.on_open_live_log(move |kind, id| {
-        let source = match kind.as_str() {
-            "client" => backend::parse_instance_id(&id).map(LiveLogSource::Client),
-            "server" => backend::parse_server_id(&id).map(LiveLogSource::Server),
-            _ => None,
-        };
-        let Some(source) = source else {
-            return;
-        };
-        open_state.borrow_mut().activate(source.clone());
-        if let Some(ui) = weak.upgrade() {
-            ui.set_log_query(SharedString::default());
-            ui.set_log_follow(true);
-            render_live_viewer(&ui, &mut open_state.borrow_mut());
-        }
-        send(&sender, Command::OpenLiveLog(source));
-    });
-
-    let sender = commands.clone();
-    let weak = ui.as_weak();
-    let file_state = Rc::clone(live_viewer);
-    ui.on_open_log_file(move |kind, id, name| {
-        let Some(scope) = backend::parse_scope(&kind, &id) else {
-            return;
-        };
-        let source = LiveLogSource::File {
-            scope,
-            name: name.to_string(),
-        };
-        file_state.borrow_mut().activate(source.clone());
-        if let Some(ui) = weak.upgrade() {
-            ui.set_log_query(SharedString::default());
-            // A saved log does not grow, so there is nothing to follow. The
-            // view still opens at the end, which is where a log is read from.
-            ui.set_log_follow(false);
-            render_live_viewer(&ui, &mut file_state.borrow_mut());
-        }
-        send(&sender, Command::OpenLiveLog(source));
-    });
-
-    register_log_selection(ui, live_viewer);
-
-    let sender = commands.clone();
-    let close_state = Rc::clone(live_viewer);
-    ui.on_close_live_log(move || {
-        close_state.borrow_mut().deactivate();
-        send(&sender, Command::CloseLiveLog);
-    });
-
-    let weak = ui.as_weak();
-    let filter_state = Rc::clone(live_viewer);
-    ui.on_set_log_level(move |level, enabled| {
-        let mut state = filter_state.borrow_mut();
-        if level == "all" {
-            state.filter.set_all(enabled);
-        } else if let Some(level) = parse_log_level_name(&level) {
-            state.filter.set(level, enabled);
-        }
-        if let Some(ui) = weak.upgrade() {
-            render_live_viewer(&ui, &mut state);
-        }
-    });
-
-    let weak = ui.as_weak();
-    let search_state = Rc::clone(live_viewer);
-    ui.on_search_live_log(move |query| {
-        let mut state = search_state.borrow_mut();
-        state.search_query = query.into();
-        if let Some(ui) = weak.upgrade() {
-            render_live_viewer(&ui, &mut state);
-        }
-    });
-
-    let weak = ui.as_weak();
-    let follow_state = Rc::clone(live_viewer);
-    ui.on_live_log_follow_changed(move |follow| {
-        let Some(ui) = weak.upgrade() else {
-            return;
-        };
-        let mut state = follow_state.borrow_mut();
-        if follow {
-            render_live_viewer(&ui, &mut state);
-        } else {
-            state.pending_lines = 0;
-            ui.set_log_pending_lines(0);
-        }
-    });
-
-    let weak = ui.as_weak();
-    let copy_state = Rc::clone(live_viewer);
-    ui.on_copy_live_log(move || {
-        let content = copy_state.borrow().history.text();
-        if let Some(ui) = weak.upgrade() {
-            copy_to_clipboard(&ui, content);
-        }
-    });
-}
-
 fn parse_log_level_name(value: &str) -> Option<LogLevel> {
     match value {
         "trace" => Some(LogLevel::Trace),
@@ -655,56 +549,6 @@ fn sync_log_chunks(model: &VecModel<LogChunk>, chunks: Vec<LogChunk>) -> bool {
     true
 }
 
-/// Selecting across the console's rows, and copying what was selected.
-fn register_log_selection(ui: &AppWindow, live_viewer: &Rc<RefCell<LiveViewerState>>) {
-    let weak = ui.as_weak();
-    let select_state = Rc::clone(live_viewer);
-    ui.on_select_log_at(move |row, column, extend| {
-        let (Ok(row), Ok(column)) = (usize::try_from(row), usize::try_from(column)) else {
-            return;
-        };
-        let mut state = select_state.borrow_mut();
-        state.select_at(row, column, extend);
-        if let Some(ui) = weak.upgrade() {
-            publish_log_selection(&ui, &state);
-        }
-    });
-
-    let weak = ui.as_weak();
-    let word_state = Rc::clone(live_viewer);
-    ui.on_select_log_word_at(move |row, column| {
-        let (Ok(row), Ok(column)) = (usize::try_from(row), usize::try_from(column)) else {
-            return;
-        };
-        let mut state = word_state.borrow_mut();
-        state.select_word_at(row, column);
-        if let Some(ui) = weak.upgrade() {
-            publish_log_selection(&ui, &state);
-        }
-    });
-
-    let weak = ui.as_weak();
-    let all_state = Rc::clone(live_viewer);
-    ui.on_select_all_log(move || {
-        let mut state = all_state.borrow_mut();
-        state.select_all();
-        if let Some(ui) = weak.upgrade() {
-            publish_log_selection(&ui, &state);
-        }
-    });
-
-    let weak = ui.as_weak();
-    let copy_state = Rc::clone(live_viewer);
-    ui.on_copy_log_selection(move || {
-        let Some(text) = copy_state.borrow().selected_text() else {
-            return;
-        };
-        if let Some(ui) = weak.upgrade() {
-            ui.invoke_copy_text(text.into());
-        }
-    });
-}
-
 /// Whether a character belongs to the middle of a log's idea of a word.
 ///
 /// Alphanumerics plus the punctuation identifiers are built from, so
@@ -747,66 +591,6 @@ fn word_bounds(text: &str, offset: usize) -> Option<(usize, usize)> {
         .last()
         .map_or(anchor, |(at, character)| anchor + at + character.len_utf8());
     Some((start, end))
-}
-
-/// Puts the selection on screen, in the reading order the rows expect.
-///
-/// The revision is what makes rows apply it: a selection is a call on a text
-/// item rather than a binding, so there has to be something for a row to react
-/// to.
-fn publish_log_selection(ui: &AppWindow, state: &LiveViewerState) {
-    if let Some(selection) = state.selection.filter(|selection| !selection.is_empty()) {
-        let (start, end) = selection.ordered();
-        ui.set_log_selection_start_row(to_i32(start.row));
-        ui.set_log_selection_start_offset(to_i32(start.offset));
-        ui.set_log_selection_end_row(to_i32(end.row));
-        ui.set_log_selection_end_offset(to_i32(end.offset));
-        ui.set_log_has_selection(true);
-    } else {
-        // A press with no drag is not a selection, and must clear the one it
-        // replaced rather than leave it highlighted.
-        ui.set_log_selection_start_row(-1);
-        ui.set_log_selection_end_row(-1);
-        ui.set_log_has_selection(false);
-    }
-    ui.set_log_selection_revision(ui.get_log_selection_revision().saturating_add(1));
-}
-
-fn render_live_viewer(ui: &AppWindow, state: &mut LiveViewerState) {
-    let presentation = build_log_presentation(state);
-
-    let status = if state.search_query.is_empty() {
-        lookup_args(
-            "gui-retained-log-records",
-            [("count", Arg::from(state.history.len()))],
-        )
-    } else {
-        lookup_args(
-            "gui-live-log-search-matches",
-            [("count", Arg::from(presentation.match_count))],
-        )
-    };
-    let chunks_changed = sync_log_chunks(&state.chunks, presentation.chunks);
-    ui.set_log_has_content(!state.history.is_empty());
-    ui.set_log_status(status.into());
-    ui.set_log_history_truncated(state.source_truncated || state.history.history_truncated());
-    ui.set_log_pending_lines(0);
-    ui.set_log_content_columns(to_i32(presentation.content_columns.min(100_000)));
-    ui.set_log_trace_enabled(state.filter.is_enabled(LogLevel::Trace));
-    ui.set_log_debug_enabled(state.filter.is_enabled(LogLevel::Debug));
-    ui.set_log_info_enabled(state.filter.is_enabled(LogLevel::Info));
-    ui.set_log_warn_enabled(state.filter.is_enabled(LogLevel::Warn));
-    ui.set_log_error_enabled(state.filter.is_enabled(LogLevel::Error));
-    ui.set_log_fatal_enabled(state.filter.is_enabled(LogLevel::Fatal));
-    ui.set_log_other_enabled(state.filter.is_enabled(LogLevel::Other));
-    if chunks_changed {
-        ui.set_log_revision(ui.get_log_revision().saturating_add(1));
-        // Rows are addressed by index, and the indices just moved. Keeping the
-        // highlight would mean highlighting different text than was selected.
-        state.selection = None;
-        publish_log_selection(ui, state);
-    }
-    state.pending_lines = 0;
 }
 
 /// Pushes the import modal's every visible property from the flow's current
@@ -2383,7 +2167,6 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
     let receiver = Rc::new(RefCell::new(backend.events));
     let activities = Rc::new(RefCell::new(Vec::<ActivityData>::new()));
     let creations = Rc::new(RefCell::new(CreationTracker::default()));
-    let live_viewer = Rc::new(RefCell::new(LiveViewerState::default()));
     let import_flow = Rc::new(RefCell::new(ImportFlowState::default()));
     let minecraft = Rc::new(RefCell::new(MinecraftDefaultsModel::new()));
     let browser = Rc::new(ModBrowser::default());
@@ -2396,6 +2179,7 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
     let workspace = Workspace {
         state: Rc::new(RefCell::new(WorkspaceState::default())),
         lifecycle: Rc::clone(&lifecycle),
+        logs: Rc::new(RefCell::new(LogViews::new(backend.commands.clone()))),
     };
     register_i18n(ui);
     register_toasts(ui);
@@ -2403,7 +2187,6 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
         ui,
         &backend.commands,
         &creations,
-        &live_viewer,
         &import_flow,
         &minecraft,
         &browser,
@@ -2421,7 +2204,6 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
     let poll_receiver = Rc::clone(&receiver);
     let poll_activities = Rc::clone(&activities);
     let poll_creations = Rc::clone(&creations);
-    let poll_live_viewer = Rc::clone(&live_viewer);
     let poll_import_flow = Rc::clone(&import_flow);
     let poll_minecraft = Rc::clone(&minecraft);
     let poll_browser = Rc::clone(&browser);
@@ -2448,11 +2230,14 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
         if ui.get_compact_layout() != compact_layout {
             ui.set_compact_layout(compact_layout);
         }
-        let mut live_change = LiveLogChange::Nothing;
+        let mut log_changes = HashMap::new();
         for event in poll_receiver.borrow_mut().try_iter() {
             match event {
                 Event::LiveLog(update) => {
-                    live_change = live_change.max(poll_live_viewer.borrow_mut().apply(update));
+                    poll_workspace
+                        .logs
+                        .borrow_mut()
+                        .apply(&update, &mut log_changes);
                 }
                 other => apply_event(
                     &ui,
@@ -2473,21 +2258,7 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
                 ),
             }
         }
-        match live_change {
-            // A saved log is opened with following off, because a finished log
-            // has nothing to follow. Counting its lines instead of drawing them
-            // left the view empty until it was opened a second time.
-            LiveLogChange::Reset => {
-                render_live_viewer(&ui, &mut poll_live_viewer.borrow_mut());
-            }
-            LiveLogChange::Grew if ui.get_log_follow() => {
-                render_live_viewer(&ui, &mut poll_live_viewer.borrow_mut());
-            }
-            LiveLogChange::Grew => {
-                ui.set_log_pending_lines(to_i32(poll_live_viewer.borrow().pending_lines));
-            }
-            LiveLogChange::Nothing => {}
-        }
+        poll_workspace.logs.borrow_mut().settle(log_changes);
     });
 
     // A second is enough for uptime and for CPU to read smoothly, and it costs
@@ -2787,7 +2558,6 @@ fn register_callbacks(
     ui: &AppWindow,
     commands: &Sender<Command>,
     creations: &Rc<RefCell<CreationTracker>>,
-    live_viewer: &Rc<RefCell<LiveViewerState>>,
     import_flow: &Rc<RefCell<ImportFlowState>>,
     minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
     browser: &Rc<ModBrowser>,
@@ -2812,17 +2582,16 @@ fn register_callbacks(
     let sender = commands.clone();
     ui.on_select_server(move |_| send(&sender, Command::Refresh));
 
-    register_server_actions(ui, commands, live_viewer, workspace);
+    register_server_actions(ui, commands, workspace);
     register_workspace(ui, workspace);
     register_mod_state_actions(ui, commands, local_mods);
-    register_diagnostics(ui, commands);
     register_snapshot_actions(ui, commands);
     register_isolation_actions(ui, commands, isolation_flow);
     register_integrity_actions(ui, commands, integrity_flow);
     register_bundle_actions(ui, commands, integrity_flow);
     register_restart_actions(ui, commands, lifecycle);
     register_disk_usage_actions(ui, commands, disk_usage);
-    register_live_viewer(ui, commands, live_viewer);
+    log_views::register(ui, &workspace.logs);
     register_settings(ui, commands);
     register_minecraft_defaults(ui, commands, minecraft, keys);
 
@@ -4653,13 +4422,24 @@ fn submit_local_mods(sender: &Sender<Command>, pending: &LocalModDrop) {
 struct Workspace {
     state: Rc<RefCell<WorkspaceState>>,
     lifecycle: Rc<RefCell<HostLifecycle>>,
+    logs: Rc<RefCell<LogViews>>,
 }
 
 impl Workspace {
     /// Renders the workspace and gives a pane what its new host and surface need.
     fn present(&self, ui: &AppWindow, change: Option<PaneChange>) {
         let state = self.state.borrow();
-        state.render(ui, &self.lifecycle.borrow());
+        let panes = state.layout().map_or_else(Vec::new, |layout| {
+            layout
+                .panes()
+                .iter()
+                .map(|placed| (placed.pane.id(), placed.pane.host(), placed.pane.surface()))
+                .collect()
+        });
+        let mut logs = self.logs.borrow_mut();
+        logs.sync(&panes);
+        state.render(ui, &self.lifecycle.borrow(), &logs);
+        drop(logs);
         // A single pane is the workspace of its host's page; a split belongs to
         // the page it was opened from.
         if let Some((host, _)) = state.single_content() {
@@ -4680,15 +4460,7 @@ impl Workspace {
     }
 
     fn close(&self, ui: &AppWindow) {
-        let closed = self.state.borrow_mut().close();
-        if closed.is_some_and(|layout| {
-            layout
-                .panes()
-                .iter()
-                .any(|placed| placed.pane.surface().reads_log())
-        }) {
-            ui.invoke_close_live_log();
-        }
+        self.state.borrow_mut().close();
         self.present(ui, None);
     }
 
@@ -4725,11 +4497,9 @@ impl Workspace {
                     }
                 });
             }
-            None if layout_open => return,
+            None if layout_open => {}
             None => self.open(ui, server, Surface::Console),
         }
-        ui.set_log_query(SharedString::default());
-        ui.set_log_follow(true);
     }
 
     fn single_pane(&self) -> Option<PaneId> {
@@ -4762,9 +4532,6 @@ fn apply_pane_change(ui: &AppWindow, change: PaneChange) {
     let PaneChange { before, after } = change;
     if before == after {
         return;
-    }
-    if before.is_some_and(|(_, surface)| surface.reads_log()) {
-        ui.invoke_close_live_log();
     }
     let Some((host, surface)) = after else {
         return;
@@ -4803,13 +4570,6 @@ fn activate_surface(ui: &AppWindow, host: InstalledHost, surface: Surface) {
             ui.set_snapshot_host_id(id.clone());
             ui.invoke_load_snapshots(kind, id);
         }
-        Surface::Logs => {
-            ui.set_selected_diagnostic_kind("log".into());
-            ui.set_log_shows_files(false);
-            ui.set_selected_diagnostic_name(SharedString::default());
-            ui.invoke_open_live_log(kind, id);
-        }
-        Surface::Console => ui.invoke_open_live_log(kind, id),
         Surface::Diagnostics => ui.invoke_open_integrity(kind, id),
         Surface::Mods if matches!(host, InstalledHost::Server(_)) => {
             ui.invoke_load_server_mods(id);
@@ -4896,29 +4656,24 @@ fn register_workspace(ui: &AppWindow, workspace: &Workspace) {
 /// overview, and every one of them would otherwise have to navigate for itself.
 /// Done once here, so all of them land on the output the run is about to
 /// produce.
-fn register_server_start(
-    ui: &AppWindow,
-    commands: &Sender<Command>,
-    live_viewer: &Rc<RefCell<LiveViewerState>>,
-    workspace: &Workspace,
-) {
+fn register_server_start(ui: &AppWindow, commands: &Sender<Command>, workspace: &Workspace) {
     let sender = commands.clone();
     let weak = ui.as_weak();
-    let start_state = Rc::clone(live_viewer);
     let start_workspace = workspace.clone();
     ui.on_server_start(move |id| {
         let Some(server) = backend::parse_server_id(&id) else {
             return;
         };
         send(&sender, Command::StartServer(server));
-
-        let source = LiveLogSource::Server(server);
-        start_state.borrow_mut().activate(source.clone());
+        // Views already on this server start over with the new run; a console
+        // opened below reads it from the beginning on its own.
+        start_workspace
+            .logs
+            .borrow_mut()
+            .reopen(&LiveLogSource::Server(server));
         if let Some(ui) = weak.upgrade() {
             start_workspace.show_console(&ui, InstalledHost::Server(server));
-            render_live_viewer(&ui, &mut start_state.borrow_mut());
         }
-        send(&sender, Command::OpenLiveLog(source));
     });
 }
 
@@ -4972,12 +4727,7 @@ fn register_instance_runtime_actions(ui: &AppWindow, commands: &Sender<Command>)
     });
 }
 
-fn register_server_actions(
-    ui: &AppWindow,
-    commands: &Sender<Command>,
-    live_viewer: &Rc<RefCell<LiveViewerState>>,
-    workspace: &Workspace,
-) {
+fn register_server_actions(ui: &AppWindow, commands: &Sender<Command>, workspace: &Workspace) {
     register_instance_runtime_actions(ui, commands);
 
     let sender = commands.clone();
@@ -5009,7 +4759,7 @@ fn register_server_actions(
         }
     });
 
-    register_server_start(ui, commands, live_viewer, workspace);
+    register_server_start(ui, commands, workspace);
 
     let sender = commands.clone();
     ui.on_server_stop(move |id| {
@@ -5133,80 +4883,6 @@ fn validate_player_count(value: &str) -> String {
     } else {
         lookup("gui-player-count-minimum")
     }
-}
-
-fn register_diagnostics(ui: &AppWindow, commands: &Sender<Command>) {
-    let sender = commands.clone();
-    ui.on_load_diagnostics(move |scope, id, kind| {
-        if let (Some(scope), Some(kind)) = (
-            backend::parse_scope(&scope, &id),
-            backend::parse_diagnostic_kind(&kind),
-        ) {
-            send(&sender, Command::LoadDiagnostics { scope, kind });
-        }
-    });
-
-    let sender = commands.clone();
-    ui.on_open_diagnostic(move |scope, id, kind, name| {
-        if let (Some(scope), Some(kind)) = (
-            backend::parse_scope(&scope, &id),
-            backend::parse_diagnostic_kind(&kind),
-        ) {
-            send(
-                &sender,
-                Command::OpenDiagnostic {
-                    scope,
-                    kind,
-                    name: name.into(),
-                },
-            );
-        }
-    });
-
-    let sender = commands.clone();
-    ui.on_refresh_diagnostic(move |scope, id, kind, name| {
-        if let (Some(scope), Some(kind)) = (
-            backend::parse_scope(&scope, &id),
-            backend::parse_diagnostic_kind(&kind),
-        ) {
-            send(
-                &sender,
-                Command::OpenDiagnostic {
-                    scope,
-                    kind,
-                    name: name.into(),
-                },
-            );
-        }
-    });
-
-    let sender = commands.clone();
-    ui.on_search_diagnostic(move |scope, id, kind, name, query| {
-        if let (Some(scope), Some(kind)) = (
-            backend::parse_scope(&scope, &id),
-            backend::parse_diagnostic_kind(&kind),
-        ) {
-            send(
-                &sender,
-                Command::SearchDiagnostic {
-                    scope,
-                    kind,
-                    name: name.into(),
-                    query: query.into(),
-                },
-            );
-        }
-    });
-
-    let sender = commands.clone();
-    ui.on_open_diagnostic_folder(move |scope, id, kind| {
-        if let (Some(scope), Some(kind)) = (
-            backend::parse_scope(&scope, &id),
-            backend::parse_diagnostic_kind(&kind),
-        ) {
-            send(&sender, Command::OpenDiagnosticFolder { scope, kind });
-        }
-    });
 }
 
 fn register_settings(ui: &AppWindow, commands: &Sender<Command>) {
@@ -6082,23 +5758,6 @@ fn minecraft_preference_id(id: &SharedString) -> Option<ephervex_core::Preferenc
 /// A new listing clears the previous selection along with it: leaving a file's
 /// content on screen under a different scope's list is how a reader ends up
 /// reading the wrong crash report.
-fn apply_diagnostic_listing(
-    ui: &AppWindow,
-    rows: Vec<DiagnosticData>,
-    scope: &str,
-    scope_id: &str,
-    kind: &str,
-) {
-    ui.set_diagnostics(model(diagnostic_rows(rows)));
-    ui.set_selected_diagnostic_scope(scope.into());
-    ui.set_selected_diagnostic_id(scope_id.into());
-    ui.set_selected_diagnostic_kind(kind.into());
-    ui.set_selected_diagnostic_name(SharedString::default());
-    ui.set_diagnostic_content(SharedString::default());
-    ui.set_diagnostic_path(SharedString::default());
-    ui.set_diagnostic_title(SharedString::default());
-}
-
 /// What the reusable artifact cache's own answers do to the storage page.
 fn apply_artifact_cache_event(ui: &AppWindow, event: Event) {
     match event {
@@ -7438,7 +7097,10 @@ fn apply_event(
             let (clients, servers) =
                 apply_snapshot_event(ui, *snapshot, creations, minecraft, commands);
             workspace.state.borrow_mut().set_rows(clients, servers);
-            workspace.state.borrow().render(ui, &lifecycle.borrow());
+            workspace
+                .state
+                .borrow()
+                .render(ui, &lifecycle.borrow(), &workspace.logs.borrow());
             // A snapshot rebuilds the rows from records that know nothing of
             // restarts, so their stages are stamped again.
             stamp_host_lifecycle(ui, &lifecycle.borrow());
@@ -7588,12 +7250,23 @@ fn apply_event(
             scope,
             scope_id,
             kind,
-        } => apply_diagnostic_listing(ui, rows, &scope, &scope_id, &kind),
-        Event::DiagnosticContent(content) => apply_diagnostic_content(ui, content),
-        Event::DiagnosticUnavailable(message) => {
-            ui.set_diagnostic_title(lookup("gui-diagnostic-unavailable").into());
-            ui.set_diagnostic_path(SharedString::default());
-            ui.set_diagnostic_content(message.into());
+        } => workspace
+            .logs
+            .borrow_mut()
+            .apply_listing(&rows, &scope, &scope_id, &kind),
+        Event::DiagnosticContent(content) => {
+            apply_diagnostic_content(ui, &mut workspace.logs.borrow_mut(), &content);
+        }
+        Event::DiagnosticUnavailable {
+            scope,
+            name,
+            message,
+            ..
+        } => {
+            workspace
+                .logs
+                .borrow_mut()
+                .apply_report_unavailable(scope, &name, &message);
             ui.set_status_message(lookup("gui-diagnostic-disappeared").into());
         }
         Event::HostSnapshots(data) => {
@@ -8630,12 +8303,11 @@ fn apply_server_workspace(ui: &AppWindow, workspace: ServerWorkspaceData) {
     ui.set_property_address_error(SharedString::default());
 }
 
-fn apply_diagnostic_content(ui: &AppWindow, content: DiagnosticContent) {
-    ui.set_diagnostic_title(content.title.into());
-    ui.set_diagnostic_path(content.path.into());
+/// Puts a crash report in every view that has it open, and says how much of it arrived.
+fn apply_diagnostic_content(ui: &AppWindow, logs: &mut LogViews, content: &DiagnosticContent) {
     // Through the same expansion a log record gets. A crash report is tab
     // indented on nearly every stack line, and a tab has no glyph to draw.
-    ui.set_diagnostic_content(expand_tabs(&content.text).into());
+    logs.apply_report(content);
     let status = match (content.truncated, content.lossy, content.matches) {
         (_, _, Some(matches)) => lookup_args(
             "gui-diagnostic-search-matches",
@@ -10533,12 +10205,20 @@ mod tests {
     }
 
     fn test_workspace(ui: &AppWindow) -> Workspace {
+        test_workspace_sending(ui).0
+    }
+
+    /// A workspace whose commands can be read back.
+    fn test_workspace_sending(ui: &AppWindow) -> (Workspace, std::sync::mpsc::Receiver<Command>) {
+        let (sender, commands) = std::sync::mpsc::channel();
         let workspace = Workspace {
             state: Rc::default(),
             lifecycle: Rc::default(),
+            logs: Rc::new(RefCell::new(LogViews::new(sender))),
         };
         register_workspace(ui, &workspace);
-        workspace
+        log_views::register(ui, &workspace.logs);
+        (workspace, commands)
     }
 
     fn client_host() -> InstalledHost {
@@ -10572,8 +10252,6 @@ mod tests {
         let ui = test_window();
         let workspace = test_workspace(&ui);
         let server = server_host();
-        ui.set_log_query("stale search".into());
-        ui.set_log_follow(false);
 
         workspace.show_console(&ui, server);
 
@@ -10584,15 +10262,16 @@ mod tests {
             SERVERS_PAGE,
             "a single server's workspace belongs to the servers page"
         );
+        let console = ui
+            .get_log_views()
+            .row_data(0)
+            .expect("the console has a viewer");
         assert!(
-            ui.get_log_follow(),
+            console.follow,
             "the output being waited for has not been written yet"
         );
-        assert_eq!(
-            ui.get_log_query(),
-            "",
-            "a search left over from another log would hide the run being started"
-        );
+        assert_eq!(console.mode, "live");
+        assert_eq!(console.query, "");
     }
 
     /// Started from a client's workspace, Back returns to that client.
@@ -11331,12 +11010,16 @@ mod tests {
             declared.len()
         );
 
-        let controller = include_str!("controller.rs");
-        let main = include_str!("main.rs");
+        let rust = [
+            include_str!("controller.rs"),
+            include_str!("controller/log_views.rs"),
+            include_str!("controller/workspace.rs"),
+            include_str!("main.rs"),
+        ];
         for name in declared {
             let handler = format!("on_{}(", name.replace('-', "_"));
             assert!(
-                controller.contains(&handler) || main.contains(&handler),
+                rust.iter().any(|source| source.contains(&handler)),
                 "`{name}` is declared on the window and nothing handles it, so the control \
                  that invokes it does nothing"
             );
@@ -11835,8 +11518,9 @@ mod tests {
         assert!(!source.contains(&format!(
             r#"label: GuiI18n.text("{logs}"); selected: root.page == 2"#
         )));
-        assert!(source.contains("root.load-diagnostics(\"client\""));
-        assert!(source.contains("root.load-diagnostics(\"server\""));
+        // Logs is a surface of each host's workspace, read through that pane's viewer.
+        assert!(source.contains("if host.available && pane.surface == \"Logs\""));
+        assert!(source.contains("root.log-show(pane.id, \"files\")"));
     }
 
     #[test]
@@ -12296,9 +11980,22 @@ mod tests {
     #[test]
     fn a_crash_report_reaches_its_viewer_with_no_tab_left_in_it() {
         let ui = test_window();
+        let (sender, _commands) = std::sync::mpsc::channel();
+        let mut logs = LogViews::new(sender);
+        logs.attach(&ui);
+        let instance = ephervex_model::InstanceId::new();
+        let pane = PaneId::from_raw(1);
+        let name = "crash-2026-09-18_16.54.00-client.txt";
+        logs.sync(&[(pane, InstalledHost::Instance(instance), Surface::Logs)]);
+        logs.show(pane, log_views::LogMode::Crashes);
+        logs.open_file(pane, name);
         apply_diagnostic_content(
             &ui,
-            DiagnosticContent {
+            &mut logs,
+            &DiagnosticContent {
+                scope: ephervex_core::DiagnosticScope::Client(instance),
+                kind: backend::parse_diagnostic_kind("crash-report").expect("kind"),
+                name: name.to_owned(),
                 title: "crash-2026-09-18_16.54.00-client.txt".to_owned(),
                 path: "/tmp/crash-reports/crash-2026-09-18_16.54.00-client.txt".to_owned(),
                 text: "java.lang.Throwable\n\tat net.minecraft.Util.run(Util.java:12)\n".to_owned(),
@@ -12307,7 +12004,7 @@ mod tests {
                 matches: None,
             },
         );
-        let shown = ui.get_diagnostic_content();
+        let shown = ui.get_log_views().row_data(0).expect("viewer").report;
         assert!(
             !shown.contains('\t'),
             "a tab left in the report has no glyph"
@@ -12372,11 +12069,11 @@ mod tests {
         assert!(source.contains("selectable-input.copy()"));
         assert!(source.contains("selectable-input.select-all()"));
         assert!(source.contains(
-            "SelectableText { text: root.diagnostic-content; font-size: root.technical-text-size * 1px; }"
+            "SelectableText { text: log-view.report; font-size: root.technical-text-size * 1px; }"
         ));
 
         assert!(source.contains("component LiveLogViewer inherits Rectangle"));
-        assert!(source.contains("root.copy-live-log()"));
+        assert!(source.contains("root.log-copy(pane.id)"));
         // The row's own pointer area, declared after the text item so it takes
         // the press before a single-element selection can begin.
         assert!(source.contains("select := TouchArea"));

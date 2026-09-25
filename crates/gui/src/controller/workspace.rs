@@ -12,6 +12,7 @@ use ephervex_i18n::lookup;
 use slint::{Model as _, ModelRc, VecModel};
 
 use super::HostLifecycle;
+use super::log_views::LogViews;
 use crate::backend;
 use crate::ui::{
     AppWindow, HostView, InstanceRow, ServerRow, WorkspacePaneRow, WorkspaceSurfaceRow,
@@ -122,7 +123,7 @@ impl WorkspaceState {
     }
 
     /// Writes the panes and one view per shown host into the window.
-    pub(super) fn render(&self, ui: &AppWindow, lifecycle: &HostLifecycle) {
+    pub(super) fn render(&self, ui: &AppWindow, lifecycle: &HostLifecycle, logs: &LogViews) {
         let Some(layout) = &self.layout else {
             ui.set_workspace_open(false);
             sync_rows(&self.panes, Vec::new());
@@ -146,6 +147,7 @@ impl WorkspaceState {
                         .position(|&host| host == placed.pane.host())
                         .and_then(|index| i32::try_from(index).ok())
                         .unwrap_or(-1),
+                    log: logs.slot_of(id),
                     surface: placed.pane.surface().id().into(),
                     column: i32::from(placed.placement.column),
                     row: i32::from(placed.placement.row),

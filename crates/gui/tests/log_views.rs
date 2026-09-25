@@ -13,25 +13,32 @@ mod support;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use ephervex_gui::ui::{AppWindow, DiagnosticRow, GuiI18n, LogChunk, ServerRow};
+use ephervex_gui::ui::{AppWindow, DiagnosticRow, GuiI18n, LogChunk, LogView, ServerRow};
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use i_slint_backend_testing::{ElementHandle, TestingBackend, TestingBackendOptions};
 use slint::platform::{PointerEventButton, WindowEvent};
-use slint::{ComponentHandle, LogicalPosition, ModelRc, PhysicalSize, SharedString, VecModel};
+use slint::{
+    ComponentHandle, LogicalPosition, Model, ModelRc, PhysicalSize, SharedString, VecModel,
+};
 
 #[test]
 fn a_log_scrolled_up_offers_a_way_back_to_the_bottom() {
     let ui = window();
     let followed: Rc<RefCell<Vec<bool>>> = Rc::default();
     let record = Rc::clone(&followed);
-    ui.on_live_log_follow_changed(move |follow| record.borrow_mut().push(follow));
+    ui.on_log_follow(move |pane, follow| {
+        assert_eq!(pane, 1, "the pane whose viewer it is");
+        record.borrow_mut().push(follow);
+    });
 
     server_logs(&ui);
     // Far more lines than fit, so the view has somewhere to go, and following
     // off, which is the state someone who scrolled up is in.
-    ui.set_log_chunks(chunks(400));
-    ui.set_log_has_content(true);
-    ui.set_log_follow(false);
+    set_view(&ui, |view| {
+        view.chunks = chunks(400);
+        view.has_content = true;
+        view.follow = false;
+    });
     settle(&ui);
 
     let jump = ElementHandle::find_by_accessible_label(&ui, &lookup("gui-jump-latest"))
@@ -40,19 +47,21 @@ fn a_log_scrolled_up_offers_a_way_back_to_the_bottom() {
     jump.mock_single_click(PointerEventButton::Left);
     settle(&ui);
 
-    assert!(
-        ui.get_log_follow(),
+    assert_eq!(
+        followed.borrow().as_slice(),
+        [true],
         "arriving at the end must resume following, or the next line scrolls away again"
     );
-    assert_eq!(followed.borrow().as_slice(), [true]);
 }
 
 #[test]
 fn a_log_that_fits_offers_nothing_to_scroll_to() {
     let ui = window();
     server_logs(&ui);
-    ui.set_log_chunks(chunks(2));
-    ui.set_log_has_content(true);
+    set_view(&ui, |view| {
+        view.chunks = chunks(2);
+        view.has_content = true;
+    });
     settle(&ui);
 
     assert!(
@@ -66,12 +75,18 @@ fn a_log_that_fits_offers_nothing_to_scroll_to() {
 #[test]
 fn a_servers_logs_offer_the_live_log_saved_files_and_crash_reports() {
     let ui = window();
-    let opened: Rc<RefCell<Vec<String>>> = Rc::default();
+    let opened: Rc<RefCell<Vec<(i32, String)>>> = Rc::default();
     let record = Rc::clone(&opened);
-    ui.on_open_log_file(move |_, _, name| record.borrow_mut().push(name.to_string()));
-    let listed: Rc<RefCell<Vec<String>>> = Rc::default();
-    let record = Rc::clone(&listed);
-    ui.on_load_diagnostics(move |_, _, kind| record.borrow_mut().push(kind.to_string()));
+    ui.on_log_open_file(move |pane, name| record.borrow_mut().push((pane, name.to_string())));
+    let shown: Rc<RefCell<Vec<(i32, String)>>> = Rc::default();
+    let record = Rc::clone(&shown);
+    let weak = ui.as_weak();
+    ui.on_log_show(move |pane, mode| {
+        record.borrow_mut().push((pane, mode.to_string()));
+        if let Some(ui) = weak.upgrade() {
+            set_view(&ui, |view| view.mode = mode);
+        }
+    });
 
     server_logs(&ui);
     settle(&ui);
@@ -89,10 +104,11 @@ fn a_servers_logs_offer_the_live_log_saved_files_and_crash_reports() {
         .next()
         .expect("the saved logs chip")
         .mock_single_click(PointerEventButton::Left);
-    assert!(ui.get_log_shows_files());
-    assert_eq!(listed.borrow().as_slice(), ["log"]);
+    assert_eq!(shown.borrow().as_slice(), [(1, "files".to_owned())]);
 
-    ui.set_diagnostics(ModelRc::new(VecModel::from(vec![log_file()])));
+    set_view(&ui, |view| {
+        view.files = ModelRc::new(VecModel::from(vec![log_file()]));
+    });
     settle(&ui);
     ElementHandle::find_by_accessible_label(&ui, "2026-08-30-1.log.gz")
         .next()
@@ -101,10 +117,9 @@ fn a_servers_logs_offer_the_live_log_saved_files_and_crash_reports() {
 
     assert_eq!(
         opened.borrow().as_slice(),
-        ["2026-08-30-1.log.gz"],
-        "a saved log has to go through the filterable view, not a plain document"
+        [(1, "2026-08-30-1.log.gz".to_owned())],
+        "a saved log is opened in the pane's own viewer"
     );
-    assert_eq!(ui.get_selected_diagnostic_name(), "2026-08-30-1.log.gz");
 }
 
 /// A saved log is read through the same viewer, so it has the same filters.
@@ -113,14 +128,16 @@ fn a_saved_log_is_filterable_like_the_live_one() {
     let ui = window();
     let levels: Rc<RefCell<Vec<String>>> = Rc::default();
     let record = Rc::clone(&levels);
-    ui.on_set_log_level(move |level, _| record.borrow_mut().push(level.to_string()));
+    ui.on_log_set_level(move |_, level, _| record.borrow_mut().push(level.to_string()));
 
     server_logs(&ui);
-    ui.set_log_shows_files(true);
-    ui.set_selected_diagnostic_name("2026-08-30-1.log.gz".into());
-    ui.set_diagnostics(ModelRc::new(VecModel::from(vec![log_file()])));
-    ui.set_log_chunks(chunks(6));
-    ui.set_log_has_content(true);
+    set_view(&ui, |view| {
+        view.mode = "files".into();
+        view.file = "2026-08-30-1.log.gz".into();
+        view.files = ModelRc::new(VecModel::from(vec![log_file()]));
+        view.chunks = chunks(6);
+        view.has_content = true;
+    });
     settle(&ui);
 
     ElementHandle::find_by_accessible_label(&ui, &lookup("gui-filter-error"))
@@ -142,7 +159,7 @@ fn a_drag_from_one_console_line_reaches_the_lines_below_it() {
     let ui = window();
     let points: Rc<RefCell<Vec<(i32, i32, bool)>>> = Rc::default();
     let record = Rc::clone(&points);
-    ui.on_select_log_at(move |row, column, extend| {
+    ui.on_log_select_at(move |_, row, column, extend| {
         record.borrow_mut().push((row, column, extend));
     });
 
@@ -176,7 +193,7 @@ fn pressing_a_console_line_selects_at_the_column_under_the_pointer() {
     let ui = window();
     let points: Rc<RefCell<Vec<(i32, i32, bool)>>> = Rc::default();
     let record = Rc::clone(&points);
-    ui.on_select_log_at(move |row, column, extend| {
+    ui.on_log_select_at(move |_, row, column, extend| {
         record.borrow_mut().push((row, column, extend));
     });
 
@@ -208,8 +225,10 @@ fn pressing_a_console_line_selects_at_the_column_under_the_pointer() {
 fn wrapped_log_rows_do_not_overlap_the_rows_above_them() {
     let ui = window();
     server_console(&ui);
-    ui.set_log_chunks(long_chunks(20));
-    ui.set_log_wrap_lines(true);
+    set_view(&ui, |view| {
+        view.chunks = long_chunks(20);
+        view.wrap_lines = true;
+    });
     settle(&ui);
 
     let rows = console_rows(&ui);
@@ -234,9 +253,11 @@ fn wrapped_log_rows_do_not_overlap_the_rows_above_them() {
 fn an_unwrapped_log_can_be_scrolled_past_the_right_edge() {
     let ui = window();
     server_console(&ui);
-    ui.set_log_chunks(long_chunks(20));
-    ui.set_log_wrap_lines(false);
-    ui.set_log_content_columns(600);
+    set_view(&ui, |view| {
+        view.chunks = long_chunks(20);
+        view.wrap_lines = false;
+        view.content_columns = 600;
+    });
     settle(&ui);
 
     let rows = console_rows(&ui);
@@ -257,10 +278,10 @@ fn ctrl_c_and_ctrl_a_reach_the_console() {
     let ui = window();
     let copied: Rc<RefCell<usize>> = Rc::default();
     let record = Rc::clone(&copied);
-    ui.on_copy_log_selection(move || *record.borrow_mut() += 1);
+    ui.on_log_copy_selection(move |_| *record.borrow_mut() += 1);
     let all: Rc<RefCell<usize>> = Rc::default();
     let record = Rc::clone(&all);
-    ui.on_select_all_log(move || *record.borrow_mut() += 1);
+    ui.on_log_select_all(move |_| *record.borrow_mut() += 1);
 
     server_console(&ui);
     settle(&ui);
@@ -290,7 +311,7 @@ fn double_clicking_a_console_line_selects_the_word_under_it() {
     let ui = window();
     let words: Rc<RefCell<Vec<(i32, i32)>>> = Rc::default();
     let record = Rc::clone(&words);
-    ui.on_select_log_word_at(move |row, column| record.borrow_mut().push((row, column)));
+    ui.on_log_select_word_at(move |_, row, column| record.borrow_mut().push((row, column)));
 
     server_console(&ui);
     settle(&ui);
@@ -372,8 +393,24 @@ fn release(ui: &AppWindow, position: LogicalPosition) {
 /// The server workspace, on its Console tab, with output to select.
 fn server_console(ui: &AppWindow) {
     support::show_server(ui, server(), "Console");
-    ui.set_log_chunks(chunks(40));
-    ui.set_log_has_content(true);
+    set_view(ui, |view| {
+        view.chunks = chunks(40);
+        view.has_content = true;
+    });
+}
+
+/// Changes the one pane's log view, as its viewer renders it.
+fn set_view(ui: &AppWindow, change: impl FnOnce(&mut LogView)) {
+    let views = ui.get_log_views();
+    let mut view = views.row_data(0).unwrap_or_else(|| LogView {
+        mode: "live".into(),
+        follow: true,
+        selection_start_row: -1,
+        selection_end_row: -1,
+        ..LogView::default()
+    });
+    change(&mut view);
+    ui.set_log_views(ModelRc::new(VecModel::from(vec![view])));
 }
 
 /// The server workspace, on its Logs tab.
@@ -384,14 +421,14 @@ fn server_console(ui: &AppWindow) {
 fn saved_logs_and_crash_reports_start_at_the_same_height() {
     let ui = window();
     server_logs(&ui);
-    ui.set_diagnostics(ModelRc::new(VecModel::from(vec![log_file()])));
-
-    ui.set_log_shows_files(true);
+    set_view(&ui, |view| {
+        view.files = ModelRc::new(VecModel::from(vec![log_file()]));
+        view.mode = "files".into();
+    });
     settle(&ui);
     let logs = file_list_top(&ui);
 
-    ui.set_log_shows_files(false);
-    ui.set_selected_diagnostic_kind("crash-report".into());
+    set_view(&ui, |view| view.mode = "crashes".into());
     settle(&ui);
     let crashes = file_list_top(&ui);
 
@@ -412,7 +449,7 @@ fn file_list_top(ui: &AppWindow) -> f32 {
 
 fn server_logs(ui: &AppWindow) {
     support::show_server(ui, server(), "Logs");
-    ui.set_selected_diagnostic_kind("log".into());
+    set_view(ui, |view| view.mode = "live".into());
 }
 
 fn chunks(count: usize) -> ModelRc<LogChunk> {
@@ -445,12 +482,12 @@ fn long_chunks(count: usize) -> ModelRc<LogChunk> {
 /// One unwrapped row's height, measured from the view itself rather than
 /// assumed, because it follows the resolved monospace family.
 fn one_line_height(ui: &AppWindow) -> f32 {
-    ui.set_log_wrap_lines(false);
+    set_view(ui, |view| view.wrap_lines = false);
     settle(ui);
     let height = console_rows(ui)
         .first()
         .map_or(0.0, |row| row.size().height);
-    ui.set_log_wrap_lines(true);
+    set_view(ui, |view| view.wrap_lines = true);
     settle(ui);
     height
 }
