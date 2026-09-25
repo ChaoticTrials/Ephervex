@@ -70,26 +70,23 @@ fn blockers_shown(ui: &AppWindow) -> Vec<&'static str> {
 fn checked_surface(ui: &AppWindow, server_host: bool, running: bool) {
     if server_host {
         server_workspace(ui, server(running));
-        ui.set_integrity_host_kind("server".into());
-        ui.set_integrity_host_id("server".into());
     } else {
         let mut row = instance();
         row.can_kill = running;
         row.can_launch = !running;
         client_workspace(ui, row);
-        ui.set_integrity_host_kind("client".into());
-        ui.set_integrity_host_id("host".into());
     }
     ui.set_host_busy_kind(SharedString::default());
     ui.set_host_busy_id(SharedString::default());
-    support::update_host(ui, 0, |view| view.isolation_active = false);
     support::set_surface(ui, 1, "Diagnostics");
-    ui.set_integrity_state("checked".into());
-    ui.set_integrity_summary(
-        lookup_args("gui-integrity-problems", [("count", Arg::from(1))]).into(),
-    );
-    ui.set_integrity_repair_targets(strings(&["mods/gone.jar"]));
-    ui.set_integrity_unrepairable(strings(&[]));
+    support::update_host(ui, 0, |view| {
+        view.isolation_active = false;
+        view.integrity_state = "checked".into();
+        view.integrity_summary =
+            lookup_args("gui-integrity-problems", [("count", Arg::from(1))]).into();
+        view.integrity_repair_targets = strings(&["mods/gone.jar"]);
+        view.integrity_unrepairable = strings(&[]);
+    });
     settle(ui);
 }
 
@@ -217,8 +214,10 @@ fn findings_nothing_can_fetch_offer_no_repair_and_say_why() {
     let ui = window();
     for (server_host, kind, _) in host_kinds() {
         checked_surface(&ui, server_host, false);
-        ui.set_integrity_repair_targets(strings(&[]));
-        ui.set_integrity_unrepairable(strings(&["mods/shipped.jar"]));
+        support::update_host(&ui, 0, |view| {
+            view.integrity_repair_targets = strings(&[]);
+            view.integrity_unrepairable = strings(&["mods/shipped.jar"]);
+        });
         settle(&ui);
         assert!(find_button(&ui, "gui-integrity-repair").is_none(), "{kind}");
         assert!(visible(
@@ -272,8 +271,13 @@ fn offered_bundle_parts_are_choices_and_export_waits_for_one() {
     let ui = window();
     let toggles = Rc::new(RefCell::new(Vec::new()));
     let toggle_sink = Rc::clone(&toggles);
-    ui.on_toggle_bundle_part(move |name, selected| {
-        toggle_sink.borrow_mut().push((name.to_string(), selected));
+    ui.on_toggle_bundle_part(move |kind, id, name, selected| {
+        toggle_sink.borrow_mut().push((
+            kind.to_string(),
+            id.to_string(),
+            name.to_string(),
+            selected,
+        ));
     });
     let exports = Rc::new(RefCell::new(Vec::new()));
     let export_sink = Rc::clone(&exports);
@@ -284,8 +288,10 @@ fn offered_bundle_parts_are_choices_and_export_waits_for_one() {
     });
     for (server_host, kind, id) in host_kinds() {
         checked_surface(&ui, server_host, false);
-        ui.set_bundle_parts(bundle_rows(true));
-        ui.set_bundle_selected_count(1);
+        support::update_host(&ui, 0, |view| {
+            view.bundle_parts = bundle_rows(true);
+            view.bundle_selected_count = 1;
+        });
         settle(&ui);
 
         assert!(visible(&ui, &lookup("gui-bundle-privacy")), "{kind}");
@@ -296,7 +302,12 @@ fn offered_bundle_parts_are_choices_and_export_waits_for_one() {
         switch.invoke_accessible_default_action();
         assert_eq!(
             toggles.borrow().last(),
-            Some(&("logs/latest.log".to_owned(), false))
+            Some(&(
+                kind.to_owned(),
+                id.to_owned(),
+                "logs/latest.log".to_owned(),
+                false
+            ))
         );
 
         assert!(enabled(&ui, "gui-bundle-export"));
@@ -306,8 +317,10 @@ fn offered_bundle_parts_are_choices_and_export_waits_for_one() {
             Some(&(kind.to_owned(), id.to_owned()))
         );
 
-        ui.set_bundle_parts(bundle_rows(false));
-        ui.set_bundle_selected_count(0);
+        support::update_host(&ui, 0, |view| {
+            view.bundle_parts = bundle_rows(false);
+            view.bundle_selected_count = 0;
+        });
         settle(&ui);
         assert!(!enabled(&ui, "gui-bundle-export"));
         assert!(visible(&ui, &lookup("gui-bundle-choose-one")));
@@ -322,10 +335,12 @@ fn an_exported_bundle_says_where_it_went_and_can_be_shown() {
     ui.on_open_bundle_folder(move |path| sink.borrow_mut().push(path.to_string()));
     for (server_host, _, _) in host_kinds() {
         checked_surface(&ui, server_host, false);
-        ui.set_bundle_parts(bundle_rows(true));
-        ui.set_bundle_selected_count(1);
-        ui.set_bundle_result("Saved one file to /home/user/bundle.zip.".into());
-        ui.set_bundle_result_path("/home/user/bundle.zip".into());
+        support::update_host(&ui, 0, |view| {
+            view.bundle_parts = bundle_rows(true);
+            view.bundle_selected_count = 1;
+            view.bundle_result = "Saved one file to /home/user/bundle.zip.".into();
+            view.bundle_result_path = "/home/user/bundle.zip".into();
+        });
         settle(&ui);
         assert!(visible(&ui, "Saved one file to /home/user/bundle.zip."));
         button(&ui, "gui-bundle-show-folder").mock_single_click(PointerEventButton::Left);
@@ -334,15 +349,16 @@ fn an_exported_bundle_says_where_it_went_and_can_be_shown() {
             Some("/home/user/bundle.zip")
         );
 
-        ui.set_bundle_result(SharedString::default());
-        ui.set_bundle_result_path(SharedString::default());
-        ui.set_bundle_error("The disk is full.".into());
+        support::update_host(&ui, 0, |view| {
+            view.bundle_result = SharedString::default();
+            view.bundle_result_path = SharedString::default();
+            view.bundle_error = "The disk is full.".into();
+        });
         settle(&ui);
         assert!(
             visible(&ui, "The disk is full."),
             "a failed export stays on screen"
         );
-        ui.set_bundle_error(SharedString::default());
     }
 }
 

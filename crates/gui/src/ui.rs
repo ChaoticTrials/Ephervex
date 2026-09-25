@@ -713,6 +713,33 @@ slint::slint! {
         workflow-title: string,
         workflow-summary: string,
         workflow-actions: [WorkflowActionRow],
+        // What the Diagnostics surface shows for the host: "unchecked",
+        // "verifying", "checked", or "stale". Empty is "unchecked".
+        integrity-state: string,
+        integrity-progress: string,
+        integrity-summary: string,
+        integrity-healthy: bool,
+        integrity-counts: string,
+        integrity-checked-at: string,
+        integrity-findings: [IntegrityFindingRow],
+        integrity-finding-total: int,
+        integrity-query: string,
+        integrity-repair-targets: [string],
+        integrity-unrepairable: [string],
+        integrity-shared-summary: string,
+        integrity-shared-faults: [IntegrityFindingRow],
+        integrity-shared-notes: [string],
+        integrity-repair-result: string,
+        integrity-repair-failed: bool,
+        integrity-recovery: [string],
+        // The diagnostic bundle being chosen for the host.
+        bundle-parts: [BundlePartRow],
+        bundle-selection: string,
+        bundle-selected-count: int,
+        bundle-exporting: bool,
+        bundle-result: string,
+        bundle-result-path: string,
+        bundle-error: string,
     }
 
     // One pane: which host view it shows, on which surface, and where.
@@ -2522,7 +2549,8 @@ slint::slint! {
         in property <string> checked-at;
         in property <[IntegrityFindingRow]> findings;
         in property <int> finding-total;
-        in-out property <string> query;
+        // The filter the findings are narrowed by, owned by the host.
+        in property <string> query;
         in property <[string]> repair-targets;
         in property <[string]> unrepairable;
         in property <string> shared-summary;
@@ -2607,7 +2635,7 @@ slint::slint! {
                     HorizontalLayout {
                         spacing: 8px;
                         Heading { text: GuiI18n.text("gui-integrity-findings"); font-size: Theme.row-heading-size; horizontal-stretch: 1; vertical-alignment: center; }
-                        TextField { text <=> root.query; placeholder: GuiI18n.text("gui-integrity-filter"); accessible-label: GuiI18n.text("gui-integrity-filter"); input-type: InputType.search; width: 220px; edited(text) => { root.filter(text); } }
+                        TextField { property <string> shown-query: root.query; changed shown-query => { self.text = self.shown-query; } init => { self.text = root.query; } placeholder: GuiI18n.text("gui-integrity-filter"); accessible-label: GuiI18n.text("gui-integrity-filter"); input-type: InputType.search; width: 220px; edited(text) => { root.filter(text); } }
                     }
                     if root.findings.length == 0 : BodyText { text: GuiI18n.value("gui-integrity-no-match", root.query); color: Theme.text-muted; wrap: word-wrap; }
                     if root.findings.length > 0 : IntegrityFindingList { items: root.findings; }
@@ -4072,26 +4100,6 @@ slint::slint! {
         in-out property <string> host-busy-kind;
         in-out property <string> host-busy-id;
         in-out property <string> host-busy-text;
-        // What the Diagnostics surface shows for the host it was opened on.
-        in-out property <string> integrity-host-kind;
-        in-out property <string> integrity-host-id;
-        in-out property <string> integrity-state: "unchecked";
-        in-out property <string> integrity-progress;
-        in-out property <string> integrity-summary;
-        in-out property <bool> integrity-healthy;
-        in-out property <string> integrity-counts;
-        in-out property <string> integrity-checked-at;
-        in-out property <[IntegrityFindingRow]> integrity-findings;
-        in-out property <int> integrity-finding-total;
-        in-out property <string> integrity-query;
-        in-out property <[string]> integrity-repair-targets;
-        in-out property <[string]> integrity-unrepairable;
-        in-out property <string> integrity-shared-summary;
-        in-out property <[IntegrityFindingRow]> integrity-shared-faults;
-        in-out property <[string]> integrity-shared-notes;
-        in-out property <string> integrity-repair-result;
-        in-out property <bool> integrity-repair-failed;
-        in-out property <[string]> integrity-recovery;
         // The disk usage view: one measurement of Ephervex's own storage.
         in-out property <string> disk-usage-state: "idle";
         in-out property <string> disk-usage-progress;
@@ -4102,14 +4110,6 @@ slint::slint! {
         in-out property <bool> disk-usage-incomplete;
         in-out property <string> disk-usage-incomplete-text;
         in-out property <[string]> disk-usage-unreadable;
-        // The diagnostic bundle the Diagnostics surface is choosing for that host.
-        in-out property <[BundlePartRow]> bundle-parts;
-        in-out property <string> bundle-selection;
-        in-out property <int> bundle-selected-count;
-        in-out property <bool> bundle-exporting;
-        in-out property <string> bundle-result;
-        in-out property <string> bundle-result-path;
-        in-out property <string> bundle-error;
         in-out property <[ActivityRow]> activities;
         in-out property <[AccountRow]> accounts;
         in-out property <[JavaRow]> java-runtimes;
@@ -4565,13 +4565,15 @@ slint::slint! {
         callback cancel-isolation(string, string);
         callback discard-isolation-setup(string, string);
         callback retry-isolation-recovery(string, string);
-        callback open-integrity(string, string);
         callback verify-host(string, string);
         callback repair-host(string, string);
         callback stop-integrity-work();
-        callback filter-integrity-findings(string);
-        callback toggle-bundle-part(string, bool);
-        callback select-all-bundle-parts(bool);
+        // (kind, id, query)
+        callback filter-integrity-findings(string, string, string);
+        // (kind, id, part, chosen)
+        callback toggle-bundle-part(string, string, string, bool);
+        // (kind, id, chosen)
+        callback select-all-bundle-parts(string, string, bool);
         callback export-bundle(string, string);
         callback open-bundle-folder(string);
         callback copy-text(string);
@@ -5004,29 +5006,29 @@ slint::slint! {
                                 rename(id, label) => { root.snapshot-host-kind = host.kind; root.snapshot-host-id = host.id; root.snapshot-action-id = id; root.snapshot-action-label = label; root.modal-error = ""; root.modal = "snapshot-rename"; }
                                 delete(id, label) => { root.snapshot-host-kind = host.kind; root.snapshot-host-id = host.id; root.snapshot-action-id = id; root.snapshot-action-label = label; root.modal-error = ""; root.modal = "snapshot-delete"; }
                             }
-                            if host.available && host.kind == "client" && pane.surface == "Diagnostics" : DiagnosticsSurface {
-                                property <bool> current: root.integrity-host-kind == "client" && root.integrity-host-id == host.id;
-                                shared-supported: true;
-                                host-running: host.client.can-kill;
-                                busy: root.host-busy-kind == "client" && root.host-busy-id == host.id;
+                            if host.available && pane.surface == "Diagnostics" : DiagnosticsSurface {
+                                // A server has no shared launch files to check.
+                                shared-supported: is-client;
+                                host-running: is-client ? host.client.can-kill : host.server.can-stop;
+                                busy: root.host-busy-kind == host.kind && root.host-busy-id == host.id;
                                 isolation-active: host.isolation-active;
-                                state: self.current ? root.integrity-state : "unchecked";
-                                progress: root.integrity-progress; summary: root.integrity-summary; healthy: root.integrity-healthy; counts: root.integrity-counts; checked-at: root.integrity-checked-at;
-                                findings: root.integrity-findings; finding-total: root.integrity-finding-total; query <=> root.integrity-query;
-                                repair-targets: root.integrity-repair-targets; unrepairable: root.integrity-unrepairable;
-                                shared-summary: root.integrity-shared-summary; shared-faults: root.integrity-shared-faults; shared-notes: root.integrity-shared-notes;
-                                repair-result: self.current ? root.integrity-repair-result : ""; repair-failed: root.integrity-repair-failed; recovery: root.integrity-recovery;
-                                verify => { root.verify-host("client", host.id); }
+                                state: host.integrity-state == "" ? "unchecked" : host.integrity-state;
+                                progress: host.integrity-progress; summary: host.integrity-summary; healthy: host.integrity-healthy; counts: host.integrity-counts; checked-at: host.integrity-checked-at;
+                                findings: host.integrity-findings; finding-total: host.integrity-finding-total; query: host.integrity-query;
+                                repair-targets: host.integrity-repair-targets; unrepairable: host.integrity-unrepairable;
+                                shared-summary: host.integrity-shared-summary; shared-faults: host.integrity-shared-faults; shared-notes: host.integrity-shared-notes;
+                                repair-result: host.integrity-repair-result; repair-failed: host.integrity-repair-failed; recovery: host.integrity-recovery;
+                                verify => { root.verify-host(host.kind, host.id); }
                                 stop => { root.stop-integrity-work(); }
-                                repair => { root.repair-host("client", host.id); }
-                                filter(query) => { root.filter-integrity-findings(query); }
+                                repair => { root.repair-host(host.kind, host.id); }
+                                filter(query) => { root.filter-integrity-findings(host.kind, host.id, query); }
                                 open-logs => { root.show-pane-surface(pane.id, "Logs"); }
-                                bundle-parts: self.current ? root.bundle-parts : []; bundle-selection: root.bundle-selection; bundle-selected-count: root.bundle-selected-count;
-                                bundle-exporting: self.current && root.bundle-exporting; bundle-result: self.current ? root.bundle-result : ""; bundle-result-path: root.bundle-result-path; bundle-error: self.current ? root.bundle-error : "";
-                                toggle-bundle-part(name, value) => { root.toggle-bundle-part(name, value); }
-                                select-all-bundle-parts(value) => { root.select-all-bundle-parts(value); }
-                                export-bundle => { root.export-bundle("client", host.id); }
-                                open-bundle-folder => { root.open-bundle-folder(root.bundle-result-path); }
+                                bundle-parts: host.bundle-parts; bundle-selection: host.bundle-selection; bundle-selected-count: host.bundle-selected-count;
+                                bundle-exporting: host.bundle-exporting; bundle-result: host.bundle-result; bundle-result-path: host.bundle-result-path; bundle-error: host.bundle-error;
+                                toggle-bundle-part(name, value) => { root.toggle-bundle-part(host.kind, host.id, name, value); }
+                                select-all-bundle-parts(value) => { root.select-all-bundle-parts(host.kind, host.id, value); }
+                                export-bundle => { root.export-bundle(host.kind, host.id); }
+                                open-bundle-folder => { root.open-bundle-folder(host.bundle-result-path); }
                             }
                             // The pane's own log viewer: what it reads, how it
                             // is filtered, and what is selected belong to this
@@ -5080,29 +5082,6 @@ slint::slint! {
                                 restore(id, label) => { root.snapshot-host-kind = host.kind; root.snapshot-host-id = host.id; root.snapshot-action-id = id; root.snapshot-action-label = label; root.snapshot-safety-copy = true; root.modal-error = ""; root.modal = "snapshot-restore"; }
                                 rename(id, label) => { root.snapshot-host-kind = host.kind; root.snapshot-host-id = host.id; root.snapshot-action-id = id; root.snapshot-action-label = label; root.modal-error = ""; root.modal = "snapshot-rename"; }
                                 delete(id, label) => { root.snapshot-host-kind = host.kind; root.snapshot-host-id = host.id; root.snapshot-action-id = id; root.snapshot-action-label = label; root.modal-error = ""; root.modal = "snapshot-delete"; }
-                            }
-                            if host.available && host.kind == "server" && pane.surface == "Diagnostics" : DiagnosticsSurface {
-                                property <bool> current: root.integrity-host-kind == "server" && root.integrity-host-id == host.id;
-                                shared-supported: false;
-                                host-running: host.server.can-stop;
-                                busy: root.host-busy-kind == "server" && root.host-busy-id == host.id;
-                                isolation-active: host.isolation-active;
-                                state: self.current ? root.integrity-state : "unchecked";
-                                progress: root.integrity-progress; summary: root.integrity-summary; healthy: root.integrity-healthy; counts: root.integrity-counts; checked-at: root.integrity-checked-at;
-                                findings: root.integrity-findings; finding-total: root.integrity-finding-total; query <=> root.integrity-query;
-                                repair-targets: root.integrity-repair-targets; unrepairable: root.integrity-unrepairable;
-                                repair-result: self.current ? root.integrity-repair-result : ""; repair-failed: root.integrity-repair-failed; recovery: root.integrity-recovery;
-                                verify => { root.verify-host("server", host.id); }
-                                stop => { root.stop-integrity-work(); }
-                                repair => { root.repair-host("server", host.id); }
-                                filter(query) => { root.filter-integrity-findings(query); }
-                                open-logs => { root.show-pane-surface(pane.id, "Logs"); }
-                                bundle-parts: self.current ? root.bundle-parts : []; bundle-selection: root.bundle-selection; bundle-selected-count: root.bundle-selected-count;
-                                bundle-exporting: self.current && root.bundle-exporting; bundle-result: self.current ? root.bundle-result : ""; bundle-result-path: root.bundle-result-path; bundle-error: self.current ? root.bundle-error : "";
-                                toggle-bundle-part(name, value) => { root.toggle-bundle-part(name, value); }
-                                select-all-bundle-parts(value) => { root.select-all-bundle-parts(value); }
-                                export-bundle => { root.export-bundle("server", host.id); }
-                                open-bundle-folder => { root.open-bundle-folder(root.bundle-result-path); }
                             }
                             if host.available && host.kind == "server" && pane.surface == "Console" : VerticalLayout { spacing: 10px;
                                 ActionRow { BodyText { text: GuiI18n.value("gui-bounded-output", host.server.state); color: host.server.can-send-command ? Theme.success : Theme.text-secondary; } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-restart"); enabled: host.server.can-restart && host.server.restart-stage == ""; clicked => { root.server-restart(host.id); } } AppButton { text: GuiI18n.text("gui-stop"); enabled: host.server.can-stop; clicked => { root.server-stop(host.id); } } AppButton { text: GuiI18n.text("gui-kill"); tone: "danger"; enabled: host.server.can-kill; clicked => { root.pending-action-id = host.id; root.pending-action-name = host.server.name; root.modal = "kill"; } } }
