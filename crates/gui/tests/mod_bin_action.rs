@@ -184,7 +184,9 @@ fn show(ui: &AppWindow, mods_are_the_users: bool, rows: &[ModRow]) {
     let mut view = support::client_view(client());
     view.allow_pack_mod_changes = mods_are_the_users;
     support::show(ui, 0, vec![view], vec![support::pane(1, 0, "Mods")]);
-    ui.set_managed_mods(ModelRc::from(Rc::new(VecModel::from(rows.to_vec()))));
+    support::update_host(ui, 0, |view| {
+        view.mods = ModelRc::from(Rc::new(VecModel::from(rows.to_vec())));
+    });
     slint::platform::update_timers_and_animations();
     ui.window().take_snapshot().expect("render");
 }

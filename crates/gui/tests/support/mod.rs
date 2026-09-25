@@ -118,3 +118,8 @@ pub(crate) fn update_host(ui: &AppWindow, index: usize, change: impl FnOnce(&mut
         views.set_row_data(index, view);
     }
 }
+
+/// Puts a mod list on the first host view, as the controller does.
+pub(crate) fn set_mods(ui: &AppWindow, rows: ModelRc<ephervex_gui::ui::ModRow>) {
+    update_host(ui, 0, |view| view.mods = rows);
+}

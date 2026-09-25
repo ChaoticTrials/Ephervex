@@ -63,7 +63,7 @@ fn show(ui: &AppWindow, rows: &[ModRow]) -> Rc<VecModel<ModRow>> {
         "Mods",
     );
     let model = Rc::new(VecModel::from(rows.to_vec()));
-    ui.set_managed_mods(ModelRc::from(model.clone()));
+    support::update_host(ui, 0, |view| view.mods = ModelRc::from(model.clone()));
     model
 }
 

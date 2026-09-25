@@ -48,9 +48,11 @@ use crate::window_aspect;
 use crate::workspace_layout::{PaneId, Surface, WorkspaceLayout};
 
 mod log_views;
+mod mod_views;
 mod workspace;
 
 use log_views::LogViews;
+use mod_views::ModViews;
 use workspace::{PaneChange, WorkspaceState};
 
 pub struct Controller {
@@ -2172,7 +2174,6 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
     let import_flow = Rc::new(RefCell::new(ImportFlowState::default()));
     let minecraft = Rc::new(RefCell::new(MinecraftDefaultsModel::new()));
     let browser = Rc::new(ModBrowser::default());
-    let mod_lists = Rc::new(RefCell::new(ModLists::default()));
     let local_mods = Rc::new(RefCell::new(LocalModDrop::default()));
     let isolation_flow = Rc::new(RefCell::new(IsolationFlowState::default()));
     let integrity_flow = Rc::new(RefCell::new(IntegrityFlowState::default()));
@@ -2182,6 +2183,8 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
         state: Rc::new(RefCell::new(WorkspaceState::default())),
         lifecycle: Rc::clone(&lifecycle),
         logs: Rc::new(RefCell::new(LogViews::new(backend.commands.clone()))),
+        mods: Rc::default(),
+        browser: Rc::clone(&browser),
     };
     register_i18n(ui);
     register_toasts(ui);
@@ -2191,8 +2194,6 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
         &creations,
         &import_flow,
         &minecraft,
-        &browser,
-        &mod_lists,
         &local_mods,
         &isolation_flow,
         &integrity_flow,
@@ -2208,8 +2209,6 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
     let poll_creations = Rc::clone(&creations);
     let poll_import_flow = Rc::clone(&import_flow);
     let poll_minecraft = Rc::clone(&minecraft);
-    let poll_browser = Rc::clone(&browser);
-    let poll_mod_lists = Rc::clone(&mod_lists);
     let poll_local_mods = Rc::clone(&local_mods);
     let poll_isolation_flow = Rc::clone(&isolation_flow);
     let poll_integrity_flow = Rc::clone(&integrity_flow);
@@ -2248,8 +2247,6 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
                     &poll_creations,
                     &poll_import_flow,
                     &poll_minecraft,
-                    &poll_browser,
-                    &poll_mod_lists,
                     &poll_local_mods,
                     &poll_isolation_flow,
                     &poll_integrity_flow,
@@ -2472,20 +2469,6 @@ fn register_create_server(
     );
 }
 
-/// Narrowing a mod list to what the user typed.
-///
-/// The full list stays in `mod_lists`, so clearing the box restores it without
-/// asking core for the mods again.
-fn register_mod_filter(ui: &AppWindow, mod_lists: &Rc<RefCell<ModLists>>) {
-    let weak = ui.as_weak();
-    let lists = Rc::clone(mod_lists);
-    ui.on_filter_mods(move |host_kind, _query| {
-        if let Some(ui) = weak.upgrade() {
-            render_mod_list(&ui, &lists.borrow(), host_kind.as_str());
-        }
-    });
-}
-
 /// Choosing, and unchoosing, the archive a server's content comes from.
 ///
 /// Two dialogs can name one, and the pick is asynchronous, so each request says
@@ -2562,8 +2545,6 @@ fn register_callbacks(
     creations: &Rc<RefCell<CreationTracker>>,
     import_flow: &Rc<RefCell<ImportFlowState>>,
     minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
-    browser: &Rc<ModBrowser>,
-    mod_lists: &Rc<RefCell<ModLists>>,
     local_mods: &Rc<RefCell<LocalModDrop>>,
     isolation_flow: &Rc<RefCell<IsolationFlowState>>,
     integrity_flow: &Rc<RefCell<IntegrityFlowState>>,
@@ -2573,9 +2554,8 @@ fn register_callbacks(
     keys: &BindingCapture,
 ) {
     register_catalog_actions(ui, commands);
-    register_mod_filter(ui, mod_lists);
     register_client_actions(ui, commands, creations);
-    register_mod_actions(ui, commands, browser);
+    register_mod_actions(ui, commands, workspace);
     register_create_instance_naming(ui, commands);
     register_import_flow(ui, commands, import_flow, creations);
     register_server_pack_choice(ui, commands);
@@ -3082,46 +3062,6 @@ impl LocalModDrop {
 
 /// Every mod each list has, before the query narrows it.
 ///
-/// The lists are kept here rather than in the window because filtering happens
-/// in Rust: only the matching rows become `ModRow`s, so typing into the box
-/// shrinks the number of cards the markup builds instead of hiding cards it
-/// already built.
-#[derive(Debug, Default)]
-struct ModLists {
-    client: Vec<ModRow>,
-    server: Vec<ModRow>,
-    /// Which host each list is currently for, so a query typed against one
-    /// instance is not left filtering the next one's mods.
-    client_host: String,
-    server_host: String,
-}
-
-impl ModLists {
-    fn rows(&self, host_kind: &str) -> &[ModRow] {
-        if host_kind == "server" {
-            &self.server
-        } else {
-            &self.client
-        }
-    }
-
-    /// Replaces one list, answering whether it is now about a different host.
-    fn replace(&mut self, host_kind: &str, host: &str, rows: Vec<ModRow>) -> bool {
-        let (current, target) = if host_kind == "server" {
-            self.server = rows;
-            (&mut self.server_host, host)
-        } else {
-            self.client = rows;
-            (&mut self.client_host, host)
-        };
-        let changed = current != target;
-        if changed {
-            target.clone_into(current);
-        }
-        changed
-    }
-}
-
 /// The rows whose name, file name, or provider contains `query`.
 ///
 /// Case-insensitive and substring rather than prefix, because a user looking
@@ -3141,21 +3081,6 @@ fn matching_mods(rows: &[ModRow], query: &str) -> Vec<ModRow> {
         })
         .cloned()
         .collect()
-}
-
-/// Redraws one mod list through its current query.
-fn render_mod_list(ui: &AppWindow, lists: &ModLists, host_kind: &str) {
-    let query = if host_kind == "server" {
-        ui.get_server_mods_query()
-    } else {
-        ui.get_managed_mods_query()
-    };
-    let rows = matching_mods(lists.rows(host_kind), query.as_str());
-    if host_kind == "server" {
-        ui.set_server_mods(reconciled(&ui.get_server_mods(), rows));
-    } else {
-        ui.set_managed_mods(reconciled(&ui.get_managed_mods(), rows));
-    }
 }
 
 /// A handle for one additional launch, unique for the life of this process.
@@ -3314,30 +3239,17 @@ fn register_client_actions(
     });
 
     let sender = commands.clone();
-    let handle = ui.as_weak();
     ui.on_load_instance_workspace(move |id| {
-        let Some(ui) = handle.upgrade() else { return };
-        // Opening an instance is where the preferred catalog applies: a
-        // preference decides what the browser starts on, and never moves the
-        // catalog out from under a search the user is already reading. An
-        // unresolvable recorded name leaves the browser where it is rather
-        // than searching one catalog while the setting names another; the
-        // settings screen is where that name is reported.
-        let preferred = ui.get_default_mod_catalog();
-        if let Some(catalog) = presentation::catalog_to_open_on(&preferred, &ui.get_mod_provider())
-        {
-            show_mod_catalog(&ui, catalog);
-        }
         if let Some(id) = backend::parse_instance_id(&id) {
             send(&sender, Command::LoadInstanceWorkspace(id));
         }
     });
 }
 
-fn register_mod_actions(ui: &AppWindow, commands: &Sender<Command>, browser: &Rc<ModBrowser>) {
+fn register_mod_actions(ui: &AppWindow, commands: &Sender<Command>, workspace: &Workspace) {
     register_mod_mutations(ui, commands);
-    register_mod_browser(ui, commands, browser);
-    register_browser_install(ui, commands, browser);
+    register_mod_browser(ui, commands, workspace);
+    register_browser_install(ui, commands, workspace);
     register_favorite_versions(ui, commands);
 
     let weak = ui.as_weak();
@@ -3361,16 +3273,23 @@ fn register_mod_actions(ui: &AppWindow, commands: &Sender<Command>, browser: &Rc
 
     let sender = commands.clone();
     let handle = ui.as_weak();
-    ui.on_open_mod_manager(move |path| {
+    let lists = workspace.clone();
+    ui.on_open_mod_manager(move |id, path| {
         let Some(ui) = handle.upgrade() else { return };
-        let Some(instance) = backend::parse_instance_id(&ui.get_selected_instance_id()) else {
+        let Some(instance) = backend::parse_instance_id(&id) else {
             return;
         };
         // The modal opens on the state the list already has, then fills in.
         // Waiting for the catalog before showing anything would make an offline
         // instance feel broken.
+        ui.set_mod_action_host(id);
         ui.set_mod_action_path(path.clone());
-        ui.set_mod_action_name(mod_row_title(&ui, &path));
+        ui.set_mod_action_name(
+            lists
+                .mods
+                .borrow()
+                .title(InstalledHost::Instance(instance), &path),
+        );
         ui.set_mod_action_notice(SharedString::default());
         ui.set_mod_action_selected(SharedString::default());
         ui.set_mod_action_project_url(SharedString::default());
@@ -3420,118 +3339,69 @@ fn register_mod_actions(ui: &AppWindow, commands: &Sender<Command>, browser: &Rc
 ///
 /// Deciding what fits this instance and resolving a dependency graph both
 /// happen in `ephervex-core`; this side never asks a provider anything.
-fn register_mod_browser(ui: &AppWindow, commands: &Sender<Command>, browser: &Rc<ModBrowser>) {
-    // One counter for every search request this browser ever sends, searches,
-    // "load more", and the continuations of a page size larger than one
-    // request alike, so two requests that end up identical in every other way
-    // (the same instance, catalog, text, and offset, asked for twice because
-    // the user switched catalog and back) still mint distinct ids. Owned by
-    // the browser rather than read from the query/provider/offset the request
-    // carries: those are exactly the fields that can repeat.
+fn register_mod_browser(ui: &AppWindow, commands: &Sender<Command>, workspace: &Workspace) {
+    // One counter for every search request any browser ever sends, so two
+    // requests that end up identical in every other way (the same instance,
+    // catalog, text, and offset, asked for twice because the user switched
+    // catalog and back) still mint distinct ids.
     let sender = commands.clone();
     let handle = ui.as_weak();
-    let ids = Rc::clone(browser);
+    let browsers = workspace.clone();
     ui.on_search_mods(move |instance, provider, query| {
-        let Some(ui) = handle.upgrade() else { return };
-        let Some(instance) = backend::parse_instance_id(&instance) else {
+        let (Some(ui), Some(instance)) = (handle.upgrade(), backend::parse_instance_id(&instance))
+        else {
             return;
         };
-        let Some(catalog) = ModProvider::parse(&provider) else {
-            return;
-        };
-        // Minted before anything about the browser's own state changes: a
-        // request id that could not be allocated must leave the browser
-        // exactly as it was, not part-way into a request that was never
-        // actually sent.
-        let Some(request_id) = next_mod_search_request_id(&ids.search_requests) else {
-            return;
-        };
-        // What was submitted, which is not what the fields say: the user may
-        // keep typing, or switch catalog, while this one answers, and only the
-        // answer to what was actually asked belongs on screen.
-        ui.set_mod_search_submitted(query.clone());
-        ui.set_mod_search_provider(provider);
-        ui.set_mod_search_ran(true);
-        ui.set_mod_search_loading(true);
-        ui.set_mod_search_notice(SharedString::default());
-        // A new search replaces the list rather than adding to it, so the rows
-        // on screen always belong to one question.
-        ui.set_mod_results(model(Vec::new()));
-        ui.set_mod_results_total(0);
-        ui.set_mod_results_next_offset(-1);
-        // A fresh search always starts at zero; a page arriving for any other
-        // offset belongs to a "load more" this search has superseded.
-        ui.set_mod_search_requested_offset(0);
-        // What this fill is aiming for. A page size larger than one request
-        // reaches it by asking again, so the target is what says when to stop.
-        ui.set_mod_results_target(ui.get_mod_page_size());
-        // Instance, catalog, text, and offset can all repeat (typing the same
-        // query again, or switching catalog away and back), and this is what
-        // still tells this request apart from an older, unrelated one that
-        // happens to look identical.
-        ui.set_mod_search_expected_request_id(request_id.to_string().into());
-        send(
-            &sender,
-            Command::SearchMods {
-                instance,
-                provider: catalog,
-                query: query.to_string(),
-                offset: 0,
-                limit: request_limit(),
-                request_id,
-            },
+        let host = InstalledHost::Instance(instance);
+        let command = browsers.mods.borrow_mut().search(
+            host,
+            &provider,
+            &query,
+            &browsers.browser.search_requests,
+            ui.get_mod_page_size(),
         );
+        mod_views::publish(&browsers, &browsers.mods.borrow(), host);
+        mod_views::send_if(&sender, command);
     });
 
     let sender = commands.clone();
     let handle = ui.as_weak();
-    let ids = Rc::clone(browser);
+    let browsers = workspace.clone();
     ui.on_load_more_mods(move |instance, provider, query, offset| {
-        let Some(ui) = handle.upgrade() else { return };
-        let Some(instance) = backend::parse_instance_id(&instance) else {
+        let (Some(ui), Some(instance)) = (handle.upgrade(), backend::parse_instance_id(&instance))
+        else {
             return;
         };
-        let Some(catalog) = ModProvider::parse(&provider) else {
-            return;
-        };
-        // Minted before anything about the browser's own state changes, for
-        // the same reason a fresh search does this first: an id that could
-        // not be allocated must leave the browser exactly as it was.
-        let Some(request_id) = next_mod_search_request_id(&ids.search_requests) else {
-            return;
-        };
-        // Continues the search already on screen, at the offset the provider
-        // itself named as the continuation. Nothing is fetched ahead of what
-        // was asked for, and an answer for any other offset is stale.
-        ui.set_mod_search_loading(true);
-        ui.set_mod_search_requested_offset(offset);
-        // One more page on top of what is already shown, rather than a target
-        // the list has long since passed.
-        ui.set_mod_results_target(
-            to_i32(ui.get_mod_results().row_count()) + ui.get_mod_page_size(),
+        let host = InstalledHost::Instance(instance);
+        let command = browsers.mods.borrow_mut().load_more(
+            host,
+            &provider,
+            &query,
+            offset,
+            &browsers.browser.search_requests,
+            ui.get_mod_page_size(),
         );
-        // Its own fresh id, from the same counter a fresh search uses: a
-        // "load more" is just as much an individual request as a search is,
-        // and its offset alone does not distinguish it from another one
-        // fired at the same offset for a superseded question.
-        ui.set_mod_search_expected_request_id(request_id.to_string().into());
-        send(
-            &sender,
-            Command::SearchMods {
-                instance,
-                provider: catalog,
-                query: query.to_string(),
-                offset: offset.try_into().unwrap_or(0),
-                limit: request_limit(),
-                request_id,
-            },
-        );
+        mod_views::publish(&browsers, &browsers.mods.borrow(), host);
+        mod_views::send_if(&sender, command);
     });
 
-    let handle = ui.as_weak();
-    ui.on_switch_mod_catalog(move |provider| {
-        let Some(ui) = handle.upgrade() else { return };
-        show_mod_catalog(&ui, &provider);
+    let browsers = workspace.clone();
+    ui.on_switch_mod_catalog(move |instance, provider| {
+        if let Some(instance) = backend::parse_instance_id(&instance) {
+            let host = InstalledHost::Instance(instance);
+            if browsers.mods.borrow_mut().switch_catalog(host, &provider) {
+                mod_views::publish(&browsers, &browsers.mods.borrow(), host);
+            }
+        }
+    });
+
+    let lists = workspace.clone();
+    ui.on_filter_mods(move |kind, id, query| {
+        if let Some(host) = backend::parse_mod_host(&kind, &id)
+            && lists.mods.borrow_mut().filter(host, &query)
+        {
+            mod_views::publish(&lists, &lists.mods.borrow(), host);
+        }
     });
 
     // Held for the session only. It is a reading preference for one panel, not
@@ -3545,37 +3415,6 @@ fn register_mod_browser(ui: &AppWindow, commands: &Sender<Command>, browser: &Rc
         ui.set_mod_page_size(to_i32(size));
         ui.set_mod_page_size_label(label);
     });
-}
-
-/// Points the browser at one catalog and retires everything the previous one
-/// could still be answered by.
-///
-/// Switching asks a different question, and everything that could let a search
-/// still in flight for the catalog just left behind land on this one has to
-/// move together, in this one step, or a late answer can still slip past the
-/// staleness guard. Shared with opening an instance so that arriving at the
-/// browser on the preferred catalog invalidates exactly as much as clicking the
-/// chip for it does, rather than through a second set of rules.
-fn show_mod_catalog(ui: &AppWindow, provider: &str) {
-    let reset = presentation::CatalogSwitchReset::for_provider(provider);
-    ui.set_mod_provider(provider.into());
-    ui.set_mod_search_provider(reset.provider.into());
-    // Retired, not just momentarily mismatched: switching back to this
-    // catalog before an old answer returns must not reinstate the exact
-    // question it was waiting on. The expected request id is retired the
-    // same way: `submitted` alone cannot survive a later search for the
-    // exact same words, which fills it back in with the exact same value.
-    ui.set_mod_search_submitted(reset.submitted.into());
-    ui.set_mod_search_expected_request_id(reset.request_id.into());
-    ui.set_mod_search_loading(reset.loading);
-    ui.set_mod_search_requested_offset(reset.requested_offset);
-    // A new catalog replaces the list rather than showing the old one's
-    // rows under a different heading.
-    ui.set_mod_results(model(Vec::new()));
-    ui.set_mod_search_ran(false);
-    ui.set_mod_search_notice(SharedString::default());
-    ui.set_mod_results_total(0);
-    ui.set_mod_results_next_offset(-1);
 }
 
 /// Narrows the loader choice to the ones a Minecraft release ever had.
@@ -3703,10 +3542,11 @@ fn apply_minecraft_selection(ui: &AppWindow, form: &str, minecraft: &str) {
 /// Kept apart from `register_mod_browser`: this is not a search, carries no
 /// request id or offset of its own, and does not touch any of the search
 /// staleness bookkeeping.
-fn register_browser_install(ui: &AppWindow, commands: &Sender<Command>, browser: &Rc<ModBrowser>) {
+fn register_browser_install(ui: &AppWindow, commands: &Sender<Command>, workspace: &Workspace) {
     let sender = commands.clone();
     let handle = ui.as_weak();
-    let install_queue = Rc::clone(browser);
+    let install_workspace = workspace.clone();
+    let install_queue = Rc::clone(&workspace.browser);
     ui.on_install_from_browser(move |instance, provider, project| {
         let Some(ui) = handle.upgrade() else { return };
         if backend::parse_instance_id(&instance).is_none()
@@ -3723,16 +3563,20 @@ fn register_browser_install(ui: &AppWindow, commands: &Sender<Command>, browser:
         if let Some(request) = start {
             start_browser_install(&ui, &sender, &request);
         }
-        mark_queued_results(&ui, &install_queue.installs.borrow());
+        mark_queued(&install_workspace);
     });
 
     let handle = ui.as_weak();
     let sender = commands.clone();
-    let install_queue = Rc::clone(browser);
+    let abandon_workspace = workspace.clone();
     ui.on_abandon_browser_install(move || {
         let Some(ui) = handle.upgrade() else { return };
-        let next = install_queue.installs.borrow_mut().finish_active();
-        advance_browser_install(&ui, &sender, &install_queue, next);
+        let next = abandon_workspace
+            .browser
+            .installs
+            .borrow_mut()
+            .finish_active();
+        advance_browser_install(&ui, &sender, &abandon_workspace, next);
     });
 }
 
@@ -3744,6 +3588,7 @@ fn start_browser_install(ui: &AppWindow, commands: &Sender<Command>, request: &B
     ) else {
         return;
     };
+    ui.set_mod_action_host(request.instance.as_str().into());
     ui.set_mod_plan_requested(request.project.as_str().into());
     ui.set_mod_plan_requested_provider(request.provider.as_str().into());
     ui.set_mod_plan_direct(true);
@@ -3765,13 +3610,25 @@ fn start_browser_install(ui: &AppWindow, commands: &Sender<Command>, request: &B
 fn advance_browser_install(
     ui: &AppWindow,
     commands: &Sender<Command>,
-    browser: &Rc<ModBrowser>,
+    workspace: &Workspace,
     next: Option<BrowserInstall>,
 ) {
     if let Some(next) = next {
         start_browser_install(ui, commands, &next);
     }
-    mark_queued_results(ui, &browser.installs.borrow());
+    mark_queued(workspace);
+}
+
+/// Marks, in every shown client's browser, the results whose install is
+/// queued or under way.
+fn mark_queued(workspace: &Workspace) {
+    let marked = workspace
+        .mods
+        .borrow_mut()
+        .mark_queued(&workspace.browser.installs.borrow());
+    for host in marked {
+        mod_views::publish(workspace, &workspace.mods.borrow(), host);
+    }
 }
 
 /// The next opaque id for a mod search request, unique for the life of this
@@ -3836,8 +3693,12 @@ fn register_mod_mutations(ui: &AppWindow, commands: &Sender<Command>) {
     });
 
     let sender = commands.clone();
-    ui.on_plan_mod_removal(move |instance, path| {
-        if let Some(instance) = backend::parse_instance_id(&instance) {
+    let handle = ui.as_weak();
+    ui.on_plan_mod_removal(move |id, path| {
+        if let Some(ui) = handle.upgrade() {
+            ui.set_mod_action_host(id.clone());
+        }
+        if let Some(instance) = backend::parse_instance_id(&id) {
             send(
                 &sender,
                 Command::PlanModRemoval {
@@ -3906,14 +3767,17 @@ fn chosen_linked_servers(ui: &AppWindow) -> Vec<ephervex_model::ServerId> {
 fn register_loader_change(ui: &AppWindow, commands: &Sender<Command>) {
     let sender = commands.clone();
     let handle = ui.as_weak();
-    ui.on_open_loader_change(move || {
+    ui.on_open_loader_change(move |id| {
         let Some(ui) = handle.upgrade() else { return };
-        let Ok(index) = usize::try_from(ui.get_selected_instance_index()) else {
+        let Some(row) = ui
+            .get_host_views()
+            .iter()
+            .find(|view| view.kind == "client" && view.id == id)
+            .map(|view| view.client)
+        else {
             return;
         };
-        let Some(row) = ui.get_instances().row_data(index) else {
-            return;
-        };
+        ui.set_mod_action_host(id);
         // Vanilla has no build to change; the control that opens this is
         // hidden for it, and this is the second gate.
         let Some(loader) = loader_kind_of(&row.loader_kind) else {
@@ -4411,6 +4275,11 @@ struct Workspace {
     state: Rc<RefCell<WorkspaceState>>,
     lifecycle: Rc<RefCell<HostLifecycle>>,
     logs: Rc<RefCell<LogViews>>,
+    /// Each shown host's mod list and catalog browser. Kept for exactly the
+    /// hosts the workspace shows.
+    mods: Rc<RefCell<ModViews>>,
+    /// The install queue and search ids every browser shares.
+    browser: Rc<ModBrowser>,
 }
 
 impl Workspace {
@@ -4434,9 +4303,7 @@ impl Workspace {
             .borrow_mut()
             .render(ui, &self.lifecycle.borrow(), &logs);
         drop(logs);
-        for host in entered {
-            load_host(ui, host);
-        }
+        self.follow_hosts(ui, &entered);
         let state = self.state.borrow();
         // A single pane is the workspace of its host's page; a split belongs to
         // the page it was opened from.
@@ -4458,7 +4325,22 @@ impl Workspace {
             self.state
                 .borrow_mut()
                 .render(ui, &self.lifecycle.borrow(), &self.logs.borrow());
-        for host in entered {
+        self.follow_hosts(ui, &entered);
+    }
+
+    /// Lets each host's feature state follow the workspace's hosts, and asks
+    /// for everything the hosts that just entered show.
+    fn follow_hosts(&self, ui: &AppWindow, entered: &[InstalledHost]) {
+        let shown = self.state.borrow().shown();
+        // A client opens its browser on the preferred catalog. A name this
+        // build cannot resolve leaves it on the default rather than searching
+        // one catalog while the setting names another.
+        let preferred = ui.get_default_mod_catalog();
+        let default = ModProvider::Modrinth.as_str();
+        let catalog = presentation::catalog_to_open_on(&preferred, default).unwrap_or(default);
+        self.mods.borrow_mut().follow(&shown, catalog);
+        for &host in entered {
+            mod_views::publish(self, &self.mods.borrow(), host);
             load_host(ui, host);
         }
     }
@@ -7059,8 +6941,6 @@ fn apply_event(
     creations: &Rc<RefCell<CreationTracker>>,
     import_flow: &Rc<RefCell<ImportFlowState>>,
     minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
-    browser: &Rc<ModBrowser>,
-    mod_lists: &Rc<RefCell<ModLists>>,
     local_mods: &Rc<RefCell<LocalModDrop>>,
     isolation_flow: &Rc<RefCell<IsolationFlowState>>,
     integrity_flow: &Rc<RefCell<IntegrityFlowState>>,
@@ -7148,32 +7028,18 @@ fn apply_event(
             versions,
         } => apply_loader_versions(ui, &form, loader, &minecraft, &versions),
         Event::ManagedMods(data) => {
-            // A late answer for a workspace the user has already navigated
-            // away from is discarded rather than rendered under the wrong
-            // name. The workspace it belongs to already showed its durable
-            // state, and reopening it asks again. The kind is checked as well
-            // as the id, so a server's list can never land in the panel of the
-            // instance it is linked to.
-            if data.host_kind == "server" {
-                if presentation::result_is_current(&data.host, &ui.get_selected_server_id()) {
-                    let mut lists = mod_lists.borrow_mut();
-                    if lists.replace("server", &data.host, managed_mod_rows(data.mods)) {
-                        ui.set_server_mods_query(SharedString::default());
-                    }
-                    render_mod_list(ui, &lists, "server");
-                    ui.set_server_mods_notice(data.notice.into());
-                }
-            } else if presentation::result_is_current(&data.host, &ui.get_selected_instance_id()) {
-                let mut lists = mod_lists.borrow_mut();
-                if lists.replace("client", &data.host, managed_mod_rows(data.mods)) {
-                    ui.set_managed_mods_query(SharedString::default());
-                }
-                render_mod_list(ui, &lists, "client");
-                drop(lists);
-                ui.set_managed_mods_notice(data.notice.into());
-                // What the instance has just changed, and the browser beside
-                // this list says whether each result is already one of them.
-                mark_installed_results(ui);
+            // Kept with the host it belongs to, checked by kind as well as id,
+            // so a server's list never lands in the panel of the instance it
+            // is linked to. A host no pane shows keeps nothing; opening it
+            // again asks again.
+            if let Some(host) = backend::parse_mod_host(&data.host_kind, &data.host)
+                && workspace.mods.borrow_mut().apply_list(
+                    host,
+                    managed_mod_rows(data.mods),
+                    data.notice,
+                )
+            {
+                mod_views::publish(workspace, &workspace.mods.borrow(), host);
             }
         }
         Event::CrashNotice(notice) => {
@@ -7209,8 +7075,8 @@ fn apply_event(
         Event::ModAcquisitionRequired(data) => apply_mod_acquisition(ui, &data),
         Event::ModRelations(data) => apply_mod_relations(ui, &data),
         Event::ModRemovalPlan(data) => apply_mod_removal_plan(ui, data),
-        Event::ModResults(results) => apply_mod_results(ui, results, browser, commands),
-        Event::ModPlan(plan) => apply_mod_install_plan(ui, plan, browser, commands),
+        Event::ModResults(results) => apply_mod_results(workspace, results, commands),
+        Event::ModPlan(plan) => apply_mod_install_plan(ui, plan, workspace, commands),
         Event::ModInstallFinished {
             instance,
             provider,
@@ -7221,8 +7087,8 @@ fn apply_event(
                 provider,
                 project,
             };
-            let next = browser.installs.borrow_mut().finish(&finished);
-            advance_browser_install(ui, commands, browser, next);
+            let next = workspace.browser.installs.borrow_mut().finish(&finished);
+            advance_browser_install(ui, commands, workspace, next);
         }
         // The question will never be answered, so whatever asked it stops
         // waiting. The reason itself already arrived as an error.
@@ -7236,8 +7102,8 @@ fn apply_event(
                 provider,
                 project: requested,
             };
-            let next = browser.installs.borrow_mut().finish(&abandoned);
-            advance_browser_install(ui, commands, browser, next);
+            let next = workspace.browser.installs.borrow_mut().finish(&abandoned);
+            advance_browser_install(ui, commands, workspace, next);
         }
         Event::LinkedApply(section) => apply_linked_confirmation(ui, section),
         Event::LinkedResult(result) => apply_linked_result(ui, result),
@@ -8398,7 +8264,7 @@ fn apply_mod_acquisition(ui: &AppWindow, data: &backend::ModAcquisitionData) {
     // Addressed to the instance rather than to one open mod: installing a mod
     // from the browser reaches this with no mod open at all, and the question
     // it asks is about the operation the user just started here.
-    if !presentation::result_is_current(&data.instance, &ui.get_selected_instance_id()) {
+    if !presentation::result_is_current(&data.instance, &ui.get_mod_action_host()) {
         return;
     }
     ui.set_mod_action_pending(false);
@@ -8453,97 +8319,26 @@ fn relation_rows(rows: &[presentation::RelationRowPresentation]) -> Vec<Relation
 /// threads and can finish in either order, so without all five a slow older
 /// one could replace or truncate the results already shown.
 fn apply_mod_results(
-    ui: &AppWindow,
+    workspace: &Workspace,
     results: backend::ModResultsData,
-    browser: &Rc<ModBrowser>,
     commands: &Sender<Command>,
 ) {
-    let selected = ui.get_selected_instance_id();
-    let submitted = ui.get_mod_search_submitted();
-    let catalog = ui.get_mod_search_provider();
-    let expected_offset = u32::try_from(ui.get_mod_search_requested_offset()).unwrap_or(0);
-    let expected_request_id = ui.get_mod_search_expected_request_id();
-    if !presentation::search_page_belongs(
-        presentation::BrowserQuestion {
-            instance: &selected,
-            provider: &catalog,
-            reference: &submitted,
-        },
-        presentation::BrowserQuestion {
-            instance: &results.instance,
-            provider: &results.provider,
-            reference: &results.query,
-        },
-        results.offset,
-        expected_offset,
-        &results.request_id.to_string(),
-        &expected_request_id,
-    ) {
-        return;
+    let host = backend::parse_instance_id(&results.instance).map(InstalledHost::Instance);
+    let next = workspace.mods.borrow_mut().apply_results(
+        results,
+        &workspace.browser.installs.borrow(),
+        &workspace.browser.search_requests,
+    );
+    if let Some(host) = host {
+        mod_views::publish(workspace, &workspace.mods.borrow(), host);
     }
-
-    ui.set_mod_search_notice(results.notice.clone().into());
-    if !results.notice.is_empty() {
-        ui.set_mod_search_loading(false);
-        return;
-    }
-
-    let mut rows: Vec<ModSearchRow> = ui.get_mod_results().iter().collect();
-    rows.extend(mod_search_rows(results.rows));
-    let shown = rows.len();
-    ui.set_mod_results_total(to_i32(usize::try_from(results.total).unwrap_or(usize::MAX)));
-    ui.set_mod_results(model(rows));
-    mark_installed_results(ui);
-    mark_queued_results(ui, &browser.installs.borrow());
-    // The provider's own continuation, never how many rows are now on screen:
-    // a page can consume results this launcher declined to show.
-    let next_offset = results.next_offset.map_or(-1, |offset| {
-        to_i32(usize::try_from(offset).unwrap_or(usize::MAX))
-    });
-    ui.set_mod_results_next_offset(next_offset);
-    // A page size larger than one provider request is filled by asking again
-    // rather than by asking for more at once: the ceiling on a single request
-    // is a budget, because deciding compatibility costs one version lookup per
-    // hit. Each continuation is an ordinary request with its own id, so the
-    // staleness rules above hold for it exactly as they do for the first.
-    if shown < result_target(ui)
-        && next_offset >= 0
-        && let Some(instance) = backend::parse_instance_id(&results.instance)
-        && let Some(catalog) = ModProvider::parse(&results.provider)
-        && let Some(request_id) = next_mod_search_request_id(&browser.search_requests)
-    {
-        ui.set_mod_search_requested_offset(next_offset);
-        ui.set_mod_search_expected_request_id(request_id.to_string().into());
-        send(
-            commands,
-            Command::SearchMods {
-                instance,
-                provider: catalog,
-                query: results.query,
-                offset: u32::try_from(next_offset).unwrap_or(0),
-                limit: request_limit(),
-                request_id,
-            },
-        );
-        return;
-    }
-    ui.set_mod_search_loading(false);
+    mod_views::send_if(commands, next);
 }
 
 /// The largest page a single provider request may take, which is the launcher's
 /// budget rather than the user's choice.
 fn request_limit() -> u8 {
     ephervex_core::MAX_SEARCH_LIMIT
-}
-
-/// How many rows the fill currently under way is aiming for.
-///
-/// Clamped rather than trusted: it is derived from a picker, and a fill aiming
-/// at more than the largest offered page size would keep asking for pages.
-fn result_target(ui: &AppWindow) -> usize {
-    usize::try_from(ui.get_mod_results_target())
-        .unwrap_or(usize::from(ephervex_core::DEFAULT_SEARCH_LIMIT))
-        .clamp(1, presentation::MAX_RESULT_PAGE_SIZE.saturating_mul(100))
 }
 
 /// Shows what installing a mod would involve, here and on each linked server.
@@ -8581,9 +8376,10 @@ fn plan_disposition(direct: bool, plan: &backend::ModPlanData) -> PlanDispositio
 fn apply_mod_install_plan(
     ui: &AppWindow,
     plan: backend::ModPlanData,
-    browser: &Rc<ModBrowser>,
+    workspace: &Workspace,
     commands: &Sender<Command>,
 ) {
+    let browser = &workspace.browser;
     // Whether the queue is waiting on this exact answer, decided before
     // anything below can discard it: a plan that is dropped still ends the
     // request that asked for it, or everything behind it waits forever.
@@ -8596,11 +8392,11 @@ fn apply_mod_install_plan(
     let retire = |ui: &AppWindow| {
         if queued {
             let next = browser.installs.borrow_mut().finish(&awaited);
-            advance_browser_install(ui, commands, browser, next);
+            advance_browser_install(ui, commands, workspace, next);
         }
     };
 
-    if !presentation::result_is_current(&plan.instance, &ui.get_selected_instance_id()) {
+    if !presentation::result_is_current(&plan.instance, &ui.get_mod_action_host()) {
         retire(ui);
         return;
     }
@@ -8615,7 +8411,7 @@ fn apply_mod_install_plan(
     }
     // Two reviews can be in flight; the older one must not replace the newer,
     // and neither may one for the same project id on the other catalog.
-    let selected = ui.get_selected_instance_id();
+    let selected = ui.get_mod_action_host();
     let requested = ui.get_mod_plan_requested();
     let catalog = ui.get_mod_plan_requested_provider();
     if !presentation::browser_answer_is_current(
@@ -8755,7 +8551,7 @@ fn linked_target_rows(rows: Vec<backend::LinkedTargetData>) -> Vec<LinkedTargetR
 
 /// Whether a background answer is about the mod the user currently has open.
 fn addresses_open_mod(ui: &AppWindow, instance: &str, logical_path: &str) -> bool {
-    presentation::result_is_current(instance, &ui.get_selected_instance_id())
+    presentation::result_is_current(instance, &ui.get_mod_action_host())
         && logical_path == ui.get_mod_action_path().as_str()
 }
 
@@ -8769,17 +8565,6 @@ fn loader_kind_of(value: &str) -> Option<ephervex_model::LoaderKind> {
         "NeoForge" | "neoforge" => Some(ephervex_model::LoaderKind::NeoForge),
         _ => None,
     }
-}
-
-/// The title the mod list is already showing for one row.
-///
-/// Used to name the modal before the catalog answers, so it opens with the mod
-/// the user clicked rather than with a blank heading.
-fn mod_row_title(ui: &AppWindow, path: &SharedString) -> SharedString {
-    ui.get_managed_mods()
-        .iter()
-        .find(|row| row.logical_path == *path)
-        .map_or_else(SharedString::default, |row| row.title.clone())
 }
 
 fn mod_version_rows(rows: Vec<backend::ModVersionData>) -> Vec<ModVersionRow> {
@@ -8826,49 +8611,6 @@ fn managed_mod_rows(rows: Vec<ManagedModData>) -> Vec<ModRow> {
             suspect_confidence: row.suspect_confidence.into(),
         })
         .collect()
-}
-
-/// Marks the results this instance already has.
-///
-/// Decided against the managed-mods list rather than remembered from a press,
-/// so a mod installed from anywhere — this browser, a pack import, a linked
-/// server operation — is shown as installed without a re-search, and one
-/// removed stops being.
-fn mark_installed_results(ui: &AppWindow) {
-    let managed: std::collections::HashSet<SharedString> = ui
-        .get_managed_mods()
-        .iter()
-        .map(|row| row.project_id)
-        .filter(|project| !project.is_empty())
-        .collect();
-    let rows = ui
-        .get_mod_results()
-        .iter()
-        .map(|row| ModSearchRow {
-            installed: managed.contains(&row.project_id),
-            ..row
-        })
-        .collect::<Vec<_>>();
-    ui.set_mod_results(model(rows));
-}
-
-/// Marks the results whose install is queued or under way.
-fn mark_queued_results(ui: &AppWindow, queue: &BrowserInstallQueue) {
-    let instance = ui.get_selected_instance_id();
-    let provider = ui.get_mod_provider();
-    let outstanding: std::collections::HashSet<&str> = queue
-        .outstanding(instance.as_str(), provider.as_str())
-        .into_iter()
-        .collect();
-    let rows = ui
-        .get_mod_results()
-        .iter()
-        .map(|row| ModSearchRow {
-            queued: outstanding.contains(row.project_id.as_str()),
-            ..row
-        })
-        .collect::<Vec<_>>();
-    ui.set_mod_results(model(rows));
 }
 
 /// Loads an image the application service already put in its cache.
@@ -10070,19 +9812,54 @@ mod tests {
         );
     }
 
-    /// A query typed against one instance must not be left filtering the mods
-    /// of the next one the user opens.
+    /// Each shown host keeps its own list and filter: a filter typed for one
+    /// host never narrows another's, and a list for one never lands on the other.
     #[test]
-    fn changing_host_is_reported_so_the_query_can_be_cleared() {
-        let mut lists = ModLists::default();
+    fn each_shown_host_keeps_its_own_mod_list_and_filter() {
+        let ui = test_window();
+        let workspace = test_workspace(&ui);
+        let (client, server) = (client_host(), server_host());
+        workspace.open(&ui, client, Surface::Mods);
+        let first = workspace.single_pane().expect("one pane");
+        workspace.change_pane(&ui, first, |layout| layout.split_beside(first).is_ok());
+        ui.invoke_follow_host(2, "server".into(), server.id().into(), "Mods".into());
 
-        assert!(lists.replace("client", "instance-a", vec![mod_row("A", "a.jar", "")]));
-        assert!(!lists.replace("client", "instance-a", vec![mod_row("A", "a.jar", "")]));
-        assert!(lists.replace("client", "instance-b", Vec::new()));
+        let mut mods = workspace.mods.borrow_mut();
+        assert!(mods.apply_list(
+            client,
+            vec![
+                mod_row("Sodium", "sodium.jar", ""),
+                mod_row("Iris", "iris.jar", "")
+            ],
+            String::new(),
+        ));
+        assert!(mods.apply_list(
+            server,
+            vec![mod_row("Lithium", "lithium.jar", "")],
+            String::new()
+        ));
+        assert!(mods.filter(client, "iris"));
         assert!(
-            lists.replace("server", "server-a", Vec::new()),
-            "the two lists track their hosts separately"
+            !mods.apply_list(client_host(), Vec::new(), String::new()),
+            "a list for a host no pane shows lands nowhere"
         );
+        drop(mods);
+        for host in [client, server] {
+            mod_views::publish(&workspace, &workspace.mods.borrow(), host);
+        }
+
+        let views = ui.get_host_views();
+        let titles = |index: usize| -> Vec<String> {
+            views
+                .row_data(index)
+                .expect("view")
+                .mods
+                .iter()
+                .map(|row| row.title.to_string())
+                .collect()
+        };
+        assert_eq!(titles(0), ["Iris"], "the client's own filter");
+        assert_eq!(titles(1), ["Lithium"], "the server's list is unfiltered");
     }
 
     /// A file dropped on the window carries no cursor position, so what it is
@@ -10208,6 +9985,8 @@ mod tests {
             state: Rc::default(),
             lifecycle: Rc::default(),
             logs: Rc::new(RefCell::new(LogViews::new(sender))),
+            mods: Rc::default(),
+            browser: Rc::default(),
         };
         register_workspace(ui, &workspace);
         log_views::register(ui, &workspace.logs);
@@ -11085,9 +10864,9 @@ mod tests {
     #[test]
     fn modrinth_search_does_not_reuse_the_server_filter() {
         let source = include_str!("ui.rs");
-        assert!(source.contains("text <=> root.mod-query"));
+        assert!(source.contains("root.search-mods(host.id, host.browser-provider, self.text)"));
         assert!(source.contains("text <=> root.server-query"));
-        assert!(!source.contains("search-mods(root.selected-instance-id, root.server-query)"));
+        assert!(!source.contains("root.server-query)"));
     }
 
     #[test]
@@ -12359,8 +12138,11 @@ mod tests {
         let source = include_str!("controller.rs");
         // The lifecycle point the preference applies at, and the same reset a
         // chip click uses, so an in-flight search cannot survive the move.
-        assert!(source.contains("presentation::catalog_to_open_on("));
-        assert!(source.contains("fn show_mod_catalog(ui: &AppWindow, provider: &str)"));
+        assert!(source.contains("presentation::catalog_to_open_on(&preferred, default)"));
+        assert!(
+            include_str!("controller/mod_views.rs")
+                .contains("fn switch(&mut self, provider: &str)")
+        );
         // Applying a settings snapshot writes the three settings properties and
         // never the browser's own catalog: saving an unrelated setting must not
         // move a browser the user is in the middle of reading.

@@ -48,10 +48,10 @@ fn the_mods_panel_offers_to_disable_only_what_the_report_stated() {
 
     crashed_server_workspace(&ui);
     support::set_surface(&ui, 1, "Mods");
-    ui.set_server_mods(ModelRc::new(VecModel::from(vec![
-        suspect_mod(),
-        ordinary_mod(),
-    ])));
+    support::set_mods(
+        &ui,
+        ModelRc::new(VecModel::from(vec![suspect_mod(), ordinary_mod()])),
+    );
     // One stated suspect. The compat trigger in the list is deliberately not
     // counted: it is an inference, and it stays a row the user ticks by hand.
     support::update_host(&ui, 0, |view| view.crash_suggested = 1);
@@ -94,7 +94,7 @@ fn a_report_naming_only_mods_already_switched_off_offers_no_action() {
     support::set_surface(&ui, 1, "Mods");
     let mut already_off = suspect_mod();
     already_off.enabled = false;
-    ui.set_server_mods(ModelRc::new(VecModel::from(vec![already_off])));
+    support::set_mods(&ui, ModelRc::new(VecModel::from(vec![already_off])));
     support::update_host(&ui, 0, |view| view.crash_suggested = 0);
     settle(&ui);
 

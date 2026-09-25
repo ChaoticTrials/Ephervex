@@ -139,7 +139,7 @@ fn a_queued_result_says_so_and_cannot_be_pressed_again() {
 fn a_managed_mod_names_the_catalog_it_came_from() {
     let ui = window();
     mod_browser(&ui, Vec::new());
-    ui.set_managed_mods(ModelRc::new(VecModel::from(vec![managed_mod()])));
+    support::set_mods(&ui, ModelRc::new(VecModel::from(vec![managed_mod()])));
     settle(&ui);
 
     assert!(
@@ -159,7 +159,7 @@ fn a_managed_mod_names_the_catalog_it_came_from() {
 fn a_rows_badges_sit_at_its_trailing_edge_above_the_bin() {
     let ui = window();
     mod_browser(&ui, Vec::new());
-    ui.set_managed_mods(ModelRc::new(VecModel::from(vec![hand_placed_mod()])));
+    support::set_mods(&ui, ModelRc::new(VecModel::from(vec![hand_placed_mod()])));
     settle(&ui);
 
     let badge = ElementHandle::find_by_accessible_label(&ui, "Added by hand")
@@ -276,7 +276,7 @@ fn record_toggles(ui: &AppWindow) -> Rc<RefCell<Vec<(String, String, bool)>>> {
 fn instance_mods(ui: &AppWindow, instance: InstanceRow) {
     mod_browser(ui, Vec::new());
     support::show_client(ui, instance, "Mods");
-    ui.set_managed_mods(ModelRc::new(VecModel::from(vec![managed_mod()])));
+    support::set_mods(ui, ModelRc::new(VecModel::from(vec![managed_mod()])));
     settle(ui);
 }
 
@@ -319,7 +319,7 @@ fn idle_instance() -> InstanceRow {
 fn the_switch_and_the_bin_share_the_rows_trailing_column() {
     let ui = window();
     mod_browser(&ui, Vec::new());
-    ui.set_managed_mods(ModelRc::new(VecModel::from(vec![hand_placed_mod()])));
+    support::set_mods(&ui, ModelRc::new(VecModel::from(vec![hand_placed_mod()])));
     settle(&ui);
 
     let switch = ElementHandle::find_by_accessible_label(
@@ -365,14 +365,17 @@ fn a_deleted_pack_mod_keeps_its_row_and_offers_to_come_back() {
     ui.on_restore_mod_file(move |_kind, _host, path| sink.borrow_mut().push(path.to_string()));
 
     mod_browser(&ui, Vec::new());
-    ui.set_managed_mods(ModelRc::new(VecModel::from(vec![ModRow {
-        origin: "From pack".into(),
-        origin_kind: "pack".into(),
-        deleted: true,
-        can_delete_file: true,
-        can_remove: false,
-        ..managed_mod()
-    }])));
+    support::set_mods(
+        &ui,
+        ModelRc::new(VecModel::from(vec![ModRow {
+            origin: "From pack".into(),
+            origin_kind: "pack".into(),
+            deleted: true,
+            can_delete_file: true,
+            can_remove: false,
+            ..managed_mod()
+        }])),
+    );
     settle(&ui);
 
     assert!(
@@ -445,8 +448,10 @@ fn mod_browser(ui: &AppWindow, results: Vec<ModSearchRow>) {
         },
         "Mods",
     );
-    ui.set_mod_provider("modrinth".into());
-    ui.set_mod_results(ModelRc::new(VecModel::from(results)));
+    support::update_host(ui, 0, |view| {
+        view.browser_provider = "modrinth".into();
+        view.browser_results = ModelRc::new(VecModel::from(results));
+    });
 }
 
 fn result(project: &str, title: &str) -> ModSearchRow {

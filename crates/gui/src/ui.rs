@@ -664,6 +664,22 @@ slint::slint! {
         property-address: string,
         property-port: string,
         properties-revision: int,
+        // The host's mods through the filter, the filter, and what the list
+        // has to say about itself.
+        mods: [ModRow],
+        mods-query: string,
+        mods-notice: string,
+        // A client's catalog browser: the catalog shown, the search on
+        // screen, and its results.
+        browser-provider: string,
+        browser-submitted: string,
+        browser-search-provider: string,
+        browser-loading: bool,
+        browser-ran: bool,
+        browser-notice: string,
+        browser-results: [ModSearchRow],
+        // Where the provider says its next page begins, or -1 once there is none.
+        browser-next-offset: int,
     }
 
     // One pane: which host view it shows, on which surface, and where.
@@ -3894,7 +3910,6 @@ slint::slint! {
         // What the launcher is running right now. Polled only while the page
         // showing it is open.
         in-out property <[RunningRow]> running;
-        in-out property <[ModRow]> managed-mods;
         // -- dropping jars onto a mod list.
         //
         // One question at a time, because "this name is taken" is a question
@@ -3904,13 +3919,6 @@ slint::slint! {
         in-out property <int> mod-clash-index: 0;
         // -- what a copy would inherit with no jar behind it.
         in-out property <[string]> absent-mods;
-        // Empty unless something has to be said about how complete the list is.
-        in-out property <string> managed-mods-notice;
-        // A server's own list, kept apart from its linked client's. The two are
-        // separate installations that happen to share a pack, and a server that
-        // had a client-only mod turned off must not look like the client did.
-        in-out property <[ModRow]> server-mods;
-        in-out property <string> server-mods-notice;
         // -- what the selected host's newest crash report says. Empty report
         // means it has never crashed, which is what clears a notice left by a
         // previous selection.
@@ -3992,9 +4000,12 @@ slint::slint! {
         in-out property <bool> loader-change-loading: false;
         in-out property <bool> loader-change-pending: false;
         in-out property <int> loader-change-unverifiable: 0;
-        callback open-loader-change();
+        callback open-loader-change(string);
         callback change-loader-version(string, string);
-        callback open-mod-manager(string);
+        // (instance, the mod's path)
+        callback open-mod-manager(string, string);
+        // The instance the open mod dialog acts on, set by whichever pane opened it.
+        in-out property <string> mod-action-host;
         // (host kind, host id, the mod's path, whether the loader loads it)
         callback set-mod-enabled(string, string, string, bool);
         callback restore-mod-file(string, string, string);
@@ -4006,7 +4017,6 @@ slint::slint! {
         callback plan-mod-apply(string, string, string);
         callback remove-mod(string, string);
         callback open-mod-project-page(string);
-        in-out property <[ModSearchRow]> mod-results;
         // The host and snapshot selected by a snapshot modal. IDs rather than
         // row positions keep the action attached when a refreshed list moves.
         in-out property <string> snapshot-host-kind;
@@ -4134,45 +4144,6 @@ slint::slint! {
         in-out property <string> instance-filter: "all";
         in-out property <string> instance-query;
         in-out property <string> server-query;
-        in-out property <string> mod-query;
-        // The query a search was actually submitted with. Distinct from
-        // `mod-query`, which follows the field as it is typed: an answer is
-        // matched against what was asked for, not against what the field says
-        // by the time it arrives.
-        in-out property <string> mod-search-submitted;
-        // Which catalog the browser is reading. Explicit and visible: a project
-        // id belongs to one catalog, and a result list that did not say where
-        // it came from would be unreadable once two of them are offered.
-        in-out property <string> mod-provider: "modrinth";
-        // The catalog a submitted search was for. Matched against an answer for
-        // the same reason `mod-search-submitted` is: switching catalog asks a
-        // new question, and the previous one's answer must not land on it.
-        in-out property <string> mod-search-provider;
-        in-out property <bool> mod-search-loading: false;
-        // True once a search has been submitted, so an empty list can say "no
-        // results" rather than being mistaken for "nothing asked yet".
-        in-out property <bool> mod-search-ran: false;
-        // How many results the catalog says match. Informational only: what
-        // decides whether "Load more" is offered is `mod-results-next-offset`,
-        // not this count.
-        in-out property <int> mod-results-total: 0;
-        // Where the provider says its next page begins, or -1 once there is
-        // none. Set from the provider's own answer, never from how many rows
-        // ended up on screen: a page can consume results this launcher
-        // declines to show, and the next request has to continue from where
-        // the provider left off, not from the visible list's length.
-        in-out property <int> mod-results-next-offset: -1;
-        // The offset the browser is currently waiting for a page at. Set the
-        // moment a search or a "load more" is sent, so a page that lands after
-        // the browser has moved on to a different offset is recognized as
-        // stale rather than judged by how many rows happen to be on screen.
-        in-out property <int> mod-search-requested-offset: 0;
-        // An opaque id minted for the exact request currently in flight, set
-        // the moment it is sent and cleared on catalog switch. Never
-        // interpreted here: instance, catalog, submitted text, and offset can
-        // all agree between two distinct requests, and this is what still
-        // tells them apart.
-        in-out property <string> mod-search-expected-request-id: "";
         // How many results one Search or one Load More aims to put on screen.
         // Not a provider page size: a provider is asked in pages of at most
         // what one request may take, and a larger choice is filled by asking
@@ -4183,11 +4154,6 @@ slint::slint! {
         // needs a number.
         in-out property <string> mod-page-size-label: "10";
         in-out property <[string]> mod-page-sizes: ["10", "25", "50", "100"];
-        // How many rows the fill currently under way is aiming for, counted
-        // over the whole list: a Load More adds another page size to whatever
-        // is already shown.
-        in-out property <int> mod-results-target: 10;
-        in-out property <string> mod-search-notice;
         // Which Settings page is open.
         in-out property <string> settings-tab: "General";
         // Whether the host workspace is on screen instead of the page's list.
@@ -4322,12 +4288,10 @@ slint::slint! {
         // linked server borrows the client's own name, a standalone one is
         // named for its exact target the same way a new instance is.
         in-out property <string> create-server-name-suggestion;
-        // What the two mod lists are filtered by. Filtering happens in Rust so
-        // the list a `for` builds is only the rows that match, which is also
-        // what keeps a large pack from laying out every card to show three.
-        in-out property <string> managed-mods-query;
-        in-out property <string> server-mods-query;
-        callback filter-mods(string, string);
+        // Filters one host's mod list: (kind, id, query). Filtering happens in
+        // Rust so the list a `for` builds is only the rows that match, which is
+        // also what keeps a large pack from laying out every card to show three.
+        callback filter-mods(string, string, string);
         in-out property <string> create-server-minecraft;
         in-out property <string> create-server-loader: "Vanilla";
         in-out property <[string]> create-server-loaders: ["Vanilla", "Forge", "NeoForge"];
@@ -4485,7 +4449,8 @@ slint::slint! {
         callback follow-host(int, string, string, string);
         callback search-mods(string, string, string);
         callback load-more-mods(string, string, string, int);
-        callback switch-mod-catalog(string);
+        // (instance, catalog)
+        callback switch-mod-catalog(string, string);
         callback install-from-browser(string, string, string);
         // The user closed a browser install's confirmation. The queue behind it
         // has to hear that, or the next queued install never starts.
@@ -4940,7 +4905,7 @@ slint::slint! {
                                         if host.client.loader-kind != "vanilla" : BodyText { text: GuiI18n.value("gui-loader-change-summary", host.client.loader); color: Theme.text-secondary; vertical-alignment: center; }
                                         Rectangle { horizontal-stretch: 1; }
                                         if host.client.storage-kind == "temporary" : AppButton { text: GuiI18n.text("gui-make-persistent"); enabled: !host.client.can-kill; hint: GuiI18n.text("gui-make-persistent-while-running"); clicked => { root.open-make-persistent(host.id); } }
-                                        if host.client.loader-kind != "vanilla" : AppButton { text: GuiI18n.text("gui-loader-change-open"); clicked => { root.open-loader-change(); } }
+                                        if host.client.loader-kind != "vanilla" : AppButton { text: GuiI18n.text("gui-loader-change-open"); clicked => { root.open-loader-change(host.id); } }
                                     }
                                     BodyText { text: host.client.storage-kind == "temporary" ? GuiI18n.text("gui-temporary-lifecycle") : GuiI18n.text("gui-persistent-lifecycle"); color: Theme.text-muted; wrap: word-wrap; }
                                     Divider { }
@@ -4965,27 +4930,27 @@ slint::slint! {
                             if host.available && host.kind == "client" && pane.surface == "Mods" : HorizontalLayout {
                                 spacing: 16px;
                                 Rectangle { width: 46%; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface;
-                                    VerticalLayout { padding: 16px; spacing: 10px; HorizontalLayout { spacing: 8px; cross-axis-alignment: center; Heading { text: GuiI18n.text("gui-managed-mods"); horizontal-stretch: 1; } TextField { text <=> root.managed-mods-query; placeholder: GuiI18n.text("gui-filter-mods"); accessible-label: GuiI18n.text("gui-filter-mods"); input-type: InputType.search; width: 200px; edited(text) => { root.filter-mods("client", text); } } AppButton { text: GuiI18n.text("gui-add-local-mods"); clicked => { root.pick-local-mods("client", host.id); } } IconButton { icon: @image-url("../../../assets/icons/refresh.svg"); accessible-name: GuiI18n.text("gui-refresh-mod-details"); clicked => { root.refresh-mods("client", host.id); } } } BodyText { text: GuiI18n.text("gui-managed-mods-detail"); wrap: word-wrap; }
-                                        if root.managed-mods-notice != "" : BodyText { text: root.managed-mods-notice; color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
-                                        if root.managed-mods.length == 0 : EmptyState { icon: @image-url("../../../assets/icons/semantic-mod.svg"); title: root.managed-mods-query != "" ? GuiI18n.text("gui-no-mods-match-title") : GuiI18n.text("gui-no-managed-mods"); message: root.managed-mods-query != "" ? GuiI18n.value("gui-no-mods-match", root.managed-mods-query) : GuiI18n.text("gui-no-managed-mods-detail"); }
-                                        ScrollView { viewport-width: self.width; VerticalLayout { spacing: 8px; for mod in root.managed-mods : ModCard { item: mod; removable: true; togglable: true; mods-are-the-users: host.allow-pack-mod-changes; restore-file(path) => { root.restore-mod-file("client", host.id, path); } toggle(path, on) => { root.set-mod-enabled("client", host.id, path, on); } manage(path) => { root.open-mod-manager(path); } delete-file(path, title) => { root.pending-action-kind = "client"; root.pending-action-id = host.id; root.pending-action-name = title; root.mod-action-path = path; root.mod-action-name = title; root.mod-action-is-hand-placed = mod.origin-kind == "hand-placed"; root.modal-error = ""; root.mod-remove-returns-to-manager = false; if mod.can-delete-file && !(host.allow-pack-mod-changes && mod.can-remove) { root.modal = "delete-mod"; } else { root.plan-mod-removal(host.id, path); } } } } }
+                                    VerticalLayout { padding: 16px; spacing: 10px; HorizontalLayout { spacing: 8px; cross-axis-alignment: center; Heading { text: GuiI18n.text("gui-managed-mods"); horizontal-stretch: 1; } TextField { property <string> host-query: host.mods-query; changed host-query => { self.text = self.host-query; } init => { self.text = self.host-query; } placeholder: GuiI18n.text("gui-filter-mods"); accessible-label: GuiI18n.text("gui-filter-mods"); input-type: InputType.search; width: 200px; edited(text) => { root.filter-mods("client", host.id, text); } } AppButton { text: GuiI18n.text("gui-add-local-mods"); clicked => { root.pick-local-mods("client", host.id); } } IconButton { icon: @image-url("../../../assets/icons/refresh.svg"); accessible-name: GuiI18n.text("gui-refresh-mod-details"); clicked => { root.refresh-mods("client", host.id); } } } BodyText { text: GuiI18n.text("gui-managed-mods-detail"); wrap: word-wrap; }
+                                        if host.mods-notice != "" : BodyText { text: host.mods-notice; color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
+                                        if host.mods.length == 0 : EmptyState { icon: @image-url("../../../assets/icons/semantic-mod.svg"); title: host.mods-query != "" ? GuiI18n.text("gui-no-mods-match-title") : GuiI18n.text("gui-no-managed-mods"); message: host.mods-query != "" ? GuiI18n.value("gui-no-mods-match", host.mods-query) : GuiI18n.text("gui-no-managed-mods-detail"); }
+                                        ScrollView { viewport-width: self.width; VerticalLayout { spacing: 8px; for mod in host.mods : ModCard { item: mod; removable: true; togglable: true; mods-are-the-users: host.allow-pack-mod-changes; restore-file(path) => { root.restore-mod-file("client", host.id, path); } toggle(path, on) => { root.set-mod-enabled("client", host.id, path, on); } manage(path) => { root.open-mod-manager(host.id, path); } delete-file(path, title) => { root.pending-action-kind = "client"; root.pending-action-id = host.id; root.pending-action-name = title; root.mod-action-path = path; root.mod-action-name = title; root.mod-action-is-hand-placed = mod.origin-kind == "hand-placed"; root.modal-error = ""; root.mod-remove-returns-to-manager = false; if mod.can-delete-file && !(host.allow-pack-mod-changes && mod.can-remove) { root.modal = "delete-mod"; } else { root.plan-mod-removal(host.id, path); } } } } }
                                     }
                                 }
                                 Rectangle { horizontal-stretch: 1; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface;
                                     VerticalLayout { padding: 16px; spacing: 10px; Heading { text: GuiI18n.text("gui-add-mods"); } BodyText { text: GuiI18n.text("gui-catalog-compatibility"); wrap: word-wrap; }
                                         HorizontalLayout { spacing: 8px; cross-axis-alignment: center; Text { text: GuiI18n.text("gui-mod-catalog"); color: Theme.text-secondary; font-size: Theme.label-size; vertical-alignment: center; }
-                                            FilterChip { text: GuiI18n.text("gui-provider-modrinth"); accessible-name: GuiI18n.text("gui-provider-modrinth"); selected: root.mod-provider == "modrinth"; clicked => { root.switch-mod-catalog("modrinth"); } }
-                                            FilterChip { text: GuiI18n.text("gui-provider-curseforge"); accessible-name: GuiI18n.text("gui-provider-curseforge"); selected: root.mod-provider == "curseforge"; clicked => { root.switch-mod-catalog("curseforge"); } }
+                                            FilterChip { text: GuiI18n.text("gui-provider-modrinth"); accessible-name: GuiI18n.text("gui-provider-modrinth"); selected: host.browser-provider == "modrinth"; clicked => { root.switch-mod-catalog(host.id, "modrinth"); } }
+                                            FilterChip { text: GuiI18n.text("gui-provider-curseforge"); accessible-name: GuiI18n.text("gui-provider-curseforge"); selected: host.browser-provider == "curseforge"; clicked => { root.switch-mod-catalog(host.id, "curseforge"); } }
                                             Rectangle { horizontal-stretch: 1; }
                                             Text { text: GuiI18n.text("gui-mod-results-per-page"); color: Theme.text-secondary; font-size: Theme.label-size; vertical-alignment: center; }
                                             page-size-box := ComboBox { width: 92px; accessible-label: GuiI18n.text("gui-mod-results-per-page"); model: root.mod-page-sizes; current-value: root.mod-page-size-label; selected(value) => { root.set-mod-page-size(value); } }
                                         }
-                                        ActionRow { TextField { text <=> root.mod-query; placeholder: GuiI18n.text("gui-search-compatible-mods"); input-type: InputType.search; horizontal-stretch: 1; accepted => { root.search-mods(host.id, root.mod-provider, root.mod-query); } } AppButton { text: GuiI18n.text("gui-search"); tone: "primary"; enabled: !root.mod-search-loading; clicked => { root.search-mods(host.id, root.mod-provider, root.mod-query); } } }
-                                        if root.mod-search-notice != "" : Rectangle { border-radius: 6px; border-width: 1px; border-color: Theme.danger; background: Theme.background; VerticalLayout { padding: 10px; spacing: 6px; BodyText { text: root.mod-search-notice; color: Theme.text-secondary; wrap: word-wrap; } if root.mod-provider == "curseforge" : HorizontalLayout { AppButton { text: GuiI18n.text("gui-open-providers-settings"); clicked => { root.close-workspace(); root.page = 4; root.settings-tab = "Providers & APIs"; } } Rectangle { horizontal-stretch: 1; } } } }
-                                        if root.mod-search-loading : BodyText { text: GuiI18n.text("gui-mod-search-running"); color: Theme.text-muted; }
-                                        if !root.mod-search-loading && root.mod-search-ran && root.mod-search-notice == "" && root.mod-results.length == 0 && root.mod-results-next-offset < 0 : EmptyState { icon: @image-url("../../../assets/icons/semantic-mod.svg"); title: GuiI18n.text("gui-no-mod-results"); message: GuiI18n.text("gui-no-mod-results-detail"); }
-                                        ScrollView { VerticalLayout { spacing: 8px; for mod in root.mod-results : Rectangle { height: 92px; clip: true; border-radius: 6px; border-width: 1px; border-color: Theme.border; background: Theme.background; HorizontalLayout { padding: 10px; spacing: 11px; VerticalLayout { alignment: center; ModArtwork { icon: mod.icon; origin-kind: "user"; } } VerticalLayout { horizontal-stretch: 1; Heading { text: mod.title; font-size: Theme.row-heading-size; overflow: elide; } BodyText { text: mod.description; wrap: word-wrap; overflow: elide; vertical-alignment: top; height: Theme.body-size * 2.7; } BodyText { text: GuiI18n.values("gui-mod-result-meta", mod.author, mod.note); color: Theme.text-muted; overflow: elide; } } VerticalLayout { alignment: center; AppButton { width: 120px; text: mod.installed ? GuiI18n.text("gui-mod-result-installed") : mod.queued ? GuiI18n.text("gui-mod-result-queued") : GuiI18n.text("gui-install"); tone: mod.installed || mod.queued ? "secondary" : "primary"; enabled: !mod.installed && !mod.queued; clicked => { root.install-from-browser(host.id, root.mod-provider, mod.project-id); } } } } }
-                                            if root.mod-results-next-offset >= 0 : HorizontalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-load-more"); enabled: !root.mod-search-loading; clicked => { root.load-more-mods(host.id, root.mod-search-provider, root.mod-search-submitted, root.mod-results-next-offset); } } }
+                                        ActionRow { mod-search-field := TextField { property <string> host-search: host.browser-submitted; changed host-search => { self.text = self.host-search; } placeholder: GuiI18n.text("gui-search-compatible-mods"); input-type: InputType.search; horizontal-stretch: 1; init => { self.text = self.host-search; } accepted => { root.search-mods(host.id, host.browser-provider, self.text); } } AppButton { text: GuiI18n.text("gui-search"); tone: "primary"; enabled: !host.browser-loading; clicked => { root.search-mods(host.id, host.browser-provider, mod-search-field.text); } } }
+                                        if host.browser-notice != "" : Rectangle { border-radius: 6px; border-width: 1px; border-color: Theme.danger; background: Theme.background; VerticalLayout { padding: 10px; spacing: 6px; BodyText { text: host.browser-notice; color: Theme.text-secondary; wrap: word-wrap; } if host.browser-provider == "curseforge" : HorizontalLayout { AppButton { text: GuiI18n.text("gui-open-providers-settings"); clicked => { root.close-workspace(); root.page = 4; root.settings-tab = "Providers & APIs"; } } Rectangle { horizontal-stretch: 1; } } } }
+                                        if host.browser-loading : BodyText { text: GuiI18n.text("gui-mod-search-running"); color: Theme.text-muted; }
+                                        if !host.browser-loading && host.browser-ran && host.browser-notice == "" && host.browser-results.length == 0 && host.browser-next-offset < 0 : EmptyState { icon: @image-url("../../../assets/icons/semantic-mod.svg"); title: GuiI18n.text("gui-no-mod-results"); message: GuiI18n.text("gui-no-mod-results-detail"); }
+                                        ScrollView { VerticalLayout { spacing: 8px; for mod in host.browser-results : Rectangle { height: 92px; clip: true; border-radius: 6px; border-width: 1px; border-color: Theme.border; background: Theme.background; HorizontalLayout { padding: 10px; spacing: 11px; VerticalLayout { alignment: center; ModArtwork { icon: mod.icon; origin-kind: "user"; } } VerticalLayout { horizontal-stretch: 1; Heading { text: mod.title; font-size: Theme.row-heading-size; overflow: elide; } BodyText { text: mod.description; wrap: word-wrap; overflow: elide; vertical-alignment: top; height: Theme.body-size * 2.7; } BodyText { text: GuiI18n.values("gui-mod-result-meta", mod.author, mod.note); color: Theme.text-muted; overflow: elide; } } VerticalLayout { alignment: center; AppButton { width: 120px; text: mod.installed ? GuiI18n.text("gui-mod-result-installed") : mod.queued ? GuiI18n.text("gui-mod-result-queued") : GuiI18n.text("gui-install"); tone: mod.installed || mod.queued ? "secondary" : "primary"; enabled: !mod.installed && !mod.queued; clicked => { root.install-from-browser(host.id, host.browser-provider, mod.project-id); } } } } }
+                                            if host.browser-next-offset >= 0 : HorizontalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-load-more"); enabled: !host.browser-loading; clicked => { root.load-more-mods(host.id, host.browser-search-provider, host.browser-submitted, host.browser-next-offset); } } }
                                         } }
                                     }
                                 }
@@ -5137,11 +5102,11 @@ slint::slint! {
                                 ActionRow { command-field := TextField { placeholder: host.server.can-send-command ? GuiI18n.text("gui-enter-server-command") : GuiI18n.text("gui-start-server-command"); enabled: host.server.can-send-command; horizontal-stretch: 1; accepted => { root.server-console(host.id, self.text); self.text = ""; } } AppButton { text: GuiI18n.text("gui-send"); tone: "primary"; enabled: host.server.can-send-command && command-field.text != ""; clicked => { root.server-console(host.id, command-field.text); command-field.text = ""; } } }
                             }
                             if host.available && host.kind == "server" && pane.surface == "Mods" : VerticalLayout { spacing: 10px;
-                                HorizontalLayout { spacing: 8px; SectionTitle { title: GuiI18n.text("gui-server-mods"); detail: GuiI18n.text("gui-server-mods-detail"); horizontal-stretch: 1; } VerticalLayout { alignment: center; TextField { text <=> root.server-mods-query; placeholder: GuiI18n.text("gui-filter-mods"); accessible-label: GuiI18n.text("gui-filter-mods"); input-type: InputType.search; width: 200px; edited(text) => { root.filter-mods("server", text); } } } VerticalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-add-local-mods"); clicked => { root.pick-local-mods("server", host.id); } } } VerticalLayout { alignment: center; IconButton { icon: @image-url("../../../assets/icons/refresh.svg"); accessible-name: GuiI18n.text("gui-refresh-mod-details"); clicked => { root.refresh-mods("server", host.id); } } } }
+                                HorizontalLayout { spacing: 8px; SectionTitle { title: GuiI18n.text("gui-server-mods"); detail: GuiI18n.text("gui-server-mods-detail"); horizontal-stretch: 1; } VerticalLayout { alignment: center; TextField { property <string> host-query: host.mods-query; changed host-query => { self.text = self.host-query; } init => { self.text = self.host-query; } placeholder: GuiI18n.text("gui-filter-mods"); accessible-label: GuiI18n.text("gui-filter-mods"); input-type: InputType.search; width: 200px; edited(text) => { root.filter-mods("server", host.id, text); } } } VerticalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-add-local-mods"); clicked => { root.pick-local-mods("server", host.id); } } } VerticalLayout { alignment: center; IconButton { icon: @image-url("../../../assets/icons/refresh.svg"); accessible-name: GuiI18n.text("gui-refresh-mod-details"); clicked => { root.refresh-mods("server", host.id); } } } }
                                 if host.crash-report != "" : CrashNotice { report: host.crash-report; failure: host.crash-failure; client-code-on-server: host.crash-client-code-on-server; suggested: host.crash-suggested; beside-the-mods: true; disable-suggested => { root.disable-suggested-mods(host.id); } }
-                                if root.server-mods-notice != "" : BodyText { text: root.server-mods-notice; color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
-                                if root.server-mods.length == 0 : EmptyState { icon: @image-url("../../../assets/icons/semantic-mod.svg"); title: root.server-mods-query != "" ? GuiI18n.text("gui-no-mods-match-title") : GuiI18n.text("gui-no-managed-mods"); message: root.server-mods-query != "" ? GuiI18n.value("gui-no-mods-match", root.server-mods-query) : GuiI18n.text("gui-no-server-mods-detail"); }
-                                if root.server-mods.length > 0 : ScrollView { viewport-width: self.width; VerticalLayout { spacing: 8px; for mod in root.server-mods : ModCard { item: mod; togglable: true; restore-file(path) => { root.restore-mod-file("server", host.id, path); } toggle(path, on) => { root.set-mod-enabled("server", host.id, path, on); } delete-file(path, title) => { root.pending-action-kind = "server"; root.pending-action-id = host.id; root.pending-action-name = title; root.mod-action-path = path; root.mod-action-name = title; root.mod-action-is-hand-placed = mod.origin-kind == "hand-placed"; root.modal-error = ""; root.modal = "delete-mod"; } } } }
+                                if host.mods-notice != "" : BodyText { text: host.mods-notice; color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
+                                if host.mods.length == 0 : EmptyState { icon: @image-url("../../../assets/icons/semantic-mod.svg"); title: host.mods-query != "" ? GuiI18n.text("gui-no-mods-match-title") : GuiI18n.text("gui-no-managed-mods"); message: host.mods-query != "" ? GuiI18n.value("gui-no-mods-match", host.mods-query) : GuiI18n.text("gui-no-server-mods-detail"); }
+                                if host.mods.length > 0 : ScrollView { viewport-width: self.width; VerticalLayout { spacing: 8px; for mod in host.mods : ModCard { item: mod; togglable: true; restore-file(path) => { root.restore-mod-file("server", host.id, path); } toggle(path, on) => { root.set-mod-enabled("server", host.id, path, on); } delete-file(path, title) => { root.pending-action-kind = "server"; root.pending-action-id = host.id; root.pending-action-name = title; root.mod-action-path = path; root.mod-action-name = title; root.mod-action-is-hand-placed = mod.origin-kind == "hand-placed"; root.modal-error = ""; root.modal = "delete-mod"; } } } }
                             }
                             if host.available && host.kind == "server" && pane.surface == "Isolation" : IsolationSurface {
                                 phase: root.isolation-host-kind == "server" && root.isolation-host-id == host.id ? root.isolation-phase : "none";
@@ -6065,19 +6030,19 @@ slint::slint! {
                                 RelationList { rows: root.mod-action-required-by; note: GuiI18n.text("gui-mod-required-by-nothing"); }
                             }
                         }
-                        if root.mod-action-relations-refreshable : HorizontalLayout { AppButton { text: GuiI18n.text("gui-mod-impact-refresh"); clicked => { root.refresh-mod-dependencies("client", root.selected-instance-id, root.mod-action-path); } } Rectangle { horizontal-stretch: 1; } }
+                        if root.mod-action-relations-refreshable : HorizontalLayout { AppButton { text: GuiI18n.text("gui-mod-impact-refresh"); clicked => { root.refresh-mod-dependencies("client", root.mod-action-host, root.mod-action-path); } } Rectangle { horizontal-stretch: 1; } }
                         if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; }
                         // Leaving on the left, acting on the right, and the one
                         // that takes the selected release last. Everything bunched
                         // at one end left the dialog looking like it had run out
                         // of room, which is what it used to do.
                         HorizontalLayout { spacing: 8px;
-                            if root.mod-action-can-remove : AppButton { text: GuiI18n.text("gui-remove"); tone: "danger"; enabled: !root.mod-action-pending; clicked => { root.modal-error = ""; root.mod-remove-returns-to-manager = true; root.plan-mod-removal(root.selected-instance-id, root.mod-action-path); } }
+                            if root.mod-action-can-remove : AppButton { text: GuiI18n.text("gui-remove"); tone: "danger"; enabled: !root.mod-action-pending; clicked => { root.modal-error = ""; root.mod-remove-returns-to-manager = true; root.plan-mod-removal(root.mod-action-host, root.mod-action-path); } }
                             AppButton { min-width: 124px; text: GuiI18n.text("gui-close"); clicked => { root.modal = ""; root.modal-error = ""; } }
                             Rectangle { horizontal-stretch: 1; }
-                            if root.mod-action-is-pack-owned && root.mod-action-pack-original-version != "" : AppButton { text: GuiI18n.text("gui-mod-reset-to-pack-version"); enabled: !root.mod-action-pending; clicked => { root.mod-action-pending = true; root.modal-error = ""; root.plan-mod-apply(root.selected-instance-id, root.mod-action-path, root.mod-action-pack-original-version); } }
-                            if root.mod-action-can-update : AppButton { min-width: 124px; text: GuiI18n.text("gui-mod-update"); enabled: !root.mod-action-pending; clicked => { root.mod-action-pending = true; root.modal-error = ""; root.plan-mod-apply(root.selected-instance-id, root.mod-action-path, ""); } }
-                            if root.mod-action-can-change : AppButton { min-width: 150px; text: GuiI18n.text("gui-mod-change-version"); tone: "primary"; enabled: !root.mod-action-pending && root.mod-action-selected != "" && root.mod-action-selected != root.mod-action-installed; clicked => { root.mod-action-pending = true; root.modal-error = ""; root.plan-mod-apply(root.selected-instance-id, root.mod-action-path, root.mod-action-selected); } }
+                            if root.mod-action-is-pack-owned && root.mod-action-pack-original-version != "" : AppButton { text: GuiI18n.text("gui-mod-reset-to-pack-version"); enabled: !root.mod-action-pending; clicked => { root.mod-action-pending = true; root.modal-error = ""; root.plan-mod-apply(root.mod-action-host, root.mod-action-path, root.mod-action-pack-original-version); } }
+                            if root.mod-action-can-update : AppButton { min-width: 124px; text: GuiI18n.text("gui-mod-update"); enabled: !root.mod-action-pending; clicked => { root.mod-action-pending = true; root.modal-error = ""; root.plan-mod-apply(root.mod-action-host, root.mod-action-path, ""); } }
+                            if root.mod-action-can-change : AppButton { min-width: 150px; text: GuiI18n.text("gui-mod-change-version"); tone: "primary"; enabled: !root.mod-action-pending && root.mod-action-selected != "" && root.mod-action-selected != root.mod-action-installed; clicked => { root.mod-action-pending = true; root.modal-error = ""; root.plan-mod-apply(root.mod-action-host, root.mod-action-path, root.mod-action-selected); } }
                         }
                     }
                     if root.modal == "mod-acquire" : VerticalLayout { spacing: 11px;
@@ -6120,7 +6085,7 @@ slint::slint! {
                         if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; }
                         HorizontalLayout { spacing: 8px; Rectangle { horizontal-stretch: 1; }
                             AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = root.mod-remove-returns-to-manager ? "mod-manage" : ""; root.modal-error = ""; } }
-                            AppButton { text: GuiI18n.text("gui-mod-remove-action"); tone: "danger"; enabled: !root.mod-action-pending; clicked => { root.modal-error = ""; root.remove-mod(root.selected-instance-id, root.mod-action-path); root.modal = ""; } }
+                            AppButton { text: GuiI18n.text("gui-mod-remove-action"); tone: "danger"; enabled: !root.mod-action-pending; clicked => { root.modal-error = ""; root.remove-mod(root.mod-action-host, root.mod-action-path); root.modal = ""; } }
                         }
                     }
                     if root.modal == "mod-apply" : VerticalLayout { spacing: 11px;
@@ -6132,7 +6097,7 @@ slint::slint! {
                         if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; }
                         HorizontalLayout { spacing: 8px; Rectangle { horizontal-stretch: 1; }
                             AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = "mod-manage"; root.modal-error = ""; root.mod-action-pending = false; } }
-                            AppButton { text: GuiI18n.text("gui-linked-apply"); tone: "primary"; enabled: !root.mod-action-pending; clicked => { root.modal-error = ""; root.change-mod-version(root.selected-instance-id, root.linked-path, root.linked-version); root.modal = ""; } }
+                            AppButton { text: GuiI18n.text("gui-linked-apply"); tone: "primary"; enabled: !root.mod-action-pending; clicked => { root.modal-error = ""; root.change-mod-version(root.mod-action-host, root.linked-path, root.linked-version); root.modal = ""; } }
                         }
                     }
                     if root.modal == "mod-result" : VerticalLayout { spacing: 11px;
@@ -6153,7 +6118,7 @@ slint::slint! {
                         if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; }
                         HorizontalLayout { spacing: 8px; Rectangle { horizontal-stretch: 1; }
                             AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; root.modal-error = ""; } }
-                            AppButton { text: GuiI18n.text("gui-loader-change-action"); tone: "primary"; enabled: !root.loader-change-pending && root.loader-change-selected != "" && root.loader-change-selected != root.loader-change-current; clicked => { root.loader-change-pending = true; root.modal-error = ""; root.change-loader-version(root.selected-instance-id, root.loader-change-selected); } }
+                            AppButton { text: GuiI18n.text("gui-loader-change-action"); tone: "primary"; enabled: !root.loader-change-pending && root.loader-change-selected != "" && root.loader-change-selected != root.loader-change-current; clicked => { root.loader-change-pending = true; root.modal-error = ""; root.change-loader-version(root.mod-action-host, root.loader-change-selected); } }
                         }
                     }
                     if root.modal == "eula" : VerticalLayout { spacing: 12px; BodyText { text: GuiI18n.text("gui-eula-detail"); wrap: word-wrap; } AppButton { text: GuiI18n.text("gui-open-minecraft-eula"); clicked => { root.open-eula-reference(); } } Rectangle { height: 70px; border-radius: 6px; border-width: 1px; border-color: root.eula-accepted ? Theme.success : Theme.warning; background: Theme.surface; BodyText { x: 12px; width: parent.width - 24px; text: root.eula-status; wrap: word-wrap; } } if !root.eula-accepted : BodyText { text: GuiI18n.text("gui-eula-confirm"); color: Theme.text; wrap: word-wrap; } ActionRow { Rectangle { horizontal-stretch: 1; } if root.eula-accepted : AppButton { text: GuiI18n.text("gui-revoke-consent"); tone: "danger"; clicked => { root.revoke-eula(); } } if !root.eula-accepted : AppButton { text: GuiI18n.text("gui-accept-eula"); tone: "primary"; clicked => { root.accept-eula(); } } } }

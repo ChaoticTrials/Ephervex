@@ -132,6 +132,11 @@ impl WorkspaceState {
         true
     }
 
+    /// The hosts the workspace shows, in reading order.
+    pub(super) fn shown(&self) -> Vec<InstalledHost> {
+        self.shown.clone()
+    }
+
     /// Whether some pane shows `surface` of `host`.
     pub(super) fn shows(&self, host: InstalledHost, surface: Surface) -> bool {
         self.layout.as_ref().is_some_and(|layout| {
