@@ -10,17 +10,17 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use ephervex_core::InstalledHost;
-use ephervex_i18n::lookup;
-use slint::{Model as _, ModelRc, VecModel};
+use ephervex_i18n::{Arg, lookup, lookup_args};
+use slint::{Model as _, ModelRc, SharedString, VecModel};
 
-use super::HostLifecycle;
 use super::log_views::LogViews;
+use super::{HostLifecycle, SERVERS_PAGE};
 use crate::backend;
 use crate::ui::{
-    AppWindow, HostView, InstanceRow, PendingEntityRow, ServerRow, WorkspacePaneRow,
-    WorkspaceSurfaceRow,
+    AppWindow, HostView, InstanceRow, PendingEntityRow, ServerRow, WorkspaceHostChoice,
+    WorkspacePaneRow, WorkspaceSurfaceRow,
 };
-use crate::workspace_layout::{PaneId, Surface, WorkspaceLayout};
+use crate::workspace_layout::{PaneId, Placement, Shape, Surface, WorkspaceLayout};
 
 /// The workspace's layout, and the rows its host views are built from.
 pub(super) struct WorkspaceState {
@@ -35,10 +35,15 @@ pub(super) struct WorkspaceState {
     shown: Vec<InstalledHost>,
     host_views: Rc<VecModel<HostView>>,
     panes: Rc<VecModel<WorkspacePaneRow>>,
+    /// Every installed host, as a pane's host picker offers them.
+    host_choices: Rc<VecModel<WorkspaceHostChoice>>,
+    host_labels: Rc<VecModel<SharedString>>,
     /// Each host kind's navigation, built once so a re-rendered host view
     /// keeps the same model and its tabs are not rebuilt.
     client_surfaces: ModelRc<WorkspaceSurfaceRow>,
     server_surfaces: ModelRc<WorkspaceSurfaceRow>,
+    client_surface_labels: ModelRc<SharedString>,
+    server_surface_labels: ModelRc<SharedString>,
 }
 
 impl Default for WorkspaceState {
@@ -51,8 +56,12 @@ impl Default for WorkspaceState {
             shown: Vec::new(),
             host_views: Rc::new(VecModel::default()),
             panes: Rc::new(VecModel::default()),
+            host_choices: Rc::new(VecModel::default()),
+            host_labels: Rc::new(VecModel::default()),
             client_surfaces: surface_rows(Surface::client()),
             server_surfaces: surface_rows(Surface::server()),
+            client_surface_labels: surface_labels(Surface::client()),
+            server_surface_labels: surface_labels(Surface::server()),
         }
     }
 }
@@ -68,6 +77,8 @@ impl WorkspaceState {
     pub(super) fn attach(&self, ui: &AppWindow) {
         ui.set_host_views(ModelRc::from(Rc::clone(&self.host_views)));
         ui.set_workspace_panes(ModelRc::from(Rc::clone(&self.panes)));
+        ui.set_workspace_host_choices(ModelRc::from(Rc::clone(&self.host_choices)));
+        ui.set_workspace_host_labels(ModelRc::from(Rc::clone(&self.host_labels)));
     }
 
     pub(super) const fn layout(&self) -> Option<&WorkspaceLayout> {
@@ -193,40 +204,18 @@ impl WorkspaceState {
             );
         }
         let pending = ui.get_linked_pending_servers();
-        let views = hosts
+        let views: Vec<HostView> = hosts
             .iter()
             .map(|&host| self.host_view(host, lifecycle, &pending))
             .collect();
-        let panes = layout
-            .panes()
-            .iter()
-            .map(|placed| {
-                let id = placed.pane.id();
-                WorkspacePaneRow {
-                    id: i32::try_from(id.get()).unwrap_or(i32::MAX),
-                    host: hosts
-                        .iter()
-                        .position(|&host| host == placed.pane.host())
-                        .and_then(|index| i32::try_from(index).ok())
-                        .unwrap_or(-1),
-                    log: logs.slot_of(id),
-                    surface: placed.pane.surface().id().into(),
-                    column: i32::from(placed.placement.column),
-                    row: i32::from(placed.placement.row),
-                    stacked: placed.placement.stacked,
-                    can_split_beside: layout.can_split_beside(id),
-                    can_split_below: layout.can_split_below(id),
-                    can_close: layout.can_close(id),
-                }
-            })
-            .collect();
+        let choices = self.host_choices();
+        let panes = pane_rows(layout, &hosts, &views, &choices, logs);
+        let labels = choices.iter().map(|choice| choice.label.clone()).collect();
+        sync_rows(&self.host_choices, choices);
+        sync_rows(&self.host_labels, labels);
         sync_rows(&self.host_views, views);
         sync_rows(&self.panes, panes);
-        let back = match hosts.first() {
-            Some(InstalledHost::Server(_)) if layout.way_back().is_some() => "gui-back-instance",
-            Some(InstalledHost::Server(_)) => "gui-back-servers",
-            _ => "gui-back-instances",
-        };
+        let back = back_label(ui, layout, &hosts);
         self.shown = hosts;
         ui.set_workspace_back_label(lookup(back).into());
         ui.set_workspace_open(true);
@@ -243,9 +232,15 @@ impl WorkspaceState {
         let mut view = self.reported.get(&host).cloned().unwrap_or_default();
         view.kind = host.kind().into();
         view.id = id.as_str().into();
-        view.surfaces = match host {
-            InstalledHost::Instance(_) => self.client_surfaces.clone(),
-            InstalledHost::Server(_) => self.server_surfaces.clone(),
+        (view.surfaces, view.surface_labels) = match host {
+            InstalledHost::Instance(_) => (
+                self.client_surfaces.clone(),
+                self.client_surface_labels.clone(),
+            ),
+            InstalledHost::Server(_) => (
+                self.server_surfaces.clone(),
+                self.server_surface_labels.clone(),
+            ),
         };
         view.available = false;
         match host {
@@ -278,6 +273,139 @@ impl WorkspaceState {
         }
         view
     }
+
+    /// Every installed client, then every server, as a pane's picker names them.
+    fn host_choices(&self) -> Vec<WorkspaceHostChoice> {
+        let clients = self.clients.iter().map(|row| WorkspaceHostChoice {
+            kind: "client".into(),
+            id: row.id.clone(),
+            label: lookup_args(
+                "gui-host-choice-client",
+                [("value", Arg::from(row.name.as_str()))],
+            )
+            .into(),
+        });
+        let servers = self.servers.iter().map(|row| WorkspaceHostChoice {
+            kind: "server".into(),
+            id: row.id.clone(),
+            label: lookup_args(
+                "gui-host-choice-server",
+                [("value", Arg::from(row.name.as_str()))],
+            )
+            .into(),
+        });
+        clients.chain(servers).collect()
+    }
+}
+
+/// One row per pane, in reading order, pointing at the host views and host
+/// choices it reads.
+fn pane_rows(
+    layout: &WorkspaceLayout,
+    hosts: &[InstalledHost],
+    views: &[HostView],
+    choices: &[WorkspaceHostChoice],
+    logs: &LogViews,
+) -> Vec<WorkspacePaneRow> {
+    let shape = layout.shape();
+    layout
+        .panes()
+        .iter()
+        .map(|placed| {
+            let id = placed.pane.id();
+            let host = placed.pane.host();
+            let surface = placed.pane.surface();
+            let shown = hosts.iter().position(|&shown| shown == host);
+            let name = shown
+                .and_then(|index| views.get(index))
+                .filter(|view| view.available)
+                .map_or_else(
+                    || lookup("gui-workspace-host-gone"),
+                    |view| host_name(view).to_owned(),
+                );
+            WorkspacePaneRow {
+                id: i32::try_from(id.get()).unwrap_or(i32::MAX),
+                host: index(shown),
+                log: logs.slot_of(id),
+                surface: surface.id().into(),
+                label: pane_label(shape, placed.placement, &name, surface).into(),
+                host_choice: index(choices.iter().position(|choice| {
+                    choice.kind == host.kind() && choice.id == host.id().as_str()
+                })),
+                surface_choice: index(
+                    Surface::offered_by(host)
+                        .iter()
+                        .position(|&offered| offered == surface),
+                )
+                .max(0),
+                column: i32::from(placed.placement.column),
+                row: i32::from(placed.placement.row),
+                stacked: placed.placement.stacked,
+                can_split_beside: layout.can_split_beside(id),
+                can_split_below: layout.can_split_below(id),
+                can_close: layout.can_close(id),
+            }
+        })
+        .collect()
+}
+
+/// A position as the markup indexes, or -1 for none.
+fn index(position: Option<usize>) -> i32 {
+    position
+        .and_then(|index| i32::try_from(index).ok())
+        .unwrap_or(-1)
+}
+
+/// Where Back leaves for. A split leaves for the page it was opened from,
+/// whichever hosts it shows; a single workspace for its host's list, or for
+/// the client it was followed from.
+fn back_label(ui: &AppWindow, layout: &WorkspaceLayout, hosts: &[InstalledHost]) -> &'static str {
+    if layout.shape() == Shape::Single {
+        match hosts.first() {
+            Some(InstalledHost::Server(_)) if layout.way_back().is_some() => "gui-back-instance",
+            Some(InstalledHost::Server(_)) => "gui-back-servers",
+            _ => "gui-back-instances",
+        }
+    } else if ui.get_page() == SERVERS_PAGE {
+        "gui-back-servers"
+    } else {
+        "gui-back-instances"
+    }
+}
+
+fn host_name(view: &HostView) -> &str {
+    if view.kind == "server" {
+        view.server.name.as_str()
+    } else {
+        view.client.name.as_str()
+    }
+}
+
+/// Where a pane sits, its host, and its surface, as assistive technology reads it.
+fn pane_label(shape: Shape, placement: Placement, host: &str, surface: Surface) -> String {
+    let surface = lookup(surface.label());
+    if shape == Shape::Single {
+        return lookup_args(
+            "gui-pane-label-single",
+            [("host", Arg::from(host)), ("surface", Arg::from(surface))],
+        );
+    }
+    let position = match (placement.column, placement.row, placement.stacked) {
+        (0, _, false) => "gui-pane-left",
+        (0, 0, true) => "gui-pane-top-left",
+        (0, _, true) => "gui-pane-bottom-left",
+        (_, _, false) => "gui-pane-right",
+        (_, 0, true) => "gui-pane-top-right",
+        (_, _, true) => "gui-pane-bottom-right",
+    };
+    lookup_args(
+        "gui-pane-label",
+        [
+            ("position", Arg::from(lookup(position))),
+            ("host", Arg::from(host)),
+            ("surface", Arg::from(surface)),
+        ],
+    )
 }
 
 /// Writes what a feature reported into a host view already on screen, keeping
@@ -290,6 +418,7 @@ fn change_row(row: &mut HostView, reported: &HostView) {
     updated.client = row.client.clone();
     updated.server = row.server.clone();
     updated.surfaces = row.surfaces.clone();
+    updated.surface_labels = row.surface_labels.clone();
     updated.linked_servers = row.linked_servers.clone();
     updated.pending_servers = row.pending_servers.clone();
     *row = updated;
@@ -329,6 +458,15 @@ fn surface_rows(surfaces: &[Surface]) -> ModelRc<WorkspaceSurfaceRow> {
                 id: surface.id().into(),
                 label: lookup(surface.label()).into(),
             })
+            .collect::<Vec<_>>(),
+    ))
+}
+
+fn surface_labels(surfaces: &[Surface]) -> ModelRc<SharedString> {
+    ModelRc::new(VecModel::from(
+        surfaces
+            .iter()
+            .map(|surface| SharedString::from(lookup(surface.label())))
             .collect::<Vec<_>>(),
     ))
 }

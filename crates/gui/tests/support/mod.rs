@@ -11,7 +11,7 @@ use ephervex_gui::ui::{
 };
 use ephervex_gui::workspace_layout::Surface;
 use ephervex_i18n::lookup;
-use slint::{ComponentHandle, Model, ModelRc, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
 fn surfaces(surfaces: &[Surface]) -> ModelRc<WorkspaceSurfaceRow> {
     ModelRc::new(VecModel::from(
@@ -25,6 +25,15 @@ fn surfaces(surfaces: &[Surface]) -> ModelRc<WorkspaceSurfaceRow> {
     ))
 }
 
+fn surface_labels(surfaces: &[Surface]) -> ModelRc<SharedString> {
+    ModelRc::new(VecModel::from(
+        surfaces
+            .iter()
+            .map(|surface| SharedString::from(lookup(surface.label())))
+            .collect::<Vec<_>>(),
+    ))
+}
+
 pub(crate) fn client_view(row: InstanceRow) -> HostView {
     HostView {
         kind: "client".into(),
@@ -32,6 +41,7 @@ pub(crate) fn client_view(row: InstanceRow) -> HostView {
         available: true,
         client: row,
         surfaces: surfaces(Surface::client()),
+        surface_labels: surface_labels(Surface::client()),
         ..HostView::default()
     }
 }
@@ -43,6 +53,7 @@ pub(crate) fn server_view(row: ServerRow) -> HostView {
         available: true,
         server: row,
         surfaces: surfaces(Surface::server()),
+        surface_labels: surface_labels(Surface::server()),
         ..HostView::default()
     }
 }

@@ -4680,6 +4680,51 @@ fn register_workspace(ui: &AppWindow, workspace: &Workspace) {
             layout.follow(pane, host, surface).is_ok()
         });
     });
+
+    register_pane_layout(ui, workspace);
+}
+
+/// Splitting the workspace, closing its panes, and pointing a pane at a host.
+fn register_pane_layout(ui: &AppWindow, workspace: &Workspace) {
+    let weak = ui.as_weak();
+    let beside = workspace.clone();
+    ui.on_split_pane_beside(move |pane| {
+        let (Some(ui), Some(pane)) = (weak.upgrade(), workspace::pane_id(pane)) else {
+            return;
+        };
+        beside.change_pane(&ui, pane, |layout| layout.split_beside(pane).is_ok());
+    });
+
+    let weak = ui.as_weak();
+    let below = workspace.clone();
+    ui.on_split_pane_below(move |pane| {
+        let (Some(ui), Some(pane)) = (weak.upgrade(), workspace::pane_id(pane)) else {
+            return;
+        };
+        below.change_pane(&ui, pane, |layout| layout.split_below(pane).is_ok());
+    });
+
+    let weak = ui.as_weak();
+    let close = workspace.clone();
+    ui.on_close_pane(move |pane| {
+        let (Some(ui), Some(pane)) = (weak.upgrade(), workspace::pane_id(pane)) else {
+            return;
+        };
+        close.change_pane(&ui, pane, |layout| layout.close(pane).is_ok());
+    });
+
+    let weak = ui.as_weak();
+    let choose = workspace.clone();
+    ui.on_choose_pane_host(move |pane, kind, id| {
+        let (Some(ui), Some(pane), Some(host)) = (
+            weak.upgrade(),
+            workspace::pane_id(pane),
+            workspace::parse_host(&kind, &id),
+        ) else {
+            return;
+        };
+        choose.change_pane(&ui, pane, |layout| layout.show_host(pane, host).is_ok());
+    });
 }
 
 /// Starting a server, which also puts its console on screen.
@@ -10473,6 +10518,195 @@ mod tests {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// A workspace listing one client and one server, as a snapshot fills it.
+    fn listed_workspace(ui: &AppWindow) -> (Workspace, InstalledHost, InstalledHost) {
+        let workspace = test_workspace(ui);
+        let (client, server) = (client_host(), server_host());
+        workspace.state.borrow_mut().set_rows(
+            vec![InstanceRow {
+                id: client.id().into(),
+                name: "Repro Client".into(),
+                ..InstanceRow::default()
+            }],
+            vec![ServerRow {
+                id: server.id().into(),
+                name: "Repro Server".into(),
+                can_restart: true,
+                ..ServerRow::default()
+            }],
+        );
+        (workspace, client, server)
+    }
+
+    fn pane_labels(ui: &AppWindow) -> Vec<String> {
+        ui.get_workspace_panes()
+            .iter()
+            .map(|pane| pane.label.to_string())
+            .collect()
+    }
+
+    /// The pane controls change the shape one supported step at a time, and
+    /// every pane is named by where it is, its host, and its surface.
+    #[test]
+    fn the_pane_controls_move_between_the_supported_shapes() {
+        let ui = test_window();
+        let (workspace, client, _) = listed_workspace(&ui);
+        workspace.open(&ui, client, Surface::Isolation);
+        assert_eq!(pane_labels(&ui), ["Repro Client, Isolation"]);
+
+        ui.invoke_split_pane_beside(1);
+        assert_eq!(
+            shown(&workspace),
+            [(client, Surface::Isolation), (client, Surface::Overview)],
+            "the new pane shows the same host"
+        );
+        assert_eq!(
+            pane_labels(&ui),
+            [
+                "Left pane: Repro Client, Isolation",
+                "Right pane: Repro Client, Overview"
+            ]
+        );
+        ui.invoke_split_pane_beside(1);
+        assert_eq!(shown(&workspace).len(), 2, "there are only two columns");
+
+        ui.invoke_split_pane_below(2);
+        ui.invoke_split_pane_below(1);
+        assert_eq!(
+            workspace
+                .state
+                .borrow()
+                .layout()
+                .map(WorkspaceLayout::shape),
+            Some(crate::workspace_layout::Shape::TwoByTwo)
+        );
+        assert_eq!(
+            pane_labels(&ui),
+            [
+                "Top left pane: Repro Client, Isolation",
+                "Bottom left pane: Repro Client, Overview",
+                "Top right pane: Repro Client, Overview",
+                "Bottom right pane: Repro Client, Overview"
+            ]
+        );
+        let offered: Vec<(bool, bool, bool)> = ui
+            .get_workspace_panes()
+            .iter()
+            .map(|pane| (pane.can_split_beside, pane.can_split_below, pane.can_close))
+            .collect();
+        assert_eq!(offered, [(false, false, true); 4]);
+
+        for pane in [4, 3, 2] {
+            ui.invoke_close_pane(pane);
+        }
+        assert_eq!(shown(&workspace), [(client, Surface::Isolation)]);
+        assert!(
+            ui.get_workspace_open(),
+            "closing panes never leaves the workspace"
+        );
+        ui.invoke_close_pane(1);
+        assert_eq!(
+            shown(&workspace).len(),
+            1,
+            "the last pane is left with Back"
+        );
+    }
+
+    /// A pane can show any installed host, keeping its surface when the host
+    /// has it, and the host entering the workspace is loaded.
+    #[test]
+    fn a_pane_shows_whichever_installed_host_is_chosen() {
+        let ui = test_window();
+        let loaded = Rc::new(RefCell::new(Vec::new()));
+        let sink = Rc::clone(&loaded);
+        ui.on_load_server_workspace(move |id| sink.borrow_mut().push(id.to_string()));
+        let (workspace, client, server) = listed_workspace(&ui);
+        workspace.open(&ui, client, Surface::Logs);
+        ui.invoke_split_pane_beside(1);
+        ui.invoke_show_pane_surface(2, "Logs".into());
+
+        let choices: Vec<(String, String)> = ui
+            .get_workspace_host_choices()
+            .iter()
+            .map(|choice| (choice.kind.to_string(), choice.label.to_string()))
+            .collect();
+        assert_eq!(
+            choices,
+            [
+                ("client".to_owned(), "Client: Repro Client".to_owned()),
+                ("server".to_owned(), "Server: Repro Server".to_owned())
+            ]
+        );
+        assert_eq!(ui.get_workspace_host_labels().row_count(), 2);
+
+        ui.invoke_choose_pane_host(2, "server".into(), server.id().into());
+        assert_eq!(
+            shown(&workspace),
+            [(client, Surface::Logs), (server, Surface::Logs)]
+        );
+        assert_eq!(loaded.borrow().as_slice(), [server.id()]);
+        let panes: Vec<(i32, i32)> = ui
+            .get_workspace_panes()
+            .iter()
+            .map(|pane| (pane.host_choice, pane.surface_choice))
+            .collect();
+        let logs = |surfaces: &[Surface]| {
+            surfaces
+                .iter()
+                .position(|&surface| surface == Surface::Logs)
+                .and_then(|index| i32::try_from(index).ok())
+                .expect("logs")
+        };
+        assert_eq!(
+            panes,
+            [(0, logs(Surface::client())), (1, logs(Surface::server()))]
+        );
+        assert_eq!(
+            ui.get_workspace_back_label(),
+            lookup("gui-back-instances").as_str(),
+            "a split leaves for the page it was opened from"
+        );
+
+        ui.invoke_choose_pane_host(2, "client".into(), client.id().into());
+        ui.invoke_show_pane_surface(2, "Overview".into());
+        assert_eq!(ui.get_host_views().row_count(), 1);
+    }
+
+    /// A restart asked for from either of two panes on one server is one
+    /// restart, and both panes show it.
+    #[test]
+    fn a_restart_from_two_panes_on_one_host_is_one_restart() {
+        let ui = test_window();
+        let (workspace, _, server) = listed_workspace(&ui);
+        let (sender, commands) = std::sync::mpsc::channel();
+        register_restart_actions(&ui, &sender, &workspace.lifecycle);
+        workspace.open(&ui, server, Surface::Console);
+        ui.invoke_split_pane_beside(1);
+        ui.invoke_show_pane_surface(2, "Logs".into());
+
+        for _pane in [1, 2] {
+            ui.invoke_server_restart(server.id().into());
+        }
+        let sent: Vec<Command> = commands.try_iter().collect();
+        assert_eq!(sent.len(), 1, "the second pane's restart waits: {sent:?}");
+
+        workspace.refresh(&ui);
+        let panes: Vec<i32> = ui
+            .get_workspace_panes()
+            .iter()
+            .map(|pane| pane.host)
+            .collect();
+        assert_eq!(panes, [0, 0], "both panes read the one host view");
+        assert_eq!(
+            ui.get_host_views()
+                .row_data(0)
+                .expect("view")
+                .server
+                .restart_stage,
+            "stopping"
+        );
     }
 
     /// Two panes on one host read one view of it, and whatever a feature
