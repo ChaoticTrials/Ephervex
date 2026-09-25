@@ -123,3 +123,24 @@ pub(crate) fn update_host(ui: &AppWindow, index: usize, change: impl FnOnce(&mut
 pub(crate) fn set_mods(ui: &AppWindow, rows: ModelRc<ephervex_gui::ui::ModRow>) {
     update_host(ui, 0, |view| view.mods = rows);
 }
+
+/// The host view at `index`, as the panes showing it read it.
+pub(crate) fn host(ui: &AppWindow, index: usize) -> HostView {
+    ui.get_host_views().row_data(index).unwrap_or_default()
+}
+
+/// Records an isolation acknowledgement on the first host, as the controller does.
+pub(crate) fn follow_acknowledgements(ui: &AppWindow) {
+    let weak = ui.as_weak();
+    ui.on_acknowledge_isolation(move |_, _, what, accepted| {
+        if let Some(ui) = weak.upgrade() {
+            update_host(&ui, 0, |view| {
+                if what == "missing" {
+                    view.isolation_accept_missing = accepted;
+                } else {
+                    view.isolation_accept_unrecorded = accepted;
+                }
+            });
+        }
+    });
+}

@@ -680,6 +680,39 @@ slint::slint! {
         browser-results: [ModSearchRow],
         // Where the provider says its next page begins, or -1 once there is none.
         browser-next-offset: int,
+        // The host's mod isolation, as its surface shows it. An empty phase is
+        // the same as "none": nothing is set up.
+        isolation-phase: string,
+        isolation-active: bool,
+        isolation-summary: string,
+        isolation-confidence: string,
+        isolation-round: int,
+        isolation-granularity: int,
+        isolation-candidates: [IsolationCandidateRow],
+        isolation-enabled: [string],
+        isolation-disabled: [string],
+        isolation-unrecorded: [string],
+        isolation-unidentifiable: [string],
+        isolation-missing: [string],
+        isolation-linked-servers: [string],
+        isolation-remaining-candidates: [string],
+        isolation-pinned: [string],
+        isolation-required-dependencies: [string],
+        isolation-history: [string],
+        // Why the session's round cannot be answered yet: "running" or "failed".
+        isolation-recovery: string,
+        isolation-recovery-detail: string,
+        isolation-reduced-confidence: bool,
+        isolation-accept-unrecorded: bool,
+        isolation-accept-missing: bool,
+        isolation-query: string,
+        // The durable workflow attached to the host, shown above every one of
+        // its surfaces. The workspace renders these without knowing which
+        // feature owns them.
+        workflow-id: string,
+        workflow-title: string,
+        workflow-summary: string,
+        workflow-actions: [WorkflowActionRow],
     }
 
     // One pane: which host view it shows, on which surface, and where.
@@ -1560,19 +1593,21 @@ slint::slint! {
     // narrow column; the label is part of the target, as a checkbox's is.
     component AcknowledgementToggle inherits Rectangle {
         in property <string> label;
-        in-out property <bool> checked;
+        // What is recorded. Pressing asks for the opposite through `toggled`.
+        in property <bool> checked;
         in property <bool> enabled: true;
+        callback toggled(bool);
         height: row.preferred-height;
         row := HorizontalLayout {
             spacing: 10px;
-            VerticalLayout { alignment: start; Toggle { accessible-name: root.label; checked <=> root.checked; enabled: root.enabled; } }
+            VerticalLayout { alignment: start; Toggle { accessible-name: root.label; checked: root.checked; enabled: root.enabled; sets-its-own-position: false; toggled(value) => { root.toggled(value); } } }
             BodyText {
                 text: root.label;
                 color: root.enabled ? Theme.text : Theme.text-muted;
                 horizontal-stretch: 1;
                 vertical-alignment: top;
                 wrap: word-wrap;
-                TouchArea { clicked => { if root.enabled { root.checked = !root.checked; } } }
+                TouchArea { clicked => { if root.enabled { root.toggled(!root.checked); } } }
             }
         }
     }
@@ -2198,9 +2233,12 @@ slint::slint! {
         in property <bool> host-running;
         in property <string> recovery;
         in property <string> recovery-detail;
-        in-out property <string> query;
-        in-out property <bool> accept-unrecorded;
-        in-out property <bool> accept-missing;
+        // The filter the candidates are narrowed by, and the acknowledgements a
+        // reduced-confidence start needs. The host owns them, so every view of
+        // the host agrees; the controls ask for changes rather than make them.
+        in property <string> query;
+        in property <bool> accept-unrecorded;
+        in property <bool> accept-missing;
         in property <string> error;
         // The first thing Start waits for the user to do, named beside it.
         // An isolation change in flight is progress, not a requirement: the
@@ -2212,6 +2250,8 @@ slint::slint! {
             : "";
         callback filter(string);
         callback toggle-pin(string, bool);
+        // ("missing" | "unrecorded", accepted)
+        callback acknowledge(string, bool);
         callback begin();
         callback start-session(bool, bool);
         callback answer(string);
@@ -2248,7 +2288,9 @@ slint::slint! {
                     }
                     TextField {
                         vertical-stretch: 0;
-                        text <=> root.query;
+                        property <string> shown-query: root.query;
+                        changed shown-query => { self.text = self.shown-query; }
+                        init => { self.text = root.query; }
                         placeholder: GuiI18n.text("gui-isolation-search");
                         accessible-label: GuiI18n.text("gui-isolation-search");
                         input-type: InputType.search;
@@ -2313,8 +2355,8 @@ slint::slint! {
                     }
                     // Outside the scrolling warnings, so no list is long enough
                     // to hide the choices Start waits for.
-                    if root.missing.length > 0 : AcknowledgementToggle { label: GuiI18n.text("gui-isolation-accept-missing"); enabled: !root.busy; checked <=> root.accept-missing; }
-                    if root.unrecorded.length > 0 : AcknowledgementToggle { label: GuiI18n.text("gui-isolation-accept-unrecorded"); enabled: !root.busy; checked <=> root.accept-unrecorded; }
+                    if root.missing.length > 0 : AcknowledgementToggle { label: GuiI18n.text("gui-isolation-accept-missing"); enabled: !root.busy; checked: root.accept-missing; toggled(value) => { root.acknowledge("missing", value); } }
+                    if root.unrecorded.length > 0 : AcknowledgementToggle { label: GuiI18n.text("gui-isolation-accept-unrecorded"); enabled: !root.busy; checked: root.accept-unrecorded; toggled(value) => { root.acknowledge("unrecorded", value); } }
                     if root.error != "" : BodyText { text: root.error; color: Theme.danger; wrap: word-wrap; }
                     if root.start-requirement != "" : BodyText { text: GuiI18n.text(root.start-requirement == "running" ? "gui-isolation-start-blocked-running" : root.start-requirement == "missing" ? "gui-isolation-start-blocked-missing" : "gui-isolation-start-blocked-unrecorded"); color: Theme.warning; wrap: word-wrap; }
                     ActionRow {
@@ -4024,25 +4066,6 @@ slint::slint! {
         in-out property <string> snapshot-action-id;
         in-out property <string> snapshot-action-label;
         in-out property <bool> snapshot-safety-copy: true;
-        in-out property <[IsolationCandidateRow]> isolation-candidates;
-        in-out property <[string]> isolation-enabled;
-        in-out property <[string]> isolation-disabled;
-        in-out property <[string]> isolation-unrecorded;
-        in-out property <[string]> isolation-unidentifiable;
-        in-out property <[string]> isolation-missing;
-        in-out property <[string]> isolation-linked-servers;
-        in-out property <[string]> isolation-remaining-candidates;
-        in-out property <[string]> isolation-pinned;
-        in-out property <[string]> isolation-required-dependencies;
-        in-out property <[string]> isolation-history;
-        in-out property <string> isolation-host-kind;
-        in-out property <string> isolation-host-id;
-        in-out property <string> isolation-phase: "none";
-        in-out property <string> isolation-summary;
-        in-out property <string> isolation-confidence;
-        in-out property <int> isolation-round: 0;
-        in-out property <int> isolation-granularity: 0;
-        in-out property <bool> isolation-active: false;
         // The one host whose files a change is rewriting, and what it is
         // doing. Isolation and repair both claim it, so every surface of that
         // host reads a single answer to "is something changing it".
@@ -4087,21 +4110,6 @@ slint::slint! {
         in-out property <string> bundle-result;
         in-out property <string> bundle-result-path;
         in-out property <string> bundle-error;
-        // Why the active session's round cannot be answered yet: "running" or "failed".
-        in-out property <string> isolation-recovery;
-        in-out property <string> isolation-recovery-detail;
-        in-out property <bool> isolation-reduced-confidence: false;
-        in-out property <bool> isolation-accept-unrecorded: false;
-        in-out property <bool> isolation-accept-missing: false;
-        in-out property <string> isolation-query;
-        // The durable workflow currently attached to the selected host. The
-        // workspace renders these fields without knowing which subsystem owns
-        // them, so another long-running developer workflow can use the same
-        // status area later.
-        in-out property <string> active-workflow-id;
-        in-out property <string> active-workflow-title;
-        in-out property <string> active-workflow-summary;
-        in-out property <[WorkflowActionRow]> active-workflow-actions;
         in-out property <[ActivityRow]> activities;
         in-out property <[AccountRow]> accounts;
         in-out property <[JavaRow]> java-runtimes;
@@ -4539,8 +4547,17 @@ slint::slint! {
         callback rename-snapshot(string, string, string, string);
         callback delete-snapshot(string, string, string);
         callback open-isolation(string, string);
-        callback filter-isolation-candidates(string);
-        callback toggle-isolation-pin(string, bool);
+        // (kind, id, query)
+        callback filter-isolation-candidates(string, string, string);
+        // (kind, id, path, pinned)
+        callback toggle-isolation-pin(string, string, string, bool);
+        // A setup's reduced-confidence acknowledgement: (kind, id, "missing" | "unrecorded", accepted).
+        callback acknowledge-isolation(string, string, string, bool);
+        // Leaves a finished isolation's result behind.
+        callback dismiss-isolation(string, string);
+        // A durable workflow's action, routed to the feature that owns it:
+        // (pane, kind, id, workflow, action).
+        callback workflow-action(int, string, string, string, string);
         callback start-isolation(string, string, bool, bool);
         callback answer-isolation(string, string, string);
         callback undo-isolation(string, string);
@@ -4862,12 +4879,12 @@ slint::slint! {
                             restart-enabled: host.available && (self.is-client ? host.client.can-kill && host.client.can-restart : host.server.can-restart);
                             restart-hint: self.is-client && host.client.can-kill && !host.client.can-restart ? GuiI18n.text("gui-restart-client-unavailable") : "";
                             restart-stage: self.is-client ? host.client.restart-stage : host.server.restart-stage;
-                            workflow-id: root.isolation-host-kind == host.kind && root.isolation-host-id == host.id ? root.active-workflow-id : "";
+                            workflow-id: host.workflow-id;
                             busy: root.host-busy-kind == host.kind && root.host-busy-id == host.id;
                             busy-text: root.host-busy-text;
-                            workflow-title: root.active-workflow-title;
-                            workflow-summary: root.active-workflow-summary;
-                            workflow-actions: root.active-workflow-actions;
+                            workflow-title: host.workflow-title;
+                            workflow-summary: host.workflow-summary;
+                            workflow-actions: host.workflow-actions;
                             back => { root.workspace-back(); }
                             open-folder => { if self.is-client { root.open-client-folder(host.id); } else { root.open-server-folder(host.id); } }
                             primary => {
@@ -4881,14 +4898,7 @@ slint::slint! {
                             launch-as(account, alongside) => { root.launch-client-as(host.id, account, alongside); }
                             add-account => { root.close-workspace(); root.page = 4; root.settings-tab = "Accounts"; }
                             surface-selected(surface) => { root.show-pane-surface(pane.id, surface); }
-                            workflow-action(workflow, action) => {
-                                if workflow == "mod-isolation" {
-                                    if action == "details" { root.show-pane-surface(pane.id, "Isolation"); }
-                                    if action == "gone" || action == "present" { root.answer-isolation(host.kind, host.id, action); }
-                                    if action == "undo" { root.undo-isolation(host.kind, host.id); }
-                                    if action == "finish" { root.finish-isolation(host.kind, host.id); }
-                                }
-                            }
+                            workflow-action(workflow, action) => { root.workflow-action(pane.id, host.kind, host.id, workflow, action); }
                             if !host.available : EmptyState {
                                 icon: @image-url("../../../assets/icons/nav-instances.svg");
                                 title: GuiI18n.text("gui-workspace-host-gone");
@@ -4955,28 +4965,29 @@ slint::slint! {
                                     }
                                 }
                             }
-                            if host.available && host.kind == "client" && pane.surface == "Isolation" : IsolationSurface {
-                                phase: root.isolation-host-kind == "client" && root.isolation-host-id == host.id ? root.isolation-phase : "none";
-                                busy: root.host-busy-kind == "client" && root.host-busy-id == host.id;
-                                recovery: root.isolation-recovery; recovery-detail: root.isolation-recovery-detail;
-                                host-running: host.client.can-kill;
-                                summary: root.isolation-summary; confidence: root.isolation-confidence; round: root.isolation-round; granularity: root.isolation-granularity;
-                                candidates: root.isolation-candidates; enabled-items: root.isolation-enabled; disabled-items: root.isolation-disabled;
-                                unrecorded: root.isolation-unrecorded; unidentifiable: root.isolation-unidentifiable; missing: root.isolation-missing;
-                                linked-servers: root.isolation-linked-servers; remaining-candidates: root.isolation-remaining-candidates; pinned: root.isolation-pinned; required-dependencies: root.isolation-required-dependencies; history: root.isolation-history;
-                                reduced-confidence: root.isolation-reduced-confidence; query <=> root.isolation-query;
-                                accept-unrecorded <=> root.isolation-accept-unrecorded; accept-missing <=> root.isolation-accept-missing; error: root.modal-error;
-                                begin => { root.open-isolation("client", host.id); }
-                                filter(query) => { root.filter-isolation-candidates(query); }
-                                toggle-pin(path, selected) => { root.toggle-isolation-pin(path, selected); }
-                                start-session(accept-unrecorded, accept-missing) => { root.start-isolation("client", host.id, accept-unrecorded, accept-missing); }
-                                answer(answer) => { root.answer-isolation("client", host.id, answer); }
-                                undo => { root.undo-isolation("client", host.id); }
-                                finish => { root.finish-isolation("client", host.id); }
-                                cancel => { root.cancel-isolation("client", host.id); }
-                                discard-setup => { root.discard-isolation-setup("client", host.id); }
-                                retry-recovery => { root.retry-isolation-recovery("client", host.id); }
-                                close => { root.show-pane-surface(pane.id, "Mods"); root.isolation-phase = "none"; root.modal-error = ""; }
+                            if host.available && pane.surface == "Isolation" : IsolationSurface {
+                                phase: host.isolation-phase == "" ? "none" : host.isolation-phase;
+                                busy: root.host-busy-kind == host.kind && root.host-busy-id == host.id;
+                                recovery: host.isolation-recovery; recovery-detail: host.isolation-recovery-detail;
+                                host-running: is-client ? host.client.can-kill : host.server.can-stop;
+                                summary: host.isolation-summary; confidence: host.isolation-confidence; round: host.isolation-round; granularity: host.isolation-granularity;
+                                candidates: host.isolation-candidates; enabled-items: host.isolation-enabled; disabled-items: host.isolation-disabled;
+                                unrecorded: host.isolation-unrecorded; unidentifiable: host.isolation-unidentifiable; missing: host.isolation-missing;
+                                linked-servers: host.isolation-linked-servers; remaining-candidates: host.isolation-remaining-candidates; pinned: host.isolation-pinned; required-dependencies: host.isolation-required-dependencies; history: host.isolation-history;
+                                reduced-confidence: host.isolation-reduced-confidence; query: host.isolation-query;
+                                accept-unrecorded: host.isolation-accept-unrecorded; accept-missing: host.isolation-accept-missing; error: root.modal-error;
+                                begin => { root.open-isolation(host.kind, host.id); }
+                                filter(query) => { root.filter-isolation-candidates(host.kind, host.id, query); }
+                                toggle-pin(path, selected) => { root.toggle-isolation-pin(host.kind, host.id, path, selected); }
+                                acknowledge(what, accepted) => { root.acknowledge-isolation(host.kind, host.id, what, accepted); }
+                                start-session(accept-unrecorded, accept-missing) => { root.start-isolation(host.kind, host.id, accept-unrecorded, accept-missing); }
+                                answer(answer) => { root.answer-isolation(host.kind, host.id, answer); }
+                                undo => { root.undo-isolation(host.kind, host.id); }
+                                finish => { root.finish-isolation(host.kind, host.id); }
+                                cancel => { root.cancel-isolation(host.kind, host.id); }
+                                discard-setup => { root.discard-isolation-setup(host.kind, host.id); }
+                                retry-recovery => { root.retry-isolation-recovery(host.kind, host.id); }
+                                close => { root.dismiss-isolation(host.kind, host.id); root.show-pane-surface(pane.id, "Mods"); }
                             }
                             if host.available && host.kind == "client" && pane.surface == "Settings" : ClientRuntimeForm {
                                 host: host;
@@ -4998,7 +5009,7 @@ slint::slint! {
                                 shared-supported: true;
                                 host-running: host.client.can-kill;
                                 busy: root.host-busy-kind == "client" && root.host-busy-id == host.id;
-                                isolation-active: root.isolation-host-kind == "client" && root.isolation-host-id == host.id && root.active-workflow-id != "";
+                                isolation-active: host.isolation-active;
                                 state: self.current ? root.integrity-state : "unchecked";
                                 progress: root.integrity-progress; summary: root.integrity-summary; healthy: root.integrity-healthy; counts: root.integrity-counts; checked-at: root.integrity-checked-at;
                                 findings: root.integrity-findings; finding-total: root.integrity-finding-total; query <=> root.integrity-query;
@@ -5075,7 +5086,7 @@ slint::slint! {
                                 shared-supported: false;
                                 host-running: host.server.can-stop;
                                 busy: root.host-busy-kind == "server" && root.host-busy-id == host.id;
-                                isolation-active: root.isolation-host-kind == "server" && root.isolation-host-id == host.id && root.active-workflow-id != "";
+                                isolation-active: host.isolation-active;
                                 state: self.current ? root.integrity-state : "unchecked";
                                 progress: root.integrity-progress; summary: root.integrity-summary; healthy: root.integrity-healthy; counts: root.integrity-counts; checked-at: root.integrity-checked-at;
                                 findings: root.integrity-findings; finding-total: root.integrity-finding-total; query <=> root.integrity-query;
@@ -5107,29 +5118,6 @@ slint::slint! {
                                 if host.mods-notice != "" : BodyText { text: host.mods-notice; color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
                                 if host.mods.length == 0 : EmptyState { icon: @image-url("../../../assets/icons/semantic-mod.svg"); title: host.mods-query != "" ? GuiI18n.text("gui-no-mods-match-title") : GuiI18n.text("gui-no-managed-mods"); message: host.mods-query != "" ? GuiI18n.value("gui-no-mods-match", host.mods-query) : GuiI18n.text("gui-no-server-mods-detail"); }
                                 if host.mods.length > 0 : ScrollView { viewport-width: self.width; VerticalLayout { spacing: 8px; for mod in host.mods : ModCard { item: mod; togglable: true; restore-file(path) => { root.restore-mod-file("server", host.id, path); } toggle(path, on) => { root.set-mod-enabled("server", host.id, path, on); } delete-file(path, title) => { root.pending-action-kind = "server"; root.pending-action-id = host.id; root.pending-action-name = title; root.mod-action-path = path; root.mod-action-name = title; root.mod-action-is-hand-placed = mod.origin-kind == "hand-placed"; root.modal-error = ""; root.modal = "delete-mod"; } } } }
-                            }
-                            if host.available && host.kind == "server" && pane.surface == "Isolation" : IsolationSurface {
-                                phase: root.isolation-host-kind == "server" && root.isolation-host-id == host.id ? root.isolation-phase : "none";
-                                busy: root.host-busy-kind == "server" && root.host-busy-id == host.id;
-                                recovery: root.isolation-recovery; recovery-detail: root.isolation-recovery-detail;
-                                host-running: host.server.can-stop;
-                                summary: root.isolation-summary; confidence: root.isolation-confidence; round: root.isolation-round; granularity: root.isolation-granularity;
-                                candidates: root.isolation-candidates; enabled-items: root.isolation-enabled; disabled-items: root.isolation-disabled;
-                                unrecorded: root.isolation-unrecorded; unidentifiable: root.isolation-unidentifiable; missing: root.isolation-missing;
-                                linked-servers: root.isolation-linked-servers; remaining-candidates: root.isolation-remaining-candidates; pinned: root.isolation-pinned; required-dependencies: root.isolation-required-dependencies; history: root.isolation-history;
-                                reduced-confidence: root.isolation-reduced-confidence; query <=> root.isolation-query;
-                                accept-unrecorded <=> root.isolation-accept-unrecorded; accept-missing <=> root.isolation-accept-missing; error: root.modal-error;
-                                begin => { root.open-isolation("server", host.id); }
-                                filter(query) => { root.filter-isolation-candidates(query); }
-                                toggle-pin(path, selected) => { root.toggle-isolation-pin(path, selected); }
-                                start-session(accept-unrecorded, accept-missing) => { root.start-isolation("server", host.id, accept-unrecorded, accept-missing); }
-                                answer(answer) => { root.answer-isolation("server", host.id, answer); }
-                                undo => { root.undo-isolation("server", host.id); }
-                                finish => { root.finish-isolation("server", host.id); }
-                                cancel => { root.cancel-isolation("server", host.id); }
-                                discard-setup => { root.discard-isolation-setup("server", host.id); }
-                                retry-recovery => { root.retry-isolation-recovery("server", host.id); }
-                                close => { root.show-pane-surface(pane.id, "Mods"); root.isolation-phase = "none"; root.modal-error = ""; }
                             }
                             if host.available && host.kind == "server" && pane.surface == "Properties" : ServerPropertiesForm {
                                 host: host;

@@ -82,7 +82,7 @@ fn checked_surface(ui: &AppWindow, server_host: bool, running: bool) {
     }
     ui.set_host_busy_kind(SharedString::default());
     ui.set_host_busy_id(SharedString::default());
-    ui.set_active_workflow_id(SharedString::default());
+    support::update_host(ui, 0, |view| view.isolation_active = false);
     support::set_surface(ui, 1, "Diagnostics");
     ui.set_integrity_state("checked".into());
     ui.set_integrity_summary(
@@ -179,11 +179,9 @@ fn a_running_host_holds_repair_and_says_to_stop_it() {
 #[test]
 fn an_isolation_session_holds_repair_with_its_own_reason() {
     let ui = window();
-    for (server_host, kind, id) in host_kinds() {
+    for (server_host, kind, _) in host_kinds() {
         checked_surface(&ui, server_host, false);
-        ui.set_isolation_host_kind(kind.into());
-        ui.set_isolation_host_id(id.into());
-        ui.set_active_workflow_id("mod-isolation".into());
+        support::update_host(&ui, 0, |view| view.isolation_active = true);
         settle(&ui);
         assert!(!enabled(&ui, "gui-integrity-repair"), "{kind}");
         assert_eq!(

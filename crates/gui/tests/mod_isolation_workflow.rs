@@ -54,25 +54,35 @@ fn setup_requires_each_reduced_confidence_acknowledgement() {
     let ui = window();
     client_workspace(&ui);
     support::set_surface(&ui, 1, "Isolation");
-    ui.set_isolation_phase("setup".into());
-    ui.set_isolation_summary("Two candidate roots can be tested.".into());
-    ui.set_isolation_candidates(ModelRc::new(VecModel::from(vec![
-        IsolationCandidateRow {
-            path: "mods/a.jar".into(),
-            display_path: "a.jar".into(),
-            name: "A".into(),
-            selected: false,
-        },
-        IsolationCandidateRow {
-            path: "mods/b.jar".into(),
-            display_path: "b.jar".into(),
-            name: "B".into(),
-            selected: true,
-        },
-    ])));
-    ui.set_isolation_unrecorded(strings(&["mods/unrecorded.jar"]));
-    ui.set_isolation_unidentifiable(strings(&["mods/unidentified.jar"]));
-    ui.set_isolation_missing(strings(&["mods/b.jar: required-library"]));
+    support::update_host(&ui, 0, |view| view.isolation_phase = "setup".into());
+    support::update_host(&ui, 0, |view| {
+        view.isolation_summary = "Two candidate roots can be tested.".into();
+    });
+    support::update_host(&ui, 0, |view| {
+        view.isolation_candidates = ModelRc::new(VecModel::from(vec![
+            IsolationCandidateRow {
+                path: "mods/a.jar".into(),
+                display_path: "a.jar".into(),
+                name: "A".into(),
+                selected: false,
+            },
+            IsolationCandidateRow {
+                path: "mods/b.jar".into(),
+                display_path: "b.jar".into(),
+                name: "B".into(),
+                selected: true,
+            },
+        ]));
+    });
+    support::update_host(&ui, 0, |view| {
+        view.isolation_unrecorded = strings(&["mods/unrecorded.jar"]);
+    });
+    support::update_host(&ui, 0, |view| {
+        view.isolation_unidentifiable = strings(&["mods/unidentified.jar"]);
+    });
+    support::update_host(&ui, 0, |view| {
+        view.isolation_missing = strings(&["mods/b.jar: required-library"]);
+    });
     settle(&ui);
 
     assert!(visible(&ui, "A"));
@@ -89,13 +99,13 @@ fn setup_requires_each_reduced_confidence_acknowledgement() {
             .expect("the start button reports whether it is enabled")
     );
 
-    ui.set_isolation_accept_unrecorded(true);
+    support::update_host(&ui, 0, |view| view.isolation_accept_unrecorded = true);
     assert!(
         !button(&ui, "gui-isolation-start")
             .accessible_enabled()
             .expect("the start button reports whether it is enabled")
     );
-    ui.set_isolation_accept_missing(true);
+    support::update_host(&ui, 0, |view| view.isolation_accept_missing = true);
     assert!(
         button(&ui, "gui-isolation-start")
             .accessible_enabled()
@@ -108,8 +118,6 @@ fn setup_requires_each_reduced_confidence_acknowledgement() {
 fn setup_on(ui: &AppWindow, server_host: bool, running: bool) {
     if server_host {
         server_workspace(ui, server(running));
-        ui.set_isolation_host_kind("server".into());
-        ui.set_isolation_host_id("server".into());
     } else {
         let mut row = instance();
         row.can_kill = running;
@@ -117,12 +125,14 @@ fn setup_on(ui: &AppWindow, server_host: bool, running: bool) {
         client_workspace_with(ui, row);
     }
     support::set_surface(ui, 1, "Isolation");
-    ui.set_isolation_phase("setup".into());
-    ui.set_isolation_summary("261 candidate roots can be tested.".into());
-    ui.set_isolation_missing(strings(&[]));
-    ui.set_isolation_unrecorded(strings(&[]));
-    ui.set_isolation_accept_missing(false);
-    ui.set_isolation_accept_unrecorded(false);
+    support::update_host(ui, 0, |view| view.isolation_phase = "setup".into());
+    support::update_host(ui, 0, |view| {
+        view.isolation_summary = "261 candidate roots can be tested.".into();
+    });
+    support::update_host(ui, 0, |view| view.isolation_missing = strings(&[]));
+    support::update_host(ui, 0, |view| view.isolation_unrecorded = strings(&[]));
+    support::update_host(ui, 0, |view| view.isolation_accept_missing = false);
+    support::update_host(ui, 0, |view| view.isolation_accept_unrecorded = false);
     ui.set_host_busy_kind("".into());
     ui.set_host_busy_id("".into());
     settle(ui);
@@ -211,9 +221,10 @@ fn unrecorded_dependency_information_waits_for_a_visible_acknowledgement() {
     for server_host in [false, true] {
         setup_on(&ui, server_host, false);
         let many: Vec<String> = (0..60).map(|index| format!("mod-{index}.jar")).collect();
-        ui.set_isolation_unrecorded(strings(
-            &many.iter().map(String::as_str).collect::<Vec<_>>(),
-        ));
+        support::update_host(&ui, 0, |view| {
+            view.isolation_unrecorded =
+                strings(&many.iter().map(String::as_str).collect::<Vec<_>>());
+        });
         settle(&ui);
 
         assert!(!start_enabled(&ui), "server: {server_host}");
@@ -224,7 +235,7 @@ fn unrecorded_dependency_information_waits_for_a_visible_acknowledgement() {
         acknowledgement(&ui, "gui-isolation-accept-unrecorded").invoke_accessible_default_action();
         settle(&ui);
 
-        assert!(ui.get_isolation_accept_unrecorded());
+        assert!(support::host(&ui, 0).isolation_accept_unrecorded);
         assert!(start_enabled(&ui), "server: {server_host}");
         assert!(blockers_shown(&ui).is_empty());
     }
@@ -234,14 +245,16 @@ fn unrecorded_dependency_information_waits_for_a_visible_acknowledgement() {
 fn the_acknowledgement_label_is_part_of_its_switch() {
     let ui = window();
     setup_on(&ui, false, false);
-    ui.set_isolation_unrecorded(strings(&["unrecorded.jar"]));
+    support::update_host(&ui, 0, |view| {
+        view.isolation_unrecorded = strings(&["unrecorded.jar"]);
+    });
     settle(&ui);
     ElementHandle::find_by_accessible_label(&ui, &lookup("gui-isolation-accept-unrecorded"))
         .find(|element| element.accessible_role() == Some(AccessibleRole::Text))
         .expect("the acknowledgement's label is shown")
         .mock_single_click(PointerEventButton::Left);
     settle(&ui);
-    assert!(ui.get_isolation_accept_unrecorded());
+    assert!(support::host(&ui, 0).isolation_accept_unrecorded);
     assert!(start_enabled(&ui));
 }
 
@@ -250,8 +263,12 @@ fn missing_dependencies_block_start_with_their_own_reason_until_acknowledged() {
     let ui = window();
     for server_host in [false, true] {
         setup_on(&ui, server_host, false);
-        ui.set_isolation_missing(strings(&["feature.jar: library"]));
-        ui.set_isolation_unrecorded(strings(&["unrecorded.jar"]));
+        support::update_host(&ui, 0, |view| {
+            view.isolation_missing = strings(&["feature.jar: library"]);
+        });
+        support::update_host(&ui, 0, |view| {
+            view.isolation_unrecorded = strings(&["unrecorded.jar"]);
+        });
         settle(&ui);
         assert_eq!(blockers_shown(&ui), ["gui-isolation-start-blocked-missing"]);
 
@@ -282,13 +299,15 @@ fn a_start_in_progress_disables_start_and_shows_only_its_progress() {
     let ui = window();
     for server_host in [false, true] {
         setup_on(&ui, server_host, false);
-        ui.set_isolation_unrecorded(strings(&["unrecorded.jar"]));
+        support::update_host(&ui, 0, |view| {
+            view.isolation_unrecorded = strings(&["unrecorded.jar"]);
+        });
         settle(&ui);
         assert_eq!(
             notes_beside_start(&ui, "gui-isolation-accept-unrecorded"),
             [lookup("gui-isolation-start-blocked-unrecorded")]
         );
-        ui.set_isolation_accept_unrecorded(true);
+        support::update_host(&ui, 0, |view| view.isolation_accept_unrecorded = true);
         let (kind, id) = if server_host {
             ("server", "server")
         } else {
@@ -326,7 +345,7 @@ fn canceling_setup_stays_on_the_isolation_tab() {
     let ui = window();
     client_workspace(&ui);
     support::set_surface(&ui, 1, "Isolation");
-    ui.set_isolation_phase("setup".into());
+    support::update_host(&ui, 0, |view| view.isolation_phase = "setup".into());
     settle(&ui);
 
     let discarded = Rc::new(RefCell::new(Vec::new()));
@@ -353,12 +372,14 @@ fn detailed_round_names_the_exact_configuration_and_records_either_answer() {
     let ui = window();
     client_workspace(&ui);
     support::set_surface(&ui, 1, "Isolation");
-    ui.set_isolation_phase("round".into());
-    ui.set_isolation_round(4);
-    ui.set_isolation_enabled(strings(&["mods/a.jar", "mods/shared.jar"]));
-    ui.set_isolation_disabled(strings(&["mods/b.jar"]));
-    ui.set_isolation_host_kind("client".into());
-    ui.set_isolation_host_id("host".into());
+    support::update_host(&ui, 0, |view| view.isolation_phase = "round".into());
+    support::update_host(&ui, 0, |view| view.isolation_round = 4);
+    support::update_host(&ui, 0, |view| {
+        view.isolation_enabled = strings(&["mods/a.jar", "mods/shared.jar"]);
+    });
+    support::update_host(&ui, 0, |view| {
+        view.isolation_disabled = strings(&["mods/b.jar"]);
+    });
     settle(&ui);
 
     assert!(visible(&ui, "mods/a.jar"));
@@ -380,8 +401,10 @@ fn a_busy_isolation_change_disables_answers_and_launch_and_says_what_it_is_doing
     let ui = window();
     client_workspace(&ui);
     support::set_surface(&ui, 1, "Isolation");
-    ui.set_isolation_phase("round".into());
-    ui.set_isolation_history(strings(&["Round 1"]));
+    support::update_host(&ui, 0, |view| view.isolation_phase = "round".into());
+    support::update_host(&ui, 0, |view| {
+        view.isolation_history = strings(&["Round 1"]);
+    });
     ui.set_host_busy_kind("client".into());
     ui.set_host_busy_id("host".into());
     ui.set_host_busy_text("Applying the next mod setup".into());
@@ -419,10 +442,14 @@ fn a_round_awaiting_recovery_blocks_answers_and_offers_only_a_retry() {
     let ui = window();
     client_workspace(&ui);
     support::set_surface(&ui, 1, "Isolation");
-    ui.set_isolation_phase("round".into());
-    ui.set_isolation_history(strings(&["Round 1"]));
-    ui.set_isolation_recovery("failed".into());
-    ui.set_isolation_recovery_detail("The jar is missing.".into());
+    support::update_host(&ui, 0, |view| view.isolation_phase = "round".into());
+    support::update_host(&ui, 0, |view| {
+        view.isolation_history = strings(&["Round 1"]);
+    });
+    support::update_host(&ui, 0, |view| view.isolation_recovery = "failed".into());
+    support::update_host(&ui, 0, |view| {
+        view.isolation_recovery_detail = "The jar is missing.".into();
+    });
     settle(&ui);
 
     assert!(visible(&ui, &lookup("gui-isolation-recovery-failed")));
@@ -456,12 +483,12 @@ fn a_round_awaiting_recovery_blocks_answers_and_offers_only_a_retry() {
         &[("client".to_owned(), "host".to_owned())]
     );
 
-    ui.set_isolation_recovery("running".into());
-    ui.set_isolation_recovery_detail("".into());
+    support::update_host(&ui, 0, |view| view.isolation_recovery = "running".into());
+    support::update_host(&ui, 0, |view| view.isolation_recovery_detail = "".into());
     settle(&ui);
     assert!(visible(&ui, &lookup("gui-isolation-recovery-running")));
 
-    ui.set_isolation_recovery("".into());
+    support::update_host(&ui, 0, |view| view.isolation_recovery = "".into());
     settle(&ui);
     assert!(!visible(&ui, &lookup("gui-isolation-recovery-retry")));
     assert!(visible(&ui, &lookup("gui-isolation-test-instruction")));
@@ -478,7 +505,7 @@ fn no_manual_round_restore_action_is_offered() {
     let ui = window();
     client_workspace(&ui);
     support::set_surface(&ui, 1, "Isolation");
-    ui.set_isolation_phase("round".into());
+    support::update_host(&ui, 0, |view| view.isolation_phase = "round".into());
     settle(&ui);
     assert!(!visible(&ui, "Restore this round's mod setup"));
     assert!(!visible(&ui, &lookup("gui-isolation-recovery-retry")));
@@ -489,15 +516,17 @@ fn isolation_state_survives_logs_and_mods_navigation() {
     let ui = window();
     client_workspace(&ui);
     support::set_surface(&ui, 1, "Isolation");
-    ui.set_isolation_phase("round".into());
-    ui.set_isolation_round(3);
-    ui.set_isolation_enabled(strings(&["mods/persistent.jar"]));
+    support::update_host(&ui, 0, |view| view.isolation_phase = "round".into());
+    support::update_host(&ui, 0, |view| view.isolation_round = 3);
+    support::update_host(&ui, 0, |view| {
+        view.isolation_enabled = strings(&["mods/persistent.jar"]);
+    });
     settle(&ui);
 
     tab(&ui, &lookup("gui-instance-tab-logs")).invoke_accessible_default_action();
     settle(&ui);
     assert_eq!(support::surface(&ui, 0), "Logs");
-    assert_eq!(ui.get_isolation_round(), 3);
+    assert_eq!(support::host(&ui, 0).isolation_round, 3);
 
     tab(&ui, &lookup("gui-isolation-tab")).invoke_accessible_default_action();
     settle(&ui);
@@ -509,43 +538,49 @@ fn isolation_state_survives_logs_and_mods_navigation() {
 
     tab(&ui, &lookup("gui-isolation-tab")).invoke_accessible_default_action();
     settle(&ui);
-    assert_eq!(ui.get_isolation_round(), 3);
+    assert_eq!(support::host(&ui, 0).isolation_round, 3);
     assert!(visible(&ui, "mods/persistent.jar"));
 }
 
+/// The workflow area offers the round's own actions above every surface, and
+/// hands each to the controller with the pane and host it was pressed for.
 #[test]
-fn persistent_round_actions_answer_and_open_the_detailed_surface() {
+fn persistent_round_actions_name_their_pane_and_host() {
     let ui = window();
     client_workspace(&ui);
     support::set_surface(&ui, 1, "Logs");
-    ui.set_isolation_host_kind("client".into());
-    ui.set_isolation_host_id("host".into());
-    ui.set_active_workflow_id("mod-isolation".into());
-    ui.set_active_workflow_title(lookup("gui-isolation-active").into());
-    ui.set_active_workflow_summary("Waiting for an answer to round 2.".into());
-    ui.set_active_workflow_actions(ModelRc::new(VecModel::from(vec![
-        workflow_action("details", "gui-isolation-detailed-view", false),
-        workflow_action("gone", "gui-isolation-issue-gone", true),
-        workflow_action("present", "gui-isolation-issue-present", true),
-        workflow_action("undo", "gui-isolation-undo", true),
-    ])));
+    support::update_host(&ui, 0, |view| view.workflow_id = "mod-isolation".into());
+    support::update_host(&ui, 0, |view| {
+        view.workflow_title = lookup("gui-isolation-active").into();
+    });
+    support::update_host(&ui, 0, |view| {
+        view.workflow_summary = "Waiting for an answer to round 2.".into();
+    });
+    support::update_host(&ui, 0, |view| {
+        view.workflow_actions = ModelRc::new(VecModel::from(vec![
+            workflow_action("details", "gui-isolation-detailed-view", false),
+            workflow_action("gone", "gui-isolation-issue-gone", true),
+            workflow_action("present", "gui-isolation-issue-present", true),
+            workflow_action("undo", "gui-isolation-undo", true),
+        ]));
+    });
     settle(&ui);
 
     let recorded = Rc::new(RefCell::new(Vec::new()));
     let sink = Rc::clone(&recorded);
-    ui.on_answer_isolation(move |kind, id, answer| {
+    ui.on_workflow_action(move |pane, kind, id, workflow, action| {
         sink.borrow_mut()
-            .push((kind.to_string(), id.to_string(), answer.to_string()));
+            .push(format!("{pane} {kind} {id} {workflow} {action}"));
     });
     button(&ui, "gui-isolation-issue-gone").mock_single_click(PointerEventButton::Left);
+    button(&ui, "gui-isolation-detailed-view").mock_single_click(PointerEventButton::Left);
     assert_eq!(
         recorded.borrow().as_slice(),
-        &[("client".to_owned(), "host".to_owned(), "gone".to_owned())]
+        [
+            "1 client host mod-isolation gone".to_owned(),
+            "1 client host mod-isolation details".to_owned(),
+        ]
     );
-
-    button(&ui, "gui-isolation-detailed-view").mock_single_click(PointerEventButton::Left);
-    settle(&ui);
-    assert_eq!(support::surface(&ui, 0), "Isolation");
 }
 
 #[test]
@@ -553,7 +588,7 @@ fn result_separates_testable_candidates_from_untested_pins_and_dependencies() {
     let ui = window();
     client_workspace(&ui);
     support::set_surface(&ui, 1, "Isolation");
-    ui.set_isolation_phase("contradiction".into());
+    support::update_host(&ui, 0, |view| view.isolation_phase = "contradiction".into());
     settle(&ui);
     assert!(visible(&ui, &lookup("gui-isolation-contradiction")));
     assert!(
@@ -562,11 +597,19 @@ fn result_separates_testable_candidates_from_untested_pins_and_dependencies() {
             .expect("the undo button reports whether it is enabled")
     );
 
-    ui.set_isolation_phase("result".into());
-    ui.set_isolation_summary("One testable candidate root remains.".into());
-    ui.set_isolation_remaining_candidates(strings(&["mods/advancedae.jar"]));
-    ui.set_isolation_pinned(strings(&["mods/libx.jar", "mods/skyblock-builder.jar"]));
-    ui.set_isolation_required_dependencies(strings(&["mods/required-library.jar"]));
+    support::update_host(&ui, 0, |view| view.isolation_phase = "result".into());
+    support::update_host(&ui, 0, |view| {
+        view.isolation_summary = "One testable candidate root remains.".into();
+    });
+    support::update_host(&ui, 0, |view| {
+        view.isolation_remaining_candidates = strings(&["mods/advancedae.jar"]);
+    });
+    support::update_host(&ui, 0, |view| {
+        view.isolation_pinned = strings(&["mods/libx.jar", "mods/skyblock-builder.jar"]);
+    });
+    support::update_host(&ui, 0, |view| {
+        view.isolation_required_dependencies = strings(&["mods/required-library.jar"]);
+    });
     settle(&ui);
     assert!(visible(&ui, &lookup("gui-isolation-finished")));
     assert!(visible(&ui, &lookup("gui-isolation-remaining-candidates")));
@@ -634,14 +677,14 @@ fn client_workspace(ui: &AppWindow) {
 fn client_workspace_with(ui: &AppWindow, row: InstanceRow) {
     support::show_client(ui, row, "Overview");
     support::follow_surface_requests(ui);
-    ui.set_isolation_host_kind("client".into());
-    ui.set_isolation_host_id("host".into());
+    support::follow_acknowledgements(ui);
     settle(ui);
 }
 
 fn server_workspace(ui: &AppWindow, row: ServerRow) {
     support::show_server(ui, row, "Overview");
     support::follow_surface_requests(ui);
+    support::follow_acknowledgements(ui);
     settle(ui);
 }
 
