@@ -8,7 +8,9 @@
 
 #![allow(clippy::expect_used, clippy::panic)]
 
-use ephervex_gui::ui::{AppWindow, GuiI18n, ModRow};
+mod support;
+
+use ephervex_gui::ui::{AppWindow, GuiI18n, InstanceRow, ModRow};
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use i_slint_backend_testing::{ElementHandle, TestingBackend, TestingBackendOptions};
 use slint::platform::PointerEventButton;
@@ -52,10 +54,14 @@ fn mod_row(title: &str, enabled: bool) -> ModRow {
 /// tears down every row component, and the list has to survive a snapshot
 /// arriving for unrelated reasons.
 fn show(ui: &AppWindow, rows: &[ModRow]) -> Rc<VecModel<ModRow>> {
-    ui.set_page(0);
-    ui.set_workspace("instance".into());
-    ui.set_workspace_tab("Mods".into());
-    ui.set_selected_instance_id("an-id".into());
+    support::show_client(
+        ui,
+        InstanceRow {
+            id: "an-id".into(),
+            ..InstanceRow::default()
+        },
+        "Mods",
+    );
     let model = Rc::new(VecModel::from(rows.to_vec()));
     ui.set_managed_mods(ModelRc::from(model.clone()));
     model

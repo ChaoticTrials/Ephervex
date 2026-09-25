@@ -8,6 +8,8 @@
 
 #![allow(clippy::expect_used)]
 
+mod support;
+
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -20,11 +22,8 @@ use slint::{ComponentHandle, ModelRc, PhysicalSize, SharedString, VecModel};
 #[test]
 fn a_crashed_servers_overview_leads_to_the_mods_it_points_at() {
     let ui = window();
-    let loaded: Rc<RefCell<Vec<String>>> = Rc::default();
-    let record = Rc::clone(&loaded);
-    ui.on_load_server_mods(move |id| record.borrow_mut().push(id.to_string()));
-
     crashed_server_workspace(&ui);
+    let requests = support::follow_surface_requests(&ui);
     settle(&ui);
 
     let review = ElementHandle::find_by_accessible_label(&ui, &lookup("gui-crash-review-mods"))
@@ -33,15 +32,11 @@ fn a_crashed_servers_overview_leads_to_the_mods_it_points_at() {
     review.mock_single_click(PointerEventButton::Left);
 
     assert_eq!(
-        ui.get_workspace_tab(),
-        "Mods",
+        requests.borrow().as_slice(),
+        [(1, "Mods".to_owned())],
         "reviewing must land on the panel whose rows carry the marks"
     );
-    assert_eq!(
-        loaded.borrow().as_slice(),
-        ["repro-server"],
-        "the panel it opens has to be asked for its list"
-    );
+    assert_eq!(support::surface(&ui, 0), "Mods");
 }
 
 #[test]
@@ -52,7 +47,7 @@ fn the_mods_panel_offers_to_disable_only_what_the_report_stated() {
     ui.on_disable_suggested_mods(move |id| record.borrow_mut().push(id.to_string()));
 
     crashed_server_workspace(&ui);
-    ui.set_workspace_tab("Mods".into());
+    support::set_surface(&ui, 1, "Mods");
     ui.set_server_mods(ModelRc::new(VecModel::from(vec![
         suspect_mod(),
         ordinary_mod(),
@@ -96,7 +91,7 @@ fn a_report_naming_only_mods_already_switched_off_offers_no_action() {
     ui.on_disable_suggested_mods(move |id| record.borrow_mut().push(id.to_string()));
 
     crashed_server_workspace(&ui);
-    ui.set_workspace_tab("Mods".into());
+    support::set_surface(&ui, 1, "Mods");
     let mut already_off = suspect_mod();
     already_off.enabled = false;
     ui.set_server_mods(ModelRc::new(VecModel::from(vec![already_off])));
@@ -131,13 +126,7 @@ fn a_server_that_has_not_crashed_shows_no_notice() {
 
 /// The server workspace, on a server whose newest crash report named a mod.
 fn crashed_server_workspace(ui: &AppWindow) {
-    ui.set_loading(false);
-    ui.set_page(1);
-    ui.set_workspace("server".into());
-    ui.set_workspace_tab("Overview".into());
-    ui.set_servers(ModelRc::new(VecModel::from(vec![server()])));
-    ui.set_selected_server_index(0);
-    ui.set_selected_server_id("repro-server".into());
+    support::show_server(ui, server(), "Overview");
     ui.set_crash_report("crash-2026-08-30_18.09.07-server.txt".into());
     ui.set_crash_failure(
         "java.lang.NoClassDefFoundError: net/minecraft/client/multiplayer/ClientLevel".into(),

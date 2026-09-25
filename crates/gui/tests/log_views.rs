@@ -8,6 +8,8 @@
 
 #![allow(clippy::expect_used)]
 
+mod support;
+
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -369,13 +371,7 @@ fn release(ui: &AppWindow, position: LogicalPosition) {
 
 /// The server workspace, on its Console tab, with output to select.
 fn server_console(ui: &AppWindow) {
-    ui.set_loading(false);
-    ui.set_page(1);
-    ui.set_workspace("server".into());
-    ui.set_workspace_tab("Console".into());
-    ui.set_servers(ModelRc::new(VecModel::from(vec![server()])));
-    ui.set_selected_server_index(0);
-    ui.set_selected_server_id("repro-server".into());
+    support::show_server(ui, server(), "Console");
     ui.set_log_chunks(chunks(40));
     ui.set_log_has_content(true);
 }
@@ -415,14 +411,8 @@ fn file_list_top(ui: &AppWindow) -> f32 {
 }
 
 fn server_logs(ui: &AppWindow) {
-    ui.set_loading(false);
-    ui.set_page(1);
-    ui.set_workspace("server".into());
-    ui.set_workspace_tab("Logs".into());
+    support::show_server(ui, server(), "Logs");
     ui.set_selected_diagnostic_kind("log".into());
-    ui.set_servers(ModelRc::new(VecModel::from(vec![server()])));
-    ui.set_selected_server_index(0);
-    ui.set_selected_server_id("repro-server".into());
 }
 
 fn chunks(count: usize) -> ModelRc<LogChunk> {

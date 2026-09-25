@@ -7,6 +7,8 @@
 
 #![allow(clippy::expect_used)]
 
+mod support;
+
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -109,7 +111,7 @@ fn launch_as_is_offered_beside_launch_on_the_instances_page() {
 
     ui.set_loading(false);
     ui.set_page(0);
-    ui.set_workspace(SharedString::default());
+    ui.set_workspace_open(false);
     ui.set_show_inspector(true);
     ui.set_instances(ModelRc::new(VecModel::from(vec![instance()])));
     ui.set_selected_instance_index(0);
@@ -155,7 +157,7 @@ fn a_running_instance_can_still_be_launched_as_someone_else() {
 
     ui.set_loading(false);
     ui.set_page(0);
-    ui.set_workspace(SharedString::default());
+    ui.set_workspace_open(false);
     ui.set_show_inspector(true);
     ui.set_instances(ModelRc::new(VecModel::from(vec![running])));
     ui.set_selected_instance_index(0);
@@ -232,8 +234,8 @@ fn widest(ui: &AppWindow, label: &str) -> Option<ElementHandle> {
 fn accounts_page(ui: &AppWindow) {
     ui.set_loading(false);
     ui.set_page(4);
-    ui.set_workspace(SharedString::default());
-    ui.set_workspace_tab("Accounts".into());
+    ui.set_workspace_open(false);
+    ui.set_settings_tab("Accounts".into());
     ui.set_accounts(ModelRc::new(VecModel::from(vec![
         account("alice-id", "Alice", true),
         account("bob-id", "Bob", false),
@@ -241,13 +243,7 @@ fn accounts_page(ui: &AppWindow) {
 }
 
 fn instance_workspace(ui: &AppWindow) {
-    ui.set_loading(false);
-    ui.set_page(0);
-    ui.set_workspace("instance".into());
-    ui.set_workspace_tab("Overview".into());
-    ui.set_instances(ModelRc::new(VecModel::from(vec![instance()])));
-    ui.set_selected_instance_index(0);
-    ui.set_selected_instance_id("repro-client".into());
+    support::show_client(ui, instance(), "Overview");
     ui.set_accounts(ModelRc::new(VecModel::from(vec![
         account("alice-id", "Alice", true),
         account("bob-id", "Bob", false),

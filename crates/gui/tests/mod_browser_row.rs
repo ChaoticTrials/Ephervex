@@ -5,6 +5,8 @@
 
 #![allow(clippy::expect_used)]
 
+mod support;
+
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -273,8 +275,7 @@ fn record_toggles(ui: &AppWindow) -> Rc<RefCell<Vec<(String, String, bool)>>> {
 /// The instance workspace's Mods tab, showing one managed mod.
 fn instance_mods(ui: &AppWindow, instance: InstanceRow) {
     mod_browser(ui, Vec::new());
-    ui.set_instances(ModelRc::new(VecModel::from(vec![instance])));
-    ui.set_selected_instance_index(0);
+    support::show_client(ui, instance, "Mods");
     ui.set_managed_mods(ModelRc::new(VecModel::from(vec![managed_mod()])));
     settle(ui);
 }
@@ -436,11 +437,14 @@ fn record_installs(ui: &AppWindow) -> Rc<RefCell<Vec<(String, String)>>> {
 }
 
 fn mod_browser(ui: &AppWindow, results: Vec<ModSearchRow>) {
-    ui.set_loading(false);
-    ui.set_page(0);
-    ui.set_workspace("instance".into());
-    ui.set_workspace_tab("Mods".into());
-    ui.set_selected_instance_id("repro-client".into());
+    support::show_client(
+        ui,
+        InstanceRow {
+            id: "repro-client".into(),
+            ..InstanceRow::default()
+        },
+        "Mods",
+    );
     ui.set_mod_provider("modrinth".into());
     ui.set_mod_results(ModelRc::new(VecModel::from(results)));
 }

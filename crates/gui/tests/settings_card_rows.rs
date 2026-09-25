@@ -22,7 +22,7 @@ fn two_settings_cards_sharing_a_row_end_level() {
     // one where the descriptions wrap to different numbers of lines in the two
     // columns, which is what a page of independent columns cannot survive.
     for tab in ["General", "Java"] {
-        ui.set_workspace_tab(tab.into());
+        ui.set_settings_tab(tab.into());
         for width in [1440, 1499, 1600, 1920] {
             ui.window().set_size(PhysicalSize::new(width, 1600));
             settle(&ui);
@@ -54,7 +54,7 @@ fn the_provider_overrides_pair_where_the_window_is_wide_enough() {
     let ui = window();
     ui.set_loading(false);
     ui.set_page(4);
-    ui.set_workspace_tab("Providers & APIs".into());
+    ui.set_settings_tab("Providers & APIs".into());
 
     ui.window().set_size(PhysicalSize::new(1600, 1600));
     settle(&ui);

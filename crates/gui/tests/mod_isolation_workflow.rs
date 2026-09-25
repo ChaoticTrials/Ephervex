@@ -1,6 +1,8 @@
 //! The isolation surface and its persistent host-workspace actions.
 #![allow(clippy::expect_used, clippy::panic)]
 
+mod support;
+
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -51,7 +53,7 @@ fn tab(ui: &AppWindow, label: &str) -> ElementHandle {
 fn setup_requires_each_reduced_confidence_acknowledgement() {
     let ui = window();
     client_workspace(&ui);
-    ui.set_workspace_tab("Isolation".into());
+    support::set_surface(&ui, 1, "Isolation");
     ui.set_isolation_phase("setup".into());
     ui.set_isolation_summary("Two candidate roots can be tested.".into());
     ui.set_isolation_candidates(ModelRc::new(VecModel::from(vec![
@@ -112,10 +114,9 @@ fn setup_on(ui: &AppWindow, server_host: bool, running: bool) {
         let mut row = instance();
         row.can_kill = running;
         row.can_launch = !running;
-        client_workspace(ui);
-        ui.set_instances(ModelRc::new(VecModel::from(vec![row])));
+        client_workspace_with(ui, row);
     }
-    ui.set_workspace_tab("Isolation".into());
+    support::set_surface(ui, 1, "Isolation");
     ui.set_isolation_phase("setup".into());
     ui.set_isolation_summary("261 candidate roots can be tested.".into());
     ui.set_isolation_missing(strings(&[]));
@@ -324,7 +325,7 @@ fn a_start_in_progress_disables_start_and_shows_only_its_progress() {
 fn canceling_setup_stays_on_the_isolation_tab() {
     let ui = window();
     client_workspace(&ui);
-    ui.set_workspace_tab("Isolation".into());
+    support::set_surface(&ui, 1, "Isolation");
     ui.set_isolation_phase("setup".into());
     settle(&ui);
 
@@ -344,14 +345,14 @@ fn canceling_setup_stays_on_the_isolation_tab() {
         &[("client".to_owned(), "host".to_owned())]
     );
     assert!(!*canceled.borrow(), "a setup has no session to restore");
-    assert_eq!(ui.get_workspace_tab(), "Isolation");
+    assert_eq!(support::surface(&ui, 0), "Isolation");
 }
 
 #[test]
 fn detailed_round_names_the_exact_configuration_and_records_either_answer() {
     let ui = window();
     client_workspace(&ui);
-    ui.set_workspace_tab("Isolation".into());
+    support::set_surface(&ui, 1, "Isolation");
     ui.set_isolation_phase("round".into());
     ui.set_isolation_round(4);
     ui.set_isolation_enabled(strings(&["mods/a.jar", "mods/shared.jar"]));
@@ -378,7 +379,7 @@ fn detailed_round_names_the_exact_configuration_and_records_either_answer() {
 fn a_busy_isolation_change_disables_answers_and_launch_and_says_what_it_is_doing() {
     let ui = window();
     client_workspace(&ui);
-    ui.set_workspace_tab("Isolation".into());
+    support::set_surface(&ui, 1, "Isolation");
     ui.set_isolation_phase("round".into());
     ui.set_isolation_history(strings(&["Round 1"]));
     ui.set_host_busy_kind("client".into());
@@ -417,7 +418,7 @@ fn a_busy_isolation_change_disables_answers_and_launch_and_says_what_it_is_doing
 fn a_round_awaiting_recovery_blocks_answers_and_offers_only_a_retry() {
     let ui = window();
     client_workspace(&ui);
-    ui.set_workspace_tab("Isolation".into());
+    support::set_surface(&ui, 1, "Isolation");
     ui.set_isolation_phase("round".into());
     ui.set_isolation_history(strings(&["Round 1"]));
     ui.set_isolation_recovery("failed".into());
@@ -476,7 +477,7 @@ fn no_manual_round_restore_action_is_offered() {
     assert!(!ephervex_i18n::has("gui-isolation-reapply"));
     let ui = window();
     client_workspace(&ui);
-    ui.set_workspace_tab("Isolation".into());
+    support::set_surface(&ui, 1, "Isolation");
     ui.set_isolation_phase("round".into());
     settle(&ui);
     assert!(!visible(&ui, "Restore this round's mod setup"));
@@ -487,7 +488,7 @@ fn no_manual_round_restore_action_is_offered() {
 fn isolation_state_survives_logs_and_mods_navigation() {
     let ui = window();
     client_workspace(&ui);
-    ui.set_workspace_tab("Isolation".into());
+    support::set_surface(&ui, 1, "Isolation");
     ui.set_isolation_phase("round".into());
     ui.set_isolation_round(3);
     ui.set_isolation_enabled(strings(&["mods/persistent.jar"]));
@@ -495,7 +496,7 @@ fn isolation_state_survives_logs_and_mods_navigation() {
 
     tab(&ui, &lookup("gui-instance-tab-logs")).invoke_accessible_default_action();
     settle(&ui);
-    assert_eq!(ui.get_workspace_tab(), "Logs");
+    assert_eq!(support::surface(&ui, 0), "Logs");
     assert_eq!(ui.get_isolation_round(), 3);
 
     tab(&ui, &lookup("gui-isolation-tab")).invoke_accessible_default_action();
@@ -504,7 +505,7 @@ fn isolation_state_survives_logs_and_mods_navigation() {
 
     tab(&ui, &lookup("gui-instance-tab-mods")).invoke_accessible_default_action();
     settle(&ui);
-    assert_eq!(ui.get_workspace_tab(), "Mods");
+    assert_eq!(support::surface(&ui, 0), "Mods");
 
     tab(&ui, &lookup("gui-isolation-tab")).invoke_accessible_default_action();
     settle(&ui);
@@ -516,7 +517,7 @@ fn isolation_state_survives_logs_and_mods_navigation() {
 fn persistent_round_actions_answer_and_open_the_detailed_surface() {
     let ui = window();
     client_workspace(&ui);
-    ui.set_workspace_tab("Logs".into());
+    support::set_surface(&ui, 1, "Logs");
     ui.set_isolation_host_kind("client".into());
     ui.set_isolation_host_id("host".into());
     ui.set_active_workflow_id("mod-isolation".into());
@@ -544,14 +545,14 @@ fn persistent_round_actions_answer_and_open_the_detailed_surface() {
 
     button(&ui, "gui-isolation-detailed-view").mock_single_click(PointerEventButton::Left);
     settle(&ui);
-    assert_eq!(ui.get_workspace_tab(), "Isolation");
+    assert_eq!(support::surface(&ui, 0), "Isolation");
 }
 
 #[test]
 fn result_separates_testable_candidates_from_untested_pins_and_dependencies() {
     let ui = window();
     client_workspace(&ui);
-    ui.set_workspace_tab("Isolation".into());
+    support::set_surface(&ui, 1, "Isolation");
     ui.set_isolation_phase("contradiction".into());
     settle(&ui);
     assert!(visible(&ui, &lookup("gui-isolation-contradiction")));
@@ -583,7 +584,7 @@ fn result_separates_testable_candidates_from_untested_pins_and_dependencies() {
 fn host_actions_remain_available_for_client_and_server_workspaces() {
     let ui = window();
     client_workspace(&ui);
-    ui.set_workspace_tab("Isolation".into());
+    support::set_surface(&ui, 1, "Isolation");
     settle(&ui);
 
     let client_launches = Rc::new(RefCell::new(Vec::new()));
@@ -593,7 +594,7 @@ fn host_actions_remain_available_for_client_and_server_workspaces() {
     assert_eq!(client_launches.borrow().as_slice(), ["host".to_owned()]);
 
     server_workspace(&ui, server(false));
-    ui.set_workspace_tab("Isolation".into());
+    support::set_surface(&ui, 1, "Isolation");
     settle(&ui);
     let starts = Rc::new(RefCell::new(Vec::new()));
     let start_sink = Rc::clone(&starts);
@@ -602,7 +603,7 @@ fn host_actions_remain_available_for_client_and_server_workspaces() {
     assert_eq!(starts.borrow().as_slice(), ["server".to_owned()]);
 
     server_workspace(&ui, server(true));
-    ui.set_workspace_tab("Isolation".into());
+    support::set_surface(&ui, 1, "Isolation");
     settle(&ui);
     let stops = Rc::new(RefCell::new(Vec::new()));
     let stop_sink = Rc::clone(&stops);
@@ -627,24 +628,20 @@ fn workflow_action(id: &str, message: &str, requires_stopped: bool) -> WorkflowA
 }
 
 fn client_workspace(ui: &AppWindow) {
-    ui.set_loading(false);
-    ui.set_page(0);
-    ui.set_workspace("instance".into());
-    ui.set_instances(ModelRc::new(VecModel::from(vec![instance()])));
-    ui.set_selected_instance_index(0);
-    ui.set_selected_instance_id("host".into());
+    client_workspace_with(ui, instance());
+}
+
+fn client_workspace_with(ui: &AppWindow, row: InstanceRow) {
+    support::show_client(ui, row, "Overview");
+    support::follow_surface_requests(ui);
     ui.set_isolation_host_kind("client".into());
     ui.set_isolation_host_id("host".into());
     settle(ui);
 }
 
 fn server_workspace(ui: &AppWindow, row: ServerRow) {
-    ui.set_loading(false);
-    ui.set_page(1);
-    ui.set_workspace("server".into());
-    ui.set_servers(ModelRc::new(VecModel::from(vec![row])));
-    ui.set_selected_server_index(0);
-    ui.set_selected_server_id("server".into());
+    support::show_server(ui, row, "Overview");
+    support::follow_surface_requests(ui);
     settle(ui);
 }
 

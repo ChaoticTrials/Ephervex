@@ -2,6 +2,8 @@
 //! repair, and the reasons Repair waits.
 #![allow(clippy::expect_used, clippy::panic)]
 
+mod support;
+
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -81,7 +83,7 @@ fn checked_surface(ui: &AppWindow, server_host: bool, running: bool) {
     ui.set_host_busy_kind(SharedString::default());
     ui.set_host_busy_id(SharedString::default());
     ui.set_active_workflow_id(SharedString::default());
-    ui.set_workspace_tab("Diagnostics".into());
+    support::set_surface(ui, 1, "Diagnostics");
     ui.set_integrity_state("checked".into());
     ui.set_integrity_summary(
         lookup_args("gui-integrity-problems", [("count", Arg::from(1))]).into(),
@@ -98,28 +100,23 @@ fn host_kinds() -> [(bool, &'static str, &'static str); 2] {
 #[test]
 fn diagnostics_is_a_surface_of_client_and_server_workspaces() {
     let ui = window();
-    let opened = Rc::new(RefCell::new(Vec::new()));
-    let sink = Rc::clone(&opened);
-    ui.on_open_integrity(move |kind, id| {
-        sink.borrow_mut().push((kind.to_string(), id.to_string()));
-    });
-    for (server_host, kind, id) in host_kinds() {
+    let requests = support::follow_surface_requests(&ui);
+    for (server_host, kind, _) in host_kinds() {
         if server_host {
             server_workspace(&ui, server(false));
         } else {
             client_workspace(&ui, instance());
         }
-        ui.set_workspace_tab("Overview".into());
         settle(&ui);
 
         tab(&ui, "gui-diagnostics-tab").mock_single_click(PointerEventButton::Left);
         settle(&ui);
 
-        assert_eq!(ui.get_workspace_tab(), "Diagnostics");
         assert_eq!(
-            opened.borrow().last(),
-            Some(&(kind.to_owned(), id.to_owned()))
+            requests.borrow().last(),
+            Some(&(1, "Diagnostics".to_owned()))
         );
+        assert_eq!(support::surface(&ui, 0), "Diagnostics");
         assert!(enabled(&ui, "gui-integrity-verify"), "{kind}");
     }
 }
@@ -245,18 +242,13 @@ fn shared_launch_files_are_described_for_what_each_host_kind_supports() {
 #[test]
 fn diagnostics_links_to_the_logs_surface() {
     let ui = window();
-    let logs = Rc::new(RefCell::new(Vec::new()));
-    let sink = Rc::clone(&logs);
-    ui.on_open_live_log(move |kind, id| sink.borrow_mut().push((kind.to_string(), id.to_string())));
-    for (server_host, kind, id) in host_kinds() {
+    let requests = support::follow_surface_requests(&ui);
+    for (server_host, _, _) in host_kinds() {
         checked_surface(&ui, server_host, false);
         button(&ui, "gui-integrity-open-logs").mock_single_click(PointerEventButton::Left);
         settle(&ui);
-        assert_eq!(ui.get_workspace_tab(), "Logs");
-        assert_eq!(
-            logs.borrow().last(),
-            Some(&(kind.to_owned(), id.to_owned()))
-        );
+        assert_eq!(requests.borrow().last(), Some(&(1, "Logs".to_owned())));
+        assert_eq!(support::surface(&ui, 0), "Logs");
     }
 }
 
@@ -357,22 +349,12 @@ fn an_exported_bundle_says_where_it_went_and_can_be_shown() {
 }
 
 fn client_workspace(ui: &AppWindow, row: InstanceRow) {
-    ui.set_loading(false);
-    ui.set_page(0);
-    ui.set_workspace("instance".into());
-    ui.set_instances(ModelRc::new(VecModel::from(vec![row])));
-    ui.set_selected_instance_index(0);
-    ui.set_selected_instance_id("host".into());
+    support::show_client(ui, row, "Overview");
     settle(ui);
 }
 
 fn server_workspace(ui: &AppWindow, row: ServerRow) {
-    ui.set_loading(false);
-    ui.set_page(1);
-    ui.set_workspace("server".into());
-    ui.set_servers(ModelRc::new(VecModel::from(vec![row])));
-    ui.set_selected_server_index(0);
-    ui.set_selected_server_id("server".into());
+    support::show_server(ui, row, "Overview");
     settle(ui);
 }
 

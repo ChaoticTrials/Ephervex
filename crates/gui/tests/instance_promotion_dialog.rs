@@ -7,6 +7,8 @@
 
 #![allow(clippy::expect_used)]
 
+mod support;
+
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -219,13 +221,8 @@ fn record_submissions(ui: &AppWindow) -> Rc<RefCell<Vec<String>>> {
 }
 
 fn client_workspace_with(ui: &AppWindow, row: InstanceRow) {
-    ui.set_loading(false);
-    ui.set_page(0);
-    ui.set_workspace("instance".into());
-    ui.set_workspace_tab("Overview".into());
-    ui.set_instances(ModelRc::new(VecModel::from(vec![row])));
-    ui.set_selected_instance_index(0);
-    ui.set_selected_instance_id("repro-client".into());
+    support::show_client(ui, row, "Overview");
+    support::follow_surface_requests(ui);
     settle(ui);
 }
 

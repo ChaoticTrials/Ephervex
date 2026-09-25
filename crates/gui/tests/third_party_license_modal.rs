@@ -78,7 +78,7 @@ fn the_slint_attribution_widget_is_on_the_about_screen() {
     let ui = window();
     ui.set_loading(false);
     ui.set_page(4);
-    ui.set_workspace_tab("About & Licenses".into());
+    ui.set_settings_tab("About & Licenses".into());
     settle(&ui);
 
     let found = ElementHandle::find_by_element_type_name(&ui, "AboutSlint");

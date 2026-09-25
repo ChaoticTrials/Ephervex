@@ -1616,6 +1616,9 @@ gui-select-all = Select All
 gui-diagnostics = DIAGNOSTICS
 gui-view-logs-crash-reports = View Logs & Crash Reports
 gui-back-instances = Back to Instances
+# A workspace pane whose client or server was deleted while it was shown.
+gui-workspace-host-gone = No longer installed
+gui-workspace-host-gone-detail = This client or server was removed. Choose another host for this pane or close it.
 gui-instance = Instance
 gui-instance-tab-overview = Overview
 gui-instance-tab-mods = Mods

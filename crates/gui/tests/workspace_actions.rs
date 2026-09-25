@@ -7,6 +7,8 @@
 
 #![allow(clippy::expect_used)]
 
+mod support;
+
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -15,7 +17,7 @@ use ephervex_i18n::{Arg, lookup, lookup_args};
 use i_slint_backend_testing::{
     AccessibleRole, ElementHandle, TestingBackend, TestingBackendOptions,
 };
-use slint::{ComponentHandle, ModelRc, PhysicalSize, SharedString, VecModel};
+use slint::{ComponentHandle, PhysicalSize, SharedString};
 
 /// The client workspace opens the client's own folder.
 ///
@@ -90,7 +92,7 @@ fn the_pack_mod_opt_in_survives_leaving_its_tab() {
     });
 
     client_workspace(&ui);
-    ui.set_workspace_tab("Settings".into());
+    support::set_surface(&ui, 1, "Settings");
     settle(&ui);
 
     let toggle = opt_in(&ui).expect("the Settings tab offers the opt-in");
@@ -106,9 +108,9 @@ fn the_pack_mod_opt_in_survives_leaving_its_tab() {
         "and has to be what the window now holds"
     );
 
-    ui.set_workspace_tab("Overview".into());
+    support::set_surface(&ui, 1, "Overview");
     settle(&ui);
-    ui.set_workspace_tab("Settings".into());
+    support::set_surface(&ui, 1, "Settings");
     settle(&ui);
 
     let toggle = opt_in(&ui).expect("the opt-in is still there");
@@ -134,13 +136,8 @@ fn client_workspace(ui: &AppWindow) {
 }
 
 fn client_workspace_with(ui: &AppWindow, row: InstanceRow) {
-    ui.set_loading(false);
-    ui.set_page(0);
-    ui.set_workspace("instance".into());
-    ui.set_workspace_tab("Overview".into());
-    ui.set_instances(ModelRc::new(VecModel::from(vec![row])));
-    ui.set_selected_instance_index(0);
-    ui.set_selected_instance_id("repro-client".into());
+    support::show_client(ui, row, "Overview");
+    support::follow_surface_requests(ui);
     settle(ui);
 }
 

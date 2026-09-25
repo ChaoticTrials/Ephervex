@@ -25,7 +25,7 @@ fn the_running_page_is_its_own_entry_and_asks_for_the_list_when_opened() {
 
     ui.set_loading(false);
     ui.set_page(0);
-    ui.set_workspace(SharedString::default());
+    ui.set_workspace_open(false);
     settle(&ui);
 
     ElementHandle::find_by_accessible_label(&ui, &lookup("gui-running"))
@@ -69,7 +69,7 @@ fn a_clients_two_ways_to_stop_are_offered_separately() {
     ui.on_force_stop_launch(move |id, _launch| record.borrow_mut().push(id.to_string()));
     let opened: Rc<RefCell<Vec<String>>> = Rc::default();
     let record = Rc::clone(&opened);
-    ui.on_load_instance_workspace(move |id| record.borrow_mut().push(id.to_string()));
+    ui.on_open_workspace(move |_kind, id, _surface| record.borrow_mut().push(id.to_string()));
 
     running_page(&ui, vec![client()]);
     settle(&ui);
@@ -166,14 +166,16 @@ fn only_a_server_is_offered_a_console() {
     assert_eq!(stopped.borrow().as_slice(), ["repro-server"]);
 }
 
-/// Opening a run's log lands on the workspace that owns it, on the live log.
+/// Opening a run's log opens the workspace that owns it, on its Logs surface.
 #[test]
-fn opening_a_runs_log_lands_on_its_own_workspace() {
+fn opening_a_runs_log_opens_its_own_workspace_on_logs() {
     let ui = window();
-    let opened: Rc<RefCell<Vec<(String, String)>>> = Rc::default();
+    let opened: Rc<RefCell<Vec<(String, String, String)>>> = Rc::default();
     let record = Rc::clone(&opened);
-    ui.on_open_live_log(move |kind, id| {
-        record.borrow_mut().push((kind.to_string(), id.to_string()));
+    ui.on_open_workspace(move |kind, id, surface| {
+        record
+            .borrow_mut()
+            .push((kind.to_string(), id.to_string(), surface.to_string()));
     });
 
     running_page(&ui, vec![server()]);
@@ -184,17 +186,13 @@ fn opening_a_runs_log_lands_on_its_own_workspace() {
         .expect("every run offers its log")
         .mock_single_click(PointerEventButton::Left);
 
-    assert_eq!(ui.get_page(), 1);
-    assert_eq!(ui.get_workspace(), "server");
-    assert_eq!(ui.get_workspace_tab(), "Logs");
-    assert_eq!(ui.get_selected_server_id(), "repro-server");
-    assert!(
-        !ui.get_log_shows_files(),
-        "the log being written is what somebody watching a run wants"
-    );
     assert_eq!(
         opened.borrow().as_slice(),
-        [("server".to_owned(), "repro-server".to_owned())]
+        [(
+            "server".to_owned(),
+            "repro-server".to_owned(),
+            "Logs".to_owned()
+        )]
     );
 }
 
@@ -231,7 +229,7 @@ fn a_rows_badge_sits_above_its_buttons_against_the_same_edge() {
 fn running_page(ui: &AppWindow, rows: Vec<RunningRow>) {
     ui.set_loading(false);
     ui.set_page(2);
-    ui.set_workspace(SharedString::default());
+    ui.set_workspace_open(false);
     ui.set_running(ModelRc::new(VecModel::from(rows)));
 }
 

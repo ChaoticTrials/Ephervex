@@ -36,7 +36,7 @@ fn a_card_button_is_clickable_across_its_whole_face() {
 
     ui.set_loading(false);
     ui.set_page(0);
-    ui.set_workspace(SharedString::default());
+    ui.set_workspace_open(false);
     ui.set_instances(ModelRc::new(VecModel::from(vec![instance()])));
 
     settle(&ui);
@@ -139,7 +139,9 @@ fn double_clicking_a_card_opens_its_workspace() {
     let ui = window();
     let opened: Rc<RefCell<Vec<String>>> = Rc::default();
     let record = Rc::clone(&opened);
-    ui.on_load_instance_workspace(move |id| record.borrow_mut().push(id.to_string()));
+    ui.on_open_workspace(move |kind, id, surface| {
+        record.borrow_mut().push(format!("{kind}/{id}/{surface}"));
+    });
 
     ui.set_loading(false);
     ui.set_page(0);
@@ -151,8 +153,7 @@ fn double_clicking_a_card_opens_its_workspace() {
         .expect("the list holds the card");
     double_click(&ui, &card);
 
-    assert_eq!(opened.borrow().as_slice(), ["repro-client"]);
-    assert_eq!(ui.get_workspace(), "instance");
+    assert_eq!(opened.borrow().as_slice(), ["client/repro-client/Overview"]);
 }
 
 /// Two presses inside the platform's double-click interval, at the element's

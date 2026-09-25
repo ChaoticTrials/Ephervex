@@ -8,9 +8,11 @@
 
 #![allow(clippy::expect_used, clippy::panic)]
 
+mod support;
+
 use std::rc::Rc;
 
-use ephervex_gui::ui::{AppWindow, GuiI18n, ModRow};
+use ephervex_gui::ui::{AppWindow, GuiI18n, InstanceRow, ModRow};
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use i_slint_backend_testing::{ElementHandle, TestingBackend, TestingBackendOptions};
 use slint::{ComponentHandle, Image, ModelRc, PhysicalSize, SharedString, VecModel};
@@ -171,11 +173,15 @@ fn row(can_remove: bool, can_delete_file: bool) -> ModRow {
     }
 }
 
+fn client() -> InstanceRow {
+    InstanceRow {
+        id: "an-id".into(),
+        ..InstanceRow::default()
+    }
+}
+
 fn show(ui: &AppWindow, mods_are_the_users: bool, rows: &[ModRow]) {
-    ui.set_page(0);
-    ui.set_workspace("instance".into());
-    ui.set_workspace_tab("Mods".into());
-    ui.set_selected_instance_id("an-id".into());
+    support::show_client(ui, client(), "Mods");
     ui.set_instance_allow_pack_mod_changes(mods_are_the_users);
     ui.set_managed_mods(ModelRc::from(Rc::new(VecModel::from(rows.to_vec()))));
     slint::platform::update_timers_and_animations();

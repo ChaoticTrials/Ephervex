@@ -50,9 +50,21 @@ impl Surface {
     #[must_use]
     pub const fn offered_by(host: InstalledHost) -> &'static [Self] {
         match host {
-            InstalledHost::Instance(_) => &CLIENT_SURFACES,
-            InstalledHost::Server(_) => &SERVER_SURFACES,
+            InstalledHost::Instance(_) => Self::client(),
+            InstalledHost::Server(_) => Self::server(),
         }
+    }
+
+    /// What every client instance offers.
+    #[must_use]
+    pub const fn client() -> &'static [Self] {
+        &CLIENT_SURFACES
+    }
+
+    /// What every local server offers.
+    #[must_use]
+    pub const fn server() -> &'static [Self] {
+        &SERVER_SURFACES
     }
 
     #[must_use]
