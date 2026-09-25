@@ -9167,6 +9167,27 @@ mod tests {
         assert_eq!(client_view.isolation_candidates.row_count(), 0);
     }
 
+    /// Another pane on the same client switching surfaces or closing leaves
+    /// the isolation round the first pane shows exactly as it was.
+    #[test]
+    fn another_pane_switching_or_closing_leaves_an_isolation_round_alone() {
+        let (ui, workspace, isolation_commands, host) = isolation_window();
+        apply_isolation_data(&ui, &workspace, isolation_data(&host.id(), true, "round"));
+        ui.invoke_split_pane_beside(1);
+        ui.invoke_show_pane_surface(2, "Logs".into());
+        ui.invoke_show_pane_surface(2, "Mods".into());
+        ui.invoke_close_pane(2);
+
+        assert_eq!(shown(&workspace), [(host, Surface::Isolation)]);
+        let view = first_view(&ui);
+        assert_eq!(view.isolation_phase, "round");
+        assert_eq!(view.workflow_id, ISOLATION_WORKFLOW);
+        assert!(
+            isolation_commands.try_recv().is_err(),
+            "nothing was asked of the session"
+        );
+    }
+
     #[test]
     fn a_host_change_without_a_session_retires_the_setup_planned_before_it() {
         let (ui, workspace, _, host) = isolation_window();
