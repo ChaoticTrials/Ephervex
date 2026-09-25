@@ -160,6 +160,40 @@ not another host header or navigation structure. More than one host workspace
 can therefore be composed by a parent without teaching its surfaces about that
 parent.
 
+### Split workspace
+
+The workspace can be split into two to four panes, each showing one host and
+one of its surfaces. The layout is a typed model in the GUI crate whose only
+values are a single pane and the 1:1, 2:1, 1:2, and 2:2 shapes: two equal
+columns, each holding one pane or two equal stacked panes. A single pane offers
+Split beside; a full-height pane of a split offers a pane below it; every pane
+of a split can be closed, and closing settles on the next smaller shape in
+reading order, down to the single pane. A new pane shows the same host's
+Overview. Each pane of a split carries a compact header: a host picker listing
+every installed client and server, a surface picker, the host's state, its
+Restart and primary action, and the layout controls. Its accessible label names
+its position, host, and surface, so two panes on one host are never announced
+alike. The split has one Back, above the panes, which leaves for the page the
+split was opened from. The workspace is not persisted: opening a host from a
+list replaces the layout with a single pane.
+
+The layout owns composition only (see ADR 0039). The controller renders one
+host view per shown host and one row per pane pointing at it, and every feature
+(snapshots, runtime settings, server properties, mod lists and catalog
+searches, isolation, Diagnostics and bundles, workflow status) writes by host,
+so every pane on a host reads the same state. What a single pane is looking at
+stays with the pane: each Logs or Console pane has its own log viewer, and the
+worker follows each client's log for as long as a pane reads it. The
+single-flight guards (the isolation change, the verification or repair, a
+host's restart, the host-change claim) stay in the controller and the worker,
+so two panes on one host cannot start the same work twice. A pane whose host is
+deleted stays in place, says so, and can be pointed at another host or closed.
+
+Panes are framed and clipped. Below `Theme.workspace-pane-min-width` and
+`Theme.workspace-pane-min-height` the pane area scrolls instead of letting panes
+shrink or overlap. Surfaces laid out for the full-width workspace can be wider
+than a pane at the smallest window size; they scroll or clip inside their pane.
+
 The workspace does not interpret isolation state. The controller supplies a
 workflow identifier, status copy, and action rows, and routes those actions to
 the owning feature. Isolation currently uses that extension point for its
