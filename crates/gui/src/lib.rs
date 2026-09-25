@@ -14,6 +14,7 @@ pub mod presentation;
 pub mod ui;
 pub mod window_aspect;
 pub mod window_events;
+pub mod workspace_layout;
 
 #[cfg(test)]
 mod test_support;
