@@ -1,10 +1,12 @@
 //! The host workspace as the window shows it: the layout's panes, and one view
 //! of each host they show.
 //!
-//! A host view is built once per host, however many panes show it, from the
-//! host's own row. Nothing here owns host or feature state; it only decides
-//! which host and surface each pane is on.
+//! A host view is built once per host, however many panes show it: the
+//! host's own row, plus what the controller's features last reported about
+//! that host. Features update a host's view by host, never by pane, so every
+//! pane showing the host reads the same answer.
 
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use ephervex_core::InstalledHost;
@@ -15,7 +17,8 @@ use super::HostLifecycle;
 use super::log_views::LogViews;
 use crate::backend;
 use crate::ui::{
-    AppWindow, HostView, InstanceRow, ServerRow, WorkspacePaneRow, WorkspaceSurfaceRow,
+    AppWindow, HostView, InstanceRow, PendingEntityRow, ServerRow, WorkspacePaneRow,
+    WorkspaceSurfaceRow,
 };
 use crate::workspace_layout::{PaneId, Surface, WorkspaceLayout};
 
@@ -26,6 +29,10 @@ pub(super) struct WorkspaceState {
     /// lists' own filters: a pane shows its host whatever those lists hide.
     clients: Vec<InstanceRow>,
     servers: Vec<ServerRow>,
+    /// What features reported about each shown host, kept between renders.
+    reported: HashMap<InstalledHost, HostView>,
+    /// The hosts in the order their views were last written.
+    shown: Vec<InstalledHost>,
     host_views: Rc<VecModel<HostView>>,
     panes: Rc<VecModel<WorkspacePaneRow>>,
     /// Each host kind's navigation, built once so a re-rendered host view
@@ -40,6 +47,8 @@ impl Default for WorkspaceState {
             layout: None,
             clients: Vec::new(),
             servers: Vec::new(),
+            reported: HashMap::new(),
+            shown: Vec::new(),
             host_views: Rc::new(VecModel::default()),
             panes: Rc::new(VecModel::default()),
             client_surfaces: surface_rows(Surface::client()),
@@ -102,6 +111,27 @@ impl WorkspaceState {
         Some(PaneChange { before, after })
     }
 
+    /// Changes what a feature reported about `host`, answering whether the
+    /// workspace shows that host at all. A host no pane shows keeps nothing:
+    /// opening it again asks its features afresh.
+    pub(super) fn update(
+        &mut self,
+        host: InstalledHost,
+        change: impl FnOnce(&mut HostView),
+    ) -> bool {
+        let Some(reported) = self.reported.get_mut(&host) else {
+            return false;
+        };
+        change(reported);
+        if let Some(index) = self.shown.iter().position(|&shown| shown == host)
+            && let Some(mut row) = self.host_views.row_data(index)
+        {
+            change_row(&mut row, reported);
+            self.host_views.set_row_data(index, row);
+        }
+        true
+    }
+
     /// Whether some pane shows `surface` of `host`.
     pub(super) fn shows(&self, host: InstalledHost, surface: Surface) -> bool {
         self.layout.as_ref().is_some_and(|layout| {
@@ -122,18 +152,45 @@ impl WorkspaceState {
         }
     }
 
-    /// Writes the panes and one view per shown host into the window.
-    pub(super) fn render(&self, ui: &AppWindow, lifecycle: &HostLifecycle, logs: &LogViews) {
+    /// Writes the panes and one view per shown host into the window, and
+    /// answers the hosts that entered it, whose features have yet to report.
+    pub(super) fn render(
+        &mut self,
+        ui: &AppWindow,
+        lifecycle: &HostLifecycle,
+        logs: &LogViews,
+    ) -> Vec<InstalledHost> {
         let Some(layout) = &self.layout else {
             ui.set_workspace_open(false);
+            self.reported.clear();
+            self.shown.clear();
             sync_rows(&self.panes, Vec::new());
             sync_rows(&self.host_views, Vec::new());
-            return;
+            return Vec::new();
         };
         let hosts = layout.hosts();
+        self.reported.retain(|host, _| hosts.contains(host));
+        let entered = hosts
+            .iter()
+            .copied()
+            .filter(|host| !self.reported.contains_key(host))
+            .collect::<Vec<_>>();
+        for &host in &entered {
+            // The lists a render rewrites in place, made once per host so a
+            // render that changes nothing in them does not rebuild them.
+            self.reported.insert(
+                host,
+                HostView {
+                    linked_servers: ModelRc::new(VecModel::default()),
+                    pending_servers: ModelRc::new(VecModel::default()),
+                    ..HostView::default()
+                },
+            );
+        }
+        let pending = ui.get_linked_pending_servers();
         let views = hosts
             .iter()
-            .map(|&host| self.host_view(host, lifecycle))
+            .map(|&host| self.host_view(host, lifecycle, &pending))
             .collect();
         let panes = layout
             .panes()
@@ -165,21 +222,27 @@ impl WorkspaceState {
             Some(InstalledHost::Server(_)) => "gui-back-servers",
             _ => "gui-back-instances",
         };
+        self.shown = hosts;
         ui.set_workspace_back_label(lookup(back).into());
         ui.set_workspace_open(true);
+        entered
     }
 
-    fn host_view(&self, host: InstalledHost, lifecycle: &HostLifecycle) -> HostView {
+    fn host_view(
+        &self,
+        host: InstalledHost,
+        lifecycle: &HostLifecycle,
+        pending: &ModelRc<PendingEntityRow>,
+    ) -> HostView {
         let id = host.id();
-        let mut view = HostView {
-            kind: host.kind().into(),
-            id: id.as_str().into(),
-            surfaces: match host {
-                InstalledHost::Instance(_) => self.client_surfaces.clone(),
-                InstalledHost::Server(_) => self.server_surfaces.clone(),
-            },
-            ..HostView::default()
+        let mut view = self.reported.get(&host).cloned().unwrap_or_default();
+        view.kind = host.kind().into();
+        view.id = id.as_str().into();
+        view.surfaces = match host {
+            InstalledHost::Instance(_) => self.client_surfaces.clone(),
+            InstalledHost::Server(_) => self.server_surfaces.clone(),
         };
+        view.available = false;
         match host {
             InstalledHost::Instance(_) => {
                 if let Some(row) = self.clients.iter().find(|row| row.id == id.as_str()) {
@@ -187,6 +250,18 @@ impl WorkspaceState {
                     lifecycle.stamp_client(&mut view.client);
                     view.available = true;
                 }
+                let linked = self
+                    .servers
+                    .iter()
+                    .filter(|row| row.linked_client_id == id.as_str())
+                    .cloned()
+                    .map(|mut row| {
+                        lifecycle.stamp_server(&mut row);
+                        row
+                    })
+                    .collect::<Vec<_>>();
+                view.linked_servers = reuse(&view.linked_servers, linked);
+                view.pending_servers = reuse(&view.pending_servers, pending_for(pending, &id));
             }
             InstalledHost::Server(_) => {
                 if let Some(row) = self.servers.iter().find(|row| row.id == id.as_str()) {
@@ -197,6 +272,46 @@ impl WorkspaceState {
             }
         }
         view
+    }
+}
+
+/// Writes what a feature reported into a host view already on screen, keeping
+/// the parts only the render owns: the host's identity, row, and navigation.
+fn change_row(row: &mut HostView, reported: &HostView) {
+    let mut updated = reported.clone();
+    updated.kind = row.kind.clone();
+    updated.id = row.id.clone();
+    updated.available = row.available;
+    updated.client = row.client.clone();
+    updated.server = row.server.clone();
+    updated.surfaces = row.surfaces.clone();
+    updated.linked_servers = row.linked_servers.clone();
+    updated.pending_servers = row.pending_servers.clone();
+    *row = updated;
+}
+
+/// A client's linked servers that are still being created.
+pub(super) fn pending_for(
+    pending: &ModelRc<PendingEntityRow>,
+    client: &str,
+) -> Vec<PendingEntityRow> {
+    pending
+        .iter()
+        .filter(|row| row.linked_client_id == client)
+        .collect()
+}
+
+/// `rows` in `model` when it can hold them in place, so a list on screen is
+/// not rebuilt by a render that changed nothing in it.
+pub(super) fn reuse<T: Clone + PartialEq + 'static>(
+    model: &ModelRc<T>,
+    rows: Vec<T>,
+) -> ModelRc<T> {
+    if let Some(existing) = model.as_any().downcast_ref::<VecModel<T>>() {
+        sync_rows(existing, rows);
+        model.clone()
+    } else {
+        ModelRc::new(VecModel::from(rows))
     }
 }
 

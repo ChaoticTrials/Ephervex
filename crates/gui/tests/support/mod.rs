@@ -109,3 +109,12 @@ pub(crate) fn follow_surface_requests(ui: &AppWindow) -> Rc<RefCell<Vec<(i32, St
     });
     requests
 }
+
+/// Changes the host view at `index`, as a feature's answer does.
+pub(crate) fn update_host(ui: &AppWindow, index: usize, change: impl FnOnce(&mut HostView)) {
+    let views = ui.get_host_views();
+    if let Some(mut view) = views.row_data(index) {
+        change(&mut view);
+        views.set_row_data(index, view);
+    }
+}

@@ -54,7 +54,7 @@ fn the_mods_panel_offers_to_disable_only_what_the_report_stated() {
     ])));
     // One stated suspect. The compat trigger in the list is deliberately not
     // counted: it is an inference, and it stays a row the user ticks by hand.
-    ui.set_crash_suggested(1);
+    support::update_host(&ui, 0, |view| view.crash_suggested = 1);
     settle(&ui);
 
     let label = lookup_args("gui-crash-disable-suggested", [("count", Arg::Count(1))]);
@@ -95,7 +95,7 @@ fn a_report_naming_only_mods_already_switched_off_offers_no_action() {
     let mut already_off = suspect_mod();
     already_off.enabled = false;
     ui.set_server_mods(ModelRc::new(VecModel::from(vec![already_off])));
-    ui.set_crash_suggested(0);
+    support::update_host(&ui, 0, |view| view.crash_suggested = 0);
     settle(&ui);
 
     let label = lookup_args("gui-crash-disable-suggested", [("count", Arg::Count(0))]);
@@ -114,7 +114,7 @@ fn a_report_naming_only_mods_already_switched_off_offers_no_action() {
 fn a_server_that_has_not_crashed_shows_no_notice() {
     let ui = window();
     crashed_server_workspace(&ui);
-    ui.set_crash_report(SharedString::default());
+    support::update_host(&ui, 0, |view| view.crash_report = SharedString::default());
     settle(&ui);
 
     assert!(
@@ -126,13 +126,13 @@ fn a_server_that_has_not_crashed_shows_no_notice() {
 
 /// The server workspace, on a server whose newest crash report named a mod.
 fn crashed_server_workspace(ui: &AppWindow) {
-    support::show_server(ui, server(), "Overview");
-    ui.set_crash_report("crash-2026-08-30_18.09.07-server.txt".into());
-    ui.set_crash_failure(
-        "java.lang.NoClassDefFoundError: net/minecraft/client/multiplayer/ClientLevel".into(),
-    );
-    ui.set_crash_client_code_on_server(true);
-    ui.set_crash_suggested(1);
+    let mut view = support::server_view(server());
+    view.crash_report = "crash-2026-08-30_18.09.07-server.txt".into();
+    view.crash_failure =
+        "java.lang.NoClassDefFoundError: net/minecraft/client/multiplayer/ClientLevel".into();
+    view.crash_client_code_on_server = true;
+    view.crash_suggested = 1;
+    support::show(ui, 1, vec![view], vec![support::pane(1, 0, "Overview")]);
 }
 
 /// Renders once, which is what gives every element the geometry a pointer event

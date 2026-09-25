@@ -79,9 +79,9 @@ fn a_vanilla_instance_still_offers_its_folder() {
 }
 
 /// Turning the pack-mod opt-in on and leaving the Settings tab destroys the
-/// switch; coming back builds a new one from the window's own value. A switch
-/// that writes only its own state leaves that value behind, so the opt-in
-/// reads as off however many times it was turned on.
+/// switch; coming back builds a new one from the host's recorded value. The
+/// switch shows that value, the one the instance read back after the change,
+/// rather than a position of its own.
 #[test]
 fn the_pack_mod_opt_in_survives_leaving_its_tab() {
     let ui = window();
@@ -103,10 +103,13 @@ fn the_pack_mod_opt_in_survives_leaving_its_tab() {
         [("repro-client".to_owned(), true)],
         "turning it on has to reach the launcher"
     );
-    assert!(
-        ui.get_instance_allow_pack_mod_changes(),
-        "and has to be what the window now holds"
+    assert_eq!(
+        opt_in(&ui).and_then(|toggle| toggle.accessible_checked()),
+        Some(false),
+        "until the instance records it, the switch shows what is recorded"
     );
+    support::update_host(&ui, 0, |view| view.allow_pack_mod_changes = true);
+    settle(&ui);
 
     support::set_surface(&ui, 1, "Overview");
     settle(&ui);

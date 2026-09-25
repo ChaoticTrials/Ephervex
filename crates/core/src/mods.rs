@@ -596,7 +596,7 @@ impl InstancePackSource {
 /// reads a mod list is therefore written once against this rather than twice
 /// against two ids, which is what keeps the server's Mods panel from being a
 /// second implementation that drifts from the client's.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum InstalledHost {
     Instance(InstanceId),
     Server(ServerId),

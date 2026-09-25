@@ -41,8 +41,8 @@ use crate::ui::{
     GuiI18n, HostView, ImpactRow, ImportDuplicateRow, ImportOptionRow, InstanceRow,
     IntegrityFindingRow, IsolationCandidateRow, JavaRow, LicenseRow, LinkedTargetRow,
     LocalModClashRow, LogChunk, ModRow, ModSearchRow, ModVersionRow, PendingEntityRow,
-    PromoteServerRow, RelationRow, RunningRow, ServerRow, SnapshotRow, Theme, WindowSizePreview,
-    WorkflowActionRow,
+    PromoteServerRow, PropertyRules, RelationRow, RunningRow, ServerRow, SnapshotRow, Theme,
+    WindowSizePreview, WorkflowActionRow,
 };
 use crate::window_aspect;
 use crate::workspace_layout::{PaneId, Surface, WorkspaceLayout};
@@ -1481,20 +1481,22 @@ fn stamp_host_lifecycle(ui: &AppWindow, lifecycle: &HostLifecycle) {
     stamp_rows(&ui.get_instances(), |row: &mut InstanceRow| {
         lifecycle.stamp_client(row)
     });
-    for list in [
-        ui.get_servers(),
-        ui.get_global_servers(),
-        ui.get_linked_servers(),
-    ] {
+    for list in [ui.get_servers(), ui.get_global_servers()] {
         stamp_rows(&list, |row: &mut ServerRow| lifecycle.stamp_server(row));
     }
-    stamp_rows(&ui.get_host_views(), |view: &mut HostView| {
+    let views = ui.get_host_views();
+    stamp_rows(&views, |view: &mut HostView| {
         if view.kind == "client" {
             lifecycle.stamp_client(&mut view.client)
         } else {
             lifecycle.stamp_server(&mut view.server)
         }
     });
+    for view in views.iter() {
+        stamp_rows(&view.linked_servers, |row: &mut ServerRow| {
+            lifecycle.stamp_server(row)
+        });
+    }
 }
 
 fn stamp_rows<T: Clone + 'static>(list: &ModelRc<T>, mut stamp: impl FnMut(&mut T) -> bool) {
@@ -2572,7 +2574,7 @@ fn register_callbacks(
 ) {
     register_catalog_actions(ui, commands);
     register_mod_filter(ui, mod_lists);
-    register_client_actions(ui, commands, Rc::clone(creations));
+    register_client_actions(ui, commands, creations);
     register_mod_actions(ui, commands, browser);
     register_create_instance_naming(ui, commands);
     register_import_flow(ui, commands, import_flow, creations);
@@ -3213,13 +3215,13 @@ fn register_launch_actions(ui: &AppWindow, commands: &Sender<Command>) {
 fn register_client_actions(
     ui: &AppWindow,
     commands: &Sender<Command>,
-    creations: Rc<RefCell<CreationTracker>>,
+    creations: &Rc<RefCell<CreationTracker>>,
 ) {
     register_promotion_actions(ui, commands);
     register_pack_link_actions(ui, commands);
     let sender = commands.clone();
     let weak = ui.as_weak();
-    let submit_creations = Rc::clone(&creations);
+    let submit_creations = Rc::clone(creations);
     ui.on_submit_create_instance(move |name, minecraft, loader, loader_version, persistent| {
         let key = CreationKey::Client {
             name: name.trim().to_owned(),
@@ -3253,7 +3255,7 @@ fn register_client_actions(
         );
     });
 
-    register_instance_selection(ui, commands, creations);
+    register_instance_selection(ui, commands);
 
     register_launch_actions(ui, commands);
 
@@ -3948,13 +3950,8 @@ fn register_loader_change(ui: &AppWindow, commands: &Sender<Command>) {
     });
 }
 
-fn register_instance_selection(
-    ui: &AppWindow,
-    commands: &Sender<Command>,
-    creations: Rc<RefCell<CreationTracker>>,
-) {
+fn register_instance_selection(ui: &AppWindow, commands: &Sender<Command>) {
     let sender = commands.clone();
-    let weak = ui.as_weak();
     // What this handler last acted on. The markup assigns `selected-instance-id`
     // before calling in, so the property cannot tell a new selection from a
     // repeat of the current one.
@@ -3963,15 +3960,6 @@ fn register_instance_selection(
         let repeat = *selected.borrow() == id.as_str();
         if !repeat {
             id.as_str().clone_into(&mut selected.borrow_mut());
-        }
-        if let Some(ui) = weak.upgrade() {
-            let linked = ui
-                .get_servers()
-                .iter()
-                .filter(|row| row.linked_client_id == id)
-                .collect::<Vec<_>>();
-            ui.set_linked_servers(reconciled(&ui.get_linked_servers(), linked));
-            apply_pending_creations(&ui, &creations.borrow());
         }
         // Clicking the already-selected card changes nothing that a snapshot
         // would answer, and asking for one anyway is what used to rebuild the
@@ -4428,18 +4416,28 @@ struct Workspace {
 impl Workspace {
     /// Renders the workspace and gives a pane what its new host and surface need.
     fn present(&self, ui: &AppWindow, change: Option<PaneChange>) {
-        let state = self.state.borrow();
-        let panes = state.layout().map_or_else(Vec::new, |layout| {
-            layout
-                .panes()
-                .iter()
-                .map(|placed| (placed.pane.id(), placed.pane.host(), placed.pane.surface()))
-                .collect()
-        });
+        let panes = self
+            .state
+            .borrow()
+            .layout()
+            .map_or_else(Vec::new, |layout| {
+                layout
+                    .panes()
+                    .iter()
+                    .map(|placed| (placed.pane.id(), placed.pane.host(), placed.pane.surface()))
+                    .collect()
+            });
         let mut logs = self.logs.borrow_mut();
         logs.sync(&panes);
-        state.render(ui, &self.lifecycle.borrow(), &logs);
+        let entered = self
+            .state
+            .borrow_mut()
+            .render(ui, &self.lifecycle.borrow(), &logs);
         drop(logs);
+        for host in entered {
+            load_host(ui, host);
+        }
+        let state = self.state.borrow();
         // A single pane is the workspace of its host's page; a split belongs to
         // the page it was opened from.
         if let Some((host, _)) = state.single_content() {
@@ -4452,6 +4450,22 @@ impl Workspace {
         if let Some(change) = change {
             apply_pane_change(ui, change);
         }
+    }
+
+    /// Redraws every host view from the newest rows, as a snapshot requires.
+    fn refresh(&self, ui: &AppWindow) {
+        let entered =
+            self.state
+                .borrow_mut()
+                .render(ui, &self.lifecycle.borrow(), &self.logs.borrow());
+        for host in entered {
+            load_host(ui, host);
+        }
+    }
+
+    /// Changes what a feature reported about a host, in every pane showing it.
+    fn update(&self, host: InstalledHost, change: impl FnOnce(&mut HostView)) -> bool {
+        self.state.borrow_mut().update(host, change)
     }
 
     fn open(&self, ui: &AppWindow, host: InstalledHost, surface: Surface) {
@@ -4550,9 +4564,21 @@ fn select_workspace_host(ui: &AppWindow, host: InstalledHost) {
             let index = ui.get_instances().iter().position(|row| row.id == id);
             ui.set_selected_instance_id(id.clone());
             ui.set_selected_instance_index(index.map_or(-1, to_i32));
-            ui.invoke_select_instance(id.clone());
-            ui.invoke_load_instance_workspace(id);
+            ui.invoke_select_instance(id);
         }
+        InstalledHost::Server(_) => {
+            let index = ui.get_servers().iter().position(|row| row.id == id);
+            ui.set_selected_server_id(id);
+            ui.set_selected_server_index(index.map_or(-1, to_i32));
+        }
+    }
+}
+
+/// Asks for everything a host's workspace shows, once, as it enters the workspace.
+fn load_host(ui: &AppWindow, host: InstalledHost) {
+    let id = SharedString::from(host.id());
+    match host {
+        InstalledHost::Instance(_) => ui.invoke_load_instance_workspace(id),
         InstalledHost::Server(_) => ui.invoke_load_server_workspace(id),
     }
 }
@@ -4562,14 +4588,7 @@ fn activate_surface(ui: &AppWindow, host: InstalledHost, surface: Surface) {
     let kind = SharedString::from(host.kind());
     let id = SharedString::from(host.id());
     match surface {
-        Surface::Snapshots => {
-            ui.set_snapshots(model(Vec::new()));
-            ui.set_snapshot_total(SharedString::default());
-            ui.set_snapshots_have_plain_copies(false);
-            ui.set_snapshot_host_kind(kind.clone());
-            ui.set_snapshot_host_id(id.clone());
-            ui.invoke_load_snapshots(kind, id);
-        }
+        Surface::Snapshots => ui.invoke_load_snapshots(kind, id),
         Surface::Diagnostics => ui.invoke_open_integrity(kind, id),
         Surface::Mods if matches!(host, InstalledHost::Server(_)) => {
             ui.invoke_load_server_mods(id);
@@ -4747,13 +4766,7 @@ fn register_server_actions(ui: &AppWindow, commands: &Sender<Command>, workspace
     });
 
     let sender = commands.clone();
-    let weak = ui.as_weak();
     ui.on_load_server_workspace(move |id| {
-        if let Some(ui) = weak.upgrade() {
-            let index = ui.get_servers().iter().position(|row| row.id == id);
-            ui.set_selected_server_id(id.clone());
-            ui.set_selected_server_index(index.map_or(-1, to_i32));
-        }
         if let Some(id) = backend::parse_server_id(&id) {
             send(&sender, Command::LoadServerWorkspace(id));
         }
@@ -4799,17 +4812,10 @@ fn register_server_actions(ui: &AppWindow, commands: &Sender<Command>, workspace
 }
 
 fn register_server_property_actions(ui: &AppWindow, commands: &Sender<Command>) {
-    let weak = ui.as_weak();
-    ui.on_validate_server_properties(move |access, address, port, max_players| {
-        if let Some(ui) = weak.upgrade() {
-            let port = validate_port(&port);
-            let address = validate_ip(&address, access == "Custom");
-            let players = validate_player_count(&max_players);
-            ui.set_property_port_error(port.message.into());
-            ui.set_property_address_error(address.message.into());
-            ui.set_property_max_players_error(players.into());
-        }
-    });
+    let rules = ui.global::<PropertyRules>();
+    rules.on_port_error(|port| validate_port(&port).message.into());
+    rules.on_address_error(|address, custom| validate_ip(&address, custom).message.into());
+    rules.on_players_error(|players| validate_player_count(&players).into());
 
     let sender = commands.clone();
     let weak = ui.as_weak();
@@ -4829,14 +4835,9 @@ fn register_server_property_actions(ui: &AppWindow, commands: &Sender<Command>) 
             let Some(server) = backend::parse_server_id(&id) else {
                 return;
             };
-            let port_result = validate_port(&port);
-            let address_result = validate_ip(&address, access == "Custom");
+            // The form shows each field's problem as it is typed; a save with
+            // one left is refused here all the same.
             let max_players_error = validate_player_count(&max_players);
-            if let Some(ui) = weak.upgrade() {
-                ui.set_property_port_error(port_result.message.clone().into());
-                ui.set_property_address_error(address_result.message.clone().into());
-                ui.set_property_max_players_error(max_players_error.clone().into());
-            }
             let max_players_valid = max_players_error.is_empty();
             let difficulty_valid =
                 ["peaceful", "easy", "normal", "hard"].contains(&difficulty.as_str());
@@ -7097,10 +7098,7 @@ fn apply_event(
             let (clients, servers) =
                 apply_snapshot_event(ui, *snapshot, creations, minecraft, commands);
             workspace.state.borrow_mut().set_rows(clients, servers);
-            workspace
-                .state
-                .borrow()
-                .render(ui, &lifecycle.borrow(), &workspace.logs.borrow());
+            workspace.refresh(ui);
             // A snapshot rebuilds the rows from records that know nothing of
             // restarts, so their stages are stamped again.
             stamp_host_lifecycle(ui, &lifecycle.borrow());
@@ -7114,16 +7112,19 @@ fn apply_event(
             apply_artifact_cache_event(ui, event);
         }
         Event::InstanceRuntime(runtime) => {
-            // A late answer for an instance the user has already left is
-            // discarded rather than typed into the fields of another one.
-            if presentation::result_is_current(&runtime.instance, &ui.get_selected_instance_id()) {
-                ui.set_instance_java_path(runtime.java.into());
-                ui.set_instance_memory_min(runtime.min_memory.into());
-                ui.set_instance_memory_max(runtime.max_memory.into());
-                ui.set_instance_jvm_args(runtime.jvm_args.into());
-                ui.set_instance_runtime_pinned(runtime.pinned);
-                ui.set_instance_runtime_global(runtime.global.into());
-                ui.set_instance_allow_pack_mod_changes(runtime.allow_pack_mod_version_changes);
+            // Kept with the instance it belongs to, so a late answer lands in
+            // its own view and never in the fields of another instance.
+            if let Some(instance) = backend::parse_instance_id(&runtime.instance) {
+                workspace.update(InstalledHost::Instance(instance), |view| {
+                    view.runtime_java = runtime.java.into();
+                    view.runtime_memory_min = runtime.min_memory.into();
+                    view.runtime_memory_max = runtime.max_memory.into();
+                    view.runtime_jvm_args = runtime.jvm_args.into();
+                    view.runtime_pinned = runtime.pinned;
+                    view.runtime_global = runtime.global.into();
+                    view.allow_pack_mod_changes = runtime.allow_pack_mod_version_changes;
+                    view.runtime_revision = view.runtime_revision.wrapping_add(1);
+                });
             }
         }
         Event::CreationProgress {
@@ -7176,16 +7177,13 @@ fn apply_event(
             }
         }
         Event::CrashNotice(notice) => {
-            let current = if notice.host_kind == "server" {
-                ui.get_selected_server_id()
-            } else {
-                ui.get_selected_instance_id()
-            };
-            if presentation::result_is_current(&notice.host, &current) {
-                ui.set_crash_report(notice.report.into());
-                ui.set_crash_failure(notice.failure.into());
-                ui.set_crash_client_code_on_server(notice.client_code_on_server);
-                ui.set_crash_suggested(i32::try_from(notice.suggested).unwrap_or(i32::MAX));
+            if let Some(host) = backend::parse_mod_host(&notice.host_kind, &notice.host) {
+                workspace.update(host, |view| {
+                    view.crash_report = notice.report.into();
+                    view.crash_failure = notice.failure.into();
+                    view.crash_client_code_on_server = notice.client_code_on_server;
+                    view.crash_suggested = i32::try_from(notice.suggested).unwrap_or(i32::MAX);
+                });
             }
         }
         Event::Running(running) => {
@@ -7243,7 +7241,7 @@ fn apply_event(
         }
         Event::LinkedApply(section) => apply_linked_confirmation(ui, section),
         Event::LinkedResult(result) => apply_linked_result(ui, result),
-        Event::ServerWorkspace(workspace) => apply_server_workspace(ui, workspace),
+        Event::ServerWorkspace(data) => apply_server_workspace(workspace, data),
         Event::LiveLog(_) => {}
         Event::Diagnostics {
             rows,
@@ -7270,13 +7268,8 @@ fn apply_event(
             ui.set_status_message(lookup("gui-diagnostic-disappeared").into());
         }
         Event::HostSnapshots(data) => {
-            let current = if data.host_kind == "server" {
-                ui.get_selected_server_id()
-            } else {
-                ui.get_selected_instance_id()
-            };
-            if presentation::result_is_current(&data.host, &current) {
-                ui.set_snapshots(model(
+            if let Some(host) = backend::parse_mod_host(&data.host_kind, &data.host) {
+                let rows = model(
                     data.rows
                         .into_iter()
                         .map(|snapshot| SnapshotRow {
@@ -7290,9 +7283,12 @@ fn apply_event(
                             uses_full_space: snapshot.uses_full_space,
                         })
                         .collect(),
-                ));
-                ui.set_snapshot_total(data.total.into());
-                ui.set_snapshots_have_plain_copies(data.has_plain_copies);
+                );
+                workspace.update(host, |view| {
+                    view.snapshots = rows;
+                    view.snapshot_total = data.total.into();
+                    view.snapshots_have_plain_copies = data.has_plain_copies;
+                });
             }
         }
         Event::Isolation {
@@ -7824,17 +7820,18 @@ fn apply_pending_creations(ui: &AppWindow, tracker: &CreationTracker) {
         .collect();
     // Unfiltered by selection: the overview tab shows one of these next to
     // every instance card whose id matches, not only the one currently open.
-    let selected_instance = ui.get_selected_instance_id();
-    let for_selected: Vec<PendingEntityRow> = linked
-        .iter()
-        .filter(|row| row.linked_client_id == selected_instance)
-        .cloned()
-        .collect();
-    ui.set_linked_pending_servers(model(linked));
-    // The instance workspace renders this one directly. Narrowing it here
-    // rather than hiding rows in the markup is what keeps the rows it does
-    // not want from taking up room where they are not shown.
-    ui.set_selected_instance_pending_servers(model(for_selected));
+    let linked = model(linked);
+    ui.set_linked_pending_servers(linked.clone());
+    // Each client's workspace renders its own, narrowed here rather than by
+    // hiding rows in the markup, which would leave the room they take.
+    for view in ui.get_host_views().iter() {
+        if view.kind == "client" {
+            workspace::reuse(
+                &view.pending_servers,
+                workspace::pending_for(&linked, &view.id),
+            );
+        }
+    }
     attach_creating_servers(ui);
 }
 
@@ -8221,12 +8218,6 @@ fn apply_server_snapshot(
         ui.set_selected_global_server_id(SharedString::default());
         ui.set_selected_global_server_index(-1);
     }
-    let selected_instance = ui.get_selected_instance_id();
-    let linked_rows = server_rows
-        .iter()
-        .filter(|row| row.linked_client_id == selected_instance)
-        .cloned()
-        .collect::<Vec<_>>();
     let workspace_server = ui.get_selected_server_id();
     let workspace_index = server_rows
         .iter()
@@ -8234,7 +8225,6 @@ fn apply_server_snapshot(
     ui.set_selected_server_index(workspace_index.map_or(-1, to_i32));
     ui.set_servers(reconciled(&ui.get_servers(), server_rows.clone()));
     ui.set_global_servers(reconciled(&ui.get_global_servers(), global_rows));
-    ui.set_linked_servers(reconciled(&ui.get_linked_servers(), linked_rows));
     server_rows
 }
 
@@ -8280,27 +8270,30 @@ fn server_row(item: crate::presentation::ServerPresentation) -> ServerRow {
     }
 }
 
-fn apply_server_workspace(ui: &AppWindow, workspace: ServerWorkspaceData) {
-    ui.set_property_motd(workspace.motd.into());
-    ui.set_property_max_players(workspace.max_players.into());
-    ui.set_property_difficulty(workspace.difficulty.into());
-    ui.set_property_gamemode(workspace.gamemode.into());
-    ui.set_property_allow_flight(workspace.allow_flight);
-    ui.set_property_pvp(workspace.pvp);
-    ui.set_property_allowlist(workspace.allowlist);
-    ui.set_property_online_mode(workspace.network.online_mode);
-    ui.set_property_access(
-        match workspace.network.access {
+/// A server's stored properties, which its Properties form starts from.
+fn apply_server_workspace(workspace: &Workspace, data: ServerWorkspaceData) {
+    let Some(server) = backend::parse_server_id(&data.server) else {
+        return;
+    };
+    workspace.update(InstalledHost::Server(server), |view| {
+        view.property_motd = data.motd.into();
+        view.property_max_players = data.max_players.into();
+        view.property_difficulty = data.difficulty.into();
+        view.property_gamemode = data.gamemode.into();
+        view.property_allow_flight = data.allow_flight;
+        view.property_pvp = data.pvp;
+        view.property_allowlist = data.allowlist;
+        view.property_online_mode = data.network.online_mode;
+        view.property_access = match data.network.access {
             ephervex_core::NetworkAccess::Localhost => "Localhost",
             ephervex_core::NetworkAccess::Lan => "LAN",
             ephervex_core::NetworkAccess::Custom => "Custom",
         }
-        .into(),
-    );
-    ui.set_property_address(workspace.network.bind_address.unwrap_or_default().into());
-    ui.set_property_port(workspace.network.port.to_string().into());
-    ui.set_property_port_error(SharedString::default());
-    ui.set_property_address_error(SharedString::default());
+        .into();
+        view.property_address = data.network.bind_address.unwrap_or_default().into();
+        view.property_port = data.network.port.to_string().into();
+        view.properties_revision = view.properties_revision.wrapping_add(1);
+    });
 }
 
 /// Puts a crash report in every view that has it open, and says how much of it arrived.
@@ -10245,6 +10238,58 @@ mod tests {
             .unwrap_or_default()
     }
 
+    /// Two panes on one host read one view of it, and whatever a feature
+    /// reports about the host reaches both.
+    #[test]
+    fn a_host_in_two_panes_has_one_view_every_report_reaches() {
+        let ui = test_window();
+        let workspace = test_workspace(&ui);
+        let host = client_host();
+        workspace.open(&ui, host, Surface::Snapshots);
+        let first = workspace.single_pane().expect("one pane");
+        workspace.change_pane(&ui, first, |layout| layout.split_beside(first).is_ok());
+
+        let views = ui.get_host_views();
+        assert_eq!(views.row_count(), 1, "one host, one view");
+        let panes = ui.get_workspace_panes();
+        assert!(panes.iter().all(|pane| pane.host == 0));
+
+        assert!(workspace.update(host, |view| view.snapshot_total = "2 snapshots".into()));
+        assert_eq!(
+            views.row_data(0).expect("view").snapshot_total,
+            "2 snapshots"
+        );
+        assert!(
+            !workspace.update(client_host(), |view| view.snapshot_total = "wrong".into()),
+            "a report about a host no pane shows lands nowhere"
+        );
+        assert_eq!(
+            views.row_data(0).expect("view").snapshot_total,
+            "2 snapshots"
+        );
+    }
+
+    /// A host no pane shows any more keeps nothing, so showing it again asks
+    /// its features afresh rather than showing what they said before.
+    #[test]
+    fn a_host_leaving_the_workspace_forgets_what_was_reported() {
+        let ui = test_window();
+        let workspace = test_workspace(&ui);
+        let (first, second) = (server_host(), server_host());
+        workspace.open(&ui, first, Surface::Overview);
+        workspace.update(first, |view| view.crash_report = "crash.txt".into());
+        let pane = workspace.single_pane().expect("one pane");
+
+        workspace.change_pane(&ui, pane, |layout| layout.show_host(pane, second).is_ok());
+        assert!(!workspace.update(first, |view| view.crash_report = "late".into()));
+        workspace.change_pane(&ui, pane, |layout| layout.show_host(pane, first).is_ok());
+
+        assert_eq!(
+            ui.get_host_views().row_data(0).expect("view").crash_report,
+            ""
+        );
+    }
+
     /// Start is offered from four places. Every one of them has to leave the
     /// user watching the output the run is about to produce.
     #[test]
@@ -10463,11 +10508,18 @@ mod tests {
     #[test]
     fn linked_pending_servers_are_not_filtered_to_the_selected_instance() {
         let ui = test_window();
-        ui.set_selected_instance_id("client-a".into());
+        let workspace = test_workspace(&ui);
+        let (client_a, client_b) = (client_host(), client_host());
+        workspace.open(&ui, client_a, Surface::Overview);
+        let first_pane = workspace.single_pane().expect("one pane");
+        workspace.change_pane(&ui, first_pane, |layout| {
+            layout.split_beside(first_pane).is_ok()
+        });
+        ui.invoke_follow_host(2, "client".into(), client_b.id().into(), "Overview".into());
 
         let first = CreationKey::Server {
             name: "First Server".to_owned(),
-            client: "client-a".to_owned(),
+            client: client_a.id(),
             minecraft: String::new(),
             loader: String::new(),
             loader_version: String::new(),
@@ -10479,7 +10531,7 @@ mod tests {
         let CreationKey::Server { client, name, .. } = &mut second else {
             unreachable!()
         };
-        *client = "client-b".to_owned();
+        *client = client_b.id();
         *name = "Second Server".to_owned();
 
         let mut tracker = CreationTracker::default();
@@ -10494,21 +10546,25 @@ mod tests {
             .map(|row| row.linked_client_id.to_string())
             .collect();
         assert_eq!(linked_client_ids.len(), 2);
-        assert!(linked_client_ids.contains(&"client-a".to_owned()));
+        assert!(linked_client_ids.contains(&client_a.id()));
         assert!(
-            linked_client_ids.contains(&"client-b".to_owned()),
+            linked_client_ids.contains(&client_b.id()),
             "an instance's pending linked server must show up on its own card \
              even while a different instance is selected"
         );
 
-        // The workspace's own list is the narrowed one, so that page renders
-        // only what it means to show rather than hiding the rest in place.
-        let on_the_open_instance: Vec<String> = ui
-            .get_selected_instance_pending_servers()
-            .iter()
-            .map(|row| row.linked_client_id.to_string())
-            .collect();
-        assert_eq!(on_the_open_instance, ["client-a".to_owned()]);
+        // Each client's workspace view holds its own narrowed list, so a pane
+        // renders only what it means to show rather than hiding the rest.
+        let views = ui.get_host_views();
+        assert_eq!(views.row_count(), 2);
+        for view in views.iter() {
+            let own: Vec<String> = view
+                .pending_servers
+                .iter()
+                .map(|row| row.linked_client_id.to_string())
+                .collect();
+            assert_eq!(own, [view.id.to_string()]);
+        }
     }
 
     fn disk_usage_report() -> ephervex_core::DiskUsageReport {
@@ -11532,7 +11588,7 @@ mod tests {
         assert!(controller.contains("ui.invoke_load_snapshots(kind, id);"));
         assert!(source.contains("root.snapshot-safety-copy = true"));
         assert!(source.contains(&format!("GuiI18n.text(\"{replacement_note}\")")));
-        assert!(source.contains("root.snapshots-have-plain-copies"));
+        assert!(source.contains("host.snapshots-have-plain-copies"));
         assert_eq!(
             source
                 .matches("root.pending-snapshot-deletion-note = ")
@@ -12255,11 +12311,11 @@ mod tests {
     #[test]
     fn linked_server_workspace_and_pending_creation_remain_contextual() {
         let source = include_str!("ui.rs");
-        assert!(source.contains("for server in root.linked-servers"));
+        assert!(source.contains("for server in host.linked-servers"));
         assert!(source.contains("root.follow-host(pane.id, \"server\", server.id, \"Overview\")"));
         // Scoped by the model it renders rather than by hiding rows, which
         // would leave the room they would have taken behind them.
-        assert!(source.contains("for pending in root.selected-instance-pending-servers"));
+        assert!(source.contains("for pending in host.pending-servers"));
         assert!(source.contains("name + \" Server\""));
     }
 

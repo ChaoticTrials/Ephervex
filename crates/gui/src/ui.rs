@@ -8,6 +8,15 @@ slint::slint! {
         pure callback values(string, string, string) -> string;
     }
 
+    // Whether a server property value is acceptable, answered by the same
+    // checks saving applies. Empty when it is; otherwise what is wrong.
+    export global PropertyRules {
+        pure callback port-error(string) -> string;
+        // (address, whether a custom address is in use)
+        pure callback address-error(string, bool) -> string;
+        pure callback players-error(string) -> string;
+    }
+
     export global Theme {
         // A few colors below are written as `rgb(...)`: the markup lives in a
         // Rust macro, and Rust's own lexer reads `#0b0e10` as a binary literal
@@ -332,39 +341,6 @@ slint::slint! {
         requires-stopped: bool,
     }
 
-    // One host the workspace shows, as every pane showing it reads it. Built
-    // once per host rather than per pane, so two panes on one host cannot
-    // disagree about it.
-    export struct HostView {
-        // "client" or "server".
-        kind: string,
-        id: string,
-        // False once the host has left the registry.
-        available: bool,
-        // The host's own row; only the one matching `kind` is filled.
-        client: InstanceRow,
-        server: ServerRow,
-        surfaces: [WorkspaceSurfaceRow],
-    }
-
-    // One pane: which host view it shows, on which surface, and where.
-    export struct WorkspacePaneRow {
-        // The pane's composition identity, which callbacks name it by.
-        id: int,
-        // Index into the window's host views.
-        host: int,
-        // Index into the window's log views, or -1 for a pane not on Logs or Console.
-        log: int,
-        surface: string,
-        column: int,
-        row: int,
-        // Whether the pane shares its column with a second pane.
-        stacked: bool,
-        can-split-beside: bool,
-        can-split-below: bool,
-        can-close: bool,
-    }
-
     // One dropped jar whose name the mods folder already has.
     export struct LocalModClashRow {
         source: string,
@@ -636,6 +612,76 @@ slint::slint! {
         detail: string,
         progress: float,
         indeterminate: bool,
+    }
+
+    // One host the workspace shows, as every pane showing it reads it. Built
+    // once per host rather than per pane, so two panes on one host cannot
+    // disagree about it.
+    export struct HostView {
+        // "client" or "server".
+        kind: string,
+        id: string,
+        // False once the host has left the registry.
+        available: bool,
+        // The host's own row; only the one matching `kind` is filled.
+        client: InstanceRow,
+        server: ServerRow,
+        surfaces: [WorkspaceSurfaceRow],
+        // A client's linked servers, and those still being created.
+        linked-servers: [ServerRow],
+        pending-servers: [PendingEntityRow],
+        // The newest crash review; an empty report when the host never crashed.
+        crash-report: string,
+        crash-failure: string,
+        crash-client-code-on-server: bool,
+        crash-suggested: int,
+        snapshots: [SnapshotRow],
+        snapshot-total: string,
+        snapshots-have-plain-copies: bool,
+        // A client's runtime settings as stored. Empty where it follows the
+        // global setting.
+        runtime-java: string,
+        runtime-memory-min: string,
+        runtime-memory-max: string,
+        runtime-jvm-args: string,
+        runtime-pinned: bool,
+        runtime-global: string,
+        allow-pack-mod-changes: bool,
+        // Bumped each time the stored settings are read, so an open form
+        // starts over from them.
+        runtime-revision: int,
+        // A server's properties as stored, and the same kind of revision.
+        property-motd: string,
+        property-max-players: string,
+        property-difficulty: string,
+        property-gamemode: string,
+        property-allow-flight: bool,
+        property-pvp: bool,
+        property-allowlist: bool,
+        property-online-mode: bool,
+        // "Localhost", "LAN", or "Custom".
+        property-access: string,
+        property-address: string,
+        property-port: string,
+        properties-revision: int,
+    }
+
+    // One pane: which host view it shows, on which surface, and where.
+    export struct WorkspacePaneRow {
+        // The pane's composition identity, which callbacks name it by.
+        id: int,
+        // Index into the window's host views.
+        host: int,
+        // Index into the window's log views, or -1 for a pane not on Logs or Console.
+        log: int,
+        surface: string,
+        column: int,
+        row: int,
+        // Whether the pane shares its column with a second pane.
+        stacked: bool,
+        can-split-beside: bool,
+        can-split-below: bool,
+        can-close: bool,
     }
 
     component BodyText inherits Text {
@@ -1480,6 +1526,8 @@ slint::slint! {
         in property <string> label;
         in-out property <bool> checked;
         in property <bool> enabled: true;
+        // See `Toggle`: false when the position has to come from what happened.
+        in property <bool> sets-its-own-position: true;
         callback toggled(bool);
         width: 210px;
         height: 32px;
@@ -1487,7 +1535,7 @@ slint::slint! {
         HorizontalLayout { spacing: 10px;
             BodyText { text: root.label; color: root.enabled ? Theme.text-secondary : Theme.text-muted; }
             Rectangle { horizontal-stretch: 1; }
-            Toggle { accessible-name: root.label; checked <=> root.checked; enabled: root.enabled; toggled(value) => { root.toggled(value); } }
+            Toggle { accessible-name: root.label; checked <=> root.checked; enabled: root.enabled; sets-its-own-position: root.sets-its-own-position; toggled(value) => { root.toggled(value); } }
         }
     }
 
@@ -1923,6 +1971,106 @@ slint::slint! {
             }
             Divider { }
             @children
+        }
+    }
+
+    // A client's own runtime settings, edited here and saved together. The
+    // fields start from what is stored and start over whenever it is read again.
+    component ClientRuntimeForm inherits ScrollView {
+        in property <HostView> host;
+        in property <string> error;
+        // (host, java, minimum memory, maximum memory, arguments)
+        callback save(string, string, string, string, string);
+        callback clear(string);
+        callback allow-pack-mod-changes(string, bool);
+        callback open-global-defaults();
+        property <int> revision: root.host.runtime-revision;
+        changed revision => { root.reset(); }
+        init => { root.reset(); }
+        function reset() {
+            java-field.text = root.host.runtime-java;
+            min-field.text = root.host.runtime-memory-min;
+            max-field.text = root.host.runtime-memory-max;
+            args-field.text = root.host.runtime-jvm-args;
+        }
+        viewport-width: self.width;
+        VerticalLayout { alignment: start; width: min(parent.width, 720px); spacing: 12px;
+            SectionTitle { title: GuiI18n.text("gui-instance-runtime"); detail: GuiI18n.text("gui-instance-runtime-detail"); }
+            BodyText { text: root.host.runtime-global; color: Theme.text-muted; wrap: word-wrap; }
+            Text { text: GuiI18n.text("gui-java-preferred"); color: Theme.text-secondary; font-size: Theme.label-size; }
+            java-field := TextField { placeholder: GuiI18n.text("gui-instance-runtime-inherited"); accessible-name: GuiI18n.text("gui-java-preferred"); }
+            HorizontalLayout { spacing: 12px;
+                VerticalLayout { spacing: 4px; FieldLabel { text: GuiI18n.text("gui-java-memory-min"); } min-field := TextField { placeholder: GuiI18n.text("gui-instance-runtime-inherited"); accessible-name: GuiI18n.text("gui-java-memory-min"); input-type: InputType.number; width: 190px; } }
+                VerticalLayout { spacing: 4px; FieldLabel { text: GuiI18n.text("gui-java-memory-max"); } max-field := TextField { placeholder: GuiI18n.text("gui-instance-runtime-inherited"); accessible-name: GuiI18n.text("gui-java-memory-max"); input-type: InputType.number; width: 190px; } }
+                Rectangle { horizontal-stretch: 1; }
+            }
+            Text { text: GuiI18n.text("gui-instance-jvm-args"); color: Theme.text-secondary; font-size: Theme.label-size; }
+            args-field := TextField { placeholder: GuiI18n.text("gui-instance-jvm-args-placeholder"); accessible-name: GuiI18n.text("gui-instance-jvm-args"); }
+            if root.error != "" : BodyText { text: root.error; color: Theme.danger; wrap: word-wrap; }
+            HorizontalLayout { spacing: 8px;
+                if root.host.runtime-pinned : AppButton { text: GuiI18n.text("gui-instance-runtime-clear"); clicked => { root.clear(root.host.id); } }
+                Rectangle { horizontal-stretch: 1; }
+                AppButton { text: GuiI18n.text("gui-instance-runtime-save"); tone: "primary"; clicked => { root.save(root.host.id, java-field.text, min-field.text, max-field.text, args-field.text); } }
+            }
+            Divider { }
+            SectionTitle { title: GuiI18n.text("gui-allow-pack-mod-changes"); detail: GuiI18n.text("gui-allow-pack-mod-changes-detail"); }
+            // Its position is what the instance records, read back after the change.
+            LabeledToggle { width: min(parent.width, 520px); label: GuiI18n.text("gui-allow-pack-mod-changes-toggle"); checked: root.host.allow-pack-mod-changes; sets-its-own-position: false; toggled(value) => { root.allow-pack-mod-changes(root.host.id, value); } }
+            Divider { }
+            SectionTitle { title: GuiI18n.text("gui-instance-settings-unavailable"); detail: GuiI18n.text("gui-instance-settings-unavailable-detail"); }
+            HorizontalLayout { AppButton { text: GuiI18n.text("gui-open-global-defaults"); clicked => { root.open-global-defaults(); } } Rectangle { horizontal-stretch: 1; } }
+        }
+    }
+
+    // A server's properties, edited here and saved together. Like the client
+    // form, it starts from what is stored and starts over when that is read again.
+    component ServerPropertiesForm inherits ScrollView {
+        in property <HostView> host;
+        in property <bool> eula-accepted;
+        in property <string> eula-status;
+        // (server, motd, max players, difficulty, game mode, allow flight, pvp,
+        // allowlist, online mode, access, address, port)
+        callback save(string, string, string, string, string, bool, bool, bool, bool, string, string, string);
+        callback review-eula();
+        property <string> access;
+        property <string> difficulty;
+        property <string> gamemode;
+        property <bool> online-mode;
+        property <bool> allow-flight;
+        property <bool> pvp;
+        property <bool> allowlist;
+        property <string> port-error: PropertyRules.port-error(port-field.text);
+        property <string> address-error: PropertyRules.address-error(address-field.text, root.access == "Custom");
+        property <string> players-error: PropertyRules.players-error(players-field.text);
+        property <int> revision: root.host.properties-revision;
+        changed revision => { root.reset(); }
+        init => { root.reset(); }
+        function reset() {
+            root.access = root.host.property-access;
+            root.difficulty = root.host.property-difficulty;
+            root.gamemode = root.host.property-gamemode;
+            root.online-mode = root.host.property-online-mode;
+            root.allow-flight = root.host.property-allow-flight;
+            root.pvp = root.host.property-pvp;
+            root.allowlist = root.host.property-allowlist;
+            motd-field.text = root.host.property-motd;
+            players-field.text = root.host.property-max-players;
+            port-field.text = root.host.property-port;
+            address-field.text = root.host.property-address;
+            access-box.current-index = root.access == "LAN" ? 1 : root.access == "Custom" ? 2 : 0;
+            difficulty-box.current-index = root.difficulty == "peaceful" ? 0 : root.difficulty == "easy" ? 1 : root.difficulty == "hard" ? 3 : 2;
+            gamemode-box.current-index = root.gamemode == "creative" ? 1 : root.gamemode == "adventure" ? 2 : root.gamemode == "spectator" ? 3 : 0;
+        }
+        VerticalLayout { alignment: start; width: min(parent.width, 1100px); spacing: 14px;
+            Heading { text: GuiI18n.text("gui-network"); } BodyText { text: GuiI18n.text("gui-network-detail"); wrap: word-wrap; }
+            HorizontalLayout { spacing: 12px; VerticalLayout { FieldLabel { text: GuiI18n.text("gui-access"); } access-box := ComboBox { model: [GuiI18n.text("gui-access-localhost"), GuiI18n.text("gui-access-lan"), GuiI18n.text("gui-access-custom")]; selected(value) => { root.access = value == GuiI18n.text("gui-access-lan") ? "LAN" : value == GuiI18n.text("gui-access-custom") ? "Custom" : "Localhost"; } width: 190px; } Rectangle { height: 14px; } } VerticalLayout { FieldLabel { text: GuiI18n.text("gui-port"); } port-field := TextField { placeholder: "25565"; input-type: InputType.number; invalid: root.port-error != ""; width: 150px; } Rectangle { height: 14px; Text { text: root.port-error; visible: root.port-error != ""; color: Theme.danger; font-size: Theme.caption-size; } } } VerticalLayout { horizontal-stretch: 1; FieldLabel { text: GuiI18n.text("gui-custom-bind-address"); } address-field := TextField { placeholder: "127.0.0.1 or ::1"; enabled: root.access == "Custom"; invalid: root.address-error != ""; } Rectangle { height: 14px; Text { text: root.address-error; visible: root.address-error != ""; color: Theme.danger; font-size: Theme.caption-size; } } } }
+            Rectangle { height: 32px; HorizontalLayout { spacing: 10px; LabeledToggle { label: GuiI18n.text("gui-online-mode"); checked <=> root.online-mode; } BodyText { visible: !root.online-mode && root.access != "Localhost"; text: GuiI18n.text("gui-network-warning"); color: Theme.warning; } } }
+            Divider { } Heading { text: GuiI18n.text("gui-gameplay"); }
+            HorizontalLayout { spacing: 12px; VerticalLayout { horizontal-stretch: 1; FieldLabel { text: GuiI18n.text("gui-message-of-the-day"); } motd-field := TextField { placeholder: GuiI18n.text("gui-default-motd"); } } VerticalLayout { width: 190px; FieldLabel { text: GuiI18n.text("gui-maximum-players"); } players-field := TextField { placeholder: "20"; input-type: InputType.number; invalid: root.players-error != ""; } if root.players-error != "" : Text { text: root.players-error; color: Theme.danger; font-size: Theme.caption-size; } } }
+            HorizontalLayout { spacing: 12px; VerticalLayout { Text { text: GuiI18n.text("gui-difficulty"); color: Theme.text-secondary; font-size: Theme.label-size; } difficulty-box := ComboBox { model: ["peaceful", "easy", "normal", "hard"]; selected(value) => { root.difficulty = value; } width: 240px; } } VerticalLayout { Text { text: GuiI18n.text("gui-game-mode"); color: Theme.text-secondary; font-size: Theme.label-size; } gamemode-box := ComboBox { model: ["survival", "creative", "adventure", "spectator"]; selected(value) => { root.gamemode = value; } width: 270px; } } }
+            HorizontalLayout { spacing: 14px; LabeledToggle { label: GuiI18n.text("gui-allow-flight"); checked <=> root.allow-flight; } LabeledToggle { label: GuiI18n.text("gui-pvp"); checked <=> root.pvp; } LabeledToggle { label: GuiI18n.text("gui-allowlist"); checked <=> root.allowlist; } Rectangle { horizontal-stretch: 1; } }
+            Rectangle { height: 84px; border-radius: 8px; border-width: 1px; border-color: root.eula-accepted ? Theme.success : Theme.warning; background: Theme.surface; HorizontalLayout { padding: 14px; VerticalLayout { Heading { text: GuiI18n.text("gui-server-eula"); font-size: Theme.row-heading-size; } BodyText { text: root.eula-status; wrap: word-wrap; } } AppButton { text: root.eula-accepted ? GuiI18n.text("gui-eula-review") : GuiI18n.text("gui-eula-review-accept"); clicked => { root.review-eula(); } } } }
+            ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-save-changes"); tone: "primary"; enabled: root.host.server.state-kind == "stopped"; clicked => { root.save(root.host.id, motd-field.text, players-field.text, root.difficulty, root.gamemode, root.allow-flight, root.pvp, root.allowlist, root.online-mode, root.access, address-field.text, port-field.text); } } }
         }
     }
 
@@ -3746,7 +3894,6 @@ slint::slint! {
         // What the launcher is running right now. Polled only while the page
         // showing it is open.
         in-out property <[RunningRow]> running;
-        in-out property <[ServerRow]> linked-servers;
         in-out property <[ModRow]> managed-mods;
         // -- dropping jars onto a mod list.
         //
@@ -3767,10 +3914,6 @@ slint::slint! {
         // -- what the selected host's newest crash report says. Empty report
         // means it has never crashed, which is what clears a notice left by a
         // previous selection.
-        in-out property <string> crash-report;
-        in-out property <string> crash-failure;
-        in-out property <bool> crash-client-code-on-server;
-        in-out property <int> crash-suggested;
         // -- managing one mod, which is what the mod modals act on.
         in-out property <string> mod-action-path;
         in-out property <string> mod-action-name;
@@ -3864,9 +4007,6 @@ slint::slint! {
         callback remove-mod(string, string);
         callback open-mod-project-page(string);
         in-out property <[ModSearchRow]> mod-results;
-        in-out property <[SnapshotRow]> snapshots;
-        in-out property <string> snapshot-total;
-        in-out property <bool> snapshots-have-plain-copies;
         // The host and snapshot selected by a snapshot modal. IDs rather than
         // row positions keep the action attached when a refreshed list moves.
         in-out property <string> snapshot-host-kind;
@@ -3983,11 +4123,6 @@ slint::slint! {
         // Every instance's pending linked server, for the overview, which
         // places each one against the card whose id it names.
         in-out property <[PendingEntityRow]> linked-pending-servers;
-        // The same rows narrowed to the instance on screen. Filtered here
-        // rather than in the markup because Slint has no array filter
-        // expression, and a `for` that hides most of what it renders still
-        // reserves the room for it.
-        in-out property <[PendingEntityRow]> selected-instance-pending-servers;
         // One viewer per Logs or Console pane, indexed by the pane's `log`.
         in-out property <[LogView]> log-views;
         in-out property <string> selected-instance-id;
@@ -4210,20 +4345,6 @@ slint::slint! {
         // one session and neither is the other's default.
         in-out property <string> import-server-pack;
         in-out property <string> import-server-pack-name;
-        in-out property <string> property-motd;
-        in-out property <string> property-max-players: "20";
-        in-out property <string> property-difficulty: "normal";
-        in-out property <string> property-gamemode: "survival";
-        in-out property <bool> property-allow-flight;
-        in-out property <bool> property-pvp: true;
-        in-out property <bool> property-allowlist;
-        in-out property <bool> property-online-mode;
-        in-out property <string> property-access: "Localhost";
-        in-out property <string> property-address;
-        in-out property <string> property-port: "25565";
-        in-out property <string> property-port-error;
-        in-out property <string> property-address-error;
-        in-out property <string> property-max-players-error;
         in-out property <bool> eula-accepted;
         in-out property <string> eula-status;
         in-out property <string> offline-account-name;
@@ -4283,16 +4404,6 @@ slint::slint! {
         in-out property <string> java-memory-min: "512";
         in-out property <string> java-memory-max: "4096";
         in-out property <string> java-preferred-path;
-        // What one instance pins for itself. Each field is empty while the
-        // instance follows the global setting, which is a different state from
-        // pinning the value the global one currently holds.
-        in-out property <string> instance-java-path;
-        in-out property <string> instance-memory-min;
-        in-out property <string> instance-memory-max;
-        in-out property <string> instance-jvm-args;
-        in-out property <bool> instance-runtime-pinned: false;
-        in-out property <string> instance-runtime-global;
-        in-out property <bool> instance-allow-pack-mod-changes: false;
         in-out property <bool> java-auto-detect: true;
         in-out property <bool> java-auto-download: true;
         in-out property <bool> show-linked-servers: false;
@@ -4452,7 +4563,6 @@ slint::slint! {
         callback refresh-mods(string, string);
         callback disable-suggested-mods(string);
         callback save-server-properties(string, string, string, string, string, bool, bool, bool, bool, string, string, string);
-        callback validate-server-properties(string, string, string, string);
         callback accept-eula();
         callback revoke-eula();
         callback open-eula-reference();
@@ -4834,10 +4944,10 @@ slint::slint! {
                                     }
                                     BodyText { text: host.client.storage-kind == "temporary" ? GuiI18n.text("gui-temporary-lifecycle") : GuiI18n.text("gui-persistent-lifecycle"); color: Theme.text-muted; wrap: word-wrap; }
                                     Divider { }
-                                    HorizontalLayout { Heading { text: GuiI18n.text("gui-linked-server"); font-size: Theme.section-size; } Rectangle { horizontal-stretch: 1; } if root.linked-servers.length == 0 && root.selected-instance-pending-servers.length == 0 : AppButton { text: GuiI18n.text("gui-create-linked-server"); clicked => { root.create-server-client-id = host.id; root.create-server-name = ""; root.create-server-name-suggestion = host.client.name + " Server"; root.create-server-pack = ""; root.create-server-pack-name = ""; root.modal = "create-server"; } } }
-                                    if root.linked-servers.length == 0 && root.selected-instance-pending-servers.length == 0 : BodyText { text: GuiI18n.text("gui-no-linked-server-detail"); color: Theme.text-muted; wrap: word-wrap; }
-                                    for pending in root.selected-instance-pending-servers : PendingCard { item: pending; }
-                                    for server in root.linked-servers : Rectangle { height: 142px; border-radius: 8px; border-width: 1px; border-color: server.needs-attention ? Theme.warning : Theme.border; background: Theme.surface; VerticalLayout { padding: 14px; spacing: 8px;
+                                    HorizontalLayout { Heading { text: GuiI18n.text("gui-linked-server"); font-size: Theme.section-size; } Rectangle { horizontal-stretch: 1; } if host.linked-servers.length == 0 && host.pending-servers.length == 0 : AppButton { text: GuiI18n.text("gui-create-linked-server"); clicked => { root.create-server-client-id = host.id; root.create-server-name = ""; root.create-server-name-suggestion = host.client.name + " Server"; root.create-server-pack = ""; root.create-server-pack-name = ""; root.modal = "create-server"; } } }
+                                    if host.linked-servers.length == 0 && host.pending-servers.length == 0 : BodyText { text: GuiI18n.text("gui-no-linked-server-detail"); color: Theme.text-muted; wrap: word-wrap; }
+                                    for pending in host.pending-servers : PendingCard { item: pending; }
+                                    for server in host.linked-servers : Rectangle { height: 142px; border-radius: 8px; border-width: 1px; border-color: server.needs-attention ? Theme.warning : Theme.border; background: Theme.surface; VerticalLayout { padding: 14px; spacing: 8px;
                                         HorizontalLayout { spacing: 10px; Heading { text: server.name; font-size: Theme.row-heading-size; } Rectangle { horizontal-stretch: 1; } VerticalLayout { alignment: center; Pill { text: server.state; tone-color: server.state-kind == "running" ? Theme.success : server.needs-attention ? Theme.warning : Theme.text-secondary; } } BodyText { text: server.address; color: Theme.text-muted; vertical-alignment: center; } }
                                         BodyText { text: server.needs-attention ? GuiI18n.text("gui-server-needs-attention") : server.state-detail; color: server.needs-attention ? Theme.warning : Theme.text-secondary; }
                                         HorizontalLayout { spacing: 8px;
@@ -4858,7 +4968,7 @@ slint::slint! {
                                     VerticalLayout { padding: 16px; spacing: 10px; HorizontalLayout { spacing: 8px; cross-axis-alignment: center; Heading { text: GuiI18n.text("gui-managed-mods"); horizontal-stretch: 1; } TextField { text <=> root.managed-mods-query; placeholder: GuiI18n.text("gui-filter-mods"); accessible-label: GuiI18n.text("gui-filter-mods"); input-type: InputType.search; width: 200px; edited(text) => { root.filter-mods("client", text); } } AppButton { text: GuiI18n.text("gui-add-local-mods"); clicked => { root.pick-local-mods("client", host.id); } } IconButton { icon: @image-url("../../../assets/icons/refresh.svg"); accessible-name: GuiI18n.text("gui-refresh-mod-details"); clicked => { root.refresh-mods("client", host.id); } } } BodyText { text: GuiI18n.text("gui-managed-mods-detail"); wrap: word-wrap; }
                                         if root.managed-mods-notice != "" : BodyText { text: root.managed-mods-notice; color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
                                         if root.managed-mods.length == 0 : EmptyState { icon: @image-url("../../../assets/icons/semantic-mod.svg"); title: root.managed-mods-query != "" ? GuiI18n.text("gui-no-mods-match-title") : GuiI18n.text("gui-no-managed-mods"); message: root.managed-mods-query != "" ? GuiI18n.value("gui-no-mods-match", root.managed-mods-query) : GuiI18n.text("gui-no-managed-mods-detail"); }
-                                        ScrollView { viewport-width: self.width; VerticalLayout { spacing: 8px; for mod in root.managed-mods : ModCard { item: mod; removable: true; togglable: true; mods-are-the-users: root.instance-allow-pack-mod-changes; restore-file(path) => { root.restore-mod-file("client", host.id, path); } toggle(path, on) => { root.set-mod-enabled("client", host.id, path, on); } manage(path) => { root.open-mod-manager(path); } delete-file(path, title) => { root.pending-action-kind = "client"; root.pending-action-id = host.id; root.pending-action-name = title; root.mod-action-path = path; root.mod-action-name = title; root.mod-action-is-hand-placed = mod.origin-kind == "hand-placed"; root.modal-error = ""; root.mod-remove-returns-to-manager = false; if mod.can-delete-file && !(root.instance-allow-pack-mod-changes && mod.can-remove) { root.modal = "delete-mod"; } else { root.plan-mod-removal(host.id, path); } } } } }
+                                        ScrollView { viewport-width: self.width; VerticalLayout { spacing: 8px; for mod in root.managed-mods : ModCard { item: mod; removable: true; togglable: true; mods-are-the-users: host.allow-pack-mod-changes; restore-file(path) => { root.restore-mod-file("client", host.id, path); } toggle(path, on) => { root.set-mod-enabled("client", host.id, path, on); } manage(path) => { root.open-mod-manager(path); } delete-file(path, title) => { root.pending-action-kind = "client"; root.pending-action-id = host.id; root.pending-action-name = title; root.mod-action-path = path; root.mod-action-name = title; root.mod-action-is-hand-placed = mod.origin-kind == "hand-placed"; root.modal-error = ""; root.mod-remove-returns-to-manager = false; if mod.can-delete-file && !(host.allow-pack-mod-changes && mod.can-remove) { root.modal = "delete-mod"; } else { root.plan-mod-removal(host.id, path); } } } } }
                                     }
                                 }
                                 Rectangle { horizontal-stretch: 1; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface;
@@ -4903,37 +5013,20 @@ slint::slint! {
                                 retry-recovery => { root.retry-isolation-recovery("client", host.id); }
                                 close => { root.show-pane-surface(pane.id, "Mods"); root.isolation-phase = "none"; root.modal-error = ""; }
                             }
-                            if host.available && host.kind == "client" && pane.surface == "Settings" : ScrollView { viewport-width: self.width; VerticalLayout { alignment: start; width: min(parent.width, 720px); spacing: 12px;
-                                SectionTitle { title: GuiI18n.text("gui-instance-runtime"); detail: GuiI18n.text("gui-instance-runtime-detail"); }
-                                BodyText { text: root.instance-runtime-global; color: Theme.text-muted; wrap: word-wrap; }
-                                Text { text: GuiI18n.text("gui-java-preferred"); color: Theme.text-secondary; font-size: Theme.label-size; }
-                                TextField { text <=> root.instance-java-path; placeholder: GuiI18n.text("gui-instance-runtime-inherited"); accessible-name: GuiI18n.text("gui-java-preferred"); }
-                                HorizontalLayout { spacing: 12px;
-                                    VerticalLayout { spacing: 4px; FieldLabel { text: GuiI18n.text("gui-java-memory-min"); } TextField { text <=> root.instance-memory-min; placeholder: GuiI18n.text("gui-instance-runtime-inherited"); accessible-name: GuiI18n.text("gui-java-memory-min"); input-type: InputType.number; width: 190px; } }
-                                    VerticalLayout { spacing: 4px; FieldLabel { text: GuiI18n.text("gui-java-memory-max"); } TextField { text <=> root.instance-memory-max; placeholder: GuiI18n.text("gui-instance-runtime-inherited"); accessible-name: GuiI18n.text("gui-java-memory-max"); input-type: InputType.number; width: 190px; } }
-                                    Rectangle { horizontal-stretch: 1; }
-                                }
-                                Text { text: GuiI18n.text("gui-instance-jvm-args"); color: Theme.text-secondary; font-size: Theme.label-size; }
-                                TextField { text <=> root.instance-jvm-args; placeholder: GuiI18n.text("gui-instance-jvm-args-placeholder"); accessible-name: GuiI18n.text("gui-instance-jvm-args"); }
-                                if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; }
-                                HorizontalLayout { spacing: 8px;
-                                    if root.instance-runtime-pinned : AppButton { text: GuiI18n.text("gui-instance-runtime-clear"); clicked => { root.clear-instance-runtime(host.id); } }
-                                    Rectangle { horizontal-stretch: 1; }
-                                    AppButton { text: GuiI18n.text("gui-instance-runtime-save"); tone: "primary"; clicked => { root.save-instance-runtime(host.id, root.instance-java-path, root.instance-memory-min, root.instance-memory-max, root.instance-jvm-args); } }
-                                }
-                                Divider { }
-                                SectionTitle { title: GuiI18n.text("gui-allow-pack-mod-changes"); detail: GuiI18n.text("gui-allow-pack-mod-changes-detail"); }
-                                LabeledToggle { width: min(parent.width, 520px); label: GuiI18n.text("gui-allow-pack-mod-changes-toggle"); checked <=> root.instance-allow-pack-mod-changes; toggled(value) => { root.set-allow-pack-mod-version-changes(host.id, value); } }
-                                Divider { }
-                                SectionTitle { title: GuiI18n.text("gui-instance-settings-unavailable"); detail: GuiI18n.text("gui-instance-settings-unavailable-detail"); }
-                                HorizontalLayout { AppButton { text: GuiI18n.text("gui-open-global-defaults"); clicked => { root.close-workspace(); root.page = 4; root.settings-tab = "Minecraft"; } } Rectangle { horizontal-stretch: 1; } }
-                            } }
+                            if host.available && host.kind == "client" && pane.surface == "Settings" : ClientRuntimeForm {
+                                host: host;
+                                error: root.modal-error;
+                                save(id, java, min, max, args) => { root.save-instance-runtime(id, java, min, max, args); }
+                                clear(id) => { root.clear-instance-runtime(id); }
+                                allow-pack-mod-changes(id, allow) => { root.set-allow-pack-mod-version-changes(id, allow); }
+                                open-global-defaults => { root.close-workspace(); root.page = 4; root.settings-tab = "Minecraft"; }
+                            }
                             if host.available && host.kind == "client" && pane.surface == "Snapshots" : SnapshotPanel {
-                                items: root.snapshots; total: root.snapshot-total; has-plain-copies: root.snapshots-have-plain-copies;
-                                create => { root.snapshot-action-label = ""; root.recompute-snapshot-label(); root.modal-error = ""; root.modal = "snapshot-create"; }
-                                restore(id, label) => { root.snapshot-action-id = id; root.snapshot-action-label = label; root.snapshot-safety-copy = true; root.modal-error = ""; root.modal = "snapshot-restore"; }
-                                rename(id, label) => { root.snapshot-action-id = id; root.snapshot-action-label = label; root.modal-error = ""; root.modal = "snapshot-rename"; }
-                                delete(id, label) => { root.snapshot-action-id = id; root.snapshot-action-label = label; root.modal-error = ""; root.modal = "snapshot-delete"; }
+                                items: host.snapshots; total: host.snapshot-total; has-plain-copies: host.snapshots-have-plain-copies;
+                                create => { root.snapshot-host-kind = host.kind; root.snapshot-host-id = host.id; root.snapshot-action-label = ""; root.recompute-snapshot-label(); root.modal-error = ""; root.modal = "snapshot-create"; }
+                                restore(id, label) => { root.snapshot-host-kind = host.kind; root.snapshot-host-id = host.id; root.snapshot-action-id = id; root.snapshot-action-label = label; root.snapshot-safety-copy = true; root.modal-error = ""; root.modal = "snapshot-restore"; }
+                                rename(id, label) => { root.snapshot-host-kind = host.kind; root.snapshot-host-id = host.id; root.snapshot-action-id = id; root.snapshot-action-label = label; root.modal-error = ""; root.modal = "snapshot-rename"; }
+                                delete(id, label) => { root.snapshot-host-kind = host.kind; root.snapshot-host-id = host.id; root.snapshot-action-id = id; root.snapshot-action-label = label; root.modal-error = ""; root.modal = "snapshot-delete"; }
                             }
                             if host.available && host.kind == "client" && pane.surface == "Diagnostics" : DiagnosticsSurface {
                                 property <bool> current: root.integrity-host-kind == "client" && root.integrity-host-id == host.id;
@@ -4998,7 +5091,7 @@ slint::slint! {
                                 }
                             }
                             if host.available && host.kind == "server" && pane.surface == "Overview" : ScrollView { VerticalLayout { alignment: start; width: min(parent.width, 980px); spacing: 12px; Heading { text: GuiI18n.text("gui-dedicated-server"); } BodyText { text: host.server.state-detail; }
-                                if root.crash-report != "" : CrashNotice { report: root.crash-report; failure: root.crash-failure; client-code-on-server: root.crash-client-code-on-server; suggested: root.crash-suggested; review => { root.show-pane-surface(pane.id, "Mods"); } } Rectangle { height: 160px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface; VerticalLayout { padding: 18px; spacing: 7px;
+                                if host.crash-report != "" : CrashNotice { report: host.crash-report; failure: host.crash-failure; client-code-on-server: host.crash-client-code-on-server; suggested: host.crash-suggested; review => { root.show-pane-surface(pane.id, "Mods"); } } Rectangle { height: 160px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface; VerticalLayout { padding: 18px; spacing: 7px;
                                 HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-exact-target"); } BodyText { text: GuiI18n.values("gui-target-summary", host.server.minecraft, host.server.loader); } }
                                 HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-runtime"); } BodyText { text: host.server.state + " | " + host.server.state-detail; } }
                                 HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-network"); } BodyText { text: host.server.address; } }
@@ -5006,11 +5099,11 @@ slint::slint! {
                                 HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-relationship"); } BodyText { text: host.server.relationship; } }
                             } } HorizontalLayout { spacing: 8px; AppButton { text: GuiI18n.text("gui-view-logs"); clicked => { root.show-pane-surface(pane.id, "Logs"); } } if host.server.linked-client-id != "" : AppButton { text: GuiI18n.text("gui-launch-client-connect"); tone: "primary"; enabled: host.server.can-connect; clicked => { root.launch-and-connect(host.server.linked-client-id, host.id); } } if host.server.state-kind == "needs-recovery" : AppButton { text: GuiI18n.text("gui-repair-server"); tone: "primary"; clicked => { root.repair-server(host.id); } } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-delete-server"); tone: "danger"; clicked => { root.pending-action-id = host.id; root.pending-action-name = host.server.name; root.pending-snapshot-deletion-note = host.server.snapshot-deletion-note; root.modal = "delete-server"; } } } } }
                             if host.available && host.kind == "server" && pane.surface == "Snapshots" : SnapshotPanel {
-                                items: root.snapshots; total: root.snapshot-total; has-plain-copies: root.snapshots-have-plain-copies;
-                                create => { root.snapshot-action-label = ""; root.recompute-snapshot-label(); root.modal-error = ""; root.modal = "snapshot-create"; }
-                                restore(id, label) => { root.snapshot-action-id = id; root.snapshot-action-label = label; root.snapshot-safety-copy = true; root.modal-error = ""; root.modal = "snapshot-restore"; }
-                                rename(id, label) => { root.snapshot-action-id = id; root.snapshot-action-label = label; root.modal-error = ""; root.modal = "snapshot-rename"; }
-                                delete(id, label) => { root.snapshot-action-id = id; root.snapshot-action-label = label; root.modal-error = ""; root.modal = "snapshot-delete"; }
+                                items: host.snapshots; total: host.snapshot-total; has-plain-copies: host.snapshots-have-plain-copies;
+                                create => { root.snapshot-host-kind = host.kind; root.snapshot-host-id = host.id; root.snapshot-action-label = ""; root.recompute-snapshot-label(); root.modal-error = ""; root.modal = "snapshot-create"; }
+                                restore(id, label) => { root.snapshot-host-kind = host.kind; root.snapshot-host-id = host.id; root.snapshot-action-id = id; root.snapshot-action-label = label; root.snapshot-safety-copy = true; root.modal-error = ""; root.modal = "snapshot-restore"; }
+                                rename(id, label) => { root.snapshot-host-kind = host.kind; root.snapshot-host-id = host.id; root.snapshot-action-id = id; root.snapshot-action-label = label; root.modal-error = ""; root.modal = "snapshot-rename"; }
+                                delete(id, label) => { root.snapshot-host-kind = host.kind; root.snapshot-host-id = host.id; root.snapshot-action-id = id; root.snapshot-action-label = label; root.modal-error = ""; root.modal = "snapshot-delete"; }
                             }
                             if host.available && host.kind == "server" && pane.surface == "Diagnostics" : DiagnosticsSurface {
                                 property <bool> current: root.integrity-host-kind == "server" && root.integrity-host-id == host.id;
@@ -5045,7 +5138,7 @@ slint::slint! {
                             }
                             if host.available && host.kind == "server" && pane.surface == "Mods" : VerticalLayout { spacing: 10px;
                                 HorizontalLayout { spacing: 8px; SectionTitle { title: GuiI18n.text("gui-server-mods"); detail: GuiI18n.text("gui-server-mods-detail"); horizontal-stretch: 1; } VerticalLayout { alignment: center; TextField { text <=> root.server-mods-query; placeholder: GuiI18n.text("gui-filter-mods"); accessible-label: GuiI18n.text("gui-filter-mods"); input-type: InputType.search; width: 200px; edited(text) => { root.filter-mods("server", text); } } } VerticalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-add-local-mods"); clicked => { root.pick-local-mods("server", host.id); } } } VerticalLayout { alignment: center; IconButton { icon: @image-url("../../../assets/icons/refresh.svg"); accessible-name: GuiI18n.text("gui-refresh-mod-details"); clicked => { root.refresh-mods("server", host.id); } } } }
-                                if root.crash-report != "" : CrashNotice { report: root.crash-report; failure: root.crash-failure; client-code-on-server: root.crash-client-code-on-server; suggested: root.crash-suggested; beside-the-mods: true; disable-suggested => { root.disable-suggested-mods(host.id); } }
+                                if host.crash-report != "" : CrashNotice { report: host.crash-report; failure: host.crash-failure; client-code-on-server: host.crash-client-code-on-server; suggested: host.crash-suggested; beside-the-mods: true; disable-suggested => { root.disable-suggested-mods(host.id); } }
                                 if root.server-mods-notice != "" : BodyText { text: root.server-mods-notice; color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
                                 if root.server-mods.length == 0 : EmptyState { icon: @image-url("../../../assets/icons/semantic-mod.svg"); title: root.server-mods-query != "" ? GuiI18n.text("gui-no-mods-match-title") : GuiI18n.text("gui-no-managed-mods"); message: root.server-mods-query != "" ? GuiI18n.value("gui-no-mods-match", root.server-mods-query) : GuiI18n.text("gui-no-server-mods-detail"); }
                                 if root.server-mods.length > 0 : ScrollView { viewport-width: self.width; VerticalLayout { spacing: 8px; for mod in root.server-mods : ModCard { item: mod; togglable: true; restore-file(path) => { root.restore-mod-file("server", host.id, path); } toggle(path, on) => { root.set-mod-enabled("server", host.id, path, on); } delete-file(path, title) => { root.pending-action-kind = "server"; root.pending-action-id = host.id; root.pending-action-name = title; root.mod-action-path = path; root.mod-action-name = title; root.mod-action-is-hand-placed = mod.origin-kind == "hand-placed"; root.modal-error = ""; root.modal = "delete-mod"; } } } }
@@ -5073,17 +5166,13 @@ slint::slint! {
                                 retry-recovery => { root.retry-isolation-recovery("server", host.id); }
                                 close => { root.show-pane-surface(pane.id, "Mods"); root.isolation-phase = "none"; root.modal-error = ""; }
                             }
-                            if host.available && host.kind == "server" && pane.surface == "Properties" : ScrollView { VerticalLayout { alignment: start; width: min(parent.width, 1100px); spacing: 14px;
-                                Heading { text: GuiI18n.text("gui-network"); } BodyText { text: GuiI18n.text("gui-network-detail"); wrap: word-wrap; }
-                                HorizontalLayout { spacing: 12px; VerticalLayout { FieldLabel { text: GuiI18n.text("gui-access"); } ComboBox { model: [GuiI18n.text("gui-access-localhost"), GuiI18n.text("gui-access-lan"), GuiI18n.text("gui-access-custom")]; current-index: root.property-access == "LAN" ? 1 : root.property-access == "Custom" ? 2 : 0; selected(value) => { root.property-access = value == GuiI18n.text("gui-access-lan") ? "LAN" : value == GuiI18n.text("gui-access-custom") ? "Custom" : "Localhost"; root.validate-server-properties(root.property-access, root.property-address, root.property-port, root.property-max-players); } width: 190px; } Rectangle { height: 14px; } } VerticalLayout { FieldLabel { text: GuiI18n.text("gui-port"); } TextField { text <=> root.property-port; placeholder: "25565"; input-type: InputType.number; invalid: root.property-port-error != ""; width: 150px; edited => { root.validate-server-properties(root.property-access, root.property-address, root.property-port, root.property-max-players); } } Rectangle { height: 14px; Text { text: root.property-port-error; visible: root.property-port-error != ""; color: Theme.danger; font-size: Theme.caption-size; } } } VerticalLayout { horizontal-stretch: 1; FieldLabel { text: GuiI18n.text("gui-custom-bind-address"); } TextField { text <=> root.property-address; placeholder: "127.0.0.1 or ::1"; enabled: root.property-access == "Custom"; invalid: root.property-address-error != ""; edited => { root.validate-server-properties(root.property-access, root.property-address, root.property-port, root.property-max-players); } } Rectangle { height: 14px; Text { text: root.property-address-error; visible: root.property-address-error != ""; color: Theme.danger; font-size: Theme.caption-size; } } } }
-                                Rectangle { height: 32px; HorizontalLayout { spacing: 10px; LabeledToggle { label: GuiI18n.text("gui-online-mode"); checked <=> root.property-online-mode; } BodyText { visible: !root.property-online-mode && root.property-access != "Localhost"; text: GuiI18n.text("gui-network-warning"); color: Theme.warning; } } }
-                                Divider { } Heading { text: GuiI18n.text("gui-gameplay"); }
-                                HorizontalLayout { spacing: 12px; VerticalLayout { horizontal-stretch: 1; FieldLabel { text: GuiI18n.text("gui-message-of-the-day"); } TextField { text <=> root.property-motd; placeholder: GuiI18n.text("gui-default-motd"); } } VerticalLayout { width: 190px; FieldLabel { text: GuiI18n.text("gui-maximum-players"); } TextField { text <=> root.property-max-players; placeholder: "20"; input-type: InputType.number; invalid: root.property-max-players-error != ""; edited => { root.validate-server-properties(root.property-access, root.property-address, root.property-port, root.property-max-players); } } if root.property-max-players-error != "" : Text { text: root.property-max-players-error; color: Theme.danger; font-size: Theme.caption-size; } } }
-                                HorizontalLayout { spacing: 12px; VerticalLayout { Text { text: GuiI18n.text("gui-difficulty"); color: Theme.text-secondary; font-size: Theme.label-size; } ComboBox { model: ["peaceful", "easy", "normal", "hard"]; current-index: root.property-difficulty == "peaceful" ? 0 : root.property-difficulty == "easy" ? 1 : root.property-difficulty == "hard" ? 3 : 2; selected(value) => { root.property-difficulty = value; } width: 240px; } } VerticalLayout { Text { text: GuiI18n.text("gui-game-mode"); color: Theme.text-secondary; font-size: Theme.label-size; } ComboBox { model: ["survival", "creative", "adventure", "spectator"]; current-index: root.property-gamemode == "creative" ? 1 : root.property-gamemode == "adventure" ? 2 : root.property-gamemode == "spectator" ? 3 : 0; selected(value) => { root.property-gamemode = value; } width: 270px; } } }
-                                HorizontalLayout { spacing: 14px; LabeledToggle { label: GuiI18n.text("gui-allow-flight"); checked <=> root.property-allow-flight; } LabeledToggle { label: GuiI18n.text("gui-pvp"); checked <=> root.property-pvp; } LabeledToggle { label: GuiI18n.text("gui-allowlist"); checked <=> root.property-allowlist; } Rectangle { horizontal-stretch: 1; } }
-                                Rectangle { height: 84px; border-radius: 8px; border-width: 1px; border-color: root.eula-accepted ? Theme.success : Theme.warning; background: Theme.surface; HorizontalLayout { padding: 14px; VerticalLayout { Heading { text: GuiI18n.text("gui-server-eula"); font-size: Theme.row-heading-size; } BodyText { text: root.eula-status; wrap: word-wrap; } } AppButton { text: root.eula-accepted ? GuiI18n.text("gui-eula-review") : GuiI18n.text("gui-eula-review-accept"); clicked => { root.modal = "eula"; } } } }
-                                ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-save-changes"); tone: "primary"; enabled: host.server.state-kind == "stopped"; clicked => { root.save-server-properties(host.id, root.property-motd, root.property-max-players, root.property-difficulty, root.property-gamemode, root.property-allow-flight, root.property-pvp, root.property-allowlist, root.property-online-mode, root.property-access, root.property-address, root.property-port); } } }
-                            } }
+                            if host.available && host.kind == "server" && pane.surface == "Properties" : ServerPropertiesForm {
+                                host: host;
+                                eula-accepted: root.eula-accepted;
+                                eula-status: root.eula-status;
+                                save(id, motd, players, difficulty, gamemode, flight, pvp, allowlist, online, access, address, port) => { root.save-server-properties(id, motd, players, difficulty, gamemode, flight, pvp, allowlist, online, access, address, port); }
+                                review-eula => { root.modal = "eula"; }
+                            }
                         }
                     }
 

@@ -1395,6 +1395,8 @@ pub struct IsolationData {
 
 #[derive(Debug, Clone)]
 pub struct ServerWorkspaceData {
+    /// The server these are, which is the view they belong in.
+    pub server: String,
     pub motd: String,
     pub max_players: String,
     pub difficulty: String,
@@ -2112,6 +2114,11 @@ fn run_worker(
                             error: false,
                         });
                         send_snapshot(&app, &events);
+                        // The form starts over from what was stored, which
+                        // also says whether anything is pinned now.
+                        if let Ok(runtime) = instance_runtime_data(&app, instance) {
+                            let _ = events.send(Event::InstanceRuntime(runtime));
+                        }
                     }
                     // Shown on the screen the fields are on, not as a toast the
                     // user has to catch: a refused save leaves them looking at
@@ -5364,6 +5371,7 @@ fn send_server_workspace(app: &App, server: ServerId, events: &Sender<Event>) {
         let record = app.server(server)?;
         let properties = app.server_properties(server)?;
         Ok::<_, CoreError>(ServerWorkspaceData {
+            server: server.to_string(),
             motd: properties
                 .get("motd")
                 .unwrap_or_else(|| lookup("gui-default-motd")),
