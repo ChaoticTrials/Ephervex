@@ -7912,6 +7912,8 @@ fn refresh_enriched_host_mods(paths: Paths, events: &Sender<Event>, host: Instal
                     &snapshot,
                     review.as_ref(),
                 )));
+                // Identities and relations may have just been recorded.
+                send_isolation_basis(&app, host, &events);
             }
             // Enrichment is decoration. The list the user is already looking at
             // is correct without it, so this is logged rather than shown as a

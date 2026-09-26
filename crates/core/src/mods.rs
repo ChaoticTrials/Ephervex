@@ -1372,6 +1372,10 @@ impl App {
     /// [`ManagedModSnapshot::metadata`] saying so. Nothing here can remove a
     /// mod from the list or change what the launcher believes is installed.
     ///
+    /// The relations each fetched release declares are recorded, exactly as
+    /// [`App::refresh_mod_dependencies`] records them. A release the catalog
+    /// did not answer for keeps whatever was recorded before.
+    ///
     /// Provider responses are served through the metadata cache, so repeated
     /// opens inside its TTL make no request at all, and an earlier response is
     /// still shown when the provider is down.
@@ -1414,6 +1418,18 @@ impl App {
 
         match self.mod_details(&snapshot, reporter, cancel).await {
             Ok(details) => {
+                // The releases just fetched state what each mod requires. Kept,
+                // so refreshing the list leaves dependency questions answered
+                // exactly as an explicit dependency refresh would.
+                if let Err(error) = self.record_declared_relations(
+                    host,
+                    details
+                        .versions
+                        .iter()
+                        .map(|((catalog, _), version)| (*catalog, version)),
+                ) {
+                    warn!(%error, "the relations these mods declare could not be recorded");
+                }
                 snapshot.apply(&details);
                 snapshot.metadata = MetadataAvailability::Provider;
                 // Names have just changed, and so has the order they sort in.

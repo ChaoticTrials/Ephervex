@@ -840,18 +840,26 @@ because the provider refused to describe it has no such document, and stays
 unasked.
 
 A Modrinth pack index declares no relations at all - it states paths, hashes and
-download addresses - so its entries stay unasked until an explicit refresh. A jar
-with no catalog identity has nothing to ask about and stays unasked.
+download addresses - so its entries stay unasked until a refresh. A jar with no
+catalog identity has nothing to ask about and stays unasked.
 
-That refresh is `App::refresh_mod_dependencies`, and it is explicit because it
-reaches the network: reading a mod list stays a directory read. It asks each
-catalog once, in one batched request, about every mod whose recorded identity
-names an exact release - a project without one has nothing to look up, since
-asking about the project would answer for whichever release the catalog
-considers current rather than the one installed here. A catalog that cannot be
-reached is named in the report and costs only its own mods' answers; they stay
-unasked rather than being recorded as needing nothing, which is the one outcome
-that would turn a missing answer into a confident wrong one.
+Two refreshes record them, and both go through
+`App::record_declared_relations`, so they leave the host in the same state.
+`App::refresh_mod_dependencies` is the explicit one. It asks each catalog once,
+in one batched request, about every mod whose recorded identity names an exact
+release - a project without one has nothing to look up, since asking about the
+project would answer for whichever release the catalog considers current rather
+than the one installed here. A refreshed mod listing already fetches those same
+exact releases for their names and versions, so it records the relations they
+declare as well, and refreshing the Mods list is enough for a dependency graph
+built on it. Neither runs when a mod list is merely read, which stays a
+directory read. The recipe is read again after the network, so a change made
+while a catalog was being asked is kept. A catalog that cannot be reached, or
+that does not answer for a release, costs only those mods' answers; they keep
+what they had, and a mod nothing had asked about stays unasked rather than being
+recorded as needing nothing, which is the one outcome that would turn a missing
+answer into a confident wrong one. The explicit refresh names such a catalog in
+its report.
 
 Two questions are asked of that state, both offline and both pure. What else
 stops loading if this mod does, which is the same answer for turning a mod off

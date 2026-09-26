@@ -6,14 +6,16 @@
 //! does not: a Modrinth pack index declares no relations at all, and an
 //! instance built before relations were recorded has none.
 //!
-//! This module is how those instances catch up. It is an explicit, user-invoked
-//! refresh and never part of reading a mod list, which has to stay a directory
-//! read that reaches no network.
+//! This module is how those instances catch up. Relations are recorded only
+//! when a catalog has been asked anyway: by an explicit dependency refresh, or
+//! by a refreshed mod listing, which fetches the same exact releases for their
+//! names. Reading a mod list stays a directory read that reaches no network.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use ephervex_download::OperationReporter;
+use ephervex_mod_platform::ModVersionInfo;
 use ephervex_model::{ModOrigin, ModProvider, ModRelationKind};
 use ephervex_pack::{ModIdentity, PackRecipe, RecipeRelation, RelationTarget, SourceStore};
 use tokio_util::sync::CancellationToken;
@@ -490,7 +492,7 @@ impl App {
     /// Asks each catalog what this host's mods need, and records the answers.
     ///
     /// Explicit on purpose. It reaches the network, so it is something a user
-    /// asks for rather than something a mod list does on its own.
+    /// asks for rather than something reading a mod list does on its own.
     ///
     /// A catalog that cannot be reached is reported and costs only its own
     /// mods' answers: the rest are still recorded, and the ones that were not
@@ -508,7 +510,7 @@ impl App {
         let layout = self.host_layout(host)?;
         let mut report = DependencyRefreshReport::default();
         // A host with no recipe records nothing and has nothing to refresh.
-        let Some(mut recipe) = layout.recipe.clone() else {
+        let Some(recipe) = layout.recipe else {
             return Ok(report);
         };
 
@@ -527,6 +529,7 @@ impl App {
             })
             .count();
 
+        let mut answered = Vec::new();
         for catalog in [ModProvider::Modrinth, ModProvider::CurseForge] {
             let versions = exact_versions(&recipe, catalog);
             if versions.is_empty() {
@@ -540,32 +543,67 @@ impl App {
                     continue;
                 }
             };
-            let answers = match provider.versions_by_id(&versions, reporter, cancel).await {
-                Ok(answers) => answers,
+            match provider.versions_by_id(&versions, reporter, cancel).await {
+                Ok(answers) => answered.extend(answers.into_iter().map(|answer| (catalog, answer))),
                 Err(error) => {
                     warn!(%error, provider = %catalog, "dependencies could not be fetched");
                     report.providers_unavailable.push(catalog);
+                }
+            }
+        }
+
+        let recorded = self.record_declared_relations(
+            host,
+            answered.iter().map(|(catalog, answer)| (*catalog, answer)),
+        )?;
+        report.recorded = recorded.recorded;
+        report.unchanged = recorded.unchanged;
+        info!(
+            recorded = report.recorded,
+            unchanged = report.unchanged,
+            unidentified = report.unidentified,
+            "refreshed what this host's mods require"
+        );
+        Ok(report)
+    }
+
+    /// Records the relations catalogs stated about this host's exact releases.
+    ///
+    /// The one place a catalog's answer becomes a recorded relation, for an
+    /// explicit refresh and for a refreshed mod listing alike, so both leave
+    /// the host in the same state. The recipe is read again here, after the
+    /// network, so a change made while the catalog was being asked is kept.
+    ///
+    /// Only an entry naming the answered release in the answering catalog is
+    /// touched. A release no answer covers keeps whatever it had: nothing is
+    /// written as needing nothing, and nothing already recorded is erased.
+    pub(crate) fn record_declared_relations<'a>(
+        &self,
+        host: InstalledHost,
+        answers: impl IntoIterator<Item = (ModProvider, &'a ModVersionInfo)>,
+    ) -> CoreResult<DependencyRefreshReport> {
+        let mut report = DependencyRefreshReport::default();
+        let layout = self.host_layout(host)?;
+        let Some(mut recipe) = layout.recipe else {
+            return Ok(report);
+        };
+
+        for (catalog, answer) in answers {
+            let relations = recipe_relations(&answer.dependencies);
+            for file in &mut recipe.files {
+                let Some(identity) = file.identity.as_ref() else {
+                    continue;
+                };
+                if identity.provider != Some(catalog)
+                    || identity.version_id.as_deref() != Some(answer.id.as_str())
+                {
                     continue;
                 }
-            };
-
-            for answer in answers {
-                let relations = recipe_relations(&answer.dependencies);
-                for file in &mut recipe.files {
-                    if file
-                        .identity
-                        .as_ref()
-                        .and_then(|identity| identity.version_id.as_deref())
-                        != Some(answer.id.as_str())
-                    {
-                        continue;
-                    }
-                    if file.relations.as_ref() == Some(&relations) {
-                        report.unchanged += 1;
-                    } else {
-                        file.relations = Some(relations.clone());
-                        report.recorded += 1;
-                    }
+                if file.relations.as_ref() == Some(&relations) {
+                    report.unchanged += 1;
+                } else {
+                    file.relations = Some(relations.clone());
+                    report.recorded += 1;
                 }
             }
         }
@@ -574,12 +612,6 @@ impl App {
             SourceStore::new(ephervex_storage::metadata::source_dir(&layout.root))
                 .write_recipe(&recipe)?;
         }
-        info!(
-            recorded = report.recorded,
-            unchanged = report.unchanged,
-            unidentified = report.unidentified,
-            "refreshed what this host's mods require"
-        );
         Ok(report)
     }
 }
@@ -1787,6 +1819,406 @@ mod tests {
         assert_eq!(
             report.recorded, 2,
             "the two that name a release are recorded"
+        );
+    }
+
+    /// Every mod of [`instance_with_unasked_mods`] plus one that needs both,
+    /// each with a jar in the game directory so the host lists them as loading.
+    fn listed_instance_with_unasked_mods(base: &std::path::Path) -> (App, InstalledHost, PathBuf) {
+        let (app, instance, root) = instance_with_unasked_mods(base);
+        let store = SourceStore::new(ephervex_storage::metadata::source_dir(&root));
+        let mut recipe = store.read_recipe().expect("recipe");
+        recipe
+            .files
+            .push(recorded("SkyGUIs.jar", SKYGUIS, SKYGUIS_RELEASE));
+        store.write_recipe(&recipe).expect("write");
+
+        let mods = ephervex_storage::metadata::client_game_dir(&root).join("mods");
+        std::fs::create_dir_all(&mods).expect("mods dir");
+        for jar in ["LibX.jar", "SkyblockBuilder.jar", "SkyGUIs.jar"] {
+            std::fs::write(mods.join(jar), b"jar").expect("write jar");
+        }
+        (app, InstalledHost::Instance(instance), root)
+    }
+
+    const SKYGUIS_RELEASE: &str = "zypaCGkp";
+
+    fn project_json(id: &str) -> Value {
+        json!({
+            "id": id,
+            "slug": id.to_ascii_lowercase(),
+            "title": format!("Project {id}"),
+            "description": "a fixture project",
+            "project_type": "mod",
+            "client_side": "required",
+            "server_side": "required",
+            "icon_url": null,
+        })
+    }
+
+    /// What a mod listing asks Modrinth: its projects, then its exact releases.
+    async fn listing_catalog(versions: Vec<Value>) -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(route("/projects"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(vec![
+                project_json(LIBRARY),
+                project_json(DEPENDENT),
+                project_json(SKYGUIS),
+            ]))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(route("/versions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(versions))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    fn every_release() -> Vec<Value> {
+        vec![
+            version_json(LIBRARY_RELEASE, LIBRARY, &[]),
+            version_json(DEPENDENT_RELEASE, DEPENDENT, &[LIBRARY]),
+            version_json(SKYGUIS_RELEASE, SKYGUIS, &[LIBRARY, DEPENDENT]),
+        ]
+    }
+
+    async fn list(app: &App, host: InstalledHost) {
+        app.enriched_host_mods(
+            host,
+            &OperationReporter::silent("test-listing"),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("a listing reports rather than fails");
+    }
+
+    fn relations_of<'a>(recipe: &'a PackRecipe, name: &str) -> Option<&'a [RecipeRelation]> {
+        recipe
+            .files
+            .iter()
+            .find(|file| file.file_name() == name)
+            .expect("the entry")
+            .recorded_relations()
+    }
+
+    fn closure_of<'a>(plan: &'a crate::isolation::IsolationPlan, name: &str) -> Vec<&'a str> {
+        let candidate = plan
+            .candidates
+            .iter()
+            .find(|candidate| candidate.root == Path::new("mods").join(name))
+            .expect("the candidate");
+        let mut names: Vec<&str> = candidate
+            .closure
+            .iter()
+            .map(|path| path.file_name().expect("name").to_str().expect("utf8"))
+            .collect();
+        names.sort_unstable();
+        names
+    }
+
+    #[tokio::test]
+    async fn refreshing_the_mod_list_records_what_every_listed_release_requires() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let catalog = listing_catalog(every_release()).await;
+        let (mut app, host, root) = listed_instance_with_unasked_mods(base.path());
+        app.use_loopback_catalog(&catalog.uri())
+            .expect("loopback catalog");
+
+        let before = app.plan_isolation(host, &[]).expect("plan");
+        assert_eq!(before.unrecorded.len(), 3, "nothing has been asked yet");
+
+        list(&app, host).await;
+
+        let recipe = recipe_at(&root);
+        assert_eq!(relations_of(&recipe, "LibX.jar"), Some(&[][..]));
+        assert_eq!(
+            relations_of(&recipe, "SkyblockBuilder.jar").map(<[_]>::len),
+            Some(1)
+        );
+        assert_eq!(
+            relations_of(&recipe, "SkyGUIs.jar").map(<[_]>::len),
+            Some(2)
+        );
+
+        // Isolation plans from the recipe, so the graph it builds next is the
+        // one the listing just recorded.
+        let after = app.plan_isolation(host, &[]).expect("plan");
+        assert!(after.unrecorded.is_empty(), "every mod was answered");
+        assert_eq!(
+            closure_of(&after, "SkyGUIs.jar"),
+            ["LibX.jar", "SkyGUIs.jar", "SkyblockBuilder.jar"]
+        );
+        assert_eq!(
+            closure_of(&after, "SkyblockBuilder.jar"),
+            ["LibX.jar", "SkyblockBuilder.jar"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_mod_the_listing_catalog_did_not_answer_for_stays_unrecorded() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let catalog = listing_catalog(vec![
+            version_json(LIBRARY_RELEASE, LIBRARY, &[]),
+            version_json(SKYGUIS_RELEASE, SKYGUIS, &[LIBRARY, DEPENDENT]),
+        ])
+        .await;
+        let (mut app, host, root) = listed_instance_with_unasked_mods(base.path());
+        app.use_loopback_catalog(&catalog.uri())
+            .expect("loopback catalog");
+
+        list(&app, host).await;
+
+        let recipe = recipe_at(&root);
+        assert_eq!(
+            relations_of(&recipe, "SkyblockBuilder.jar"),
+            None,
+            "no answer is not an answer of needing nothing"
+        );
+        assert!(relations_of(&recipe, "LibX.jar").is_some());
+        let plan = app.plan_isolation(host, &[]).expect("plan");
+        assert_eq!(plan.unrecorded, [PathBuf::from("mods/SkyblockBuilder.jar")]);
+    }
+
+    #[tokio::test]
+    async fn a_listing_whose_releases_cannot_be_fetched_keeps_what_was_recorded() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let catalog = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(route("/projects"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(vec![
+                project_json(LIBRARY),
+                project_json(DEPENDENT),
+                project_json(SKYGUIS),
+            ]))
+            .mount(&catalog)
+            .await;
+        Mock::given(method("GET"))
+            .and(route("/versions"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&catalog)
+            .await;
+        let (mut app, host, root) = listed_instance_with_unasked_mods(base.path());
+        app.use_loopback_catalog(&catalog.uri())
+            .expect("loopback catalog");
+
+        let store = SourceStore::new(ephervex_storage::metadata::source_dir(&root));
+        let mut recipe = store.read_recipe().expect("recipe");
+        for file in &mut recipe.files {
+            if file.file_name() == "SkyblockBuilder.jar" {
+                *file = with_relations(file.clone(), &[(LIBRARY, ModRelationKind::Required)]);
+            }
+        }
+        store.write_recipe(&recipe).expect("write");
+
+        list(&app, host).await;
+
+        let after = recipe_at(&root);
+        assert_eq!(after, recipe, "a failed lookup records and erases nothing");
+        let plan = app.plan_isolation(host, &[]).expect("plan");
+        assert_eq!(
+            plan.unrecorded,
+            [
+                PathBuf::from("mods/LibX.jar"),
+                PathBuf::from("mods/SkyGUIs.jar")
+            ],
+            "what was never answered is still reported as unknown"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_listing_records_what_an_explicit_refresh_records() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let catalog = listing_catalog(every_release()).await;
+        let (mut app, host, root) = listed_instance_with_unasked_mods(base.path());
+        app.use_loopback_catalog(&catalog.uri())
+            .expect("loopback catalog");
+        let store = SourceStore::new(ephervex_storage::metadata::source_dir(&root));
+        let unasked = store.read_recipe().expect("recipe");
+
+        list(&app, host).await;
+        let listed = recipe_at(&root);
+
+        store.write_recipe(&unasked).expect("forget the answers");
+        let report = app
+            .refresh_mod_dependencies(
+                host,
+                &OperationReporter::silent("test-refresh"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("refresh");
+        assert_eq!(report.recorded, 3);
+        assert!(report.is_complete());
+        assert_eq!(recipe_at(&root), listed);
+
+        // And the refresh after a listing has nothing left to record.
+        let again = app
+            .refresh_mod_dependencies(
+                host,
+                &OperationReporter::silent("test-refresh"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("refresh");
+        assert_eq!(again.recorded, 0);
+        assert_eq!(again.unchanged, 3);
+    }
+
+    #[tokio::test]
+    async fn a_listing_changes_nothing_about_the_mods_but_their_recorded_relations() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let catalog = listing_catalog(every_release()).await;
+        let (mut app, host, root) = listed_instance_with_unasked_mods(base.path());
+        app.use_loopback_catalog(&catalog.uri())
+            .expect("loopback catalog");
+
+        let store = SourceStore::new(ephervex_storage::metadata::source_dir(&root));
+        let mut recipe = store.read_recipe().expect("recipe");
+        for file in &mut recipe.files {
+            if file.file_name() == "LibX.jar" {
+                file.origin = ModOrigin::RequiredDependency;
+            }
+        }
+        store.write_recipe(&recipe).expect("write");
+        app.set_mod_enabled(host, Path::new("mods/SkyGUIs.jar"), false)
+            .expect("disable");
+        let before = app.host_mod_snapshot(host).expect("snapshot");
+
+        list(&app, host).await;
+
+        let mut after = recipe_at(&root);
+        assert!(after.files.iter().all(|file| file.relations.is_some()));
+        for file in &mut after.files {
+            file.relations = None;
+        }
+        assert_eq!(after, recipe, "only relations were written");
+        let listed = app.host_mod_snapshot(host).expect("snapshot");
+        // By path, since remembered titles change the order a list sorts in.
+        let state = |snapshot: &crate::mods::ManagedModSnapshot| {
+            let mut state: Vec<_> = snapshot
+                .mods
+                .iter()
+                .map(|entry| (entry.logical_path.clone(), entry.presence, entry.origin))
+                .collect();
+            state.sort_by(|left, right| left.0.cmp(&right.0));
+            state
+        };
+        assert_eq!(state(&listed), state(&before));
+    }
+
+    const CURSEFORGE_KEY: &str = "test-curseforge-key-do-not-use";
+    const CURSEFORGE_LIBRARY: &str = "306612";
+    const CURSEFORGE_LIBRARY_FILE: &str = "4593548";
+    const CURSEFORGE_DEPENDENT: &str = "238222";
+    const CURSEFORGE_DEPENDENT_FILE: &str = "4712354";
+
+    fn curseforge_recorded(name: &str, project: &str, file: &str) -> PackFileRecipe {
+        let mut entry = recorded(name, project, file);
+        entry.identity = Some(ProviderFileIdentity {
+            provider: Some(ModProvider::CurseForge),
+            project_id: Some(project.to_owned()),
+            version_id: Some(file.to_owned()),
+            file_id: Some(file.to_owned()),
+        });
+        entry
+    }
+
+    fn curseforge_file(project: &str, file: &str, relations: &str) -> String {
+        format!(
+            r#"{{"id":{file},"gameId":432,"modId":{project},"isAvailable":true,
+                "displayName":"Release {file}","fileName":"{project}-{file}.jar","releaseType":1,
+                "fileDate":"2024-07-01T10:00:00Z","fileLength":4096,"downloadUrl":null,
+                "hashes":[{{"value":"da39a3ee5e6b4b0d3255bfef95601890afd80709","algo":1}}],
+                "gameVersions":["1.21.1","NeoForge"],
+                "dependencies":[{relations}]}}"#
+        )
+    }
+
+    #[tokio::test]
+    async fn refreshing_a_curseforge_mod_list_records_what_every_listed_file_requires() {
+        use std::sync::Arc;
+
+        use ephervex_auth::{CredentialStore, MemoryStore};
+        use ephervex_model::SecretString;
+
+        let base = tempfile::tempdir().expect("temp dir");
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(route("/v1/categories"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                r#"{"data":[{"id":6,"gameId":432,"name":"Mods","slug":"mc-mods","isClass":true}]}"#,
+                "application/json",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(route("/v1/mods"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                format!(
+                    r#"{{"data":[{{"id":{CURSEFORGE_LIBRARY},"gameId":432,"name":"Library","slug":"library","classId":6}},{{"id":{CURSEFORGE_DEPENDENT},"gameId":432,"name":"Feature","slug":"feature","classId":6}}]}}"#
+                ),
+                "application/json",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(route("/v1/mods/files"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                format!(
+                    r#"{{"data":[{},{}]}}"#,
+                    curseforge_file(CURSEFORGE_LIBRARY, CURSEFORGE_LIBRARY_FILE, ""),
+                    curseforge_file(
+                        CURSEFORGE_DEPENDENT,
+                        CURSEFORGE_DEPENDENT_FILE,
+                        &format!(r#"{{"modId":{CURSEFORGE_LIBRARY},"relationType":3}}"#),
+                    ),
+                ),
+                "application/json",
+            ))
+            .mount(&server)
+            .await;
+
+        let (mut app, instance, root) = instance_with_unasked_mods(base.path());
+        let host = InstalledHost::Instance(instance);
+        let store = SourceStore::new(ephervex_storage::metadata::source_dir(&root));
+        let mut recipe = store.read_recipe().expect("recipe");
+        recipe.files = vec![
+            curseforge_recorded("Library.jar", CURSEFORGE_LIBRARY, CURSEFORGE_LIBRARY_FILE),
+            curseforge_recorded(
+                "Feature.jar",
+                CURSEFORGE_DEPENDENT,
+                CURSEFORGE_DEPENDENT_FILE,
+            ),
+        ];
+        store.write_recipe(&recipe).expect("write");
+        let mods = ephervex_storage::metadata::client_game_dir(&root).join("mods");
+        std::fs::create_dir_all(&mods).expect("mods dir");
+        for jar in ["Library.jar", "Feature.jar"] {
+            std::fs::write(mods.join(jar), b"jar").expect("write jar");
+        }
+        let credentials = MemoryStore::new();
+        ephervex_auth::set_curseforge_api_key(&credentials, &SecretString::new(CURSEFORGE_KEY))
+            .expect("store the key");
+        let credentials: Arc<dyn CredentialStore> = Arc::new(credentials);
+        app.use_loopback_curseforge(&format!("{}/v1", server.uri()), credentials)
+            .expect("a loopback client");
+
+        list(&app, host).await;
+
+        let recipe = recipe_at(&root);
+        assert_eq!(relations_of(&recipe, "Library.jar"), Some(&[][..]));
+        let feature = relations_of(&recipe, "Feature.jar").expect("recorded");
+        assert_eq!(feature.len(), 1);
+        assert!(feature[0].kind.is_required());
+        assert_eq!(feature[0].target.project_id(), Some(CURSEFORGE_LIBRARY));
+
+        let plan = app.plan_isolation(host, &[]).expect("plan");
+        assert!(plan.unrecorded.is_empty());
+        assert_eq!(
+            closure_of(&plan, "Feature.jar"),
+            ["Feature.jar", "Library.jar"]
         );
     }
 }

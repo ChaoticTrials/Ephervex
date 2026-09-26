@@ -114,6 +114,10 @@ install, because nothing installs from it.
   is the one source that records nothing, because the format states a path,
   hashes and download addresses and declares no relations at all; those entries
   stay unasked until a refresh.
+- Refreshing a host's mod list records the relations of every exact release it
+  looks up, through the same path as the explicit dependency refresh. It asks
+  nothing it did not already ask, and a release no answer covers keeps what it
+  had.
 - A mod with no catalog identity has nothing to ask about, and stays unasked
   permanently. Any feature built on this graph has to say so rather than treat
   the jar as independent.

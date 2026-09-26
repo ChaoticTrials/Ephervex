@@ -10,14 +10,18 @@ Open a client's or server's **Isolation** tab and choose **Set up isolation**.
 Select any mods that must stay enabled throughout the investigation. Ephervex
 also keeps everything those mods require enabled. Canceling the setup returns
 to the empty Isolation tab. A setup is only valid for the mods it was planned
-from: enabling, disabling, adding, deleting, updating, or restoring mods, or
-restoring a snapshot of the host, discards a setup that has not started. Set up
+from: enabling, disabling, adding, deleting, updating, or restoring mods,
+restoring a snapshot of the host, or recording new dependency information,
+discards a setup that has not started. Set up
 isolation again to plan from the current mods. A change that fails or leaves the
 mods as they were keeps the setup.
 
 The setup screen requires a separate acknowledgement when a required dependency
 is missing. If dependency information can be refreshed but has not been
 recorded, refresh it first or explicitly continue with reduced confidence.
+The Mods tab's refresh button records dependency information for every mod the
+catalogs can identify, in one pass. Mods a catalog could not answer for stay
+listed as incomplete.
 Either acknowledgement marks the result as unproven. Both choices sit directly
 above **Start isolation**. While Start waits on the user, the setup names what
 it needs beside it: stopping the host or giving an acknowledgement. While a
