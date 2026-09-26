@@ -42,8 +42,6 @@ pub(super) struct WorkspaceState {
     /// keeps the same model and its tabs are not rebuilt.
     client_surfaces: ModelRc<WorkspaceSurfaceRow>,
     server_surfaces: ModelRc<WorkspaceSurfaceRow>,
-    client_surface_labels: ModelRc<SharedString>,
-    server_surface_labels: ModelRc<SharedString>,
 }
 
 impl Default for WorkspaceState {
@@ -60,8 +58,6 @@ impl Default for WorkspaceState {
             host_labels: Rc::new(VecModel::default()),
             client_surfaces: surface_rows(Surface::client()),
             server_surfaces: surface_rows(Surface::server()),
-            client_surface_labels: surface_labels(Surface::client()),
-            server_surface_labels: surface_labels(Surface::server()),
         }
     }
 }
@@ -232,15 +228,9 @@ impl WorkspaceState {
         let mut view = self.reported.get(&host).cloned().unwrap_or_default();
         view.kind = host.kind().into();
         view.id = id.as_str().into();
-        (view.surfaces, view.surface_labels) = match host {
-            InstalledHost::Instance(_) => (
-                self.client_surfaces.clone(),
-                self.client_surface_labels.clone(),
-            ),
-            InstalledHost::Server(_) => (
-                self.server_surfaces.clone(),
-                self.server_surface_labels.clone(),
-            ),
+        view.surfaces = match host {
+            InstalledHost::Instance(_) => self.client_surfaces.clone(),
+            InstalledHost::Server(_) => self.server_surfaces.clone(),
         };
         view.available = false;
         match host {
@@ -418,7 +408,6 @@ fn change_row(row: &mut HostView, reported: &HostView) {
     updated.client = row.client.clone();
     updated.server = row.server.clone();
     updated.surfaces = row.surfaces.clone();
-    updated.surface_labels = row.surface_labels.clone();
     updated.linked_servers = row.linked_servers.clone();
     updated.pending_servers = row.pending_servers.clone();
     *row = updated;
@@ -458,15 +447,6 @@ fn surface_rows(surfaces: &[Surface]) -> ModelRc<WorkspaceSurfaceRow> {
                 id: surface.id().into(),
                 label: lookup(surface.label()).into(),
             })
-            .collect::<Vec<_>>(),
-    ))
-}
-
-fn surface_labels(surfaces: &[Surface]) -> ModelRc<SharedString> {
-    ModelRc::new(VecModel::from(
-        surfaces
-            .iter()
-            .map(|surface| SharedString::from(lookup(surface.label())))
             .collect::<Vec<_>>(),
     ))
 }

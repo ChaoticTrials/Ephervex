@@ -131,6 +131,9 @@ slint::slint! {
         // headers, and the pane geometry arithmetic reads the same numbers.
         out property <length> workspace-pane-min-width: 360px;
         out property <length> workspace-pane-min-height: 260px;
+        // One host surface tab. Every tab is this wide so a tab bar can tell
+        // how many fit before the rest move under More.
+        out property <length> workspace-tab-width: 112px * text-scale;
     }
 
     // One dependency Ephervex is built on. Generated from the real dependency
@@ -639,8 +642,6 @@ slint::slint! {
         client: InstanceRow,
         server: ServerRow,
         surfaces: [WorkspaceSurfaceRow],
-        // The same surfaces' labels, as a pane's surface picker lists them.
-        surface-labels: [string],
         // A client's linked servers, and those still being created.
         linked-servers: [ServerRow],
         pending-servers: [PendingEntityRow],
@@ -1915,6 +1916,82 @@ slint::slint! {
         area := TouchArea { clicked => { root.clicked(); } }
     }
 
+    // A host's surfaces as tabs: as many as fit, then More, which lists the
+    // rest. The selected surface always keeps a tab of its own.
+    component SurfaceTabs inherits Rectangle {
+        in property <[WorkspaceSurfaceRow]> surfaces;
+        in property <string> selected;
+        in property <int> selected-index;
+        callback chosen(string);
+        property <length> tab-width: Theme.workspace-tab-width;
+        property <bool> all-fit: root.surfaces.length * root.tab-width <= root.width;
+        // Tabs shown besides More, never fewer than the selected one.
+        property <int> fitting: root.all-fit ? root.surfaces.length : max(1, floor((root.width - root.tab-width) / root.tab-width));
+        property <bool> selected-hidden: root.selected-index >= root.fitting;
+        height: 38px;
+        horizontal-stretch: 1;
+        min-width: 2 * root.tab-width;
+        // Placed by hand rather than laid out: how many tabs fit depends on
+        // this bar's width, which a layout would in turn take from the tabs.
+        property <int> leading: root.fitting - (root.selected-hidden ? 1 : 0);
+        for surface[index] in root.surfaces : WorkspaceTab {
+            property <bool> shown: index == root.selected-index || index < root.leading;
+            x: (index < root.leading ? index : root.leading) * root.tab-width;
+            y: 0px;
+            width: root.tab-width;
+            height: root.height;
+            visible: self.shown;
+            text: surface.label;
+            selected: root.selected == surface.id;
+            clicked => { root.chosen(surface.id); }
+        }
+        if !root.all-fit : Rectangle {
+            x: root.fitting * root.tab-width;
+            y: 0px;
+            width: root.tab-width;
+            height: root.height;
+            more := Rectangle {
+                border-radius: 5px;
+                background: more-area.has-hover ? Theme.elevated : transparent;
+                accessible-role: button;
+                accessible-label: GuiI18n.text("gui-workspace-more-surfaces");
+                accessible-expandable: true;
+                accessible-action-default => { menu.show(); }
+                accessible-action-expand => { menu.show(); }
+                Rectangle { x: 0px; y: (parent.height - 18px) / 2; width: 1px; height: 18px; background: Theme.border; }
+                HorizontalLayout {
+                    alignment: center; spacing: 6px;
+                    Text { text: GuiI18n.text("gui-workspace-more-surfaces"); color: Theme.text-secondary; font-size: Theme.body-size; vertical-alignment: center; }
+                    Path { width: 8px; height: 5px; y: (parent.height - self.height) / 2; commands: "M 0 0 L 4 4 L 8 0"; stroke: Theme.text-secondary; stroke-width: 1.5px; fill: transparent; }
+                }
+                more-area := TouchArea { clicked => { menu.show(); } }
+        }
+        menu := PopupWindow {
+            x: 0px;
+            y: parent.height + 4px;
+            width: max(root.tab-width * 1.5, 180px);
+            Rectangle {
+                border-radius: 7px; border-width: 1px; border-color: Theme.border; background: Theme.elevated;
+                VerticalLayout {
+                    padding: 4px;
+                    for surface[index] in root.surfaces : Rectangle {
+                        property <bool> hidden: !(index == root.selected-index || index < root.leading);
+                        height: self.hidden ? 34px : 0px;
+                        visible: self.hidden;
+                        border-radius: 5px;
+                        background: entry-area.has-hover ? Theme.surface : transparent;
+                        accessible-role: button;
+                        accessible-label: surface.label;
+                        accessible-action-default => { root.chosen(surface.id); }
+                        Text { x: 10px; text: surface.label; color: Theme.text; font-size: Theme.body-size; vertical-alignment: center; height: parent.height; }
+                        entry-area := TouchArea { clicked => { root.chosen(surface.id); } }
+                    }
+                }
+            }
+        }
+        }
+    }
+
     component SnapshotCard inherits Rectangle {
         in property <SnapshotRow> item;
         callback restore();
@@ -2004,13 +2081,11 @@ slint::slint! {
         in property <string> pane-label;
         in property <[string]> host-choices;
         in property <int> host-choice;
-        in property <[string]> surface-labels;
         in property <int> surface-choice;
         in property <bool> can-split-beside;
         in property <bool> can-split-below;
         in property <bool> can-close;
         callback choose-host(int);
-        callback choose-surface(int);
         callback split-beside();
         callback split-below();
         callback close-pane();
@@ -2024,17 +2099,19 @@ slint::slint! {
         VerticalLayout {
             padding: root.compact ? 12px : 22px;
             spacing: root.compact ? 10px : 14px;
+            // The host on one row: which it is, its state, and its actions.
+            // The view below: which surface, and the layout controls.
             if root.compact : VerticalLayout {
                 spacing: 8px;
                 HorizontalLayout {
                     spacing: 8px;
-                    // Both pickers show what the pane shows, and snap back to
+                    // The picker shows what the pane shows, and snaps back to
                     // it after a choice: the controller decides what a pane
                     // shows, so a choice it refused never lingers here.
                     ComboBox {
                         property <int> shown: root.host-choice;
                         horizontal-stretch: 1;
-                        min-width: 100px;
+                        min-width: 80px;
                         accessible-label: GuiI18n.value("gui-pane-host", root.pane-label);
                         model: root.host-choices;
                         init => { self.current-index = self.shown; self.current-value = self.shown < 0 ? "" : root.host-choices[self.shown]; }
@@ -2042,25 +2119,19 @@ slint::slint! {
                         selected(value) => { root.choose-host(self.current-index); self.current-index = self.shown; self.current-value = self.shown < 0 ? "" : root.host-choices[self.shown]; }
                     }
                     VerticalLayout { alignment: center; Pill { text: root.restart-stage != "" ? GuiI18n.text("gui-state-restarting") : root.status; tone-color: root.restart-stage != "" || root.status-kind == "starting" ? Theme.warning : root.status-kind == "running" ? Theme.success : Theme.text-secondary; } }
-                    if root.can-split-below : IconButton { icon: @image-url("../../../assets/icons/split-below.svg"); accessible-name: GuiI18n.value("gui-pane-split-below", root.pane-label); clicked => { root.split-below(); } }
-                    if root.can-close : IconButton { icon: @image-url("../../../assets/icons/close.svg"); accessible-name: GuiI18n.value("gui-pane-close", root.pane-label); clicked => { root.close-pane(); } }
+                    if root.restart-visible : AppButton { text: GuiI18n.text("gui-restart"); accessible-name: GuiI18n.values("gui-pane-action", GuiI18n.text("gui-restart"), root.pane-label); enabled: root.restart-enabled && !root.occupied; hint: root.restart-hint; clicked => { root.restart(); } }
+                    AppButton { text: root.primary-label; accessible-name: GuiI18n.values("gui-pane-action", root.primary-label, root.pane-label); tone: root.primary-tone; enabled: root.primary-enabled && !root.occupied; clicked => { root.primary(); } }
                 }
                 HorizontalLayout {
                     spacing: 8px;
-                    ComboBox {
-                        property <int> shown: root.surface-choice;
-                        horizontal-stretch: 1;
-                        min-width: 100px;
-                        max-width: 220px;
-                        accessible-label: GuiI18n.value("gui-pane-surface", root.pane-label);
-                        model: root.surface-labels;
-                        init => { self.current-index = self.shown; self.current-value = root.surface-labels[self.shown]; }
-                        changed shown => { self.current-index = self.shown; self.current-value = root.surface-labels[self.shown]; }
-                        selected(value) => { root.choose-surface(self.current-index); self.current-index = self.shown; self.current-value = root.surface-labels[self.shown]; }
+                    SurfaceTabs {
+                        surfaces: root.surfaces;
+                        selected: root.selected-surface;
+                        selected-index: root.surface-choice;
+                        chosen(surface) => { root.surface-selected(surface); }
                     }
-                    Rectangle { horizontal-stretch: 0.01; }
-                    if root.restart-visible : AppButton { text: GuiI18n.text("gui-restart"); accessible-name: GuiI18n.values("gui-pane-action", GuiI18n.text("gui-restart"), root.pane-label); enabled: root.restart-enabled && !root.occupied; hint: root.restart-hint; clicked => { root.restart(); } }
-                    AppButton { text: root.primary-label; accessible-name: GuiI18n.values("gui-pane-action", root.primary-label, root.pane-label); tone: root.primary-tone; enabled: root.primary-enabled && !root.occupied; clicked => { root.primary(); } }
+                    if root.can-split-below : IconButton { icon: @image-url("../../../assets/icons/split-below.svg"); accessible-name: GuiI18n.value("gui-pane-split-below", root.pane-label); clicked => { root.split-below(); } }
+                    if root.can-close : IconButton { icon: @image-url("../../../assets/icons/close.svg"); accessible-name: GuiI18n.value("gui-pane-close", root.pane-label); clicked => { root.close-pane(); } }
                 }
             }
             if !root.compact : HorizontalLayout {
@@ -2120,15 +2191,11 @@ slint::slint! {
                     BodyText { text: root.occupied-text; horizontal-stretch: 1; wrap: word-wrap; }
                 }
             }
-            if !root.compact : HorizontalLayout {
-                spacing: 4px;
-                for surface in root.surfaces : WorkspaceTab {
-                    text: surface.label;
-                    min-width: max(88px, self.preferred-width);
-                    selected: root.selected-surface == surface.id;
-                    clicked => { root.surface-selected(surface.id); }
-                }
-                Rectangle { horizontal-stretch: 1; }
+            if !root.compact : SurfaceTabs {
+                surfaces: root.surfaces;
+                selected: root.selected-surface;
+                selected-index: root.surface-choice;
+                chosen(surface) => { root.surface-selected(surface); }
             }
             Divider { }
             @children
@@ -4979,13 +5046,11 @@ slint::slint! {
                                     pane-label: pane.label;
                                     host-choices: root.workspace-host-labels;
                                     host-choice: pane.host-choice;
-                                    surface-labels: host.surface-labels;
                                     surface-choice: pane.surface-choice;
                                     can-split-beside: pane.can-split-beside;
                                     can-split-below: pane.can-split-below;
                                     can-close: pane.can-close;
                                     choose-host(index) => { root.choose-pane-host(pane.id, root.workspace-host-choices[index].kind, root.workspace-host-choices[index].id); }
-                                    choose-surface(index) => { root.show-pane-surface(pane.id, host.surfaces[index].id); }
                                     split-beside => { root.split-pane-beside(pane.id); }
                                     split-below => { root.split-pane-below(pane.id); }
                                     close-pane => { root.close-pane(pane.id); }

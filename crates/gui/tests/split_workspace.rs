@@ -304,7 +304,6 @@ fn each_panes_header_stays_inside_the_pane() {
             };
             let controls = [
                 picker(&ui, "gui-pane-host", id),
-                picker(&ui, "gui-pane-surface", id),
                 button(&ui, &pane_control("gui-pane-close", id)),
                 button(&ui, &pane_action(primary, id)),
             ];
@@ -375,10 +374,10 @@ fn split_panes_offer_what_their_shape_allows() {
     assert_eq!(closed.borrow().as_slice(), [1, 2, 3]);
 }
 
-/// A pane's pickers show its own host and surface, ask for another, and keep
+/// A pane's host picker shows its own host, asks for another, and keeps
 /// showing what the pane shows until the answer changes it.
 #[test]
-fn a_panes_pickers_show_and_ask_for_its_host_and_surface() {
+fn a_panes_host_picker_shows_and_asks_for_its_host() {
     let ui = window();
     let hosts = Rc::new(RefCell::new(Vec::new()));
     let host_sink = Rc::clone(&hosts);
@@ -387,23 +386,13 @@ fn a_panes_pickers_show_and_ask_for_its_host_and_surface() {
             .borrow_mut()
             .push((pane, kind.to_string(), id.to_string()));
     });
-    let surfaces = support::follow_surface_requests(&ui);
-    let mut panes = vec![
-        placed(1, CLIENT, "Overview", 0, 0, false),
-        placed(2, SERVER, "Console", 1, 0, false),
-    ];
-    panes[1].surface_choice = 1;
+    let (_, panes) = shapes().into_iter().next().expect("the 1:1 shape");
     split(&ui, panes);
 
     let host_picker = picker(&ui, "gui-pane-host", 2);
-    let surface_picker = picker(&ui, "gui-pane-surface", 2);
     assert_eq!(
         host_picker.accessible_value().as_deref(),
         Some(choice_label("server").as_str())
-    );
-    assert_eq!(
-        surface_picker.accessible_value().as_deref(),
-        Some(lookup("gui-server-tab-console").as_str())
     );
     assert_eq!(
         picker(&ui, "gui-pane-host", 1)
@@ -425,19 +414,112 @@ fn a_panes_pickers_show_and_ask_for_its_host_and_surface() {
         Some(choice_label("server").as_str()),
         "the pane shows its host until the workspace points it elsewhere"
     );
+}
 
-    choose(
-        &ui,
-        &picker(&ui, "gui-pane-surface", 2),
-        &lookup("gui-instance-tab-mods"),
-    );
-    assert_eq!(surfaces.borrow().last(), Some(&(2, "Mods".to_owned())));
-    assert_eq!(support::surface(&ui, 1), "Mods");
+/// The elements labeled `label` with `role` inside one pane.
+fn in_pane(ui: &AppWindow, pane: i32, label: &str, role: AccessibleRole) -> Vec<ElementHandle> {
+    let area = pane_area(ui, pane);
+    ElementHandle::find_by_accessible_label(ui, label)
+        .filter(|element| element.accessible_role() == Some(role))
+        .filter(|element| area.contains(Area::of(element)))
+        .collect()
+}
+
+/// A tab switches only its own pane's surface.
+#[test]
+fn a_panes_tabs_switch_only_that_pane() {
+    let ui = window();
+    let surfaces = support::follow_surface_requests(&ui);
+    let (_, panes) = shapes().into_iter().next().expect("the 1:1 shape");
+    split(&ui, panes);
+
+    let console = lookup("gui-server-tab-console");
+    in_pane(&ui, 2, &console, AccessibleRole::Button)
+        .first()
+        .expect("the server pane has a Console tab")
+        .invoke_accessible_default_action();
+    settle(&ui);
+    assert_eq!(surfaces.borrow().last(), Some(&(2, "Console".to_owned())));
+    assert_eq!(support::surface(&ui, 1), "Console");
     assert_eq!(
         support::surface(&ui, 0),
         "Overview",
         "the other pane is left alone"
     );
+}
+
+/// Tabs that do not fit wait under More, and the selected surface always
+/// keeps a tab of its own, however far down the list it is.
+#[test]
+fn tabs_that_do_not_fit_wait_under_more() {
+    let ui = window();
+    ui.window().set_size(PhysicalSize::new(980, 680));
+    let surfaces = support::follow_surface_requests(&ui);
+    let mut panes = vec![
+        placed(1, CLIENT, "Overview", 0, 0, false),
+        placed(2, SERVER, "Diagnostics", 1, 0, false),
+    ];
+    panes[1].surface_choice = 7;
+    split(&ui, panes);
+
+    let tab = |label: &str| in_pane(&ui, 2, &lookup(label), AccessibleRole::Button).len();
+    assert_eq!(
+        tab("gui-diagnostics-tab"),
+        1,
+        "the selected surface keeps its tab"
+    );
+    assert_eq!(
+        tab("gui-server-tab-console"),
+        0,
+        "a tab that does not fit is not drawn"
+    );
+    let more = in_pane(
+        &ui,
+        2,
+        &lookup("gui-workspace-more-surfaces"),
+        AccessibleRole::Button,
+    );
+    assert_eq!(more.len(), 1);
+
+    open_more(&ui, &more[0], &lookup("gui-server-tab-console"));
+    assert_eq!(surfaces.borrow().last(), Some(&(2, "Console".to_owned())));
+    assert_eq!(support::surface(&ui, 1), "Console");
+
+    ui.window().set_size(PhysicalSize::new(1480, 900));
+    split(&ui, vec![placed(1, CLIENT, "Overview", 0, 0, false)]);
+    assert!(
+        find(
+            &ui,
+            &lookup("gui-workspace-more-surfaces"),
+            AccessibleRole::Button
+        )
+        .is_none(),
+        "a single pane at the usual size has room for every tab"
+    );
+}
+
+/// Opens More and clicks the entry for `value`. The list is a popup placed
+/// under More, and an entry's position is reported within that popup.
+fn open_more(ui: &AppWindow, more: &ElementHandle, value: &str) {
+    more.invoke_accessible_default_action();
+    settle(ui);
+    let entry = ElementHandle::find_by_accessible_label(ui, value)
+        .filter(|element| element.accessible_role() == Some(AccessibleRole::Button))
+        .find(|element| element.size().height > 0.0 && element.absolute_position().y < 40.0)
+        .unwrap_or_else(|| panic!("no entry {value} under More"));
+    let origin = more.absolute_position();
+    let within = entry.absolute_position();
+    let size = entry.size();
+    let position = LogicalPosition::new(
+        origin.x + within.x + size.width / 2.0,
+        origin.y + more.size().height + 4.0 + within.y + size.height / 2.0,
+    );
+    let button = PointerEventButton::Left;
+    ui.window()
+        .dispatch_event(WindowEvent::PointerPressed { position, button });
+    ui.window()
+        .dispatch_event(WindowEvent::PointerReleased { position, button });
+    settle(ui);
 }
 
 /// Two panes on one host read the host's one state: a change to it shows in

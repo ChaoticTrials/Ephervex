@@ -1634,7 +1634,7 @@ gui-pane-bottom-left = Bottom left
 gui-pane-top-right = Top right
 gui-pane-bottom-right = Bottom right
 gui-pane-host = Host shown in { $value }
-gui-pane-surface = View shown in { $value }
+gui-workspace-more-surfaces = More
 gui-pane-split-below = Add a pane below { $value }
 gui-pane-close = Close { $value }
 # A host action inside one pane, named with the pane: (action, pane).
