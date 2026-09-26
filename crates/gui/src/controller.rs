@@ -12086,7 +12086,8 @@ mod tests {
             source
                 .matches("root.pending-snapshot-deletion-note = ")
                 .count(),
-            4
+            6,
+            "every Delete, including the ones a narrow overview moves to a row of their own"
         );
         assert!(source.contains("text: root.pending-snapshot-deletion-note"));
     }
