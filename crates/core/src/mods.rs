@@ -752,6 +752,37 @@ impl ManagedModSnapshot {
 
 /// Orders a mod list the way a reader looks through one.
 ///
+/// Brings an enriched list up to what the host holds now. A mod enabled,
+/// disabled, or deleted while its metadata was fetched shows its current
+/// state; one added or replaced meanwhile shows undecorated, and one removed
+/// meanwhile is gone.
+fn carry_current_state(enriched: &mut ManagedModSnapshot, current: ManagedModSnapshot) {
+    let mut now: BTreeMap<PathBuf, ManagedModEntry> = current
+        .mods
+        .into_iter()
+        .map(|entry| (entry.logical_path.clone(), entry))
+        .collect();
+    let mut replaced = Vec::new();
+    enriched.mods.retain_mut(|entry| {
+        let Some(current) = now.remove(&entry.logical_path) else {
+            return false;
+        };
+        if current.file_name == entry.file_name && current.origin == entry.origin {
+            entry.presence = current.presence;
+            entry.size = current.size;
+            true
+        } else {
+            replaced.push(current);
+            false
+        }
+    });
+    enriched.mods.extend(replaced);
+    enriched.mods.extend(now.into_values());
+    enriched.source = current.source;
+    enriched.mods_are_the_users = current.mods_are_the_users;
+    sort_for_display(&mut enriched.mods);
+}
+
 /// By the name on screen, case-insensitively, with the logical path breaking a
 /// tie so the order is stable between two opens.
 fn sort_for_display(mods: &mut [ManagedModEntry]) {
@@ -1377,6 +1408,9 @@ impl App {
                 snapshot.metadata = MetadataAvailability::Unavailable;
             }
         }
+        // The catalog can take long enough for the host to change meanwhile,
+        // such as an isolation round disabling half of it.
+        carry_current_state(&mut snapshot, self.host_mod_snapshot(host)?);
         Ok(snapshot)
     }
 
@@ -2734,6 +2768,69 @@ mod tests {
             .expect_err("nothing to enable");
         assert!(matches!(error, CoreError::ModFileMissing { .. }));
         assert_eq!(error.failing_path().as_deref(), Some(path.as_path()));
+    }
+
+    /// A list whose metadata arrived after the host changed shows the host as
+    /// it is now, keeping the metadata only for the jars still there.
+    #[test]
+    fn an_enriched_list_shows_what_changed_while_it_was_fetched() {
+        let entry = |path: &str, file: &str, presence: ModPresence| ManagedModEntry {
+            logical_path: PathBuf::from(path),
+            file_name: file.to_owned(),
+            origin: ModOrigin::PackDeclared,
+            identity: version_identity("PROJ", "VER"),
+            original_identity: None,
+            hashes: Vec::new(),
+            size: None,
+            client: SideRequirement::Required,
+            server: SideRequirement::Unknown,
+            presence,
+            details: None,
+            cached: None,
+            icon: None,
+        };
+        let snapshot = |mods| ManagedModSnapshot {
+            host: InstalledHost::Instance(ephervex_model::InstanceId::new()),
+            source: None,
+            mods,
+            metadata: MetadataAvailability::Provider,
+            mods_are_the_users: false,
+        };
+        let mut decorated = entry("mods/a.jar", "a.jar", ModPresence::Installed);
+        decorated.icon = Some(PathBuf::from("/cache/a.png"));
+        let mut enriched = snapshot(vec![
+            decorated,
+            entry("mods/b-1.jar", "b-1.jar", ModPresence::Installed),
+            entry("mods/gone.jar", "gone.jar", ModPresence::Installed),
+        ]);
+        let current = snapshot(vec![
+            entry("mods/a.jar", "a.jar", ModPresence::Disabled),
+            entry("mods/b-1.jar", "b-2.jar", ModPresence::Installed),
+            entry("mods/new.jar", "new.jar", ModPresence::Installed),
+        ]);
+
+        carry_current_state(&mut enriched, current);
+
+        let shown: Vec<(&str, &str, ModPresence, bool)> = enriched
+            .mods
+            .iter()
+            .map(|entry| {
+                (
+                    entry.logical_path.to_str().unwrap_or_default(),
+                    entry.file_name.as_str(),
+                    entry.presence,
+                    entry.icon.is_some(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("mods/a.jar", "a.jar", ModPresence::Disabled, true),
+                ("mods/b-1.jar", "b-2.jar", ModPresence::Installed, false),
+                ("mods/new.jar", "new.jar", ModPresence::Installed, false),
+            ]
+        );
     }
 
     /// What is remembered is split by what each field is a fact about, because
