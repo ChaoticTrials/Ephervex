@@ -338,11 +338,25 @@ slint::slint! {
         label: string,
     }
 
-    // One host a pane can be pointed at: every installed client and server.
+    // A server reached through the client it is linked to.
+    export struct WorkspaceLinkedChoice {
+        id: string,
+        name: string,
+        state: string,
+        state-kind: string,
+    }
+
+    // One host a pane can be pointed at, as the host picker's card shows it.
     export struct WorkspaceHostChoice {
         kind: string,
         id: string,
-        label: string,
+        name: string,
+        summary: string,
+        loader-kind: string,
+        state: string,
+        state-kind: string,
+        // A client's linked servers, pickable from its card.
+        linked: [WorkspaceLinkedChoice],
     }
 
     // One action belonging to a durable workflow shown above every surface.
@@ -769,8 +783,6 @@ slint::slint! {
         // What assistive technology calls the pane: where it is, its host, and
         // its surface, so two panes on one host are never named alike.
         label: string,
-        // Index into the window's host choices, or -1 for a host no longer installed.
-        host-choice: int,
         // Index into the host's surfaces.
         surface-choice: int,
         column: int,
@@ -1916,6 +1928,31 @@ slint::slint! {
         area := TouchArea { clicked => { root.clicked(); } }
     }
 
+    // What a pane of a split shows, as a button that opens the host picker.
+    component PaneHostButton inherits Rectangle {
+        in property <string> name;
+        in property <string> kind;
+        in property <string> accessible-name;
+        callback clicked();
+        height: Theme.control-height;
+        horizontal-stretch: 1;
+        min-width: 80px;
+        border-radius: 6px;
+        border-width: 1px;
+        border-color: area.has-hover ? Theme.accent : Theme.border;
+        background: area.has-hover ? Theme.elevated : transparent;
+        accessible-role: button;
+        accessible-label: root.accessible-name;
+        accessible-action-default => { root.clicked(); }
+        HorizontalLayout {
+            padding-left: 10px; padding-right: 10px; spacing: 8px;
+            Text { text: root.kind; color: Theme.text-muted; font-size: Theme.caption-size; vertical-alignment: center; }
+            Text { text: root.name; color: Theme.text; font-size: Theme.body-size; font-weight: 600; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
+            Path { width: 8px; height: 5px; y: (parent.height - self.height) / 2; commands: "M 0 0 L 4 4 L 8 0"; stroke: Theme.text-secondary; stroke-width: 1.5px; fill: transparent; }
+        }
+        area := TouchArea { clicked => { root.clicked(); } }
+    }
+
     // A host's surfaces as tabs: as many as fit, then More, which lists the
     // rest. The selected surface always keeps a tab of its own.
     component SurfaceTabs inherits Rectangle {
@@ -2079,13 +2116,13 @@ slint::slint! {
         // apart and the host's own actions, and the pane gets a frame.
         in property <bool> compact;
         in property <string> pane-label;
-        in property <[string]> host-choices;
-        in property <int> host-choice;
+        // "Client" or "Server", beside the host's name in a compact header.
+        in property <string> host-kind-label;
         in property <int> surface-choice;
         in property <bool> can-split-beside;
         in property <bool> can-split-below;
         in property <bool> can-close;
-        callback choose-host(int);
+        callback choose-host();
         callback split-beside();
         callback split-below();
         callback close-pane();
@@ -2105,18 +2142,11 @@ slint::slint! {
                 spacing: 8px;
                 HorizontalLayout {
                     spacing: 8px;
-                    // The picker shows what the pane shows, and snaps back to
-                    // it after a choice: the controller decides what a pane
-                    // shows, so a choice it refused never lingers here.
-                    ComboBox {
-                        property <int> shown: root.host-choice;
-                        horizontal-stretch: 1;
-                        min-width: 80px;
-                        accessible-label: GuiI18n.value("gui-pane-host", root.pane-label);
-                        model: root.host-choices;
-                        init => { self.current-index = self.shown; self.current-value = self.shown < 0 ? "" : root.host-choices[self.shown]; }
-                        changed shown => { self.current-index = self.shown; self.current-value = self.shown < 0 ? "" : root.host-choices[self.shown]; }
-                        selected(value) => { root.choose-host(self.current-index); self.current-index = self.shown; self.current-value = self.shown < 0 ? "" : root.host-choices[self.shown]; }
+                    PaneHostButton {
+                        name: root.title;
+                        kind: root.host-kind-label;
+                        accessible-name: GuiI18n.value("gui-pane-host", root.pane-label);
+                        clicked => { root.choose-host(); }
                     }
                     VerticalLayout { alignment: center; Pill { text: root.restart-stage != "" ? GuiI18n.text("gui-state-restarting") : root.status; tone-color: root.restart-stage != "" || root.status-kind == "starting" ? Theme.warning : root.status-kind == "running" ? Theme.success : Theme.text-secondary; } }
                     if root.restart-visible : AppButton { text: GuiI18n.text("gui-restart"); accessible-name: GuiI18n.values("gui-pane-action", GuiI18n.text("gui-restart"), root.pane-label); enabled: root.restart-enabled && !root.occupied; hint: root.restart-hint; clicked => { root.restart(); } }
@@ -3775,6 +3805,55 @@ slint::slint! {
         }
     }
 
+    // One host in the host picker. A client's card also offers its linked
+    // servers, which the picker's server list leaves to their client.
+    component HostPickerCard inherits Rectangle {
+        in property <WorkspaceHostChoice> item;
+        in property <string> current-kind;
+        in property <string> current-id;
+        callback picked(string, string);
+        property <bool> current: root.item.kind == root.current-kind && root.item.id == root.current-id;
+        border-radius: 8px;
+        border-width: root.current ? 2px : 1px;
+        border-color: root.current ? Theme.accent : Theme.border;
+        background: card-area.has-hover ? Theme.elevated : Theme.surface;
+        accessible-role: button;
+        accessible-label: root.item.kind == "server" ? GuiI18n.value("gui-host-choice-server", root.item.name) : GuiI18n.value("gui-host-choice-client", root.item.name);
+        accessible-action-default => { root.picked(root.item.kind, root.item.id); }
+        card-area := TouchArea { clicked => { root.picked(root.item.kind, root.item.id); } }
+        VerticalLayout {
+            padding: 12px; spacing: 8px;
+            HorizontalLayout {
+                spacing: 12px;
+                LoaderGlyph { kind: root.item.loader-kind; server: root.item.kind == "server"; }
+                VerticalLayout {
+                    alignment: center; spacing: 4px; horizontal-stretch: 1;
+                    Heading { text: root.item.name; font-size: Theme.row-heading-size; overflow: elide; }
+                    BodyText { text: root.item.summary; overflow: elide; }
+                }
+                VerticalLayout { alignment: center; Pill { text: root.item.state; tone-color: root.item.state-kind == "running" ? Theme.success : root.item.state-kind == "starting" ? Theme.warning : Theme.text-secondary; } }
+            }
+            for server in root.item.linked : Rectangle {
+                property <bool> current: root.current-kind == "server" && root.current-id == server.id;
+                height: Theme.control-height;
+                border-radius: 6px;
+                border-width: 1px;
+                border-color: self.current ? Theme.accent : Theme.border;
+                background: linked-area.has-hover ? Theme.elevated : Theme.background;
+                accessible-role: button;
+                accessible-label: GuiI18n.value("gui-host-choice-server", server.name);
+                accessible-action-default => { root.picked("server", server.id); }
+                linked-area := TouchArea { clicked => { root.picked("server", server.id); } }
+                HorizontalLayout {
+                    padding-left: 10px; padding-right: 10px; spacing: 8px;
+                    Text { text: GuiI18n.text("gui-server"); color: Theme.text-muted; font-size: Theme.caption-size; vertical-alignment: center; }
+                    Text { text: server.name; color: Theme.text; font-size: Theme.body-size; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
+                    VerticalLayout { alignment: center; Pill { text: server.state; tone-color: server.state-kind == "running" ? Theme.success : server.state-kind == "starting" ? Theme.warning : Theme.text-secondary; } }
+                }
+            }
+        }
+    }
+
     component InstanceCard inherits Rectangle {
         in property <InstanceRow> item;
         in property <bool> selected;
@@ -4317,9 +4396,14 @@ slint::slint! {
         in-out property <[WorkspacePaneRow]> workspace-panes;
         in-out property <[HostView]> host-views;
         in-out property <string> workspace-back-label;
-        // Every host a pane can show, and the same hosts' labels for its picker.
-        in-out property <[WorkspaceHostChoice]> workspace-host-choices;
-        in-out property <[string]> workspace-host-labels;
+        // What the host picker offers: every client, running ones first, and
+        // the servers the Servers page lists, running ones first.
+        in-out property <[WorkspaceHostChoice]> workspace-client-choices;
+        in-out property <[WorkspaceHostChoice]> workspace-server-choices;
+        // The pane the host picker is choosing for, and the host it shows now.
+        in-out property <int> pane-host-picker-pane;
+        in-out property <string> pane-host-picker-kind;
+        in-out property <string> pane-host-picker-id;
         // Whether a file from the desktop is being held over the window. Set
         // only while the drop would be accepted, so the highlight never
         // promises something a release would not do.
@@ -5044,13 +5128,12 @@ slint::slint! {
                                     height: pane.stacked ? pane-area.stacked-height : pane-area.area-height;
                                     compact: split;
                                     pane-label: pane.label;
-                                    host-choices: root.workspace-host-labels;
-                                    host-choice: pane.host-choice;
+                                    host-kind-label: self.is-client ? GuiI18n.text("gui-client") : GuiI18n.text("gui-server");
                                     surface-choice: pane.surface-choice;
                                     can-split-beside: pane.can-split-beside;
                                     can-split-below: pane.can-split-below;
                                     can-close: pane.can-close;
-                                    choose-host(index) => { root.choose-pane-host(pane.id, root.workspace-host-choices[index].kind, root.workspace-host-choices[index].id); }
+                                    choose-host => { root.pane-host-picker-pane = pane.id; root.pane-host-picker-kind = host.kind; root.pane-host-picker-id = host.id; root.modal = "pane-host"; }
                                     split-beside => { root.split-pane-beside(pane.id); }
                                     split-below => { root.split-pane-below(pane.id); }
                                     close-pane => { root.close-pane(pane.id); }
@@ -5884,7 +5967,7 @@ slint::slint! {
             TouchArea { clicked => { } }
             Rectangle {
                 width: root.modal == "license" || root.modal == "third-party" ? min(820px, parent.width - 80px) : root.modal == "mod-plan" || root.modal == "mod-apply" || root.modal == "mod-remove" || root.modal == "mod-result" || root.modal == "mod-manage" || root.modal == "mod-acquire" ? min(720px, parent.width - 80px) : min(620px, parent.width - 80px);
-                height: root.modal == "license" || root.modal == "third-party" ? min(720px, parent.height - 80px) : root.modal == "import" ? min(620px, parent.height - 80px) : root.modal == "mod-plan" ? min(500px * Theme.text-scale + root.linked-targets.length * 68px + 14px, parent.height - 80px) : root.modal == "mod-manage" ? min(620px, parent.height - 80px) : root.modal == "mod-acquire" ? min(260px * Theme.text-scale + root.mod-acquisition-items.length * 64px, parent.height - 80px) : root.modal == "mod-apply" ? min(370px * Theme.text-scale + root.linked-targets.length * 68px + 14px, parent.height - 80px) : root.modal == "mod-result" ? min(300px * Theme.text-scale + root.linked-results.length * 68px + 14px, parent.height - 80px) : root.modal == "loader-change" ? 400px : root.modal == "mod-remove" ? min((root.linked-targets.length > 0 ? 424px : 300px) * Theme.text-scale + root.mod-removal-dependencies.length * 24px + root.linked-targets.length * 68px, parent.height - 80px) : root.modal == "eula" ? 440px : root.modal == "kill" ? 300px : root.modal == "delete-instance" || root.modal == "delete-server" ? 330px : root.modal == "rename" ? 300px : root.modal == "snapshot-create" || root.modal == "snapshot-restore" || root.modal == "snapshot-rename" || root.modal == "snapshot-delete" ? 330px : root.modal == "mod-impact" ? min(300px * Theme.text-scale + (root.mod-impact-breaks.length + root.mod-impact-degrades.length + root.mod-impact-unknown.length + root.mod-impact-unidentifiable.length + root.mod-requires-disabled.length + root.mod-requires-absent.length + root.mod-requires-incompatible.length) * 24px, parent.height - 80px) : root.modal == "delete-mod" ? 320px : root.modal == "remove-java-runtime" ? 320px : root.modal == "mod-clash" ? 320px : root.modal == "absent-mods" ? min(250px + root.absent-mods.length * 22px, parent.height - 80px) : root.modal == "make-persistent" ? min(290px + root.promote-servers.length * 28px, parent.height - 80px) : root.modal == "open-pack-link" ? 300px : root.modal == "create-server" ? min((root.create-server-client-id == "" ? 640px : 535px) + (root.create-server-client-id == "" && root.create-server-loader != "Vanilla" ? 44px : 0px), parent.height - 80px) : 570px;
+                height: root.modal == "license" || root.modal == "third-party" ? min(720px, parent.height - 80px) : root.modal == "import" || root.modal == "pane-host" ? min(620px, parent.height - 80px) : root.modal == "mod-plan" ? min(500px * Theme.text-scale + root.linked-targets.length * 68px + 14px, parent.height - 80px) : root.modal == "mod-manage" ? min(620px, parent.height - 80px) : root.modal == "mod-acquire" ? min(260px * Theme.text-scale + root.mod-acquisition-items.length * 64px, parent.height - 80px) : root.modal == "mod-apply" ? min(370px * Theme.text-scale + root.linked-targets.length * 68px + 14px, parent.height - 80px) : root.modal == "mod-result" ? min(300px * Theme.text-scale + root.linked-results.length * 68px + 14px, parent.height - 80px) : root.modal == "loader-change" ? 400px : root.modal == "mod-remove" ? min((root.linked-targets.length > 0 ? 424px : 300px) * Theme.text-scale + root.mod-removal-dependencies.length * 24px + root.linked-targets.length * 68px, parent.height - 80px) : root.modal == "eula" ? 440px : root.modal == "kill" ? 300px : root.modal == "delete-instance" || root.modal == "delete-server" ? 330px : root.modal == "rename" ? 300px : root.modal == "snapshot-create" || root.modal == "snapshot-restore" || root.modal == "snapshot-rename" || root.modal == "snapshot-delete" ? 330px : root.modal == "mod-impact" ? min(300px * Theme.text-scale + (root.mod-impact-breaks.length + root.mod-impact-degrades.length + root.mod-impact-unknown.length + root.mod-impact-unidentifiable.length + root.mod-requires-disabled.length + root.mod-requires-absent.length + root.mod-requires-incompatible.length) * 24px, parent.height - 80px) : root.modal == "delete-mod" ? 320px : root.modal == "remove-java-runtime" ? 320px : root.modal == "mod-clash" ? 320px : root.modal == "absent-mods" ? min(250px + root.absent-mods.length * 22px, parent.height - 80px) : root.modal == "make-persistent" ? min(290px + root.promote-servers.length * 28px, parent.height - 80px) : root.modal == "open-pack-link" ? 300px : root.modal == "create-server" ? min((root.create-server-client-id == "" ? 640px : 535px) + (root.create-server-client-id == "" && root.create-server-loader != "Vanilla" ? 44px : 0px), parent.height - 80px) : 570px;
                 x: (parent.width - self.width) / 2;
                 y: (parent.height - self.height) / 2;
                 border-radius: 8px;
@@ -5892,7 +5975,7 @@ slint::slint! {
                 border-color: Theme.border;
                 background: Theme.elevated;
                 VerticalLayout { padding: 22px; spacing: 13px;
-                    HorizontalLayout { cross-axis-alignment: center; Heading { text: root.modal == "create-instance" ? GuiI18n.text("gui-modal-new-instance") : root.modal == "import" ? GuiI18n.text("gui-modal-import") : root.modal == "create-server" ? GuiI18n.text("gui-modal-new-server") : root.modal == "mod-plan" ? GuiI18n.text("gui-modal-install-mod") : root.modal == "mod-manage" ? GuiI18n.text("gui-modal-manage-mod") : root.modal == "mod-acquire" ? GuiI18n.text("gui-modal-mod-acquire") : root.modal == "loader-change" ? GuiI18n.text("gui-modal-change-loader") : root.modal == "mod-remove" ? GuiI18n.text("gui-modal-remove-mod") : root.modal == "mod-apply" ? GuiI18n.text("gui-modal-apply-mod") : root.modal == "mod-result" ? GuiI18n.text("gui-modal-mod-result") : root.modal == "eula" ? GuiI18n.text("gui-server-eula") : root.modal == "kill" ? GuiI18n.text("gui-modal-force-kill") : root.modal == "delete-instance" ? GuiI18n.text("gui-delete-instance") : root.modal == "delete-server" ? GuiI18n.text("gui-delete-server") : root.modal == "rename" ? GuiI18n.text("gui-modal-rename") : root.modal == "snapshot-create" ? GuiI18n.text("gui-snapshot-create") : root.modal == "snapshot-restore" ? GuiI18n.text("gui-snapshot-restore") : root.modal == "snapshot-rename" ? GuiI18n.text("gui-snapshot-rename") : root.modal == "snapshot-delete" ? GuiI18n.text("gui-snapshot-delete") : root.modal == "mod-impact" ? GuiI18n.value(root.mod-requires-disabled.length > 0 || root.mod-requires-absent.length > 0 || root.mod-requires-incompatible.length > 0 ? "gui-mod-impact-enable-title" : "gui-mod-impact-disable-title", root.mod-impact-name) : root.modal == "delete-mod" ? GuiI18n.text("gui-modal-delete-mod") : root.modal == "remove-java-runtime" ? GuiI18n.text("gui-java-remove-runtime-title") : root.modal == "mod-clash" ? GuiI18n.text("gui-modal-mod-clash") : root.modal == "absent-mods" ? GuiI18n.text("gui-modal-absent-mods") : root.modal == "make-persistent" ? GuiI18n.text("gui-make-persistent") : root.modal == "open-pack-link" ? GuiI18n.text("gui-open-pack-link") : root.modal == "license" ? GuiI18n.text("gui-modal-apache-license") : root.third-party-open >= 0 ? root.third-party-packages[root.third-party-open].name + " " + root.third-party-packages[root.third-party-open].version + " | " + root.third-party-packages[root.third-party-open].license : GuiI18n.text("gui-third-party-licenses"); font-size: Theme.brand-size; } Rectangle { horizontal-stretch: 1; } IconButton { icon: @image-url("../../../assets/icons/close.svg"); accessible-name: GuiI18n.text("gui-close"); clicked => { if root.modal == "import" { root.close-import-modal(); } else { if root.modal == "mod-plan" { root.abandon-browser-install(); } if root.modal == "mod-acquire" { root.cancel-mod-acquisition(); } root.modal = ""; root.modal-error = ""; } } } }
+                    HorizontalLayout { cross-axis-alignment: center; Heading { text: root.modal == "pane-host" ? GuiI18n.text("gui-modal-pane-host") : root.modal == "create-instance" ? GuiI18n.text("gui-modal-new-instance") : root.modal == "import" ? GuiI18n.text("gui-modal-import") : root.modal == "create-server" ? GuiI18n.text("gui-modal-new-server") : root.modal == "mod-plan" ? GuiI18n.text("gui-modal-install-mod") : root.modal == "mod-manage" ? GuiI18n.text("gui-modal-manage-mod") : root.modal == "mod-acquire" ? GuiI18n.text("gui-modal-mod-acquire") : root.modal == "loader-change" ? GuiI18n.text("gui-modal-change-loader") : root.modal == "mod-remove" ? GuiI18n.text("gui-modal-remove-mod") : root.modal == "mod-apply" ? GuiI18n.text("gui-modal-apply-mod") : root.modal == "mod-result" ? GuiI18n.text("gui-modal-mod-result") : root.modal == "eula" ? GuiI18n.text("gui-server-eula") : root.modal == "kill" ? GuiI18n.text("gui-modal-force-kill") : root.modal == "delete-instance" ? GuiI18n.text("gui-delete-instance") : root.modal == "delete-server" ? GuiI18n.text("gui-delete-server") : root.modal == "rename" ? GuiI18n.text("gui-modal-rename") : root.modal == "snapshot-create" ? GuiI18n.text("gui-snapshot-create") : root.modal == "snapshot-restore" ? GuiI18n.text("gui-snapshot-restore") : root.modal == "snapshot-rename" ? GuiI18n.text("gui-snapshot-rename") : root.modal == "snapshot-delete" ? GuiI18n.text("gui-snapshot-delete") : root.modal == "mod-impact" ? GuiI18n.value(root.mod-requires-disabled.length > 0 || root.mod-requires-absent.length > 0 || root.mod-requires-incompatible.length > 0 ? "gui-mod-impact-enable-title" : "gui-mod-impact-disable-title", root.mod-impact-name) : root.modal == "delete-mod" ? GuiI18n.text("gui-modal-delete-mod") : root.modal == "remove-java-runtime" ? GuiI18n.text("gui-java-remove-runtime-title") : root.modal == "mod-clash" ? GuiI18n.text("gui-modal-mod-clash") : root.modal == "absent-mods" ? GuiI18n.text("gui-modal-absent-mods") : root.modal == "make-persistent" ? GuiI18n.text("gui-make-persistent") : root.modal == "open-pack-link" ? GuiI18n.text("gui-open-pack-link") : root.modal == "license" ? GuiI18n.text("gui-modal-apache-license") : root.third-party-open >= 0 ? root.third-party-packages[root.third-party-open].name + " " + root.third-party-packages[root.third-party-open].version + " | " + root.third-party-packages[root.third-party-open].license : GuiI18n.text("gui-third-party-licenses"); font-size: Theme.brand-size; } Rectangle { horizontal-stretch: 1; } IconButton { icon: @image-url("../../../assets/icons/close.svg"); accessible-name: GuiI18n.text("gui-close"); clicked => { if root.modal == "import" { root.close-import-modal(); } else { if root.modal == "mod-plan" { root.abandon-browser-install(); } if root.modal == "mod-acquire" { root.cancel-mod-acquisition(); } root.modal = ""; root.modal-error = ""; } } } }
                     Divider { }
                     if root.modal == "create-instance" : VerticalLayout { spacing: 11px; BodyText { text: GuiI18n.text("gui-create-instance-detail"); wrap: word-wrap; } Text { text: GuiI18n.text("gui-name"); color: Theme.text-secondary; font-size: Theme.label-size; } TextField { text <=> root.create-name; placeholder: root.create-name-suggestion; accessible-name: GuiI18n.text("gui-name"); } Text { text: GuiI18n.text("gui-minecraft-release"); color: Theme.text-secondary; font-size: Theme.label-size; } HorizontalLayout { spacing: 8px; ComboBox { horizontal-stretch: 1; model: root.minecraft-releases; current-value <=> root.create-minecraft; selected(value) => { root.create-minecraft = value; root.create-loader-version = ""; root.create-loader-versions = []; root.minecraft-selection-changed("client", value); if root.create-loader != "Vanilla" { root.request-loader-catalog("client", root.create-loader, value); } root.recompute-create-name(); } } FavoriteToggle { version: root.create-minecraft; favorite: root.create-minecraft-favorite; enabled: root.create-minecraft != ""; toggled => { root.toggle-favorite-version(root.create-minecraft); } } } Text { text: GuiI18n.text("gui-loader"); color: Theme.text-secondary; font-size: Theme.label-size; } ComboBox { model: root.create-loaders; current-value <=> root.create-loader; selected(value) => { root.create-loader = value; root.create-loader-version = ""; root.create-loader-versions = []; if value != "Vanilla" { root.request-loader-catalog("client", value, root.create-minecraft); } root.recompute-create-name(); } } if root.create-loader != "Vanilla" : ComboBox { model: root.create-loader-versions; current-value <=> root.create-loader-version; changed current-value => { root.recompute-create-name(); } } HorizontalLayout { BodyText { text: GuiI18n.text("gui-store-persistently"); } Toggle { checked <=> root.create-persistent; } BodyText { text: root.create-persistent ? GuiI18n.text("gui-persistent-root") : GuiI18n.text("gui-temporary-root"); color: Theme.text-muted; } } if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; } ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; } } AppButton { text: GuiI18n.text("gui-create-instance"); tone: "primary"; enabled: root.minecraft-releases.length > 0 && (root.create-name != "" || root.create-name-suggestion != "") && root.create-minecraft != "" && (root.create-loader == "Vanilla" || root.create-loader-version != ""); clicked => { root.submit-create-instance(root.create-name != "" ? root.create-name : root.create-name-suggestion, root.create-minecraft, root.create-loader, root.create-loader-version, root.create-persistent); } } } }
                     if root.modal == "import" : ScrollView {
@@ -6369,6 +6452,28 @@ slint::slint! {
                     if root.modal == "delete-mod" : VerticalLayout { spacing: 14px; BodyText { text: GuiI18n.value(root.mod-action-is-hand-placed ? "gui-delete-mod-detail" : "gui-delete-restorable-mod-detail", root.pending-action-name); color: Theme.warning; wrap: word-wrap; } BodyText { text: GuiI18n.text(root.mod-action-is-hand-placed ? "gui-delete-mod-note" : "gui-delete-restorable-mod-note"); wrap: word-wrap; } if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; } ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; root.modal-error = ""; } } AppButton { text: GuiI18n.text("gui-delete"); tone: "danger"; clicked => { root.delete-hand-placed-mod(root.pending-action-kind, root.pending-action-id, root.mod-action-path); } } } }
                     if root.modal == "remove-java-runtime" : VerticalLayout { spacing: 14px; BodyText { text: GuiI18n.value("gui-java-remove-runtime-detail", root.pending-action-name); color: Theme.warning; wrap: word-wrap; } BodyText { text: root.pending-action-id; color: Theme.text-muted; wrap: word-wrap; } BodyText { text: GuiI18n.text("gui-java-remove-runtime-note"); wrap: word-wrap; } if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; } ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; root.modal-error = ""; } } AppButton { text: GuiI18n.text("gui-remove"); tone: "danger"; clicked => { root.remove-java-runtime(root.pending-action-id); root.modal = ""; root.modal-error = ""; } } } }
                     if root.modal == "mod-clash" && root.mod-clash-index < root.mod-clashes.length : VerticalLayout { spacing: 14px; BodyText { text: GuiI18n.value("gui-mod-clash-detail", root.mod-clashes[root.mod-clash-index].file-name); wrap: word-wrap; } if root.mod-clashes[root.mod-clash-index].existing-is-disabled : BodyText { text: GuiI18n.text("gui-mod-clash-disabled"); color: Theme.warning; wrap: word-wrap; } if root.mod-clashes.length > 1 : BodyText { text: GuiI18n.values("gui-mod-clash-progress", root.mod-clash-index + 1, root.mod-clashes.length); color: Theme.text-muted; font-size: Theme.caption-size; } ActionRow { AppButton { text: GuiI18n.text("gui-skip-all"); clicked => { root.resolve-mod-clash("skip-all"); } } AppButton { text: GuiI18n.text("gui-overwrite-all"); clicked => { root.resolve-mod-clash("overwrite-all"); } } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-skip"); clicked => { root.resolve-mod-clash("skip"); } } AppButton { text: GuiI18n.text("gui-overwrite"); tone: "primary"; clicked => { root.resolve-mod-clash("overwrite"); } } } }
+                    if root.modal == "pane-host" : VerticalLayout { spacing: 12px;
+                        ScrollView {
+                            viewport-width: self.visible-width;
+                            VerticalLayout {
+                                alignment: start; spacing: 8px;
+                                Eyebrow { text: GuiI18n.text("gui-instances"); }
+                                if root.workspace-client-choices.length == 0 : BodyText { text: GuiI18n.text("gui-pane-host-no-clients"); color: Theme.text-muted; wrap: word-wrap; }
+                                for choice in root.workspace-client-choices : HostPickerCard {
+                                    item: choice; current-kind: root.pane-host-picker-kind; current-id: root.pane-host-picker-id;
+                                    picked(kind, id) => { root.modal = ""; root.choose-pane-host(root.pane-host-picker-pane, kind, id); }
+                                }
+                                Rectangle { height: 6px; }
+                                Eyebrow { text: GuiI18n.text("gui-servers"); }
+                                if root.workspace-server-choices.length == 0 : BodyText { text: GuiI18n.text("gui-pane-host-no-servers"); color: Theme.text-muted; wrap: word-wrap; }
+                                for choice in root.workspace-server-choices : HostPickerCard {
+                                    item: choice; current-kind: root.pane-host-picker-kind; current-id: root.pane-host-picker-id;
+                                    picked(kind, id) => { root.modal = ""; root.choose-pane-host(root.pane-host-picker-pane, kind, id); }
+                                }
+                            }
+                        }
+                        ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; } } }
+                    }
                     if root.modal == "open-pack-link" : VerticalLayout { spacing: 14px;
                         BodyText { text: GuiI18n.text("gui-open-pack-link-detail"); wrap: word-wrap; }
                         // The address itself, on its own line and selectable by

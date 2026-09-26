@@ -10,16 +10,15 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use ephervex_gui::ui::{
-    AppWindow, GuiI18n, InstanceRow, ServerRow, Theme, WorkspaceHostChoice, WorkspacePaneRow,
+    AppWindow, GuiI18n, InstanceRow, ServerRow, Theme, WorkspaceHostChoice, WorkspaceLinkedChoice,
+    WorkspacePaneRow,
 };
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use i_slint_backend_testing::{
     AccessibleRole, ElementHandle, TestingBackend, TestingBackendOptions,
 };
 use slint::platform::{PointerEventButton, WindowEvent};
-use slint::{
-    ComponentHandle, LogicalPosition, LogicalSize, ModelRc, PhysicalSize, SharedString, VecModel,
-};
+use slint::{ComponentHandle, LogicalPosition, LogicalSize, ModelRc, PhysicalSize, VecModel};
 
 const CLIENT: i32 = 0;
 const SERVER: i32 = 1;
@@ -39,7 +38,6 @@ fn placed(
         log: -1,
         surface: surface.into(),
         label: label(id).into(),
-        host_choice: host,
         surface_choice: 0,
         column,
         row,
@@ -158,9 +156,8 @@ fn button(ui: &AppWindow, name: &str) -> ElementHandle {
     find(ui, name, AccessibleRole::Button).unwrap_or_else(|| panic!("no button labeled {name}"))
 }
 
-fn picker(ui: &AppWindow, message: &str, pane: i32) -> ElementHandle {
-    let name = lookup_args(message, [("value", Arg::from(label(pane)))]);
-    find(ui, &name, AccessibleRole::Combobox).unwrap_or_else(|| panic!("no picker labeled {name}"))
+fn host_button(ui: &AppWindow, pane: i32) -> ElementHandle {
+    button(ui, &pane_control("gui-pane-host", pane))
 }
 
 fn pane_action(message: &str, pane: i32) -> String {
@@ -303,7 +300,7 @@ fn each_panes_header_stays_inside_the_pane() {
                 "gui-start"
             };
             let controls = [
-                picker(&ui, "gui-pane-host", id),
+                host_button(&ui, id),
                 button(&ui, &pane_control("gui-pane-close", id)),
                 button(&ui, &pane_action(primary, id)),
             ];
@@ -374,10 +371,11 @@ fn split_panes_offer_what_their_shape_allows() {
     assert_eq!(closed.borrow().as_slice(), [1, 2, 3]);
 }
 
-/// A pane's host picker shows its own host, asks for another, and keeps
-/// showing what the pane shows until the answer changes it.
+/// A pane's host button names its host and opens the host picker for that
+/// pane; a card, or a linked server on its client's card, points the pane at
+/// that host.
 #[test]
-fn a_panes_host_picker_shows_and_asks_for_its_host() {
+fn a_panes_host_button_opens_a_picker_for_that_pane() {
     let ui = window();
     let hosts = Rc::new(RefCell::new(Vec::new()));
     let host_sink = Rc::clone(&hosts);
@@ -388,31 +386,39 @@ fn a_panes_host_picker_shows_and_asks_for_its_host() {
     });
     let (_, panes) = shapes().into_iter().next().expect("the 1:1 shape");
     split(&ui, panes);
+    let names = |pane: i32, name: &str| in_pane(&ui, pane, name, AccessibleRole::Text).len();
+    assert!(names(2, "Repro Server") > 0 && names(2, "Repro Client") == 0);
+    assert!(names(1, "Repro Client") > 0 && names(1, "Repro Server") == 0);
 
-    let host_picker = picker(&ui, "gui-pane-host", 2);
+    host_button(&ui, 2).invoke_accessible_default_action();
+    settle(&ui);
+    assert_eq!(ui.get_modal(), "pane-host");
+    assert_eq!(ui.get_pane_host_picker_pane(), 2);
     assert_eq!(
-        host_picker.accessible_value().as_deref(),
-        Some(choice_label("server").as_str())
+        (ui.get_pane_host_picker_kind(), ui.get_pane_host_picker_id()),
+        ("server".into(), "server".into()),
+        "the picker knows what the pane shows now"
     );
-    assert_eq!(
-        picker(&ui, "gui-pane-host", 1)
-            .accessible_value()
-            .as_deref(),
-        Some(choice_label("client").as_str()),
-        "each pane names its own host"
-    );
+    button(&ui, &choice_label("client")).invoke_accessible_default_action();
+    settle(&ui);
+    assert_eq!(ui.get_modal(), "");
 
-    choose(&ui, &host_picker, &choice_label("client"));
+    host_button(&ui, 2).invoke_accessible_default_action();
+    settle(&ui);
+    button(
+        &ui,
+        &lookup_args(
+            "gui-host-choice-server",
+            [("value", Arg::from("Linked Server"))],
+        ),
+    )
+    .invoke_accessible_default_action();
     assert_eq!(
         hosts.borrow().as_slice(),
-        [(2, "client".to_owned(), "client".to_owned())]
-    );
-    assert_eq!(
-        picker(&ui, "gui-pane-host", 2)
-            .accessible_value()
-            .as_deref(),
-        Some(choice_label("server").as_str()),
-        "the pane shows its host until the workspace points it elsewhere"
+        [
+            (2, "client".to_owned(), "client".to_owned()),
+            (2, "server".to_owned(), "linked".to_owned())
+        ]
     );
 }
 
@@ -623,31 +629,6 @@ fn choice_label(kind: &str) -> String {
     }
 }
 
-/// Picks `value` from a combo box the way a user does: open it, then click
-/// the entry. The open list is a popup placed over the box, and an entry's
-/// position is reported within that popup.
-fn choose(ui: &AppWindow, picker: &ElementHandle, value: &str) {
-    picker.invoke_accessible_expand_action();
-    settle(ui);
-    let entry = ElementHandle::find_by_accessible_label(ui, value)
-        .find(|element| element.accessible_role() == Some(AccessibleRole::ListItem))
-        .unwrap_or_else(|| panic!("no entry {value} in the open picker"));
-    let origin = picker.absolute_position();
-    let within = entry.absolute_position();
-    let size = entry.size();
-    // The fluent popup opens 4px above the box it belongs to.
-    let position = LogicalPosition::new(
-        origin.x + within.x + size.width / 2.0,
-        origin.y - 4.0 + within.y + size.height / 2.0,
-    );
-    let button = PointerEventButton::Left;
-    ui.window()
-        .dispatch_event(WindowEvent::PointerPressed { position, button });
-    ui.window()
-        .dispatch_event(WindowEvent::PointerReleased { position, button });
-    settle(ui);
-}
-
 fn window() -> AppWindow {
     slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
         renderer_name: Some("software".into()),
@@ -674,22 +655,24 @@ fn window() -> AppWindow {
         )
         .into()
     });
-    ui.set_workspace_host_choices(ModelRc::new(VecModel::from(vec![
-        WorkspaceHostChoice {
-            kind: "client".into(),
-            id: "client".into(),
-            label: choice_label("client").into(),
-        },
-        WorkspaceHostChoice {
-            kind: "server".into(),
-            id: "server".into(),
-            label: choice_label("server").into(),
-        },
-    ])));
-    ui.set_workspace_host_labels(ModelRc::new(VecModel::from(vec![
-        SharedString::from(choice_label("client")),
-        SharedString::from(choice_label("server")),
-    ])));
+    let choice = |kind: &str, id: &str, name: &str| WorkspaceHostChoice {
+        kind: kind.into(),
+        id: id.into(),
+        name: name.into(),
+        ..WorkspaceHostChoice::default()
+    };
+    let mut client = choice("client", "client", "Repro Client");
+    client.linked = ModelRc::new(VecModel::from(vec![WorkspaceLinkedChoice {
+        id: "linked".into(),
+        name: "Linked Server".into(),
+        ..WorkspaceLinkedChoice::default()
+    }]));
+    ui.set_workspace_client_choices(ModelRc::new(VecModel::from(vec![client])));
+    ui.set_workspace_server_choices(ModelRc::new(VecModel::from(vec![choice(
+        "server",
+        "server",
+        "Repro Server",
+    )])));
     ui.window().set_size(PhysicalSize::new(1480, 900));
     ui.show().expect("show");
     ui

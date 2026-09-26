@@ -18,7 +18,7 @@ use super::{HostLifecycle, SERVERS_PAGE};
 use crate::backend;
 use crate::ui::{
     AppWindow, HostView, InstanceRow, PendingEntityRow, ServerRow, WorkspaceHostChoice,
-    WorkspacePaneRow, WorkspaceSurfaceRow,
+    WorkspaceLinkedChoice, WorkspacePaneRow, WorkspaceSurfaceRow,
 };
 use crate::workspace_layout::{PaneId, Placement, Shape, Surface, WorkspaceLayout};
 
@@ -35,9 +35,10 @@ pub(super) struct WorkspaceState {
     shown: Vec<InstalledHost>,
     host_views: Rc<VecModel<HostView>>,
     panes: Rc<VecModel<WorkspacePaneRow>>,
-    /// Every installed host, as a pane's host picker offers them.
-    host_choices: Rc<VecModel<WorkspaceHostChoice>>,
-    host_labels: Rc<VecModel<SharedString>>,
+    /// What a pane's host picker offers: every client, and the servers the
+    /// Servers page lists. A linked server is also offered on its client.
+    client_choices: Rc<VecModel<WorkspaceHostChoice>>,
+    server_choices: Rc<VecModel<WorkspaceHostChoice>>,
     /// Each host kind's navigation, built once so a re-rendered host view
     /// keeps the same model and its tabs are not rebuilt.
     client_surfaces: ModelRc<WorkspaceSurfaceRow>,
@@ -54,8 +55,8 @@ impl Default for WorkspaceState {
             shown: Vec::new(),
             host_views: Rc::new(VecModel::default()),
             panes: Rc::new(VecModel::default()),
-            host_choices: Rc::new(VecModel::default()),
-            host_labels: Rc::new(VecModel::default()),
+            client_choices: Rc::new(VecModel::default()),
+            server_choices: Rc::new(VecModel::default()),
             client_surfaces: surface_rows(Surface::client()),
             server_surfaces: surface_rows(Surface::server()),
         }
@@ -73,8 +74,8 @@ impl WorkspaceState {
     pub(super) fn attach(&self, ui: &AppWindow) {
         ui.set_host_views(ModelRc::from(Rc::clone(&self.host_views)));
         ui.set_workspace_panes(ModelRc::from(Rc::clone(&self.panes)));
-        ui.set_workspace_host_choices(ModelRc::from(Rc::clone(&self.host_choices)));
-        ui.set_workspace_host_labels(ModelRc::from(Rc::clone(&self.host_labels)));
+        ui.set_workspace_client_choices(ModelRc::from(Rc::clone(&self.client_choices)));
+        ui.set_workspace_server_choices(ModelRc::from(Rc::clone(&self.server_choices)));
     }
 
     pub(super) const fn layout(&self) -> Option<&WorkspaceLayout> {
@@ -204,11 +205,10 @@ impl WorkspaceState {
             .iter()
             .map(|&host| self.host_view(host, lifecycle, &pending))
             .collect();
-        let choices = self.host_choices();
-        let panes = pane_rows(layout, &hosts, &views, &choices, logs);
-        let labels = choices.iter().map(|choice| choice.label.clone()).collect();
-        sync_rows(&self.host_choices, choices);
-        sync_rows(&self.host_labels, labels);
+        let panes = pane_rows(layout, &hosts, &views, logs);
+        let (clients, servers) = self.host_choices(ui.get_show_linked_servers());
+        sync_rows(&self.client_choices, clients);
+        sync_rows(&self.server_choices, servers);
         sync_rows(&self.host_views, views);
         sync_rows(&self.panes, panes);
         let back = back_label(ui, layout, &hosts);
@@ -264,37 +264,84 @@ impl WorkspaceState {
         view
     }
 
-    /// Every installed client, then every server, as a pane's picker names them.
-    fn host_choices(&self) -> Vec<WorkspaceHostChoice> {
-        let clients = self.clients.iter().map(|row| WorkspaceHostChoice {
-            kind: "client".into(),
-            id: row.id.clone(),
-            label: lookup_args(
-                "gui-host-choice-client",
-                [("value", Arg::from(row.name.as_str()))],
-            )
-            .into(),
-        });
-        let servers = self.servers.iter().map(|row| WorkspaceHostChoice {
-            kind: "server".into(),
-            id: row.id.clone(),
-            label: lookup_args(
-                "gui-host-choice-server",
-                [("value", Arg::from(row.name.as_str()))],
-            )
-            .into(),
-        });
-        clients.chain(servers).collect()
+    /// What the host picker offers, running hosts first: every client with
+    /// its linked servers, and the servers the Servers page lists.
+    fn host_choices(
+        &self,
+        show_linked_servers: bool,
+    ) -> (Vec<WorkspaceHostChoice>, Vec<WorkspaceHostChoice>) {
+        let mut clients: Vec<(bool, WorkspaceHostChoice)> = self
+            .clients
+            .iter()
+            .map(|row| {
+                let linked = self
+                    .servers
+                    .iter()
+                    .filter(|server| server.linked_client_id == row.id)
+                    .map(|server| WorkspaceLinkedChoice {
+                        id: server.id.clone(),
+                        name: server.name.clone(),
+                        state: server.state.clone(),
+                        state_kind: server.state_kind.clone(),
+                    })
+                    .collect::<Vec<_>>();
+                let choice = WorkspaceHostChoice {
+                    kind: "client".into(),
+                    id: row.id.clone(),
+                    name: row.name.clone(),
+                    summary: target_summary(&row.minecraft, &row.loader),
+                    loader_kind: row.loader_kind.clone(),
+                    state: row.state.clone(),
+                    state_kind: row.state_kind.clone(),
+                    linked: ModelRc::new(VecModel::from(linked)),
+                };
+                (row.can_kill, choice)
+            })
+            .collect();
+        let mut servers: Vec<(bool, WorkspaceHostChoice)> = self
+            .servers
+            .iter()
+            .filter(|row| show_linked_servers || row.linked_client_id.is_empty())
+            .map(|row| {
+                let choice = WorkspaceHostChoice {
+                    kind: "server".into(),
+                    id: row.id.clone(),
+                    name: row.name.clone(),
+                    summary: target_summary(&row.minecraft, &row.loader),
+                    loader_kind: row.loader_kind.clone(),
+                    state: row.state.clone(),
+                    state_kind: row.state_kind.clone(),
+                    linked: ModelRc::default(),
+                };
+                (row.can_stop, choice)
+            })
+            .collect();
+        // Stable, so hosts keep the lists' own order within each group.
+        clients.sort_by_key(|(running, _)| !running);
+        servers.sort_by_key(|(running, _)| !running);
+        (
+            clients.into_iter().map(|(_, choice)| choice).collect(),
+            servers.into_iter().map(|(_, choice)| choice).collect(),
+        )
     }
 }
 
-/// One row per pane, in reading order, pointing at the host views and host
-/// choices it reads.
+fn target_summary(minecraft: &str, loader: &str) -> SharedString {
+    lookup_args(
+        "gui-target-summary",
+        [
+            ("first", Arg::from(minecraft)),
+            ("second", Arg::from(loader)),
+        ],
+    )
+    .into()
+}
+
+/// One row per pane, in reading order, pointing at the host view it reads.
 fn pane_rows(
     layout: &WorkspaceLayout,
     hosts: &[InstalledHost],
     views: &[HostView],
-    choices: &[WorkspaceHostChoice],
     logs: &LogViews,
 ) -> Vec<WorkspacePaneRow> {
     let shape = layout.shape();
@@ -319,9 +366,6 @@ fn pane_rows(
                 log: logs.slot_of(id),
                 surface: surface.id().into(),
                 label: pane_label(shape, placed.placement, &name, surface).into(),
-                host_choice: index(choices.iter().position(|choice| {
-                    choice.kind == host.kind() && choice.id == host.id().as_str()
-                })),
                 surface_choice: index(
                     Surface::offered_by(host)
                         .iter()

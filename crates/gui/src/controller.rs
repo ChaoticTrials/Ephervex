@@ -8996,6 +8996,7 @@ fn to_i32(value: usize) -> i32 {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use crate::presentation::ActivityPresentation;
+    use crate::ui::WorkspaceHostChoice;
     use ephervex_core::ArtifactCacheLimit;
     use ephervex_i18n::has;
 
@@ -10642,19 +10643,14 @@ mod tests {
         ui.invoke_split_pane_beside(1);
         ui.invoke_show_pane_surface(2, "Logs".into());
 
-        let choices: Vec<(String, String)> = ui
-            .get_workspace_host_choices()
-            .iter()
-            .map(|choice| (choice.kind.to_string(), choice.label.to_string()))
-            .collect();
-        assert_eq!(
-            choices,
-            [
-                ("client".to_owned(), "Client: Repro Client".to_owned()),
-                ("server".to_owned(), "Server: Repro Server".to_owned())
-            ]
-        );
-        assert_eq!(ui.get_workspace_host_labels().row_count(), 2);
+        let names = |choices: ModelRc<WorkspaceHostChoice>| -> Vec<String> {
+            choices
+                .iter()
+                .map(|choice| choice.name.to_string())
+                .collect()
+        };
+        assert_eq!(names(ui.get_workspace_client_choices()), ["Repro Client"]);
+        assert_eq!(names(ui.get_workspace_server_choices()), ["Repro Server"]);
 
         ui.invoke_choose_pane_host(2, "server".into(), server.id().into());
         assert_eq!(
@@ -10665,7 +10661,7 @@ mod tests {
         let panes: Vec<(i32, i32)> = ui
             .get_workspace_panes()
             .iter()
-            .map(|pane| (pane.host_choice, pane.surface_choice))
+            .map(|pane| (pane.host, pane.surface_choice))
             .collect();
         let logs = |surfaces: &[Surface]| {
             surfaces
@@ -10687,6 +10683,72 @@ mod tests {
         ui.invoke_choose_pane_host(2, "client".into(), client.id().into());
         ui.invoke_show_pane_surface(2, "Overview".into());
         assert_eq!(ui.get_host_views().row_count(), 1);
+    }
+
+    /// The host picker lists running hosts first, offers each client's linked
+    /// servers on its card, and lists a linked server on its own only when the
+    /// Servers page would.
+    #[test]
+    fn the_host_picker_lists_running_hosts_first_and_linked_servers_on_their_client() {
+        let ui = test_window();
+        let workspace = test_workspace(&ui);
+        let client = |id: &str, running: bool| InstanceRow {
+            id: id.into(),
+            name: id.into(),
+            can_kill: running,
+            ..InstanceRow::default()
+        };
+        let server = |id: &str, linked: &str, running: bool| ServerRow {
+            id: id.into(),
+            name: id.into(),
+            linked_client_id: linked.into(),
+            can_stop: running,
+            ..ServerRow::default()
+        };
+        let first = client_host();
+        workspace.state.borrow_mut().set_rows(
+            vec![
+                client(&first.id(), false),
+                client("idle", false),
+                client("playing", true),
+            ],
+            vec![
+                server("alone", "", false),
+                server("linked", &first.id(), true),
+                server("serving", "", true),
+            ],
+        );
+        workspace.open(&ui, first, Surface::Overview);
+        let names = |choices: ModelRc<WorkspaceHostChoice>| -> Vec<String> {
+            choices
+                .iter()
+                .map(|choice| choice.name.to_string())
+                .collect()
+        };
+        assert_eq!(
+            names(ui.get_workspace_client_choices()),
+            ["playing".to_owned(), first.id(), "idle".to_owned()]
+        );
+        assert_eq!(
+            names(ui.get_workspace_server_choices()),
+            ["serving", "alone"]
+        );
+        let linked: Vec<String> = ui
+            .get_workspace_client_choices()
+            .row_data(1)
+            .expect("the first client")
+            .linked
+            .iter()
+            .map(|server| server.id.to_string())
+            .collect();
+        assert_eq!(linked, ["linked"]);
+
+        ui.set_show_linked_servers(true);
+        workspace.refresh(&ui);
+        assert_eq!(
+            names(ui.get_workspace_server_choices()),
+            ["linked", "serving", "alone"]
+        );
     }
 
     /// A restart asked for from either of two panes on one server is one

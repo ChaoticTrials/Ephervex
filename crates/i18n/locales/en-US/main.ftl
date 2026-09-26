@@ -1622,6 +1622,9 @@ gui-workspace-host-gone-detail = This client or server was removed. Choose anoth
 # Splitting the host workspace into panes that each show one host and one view.
 gui-workspace-split = Split view
 gui-workspace-split-title = Split view
+gui-modal-pane-host = Show in this pane
+gui-pane-host-no-clients = No client instances yet.
+gui-pane-host-no-servers = No servers to list here. A linked server is listed under its client.
 gui-host-choice-client = Client: { $value }
 gui-host-choice-server = Server: { $value }
 # What assistive technology calls a pane: where it is, its host, and its view.
