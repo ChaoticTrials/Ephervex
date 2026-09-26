@@ -2860,7 +2860,7 @@ fn run_worker(
                     },
                     move |app, reporter, cancel| async move {
                         let _in_flight = in_flight;
-                        app.begin_isolation_reporting(
+                        let begun = app.begin_isolation_reporting(
                             host,
                             IsolationRequest {
                                 pinned,
@@ -2869,7 +2869,14 @@ fn run_worker(
                             },
                             &reporter,
                             &cancel,
-                        )?;
+                        );
+                        // Starting takes a safety snapshot, which a Snapshots
+                        // view of this host shows at once, even when a later
+                        // step of the start failed.
+                        if let Ok(data) = host_snapshots_data(&app, host) {
+                            let _ = reports.send(Event::HostSnapshots(data));
+                        }
+                        begun?;
                         send_isolation_state(&app, host, generation, true, &reports, &refreshed);
                         send_host_mods(&app, host, &reports, &refreshed, false);
                         Ok(OperationReport::Reported)
