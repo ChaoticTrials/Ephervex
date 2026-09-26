@@ -169,10 +169,15 @@ columns, each holding one pane or two equal stacked panes. A single pane offers
 Split beside; a full-height pane of a split offers a pane below it; every pane
 of a split can be closed, and closing settles on the next smaller shape in
 reading order, down to the single pane. A new pane shows the same host's
-Overview. Each pane of a split carries a compact header: a host picker listing
-every installed client and server, a surface picker, the host's state, its
-Restart and primary action, and the layout controls. Its accessible label names
-its position, host, and surface, so two panes on one host are never announced
+Overview. Each pane of a split carries a compact header: the host, its state,
+its Restart and primary action on one row, and the surface tabs and layout
+controls on the next. The host opens a picker of cards like the home screen:
+every client, with its linked servers on its card, and the servers the Servers
+page lists, running hosts first. Surface tabs that do not fit wait under More,
+and the selected surface always keeps a tab. A workflow's banner is left to the
+pane showing the workflow's own surface, so a round shown in Isolation is not
+repeated above the host's other panes. A pane's accessible label names its
+position, host, and surface, so two panes on one host are never announced
 alike. The split has one Back, above the panes, which leaves for the page the
 split was opened from. The workspace is not persisted: opening a host from a
 list replaces the layout with a single pane.
