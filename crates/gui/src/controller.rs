@@ -10712,9 +10712,9 @@ mod tests {
         assert_eq!(ui.get_host_views().row_count(), 1);
     }
 
-    /// The host picker lists running hosts first, offers each client's linked
-    /// servers on its card, and lists a linked server on its own only when the
-    /// Servers page would.
+    /// The host picker lists running hosts first, a client ranked by what runs
+    /// on its card, offers each client's linked servers on its card, and lists
+    /// a linked server on its own only when the Servers page would.
     #[test]
     fn the_host_picker_lists_running_hosts_first_and_linked_servers_on_their_client() {
         let ui = test_window();
@@ -10738,11 +10738,15 @@ mod tests {
                 client(&first.id(), false),
                 client("idle", false),
                 client("playing", true),
+                client("both", true),
+                client("quiet", false),
             ],
             vec![
                 server("alone", "", false),
                 server("linked", &first.id(), true),
                 server("serving", "", true),
+                server("both-server", "both", true),
+                server("quiet-server", "quiet", false),
             ],
         );
         workspace.open(&ui, first, Surface::Overview);
@@ -10754,7 +10758,14 @@ mod tests {
         };
         assert_eq!(
             names(ui.get_workspace_client_choices()),
-            ["playing".to_owned(), first.id(), "idle".to_owned()]
+            [
+                "both".to_owned(),
+                "playing".to_owned(),
+                first.id(),
+                "idle".to_owned(),
+                "quiet".to_owned()
+            ],
+            "running client and server, running client, running server, the rest"
         );
         assert_eq!(
             names(ui.get_workspace_server_choices()),
@@ -10762,7 +10773,7 @@ mod tests {
         );
         let linked: Vec<String> = ui
             .get_workspace_client_choices()
-            .row_data(1)
+            .row_data(2)
             .expect("the first client")
             .linked
             .iter()
@@ -10774,7 +10785,7 @@ mod tests {
         workspace.refresh(&ui);
         assert_eq!(
             names(ui.get_workspace_server_choices()),
-            ["linked", "serving", "alone"]
+            ["linked", "serving", "both-server", "alone", "quiet-server"]
         );
     }
 

@@ -173,7 +173,8 @@ Overview. Each pane of a split carries a compact header: the host, its state,
 its Restart and primary action on one row, and the surface tabs and layout
 controls on the next. The host opens a picker of cards like the home screen:
 every client, with its linked servers on its card, and the servers the Servers
-page lists, running hosts first. Surface tabs that do not fit wait under More,
+page lists, running hosts first. Clients rank by what runs on their card: the
+client and a linked server, the client alone, a linked server alone, nothing. Surface tabs that do not fit wait under More,
 and the selected surface always keeps a tab. A workflow's banner is left to the
 pane showing the workflow's own surface, so a round shown in Isolation is not
 repeated above the host's other panes. A pane's accessible label names its

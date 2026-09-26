@@ -266,20 +266,24 @@ impl WorkspaceState {
         view
     }
 
-    /// What the host picker offers, running hosts first: every client with
-    /// its linked servers, and the servers the Servers page lists.
+    /// What the host picker offers: every client with its linked servers, and
+    /// the servers the Servers page lists, running hosts first. A client
+    /// ranks by what runs on its card: itself and a linked server, then
+    /// itself, then only a linked server, then nothing.
     fn host_choices(
         &self,
         show_linked_servers: bool,
     ) -> (Vec<WorkspaceHostChoice>, Vec<WorkspaceHostChoice>) {
-        let mut clients: Vec<(bool, WorkspaceHostChoice)> = self
+        let mut clients: Vec<(u8, WorkspaceHostChoice)> = self
             .clients
             .iter()
             .map(|row| {
-                let linked = self
+                let linked_servers = self
                     .servers
                     .iter()
-                    .filter(|server| server.linked_client_id == row.id)
+                    .filter(|server| server.linked_client_id == row.id);
+                let linked_running = linked_servers.clone().any(|server| server.can_stop);
+                let linked = linked_servers
                     .map(|server| WorkspaceLinkedChoice {
                         id: server.id.clone(),
                         name: server.name.clone(),
@@ -297,7 +301,13 @@ impl WorkspaceState {
                     state_kind: row.state_kind.clone(),
                     linked: ModelRc::new(VecModel::from(linked)),
                 };
-                (row.can_kill, choice)
+                let rank = match (row.can_kill, linked_running) {
+                    (true, true) => 0,
+                    (true, false) => 1,
+                    (false, true) => 2,
+                    (false, false) => 3,
+                };
+                (rank, choice)
             })
             .collect();
         let mut servers: Vec<(bool, WorkspaceHostChoice)> = self
@@ -319,7 +329,7 @@ impl WorkspaceState {
             })
             .collect();
         // Stable, so hosts keep the lists' own order within each group.
-        clients.sort_by_key(|(running, _)| !running);
+        clients.sort_by_key(|(rank, _)| *rank);
         servers.sort_by_key(|(running, _)| !running);
         (
             clients.into_iter().map(|(_, choice)| choice).collect(),
