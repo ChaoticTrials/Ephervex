@@ -7,6 +7,8 @@
 
 #![allow(clippy::expect_used)]
 
+mod support;
+
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -15,7 +17,7 @@ use ephervex_i18n::{Arg, lookup, lookup_args};
 use i_slint_backend_testing::{
     AccessibleRole, ElementHandle, TestingBackend, TestingBackendOptions,
 };
-use slint::{ComponentHandle, ModelRc, PhysicalSize, SharedString, VecModel};
+use slint::{ComponentHandle, PhysicalSize, SharedString};
 
 /// The client workspace opens the client's own folder.
 ///
@@ -77,9 +79,9 @@ fn a_vanilla_instance_still_offers_its_folder() {
 }
 
 /// Turning the pack-mod opt-in on and leaving the Settings tab destroys the
-/// switch; coming back builds a new one from the window's own value. A switch
-/// that writes only its own state leaves that value behind, so the opt-in
-/// reads as off however many times it was turned on.
+/// switch; coming back builds a new one from the host's recorded value. The
+/// switch shows that value, the one the instance read back after the change,
+/// rather than a position of its own.
 #[test]
 fn the_pack_mod_opt_in_survives_leaving_its_tab() {
     let ui = window();
@@ -90,7 +92,7 @@ fn the_pack_mod_opt_in_survives_leaving_its_tab() {
     });
 
     client_workspace(&ui);
-    ui.set_workspace_tab("Settings".into());
+    support::set_surface(&ui, 1, "Settings");
     settle(&ui);
 
     let toggle = opt_in(&ui).expect("the Settings tab offers the opt-in");
@@ -101,14 +103,17 @@ fn the_pack_mod_opt_in_survives_leaving_its_tab() {
         [("repro-client".to_owned(), true)],
         "turning it on has to reach the launcher"
     );
-    assert!(
-        ui.get_instance_allow_pack_mod_changes(),
-        "and has to be what the window now holds"
+    assert_eq!(
+        opt_in(&ui).and_then(|toggle| toggle.accessible_checked()),
+        Some(false),
+        "until the instance records it, the switch shows what is recorded"
     );
-
-    ui.set_workspace_tab("Overview".into());
+    support::update_host(&ui, 0, |view| view.allow_pack_mod_changes = true);
     settle(&ui);
-    ui.set_workspace_tab("Settings".into());
+
+    support::set_surface(&ui, 1, "Overview");
+    settle(&ui);
+    support::set_surface(&ui, 1, "Settings");
     settle(&ui);
 
     let toggle = opt_in(&ui).expect("the opt-in is still there");
@@ -134,13 +139,8 @@ fn client_workspace(ui: &AppWindow) {
 }
 
 fn client_workspace_with(ui: &AppWindow, row: InstanceRow) {
-    ui.set_loading(false);
-    ui.set_page(0);
-    ui.set_workspace("instance".into());
-    ui.set_workspace_tab("Overview".into());
-    ui.set_instances(ModelRc::new(VecModel::from(vec![row])));
-    ui.set_selected_instance_index(0);
-    ui.set_selected_instance_id("repro-client".into());
+    support::show_client(ui, row, "Overview");
+    support::follow_surface_requests(ui);
     settle(ui);
 }
 

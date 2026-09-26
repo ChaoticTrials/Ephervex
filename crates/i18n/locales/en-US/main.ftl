@@ -1616,6 +1616,32 @@ gui-select-all = Select All
 gui-diagnostics = DIAGNOSTICS
 gui-view-logs-crash-reports = View Logs & Crash Reports
 gui-back-instances = Back to Instances
+# A workspace pane whose client or server was deleted while it was shown.
+gui-workspace-host-gone = No longer installed
+gui-workspace-host-gone-detail = This client or server was removed. Choose another host for this pane or close it.
+# Splitting the host workspace into panes that each show one host and one view.
+gui-workspace-split = Split view
+gui-workspace-split-title = Split view
+gui-modal-pane-host = Show in this pane
+gui-pane-host-no-clients = No client instances yet.
+gui-pane-host-no-servers = No servers to list here. A linked server is listed under its client.
+gui-host-choice-client = Client: { $value }
+gui-host-choice-server = Server: { $value }
+# What assistive technology calls a pane: where it is, its host, and its view.
+gui-pane-label = { $position } pane: { $host }, { $surface }
+gui-pane-label-single = { $host }, { $surface }
+gui-pane-left = Left
+gui-pane-right = Right
+gui-pane-top-left = Top left
+gui-pane-bottom-left = Bottom left
+gui-pane-top-right = Top right
+gui-pane-bottom-right = Bottom right
+gui-pane-host = Host shown in { $value }
+gui-workspace-more-surfaces = More
+gui-pane-split-below = Add a pane below { $value }
+gui-pane-close = Close { $value }
+# A host action inside one pane, named with the pane: (action, pane).
+gui-pane-action = { $first } ({ $second })
 gui-instance = Instance
 gui-instance-tab-overview = Overview
 gui-instance-tab-mods = Mods

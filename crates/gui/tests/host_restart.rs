@@ -2,6 +2,8 @@
 //! restart under way shows on every view of the host.
 #![allow(clippy::expect_used, clippy::panic)]
 
+mod support;
+
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -119,10 +121,7 @@ fn a_server_restart_shows_on_its_card_as_well_as_in_its_workspace() {
     let ui = window();
     ui.set_loading(false);
     ui.set_page(1);
-    ui.set_workspace(SharedString::default());
-    ui.set_servers(ModelRc::new(VecModel::from(vec![restarting_server(
-        "stopping",
-    )])));
+    ui.set_workspace_open(false);
     ui.set_global_servers(ModelRc::new(VecModel::from(vec![restarting_server(
         "stopping",
     )])));
@@ -133,22 +132,12 @@ fn a_server_restart_shows_on_its_card_as_well_as_in_its_workspace() {
 }
 
 fn client_workspace(ui: &AppWindow, row: InstanceRow) {
-    ui.set_loading(false);
-    ui.set_page(0);
-    ui.set_workspace("instance".into());
-    ui.set_instances(ModelRc::new(VecModel::from(vec![row])));
-    ui.set_selected_instance_index(0);
-    ui.set_selected_instance_id("host".into());
+    support::show_client(ui, row, "Overview");
     settle(ui);
 }
 
 fn server_workspace(ui: &AppWindow, row: ServerRow) {
-    ui.set_loading(false);
-    ui.set_page(1);
-    ui.set_workspace("server".into());
-    ui.set_servers(ModelRc::new(VecModel::from(vec![row])));
-    ui.set_selected_server_index(0);
-    ui.set_selected_server_id("server".into());
+    support::show_server(ui, row, "Overview");
     settle(ui);
 }
 

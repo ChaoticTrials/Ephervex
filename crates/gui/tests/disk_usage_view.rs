@@ -53,8 +53,8 @@ fn row(id: &str, label: &str, size: &str, fraction: f32, locations: &[&str]) -> 
 fn settings(ui: &AppWindow, tab: &str) {
     ui.set_loading(false);
     ui.set_page(4);
-    ui.set_workspace(SharedString::default());
-    ui.set_workspace_tab(tab.into());
+    ui.set_workspace_open(false);
+    ui.set_settings_tab(tab.into());
     settle(ui);
 }
 
@@ -104,7 +104,7 @@ fn disk_usage_is_a_settings_page_that_measures_when_asked() {
         .expect("a settings entry")
         .mock_single_click(PointerEventButton::Left);
     settle(&ui);
-    assert_eq!(ui.get_workspace_tab(), "Disk Usage");
+    assert_eq!(ui.get_settings_tab(), "Disk Usage");
     assert_eq!(
         *asked.borrow(),
         0,

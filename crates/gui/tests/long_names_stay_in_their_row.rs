@@ -153,7 +153,7 @@ fn card_title(ui: &AppWindow) -> ElementHandle {
 fn instances(ui: &AppWindow, rows: &[InstanceRow]) {
     ui.set_loading(false);
     ui.set_page(0);
-    ui.set_workspace(SharedString::default());
+    ui.set_workspace_open(false);
     ui.set_show_inspector(true);
     ui.set_instances(ModelRc::new(VecModel::from(rows.to_vec())));
     ui.set_selected_instance_index(0);

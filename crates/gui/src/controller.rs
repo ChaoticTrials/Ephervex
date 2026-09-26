@@ -38,12 +38,22 @@ use crate::presentation::{
 };
 use crate::ui::{
     AccountRow, ActivityRow, AppWindow, BlockedFileRow, BundlePartRow, DiagnosticRow, DiskUsageRow,
-    GuiI18n, ImpactRow, ImportDuplicateRow, ImportOptionRow, InstanceRow, IntegrityFindingRow,
-    IsolationCandidateRow, JavaRow, LicenseRow, LinkedTargetRow, LocalModClashRow, LogChunk,
-    ModRow, ModSearchRow, ModVersionRow, PendingEntityRow, PromoteServerRow, RelationRow,
-    RunningRow, ServerRow, SnapshotRow, Theme, WindowSizePreview, WorkflowActionRow,
+    GuiI18n, HostView, ImpactRow, ImportDuplicateRow, ImportOptionRow, InstanceRow,
+    IntegrityFindingRow, IsolationCandidateRow, JavaRow, LicenseRow, LinkedTargetRow,
+    LocalModClashRow, LogChunk, ModRow, ModSearchRow, ModVersionRow, PendingEntityRow,
+    PromoteServerRow, PropertyRules, RelationRow, RunningRow, ServerRow, SnapshotRow, Theme,
+    WindowSizePreview, WorkflowActionRow,
 };
 use crate::window_aspect;
+use crate::workspace_layout::{PaneId, Surface, WorkspaceLayout};
+
+mod log_views;
+mod mod_views;
+mod workspace;
+
+use log_views::LogViews;
+use mod_views::ModViews;
+use workspace::{PaneChange, WorkspaceState};
 
 pub struct Controller {
     _poll_timer: Timer,
@@ -54,6 +64,7 @@ pub struct Controller {
     /// commands the callbacks registered here do.
     commands: Sender<Command>,
     import_flow: Rc<RefCell<ImportFlowState>>,
+    workspace: Rc<RefCell<WorkspaceState>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -349,114 +360,6 @@ impl LiveLogChange {
     }
 }
 
-fn register_live_viewer(
-    ui: &AppWindow,
-    commands: &Sender<Command>,
-    live_viewer: &Rc<RefCell<LiveViewerState>>,
-) {
-    ui.set_log_chunks(ModelRc::from(Rc::clone(&live_viewer.borrow().chunks)));
-
-    let sender = commands.clone();
-    let weak = ui.as_weak();
-    let open_state = Rc::clone(live_viewer);
-    ui.on_open_live_log(move |kind, id| {
-        let source = match kind.as_str() {
-            "client" => backend::parse_instance_id(&id).map(LiveLogSource::Client),
-            "server" => backend::parse_server_id(&id).map(LiveLogSource::Server),
-            _ => None,
-        };
-        let Some(source) = source else {
-            return;
-        };
-        open_state.borrow_mut().activate(source.clone());
-        if let Some(ui) = weak.upgrade() {
-            ui.set_log_query(SharedString::default());
-            ui.set_log_follow(true);
-            render_live_viewer(&ui, &mut open_state.borrow_mut());
-        }
-        send(&sender, Command::OpenLiveLog(source));
-    });
-
-    let sender = commands.clone();
-    let weak = ui.as_weak();
-    let file_state = Rc::clone(live_viewer);
-    ui.on_open_log_file(move |kind, id, name| {
-        let Some(scope) = backend::parse_scope(&kind, &id) else {
-            return;
-        };
-        let source = LiveLogSource::File {
-            scope,
-            name: name.to_string(),
-        };
-        file_state.borrow_mut().activate(source.clone());
-        if let Some(ui) = weak.upgrade() {
-            ui.set_log_query(SharedString::default());
-            // A saved log does not grow, so there is nothing to follow. The
-            // view still opens at the end, which is where a log is read from.
-            ui.set_log_follow(false);
-            render_live_viewer(&ui, &mut file_state.borrow_mut());
-        }
-        send(&sender, Command::OpenLiveLog(source));
-    });
-
-    register_log_selection(ui, live_viewer);
-
-    let sender = commands.clone();
-    let close_state = Rc::clone(live_viewer);
-    ui.on_close_live_log(move || {
-        close_state.borrow_mut().deactivate();
-        send(&sender, Command::CloseLiveLog);
-    });
-
-    let weak = ui.as_weak();
-    let filter_state = Rc::clone(live_viewer);
-    ui.on_set_log_level(move |level, enabled| {
-        let mut state = filter_state.borrow_mut();
-        if level == "all" {
-            state.filter.set_all(enabled);
-        } else if let Some(level) = parse_log_level_name(&level) {
-            state.filter.set(level, enabled);
-        }
-        if let Some(ui) = weak.upgrade() {
-            render_live_viewer(&ui, &mut state);
-        }
-    });
-
-    let weak = ui.as_weak();
-    let search_state = Rc::clone(live_viewer);
-    ui.on_search_live_log(move |query| {
-        let mut state = search_state.borrow_mut();
-        state.search_query = query.into();
-        if let Some(ui) = weak.upgrade() {
-            render_live_viewer(&ui, &mut state);
-        }
-    });
-
-    let weak = ui.as_weak();
-    let follow_state = Rc::clone(live_viewer);
-    ui.on_live_log_follow_changed(move |follow| {
-        let Some(ui) = weak.upgrade() else {
-            return;
-        };
-        let mut state = follow_state.borrow_mut();
-        if follow {
-            render_live_viewer(&ui, &mut state);
-        } else {
-            state.pending_lines = 0;
-            ui.set_log_pending_lines(0);
-        }
-    });
-
-    let weak = ui.as_weak();
-    let copy_state = Rc::clone(live_viewer);
-    ui.on_copy_live_log(move || {
-        let content = copy_state.borrow().history.text();
-        if let Some(ui) = weak.upgrade() {
-            copy_to_clipboard(&ui, content);
-        }
-    });
-}
-
 fn parse_log_level_name(value: &str) -> Option<LogLevel> {
     match value {
         "trace" => Some(LogLevel::Trace),
@@ -648,56 +551,6 @@ fn sync_log_chunks(model: &VecModel<LogChunk>, chunks: Vec<LogChunk>) -> bool {
     true
 }
 
-/// Selecting across the console's rows, and copying what was selected.
-fn register_log_selection(ui: &AppWindow, live_viewer: &Rc<RefCell<LiveViewerState>>) {
-    let weak = ui.as_weak();
-    let select_state = Rc::clone(live_viewer);
-    ui.on_select_log_at(move |row, column, extend| {
-        let (Ok(row), Ok(column)) = (usize::try_from(row), usize::try_from(column)) else {
-            return;
-        };
-        let mut state = select_state.borrow_mut();
-        state.select_at(row, column, extend);
-        if let Some(ui) = weak.upgrade() {
-            publish_log_selection(&ui, &state);
-        }
-    });
-
-    let weak = ui.as_weak();
-    let word_state = Rc::clone(live_viewer);
-    ui.on_select_log_word_at(move |row, column| {
-        let (Ok(row), Ok(column)) = (usize::try_from(row), usize::try_from(column)) else {
-            return;
-        };
-        let mut state = word_state.borrow_mut();
-        state.select_word_at(row, column);
-        if let Some(ui) = weak.upgrade() {
-            publish_log_selection(&ui, &state);
-        }
-    });
-
-    let weak = ui.as_weak();
-    let all_state = Rc::clone(live_viewer);
-    ui.on_select_all_log(move || {
-        let mut state = all_state.borrow_mut();
-        state.select_all();
-        if let Some(ui) = weak.upgrade() {
-            publish_log_selection(&ui, &state);
-        }
-    });
-
-    let weak = ui.as_weak();
-    let copy_state = Rc::clone(live_viewer);
-    ui.on_copy_log_selection(move || {
-        let Some(text) = copy_state.borrow().selected_text() else {
-            return;
-        };
-        if let Some(ui) = weak.upgrade() {
-            ui.invoke_copy_text(text.into());
-        }
-    });
-}
-
 /// Whether a character belongs to the middle of a log's idea of a word.
 ///
 /// Alphanumerics plus the punctuation identifiers are built from, so
@@ -740,66 +593,6 @@ fn word_bounds(text: &str, offset: usize) -> Option<(usize, usize)> {
         .last()
         .map_or(anchor, |(at, character)| anchor + at + character.len_utf8());
     Some((start, end))
-}
-
-/// Puts the selection on screen, in the reading order the rows expect.
-///
-/// The revision is what makes rows apply it: a selection is a call on a text
-/// item rather than a binding, so there has to be something for a row to react
-/// to.
-fn publish_log_selection(ui: &AppWindow, state: &LiveViewerState) {
-    if let Some(selection) = state.selection.filter(|selection| !selection.is_empty()) {
-        let (start, end) = selection.ordered();
-        ui.set_log_selection_start_row(to_i32(start.row));
-        ui.set_log_selection_start_offset(to_i32(start.offset));
-        ui.set_log_selection_end_row(to_i32(end.row));
-        ui.set_log_selection_end_offset(to_i32(end.offset));
-        ui.set_log_has_selection(true);
-    } else {
-        // A press with no drag is not a selection, and must clear the one it
-        // replaced rather than leave it highlighted.
-        ui.set_log_selection_start_row(-1);
-        ui.set_log_selection_end_row(-1);
-        ui.set_log_has_selection(false);
-    }
-    ui.set_log_selection_revision(ui.get_log_selection_revision().saturating_add(1));
-}
-
-fn render_live_viewer(ui: &AppWindow, state: &mut LiveViewerState) {
-    let presentation = build_log_presentation(state);
-
-    let status = if state.search_query.is_empty() {
-        lookup_args(
-            "gui-retained-log-records",
-            [("count", Arg::from(state.history.len()))],
-        )
-    } else {
-        lookup_args(
-            "gui-live-log-search-matches",
-            [("count", Arg::from(presentation.match_count))],
-        )
-    };
-    let chunks_changed = sync_log_chunks(&state.chunks, presentation.chunks);
-    ui.set_log_has_content(!state.history.is_empty());
-    ui.set_log_status(status.into());
-    ui.set_log_history_truncated(state.source_truncated || state.history.history_truncated());
-    ui.set_log_pending_lines(0);
-    ui.set_log_content_columns(to_i32(presentation.content_columns.min(100_000)));
-    ui.set_log_trace_enabled(state.filter.is_enabled(LogLevel::Trace));
-    ui.set_log_debug_enabled(state.filter.is_enabled(LogLevel::Debug));
-    ui.set_log_info_enabled(state.filter.is_enabled(LogLevel::Info));
-    ui.set_log_warn_enabled(state.filter.is_enabled(LogLevel::Warn));
-    ui.set_log_error_enabled(state.filter.is_enabled(LogLevel::Error));
-    ui.set_log_fatal_enabled(state.filter.is_enabled(LogLevel::Fatal));
-    ui.set_log_other_enabled(state.filter.is_enabled(LogLevel::Other));
-    if chunks_changed {
-        ui.set_log_revision(ui.get_log_revision().saturating_add(1));
-        // Rows are addressed by index, and the indices just moved. Keeping the
-        // highlight would mean highlighting different text than was selected.
-        state.selection = None;
-        publish_log_selection(ui, state);
-    }
-    state.pending_lines = 0;
 }
 
 /// Pushes the import modal's every visible property from the flow's current
@@ -1267,36 +1060,88 @@ struct PendingIsolation {
     mutation: IsolationMutation,
 }
 
+/// One host's isolation setup, as far as this window has it.
 #[derive(Debug, Default)]
-struct IsolationFlowState {
+struct IsolationSetup {
+    /// Which load of this host's isolation a late answer has to belong to.
     generation: u64,
-    host: Option<InstalledHost>,
     pinned: HashSet<PathBuf>,
     candidates: Vec<backend::IsolationCandidateData>,
     query: String,
-    last_request: u64,
-    /// The one isolation change the worker has not finished. A second click
-    /// is refused here, before a second command can be queued behind it.
-    pending: Option<PendingIsolation>,
     /// The session's host does not have the round's mods yet, so nothing
     /// that depends on them may be sent.
     unreconciled: bool,
     /// The plan fingerprint the setup on screen was computed from.
     setup_basis: Option<u64>,
+    /// The phase the host's surface shows.
+    phase: String,
 }
 
-impl IsolationFlowState {
-    fn begin(&mut self, host: InstalledHost) -> u64 {
-        self.generation = self.generation.wrapping_add(1);
-        self.host = Some(host);
+impl IsolationSetup {
+    /// Drops the candidates and pins of a setup whose plan no longer describes the host.
+    fn forget_setup(&mut self) {
+        self.setup_basis = None;
         self.pinned.clear();
         self.candidates.clear();
         self.query.clear();
-        self.generation
+    }
+}
+
+/// Isolation as the window follows it: one setup per shown host, and the one
+/// isolation change the worker has not finished, whichever host it is for.
+#[derive(Debug, Default)]
+struct IsolationFlowState {
+    last_generation: u64,
+    hosts: HashMap<InstalledHost, IsolationSetup>,
+    last_request: u64,
+    /// The one isolation change the worker has not finished. A second click,
+    /// from any view of any host, is refused here before a second command can
+    /// be queued behind it.
+    pending: Option<PendingIsolation>,
+}
+
+impl IsolationFlowState {
+    /// Starts a fresh load of `host`'s isolation, answering its generation.
+    fn begin(&mut self, host: InstalledHost) -> u64 {
+        self.last_generation = self.last_generation.wrapping_add(1);
+        let setup = self.hosts.entry(host).or_default();
+        setup.generation = self.last_generation;
+        setup.pinned.clear();
+        setup.candidates.clear();
+        setup.query.clear();
+        self.last_generation
     }
 
-    fn accepts(&self, generation: u64) -> bool {
-        generation == 0 || generation == self.generation
+    /// Whether an answer about `host` belongs to its current load. Zero is an
+    /// answer nothing on screen asked for, such as a reload after a change.
+    fn accepts(&self, host: InstalledHost, generation: u64) -> bool {
+        generation == 0
+            || self
+                .hosts
+                .get(&host)
+                .is_some_and(|setup| setup.generation == generation)
+    }
+
+    fn setup(&self, host: InstalledHost) -> Option<&IsolationSetup> {
+        self.hosts.get(&host)
+    }
+
+    fn setup_mut(&mut self, host: InstalledHost) -> Option<&mut IsolationSetup> {
+        self.hosts.get_mut(&host)
+    }
+
+    /// The generation `host`'s current load answers to, starting one when the
+    /// window has none, as ending a session from its workflow banner does.
+    fn generation_of(&mut self, host: InstalledHost) -> u64 {
+        match self.hosts.get(&host) {
+            Some(setup) => setup.generation,
+            None => self.begin(host),
+        }
+    }
+
+    /// Forgets the setups of hosts the workspace no longer shows.
+    fn follow(&mut self, shown: &[InstalledHost]) {
+        self.hosts.retain(|host, _| shown.contains(host));
     }
 
     /// Claims the single in-flight isolation change, or refuses while one is pending.
@@ -1325,18 +1170,13 @@ impl IsolationFlowState {
     }
 
     /// Forgets a setup that never started, so a late plan cannot bring it back.
-    fn discard(&mut self) {
-        self.generation = self.generation.wrapping_add(1);
-        self.host = None;
-        self.forget_setup();
-    }
-
-    /// Drops the candidates and pins of a setup whose plan no longer describes the host.
-    fn forget_setup(&mut self) {
-        self.setup_basis = None;
-        self.pinned.clear();
-        self.candidates.clear();
-        self.query.clear();
+    fn discard(&mut self, host: InstalledHost) {
+        self.last_generation = self.last_generation.wrapping_add(1);
+        let generation = self.last_generation;
+        let setup = self.hosts.entry(host).or_default();
+        setup.generation = generation;
+        setup.forget_setup();
+        "none".clone_into(&mut setup.phase);
     }
 }
 
@@ -1658,35 +1498,52 @@ impl HostLifecycle {
             .get(&lifecycle_key(host))
             .map_or("", |tracked| tracked.stage.as_str())
     }
+
+    /// Writes a client's restart stage and restartability onto its row.
+    fn stamp_client(&self, row: &mut InstanceRow) -> bool {
+        let Some(instance) = backend::parse_instance_id(&row.id) else {
+            return false;
+        };
+        let stage = self.stage_of(InstalledHost::Instance(instance));
+        let can_restart = self.restartable.contains(&instance.to_string());
+        let changed = row.restart_stage != stage || row.can_restart != can_restart;
+        row.restart_stage = stage.into();
+        row.can_restart = can_restart;
+        changed
+    }
+
+    /// Writes a server's restart stage onto its row.
+    fn stamp_server(&self, row: &mut ServerRow) -> bool {
+        let Some(server) = backend::parse_server_id(&row.id) else {
+            return false;
+        };
+        let stage = self.stage_of(InstalledHost::Server(server));
+        let changed = row.restart_stage != stage;
+        row.restart_stage = stage.into();
+        changed
+    }
 }
 
 /// Stamps each host row with its restart stage, and each client row with
 /// whether it can be restarted, in every list that shows one.
 fn stamp_host_lifecycle(ui: &AppWindow, lifecycle: &HostLifecycle) {
     stamp_rows(&ui.get_instances(), |row: &mut InstanceRow| {
-        let Some(instance) = backend::parse_instance_id(&row.id) else {
-            return false;
-        };
-        let stage = lifecycle.stage_of(InstalledHost::Instance(instance));
-        let can_restart = lifecycle.restartable.contains(&instance.to_string());
-        let changed = row.restart_stage != stage || row.can_restart != can_restart;
-        row.restart_stage = stage.into();
-        row.can_restart = can_restart;
-        changed
+        lifecycle.stamp_client(row)
     });
-    for list in [
-        ui.get_servers(),
-        ui.get_global_servers(),
-        ui.get_linked_servers(),
-    ] {
-        stamp_rows(&list, |row: &mut ServerRow| {
-            let Some(server) = backend::parse_server_id(&row.id) else {
-                return false;
-            };
-            let stage = lifecycle.stage_of(InstalledHost::Server(server));
-            let changed = row.restart_stage != stage;
-            row.restart_stage = stage.into();
-            changed
+    stamp_rows(&ui.get_global_servers(), |row: &mut ServerRow| {
+        lifecycle.stamp_server(row)
+    });
+    let views = ui.get_host_views();
+    stamp_rows(&views, |view: &mut HostView| {
+        if view.kind == "client" {
+            lifecycle.stamp_client(&mut view.client)
+        } else {
+            lifecycle.stamp_server(&mut view.server)
+        }
+    });
+    for view in views.iter() {
+        stamp_rows(&view.linked_servers, |row: &mut ServerRow| {
+            lifecycle.stamp_server(row)
         });
     }
 }
@@ -1760,21 +1617,28 @@ struct PendingIntegrity {
     operation: Option<String>,
 }
 
+/// What one shown host's Diagnostics surface holds.
 #[derive(Debug, Default)]
-struct IntegrityFlowState {
-    /// The host the Diagnostics surface was last opened on. A result about any
-    /// other host arrived too late to show.
-    host: Option<InstalledHost>,
-    last_request: u64,
-    /// The one verification or repair the worker has not finished. A second
-    /// request is refused here, before a second command can queue behind it.
-    pending: Option<PendingIntegrity>,
-    /// Whether the surface holds a finished verification of `host`.
+struct IntegrityHost {
+    /// Whether the surface holds a finished verification of the host.
     checked: bool,
     /// Every finding worth listing, kept whole for the filter.
     findings: Vec<backend::VerifiedFileData>,
     query: String,
     bundle: BundleChoice,
+}
+
+/// Verification and repair as the window follows them: what each shown host's
+/// surface holds, and the one verification or repair the worker has not
+/// finished, whichever host it is for.
+#[derive(Debug, Default)]
+struct IntegrityFlowState {
+    hosts: HashMap<InstalledHost, IntegrityHost>,
+    last_request: u64,
+    /// The one verification or repair the worker has not finished. A second
+    /// request, from any view of any host, is refused here before a second
+    /// command can queue behind it.
+    pending: Option<PendingIntegrity>,
 }
 
 /// What the Diagnostics surface is choosing to put in a bundle for its host.
@@ -1838,25 +1702,27 @@ impl BundleChoice {
 }
 
 impl IntegrityFlowState {
-    /// Points the surface at a host. Returns whether it changed, in which case
-    /// the previous host's findings are forgotten.
+    /// Makes sure the surface has a place for `host`, answering whether it is new.
     fn open(&mut self, host: InstalledHost) -> bool {
-        if self.host == Some(host) {
+        if self.hosts.contains_key(&host) {
             return false;
         }
-        self.host = Some(host);
-        self.checked = false;
-        self.findings.clear();
-        self.query.clear();
-        // An export already running still finishes; its result is about the
-        // host it was chosen for and is not shown here.
-        let pending = self.bundle.pending;
-        self.bundle = BundleChoice {
-            pending,
-            last_request: self.bundle.last_request,
-            ..BundleChoice::default()
-        };
+        self.hosts.insert(host, IntegrityHost::default());
         true
+    }
+
+    fn host(&self, host: InstalledHost) -> Option<&IntegrityHost> {
+        self.hosts.get(&host)
+    }
+
+    fn host_mut(&mut self, host: InstalledHost) -> Option<&mut IntegrityHost> {
+        self.hosts.get_mut(&host)
+    }
+
+    /// Forgets the surfaces of hosts the workspace no longer shows. Work still
+    /// running finishes; its result has nowhere to go.
+    fn follow(&mut self, shown: &[InstalledHost]) {
+        self.hosts.retain(|host, _| shown.contains(host));
     }
 
     /// Claims the single in-flight integrity work, or refuses while one runs.
@@ -1887,9 +1753,16 @@ impl IntegrityFlowState {
         }
     }
 
-    /// Whether a result belongs on the surface as it is now.
+    /// Whether a result belongs on a surface as it is now: the host is shown,
+    /// and the result answers the newest request.
     fn accepts(&self, host: InstalledHost, request: u64) -> bool {
-        self.host == Some(host) && request == self.last_request
+        self.hosts.contains_key(&host) && request == self.last_request
+    }
+
+    /// Whether an export's outcome answers the newest export of a shown host.
+    fn accepts_export(&self, host: InstalledHost, request: u64) -> bool {
+        self.host(host)
+            .is_some_and(|surface| request == surface.bundle.last_request)
     }
 
     fn working_on(&self, host: InstalledHost) -> Option<IntegrityWork> {
@@ -2229,7 +2102,7 @@ enum DropIntent {
 }
 
 /// Which field, if any, a drop belongs to right now.
-fn drop_intent(ui: &AppWindow) -> DropIntent {
+fn drop_intent(ui: &AppWindow, workspace: &WorkspaceState) -> DropIntent {
     match ui.get_modal().as_str() {
         "create-server" => DropIntent::ServerPack(ServerPackTarget::NewServer),
         // The import dialog asks for two archives once a server is wanted, and
@@ -2241,23 +2114,30 @@ fn drop_intent(ui: &AppWindow) -> DropIntent {
         // Before the import arm below, which is what an empty modal string
         // otherwise means: a jar let go over a visible mod list is not a pack
         // somebody wants imported.
-        "" => mods_drop_intent(ui).unwrap_or(DropIntent::Import),
+        "" => mods_drop_intent(ui, workspace).unwrap_or(DropIntent::Import),
         "import" => DropIntent::Import,
         _ => DropIntent::Ignored,
     }
 }
 
-/// The mod host whose list is on screen, if one is.
-fn mods_drop_intent(ui: &AppWindow) -> Option<DropIntent> {
-    if ui.get_workspace_tab() != "Mods" {
+/// The mod host whose list is on screen, if exactly one is.
+///
+/// A drop carries no position, so with the Mods lists of two different hosts
+/// visible there is no telling which one it was meant for.
+fn mods_drop_intent(ui: &AppWindow, workspace: &WorkspaceState) -> Option<DropIntent> {
+    if !ui.get_workspace_open() || !matches!(ui.get_page(), INSTANCES_PAGE | SERVERS_PAGE) {
         return None;
     }
-    let host = match ui.get_workspace().as_str() {
-        "instance" => backend::parse_mod_host("client", &ui.get_selected_instance_id())?,
-        "server" => backend::parse_mod_host("server", &ui.get_selected_server_id())?,
-        _ => return None,
-    };
-    Some(DropIntent::Mods(host))
+    let mut hosts = workspace
+        .layout()?
+        .panes()
+        .into_iter()
+        .filter(|placed| placed.pane.surface() == Surface::Mods)
+        .map(|placed| placed.pane.host());
+    let host = hosts.next()?;
+    hosts
+        .all(|other| other == host)
+        .then_some(DropIntent::Mods(host))
 }
 
 /// Routes files dropped on the window to whatever is asking for them.
@@ -2276,9 +2156,10 @@ pub fn accept_file_drops(ui: &AppWindow, drops: &FileDrops, controller: &Control
     let weak = ui.as_weak();
     let sender = controller.commands.clone();
     let flow = Rc::clone(&controller.import_flow);
+    let workspace = Rc::clone(&controller.workspace);
     drops.listen(move |drop| {
         let Some(ui) = weak.upgrade() else { return };
-        let intent = drop_intent(&ui);
+        let intent = drop_intent(&ui, &workspace.borrow());
         match drop {
             FileDrop::Hovering => {
                 ui.set_file_drop_active(intent != DropIntent::Ignored);
@@ -2353,32 +2234,36 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
     let receiver = Rc::new(RefCell::new(backend.events));
     let activities = Rc::new(RefCell::new(Vec::<ActivityData>::new()));
     let creations = Rc::new(RefCell::new(CreationTracker::default()));
-    let live_viewer = Rc::new(RefCell::new(LiveViewerState::default()));
     let import_flow = Rc::new(RefCell::new(ImportFlowState::default()));
     let minecraft = Rc::new(RefCell::new(MinecraftDefaultsModel::new()));
     let browser = Rc::new(ModBrowser::default());
-    let mod_lists = Rc::new(RefCell::new(ModLists::default()));
     let local_mods = Rc::new(RefCell::new(LocalModDrop::default()));
     let isolation_flow = Rc::new(RefCell::new(IsolationFlowState::default()));
     let integrity_flow = Rc::new(RefCell::new(IntegrityFlowState::default()));
     let lifecycle = Rc::new(RefCell::new(HostLifecycle::default()));
     let disk_usage = Rc::new(RefCell::new(DiskUsageState::default()));
+    let workspace = Workspace {
+        state: Rc::new(RefCell::new(WorkspaceState::default())),
+        lifecycle: Rc::clone(&lifecycle),
+        logs: Rc::new(RefCell::new(LogViews::new(backend.commands.clone()))),
+        mods: Rc::default(),
+        browser: Rc::clone(&browser),
+        isolation: Rc::clone(&isolation_flow),
+        integrity: Rc::clone(&integrity_flow),
+        commands: backend.commands.clone(),
+    };
     register_i18n(ui);
     register_toasts(ui);
     register_callbacks(
         ui,
         &backend.commands,
         &creations,
-        &live_viewer,
         &import_flow,
         &minecraft,
-        &browser,
-        &mod_lists,
         &local_mods,
-        &isolation_flow,
-        &integrity_flow,
         &lifecycle,
         &disk_usage,
+        &workspace,
         keys,
     );
 
@@ -2386,16 +2271,12 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
     let poll_receiver = Rc::clone(&receiver);
     let poll_activities = Rc::clone(&activities);
     let poll_creations = Rc::clone(&creations);
-    let poll_live_viewer = Rc::clone(&live_viewer);
     let poll_import_flow = Rc::clone(&import_flow);
     let poll_minecraft = Rc::clone(&minecraft);
-    let poll_browser = Rc::clone(&browser);
-    let poll_mod_lists = Rc::clone(&mod_lists);
     let poll_local_mods = Rc::clone(&local_mods);
-    let poll_isolation_flow = Rc::clone(&isolation_flow);
-    let poll_integrity_flow = Rc::clone(&integrity_flow);
     let poll_lifecycle = Rc::clone(&lifecycle);
     let poll_disk_usage = Rc::clone(&disk_usage);
+    let poll_workspace = workspace.clone();
     let poll_commands = backend.commands.clone();
     let poll_timer = Timer::default();
     poll_timer.start(TimerMode::Repeated, Duration::from_millis(80), move || {
@@ -2412,11 +2293,14 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
         if ui.get_compact_layout() != compact_layout {
             ui.set_compact_layout(compact_layout);
         }
-        let mut live_change = LiveLogChange::Nothing;
+        let mut log_changes = HashMap::new();
         for event in poll_receiver.borrow_mut().try_iter() {
             match event {
                 Event::LiveLog(update) => {
-                    live_change = live_change.max(poll_live_viewer.borrow_mut().apply(update));
+                    poll_workspace
+                        .logs
+                        .borrow_mut()
+                        .apply(&update, &mut log_changes);
                 }
                 other => apply_event(
                     &ui,
@@ -2425,32 +2309,15 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
                     &poll_creations,
                     &poll_import_flow,
                     &poll_minecraft,
-                    &poll_browser,
-                    &poll_mod_lists,
                     &poll_local_mods,
-                    &poll_isolation_flow,
-                    &poll_integrity_flow,
                     &poll_lifecycle,
                     &poll_disk_usage,
+                    &poll_workspace,
                     &poll_commands,
                 ),
             }
         }
-        match live_change {
-            // A saved log is opened with following off, because a finished log
-            // has nothing to follow. Counting its lines instead of drawing them
-            // left the view empty until it was opened a second time.
-            LiveLogChange::Reset => {
-                render_live_viewer(&ui, &mut poll_live_viewer.borrow_mut());
-            }
-            LiveLogChange::Grew if ui.get_log_follow() => {
-                render_live_viewer(&ui, &mut poll_live_viewer.borrow_mut());
-            }
-            LiveLogChange::Grew => {
-                ui.set_log_pending_lines(to_i32(poll_live_viewer.borrow().pending_lines));
-            }
-            LiveLogChange::Nothing => {}
-        }
+        poll_workspace.logs.borrow_mut().settle(log_changes);
     });
 
     // A second is enough for uptime and for CPU to read smoothly, and it costs
@@ -2462,7 +2329,7 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
         let Some(ui) = running_weak.upgrade() else {
             return;
         };
-        if ui.get_page() == RUNNING_PAGE && ui.get_workspace().is_empty() {
+        if ui.get_page() == RUNNING_PAGE && !ui.get_workspace_open() {
             send(&running_commands, Command::LoadRunning);
         }
     });
@@ -2472,6 +2339,7 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
         _running_timer: running_timer,
         commands: backend.commands,
         import_flow,
+        workspace: workspace.state,
     }
 }
 
@@ -2661,20 +2529,6 @@ fn register_create_server(
     );
 }
 
-/// Narrowing a mod list to what the user typed.
-///
-/// The full list stays in `mod_lists`, so clearing the box restores it without
-/// asking core for the mods again.
-fn register_mod_filter(ui: &AppWindow, mod_lists: &Rc<RefCell<ModLists>>) {
-    let weak = ui.as_weak();
-    let lists = Rc::clone(mod_lists);
-    ui.on_filter_mods(move |host_kind, _query| {
-        if let Some(ui) = weak.upgrade() {
-            render_mod_list(&ui, &lists.borrow(), host_kind.as_str());
-        }
-    });
-}
-
 /// Choosing, and unchoosing, the archive a server's content comes from.
 ///
 /// Two dialogs can name one, and the pick is asynchronous, so each request says
@@ -2749,22 +2603,17 @@ fn register_callbacks(
     ui: &AppWindow,
     commands: &Sender<Command>,
     creations: &Rc<RefCell<CreationTracker>>,
-    live_viewer: &Rc<RefCell<LiveViewerState>>,
     import_flow: &Rc<RefCell<ImportFlowState>>,
     minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
-    browser: &Rc<ModBrowser>,
-    mod_lists: &Rc<RefCell<ModLists>>,
     local_mods: &Rc<RefCell<LocalModDrop>>,
-    isolation_flow: &Rc<RefCell<IsolationFlowState>>,
-    integrity_flow: &Rc<RefCell<IntegrityFlowState>>,
     lifecycle: &Rc<RefCell<HostLifecycle>>,
     disk_usage: &Rc<RefCell<DiskUsageState>>,
+    workspace: &Workspace,
     keys: &BindingCapture,
 ) {
     register_catalog_actions(ui, commands);
-    register_mod_filter(ui, mod_lists);
-    register_client_actions(ui, commands, Rc::clone(creations));
-    register_mod_actions(ui, commands, browser);
+    register_client_actions(ui, commands, creations);
+    register_mod_actions(ui, commands, workspace);
     register_create_instance_naming(ui, commands);
     register_import_flow(ui, commands, import_flow, creations);
     register_server_pack_choice(ui, commands);
@@ -2773,16 +2622,16 @@ fn register_callbacks(
     let sender = commands.clone();
     ui.on_select_server(move |_| send(&sender, Command::Refresh));
 
-    register_server_actions(ui, commands, live_viewer);
+    register_server_actions(ui, commands, workspace);
+    register_workspace(ui, workspace);
     register_mod_state_actions(ui, commands, local_mods);
-    register_diagnostics(ui, commands);
     register_snapshot_actions(ui, commands);
-    register_isolation_actions(ui, commands, isolation_flow);
-    register_integrity_actions(ui, commands, integrity_flow);
-    register_bundle_actions(ui, commands, integrity_flow);
+    register_isolation_actions(ui, commands, workspace);
+    register_integrity_actions(ui, commands, workspace);
+    register_bundle_actions(ui, commands, workspace);
     register_restart_actions(ui, commands, lifecycle);
     register_disk_usage_actions(ui, commands, disk_usage);
-    register_live_viewer(ui, commands, live_viewer);
+    log_views::register(ui, &workspace.logs);
     register_settings(ui, commands);
     register_minecraft_defaults(ui, commands, minecraft, keys);
 
@@ -2885,11 +2734,8 @@ fn register_snapshot_actions(ui: &AppWindow, commands: &Sender<Command>) {
 }
 
 #[allow(clippy::too_many_lines)]
-fn register_isolation_actions(
-    ui: &AppWindow,
-    commands: &Sender<Command>,
-    flow: &Rc<RefCell<IsolationFlowState>>,
-) {
+fn register_isolation_actions(ui: &AppWindow, commands: &Sender<Command>, workspace: &Workspace) {
+    let flow = &workspace.isolation;
     let sender = commands.clone();
     let state = Rc::clone(flow);
     ui.on_open_isolation(move |kind, id| {
@@ -2900,24 +2746,64 @@ fn register_isolation_actions(
         send(&sender, Command::OpenIsolation { host, generation });
     });
 
-    let state = Rc::clone(flow);
-    ui.on_toggle_isolation_pin(move |path, selected| {
-        let path = PathBuf::from(path.as_str());
-        if selected {
-            state.borrow_mut().pinned.insert(path);
-        } else {
-            state.borrow_mut().pinned.remove(&path);
-        }
-    });
-
-    let state = Rc::clone(flow);
-    let weak = ui.as_weak();
-    ui.on_filter_isolation_candidates(move |query| {
-        let Some(ui) = weak.upgrade() else {
+    let views = workspace.clone();
+    ui.on_toggle_isolation_pin(move |kind, id, path, selected| {
+        let Some(host) = backend::parse_mod_host(&kind, &id) else {
             return;
         };
-        state.borrow_mut().query = query.into();
-        render_isolation_candidates(&ui, &state.borrow());
+        let mut flow = views.isolation.borrow_mut();
+        let Some(setup) = flow.setup_mut(host) else {
+            return;
+        };
+        let path = PathBuf::from(path.as_str());
+        if selected {
+            setup.pinned.insert(path);
+        } else {
+            setup.pinned.remove(&path);
+        }
+        publish_isolation_candidates(&views, host, setup);
+    });
+
+    let views = workspace.clone();
+    ui.on_filter_isolation_candidates(move |kind, id, query| {
+        let Some(host) = backend::parse_mod_host(&kind, &id) else {
+            return;
+        };
+        let mut flow = views.isolation.borrow_mut();
+        let Some(setup) = flow.setup_mut(host) else {
+            return;
+        };
+        query.as_str().clone_into(&mut setup.query);
+        publish_isolation_candidates(&views, host, setup);
+    });
+
+    let views = workspace.clone();
+    ui.on_acknowledge_isolation(move |kind, id, what, accepted| {
+        let Some(host) = backend::parse_mod_host(&kind, &id) else {
+            return;
+        };
+        views.update(host, |view| match what.as_str() {
+            "missing" => view.isolation_accept_missing = accepted,
+            "unrecorded" => view.isolation_accept_unrecorded = accepted,
+            _ => {}
+        });
+    });
+
+    let views = workspace.clone();
+    let weak = ui.as_weak();
+    ui.on_dismiss_isolation(move |kind, id| {
+        let Some(host) = backend::parse_mod_host(&kind, &id) else {
+            return;
+        };
+        if let Some(setup) = views.isolation.borrow_mut().setup_mut(host)
+            && setup.phase == "result"
+        {
+            "none".clone_into(&mut setup.phase);
+            views.update(host, |view| view.isolation_phase = "none".into());
+        }
+        if let Some(ui) = weak.upgrade() {
+            ui.set_modal_error(SharedString::default());
+        }
     });
 
     let sender = commands.clone();
@@ -2928,9 +2814,14 @@ fn register_isolation_actions(
             return;
         };
         let mut state = state.borrow_mut();
-        if state.host != Some(host) {
+        // Only a setup on screen can start; one that was discarded cannot.
+        let Some((generation, pinned)) = state
+            .setup(host)
+            .filter(|setup| setup.phase == "setup")
+            .map(|setup| (setup.generation, setup.pinned.iter().cloned().collect()))
+        else {
             return;
-        }
+        };
         let Some(request) =
             claim_isolation_change(&weak, &mut state, host, IsolationMutation::Start)
         else {
@@ -2940,9 +2831,9 @@ fn register_isolation_actions(
             &sender,
             Command::BeginIsolation {
                 host,
-                generation: state.generation,
+                generation,
                 request,
-                pinned: state.pinned.iter().cloned().collect(),
+                pinned,
                 accept_unrecorded,
                 accept_missing,
             },
@@ -2957,9 +2848,9 @@ fn register_isolation_actions(
             return;
         };
         let mut state = state.borrow_mut();
-        if state.host != Some(host) || state.unreconciled {
+        let Some(generation) = answerable(&state, host) else {
             return;
-        }
+        };
         let Some(request) =
             claim_isolation_change(&weak, &mut state, host, IsolationMutation::Answer)
         else {
@@ -2969,7 +2860,7 @@ fn register_isolation_actions(
             &sender,
             Command::AnswerIsolation {
                 host,
-                generation: state.generation,
+                generation,
                 request,
                 answer: if answer == "present" {
                     ephervex_core::RoundAnswer::Reproduced
@@ -2988,9 +2879,9 @@ fn register_isolation_actions(
             return;
         };
         let mut state = state.borrow_mut();
-        if state.host != Some(host) || state.unreconciled {
+        let Some(generation) = answerable(&state, host) else {
             return;
-        }
+        };
         let Some(request) =
             claim_isolation_change(&weak, &mut state, host, IsolationMutation::Undo)
         else {
@@ -3000,7 +2891,7 @@ fn register_isolation_actions(
             &sender,
             Command::UndoIsolation {
                 host,
-                generation: state.generation,
+                generation,
                 request,
             },
         );
@@ -3014,7 +2905,7 @@ fn register_isolation_actions(
             return;
         };
         let mut state = state.borrow_mut();
-        if state.host == Some(host) && state.unreconciled {
+        if state.setup(host).is_some_and(|setup| setup.unreconciled) {
             return;
         }
         let Some(request) =
@@ -3022,11 +2913,7 @@ fn register_isolation_actions(
         else {
             return;
         };
-        let generation = if state.host == Some(host) {
-            state.generation
-        } else {
-            state.begin(host)
-        };
+        let generation = state.generation_of(host);
         send(
             &sender,
             Command::FinishIsolation {
@@ -3045,9 +2932,13 @@ fn register_isolation_actions(
             return;
         };
         let mut state = state.borrow_mut();
-        if state.host != Some(host) || !state.unreconciled {
+        let Some(generation) = state
+            .setup(host)
+            .filter(|setup| setup.unreconciled)
+            .map(|setup| setup.generation)
+        else {
             return;
-        }
+        };
         let Some(request) =
             claim_isolation_change(&weak, &mut state, host, IsolationMutation::Recover)
         else {
@@ -3057,13 +2948,13 @@ fn register_isolation_actions(
             &sender,
             Command::RecoverIsolation {
                 host,
-                generation: state.generation,
+                generation,
                 request,
             },
         );
     });
 
-    let state = Rc::clone(flow);
+    let views = workspace.clone();
     let weak = ui.as_weak();
     ui.on_discard_isolation_setup(move |kind, id| {
         let (Some(ui), Some(host)) = (weak.upgrade(), backend::parse_mod_host(&kind, &id)) else {
@@ -3071,9 +2962,11 @@ fn register_isolation_actions(
         };
         // A start in flight would be orphaned: its session would begin with
         // nothing left on screen to show it.
-        let current = state.borrow().host == Some(host) && state.borrow().pending.is_none();
+        let flow = views.isolation.borrow();
+        let current = flow.setup(host).is_some() && flow.pending.is_none();
+        drop(flow);
         if current {
-            discard_isolation_setup(&ui, &mut state.borrow_mut());
+            discard_isolation_setup(&ui, &views, host);
         }
     });
 
@@ -3090,11 +2983,7 @@ fn register_isolation_actions(
         else {
             return;
         };
-        let generation = if state.host == Some(host) {
-            state.generation
-        } else {
-            state.begin(host)
-        };
+        let generation = state.generation_of(host);
         send(
             &sender,
             Command::CancelIsolation {
@@ -3104,7 +2993,58 @@ fn register_isolation_actions(
             },
         );
     });
+
+    let views = workspace.clone();
+    let weak = ui.as_weak();
+    ui.on_workflow_action(move |pane, kind, id, workflow, action| {
+        let Some(ui) = weak.upgrade() else { return };
+        route_workflow_action(&ui, &views, pane, &kind, &id, &workflow, &action);
+    });
 }
+
+/// The generation a round answer or undo is sent with, or nothing when the
+/// host's isolation is not loaded or its round's mods are not back yet.
+fn answerable(state: &IsolationFlowState, host: InstalledHost) -> Option<u64> {
+    state
+        .setup(host)
+        .filter(|setup| !setup.unreconciled)
+        .map(|setup| setup.generation)
+}
+
+/// Sends a durable workflow's action to the feature that owns the workflow.
+///
+/// The workspace shows workflow actions without knowing what they do; this is
+/// the one place that reads a workflow id.
+fn route_workflow_action(
+    ui: &AppWindow,
+    workspace: &Workspace,
+    pane: i32,
+    kind: &str,
+    id: &str,
+    workflow: &str,
+    action: &str,
+) {
+    if workflow != ISOLATION_WORKFLOW {
+        return;
+    }
+    let (kind, id) = (SharedString::from(kind), SharedString::from(id));
+    match action {
+        "details" => {
+            if let Some(pane) = workspace::pane_id(pane) {
+                workspace.change_pane(ui, pane, |layout| {
+                    layout.show_surface(pane, Surface::Isolation).is_ok()
+                });
+            }
+        }
+        "gone" | "present" => ui.invoke_answer_isolation(kind, id, action.into()),
+        "undo" => ui.invoke_undo_isolation(kind, id),
+        "finish" => ui.invoke_finish_isolation(kind, id),
+        _ => {}
+    }
+}
+
+/// The id isolation's durable workflow is shown under.
+const ISOLATION_WORKFLOW: &str = "mod-isolation";
 
 thread_local! {
     /// The clipboard this window owns, kept for as long as the window is.
@@ -3271,46 +3211,6 @@ impl LocalModDrop {
 
 /// Every mod each list has, before the query narrows it.
 ///
-/// The lists are kept here rather than in the window because filtering happens
-/// in Rust: only the matching rows become `ModRow`s, so typing into the box
-/// shrinks the number of cards the markup builds instead of hiding cards it
-/// already built.
-#[derive(Debug, Default)]
-struct ModLists {
-    client: Vec<ModRow>,
-    server: Vec<ModRow>,
-    /// Which host each list is currently for, so a query typed against one
-    /// instance is not left filtering the next one's mods.
-    client_host: String,
-    server_host: String,
-}
-
-impl ModLists {
-    fn rows(&self, host_kind: &str) -> &[ModRow] {
-        if host_kind == "server" {
-            &self.server
-        } else {
-            &self.client
-        }
-    }
-
-    /// Replaces one list, answering whether it is now about a different host.
-    fn replace(&mut self, host_kind: &str, host: &str, rows: Vec<ModRow>) -> bool {
-        let (current, target) = if host_kind == "server" {
-            self.server = rows;
-            (&mut self.server_host, host)
-        } else {
-            self.client = rows;
-            (&mut self.client_host, host)
-        };
-        let changed = current != target;
-        if changed {
-            target.clone_into(current);
-        }
-        changed
-    }
-}
-
 /// The rows whose name, file name, or provider contains `query`.
 ///
 /// Case-insensitive and substring rather than prefix, because a user looking
@@ -3330,21 +3230,6 @@ fn matching_mods(rows: &[ModRow], query: &str) -> Vec<ModRow> {
         })
         .cloned()
         .collect()
-}
-
-/// Redraws one mod list through its current query.
-fn render_mod_list(ui: &AppWindow, lists: &ModLists, host_kind: &str) {
-    let query = if host_kind == "server" {
-        ui.get_server_mods_query()
-    } else {
-        ui.get_managed_mods_query()
-    };
-    let rows = matching_mods(lists.rows(host_kind), query.as_str());
-    if host_kind == "server" {
-        ui.set_server_mods(reconciled(&ui.get_server_mods(), rows));
-    } else {
-        ui.set_managed_mods(reconciled(&ui.get_managed_mods(), rows));
-    }
 }
 
 /// A handle for one additional launch, unique for the life of this process.
@@ -3404,13 +3289,13 @@ fn register_launch_actions(ui: &AppWindow, commands: &Sender<Command>) {
 fn register_client_actions(
     ui: &AppWindow,
     commands: &Sender<Command>,
-    creations: Rc<RefCell<CreationTracker>>,
+    creations: &Rc<RefCell<CreationTracker>>,
 ) {
     register_promotion_actions(ui, commands);
     register_pack_link_actions(ui, commands);
     let sender = commands.clone();
     let weak = ui.as_weak();
-    let submit_creations = Rc::clone(&creations);
+    let submit_creations = Rc::clone(creations);
     ui.on_submit_create_instance(move |name, minecraft, loader, loader_version, persistent| {
         let key = CreationKey::Client {
             name: name.trim().to_owned(),
@@ -3444,7 +3329,7 @@ fn register_client_actions(
         );
     });
 
-    register_instance_selection(ui, commands, creations);
+    register_instance_selection(ui, commands);
 
     register_launch_actions(ui, commands);
 
@@ -3503,30 +3388,17 @@ fn register_client_actions(
     });
 
     let sender = commands.clone();
-    let handle = ui.as_weak();
     ui.on_load_instance_workspace(move |id| {
-        let Some(ui) = handle.upgrade() else { return };
-        // Opening an instance is where the preferred catalog applies: a
-        // preference decides what the browser starts on, and never moves the
-        // catalog out from under a search the user is already reading. An
-        // unresolvable recorded name leaves the browser where it is rather
-        // than searching one catalog while the setting names another; the
-        // settings screen is where that name is reported.
-        let preferred = ui.get_default_mod_catalog();
-        if let Some(catalog) = presentation::catalog_to_open_on(&preferred, &ui.get_mod_provider())
-        {
-            show_mod_catalog(&ui, catalog);
-        }
         if let Some(id) = backend::parse_instance_id(&id) {
             send(&sender, Command::LoadInstanceWorkspace(id));
         }
     });
 }
 
-fn register_mod_actions(ui: &AppWindow, commands: &Sender<Command>, browser: &Rc<ModBrowser>) {
+fn register_mod_actions(ui: &AppWindow, commands: &Sender<Command>, workspace: &Workspace) {
     register_mod_mutations(ui, commands);
-    register_mod_browser(ui, commands, browser);
-    register_browser_install(ui, commands, browser);
+    register_mod_browser(ui, commands, workspace);
+    register_browser_install(ui, commands, workspace);
     register_favorite_versions(ui, commands);
 
     let weak = ui.as_weak();
@@ -3550,16 +3422,23 @@ fn register_mod_actions(ui: &AppWindow, commands: &Sender<Command>, browser: &Rc
 
     let sender = commands.clone();
     let handle = ui.as_weak();
-    ui.on_open_mod_manager(move |path| {
+    let lists = workspace.clone();
+    ui.on_open_mod_manager(move |id, path| {
         let Some(ui) = handle.upgrade() else { return };
-        let Some(instance) = backend::parse_instance_id(&ui.get_selected_instance_id()) else {
+        let Some(instance) = backend::parse_instance_id(&id) else {
             return;
         };
         // The modal opens on the state the list already has, then fills in.
         // Waiting for the catalog before showing anything would make an offline
         // instance feel broken.
+        ui.set_mod_action_host(id);
         ui.set_mod_action_path(path.clone());
-        ui.set_mod_action_name(mod_row_title(&ui, &path));
+        ui.set_mod_action_name(
+            lists
+                .mods
+                .borrow()
+                .title(InstalledHost::Instance(instance), &path),
+        );
         ui.set_mod_action_notice(SharedString::default());
         ui.set_mod_action_selected(SharedString::default());
         ui.set_mod_action_project_url(SharedString::default());
@@ -3609,118 +3488,69 @@ fn register_mod_actions(ui: &AppWindow, commands: &Sender<Command>, browser: &Rc
 ///
 /// Deciding what fits this instance and resolving a dependency graph both
 /// happen in `ephervex-core`; this side never asks a provider anything.
-fn register_mod_browser(ui: &AppWindow, commands: &Sender<Command>, browser: &Rc<ModBrowser>) {
-    // One counter for every search request this browser ever sends, searches,
-    // "load more", and the continuations of a page size larger than one
-    // request alike, so two requests that end up identical in every other way
-    // (the same instance, catalog, text, and offset, asked for twice because
-    // the user switched catalog and back) still mint distinct ids. Owned by
-    // the browser rather than read from the query/provider/offset the request
-    // carries: those are exactly the fields that can repeat.
+fn register_mod_browser(ui: &AppWindow, commands: &Sender<Command>, workspace: &Workspace) {
+    // One counter for every search request any browser ever sends, so two
+    // requests that end up identical in every other way (the same instance,
+    // catalog, text, and offset, asked for twice because the user switched
+    // catalog and back) still mint distinct ids.
     let sender = commands.clone();
     let handle = ui.as_weak();
-    let ids = Rc::clone(browser);
+    let browsers = workspace.clone();
     ui.on_search_mods(move |instance, provider, query| {
-        let Some(ui) = handle.upgrade() else { return };
-        let Some(instance) = backend::parse_instance_id(&instance) else {
+        let (Some(ui), Some(instance)) = (handle.upgrade(), backend::parse_instance_id(&instance))
+        else {
             return;
         };
-        let Some(catalog) = ModProvider::parse(&provider) else {
-            return;
-        };
-        // Minted before anything about the browser's own state changes: a
-        // request id that could not be allocated must leave the browser
-        // exactly as it was, not part-way into a request that was never
-        // actually sent.
-        let Some(request_id) = next_mod_search_request_id(&ids.search_requests) else {
-            return;
-        };
-        // What was submitted, which is not what the fields say: the user may
-        // keep typing, or switch catalog, while this one answers, and only the
-        // answer to what was actually asked belongs on screen.
-        ui.set_mod_search_submitted(query.clone());
-        ui.set_mod_search_provider(provider);
-        ui.set_mod_search_ran(true);
-        ui.set_mod_search_loading(true);
-        ui.set_mod_search_notice(SharedString::default());
-        // A new search replaces the list rather than adding to it, so the rows
-        // on screen always belong to one question.
-        ui.set_mod_results(model(Vec::new()));
-        ui.set_mod_results_total(0);
-        ui.set_mod_results_next_offset(-1);
-        // A fresh search always starts at zero; a page arriving for any other
-        // offset belongs to a "load more" this search has superseded.
-        ui.set_mod_search_requested_offset(0);
-        // What this fill is aiming for. A page size larger than one request
-        // reaches it by asking again, so the target is what says when to stop.
-        ui.set_mod_results_target(ui.get_mod_page_size());
-        // Instance, catalog, text, and offset can all repeat (typing the same
-        // query again, or switching catalog away and back), and this is what
-        // still tells this request apart from an older, unrelated one that
-        // happens to look identical.
-        ui.set_mod_search_expected_request_id(request_id.to_string().into());
-        send(
-            &sender,
-            Command::SearchMods {
-                instance,
-                provider: catalog,
-                query: query.to_string(),
-                offset: 0,
-                limit: request_limit(),
-                request_id,
-            },
+        let host = InstalledHost::Instance(instance);
+        let command = browsers.mods.borrow_mut().search(
+            host,
+            &provider,
+            &query,
+            &browsers.browser.search_requests,
+            ui.get_mod_page_size(),
         );
+        mod_views::publish(&browsers, &browsers.mods.borrow(), host);
+        mod_views::send_if(&sender, command);
     });
 
     let sender = commands.clone();
     let handle = ui.as_weak();
-    let ids = Rc::clone(browser);
+    let browsers = workspace.clone();
     ui.on_load_more_mods(move |instance, provider, query, offset| {
-        let Some(ui) = handle.upgrade() else { return };
-        let Some(instance) = backend::parse_instance_id(&instance) else {
+        let (Some(ui), Some(instance)) = (handle.upgrade(), backend::parse_instance_id(&instance))
+        else {
             return;
         };
-        let Some(catalog) = ModProvider::parse(&provider) else {
-            return;
-        };
-        // Minted before anything about the browser's own state changes, for
-        // the same reason a fresh search does this first: an id that could
-        // not be allocated must leave the browser exactly as it was.
-        let Some(request_id) = next_mod_search_request_id(&ids.search_requests) else {
-            return;
-        };
-        // Continues the search already on screen, at the offset the provider
-        // itself named as the continuation. Nothing is fetched ahead of what
-        // was asked for, and an answer for any other offset is stale.
-        ui.set_mod_search_loading(true);
-        ui.set_mod_search_requested_offset(offset);
-        // One more page on top of what is already shown, rather than a target
-        // the list has long since passed.
-        ui.set_mod_results_target(
-            to_i32(ui.get_mod_results().row_count()) + ui.get_mod_page_size(),
+        let host = InstalledHost::Instance(instance);
+        let command = browsers.mods.borrow_mut().load_more(
+            host,
+            &provider,
+            &query,
+            offset,
+            &browsers.browser.search_requests,
+            ui.get_mod_page_size(),
         );
-        // Its own fresh id, from the same counter a fresh search uses: a
-        // "load more" is just as much an individual request as a search is,
-        // and its offset alone does not distinguish it from another one
-        // fired at the same offset for a superseded question.
-        ui.set_mod_search_expected_request_id(request_id.to_string().into());
-        send(
-            &sender,
-            Command::SearchMods {
-                instance,
-                provider: catalog,
-                query: query.to_string(),
-                offset: offset.try_into().unwrap_or(0),
-                limit: request_limit(),
-                request_id,
-            },
-        );
+        mod_views::publish(&browsers, &browsers.mods.borrow(), host);
+        mod_views::send_if(&sender, command);
     });
 
-    let handle = ui.as_weak();
-    ui.on_switch_mod_catalog(move |provider| {
-        let Some(ui) = handle.upgrade() else { return };
-        show_mod_catalog(&ui, &provider);
+    let browsers = workspace.clone();
+    ui.on_switch_mod_catalog(move |instance, provider| {
+        if let Some(instance) = backend::parse_instance_id(&instance) {
+            let host = InstalledHost::Instance(instance);
+            if browsers.mods.borrow_mut().switch_catalog(host, &provider) {
+                mod_views::publish(&browsers, &browsers.mods.borrow(), host);
+            }
+        }
+    });
+
+    let lists = workspace.clone();
+    ui.on_filter_mods(move |kind, id, query| {
+        if let Some(host) = backend::parse_mod_host(&kind, &id)
+            && lists.mods.borrow_mut().filter(host, &query)
+        {
+            mod_views::publish(&lists, &lists.mods.borrow(), host);
+        }
     });
 
     // Held for the session only. It is a reading preference for one panel, not
@@ -3734,37 +3564,6 @@ fn register_mod_browser(ui: &AppWindow, commands: &Sender<Command>, browser: &Rc
         ui.set_mod_page_size(to_i32(size));
         ui.set_mod_page_size_label(label);
     });
-}
-
-/// Points the browser at one catalog and retires everything the previous one
-/// could still be answered by.
-///
-/// Switching asks a different question, and everything that could let a search
-/// still in flight for the catalog just left behind land on this one has to
-/// move together, in this one step, or a late answer can still slip past the
-/// staleness guard. Shared with opening an instance so that arriving at the
-/// browser on the preferred catalog invalidates exactly as much as clicking the
-/// chip for it does, rather than through a second set of rules.
-fn show_mod_catalog(ui: &AppWindow, provider: &str) {
-    let reset = presentation::CatalogSwitchReset::for_provider(provider);
-    ui.set_mod_provider(provider.into());
-    ui.set_mod_search_provider(reset.provider.into());
-    // Retired, not just momentarily mismatched: switching back to this
-    // catalog before an old answer returns must not reinstate the exact
-    // question it was waiting on. The expected request id is retired the
-    // same way: `submitted` alone cannot survive a later search for the
-    // exact same words, which fills it back in with the exact same value.
-    ui.set_mod_search_submitted(reset.submitted.into());
-    ui.set_mod_search_expected_request_id(reset.request_id.into());
-    ui.set_mod_search_loading(reset.loading);
-    ui.set_mod_search_requested_offset(reset.requested_offset);
-    // A new catalog replaces the list rather than showing the old one's
-    // rows under a different heading.
-    ui.set_mod_results(model(Vec::new()));
-    ui.set_mod_search_ran(false);
-    ui.set_mod_search_notice(SharedString::default());
-    ui.set_mod_results_total(0);
-    ui.set_mod_results_next_offset(-1);
 }
 
 /// Narrows the loader choice to the ones a Minecraft release ever had.
@@ -3892,10 +3691,11 @@ fn apply_minecraft_selection(ui: &AppWindow, form: &str, minecraft: &str) {
 /// Kept apart from `register_mod_browser`: this is not a search, carries no
 /// request id or offset of its own, and does not touch any of the search
 /// staleness bookkeeping.
-fn register_browser_install(ui: &AppWindow, commands: &Sender<Command>, browser: &Rc<ModBrowser>) {
+fn register_browser_install(ui: &AppWindow, commands: &Sender<Command>, workspace: &Workspace) {
     let sender = commands.clone();
     let handle = ui.as_weak();
-    let install_queue = Rc::clone(browser);
+    let install_workspace = workspace.clone();
+    let install_queue = Rc::clone(&workspace.browser);
     ui.on_install_from_browser(move |instance, provider, project| {
         let Some(ui) = handle.upgrade() else { return };
         if backend::parse_instance_id(&instance).is_none()
@@ -3912,16 +3712,20 @@ fn register_browser_install(ui: &AppWindow, commands: &Sender<Command>, browser:
         if let Some(request) = start {
             start_browser_install(&ui, &sender, &request);
         }
-        mark_queued_results(&ui, &install_queue.installs.borrow());
+        mark_queued(&install_workspace);
     });
 
     let handle = ui.as_weak();
     let sender = commands.clone();
-    let install_queue = Rc::clone(browser);
+    let abandon_workspace = workspace.clone();
     ui.on_abandon_browser_install(move || {
         let Some(ui) = handle.upgrade() else { return };
-        let next = install_queue.installs.borrow_mut().finish_active();
-        advance_browser_install(&ui, &sender, &install_queue, next);
+        let next = abandon_workspace
+            .browser
+            .installs
+            .borrow_mut()
+            .finish_active();
+        advance_browser_install(&ui, &sender, &abandon_workspace, next);
     });
 }
 
@@ -3933,6 +3737,7 @@ fn start_browser_install(ui: &AppWindow, commands: &Sender<Command>, request: &B
     ) else {
         return;
     };
+    ui.set_mod_action_host(request.instance.as_str().into());
     ui.set_mod_plan_requested(request.project.as_str().into());
     ui.set_mod_plan_requested_provider(request.provider.as_str().into());
     ui.set_mod_plan_direct(true);
@@ -3954,13 +3759,25 @@ fn start_browser_install(ui: &AppWindow, commands: &Sender<Command>, request: &B
 fn advance_browser_install(
     ui: &AppWindow,
     commands: &Sender<Command>,
-    browser: &Rc<ModBrowser>,
+    workspace: &Workspace,
     next: Option<BrowserInstall>,
 ) {
     if let Some(next) = next {
         start_browser_install(ui, commands, &next);
     }
-    mark_queued_results(ui, &browser.installs.borrow());
+    mark_queued(workspace);
+}
+
+/// Marks, in every shown client's browser, the results whose install is
+/// queued or under way.
+fn mark_queued(workspace: &Workspace) {
+    let marked = workspace
+        .mods
+        .borrow_mut()
+        .mark_queued(&workspace.browser.installs.borrow());
+    for host in marked {
+        mod_views::publish(workspace, &workspace.mods.borrow(), host);
+    }
 }
 
 /// The next opaque id for a mod search request, unique for the life of this
@@ -4025,8 +3842,12 @@ fn register_mod_mutations(ui: &AppWindow, commands: &Sender<Command>) {
     });
 
     let sender = commands.clone();
-    ui.on_plan_mod_removal(move |instance, path| {
-        if let Some(instance) = backend::parse_instance_id(&instance) {
+    let handle = ui.as_weak();
+    ui.on_plan_mod_removal(move |id, path| {
+        if let Some(ui) = handle.upgrade() {
+            ui.set_mod_action_host(id.clone());
+        }
+        if let Some(instance) = backend::parse_instance_id(&id) {
             send(
                 &sender,
                 Command::PlanModRemoval {
@@ -4095,14 +3916,17 @@ fn chosen_linked_servers(ui: &AppWindow) -> Vec<ephervex_model::ServerId> {
 fn register_loader_change(ui: &AppWindow, commands: &Sender<Command>) {
     let sender = commands.clone();
     let handle = ui.as_weak();
-    ui.on_open_loader_change(move || {
+    ui.on_open_loader_change(move |id| {
         let Some(ui) = handle.upgrade() else { return };
-        let Ok(index) = usize::try_from(ui.get_selected_instance_index()) else {
+        let Some(row) = ui
+            .get_host_views()
+            .iter()
+            .find(|view| view.kind == "client" && view.id == id)
+            .map(|view| view.client)
+        else {
             return;
         };
-        let Some(row) = ui.get_instances().row_data(index) else {
-            return;
-        };
+        ui.set_mod_action_host(id);
         // Vanilla has no build to change; the control that opens this is
         // hidden for it, and this is the second gate.
         let Some(loader) = loader_kind_of(&row.loader_kind) else {
@@ -4139,13 +3963,8 @@ fn register_loader_change(ui: &AppWindow, commands: &Sender<Command>) {
     });
 }
 
-fn register_instance_selection(
-    ui: &AppWindow,
-    commands: &Sender<Command>,
-    creations: Rc<RefCell<CreationTracker>>,
-) {
+fn register_instance_selection(ui: &AppWindow, commands: &Sender<Command>) {
     let sender = commands.clone();
-    let weak = ui.as_weak();
     // What this handler last acted on. The markup assigns `selected-instance-id`
     // before calling in, so the property cannot tell a new selection from a
     // repeat of the current one.
@@ -4154,15 +3973,6 @@ fn register_instance_selection(
         let repeat = *selected.borrow() == id.as_str();
         if !repeat {
             id.as_str().clone_into(&mut selected.borrow_mut());
-        }
-        if let Some(ui) = weak.upgrade() {
-            let linked = ui
-                .get_servers()
-                .iter()
-                .filter(|row| row.linked_client_id == id)
-                .collect::<Vec<_>>();
-            ui.set_linked_servers(reconciled(&ui.get_linked_servers(), linked));
-            apply_pending_creations(&ui, &creations.borrow());
         }
         // Clicking the already-selected card changes nothing that a snapshot
         // would answer, and asking for one anyway is what used to rebuild the
@@ -4605,35 +4415,316 @@ fn submit_local_mods(sender: &Sender<Command>, pending: &LocalModDrop) {
     );
 }
 
-/// Selects one server and puts its console on screen, following its output.
+/// The workspace's layout together with the host state every pane reads.
 ///
-/// The console is a tab of the server workspace, which is itself a branch of
-/// the servers page. Start is offered from a client's workspace too, so the
-/// page has to be set alongside the workspace: the body renders whichever
-/// branch matches both, and a pair that matches none renders nothing at all.
-/// Following is turned on because the output being waited for has not been
-/// written yet.
-fn show_server_console(ui: &AppWindow, server: SharedString) {
-    // Which client, if any, Back returns to. Coming from a client's workspace
-    // that is the client the server was started from. Coming from the servers
-    // list there is none, and a value left over from an earlier visit would
-    // send Back to an unrelated instance. Already inside the server workspace,
-    // whatever brought the user there still holds.
-    if ui.get_page() == INSTANCES_PAGE && ui.get_workspace() == "instance" {
-        ui.set_server_workspace_return_client(ui.get_selected_instance_id());
-    } else if ui.get_workspace() != "server" {
-        ui.set_server_workspace_return_client(SharedString::default());
+/// Cloned into each callback that changes what a pane shows, because showing a
+/// host means rendering it with its current restart stage.
+#[derive(Clone)]
+struct Workspace {
+    state: Rc<RefCell<WorkspaceState>>,
+    lifecycle: Rc<RefCell<HostLifecycle>>,
+    logs: Rc<RefCell<LogViews>>,
+    /// Each shown host's mod list and catalog browser. Kept for exactly the
+    /// hosts the workspace shows.
+    mods: Rc<RefCell<ModViews>>,
+    /// The install queue and search ids every browser shares.
+    browser: Rc<ModBrowser>,
+    /// Each shown host's isolation setup, and the one isolation change in flight.
+    isolation: Rc<RefCell<IsolationFlowState>>,
+    /// Each shown host's Diagnostics surface, and the one verification or
+    /// repair in flight.
+    integrity: Rc<RefCell<IntegrityFlowState>>,
+    /// What a surface asks the worker for when a pane opens it.
+    commands: Sender<Command>,
+}
+
+impl Workspace {
+    /// Renders the workspace and gives a pane what its new host and surface need.
+    fn present(&self, ui: &AppWindow, change: Option<PaneChange>) {
+        let panes = self
+            .state
+            .borrow()
+            .layout()
+            .map_or_else(Vec::new, |layout| {
+                layout
+                    .panes()
+                    .iter()
+                    .map(|placed| (placed.pane.id(), placed.pane.host(), placed.pane.surface()))
+                    .collect()
+            });
+        let mut logs = self.logs.borrow_mut();
+        logs.sync(&panes);
+        let entered = self
+            .state
+            .borrow_mut()
+            .render(ui, &self.lifecycle.borrow(), &logs);
+        drop(logs);
+        self.follow_hosts(ui, &entered);
+        let state = self.state.borrow();
+        // A single pane is the workspace of its host's page; a split belongs to
+        // the page it was opened from.
+        if let Some((host, _)) = state.single_content() {
+            ui.set_page(match host {
+                InstalledHost::Instance(_) => INSTANCES_PAGE,
+                InstalledHost::Server(_) => SERVERS_PAGE,
+            });
+        }
+        drop(state);
+        if let Some(change) = change {
+            apply_pane_change(ui, self, change);
+        }
     }
-    ui.set_selected_server_id(server.clone());
-    ui.set_page(SERVERS_PAGE);
-    ui.set_workspace("server".into());
-    ui.set_workspace_tab("Console".into());
-    ui.set_log_query(SharedString::default());
-    ui.set_log_follow(true);
-    // What resolves the row the whole workspace indexes and loads the crash
-    // notice. Without it the header has no name and the command field stays
-    // disabled until the next snapshot happens to arrive.
-    ui.invoke_load_server_workspace(server);
+
+    /// Redraws every host view from the newest rows, as a snapshot requires.
+    fn refresh(&self, ui: &AppWindow) {
+        let entered =
+            self.state
+                .borrow_mut()
+                .render(ui, &self.lifecycle.borrow(), &self.logs.borrow());
+        self.follow_hosts(ui, &entered);
+    }
+
+    /// Lets each host's feature state follow the workspace's hosts, and asks
+    /// for everything the hosts that just entered show.
+    fn follow_hosts(&self, ui: &AppWindow, entered: &[InstalledHost]) {
+        let shown = self.state.borrow().shown();
+        // A client opens its browser on the preferred catalog. A name this
+        // build cannot resolve leaves it on the default rather than searching
+        // one catalog while the setting names another.
+        let preferred = ui.get_default_mod_catalog();
+        let default = ModProvider::Modrinth.as_str();
+        let catalog = presentation::catalog_to_open_on(&preferred, default).unwrap_or(default);
+        self.mods.borrow_mut().follow(&shown, catalog);
+        self.isolation.borrow_mut().follow(&shown);
+        self.integrity.borrow_mut().follow(&shown);
+        for &host in entered {
+            mod_views::publish(self, &self.mods.borrow(), host);
+            load_host(ui, host);
+        }
+    }
+
+    /// Changes what a feature reported about a host, in every pane showing it.
+    fn update(&self, host: InstalledHost, change: impl FnOnce(&mut HostView)) -> bool {
+        self.state.borrow_mut().update(host, change)
+    }
+
+    fn open(&self, ui: &AppWindow, host: InstalledHost, surface: Surface) {
+        let change = self.state.borrow_mut().open(host, surface);
+        self.present(ui, Some(change));
+    }
+
+    fn close(&self, ui: &AppWindow) {
+        self.state.borrow_mut().close();
+        self.present(ui, None);
+    }
+
+    fn change_pane(
+        &self,
+        ui: &AppWindow,
+        pane: PaneId,
+        change: impl FnOnce(&mut WorkspaceLayout) -> bool,
+    ) {
+        let change = self.state.borrow_mut().change_pane(pane, change);
+        if change.is_some() {
+            self.present(ui, change);
+        }
+    }
+
+    /// Puts a started server's console on screen.
+    ///
+    /// A single workspace follows the server from wherever it was started, so
+    /// Back returns to the client that started it. A split is the user's own
+    /// arrangement and is left as it is.
+    fn show_console(&self, ui: &AppWindow, server: InstalledHost) {
+        let content = self.state.borrow().single_content();
+        let layout_open = self.state.borrow().layout().is_some();
+        match content {
+            Some((current, _)) => {
+                let Some(pane) = self.single_pane() else {
+                    return;
+                };
+                self.change_pane(ui, pane, |layout| {
+                    if current == server {
+                        layout.show_surface(pane, Surface::Console).is_ok()
+                    } else {
+                        layout.follow(pane, server, Surface::Console).is_ok()
+                    }
+                });
+            }
+            None if layout_open => {}
+            None => self.open(ui, server, Surface::Console),
+        }
+    }
+
+    fn single_pane(&self) -> Option<PaneId> {
+        let state = self.state.borrow();
+        let panes = state.layout()?.panes();
+        match panes.as_slice() {
+            [only] => Some(only.pane.id()),
+            _ => None,
+        }
+    }
+
+    /// Brings a surface of `host` forward when the workspace is that host alone.
+    fn reveal_surface(&self, ui: &AppWindow, host: InstalledHost, surface: Surface) {
+        let Some((current, _)) = self.state.borrow().single_content() else {
+            return;
+        };
+        if current != host {
+            return;
+        }
+        if let Some(pane) = self.single_pane() {
+            self.change_pane(ui, pane, |layout| {
+                layout.show_surface(pane, surface).is_ok()
+            });
+        }
+    }
+}
+
+/// Loads what a pane's new host or surface shows.
+fn apply_pane_change(ui: &AppWindow, workspace: &Workspace, change: PaneChange) {
+    let PaneChange { before, after } = change;
+    if before == after {
+        return;
+    }
+    let Some((host, surface)) = after else {
+        return;
+    };
+    let id = SharedString::from(host.id());
+    match surface {
+        Surface::Snapshots => ui.invoke_load_snapshots(host.kind().into(), id),
+        Surface::Diagnostics => open_integrity(workspace, &workspace.commands, host),
+        Surface::Mods if matches!(host, InstalledHost::Server(_)) => {
+            ui.invoke_load_server_mods(id);
+        }
+        _ => {}
+    }
+}
+
+/// Asks for everything a host's workspace shows, once, as it enters the workspace.
+fn load_host(ui: &AppWindow, host: InstalledHost) {
+    let id = SharedString::from(host.id());
+    match host {
+        InstalledHost::Instance(_) => ui.invoke_load_instance_workspace(id),
+        InstalledHost::Server(_) => ui.invoke_load_server_workspace(id),
+    }
+}
+
+/// Opening, leaving, and moving around the host workspace.
+fn register_workspace(ui: &AppWindow, workspace: &Workspace) {
+    workspace.state.borrow().attach(ui);
+
+    let weak = ui.as_weak();
+    let open = workspace.clone();
+    ui.on_open_workspace(move |kind, id, surface| {
+        let (Some(ui), Some(host)) = (weak.upgrade(), workspace::parse_host(&kind, &id)) else {
+            return;
+        };
+        open.open(
+            &ui,
+            host,
+            Surface::parse(&surface).unwrap_or(Surface::DEFAULT),
+        );
+    });
+
+    let weak = ui.as_weak();
+    let close = workspace.clone();
+    ui.on_close_workspace(move || {
+        if let Some(ui) = weak.upgrade() {
+            close.close(&ui);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let back = workspace.clone();
+    ui.on_workspace_back(move || {
+        let Some(ui) = weak.upgrade() else { return };
+        let returned = back.single_pane().and_then(|pane| {
+            back.state
+                .borrow_mut()
+                .change_pane(pane, WorkspaceLayout::go_back)
+        });
+        match returned {
+            Some(change) => back.present(&ui, Some(change)),
+            None => back.close(&ui),
+        }
+    });
+
+    let weak = ui.as_weak();
+    let surfaces = workspace.clone();
+    ui.on_show_pane_surface(move |pane, surface| {
+        let (Some(ui), Some(pane), Some(surface)) = (
+            weak.upgrade(),
+            workspace::pane_id(pane),
+            Surface::parse(&surface),
+        ) else {
+            return;
+        };
+        surfaces.change_pane(&ui, pane, |layout| {
+            layout.show_surface(pane, surface).is_ok()
+        });
+    });
+
+    let weak = ui.as_weak();
+    let follow = workspace.clone();
+    ui.on_follow_host(move |pane, kind, id, surface| {
+        let (Some(ui), Some(pane), Some(host)) = (
+            weak.upgrade(),
+            workspace::pane_id(pane),
+            workspace::parse_host(&kind, &id),
+        ) else {
+            return;
+        };
+        let surface = Surface::parse(&surface).unwrap_or(Surface::DEFAULT);
+        follow.change_pane(&ui, pane, |layout| {
+            layout.follow(pane, host, surface).is_ok()
+        });
+    });
+
+    register_pane_layout(ui, workspace);
+}
+
+/// Splitting the workspace, closing its panes, and pointing a pane at a host.
+fn register_pane_layout(ui: &AppWindow, workspace: &Workspace) {
+    let weak = ui.as_weak();
+    let beside = workspace.clone();
+    ui.on_split_pane_beside(move |pane| {
+        let (Some(ui), Some(pane)) = (weak.upgrade(), workspace::pane_id(pane)) else {
+            return;
+        };
+        beside.change_pane(&ui, pane, |layout| layout.split_beside(pane).is_ok());
+    });
+
+    let weak = ui.as_weak();
+    let below = workspace.clone();
+    ui.on_split_pane_below(move |pane| {
+        let (Some(ui), Some(pane)) = (weak.upgrade(), workspace::pane_id(pane)) else {
+            return;
+        };
+        below.change_pane(&ui, pane, |layout| layout.split_below(pane).is_ok());
+    });
+
+    let weak = ui.as_weak();
+    let close = workspace.clone();
+    ui.on_close_pane(move |pane| {
+        let (Some(ui), Some(pane)) = (weak.upgrade(), workspace::pane_id(pane)) else {
+            return;
+        };
+        close.change_pane(&ui, pane, |layout| layout.close(pane).is_ok());
+    });
+
+    let weak = ui.as_weak();
+    let choose = workspace.clone();
+    ui.on_choose_pane_host(move |pane, kind, id| {
+        let (Some(ui), Some(pane), Some(host)) = (
+            weak.upgrade(),
+            workspace::pane_id(pane),
+            workspace::parse_host(&kind, &id),
+        ) else {
+            return;
+        };
+        choose.change_pane(&ui, pane, |layout| layout.show_host(pane, host).is_ok());
+    });
 }
 
 /// Starting a server, which also puts its console on screen.
@@ -4642,27 +4733,24 @@ fn show_server_console(ui: &AppWindow, server: SharedString) {
 /// overview, and every one of them would otherwise have to navigate for itself.
 /// Done once here, so all of them land on the output the run is about to
 /// produce.
-fn register_server_start(
-    ui: &AppWindow,
-    commands: &Sender<Command>,
-    live_viewer: &Rc<RefCell<LiveViewerState>>,
-) {
+fn register_server_start(ui: &AppWindow, commands: &Sender<Command>, workspace: &Workspace) {
     let sender = commands.clone();
     let weak = ui.as_weak();
-    let start_state = Rc::clone(live_viewer);
+    let start_workspace = workspace.clone();
     ui.on_server_start(move |id| {
         let Some(server) = backend::parse_server_id(&id) else {
             return;
         };
         send(&sender, Command::StartServer(server));
-
-        let source = LiveLogSource::Server(server);
-        start_state.borrow_mut().activate(source.clone());
+        // Views already on this server start over with the new run; a console
+        // opened below reads it from the beginning on its own.
+        start_workspace
+            .logs
+            .borrow_mut()
+            .reopen(&LiveLogSource::Server(server));
         if let Some(ui) = weak.upgrade() {
-            show_server_console(&ui, id);
-            render_live_viewer(&ui, &mut start_state.borrow_mut());
+            start_workspace.show_console(&ui, InstalledHost::Server(server));
         }
-        send(&sender, Command::OpenLiveLog(source));
     });
 }
 
@@ -4716,11 +4804,7 @@ fn register_instance_runtime_actions(ui: &AppWindow, commands: &Sender<Command>)
     });
 }
 
-fn register_server_actions(
-    ui: &AppWindow,
-    commands: &Sender<Command>,
-    live_viewer: &Rc<RefCell<LiveViewerState>>,
-) {
+fn register_server_actions(ui: &AppWindow, commands: &Sender<Command>, workspace: &Workspace) {
     register_instance_runtime_actions(ui, commands);
 
     let sender = commands.clone();
@@ -4740,19 +4824,13 @@ fn register_server_actions(
     });
 
     let sender = commands.clone();
-    let weak = ui.as_weak();
     ui.on_load_server_workspace(move |id| {
-        if let Some(ui) = weak.upgrade() {
-            let index = ui.get_servers().iter().position(|row| row.id == id);
-            ui.set_selected_server_id(id.clone());
-            ui.set_selected_server_index(index.map_or(-1, to_i32));
-        }
         if let Some(id) = backend::parse_server_id(&id) {
             send(&sender, Command::LoadServerWorkspace(id));
         }
     });
 
-    register_server_start(ui, commands, live_viewer);
+    register_server_start(ui, commands, workspace);
 
     let sender = commands.clone();
     ui.on_server_stop(move |id| {
@@ -4792,17 +4870,10 @@ fn register_server_actions(
 }
 
 fn register_server_property_actions(ui: &AppWindow, commands: &Sender<Command>) {
-    let weak = ui.as_weak();
-    ui.on_validate_server_properties(move |access, address, port, max_players| {
-        if let Some(ui) = weak.upgrade() {
-            let port = validate_port(&port);
-            let address = validate_ip(&address, access == "Custom");
-            let players = validate_player_count(&max_players);
-            ui.set_property_port_error(port.message.into());
-            ui.set_property_address_error(address.message.into());
-            ui.set_property_max_players_error(players.into());
-        }
-    });
+    let rules = ui.global::<PropertyRules>();
+    rules.on_port_error(|port| validate_port(&port).message.into());
+    rules.on_address_error(|address, custom| validate_ip(&address, custom).message.into());
+    rules.on_players_error(|players| validate_player_count(&players).into());
 
     let sender = commands.clone();
     let weak = ui.as_weak();
@@ -4822,14 +4893,9 @@ fn register_server_property_actions(ui: &AppWindow, commands: &Sender<Command>) 
             let Some(server) = backend::parse_server_id(&id) else {
                 return;
             };
-            let port_result = validate_port(&port);
-            let address_result = validate_ip(&address, access == "Custom");
+            // The form shows each field's problem as it is typed; a save with
+            // one left is refused here all the same.
             let max_players_error = validate_player_count(&max_players);
-            if let Some(ui) = weak.upgrade() {
-                ui.set_property_port_error(port_result.message.clone().into());
-                ui.set_property_address_error(address_result.message.clone().into());
-                ui.set_property_max_players_error(max_players_error.clone().into());
-            }
             let max_players_valid = max_players_error.is_empty();
             let difficulty_valid =
                 ["peaceful", "easy", "normal", "hard"].contains(&difficulty.as_str());
@@ -4876,80 +4942,6 @@ fn validate_player_count(value: &str) -> String {
     } else {
         lookup("gui-player-count-minimum")
     }
-}
-
-fn register_diagnostics(ui: &AppWindow, commands: &Sender<Command>) {
-    let sender = commands.clone();
-    ui.on_load_diagnostics(move |scope, id, kind| {
-        if let (Some(scope), Some(kind)) = (
-            backend::parse_scope(&scope, &id),
-            backend::parse_diagnostic_kind(&kind),
-        ) {
-            send(&sender, Command::LoadDiagnostics { scope, kind });
-        }
-    });
-
-    let sender = commands.clone();
-    ui.on_open_diagnostic(move |scope, id, kind, name| {
-        if let (Some(scope), Some(kind)) = (
-            backend::parse_scope(&scope, &id),
-            backend::parse_diagnostic_kind(&kind),
-        ) {
-            send(
-                &sender,
-                Command::OpenDiagnostic {
-                    scope,
-                    kind,
-                    name: name.into(),
-                },
-            );
-        }
-    });
-
-    let sender = commands.clone();
-    ui.on_refresh_diagnostic(move |scope, id, kind, name| {
-        if let (Some(scope), Some(kind)) = (
-            backend::parse_scope(&scope, &id),
-            backend::parse_diagnostic_kind(&kind),
-        ) {
-            send(
-                &sender,
-                Command::OpenDiagnostic {
-                    scope,
-                    kind,
-                    name: name.into(),
-                },
-            );
-        }
-    });
-
-    let sender = commands.clone();
-    ui.on_search_diagnostic(move |scope, id, kind, name, query| {
-        if let (Some(scope), Some(kind)) = (
-            backend::parse_scope(&scope, &id),
-            backend::parse_diagnostic_kind(&kind),
-        ) {
-            send(
-                &sender,
-                Command::SearchDiagnostic {
-                    scope,
-                    kind,
-                    name: name.into(),
-                    query: query.into(),
-                },
-            );
-        }
-    });
-
-    let sender = commands.clone();
-    ui.on_open_diagnostic_folder(move |scope, id, kind| {
-        if let (Some(scope), Some(kind)) = (
-            backend::parse_scope(&scope, &id),
-            backend::parse_diagnostic_kind(&kind),
-        ) {
-            send(&sender, Command::OpenDiagnosticFolder { scope, kind });
-        }
-    });
 }
 
 fn register_settings(ui: &AppWindow, commands: &Sender<Command>) {
@@ -5825,23 +5817,6 @@ fn minecraft_preference_id(id: &SharedString) -> Option<ephervex_core::Preferenc
 /// A new listing clears the previous selection along with it: leaving a file's
 /// content on screen under a different scope's list is how a reader ends up
 /// reading the wrong crash report.
-fn apply_diagnostic_listing(
-    ui: &AppWindow,
-    rows: Vec<DiagnosticData>,
-    scope: &str,
-    scope_id: &str,
-    kind: &str,
-) {
-    ui.set_diagnostics(model(diagnostic_rows(rows)));
-    ui.set_selected_diagnostic_scope(scope.into());
-    ui.set_selected_diagnostic_id(scope_id.into());
-    ui.set_selected_diagnostic_kind(kind.into());
-    ui.set_selected_diagnostic_name(SharedString::default());
-    ui.set_diagnostic_content(SharedString::default());
-    ui.set_diagnostic_path(SharedString::default());
-    ui.set_diagnostic_title(SharedString::default());
-}
-
 /// What the reusable artifact cache's own answers do to the storage page.
 fn apply_artifact_cache_event(ui: &AppWindow, event: Event) {
     match event {
@@ -5856,74 +5831,76 @@ fn apply_artifact_cache_event(ui: &AppWindow, event: Event) {
     }
 }
 
-fn apply_isolation_data(
-    ui: &AppWindow,
-    data: IsolationData,
-    open: bool,
-    flow: &Rc<RefCell<IsolationFlowState>>,
-) {
-    let current = if data.host_kind == "server" {
-        ui.get_selected_server_id()
-    } else {
-        ui.get_selected_instance_id()
+/// Shows a host's isolation state in every pane showing the host, answering
+/// whether the workspace still shows it.
+fn apply_isolation_data(ui: &AppWindow, workspace: &Workspace, data: IsolationData) -> bool {
+    let Some(host) = backend::parse_mod_host(&data.host_kind, &data.host) else {
+        return false;
     };
-    if !presentation::result_is_current(&data.host, &current) {
-        return;
+    if !workspace.state.borrow().shown().contains(&host) {
+        return false;
     }
     let is_setup = data.phase == "setup";
     let is_inactive = data.phase == "none";
-    if let Some(host) = backend::parse_mod_host(&data.host_kind, &data.host) {
-        let mut state = flow.borrow_mut();
-        if state.host != Some(host) {
-            state.begin(host);
-        }
-        state.unreconciled = !data.recovery.is_empty();
-        state.setup_basis = data.basis.filter(|_| is_setup);
-        if is_setup {
-            state.candidates = data.candidates;
-        } else if is_inactive {
-            // No session exists, so a setup on screen was planned from a host
-            // that has since changed, such as by a snapshot restore.
-            state.forget_setup();
-        }
+    let mut flow = workspace.isolation.borrow_mut();
+    if flow.setup(host).is_none() {
+        flow.begin(host);
     }
-    render_isolation_candidates(ui, &flow.borrow());
-    ui.set_isolation_enabled(string_model(data.enabled));
-    ui.set_isolation_disabled(string_model(data.disabled));
-    ui.set_isolation_unrecorded(string_model(data.unrecorded));
-    ui.set_isolation_unidentifiable(string_model(data.unidentifiable));
-    ui.set_isolation_missing(string_model(data.missing));
-    ui.set_isolation_linked_servers(string_model(data.linked_servers));
-    ui.set_isolation_remaining_candidates(string_model(data.remaining_candidates));
-    ui.set_isolation_pinned(string_model(data.pinned));
-    ui.set_isolation_required_dependencies(string_model(data.required_dependencies));
-    ui.set_isolation_history(string_model(data.history));
-    ui.set_isolation_recovery(data.recovery.clone().into());
-    ui.set_isolation_recovery_detail(data.recovery_detail.into());
-    apply_active_isolation_workflow(ui, data.active, &data.phase, &data.summary, &data.recovery);
-    ui.set_isolation_host_kind(data.host_kind.into());
-    ui.set_isolation_host_id(data.host.into());
-    ui.set_isolation_phase(data.phase.into());
-    ui.set_isolation_summary(data.summary.into());
-    ui.set_isolation_confidence(data.confidence.into());
-    ui.set_isolation_round(to_i32(data.round));
-    ui.set_isolation_granularity(to_i32(data.granularity));
-    ui.set_isolation_active(data.active);
-    ui.set_isolation_reduced_confidence(data.reduced_confidence);
-    ui.set_modal_error(SharedString::default());
+    let Some(setup) = flow.setup_mut(host) else {
+        return false;
+    };
+    setup.unreconciled = !data.recovery.is_empty();
+    setup.setup_basis = data.basis.filter(|_| is_setup);
+    data.phase.clone_into(&mut setup.phase);
     if is_setup {
-        // Reduced confidence is an explicit choice for each new session, not a
-        // preference that carries over from an earlier setup dialog.
-        ui.set_isolation_accept_unrecorded(false);
-        ui.set_isolation_accept_missing(false);
-        ui.set_isolation_query(SharedString::default());
+        setup.candidates.clone_from(&data.candidates);
+        // Reduced confidence is an explicit choice for each new session, not
+        // a preference that carries over from an earlier setup.
+        setup.query.clear();
+    } else if is_inactive {
+        // No session exists, so a setup on screen was planned from a host
+        // that has since changed, such as by a snapshot restore.
+        setup.forget_setup();
     }
-    if is_inactive {
-        ui.set_isolation_query(SharedString::default());
-    }
-    if open {
-        ui.set_workspace_tab("Isolation".into());
-    }
+    let candidates = isolation_candidate_rows(setup);
+    drop(flow);
+    let workflow = isolation_workflow(&data);
+    workspace.update(host, |view| {
+        view.isolation_candidates = model(candidates);
+        view.isolation_enabled = string_model(data.enabled);
+        view.isolation_disabled = string_model(data.disabled);
+        view.isolation_unrecorded = string_model(data.unrecorded);
+        view.isolation_unidentifiable = string_model(data.unidentifiable);
+        view.isolation_missing = string_model(data.missing);
+        view.isolation_linked_servers = string_model(data.linked_servers);
+        view.isolation_remaining_candidates = string_model(data.remaining_candidates);
+        view.isolation_pinned = string_model(data.pinned);
+        view.isolation_required_dependencies = string_model(data.required_dependencies);
+        view.isolation_history = string_model(data.history);
+        view.isolation_recovery = data.recovery.into();
+        view.isolation_recovery_detail = data.recovery_detail.into();
+        view.isolation_phase = data.phase.into();
+        view.isolation_summary = data.summary.into();
+        view.isolation_confidence = data.confidence.into();
+        view.isolation_round = to_i32(data.round);
+        view.isolation_granularity = to_i32(data.granularity);
+        view.isolation_active = data.active;
+        view.isolation_reduced_confidence = data.reduced_confidence;
+        if is_setup {
+            view.isolation_accept_unrecorded = false;
+            view.isolation_accept_missing = false;
+        }
+        if is_setup || is_inactive {
+            view.isolation_query = SharedString::default();
+        }
+        view.workflow_id = workflow.id;
+        view.workflow_surface = workflow.surface;
+        view.workflow_title = workflow.title;
+        view.workflow_summary = workflow.summary;
+        view.workflow_actions = workflow.actions;
+    });
+    ui.set_modal_error(SharedString::default());
+    true
 }
 
 /// Claims the in-flight isolation change and shows it on that host's surfaces
@@ -5984,33 +5961,25 @@ fn refuse_while_host_changes(ui: &slint::Weak<AppWindow>) -> bool {
     true
 }
 
-/// Shows the Diagnostics surface for the host it was just opened on.
-fn show_integrity_host(ui: &AppWindow, state: &IntegrityFlowState, host: InstalledHost) {
-    ui.set_integrity_host_kind(isolation_host_kind(host).into());
-    ui.set_integrity_host_id(host.id().into());
+/// Puts a host's Diagnostics surface into its view as the flow holds it.
+fn show_integrity(workspace: &Workspace, state: &IntegrityFlowState, host: InstalledHost) {
+    let Some(surface) = state.host(host) else {
+        return;
+    };
     let shown = match state.working_on(host) {
         Some(IntegrityWork::Verify) => "verifying",
-        _ if state.checked => "checked",
+        _ if surface.checked => "checked",
         _ => "unchecked",
     };
-    ui.set_integrity_state(shown.into());
-    if state.checked {
-        return;
-    }
-    ui.set_integrity_progress(SharedString::default());
-    ui.set_integrity_summary(SharedString::default());
-    ui.set_integrity_counts(SharedString::default());
-    ui.set_integrity_checked_at(SharedString::default());
-    ui.set_integrity_query(SharedString::default());
-    ui.set_integrity_repair_targets(string_model(Vec::new()));
-    ui.set_integrity_unrepairable(string_model(Vec::new()));
-    ui.set_integrity_shared_summary(SharedString::default());
-    ui.set_integrity_shared_faults(model(Vec::new()));
-    ui.set_integrity_shared_notes(string_model(Vec::new()));
-    ui.set_integrity_repair_result(SharedString::default());
-    ui.set_integrity_repair_failed(false);
-    ui.set_integrity_recovery(string_model(Vec::new()));
-    render_integrity_findings(ui, state);
+    let (total, findings) = integrity_findings(surface);
+    let bundle = bundle_view(&surface.bundle);
+    workspace.update(host, |view| {
+        view.integrity_state = shown.into();
+        view.integrity_finding_total = total;
+        view.integrity_findings = findings;
+        view.integrity_query = surface.query.as_str().into();
+        write_bundle(view, bundle);
+    });
 }
 
 /// The word for one core integrity answer.
@@ -6039,22 +6008,25 @@ fn integrity_row(file: &backend::VerifiedFileData) -> IntegrityFindingRow {
     }
 }
 
-fn render_integrity_findings(ui: &AppWindow, state: &IntegrityFlowState) {
-    let query = state.query.trim().to_lowercase();
-    ui.set_integrity_finding_total(i32::try_from(state.findings.len()).unwrap_or(i32::MAX));
-    ui.set_integrity_findings(model(
-        state
-            .findings
-            .iter()
-            .filter(|file| query.is_empty() || file.path.to_lowercase().contains(&query))
-            .map(integrity_row)
-            .collect(),
-    ));
+/// A surface's findings through its filter, and how many there are in all.
+fn integrity_findings(surface: &IntegrityHost) -> (i32, ModelRc<IntegrityFindingRow>) {
+    let query = surface.query.trim().to_lowercase();
+    (
+        i32::try_from(surface.findings.len()).unwrap_or(i32::MAX),
+        model(
+            surface
+                .findings
+                .iter()
+                .filter(|file| query.is_empty() || file.path.to_lowercase().contains(&query))
+                .map(integrity_row)
+                .collect(),
+        ),
+    )
 }
 
-/// Shows what a verification found, if it is still about the host on screen.
+/// Shows what a verification found, if its host is still shown.
 fn apply_host_verified(
-    ui: &AppWindow,
+    workspace: &Workspace,
     state: &mut IntegrityFlowState,
     host: InstalledHost,
     request: u64,
@@ -6133,32 +6105,36 @@ fn apply_host_verified(
         .filter(|file| !file.sound && !file.repairable)
         .map(|file| file.path.clone())
         .collect();
-    state.checked = true;
-    state.findings = findings;
+    let Some(surface) = state.host_mut(host) else {
+        return;
+    };
+    surface.checked = true;
+    surface.findings = findings;
+    let (total, rows) = integrity_findings(surface);
 
     let (shared_summary, shared_faults_rows, shared_notes) =
         shared_integrity_view(data.shared.as_ref());
-
-    ui.set_integrity_summary(summary.into());
-    ui.set_integrity_healthy(problems == 0 && shared_faults == 0);
-    ui.set_integrity_counts(counts.join(", ").into());
-    ui.set_integrity_checked_at(
-        lookup_args(
-            "gui-integrity-checked-at",
-            [(
-                "value",
-                Arg::from(chrono::Local::now().format("%H:%M").to_string()),
-            )],
-        )
-        .into(),
+    let checked_at = lookup_args(
+        "gui-integrity-checked-at",
+        [(
+            "value",
+            Arg::from(chrono::Local::now().format("%H:%M").to_string()),
+        )],
     );
-    ui.set_integrity_repair_targets(string_model(repair_targets));
-    ui.set_integrity_unrepairable(string_model(unrepairable));
-    ui.set_integrity_shared_summary(shared_summary.into());
-    ui.set_integrity_shared_faults(model(shared_faults_rows));
-    ui.set_integrity_shared_notes(string_model(shared_notes));
-    ui.set_integrity_state("checked".into());
-    render_integrity_findings(ui, state);
+    workspace.update(host, |view| {
+        view.integrity_summary = summary.into();
+        view.integrity_healthy = problems == 0 && shared_faults == 0;
+        view.integrity_counts = counts.join(", ").into();
+        view.integrity_checked_at = checked_at.into();
+        view.integrity_repair_targets = string_model(repair_targets);
+        view.integrity_unrepairable = string_model(unrepairable);
+        view.integrity_shared_summary = shared_summary.into();
+        view.integrity_shared_faults = model(shared_faults_rows);
+        view.integrity_shared_notes = string_model(shared_notes);
+        view.integrity_state = "checked".into();
+        view.integrity_finding_total = total;
+        view.integrity_findings = rows;
+    });
 }
 
 /// The shared launch files section: a summary, the damaged files, and notes
@@ -6204,7 +6180,7 @@ fn shared_integrity_view(
 /// Shows what a repair did. Its findings are out of date until the check
 /// that follows it arrives.
 fn apply_host_repaired(
-    ui: &AppWindow,
+    workspace: &Workspace,
     state: &IntegrityFlowState,
     host: InstalledHost,
     request: u64,
@@ -6226,14 +6202,21 @@ fn apply_host_repaired(
             [("count", Arg::from(data.failed.len()))],
         ));
     }
-    ui.set_integrity_repair_result(result.into());
-    ui.set_integrity_repair_failed(!data.failed.is_empty());
-    ui.set_integrity_recovery(string_model(data.recovery.clone()));
-    ui.set_integrity_state("stale".into());
+    workspace.update(host, |view| {
+        view.integrity_repair_result = result.into();
+        view.integrity_repair_failed = !data.failed.is_empty();
+        view.integrity_recovery = string_model(data.recovery.clone());
+        view.integrity_state = "stale".into();
+    });
 }
 
 /// Releases finished integrity work and whatever it held on screen.
-fn settle_integrity(ui: &AppWindow, state: &mut IntegrityFlowState, request: u64) {
+fn settle_integrity(
+    ui: &AppWindow,
+    workspace: &Workspace,
+    state: &mut IntegrityFlowState,
+    request: u64,
+) {
     let Some(pending) = state.settle(request) else {
         return;
     };
@@ -6242,15 +6225,17 @@ fn settle_integrity(ui: &AppWindow, state: &mut IntegrityFlowState, request: u64
     }
     // A verification that ended without a result, canceled or failed, leaves
     // what was on screen before it.
-    if state.host == Some(pending.host) && ui.get_integrity_state() == "verifying" {
-        ui.set_integrity_state(
-            if state.checked {
-                "checked"
-            } else {
-                "unchecked"
+    if let Some(surface) = state.host(pending.host) {
+        let before = if surface.checked {
+            "checked"
+        } else {
+            "unchecked"
+        };
+        workspace.update(pending.host, |view| {
+            if view.integrity_state == "verifying" {
+                view.integrity_state = before.into();
             }
-            .into(),
-        );
+        });
     }
 }
 
@@ -6258,10 +6243,10 @@ fn settle_integrity(ui: &AppWindow, state: &mut IntegrityFlowState, request: u64
 /// stage it reports.
 fn apply_integrity_activity(
     ui: &AppWindow,
+    workspace: &Workspace,
     state: &mut IntegrityFlowState,
     activity: &ActivityData,
 ) {
-    let shown = state.host;
     let Some(pending) = state.pending.as_mut() else {
         return;
     };
@@ -6276,27 +6261,34 @@ fn apply_integrity_activity(
         return;
     }
     match pending.work {
-        IntegrityWork::Verify if shown == Some(pending.host) => {
-            ui.set_integrity_progress(activity.item.detail.clone().into());
+        IntegrityWork::Verify => {
+            let detail = SharedString::from(activity.item.detail.as_str());
+            workspace.update(pending.host, |view| view.integrity_progress = detail);
         }
         IntegrityWork::Repair if ui.get_host_busy_id() == pending.host.id() => {
             ui.set_host_busy_text(activity.item.detail.clone().into());
         }
-        _ => {}
+        IntegrityWork::Repair => {}
     }
 }
 
-/// Shows the bundle choice as it stands.
-fn render_bundle(ui: &AppWindow, bundle: &BundleChoice) {
+/// The bundle choice as it stands, ready for a host view.
+struct BundleView {
+    count: i32,
+    selection: SharedString,
+    parts: ModelRc<BundlePartRow>,
+}
+
+fn bundle_view(bundle: &BundleChoice) -> BundleView {
     let chosen: Vec<&backend::BundlePartData> = bundle
         .parts
         .iter()
         .filter(|part| bundle.selected.contains(&part.name))
         .collect();
     let bytes: u64 = chosen.iter().map(|part| part.size_bytes).sum();
-    ui.set_bundle_selected_count(i32::try_from(chosen.len()).unwrap_or(i32::MAX));
-    ui.set_bundle_selection(
-        lookup_args(
+    BundleView {
+        count: i32::try_from(chosen.len()).unwrap_or(i32::MAX),
+        selection: lookup_args(
             "gui-bundle-selection",
             [
                 ("count", Arg::from(chosen.len())),
@@ -6307,19 +6299,30 @@ fn render_bundle(ui: &AppWindow, bundle: &BundleChoice) {
             ],
         )
         .into(),
-    );
-    ui.set_bundle_parts(model(
-        bundle
-            .parts
-            .iter()
-            .map(|part| BundlePartRow {
-                name: part.name.clone().into(),
-                kind: lookup(bundle_kind_label(part.kind)).into(),
-                size: ephervex_model::format_binary_bytes(part.size_bytes).into(),
-                selected: bundle.selected.contains(&part.name),
-            })
-            .collect(),
-    ));
+        parts: model(
+            bundle
+                .parts
+                .iter()
+                .map(|part| BundlePartRow {
+                    name: part.name.clone().into(),
+                    kind: lookup(bundle_kind_label(part.kind)).into(),
+                    size: ephervex_model::format_binary_bytes(part.size_bytes).into(),
+                    selected: bundle.selected.contains(&part.name),
+                })
+                .collect(),
+        ),
+    }
+}
+
+fn write_bundle(view: &mut HostView, bundle: BundleView) {
+    view.bundle_selected_count = bundle.count;
+    view.bundle_selection = bundle.selection;
+    view.bundle_parts = bundle.parts;
+}
+
+fn render_bundle(workspace: &Workspace, host: InstalledHost, bundle: &BundleChoice) {
+    let view = bundle_view(bundle);
+    workspace.update(host, |host_view| write_bundle(host_view, view));
 }
 
 /// The word for one core bundle part kind.
@@ -6333,28 +6336,28 @@ fn bundle_kind_label(kind: &str) -> &'static str {
     }
 }
 
-/// Takes the planner's offer for the host on screen.
+/// Takes the planner's offer for a shown host.
 fn apply_bundle_plan(
-    ui: &AppWindow,
+    workspace: &Workspace,
     state: &mut IntegrityFlowState,
     host: InstalledHost,
     parts: Vec<backend::BundlePartData>,
 ) {
-    if state.host != Some(host) {
+    let Some(surface) = state.host_mut(host) else {
         return;
-    }
-    state.bundle.plan(parts);
-    render_bundle(ui, &state.bundle);
+    };
+    surface.bundle.plan(parts);
+    render_bundle(workspace, host, &surface.bundle);
 }
 
 fn apply_bundle_exported(
-    ui: &AppWindow,
+    workspace: &Workspace,
     state: &IntegrityFlowState,
     host: InstalledHost,
     request: u64,
     report: &backend::BundleExportData,
 ) {
-    if state.host != Some(host) || request != state.bundle.last_request {
+    if !state.accepts_export(host, request) {
         return;
     }
     let path = report.path.display().to_string();
@@ -6376,91 +6379,86 @@ fn apply_bundle_exported(
             [("value", Arg::from(report.unreadable.join(", ")))],
         ));
     }
-    ui.set_bundle_error(SharedString::default());
-    ui.set_bundle_result(result.into());
-    ui.set_bundle_result_path(path.into());
+    workspace.update(host, |view| {
+        view.bundle_error = SharedString::default();
+        view.bundle_result = result.into();
+        view.bundle_result_path = path.into();
+    });
 }
 
 fn apply_bundle_export_failed(
-    ui: &AppWindow,
+    workspace: &Workspace,
     state: &IntegrityFlowState,
     host: InstalledHost,
     request: u64,
     message: &str,
 ) {
-    if state.host != Some(host) || request != state.bundle.last_request {
+    if !state.accepts_export(host, request) {
         return;
     }
-    ui.set_bundle_result(SharedString::default());
-    ui.set_bundle_result_path(SharedString::default());
-    ui.set_bundle_error(message.into());
+    workspace.update(host, |view| {
+        view.bundle_result = SharedString::default();
+        view.bundle_result_path = SharedString::default();
+        view.bundle_error = message.into();
+    });
 }
 
-fn settle_bundle(ui: &AppWindow, state: &mut IntegrityFlowState, request: u64) {
-    if state.bundle.pending == Some(request) {
-        state.bundle.pending = None;
-        ui.set_bundle_exporting(false);
+/// Releases a finished export, whichever shown host it was for.
+fn settle_bundle(workspace: &Workspace, state: &mut IntegrityFlowState, request: u64) {
+    for (&host, surface) in &mut state.hosts {
+        if surface.bundle.pending == Some(request) {
+            surface.bundle.pending = None;
+            workspace.update(host, |view| view.bundle_exporting = false);
+        }
     }
 }
 
-fn register_integrity_actions(
-    ui: &AppWindow,
-    commands: &Sender<Command>,
-    flow: &Rc<RefCell<IntegrityFlowState>>,
-) {
-    let sender = commands.clone();
-    let state = Rc::clone(flow);
-    let weak = ui.as_weak();
-    ui.on_open_integrity(move |kind, id| {
-        let (Some(host), Some(ui)) = (backend::parse_mod_host(&kind, &id), weak.upgrade()) else {
-            return;
-        };
-        let mut state = state.borrow_mut();
-        if state.open(host) {
-            ui.set_bundle_result(SharedString::default());
-            ui.set_bundle_result_path(SharedString::default());
-            ui.set_bundle_error(SharedString::default());
-            ui.set_bundle_exporting(false);
-        }
-        show_integrity_host(&ui, &state, host);
-        render_bundle(&ui, &state.bundle);
-        // The logs a bundle can carry change whenever the game runs, so the
-        // offer is asked for each time the surface opens.
-        send(&sender, Command::PlanDiagnosticBundle(host));
-    });
+/// Opens a host's Diagnostics surface: keeps what it already holds, and asks
+/// for the bundle offer again, since the logs it can carry change whenever the
+/// game runs.
+fn open_integrity(workspace: &Workspace, commands: &Sender<Command>, host: InstalledHost) {
+    let mut state = workspace.integrity.borrow_mut();
+    state.open(host);
+    show_integrity(workspace, &state, host);
+    drop(state);
+    send(commands, Command::PlanDiagnosticBundle(host));
+}
 
+fn register_integrity_actions(ui: &AppWindow, commands: &Sender<Command>, workspace: &Workspace) {
     let sender = commands.clone();
-    let state = Rc::clone(flow);
+    let views = workspace.clone();
     let weak = ui.as_weak();
     ui.on_verify_host(move |kind, id| {
         let (Some(host), Some(ui)) = (backend::parse_mod_host(&kind, &id), weak.upgrade()) else {
             return;
         };
-        let mut state = state.borrow_mut();
-        if state.host != Some(host) {
+        let mut state = views.integrity.borrow_mut();
+        if state.host(host).is_none() {
             return;
         }
         let Some(request) = state.dispatch(host, IntegrityWork::Verify) else {
             ui.invoke_present_toast(lookup("gui-integrity-wait").into(), true);
             return;
         };
-        ui.set_integrity_state("verifying".into());
-        ui.set_integrity_progress(SharedString::default());
-        ui.set_integrity_repair_result(SharedString::default());
-        ui.set_integrity_repair_failed(false);
-        ui.set_integrity_recovery(string_model(Vec::new()));
+        views.update(host, |view| {
+            view.integrity_state = "verifying".into();
+            view.integrity_progress = SharedString::default();
+            view.integrity_repair_result = SharedString::default();
+            view.integrity_repair_failed = false;
+            view.integrity_recovery = string_model(Vec::new());
+        });
         send(&sender, Command::VerifyHost { host, request });
     });
 
     let sender = commands.clone();
-    let state = Rc::clone(flow);
+    let views = workspace.clone();
     let weak = ui.as_weak();
     ui.on_repair_host(move |kind, id| {
         let (Some(host), Some(ui)) = (backend::parse_mod_host(&kind, &id), weak.upgrade()) else {
             return;
         };
-        let mut state = state.borrow_mut();
-        if state.host != Some(host) {
+        let mut state = views.integrity.borrow_mut();
+        if state.host(host).is_none() {
             return;
         }
         if state.pending.is_some() {
@@ -6480,9 +6478,10 @@ fn register_integrity_actions(
     });
 
     let sender = commands.clone();
-    let state = Rc::clone(flow);
+    let views = workspace.clone();
     ui.on_stop_integrity_work(move || {
-        let operation = state
+        let operation = views
+            .integrity
             .borrow()
             .pending
             .as_ref()
@@ -6492,53 +6491,61 @@ fn register_integrity_actions(
         }
     });
 
-    let state = Rc::clone(flow);
-    let weak = ui.as_weak();
-    ui.on_filter_integrity_findings(move |query| {
-        let Some(ui) = weak.upgrade() else {
+    let views = workspace.clone();
+    ui.on_filter_integrity_findings(move |kind, id, query| {
+        let Some(host) = backend::parse_mod_host(&kind, &id) else {
             return;
         };
-        state.borrow_mut().query = query.into();
-        render_integrity_findings(&ui, &state.borrow());
+        let mut state = views.integrity.borrow_mut();
+        let Some(surface) = state.host_mut(host) else {
+            return;
+        };
+        query.as_str().clone_into(&mut surface.query);
+        let (total, rows) = integrity_findings(surface);
+        views.update(host, |view| {
+            view.integrity_query = query;
+            view.integrity_finding_total = total;
+            view.integrity_findings = rows;
+        });
     });
 }
 
 /// The diagnostic bundle choice on the Diagnostics surface.
-fn register_bundle_actions(
-    ui: &AppWindow,
-    commands: &Sender<Command>,
-    flow: &Rc<RefCell<IntegrityFlowState>>,
-) {
-    let state = Rc::clone(flow);
-    let weak = ui.as_weak();
-    ui.on_toggle_bundle_part(move |name, selected| {
-        let Some(ui) = weak.upgrade() else {
+fn register_bundle_actions(ui: &AppWindow, commands: &Sender<Command>, workspace: &Workspace) {
+    let views = workspace.clone();
+    ui.on_toggle_bundle_part(move |kind, id, name, selected| {
+        let Some(host) = backend::parse_mod_host(&kind, &id) else {
             return;
         };
-        let mut state = state.borrow_mut();
-        if state.bundle.pending.is_some() {
+        let mut state = views.integrity.borrow_mut();
+        let Some(surface) = state.host_mut(host) else {
+            return;
+        };
+        if surface.bundle.pending.is_some() {
             return;
         }
         if selected {
-            state.bundle.selected.insert(name.into());
+            surface.bundle.selected.insert(name.into());
         } else {
-            state.bundle.selected.remove(name.as_str());
+            surface.bundle.selected.remove(name.as_str());
         }
-        render_bundle(&ui, &state.bundle);
+        render_bundle(&views, host, &surface.bundle);
     });
 
-    let state = Rc::clone(flow);
-    let weak = ui.as_weak();
-    ui.on_select_all_bundle_parts(move |selected| {
-        let Some(ui) = weak.upgrade() else {
+    let views = workspace.clone();
+    ui.on_select_all_bundle_parts(move |kind, id, selected| {
+        let Some(host) = backend::parse_mod_host(&kind, &id) else {
             return;
         };
-        let mut state = state.borrow_mut();
-        if state.bundle.pending.is_some() {
+        let mut state = views.integrity.borrow_mut();
+        let Some(surface) = state.host_mut(host) else {
+            return;
+        };
+        if surface.bundle.pending.is_some() {
             return;
         }
-        state.bundle.selected = if selected {
-            state
+        surface.bundle.selected = if selected {
+            surface
                 .bundle
                 .parts
                 .iter()
@@ -6547,33 +6554,35 @@ fn register_bundle_actions(
         } else {
             HashSet::new()
         };
-        render_bundle(&ui, &state.bundle);
+        render_bundle(&views, host, &surface.bundle);
     });
 
     let sender = commands.clone();
-    let state = Rc::clone(flow);
-    let weak = ui.as_weak();
+    let views = workspace.clone();
     ui.on_export_bundle(move |kind, id| {
-        let (Some(host), Some(ui)) = (backend::parse_mod_host(&kind, &id), weak.upgrade()) else {
+        let Some(host) = backend::parse_mod_host(&kind, &id) else {
             return;
         };
-        let mut state = state.borrow_mut();
-        if state.host != Some(host) {
+        let mut state = views.integrity.borrow_mut();
+        let Some(surface) = state.host_mut(host) else {
             return;
-        }
+        };
         // An empty selection is refused rather than written as an archive
         // holding nothing but its manifest.
-        let Some(request) = state.bundle.dispatch() else {
+        let Some(request) = surface.bundle.dispatch() else {
             return;
         };
-        ui.set_bundle_exporting(true);
-        ui.set_bundle_error(SharedString::default());
+        let names = surface.bundle.chosen();
+        views.update(host, |view| {
+            view.bundle_exporting = true;
+            view.bundle_error = SharedString::default();
+        });
         send(
             &sender,
             Command::ExportDiagnosticBundle {
                 host,
                 request,
-                names: state.bundle.chosen(),
+                names,
             },
         );
     });
@@ -6600,75 +6609,73 @@ const fn isolation_host_kind(host: InstalledHost) -> &'static str {
 ///
 /// Only a setup is affected: an active session is durable and is never
 /// discarded here, and a start already sent carries the plan it was given.
-fn apply_isolation_basis(
-    ui: &AppWindow,
-    flow: &mut IsolationFlowState,
-    host: InstalledHost,
-    basis: u64,
-) {
-    let stale = flow.host == Some(host)
-        && flow.pending.is_none()
-        && flow.setup_basis.is_some_and(|planned| planned != basis);
-    let shown = ui.get_isolation_phase() == "setup"
-        && ui.get_isolation_host_kind() == isolation_host_kind(host)
-        && ui.get_isolation_host_id() == host.id().as_str();
-    if stale && shown {
-        discard_isolation_setup(ui, flow);
+fn apply_isolation_basis(ui: &AppWindow, workspace: &Workspace, host: InstalledHost, basis: u64) {
+    let flow = workspace.isolation.borrow();
+    let stale = flow.pending.is_none()
+        && flow.setup(host).is_some_and(|setup| {
+            setup.phase == "setup" && setup.setup_basis.is_some_and(|planned| planned != basis)
+        });
+    drop(flow);
+    if stale {
+        discard_isolation_setup(ui, workspace, host);
     }
 }
 
-/// Returns the Isolation surface to its empty state without leaving it.
-fn discard_isolation_setup(ui: &AppWindow, state: &mut IsolationFlowState) {
-    state.discard();
-    render_isolation_candidates(ui, state);
-    ui.set_isolation_phase("none".into());
-    ui.set_isolation_query(SharedString::default());
+/// Returns a host's Isolation surface to its empty state without leaving it.
+fn discard_isolation_setup(ui: &AppWindow, workspace: &Workspace, host: InstalledHost) {
+    workspace.isolation.borrow_mut().discard(host);
+    workspace.update(host, |view| {
+        view.isolation_candidates = model(Vec::new());
+        view.isolation_phase = "none".into();
+        view.isolation_query = SharedString::default();
+    });
     ui.set_modal_error(SharedString::default());
 }
 
-fn render_isolation_candidates(ui: &AppWindow, state: &IsolationFlowState) {
-    let query = state.query.trim().to_lowercase();
-    ui.set_isolation_candidates(model(
-        state
-            .candidates
-            .iter()
-            .filter(|candidate| {
-                query.is_empty()
-                    || candidate.name.to_lowercase().contains(&query)
-                    || candidate.path.to_lowercase().contains(&query)
-            })
-            .map(|candidate| IsolationCandidateRow {
-                selected: state.pinned.contains(&PathBuf::from(&candidate.path)),
-                path: candidate.path.clone().into(),
-                display_path: candidate.display_path.clone().into(),
-                name: candidate.name.clone().into(),
-            })
-            .collect(),
-    ));
+/// A setup's candidates through its filter, each marked when it is pinned.
+fn isolation_candidate_rows(setup: &IsolationSetup) -> Vec<IsolationCandidateRow> {
+    let query = setup.query.trim().to_lowercase();
+    setup
+        .candidates
+        .iter()
+        .filter(|candidate| {
+            query.is_empty()
+                || candidate.name.to_lowercase().contains(&query)
+                || candidate.path.to_lowercase().contains(&query)
+        })
+        .map(|candidate| IsolationCandidateRow {
+            selected: setup.pinned.contains(&PathBuf::from(&candidate.path)),
+            path: candidate.path.clone().into(),
+            display_path: candidate.display_path.clone().into(),
+            name: candidate.name.clone().into(),
+        })
+        .collect()
 }
 
-fn apply_active_isolation_workflow(
-    ui: &AppWindow,
-    active: bool,
-    phase: &str,
-    summary: &str,
-    recovery: &str,
+fn publish_isolation_candidates(
+    workspace: &Workspace,
+    host: InstalledHost,
+    setup: &IsolationSetup,
 ) {
-    ui.set_active_workflow_id(if active {
-        "mod-isolation".into()
-    } else {
-        SharedString::default()
+    let rows = isolation_candidate_rows(setup);
+    let query = SharedString::from(setup.query.as_str());
+    workspace.update(host, |view| {
+        view.isolation_candidates = model(rows);
+        view.isolation_query = query;
     });
-    ui.set_active_workflow_title(if active {
-        lookup("gui-isolation-active").into()
-    } else {
-        SharedString::default()
-    });
-    ui.set_active_workflow_summary(if recovery.is_empty() {
-        summary.into()
-    } else {
-        lookup("gui-isolation-recovery-summary").into()
-    });
+}
+
+/// What an isolation session puts in its host's workflow area.
+struct WorkflowPresentation {
+    id: SharedString,
+    /// The surface that shows the workflow in full.
+    surface: SharedString,
+    title: SharedString,
+    summary: SharedString,
+    actions: ModelRc<WorkflowActionRow>,
+}
+
+fn isolation_workflow(data: &IsolationData) -> WorkflowPresentation {
     let action = |id: &'static str,
                   message: &'static str,
                   tone: &'static str,
@@ -6685,9 +6692,9 @@ fn apply_active_isolation_workflow(
         "secondary",
         false,
     )];
-    match phase {
+    match data.phase.as_str() {
         // Until the round's mods are back, only the detailed view is offered.
-        _ if !recovery.is_empty() => {}
+        _ if !data.recovery.is_empty() => {}
         "round" => {
             actions.push(action(
                 "gone",
@@ -6701,7 +6708,7 @@ fn apply_active_isolation_workflow(
                 "primary",
                 true,
             ));
-            if ui.get_isolation_history().row_count() > 0 {
+            if !data.history.is_empty() {
                 actions.push(action("undo", "gui-isolation-undo", "secondary", true));
             }
         }
@@ -6712,7 +6719,25 @@ fn apply_active_isolation_workflow(
         }
         _ => {}
     }
-    ui.set_active_workflow_actions(model(actions));
+    WorkflowPresentation {
+        id: if data.active {
+            ISOLATION_WORKFLOW.into()
+        } else {
+            SharedString::default()
+        },
+        surface: Surface::Isolation.id().into(),
+        title: if data.active {
+            lookup("gui-isolation-active").into()
+        } else {
+            SharedString::default()
+        },
+        summary: if data.recovery.is_empty() {
+            data.summary.as_str().into()
+        } else {
+            lookup("gui-isolation-recovery-summary").into()
+        },
+        actions: model(actions),
+    }
 }
 
 fn string_model(values: Vec<String>) -> ModelRc<SharedString> {
@@ -6724,17 +6749,19 @@ fn string_model(values: Vec<String>) -> ModelRc<SharedString> {
 /// The Minecraft defaults screen asks its two background questions again from
 /// here, because a refreshed baseline can change both what the draft is and
 /// what a release would do with it.
+/// Applies a snapshot, handing back every host's row for the workspace.
 fn apply_snapshot_event(
     ui: &AppWindow,
     snapshot: Snapshot,
     creations: &Rc<RefCell<CreationTracker>>,
     minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
     commands: &Sender<Command>,
-) {
-    apply_snapshot(ui, snapshot, minecraft);
+) -> (Vec<InstanceRow>, Vec<ServerRow>) {
+    let rows = apply_snapshot(ui, snapshot, minecraft);
     apply_pending_creations(ui, &creations.borrow());
     request_minecraft_preview(ui, minecraft, commands);
     request_minecraft_languages(ui, minecraft, commands, false);
+    rows
 }
 
 /// What the Minecraft defaults screen does with its own background answers.
@@ -7027,14 +7054,15 @@ fn apply_local_mod_plan(
     ui: &AppWindow,
     plan: &backend::LocalModPlanData,
     local_mods: &Rc<RefCell<LocalModDrop>>,
+    workspace: &WorkspaceState,
     commands: &Sender<Command>,
 ) {
     let Some(host) = backend::parse_mod_host(&plan.host_kind, &plan.host) else {
         return;
     };
-    // The list the user is looking at now, not the one they dropped onto: a
-    // plan that arrives after they have navigated away has nowhere to land.
-    if !mods_drop_intent(ui).is_some_and(|intent| intent == DropIntent::Mods(host)) {
+    // A list still on screen, not merely the one they dropped onto: a plan
+    // that arrives after they have navigated away has nowhere to land.
+    if !ui.get_workspace_open() || !workspace.shows(host, Surface::Mods) {
         return;
     }
 
@@ -7141,17 +7169,16 @@ fn apply_event(
     creations: &Rc<RefCell<CreationTracker>>,
     import_flow: &Rc<RefCell<ImportFlowState>>,
     minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
-    browser: &Rc<ModBrowser>,
-    mod_lists: &Rc<RefCell<ModLists>>,
     local_mods: &Rc<RefCell<LocalModDrop>>,
-    isolation_flow: &Rc<RefCell<IsolationFlowState>>,
-    integrity_flow: &Rc<RefCell<IntegrityFlowState>>,
     lifecycle: &Rc<RefCell<HostLifecycle>>,
     disk_usage: &Rc<RefCell<DiskUsageState>>,
+    workspace: &Workspace,
     commands: &Sender<Command>,
 ) {
     match event {
-        Event::LocalModPlan(plan) => apply_local_mod_plan(ui, &plan, local_mods, commands),
+        Event::LocalModPlan(plan) => {
+            apply_local_mod_plan(ui, &plan, local_mods, &workspace.state.borrow(), commands);
+        }
         Event::AbsentMods(absent) => apply_absent_mods(ui, &absent, commands),
         Event::PromotionPlan(plan) => apply_promotion_plan(ui, &plan),
         Event::PackUrlConsent { url, display } => {
@@ -7174,7 +7201,10 @@ fn apply_event(
             );
         }
         Event::Snapshot(snapshot) => {
-            apply_snapshot_event(ui, *snapshot, creations, minecraft, commands);
+            let (clients, servers) =
+                apply_snapshot_event(ui, *snapshot, creations, minecraft, commands);
+            workspace.state.borrow_mut().set_rows(clients, servers);
+            workspace.refresh(ui);
             // A snapshot rebuilds the rows from records that know nothing of
             // restarts, so their stages are stamped again.
             stamp_host_lifecycle(ui, &lifecycle.borrow());
@@ -7188,16 +7218,19 @@ fn apply_event(
             apply_artifact_cache_event(ui, event);
         }
         Event::InstanceRuntime(runtime) => {
-            // A late answer for an instance the user has already left is
-            // discarded rather than typed into the fields of another one.
-            if presentation::result_is_current(&runtime.instance, &ui.get_selected_instance_id()) {
-                ui.set_instance_java_path(runtime.java.into());
-                ui.set_instance_memory_min(runtime.min_memory.into());
-                ui.set_instance_memory_max(runtime.max_memory.into());
-                ui.set_instance_jvm_args(runtime.jvm_args.into());
-                ui.set_instance_runtime_pinned(runtime.pinned);
-                ui.set_instance_runtime_global(runtime.global.into());
-                ui.set_instance_allow_pack_mod_changes(runtime.allow_pack_mod_version_changes);
+            // Kept with the instance it belongs to, so a late answer lands in
+            // its own view and never in the fields of another instance.
+            if let Some(instance) = backend::parse_instance_id(&runtime.instance) {
+                workspace.update(InstalledHost::Instance(instance), |view| {
+                    view.runtime_java = runtime.java.into();
+                    view.runtime_memory_min = runtime.min_memory.into();
+                    view.runtime_memory_max = runtime.max_memory.into();
+                    view.runtime_jvm_args = runtime.jvm_args.into();
+                    view.runtime_pinned = runtime.pinned;
+                    view.runtime_global = runtime.global.into();
+                    view.allow_pack_mod_changes = runtime.allow_pack_mod_version_changes;
+                    view.runtime_revision = view.runtime_revision.wrapping_add(1);
+                });
             }
         }
         Event::CreationProgress {
@@ -7221,45 +7254,28 @@ fn apply_event(
             versions,
         } => apply_loader_versions(ui, &form, loader, &minecraft, &versions),
         Event::ManagedMods(data) => {
-            // A late answer for a workspace the user has already navigated
-            // away from is discarded rather than rendered under the wrong
-            // name. The workspace it belongs to already showed its durable
-            // state, and reopening it asks again. The kind is checked as well
-            // as the id, so a server's list can never land in the panel of the
-            // instance it is linked to.
-            if data.host_kind == "server" {
-                if presentation::result_is_current(&data.host, &ui.get_selected_server_id()) {
-                    let mut lists = mod_lists.borrow_mut();
-                    if lists.replace("server", &data.host, managed_mod_rows(data.mods)) {
-                        ui.set_server_mods_query(SharedString::default());
-                    }
-                    render_mod_list(ui, &lists, "server");
-                    ui.set_server_mods_notice(data.notice.into());
-                }
-            } else if presentation::result_is_current(&data.host, &ui.get_selected_instance_id()) {
-                let mut lists = mod_lists.borrow_mut();
-                if lists.replace("client", &data.host, managed_mod_rows(data.mods)) {
-                    ui.set_managed_mods_query(SharedString::default());
-                }
-                render_mod_list(ui, &lists, "client");
-                drop(lists);
-                ui.set_managed_mods_notice(data.notice.into());
-                // What the instance has just changed, and the browser beside
-                // this list says whether each result is already one of them.
-                mark_installed_results(ui);
+            // Kept with the host it belongs to, checked by kind as well as id,
+            // so a server's list never lands in the panel of the instance it
+            // is linked to. A host no pane shows keeps nothing; opening it
+            // again asks again.
+            if let Some(host) = backend::parse_mod_host(&data.host_kind, &data.host)
+                && workspace.mods.borrow_mut().apply_list(
+                    host,
+                    managed_mod_rows(data.mods),
+                    data.notice,
+                )
+            {
+                mod_views::publish(workspace, &workspace.mods.borrow(), host);
             }
         }
         Event::CrashNotice(notice) => {
-            let current = if notice.host_kind == "server" {
-                ui.get_selected_server_id()
-            } else {
-                ui.get_selected_instance_id()
-            };
-            if presentation::result_is_current(&notice.host, &current) {
-                ui.set_crash_report(notice.report.into());
-                ui.set_crash_failure(notice.failure.into());
-                ui.set_crash_client_code_on_server(notice.client_code_on_server);
-                ui.set_crash_suggested(i32::try_from(notice.suggested).unwrap_or(i32::MAX));
+            if let Some(host) = backend::parse_mod_host(&notice.host_kind, &notice.host) {
+                workspace.update(host, |view| {
+                    view.crash_report = notice.report.into();
+                    view.crash_failure = notice.failure.into();
+                    view.crash_client_code_on_server = notice.client_code_on_server;
+                    view.crash_suggested = i32::try_from(notice.suggested).unwrap_or(i32::MAX);
+                });
             }
         }
         Event::Running(running) => {
@@ -7285,8 +7301,8 @@ fn apply_event(
         Event::ModAcquisitionRequired(data) => apply_mod_acquisition(ui, &data),
         Event::ModRelations(data) => apply_mod_relations(ui, &data),
         Event::ModRemovalPlan(data) => apply_mod_removal_plan(ui, data),
-        Event::ModResults(results) => apply_mod_results(ui, results, browser, commands),
-        Event::ModPlan(plan) => apply_mod_install_plan(ui, plan, browser, commands),
+        Event::ModResults(results) => apply_mod_results(workspace, results, commands),
+        Event::ModPlan(plan) => apply_mod_install_plan(ui, plan, workspace, commands),
         Event::ModInstallFinished {
             instance,
             provider,
@@ -7297,8 +7313,8 @@ fn apply_event(
                 provider,
                 project,
             };
-            let next = browser.installs.borrow_mut().finish(&finished);
-            advance_browser_install(ui, commands, browser, next);
+            let next = workspace.browser.installs.borrow_mut().finish(&finished);
+            advance_browser_install(ui, commands, workspace, next);
         }
         // The question will never be answered, so whatever asked it stops
         // waiting. The reason itself already arrived as an error.
@@ -7312,34 +7328,40 @@ fn apply_event(
                 provider,
                 project: requested,
             };
-            let next = browser.installs.borrow_mut().finish(&abandoned);
-            advance_browser_install(ui, commands, browser, next);
+            let next = workspace.browser.installs.borrow_mut().finish(&abandoned);
+            advance_browser_install(ui, commands, workspace, next);
         }
         Event::LinkedApply(section) => apply_linked_confirmation(ui, section),
         Event::LinkedResult(result) => apply_linked_result(ui, result),
-        Event::ServerWorkspace(workspace) => apply_server_workspace(ui, workspace),
+        Event::ServerWorkspace(data) => apply_server_workspace(workspace, data),
         Event::LiveLog(_) => {}
         Event::Diagnostics {
             rows,
             scope,
             scope_id,
             kind,
-        } => apply_diagnostic_listing(ui, rows, &scope, &scope_id, &kind),
-        Event::DiagnosticContent(content) => apply_diagnostic_content(ui, content),
-        Event::DiagnosticUnavailable(message) => {
-            ui.set_diagnostic_title(lookup("gui-diagnostic-unavailable").into());
-            ui.set_diagnostic_path(SharedString::default());
-            ui.set_diagnostic_content(message.into());
+        } => workspace
+            .logs
+            .borrow_mut()
+            .apply_listing(&rows, &scope, &scope_id, &kind),
+        Event::DiagnosticContent(content) => {
+            apply_diagnostic_content(ui, &mut workspace.logs.borrow_mut(), &content);
+        }
+        Event::DiagnosticUnavailable {
+            scope,
+            name,
+            message,
+            ..
+        } => {
+            workspace
+                .logs
+                .borrow_mut()
+                .apply_report_unavailable(scope, &name, &message);
             ui.set_status_message(lookup("gui-diagnostic-disappeared").into());
         }
         Event::HostSnapshots(data) => {
-            let current = if data.host_kind == "server" {
-                ui.get_selected_server_id()
-            } else {
-                ui.get_selected_instance_id()
-            };
-            if presentation::result_is_current(&data.host, &current) {
-                ui.set_snapshots(model(
+            if let Some(host) = backend::parse_mod_host(&data.host_kind, &data.host) {
+                let rows = model(
                     data.rows
                         .into_iter()
                         .map(|snapshot| SnapshotRow {
@@ -7353,9 +7375,12 @@ fn apply_event(
                             uses_full_space: snapshot.uses_full_space,
                         })
                         .collect(),
-                ));
-                ui.set_snapshot_total(data.total.into());
-                ui.set_snapshots_have_plain_copies(data.has_plain_copies);
+                );
+                workspace.update(host, |view| {
+                    view.snapshots = rows;
+                    view.snapshot_total = data.total.into();
+                    view.snapshots_have_plain_copies = data.has_plain_copies;
+                });
             }
         }
         Event::Isolation {
@@ -7363,23 +7388,32 @@ fn apply_event(
             open,
             data,
         } => {
-            if isolation_flow.borrow().accepts(generation) {
-                apply_isolation_data(ui, data, open, isolation_flow);
+            if let Some(host) = backend::parse_mod_host(&data.host_kind, &data.host)
+                && workspace.isolation.borrow().accepts(host, generation)
+                && apply_isolation_data(ui, workspace, data)
+                && open
+            {
+                workspace.reveal_surface(ui, host, Surface::Isolation);
             }
         }
         Event::JavaRuntimes(rows) => ui.set_java_runtimes(model(java_rows(rows))),
         Event::Activity(activity) => {
-            apply_isolation_stage(ui, &isolation_flow.borrow(), &activity);
-            apply_integrity_activity(ui, &mut integrity_flow.borrow_mut(), &activity);
+            apply_isolation_stage(ui, &workspace.isolation.borrow(), &activity);
+            apply_integrity_activity(
+                ui,
+                workspace,
+                &mut workspace.integrity.borrow_mut(),
+                &activity,
+            );
             apply_disk_usage_activity(ui, &mut disk_usage.borrow_mut(), &activity);
             upsert_activity(&mut activities.borrow_mut(), activity);
             apply_activities(ui, &activities.borrow());
         }
         Event::IsolationBasis { host, basis } => {
-            apply_isolation_basis(ui, &mut isolation_flow.borrow_mut(), host, basis);
+            apply_isolation_basis(ui, workspace, host, basis);
         }
         Event::IsolationSettled { request } => {
-            if isolation_flow.borrow_mut().settle(request) {
+            if workspace.isolation.borrow_mut().settle(request) {
                 clear_host_busy(ui);
             }
         }
@@ -7414,30 +7448,64 @@ fn apply_event(
             host,
             request,
             data,
-        } => apply_host_verified(ui, &mut integrity_flow.borrow_mut(), host, request, &data),
+        } => apply_host_verified(
+            workspace,
+            &mut workspace.integrity.borrow_mut(),
+            host,
+            request,
+            &data,
+        ),
         Event::HostRepaired {
             host,
             request,
             data,
-        } => apply_host_repaired(ui, &integrity_flow.borrow(), host, request, &data),
+        } => apply_host_repaired(
+            workspace,
+            &workspace.integrity.borrow(),
+            host,
+            request,
+            &data,
+        ),
         Event::IntegritySettled { request } => {
-            settle_integrity(ui, &mut integrity_flow.borrow_mut(), request);
+            settle_integrity(
+                ui,
+                workspace,
+                &mut workspace.integrity.borrow_mut(),
+                request,
+            );
         }
         Event::BundlePlanned { host, parts } => {
-            apply_bundle_plan(ui, &mut integrity_flow.borrow_mut(), host, parts);
+            apply_bundle_plan(
+                workspace,
+                &mut workspace.integrity.borrow_mut(),
+                host,
+                parts,
+            );
         }
         Event::BundleExported {
             host,
             request,
             report,
-        } => apply_bundle_exported(ui, &integrity_flow.borrow(), host, request, &report),
+        } => apply_bundle_exported(
+            workspace,
+            &workspace.integrity.borrow(),
+            host,
+            request,
+            &report,
+        ),
         Event::BundleExportFailed {
             host,
             request,
             message,
-        } => apply_bundle_export_failed(ui, &integrity_flow.borrow(), host, request, &message),
+        } => apply_bundle_export_failed(
+            workspace,
+            &workspace.integrity.borrow(),
+            host,
+            request,
+            &message,
+        ),
         Event::BundleSettled { request } => {
-            settle_bundle(ui, &mut integrity_flow.borrow_mut(), request);
+            settle_bundle(workspace, &mut workspace.integrity.borrow_mut(), request);
         }
         Event::Toast { message, error } => {
             ui.invoke_present_toast(message.into(), error);
@@ -7881,17 +7949,18 @@ fn apply_pending_creations(ui: &AppWindow, tracker: &CreationTracker) {
         .collect();
     // Unfiltered by selection: the overview tab shows one of these next to
     // every instance card whose id matches, not only the one currently open.
-    let selected_instance = ui.get_selected_instance_id();
-    let for_selected: Vec<PendingEntityRow> = linked
-        .iter()
-        .filter(|row| row.linked_client_id == selected_instance)
-        .cloned()
-        .collect();
-    ui.set_linked_pending_servers(model(linked));
-    // The instance workspace renders this one directly. Narrowing it here
-    // rather than hiding rows in the markup is what keeps the rows it does
-    // not want from taking up room where they are not shown.
-    ui.set_selected_instance_pending_servers(model(for_selected));
+    let linked = model(linked);
+    ui.set_linked_pending_servers(linked.clone());
+    // Each client's workspace renders its own, narrowed here rather than by
+    // hiding rows in the markup, which would leave the room they take.
+    for view in ui.get_host_views().iter() {
+        if view.kind == "client" {
+            workspace::reuse(
+                &view.pending_servers,
+                workspace::pending_for(&linked, &view.id),
+            );
+        }
+    }
     attach_creating_servers(ui);
 }
 
@@ -8090,7 +8159,7 @@ fn apply_snapshot(
     ui: &AppWindow,
     snapshot: Snapshot,
     minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
-) {
+) -> (Vec<InstanceRow>, Vec<ServerRow>) {
     let Snapshot {
         instances,
         servers,
@@ -8105,8 +8174,8 @@ fn apply_snapshot(
     apply_favorite_versions(ui, settings.favorite_minecraft_versions.clone());
     ui.set_make_default_account_operator(settings.make_default_account_operator);
     ui.set_operator_permission_level(i32::from(settings.operator_permission_level));
-    apply_instance_snapshot(ui, instances);
-    apply_server_snapshot(ui, servers);
+    let clients = apply_instance_snapshot(ui, instances);
+    let servers = apply_server_snapshot(ui, servers);
     ui.set_accounts(model(account_rows(accounts)));
     // A refresh happens for reasons unrelated to this screen, so the model
     // folds the confirmed state under whatever is unsaved rather than over it.
@@ -8156,12 +8225,14 @@ fn apply_snapshot(
     ui.set_eula_status(eula.status.into());
     ui.set_loading(false);
     ui.set_status_message(lookup("gui-ready").into());
+    (clients, servers)
 }
 
+/// Fills the instance list, and returns every instance's row, filtered or not.
 fn apply_instance_snapshot(
     ui: &AppWindow,
     instances: Vec<crate::presentation::InstancePresentation>,
-) {
+) -> Vec<InstanceRow> {
     let previous_instance = ui.get_selected_instance_id();
     let mut instance_rows = instances
         .into_iter()
@@ -8209,6 +8280,7 @@ fn apply_instance_snapshot(
             can_restart: false,
         })
         .collect::<Vec<_>>();
+    let all_rows = instance_rows.clone();
     let storage_filter = ui.get_instance_filter();
     let query = ui.get_instance_query().to_ascii_lowercase();
     instance_rows.retain(|row| {
@@ -8239,9 +8311,14 @@ fn apply_instance_snapshot(
             ui.set_reveal_selected_instance(ui.get_reveal_selected_instance().saturating_add(1));
         }
     }
+    all_rows
 }
 
-fn apply_server_snapshot(ui: &AppWindow, servers: Vec<crate::presentation::ServerPresentation>) {
+/// Fills the server lists, and returns every server's row.
+fn apply_server_snapshot(
+    ui: &AppWindow,
+    servers: Vec<crate::presentation::ServerPresentation>,
+) -> Vec<ServerRow> {
     let previous_global_server = ui.get_selected_global_server_id();
     let server_rows = servers.into_iter().map(server_row).collect::<Vec<_>>();
     let mut global_rows = server_rows
@@ -8270,20 +8347,8 @@ fn apply_server_snapshot(ui: &AppWindow, servers: Vec<crate::presentation::Serve
         ui.set_selected_global_server_id(SharedString::default());
         ui.set_selected_global_server_index(-1);
     }
-    let selected_instance = ui.get_selected_instance_id();
-    let linked_rows = server_rows
-        .iter()
-        .filter(|row| row.linked_client_id == selected_instance)
-        .cloned()
-        .collect::<Vec<_>>();
-    let workspace_server = ui.get_selected_server_id();
-    let workspace_index = server_rows
-        .iter()
-        .position(|row| row.id == workspace_server);
-    ui.set_selected_server_index(workspace_index.map_or(-1, to_i32));
-    ui.set_servers(reconciled(&ui.get_servers(), server_rows));
     ui.set_global_servers(reconciled(&ui.get_global_servers(), global_rows));
-    ui.set_linked_servers(reconciled(&ui.get_linked_servers(), linked_rows));
+    server_rows
 }
 
 fn server_is_globally_visible(row: &ServerRow, show_linked_servers: bool) -> bool {
@@ -8328,35 +8393,37 @@ fn server_row(item: crate::presentation::ServerPresentation) -> ServerRow {
     }
 }
 
-fn apply_server_workspace(ui: &AppWindow, workspace: ServerWorkspaceData) {
-    ui.set_property_motd(workspace.motd.into());
-    ui.set_property_max_players(workspace.max_players.into());
-    ui.set_property_difficulty(workspace.difficulty.into());
-    ui.set_property_gamemode(workspace.gamemode.into());
-    ui.set_property_allow_flight(workspace.allow_flight);
-    ui.set_property_pvp(workspace.pvp);
-    ui.set_property_allowlist(workspace.allowlist);
-    ui.set_property_online_mode(workspace.network.online_mode);
-    ui.set_property_access(
-        match workspace.network.access {
+/// A server's stored properties, which its Properties form starts from.
+fn apply_server_workspace(workspace: &Workspace, data: ServerWorkspaceData) {
+    let Some(server) = backend::parse_server_id(&data.server) else {
+        return;
+    };
+    workspace.update(InstalledHost::Server(server), |view| {
+        view.property_motd = data.motd.into();
+        view.property_max_players = data.max_players.into();
+        view.property_difficulty = data.difficulty.into();
+        view.property_gamemode = data.gamemode.into();
+        view.property_allow_flight = data.allow_flight;
+        view.property_pvp = data.pvp;
+        view.property_allowlist = data.allowlist;
+        view.property_online_mode = data.network.online_mode;
+        view.property_access = match data.network.access {
             ephervex_core::NetworkAccess::Localhost => "Localhost",
             ephervex_core::NetworkAccess::Lan => "LAN",
             ephervex_core::NetworkAccess::Custom => "Custom",
         }
-        .into(),
-    );
-    ui.set_property_address(workspace.network.bind_address.unwrap_or_default().into());
-    ui.set_property_port(workspace.network.port.to_string().into());
-    ui.set_property_port_error(SharedString::default());
-    ui.set_property_address_error(SharedString::default());
+        .into();
+        view.property_address = data.network.bind_address.unwrap_or_default().into();
+        view.property_port = data.network.port.to_string().into();
+        view.properties_revision = view.properties_revision.wrapping_add(1);
+    });
 }
 
-fn apply_diagnostic_content(ui: &AppWindow, content: DiagnosticContent) {
-    ui.set_diagnostic_title(content.title.into());
-    ui.set_diagnostic_path(content.path.into());
+/// Puts a crash report in every view that has it open, and says how much of it arrived.
+fn apply_diagnostic_content(ui: &AppWindow, logs: &mut LogViews, content: &DiagnosticContent) {
     // Through the same expansion a log record gets. A crash report is tab
     // indented on nearly every stack line, and a tab has no glyph to draw.
-    ui.set_diagnostic_content(expand_tabs(&content.text).into());
+    logs.apply_report(content);
     let status = match (content.truncated, content.lossy, content.matches) {
         (_, _, Some(matches)) => lookup_args(
             "gui-diagnostic-search-matches",
@@ -8454,7 +8521,7 @@ fn apply_mod_acquisition(ui: &AppWindow, data: &backend::ModAcquisitionData) {
     // Addressed to the instance rather than to one open mod: installing a mod
     // from the browser reaches this with no mod open at all, and the question
     // it asks is about the operation the user just started here.
-    if !presentation::result_is_current(&data.instance, &ui.get_selected_instance_id()) {
+    if !presentation::result_is_current(&data.instance, &ui.get_mod_action_host()) {
         return;
     }
     ui.set_mod_action_pending(false);
@@ -8509,97 +8576,26 @@ fn relation_rows(rows: &[presentation::RelationRowPresentation]) -> Vec<Relation
 /// threads and can finish in either order, so without all five a slow older
 /// one could replace or truncate the results already shown.
 fn apply_mod_results(
-    ui: &AppWindow,
+    workspace: &Workspace,
     results: backend::ModResultsData,
-    browser: &Rc<ModBrowser>,
     commands: &Sender<Command>,
 ) {
-    let selected = ui.get_selected_instance_id();
-    let submitted = ui.get_mod_search_submitted();
-    let catalog = ui.get_mod_search_provider();
-    let expected_offset = u32::try_from(ui.get_mod_search_requested_offset()).unwrap_or(0);
-    let expected_request_id = ui.get_mod_search_expected_request_id();
-    if !presentation::search_page_belongs(
-        presentation::BrowserQuestion {
-            instance: &selected,
-            provider: &catalog,
-            reference: &submitted,
-        },
-        presentation::BrowserQuestion {
-            instance: &results.instance,
-            provider: &results.provider,
-            reference: &results.query,
-        },
-        results.offset,
-        expected_offset,
-        &results.request_id.to_string(),
-        &expected_request_id,
-    ) {
-        return;
+    let host = backend::parse_instance_id(&results.instance).map(InstalledHost::Instance);
+    let next = workspace.mods.borrow_mut().apply_results(
+        results,
+        &workspace.browser.installs.borrow(),
+        &workspace.browser.search_requests,
+    );
+    if let Some(host) = host {
+        mod_views::publish(workspace, &workspace.mods.borrow(), host);
     }
-
-    ui.set_mod_search_notice(results.notice.clone().into());
-    if !results.notice.is_empty() {
-        ui.set_mod_search_loading(false);
-        return;
-    }
-
-    let mut rows: Vec<ModSearchRow> = ui.get_mod_results().iter().collect();
-    rows.extend(mod_search_rows(results.rows));
-    let shown = rows.len();
-    ui.set_mod_results_total(to_i32(usize::try_from(results.total).unwrap_or(usize::MAX)));
-    ui.set_mod_results(model(rows));
-    mark_installed_results(ui);
-    mark_queued_results(ui, &browser.installs.borrow());
-    // The provider's own continuation, never how many rows are now on screen:
-    // a page can consume results this launcher declined to show.
-    let next_offset = results.next_offset.map_or(-1, |offset| {
-        to_i32(usize::try_from(offset).unwrap_or(usize::MAX))
-    });
-    ui.set_mod_results_next_offset(next_offset);
-    // A page size larger than one provider request is filled by asking again
-    // rather than by asking for more at once: the ceiling on a single request
-    // is a budget, because deciding compatibility costs one version lookup per
-    // hit. Each continuation is an ordinary request with its own id, so the
-    // staleness rules above hold for it exactly as they do for the first.
-    if shown < result_target(ui)
-        && next_offset >= 0
-        && let Some(instance) = backend::parse_instance_id(&results.instance)
-        && let Some(catalog) = ModProvider::parse(&results.provider)
-        && let Some(request_id) = next_mod_search_request_id(&browser.search_requests)
-    {
-        ui.set_mod_search_requested_offset(next_offset);
-        ui.set_mod_search_expected_request_id(request_id.to_string().into());
-        send(
-            commands,
-            Command::SearchMods {
-                instance,
-                provider: catalog,
-                query: results.query,
-                offset: u32::try_from(next_offset).unwrap_or(0),
-                limit: request_limit(),
-                request_id,
-            },
-        );
-        return;
-    }
-    ui.set_mod_search_loading(false);
+    mod_views::send_if(commands, next);
 }
 
 /// The largest page a single provider request may take, which is the launcher's
 /// budget rather than the user's choice.
 fn request_limit() -> u8 {
     ephervex_core::MAX_SEARCH_LIMIT
-}
-
-/// How many rows the fill currently under way is aiming for.
-///
-/// Clamped rather than trusted: it is derived from a picker, and a fill aiming
-/// at more than the largest offered page size would keep asking for pages.
-fn result_target(ui: &AppWindow) -> usize {
-    usize::try_from(ui.get_mod_results_target())
-        .unwrap_or(usize::from(ephervex_core::DEFAULT_SEARCH_LIMIT))
-        .clamp(1, presentation::MAX_RESULT_PAGE_SIZE.saturating_mul(100))
 }
 
 /// Shows what installing a mod would involve, here and on each linked server.
@@ -8637,9 +8633,10 @@ fn plan_disposition(direct: bool, plan: &backend::ModPlanData) -> PlanDispositio
 fn apply_mod_install_plan(
     ui: &AppWindow,
     plan: backend::ModPlanData,
-    browser: &Rc<ModBrowser>,
+    workspace: &Workspace,
     commands: &Sender<Command>,
 ) {
+    let browser = &workspace.browser;
     // Whether the queue is waiting on this exact answer, decided before
     // anything below can discard it: a plan that is dropped still ends the
     // request that asked for it, or everything behind it waits forever.
@@ -8652,11 +8649,11 @@ fn apply_mod_install_plan(
     let retire = |ui: &AppWindow| {
         if queued {
             let next = browser.installs.borrow_mut().finish(&awaited);
-            advance_browser_install(ui, commands, browser, next);
+            advance_browser_install(ui, commands, workspace, next);
         }
     };
 
-    if !presentation::result_is_current(&plan.instance, &ui.get_selected_instance_id()) {
+    if !presentation::result_is_current(&plan.instance, &ui.get_mod_action_host()) {
         retire(ui);
         return;
     }
@@ -8671,7 +8668,7 @@ fn apply_mod_install_plan(
     }
     // Two reviews can be in flight; the older one must not replace the newer,
     // and neither may one for the same project id on the other catalog.
-    let selected = ui.get_selected_instance_id();
+    let selected = ui.get_mod_action_host();
     let requested = ui.get_mod_plan_requested();
     let catalog = ui.get_mod_plan_requested_provider();
     if !presentation::browser_answer_is_current(
@@ -8811,7 +8808,7 @@ fn linked_target_rows(rows: Vec<backend::LinkedTargetData>) -> Vec<LinkedTargetR
 
 /// Whether a background answer is about the mod the user currently has open.
 fn addresses_open_mod(ui: &AppWindow, instance: &str, logical_path: &str) -> bool {
-    presentation::result_is_current(instance, &ui.get_selected_instance_id())
+    presentation::result_is_current(instance, &ui.get_mod_action_host())
         && logical_path == ui.get_mod_action_path().as_str()
 }
 
@@ -8825,17 +8822,6 @@ fn loader_kind_of(value: &str) -> Option<ephervex_model::LoaderKind> {
         "NeoForge" | "neoforge" => Some(ephervex_model::LoaderKind::NeoForge),
         _ => None,
     }
-}
-
-/// The title the mod list is already showing for one row.
-///
-/// Used to name the modal before the catalog answers, so it opens with the mod
-/// the user clicked rather than with a blank heading.
-fn mod_row_title(ui: &AppWindow, path: &SharedString) -> SharedString {
-    ui.get_managed_mods()
-        .iter()
-        .find(|row| row.logical_path == *path)
-        .map_or_else(SharedString::default, |row| row.title.clone())
 }
 
 fn mod_version_rows(rows: Vec<backend::ModVersionData>) -> Vec<ModVersionRow> {
@@ -8882,49 +8868,6 @@ fn managed_mod_rows(rows: Vec<ManagedModData>) -> Vec<ModRow> {
             suspect_confidence: row.suspect_confidence.into(),
         })
         .collect()
-}
-
-/// Marks the results this instance already has.
-///
-/// Decided against the managed-mods list rather than remembered from a press,
-/// so a mod installed from anywhere — this browser, a pack import, a linked
-/// server operation — is shown as installed without a re-search, and one
-/// removed stops being.
-fn mark_installed_results(ui: &AppWindow) {
-    let managed: std::collections::HashSet<SharedString> = ui
-        .get_managed_mods()
-        .iter()
-        .map(|row| row.project_id)
-        .filter(|project| !project.is_empty())
-        .collect();
-    let rows = ui
-        .get_mod_results()
-        .iter()
-        .map(|row| ModSearchRow {
-            installed: managed.contains(&row.project_id),
-            ..row
-        })
-        .collect::<Vec<_>>();
-    ui.set_mod_results(model(rows));
-}
-
-/// Marks the results whose install is queued or under way.
-fn mark_queued_results(ui: &AppWindow, queue: &BrowserInstallQueue) {
-    let instance = ui.get_selected_instance_id();
-    let provider = ui.get_mod_provider();
-    let outstanding: std::collections::HashSet<&str> = queue
-        .outstanding(instance.as_str(), provider.as_str())
-        .into_iter()
-        .collect();
-    let rows = ui
-        .get_mod_results()
-        .iter()
-        .map(|row| ModSearchRow {
-            queued: outstanding.contains(row.project_id.as_str()),
-            ..row
-        })
-        .collect::<Vec<_>>();
-    ui.set_mod_results(model(rows));
 }
 
 /// Loads an image the application service already put in its cache.
@@ -9057,6 +9000,7 @@ fn to_i32(value: usize) -> i32 {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use crate::presentation::ActivityPresentation;
+    use crate::ui::WorkspaceHostChoice;
     use ephervex_core::ArtifactCacheLimit;
     use ephervex_i18n::has;
 
@@ -9106,168 +9050,332 @@ mod tests {
         }
     }
 
-    #[test]
-    fn reopening_a_workspace_applies_its_durable_isolation_state_without_changing_surface() {
+    /// A window with the workspace and isolation actions registered, its
+    /// commands, and one client open on its Isolation surface.
+    fn isolation_window() -> (
+        AppWindow,
+        Workspace,
+        std::sync::mpsc::Receiver<Command>,
+        InstalledHost,
+    ) {
         let ui = test_window();
-        ui.set_selected_instance_id("host".into());
-        let flow = Rc::new(RefCell::new(IsolationFlowState::default()));
+        let (workspace, commands) = test_workspace_sending(&ui);
+        let (sender, isolation_commands) = std::sync::mpsc::channel();
+        register_isolation_actions(&ui, &sender, &workspace);
+        let host = client_host();
+        workspace.open(&ui, host, Surface::Isolation);
+        drop(commands);
+        (ui, workspace, isolation_commands, host)
+    }
 
-        assert!(flow.borrow().accepts(0));
-        apply_isolation_data(&ui, isolation_data("host", true, "round"), false, &flow);
+    /// The first host view, which every pane on that host reads.
+    fn first_view(ui: &AppWindow) -> HostView {
+        ui.get_host_views().row_data(0).expect("a host is shown")
+    }
 
-        assert!(ui.get_isolation_active());
-        assert_eq!(ui.get_isolation_phase(), "round");
-        assert_eq!(ui.get_isolation_round(), 1);
+    fn candidates(names: &[&str]) -> Vec<backend::IsolationCandidateData> {
+        names
+            .iter()
+            .map(|name| backend::IsolationCandidateData {
+                path: format!("mods/{name}.jar"),
+                display_path: format!("{name}.jar"),
+                name: (*name).to_owned(),
+            })
+            .collect()
+    }
+
+    fn kind_and_id(host: InstalledHost) -> (SharedString, SharedString) {
+        (host.kind().into(), host.id().into())
+    }
+
+    #[test]
+    fn reopening_a_workspace_applies_its_durable_isolation_state() {
+        let (ui, workspace, _, host) = isolation_window();
+
+        assert!(workspace.isolation.borrow().accepts(host, 0));
+        assert!(apply_isolation_data(
+            &ui,
+            &workspace,
+            isolation_data(&host.id(), true, "round")
+        ));
+
+        let view = first_view(&ui);
+        assert!(view.isolation_active);
+        assert_eq!(view.isolation_phase, "round");
+        assert_eq!(view.isolation_round, 1);
+        assert_eq!(view.workflow_id, ISOLATION_WORKFLOW);
         assert_eq!(ui.get_modal(), "");
     }
 
     #[test]
-    fn a_new_setup_requires_fresh_acknowledgements_and_an_ended_session_stays_on_the_surface() {
-        let ui = test_window();
-        ui.set_selected_instance_id("host".into());
-        ui.set_isolation_accept_unrecorded(true);
-        ui.set_isolation_accept_missing(true);
-        let flow = Rc::new(RefCell::new(IsolationFlowState::default()));
+    fn a_new_setup_requires_fresh_acknowledgements_and_an_ended_session_shows_no_phase() {
+        let (ui, workspace, _, host) = isolation_window();
+        workspace.update(host, |view| {
+            view.isolation_accept_unrecorded = true;
+            view.isolation_accept_missing = true;
+        });
 
-        apply_isolation_data(&ui, isolation_data("host", false, "setup"), true, &flow);
-        assert!(!ui.get_isolation_accept_unrecorded());
-        assert!(!ui.get_isolation_accept_missing());
-        assert_eq!(ui.get_workspace_tab(), "Isolation");
+        apply_isolation_data(&ui, &workspace, isolation_data(&host.id(), false, "setup"));
+        assert!(!first_view(&ui).isolation_accept_unrecorded);
+        assert!(!first_view(&ui).isolation_accept_missing);
 
-        apply_isolation_data(&ui, isolation_data("host", false, "none"), false, &flow);
-        assert_eq!(ui.get_workspace_tab(), "Isolation");
-        assert_eq!(ui.get_isolation_phase(), "none");
+        apply_isolation_data(&ui, &workspace, isolation_data(&host.id(), false, "none"));
+        assert_eq!(first_view(&ui).isolation_phase, "none");
+        assert!(first_view(&ui).workflow_id.is_empty());
+    }
+
+    #[test]
+    fn isolation_state_for_a_host_no_pane_shows_lands_nowhere() {
+        let (ui, workspace, _, host) = isolation_window();
+        let elsewhere = client_host();
+
+        assert!(!apply_isolation_data(
+            &ui,
+            &workspace,
+            isolation_data(&elsewhere.id(), true, "round")
+        ));
+        assert_eq!(
+            first_view(&ui).isolation_phase,
+            "",
+            "the shown host is untouched"
+        );
+        assert_eq!(first_view(&ui).id, host.id().as_str());
+    }
+
+    /// Two hosts side by side each keep their own isolation: one's session,
+    /// setup, and workflow never appear on the other.
+    #[test]
+    fn two_shown_hosts_keep_their_own_isolation() {
+        let (ui, workspace, _, host) = isolation_window();
+        let first = workspace.single_pane().expect("one pane");
+        workspace.change_pane(&ui, first, |layout| layout.split_beside(first).is_ok());
+        let other = server_host();
+        ui.invoke_follow_host(2, "server".into(), other.id().into(), "Isolation".into());
+
+        apply_isolation_data(&ui, &workspace, isolation_data(&host.id(), true, "round"));
+        let mut setup = isolation_data(&other.id(), false, "setup");
+        setup.host_kind = "server".to_owned();
+        setup.candidates = candidates(&["lithium"]);
+        apply_isolation_data(&ui, &workspace, setup);
+
+        let views = ui.get_host_views();
+        let client_view = views.row_data(0).expect("client");
+        let server_view = views.row_data(1).expect("server");
+        assert_eq!(client_view.isolation_phase, "round");
+        assert_eq!(client_view.workflow_id, ISOLATION_WORKFLOW);
+        assert_eq!(server_view.isolation_phase, "setup");
+        assert!(
+            server_view.workflow_id.is_empty(),
+            "a setup is not yet a session"
+        );
+        assert_eq!(server_view.isolation_candidates.row_count(), 1);
+        assert_eq!(client_view.isolation_candidates.row_count(), 0);
+    }
+
+    /// Another pane on the same client switching surfaces or closing leaves
+    /// the isolation round the first pane shows exactly as it was.
+    #[test]
+    fn another_pane_switching_or_closing_leaves_an_isolation_round_alone() {
+        let (ui, workspace, isolation_commands, host) = isolation_window();
+        apply_isolation_data(&ui, &workspace, isolation_data(&host.id(), true, "round"));
+        ui.invoke_split_pane_beside(1);
+        ui.invoke_show_pane_surface(2, "Logs".into());
+        ui.invoke_show_pane_surface(2, "Mods".into());
+        ui.invoke_close_pane(2);
+
+        assert_eq!(shown(&workspace), [(host, Surface::Isolation)]);
+        let view = first_view(&ui);
+        assert_eq!(view.isolation_phase, "round");
+        assert_eq!(view.workflow_id, ISOLATION_WORKFLOW);
+        assert!(
+            isolation_commands.try_recv().is_err(),
+            "nothing was asked of the session"
+        );
+    }
+
+    /// An active round's banner belongs to the pane showing the round in
+    /// full; the other panes on that host leave it out, and get it back when
+    /// no pane shows the round.
+    #[test]
+    fn the_isolation_banner_stays_with_the_pane_showing_the_round() {
+        let (ui, workspace, _, host) = isolation_window();
+        apply_isolation_data(&ui, &workspace, isolation_data(&host.id(), true, "round"));
+        assert_eq!(first_view(&ui).workflow_pane, 1);
+
+        ui.invoke_split_pane_beside(1);
+        ui.invoke_show_pane_surface(2, "Mods".into());
+        assert_eq!(
+            first_view(&ui).workflow_pane,
+            1,
+            "the Isolation pane keeps it"
+        );
+
+        ui.invoke_show_pane_surface(1, "Logs".into());
+        assert_eq!(first_view(&ui).workflow_pane, 0, "no pane shows the round");
+        ui.invoke_show_pane_surface(2, "Isolation".into());
+        assert_eq!(first_view(&ui).workflow_pane, 2);
     }
 
     #[test]
     fn a_host_change_without_a_session_retires_the_setup_planned_before_it() {
-        let ui = test_window();
-        let host = ephervex_model::InstanceId::new().to_string();
-        ui.set_selected_instance_id(host.as_str().into());
-        let (sender, _commands) = std::sync::mpsc::channel();
-        let flow = Rc::new(RefCell::new(IsolationFlowState::default()));
-        register_isolation_actions(&ui, &sender, &flow);
-        let candidates = |names: &[&str]| {
-            names
-                .iter()
-                .map(|name| backend::IsolationCandidateData {
-                    path: format!("mods/{name}.jar"),
-                    display_path: format!("{name}.jar"),
-                    name: (*name).to_owned(),
-                })
-                .collect::<Vec<_>>()
-        };
-        let mut narrowed = isolation_data(&host, false, "setup");
+        let (ui, workspace, _, host) = isolation_window();
+        let (kind, id) = kind_and_id(host);
+        let mut narrowed = isolation_data(&host.id(), false, "setup");
         narrowed.candidates = candidates(&["e"]);
-        apply_isolation_data(&ui, narrowed, true, &flow);
-        ui.invoke_toggle_isolation_pin("mods/e.jar".into(), true);
+        apply_isolation_data(&ui, &workspace, narrowed);
+        ui.invoke_toggle_isolation_pin(kind, id, "mods/e.jar".into(), true);
 
         // What the worker sends after a restore when no session exists.
-        apply_isolation_data(&ui, isolation_data(&host, false, "none"), false, &flow);
-        assert_eq!(ui.get_workspace_tab(), "Isolation");
-        assert_eq!(ui.get_isolation_phase(), "none");
-        assert!(flow.borrow().candidates.is_empty());
-        assert!(flow.borrow().pinned.is_empty());
+        apply_isolation_data(&ui, &workspace, isolation_data(&host.id(), false, "none"));
+        assert_eq!(first_view(&ui).isolation_phase, "none");
+        {
+            let flow = workspace.isolation.borrow();
+            let setup = flow.setup(host).expect("loaded");
+            assert!(setup.candidates.is_empty());
+            assert!(setup.pinned.is_empty());
+        }
 
-        let mut restored = isolation_data(&host, false, "setup");
+        let mut restored = isolation_data(&host.id(), false, "setup");
         restored.candidates = candidates(&["a", "b", "e"]);
-        apply_isolation_data(&ui, restored, true, &flow);
-        let rows = ui.get_isolation_candidates();
+        apply_isolation_data(&ui, &workspace, restored);
+        let rows = first_view(&ui).isolation_candidates;
         assert_eq!(rows.row_count(), 3);
         assert!(rows.iter().all(|row| !row.selected));
     }
 
     #[test]
-    fn canceling_a_setup_discards_it_and_stays_on_the_isolation_surface() {
-        let ui = test_window();
-        let host = ephervex_model::InstanceId::new().to_string();
-        ui.set_selected_instance_id(host.as_str().into());
-        let (sender, commands) = std::sync::mpsc::channel();
-        let flow = Rc::new(RefCell::new(IsolationFlowState::default()));
-        register_isolation_actions(&ui, &sender, &flow);
-        let mut setup = isolation_data(&host, false, "setup");
-        setup.candidates = vec![backend::IsolationCandidateData {
-            path: "mods/a.jar".to_owned(),
-            display_path: "a.jar".to_owned(),
-            name: "A".to_owned(),
-        }];
-        apply_isolation_data(&ui, setup, true, &flow);
-        ui.invoke_toggle_isolation_pin("mods/a.jar".into(), true);
-        let setup_generation = flow.borrow().generation;
+    fn canceling_a_setup_discards_it() {
+        let (ui, workspace, commands, host) = isolation_window();
+        let (kind, id) = kind_and_id(host);
+        let mut setup = isolation_data(&host.id(), false, "setup");
+        setup.candidates = candidates(&["a"]);
+        apply_isolation_data(&ui, &workspace, setup);
+        ui.invoke_toggle_isolation_pin(kind.clone(), id.clone(), "mods/a.jar".into(), true);
+        let setup_generation = workspace
+            .isolation
+            .borrow()
+            .setup(host)
+            .expect("loaded")
+            .generation;
 
-        ui.invoke_discard_isolation_setup("client".into(), host.as_str().into());
-
-        assert_eq!(ui.get_workspace_tab(), "Isolation");
-        assert_eq!(ui.get_isolation_phase(), "none");
-        assert_eq!(ui.get_isolation_candidates().row_count(), 0);
-        assert!(!flow.borrow().accepts(setup_generation));
-        assert!(flow.borrow().pinned.is_empty());
-        ui.invoke_start_isolation("client".into(), host.as_str().into(), false, false);
+        ui.invoke_discard_isolation_setup(kind.clone(), id.clone());
+        assert_eq!(first_view(&ui).isolation_phase, "none");
+        assert_eq!(first_view(&ui).isolation_candidates.row_count(), 0);
+        assert!(!workspace.isolation.borrow().accepts(host, setup_generation));
+        assert!(
+            workspace
+                .isolation
+                .borrow()
+                .setup(host)
+                .is_some_and(|setup| setup.pinned.is_empty())
+        );
+        ui.invoke_start_isolation(kind, id, false, false);
         assert!(
             commands.try_recv().is_err(),
             "a discarded setup cannot start"
         );
     }
 
-    fn active_round(ui: &AppWindow, flow: &Rc<RefCell<IsolationFlowState>>) -> String {
-        let host = ephervex_model::InstanceId::new().to_string();
-        ui.set_selected_instance_id(host.as_str().into());
-        apply_isolation_data(ui, isolation_data(&host, true, "round"), false, flow);
-        host
-    }
-
     #[test]
     fn a_repeated_answer_cannot_submit_two_answers_for_one_round() {
-        let ui = test_window();
-        let (sender, commands) = std::sync::mpsc::channel();
-        let flow = Rc::new(RefCell::new(IsolationFlowState::default()));
-        register_isolation_actions(&ui, &sender, &flow);
-        let host = active_round(&ui, &flow);
+        let (ui, workspace, commands, host) = isolation_window();
+        let (kind, id) = kind_and_id(host);
+        apply_isolation_data(&ui, &workspace, isolation_data(&host.id(), true, "round"));
 
-        ui.invoke_answer_isolation("client".into(), host.as_str().into(), "present".into());
-        ui.invoke_answer_isolation("client".into(), host.as_str().into(), "present".into());
-        ui.invoke_answer_isolation("client".into(), host.as_str().into(), "gone".into());
+        ui.invoke_answer_isolation(kind.clone(), id.clone(), "present".into());
+        ui.invoke_answer_isolation(kind.clone(), id.clone(), "present".into());
+        ui.invoke_answer_isolation(kind, id, "gone".into());
 
         let sent: Vec<_> = commands.try_iter().collect();
         assert_eq!(sent.len(), 1, "one round answered once: {sent:?}");
         assert!(matches!(sent[0], Command::AnswerIsolation { .. }));
-        assert_eq!(ui.get_host_busy_id(), host.as_str());
+        assert_eq!(ui.get_host_busy_id(), host.id().as_str());
         assert_eq!(ui.get_host_busy_text(), lookup("gui-isolation-busy-answer"));
+    }
+
+    /// The same host in two panes is one session: answering from the second
+    /// pane while the first pane's answer is in flight is refused.
+    #[test]
+    fn two_panes_on_one_host_answer_one_round_once() {
+        let (ui, workspace, commands, host) = isolation_window();
+        let (kind, id) = kind_and_id(host);
+        let first = workspace.single_pane().expect("one pane");
+        workspace.change_pane(&ui, first, |layout| layout.split_beside(first).is_ok());
+        ui.invoke_show_pane_surface(2, "Logs".into());
+        apply_isolation_data(&ui, &workspace, isolation_data(&host.id(), true, "round"));
+        assert_eq!(ui.get_host_views().row_count(), 1, "one host, one view");
+
+        ui.invoke_workflow_action(
+            1,
+            kind.clone(),
+            id.clone(),
+            ISOLATION_WORKFLOW.into(),
+            "present".into(),
+        );
+        ui.invoke_workflow_action(2, kind, id, ISOLATION_WORKFLOW.into(), "gone".into());
+
+        let sent: Vec<_> = commands.try_iter().collect();
+        assert_eq!(sent.len(), 1, "{sent:?}");
+    }
+
+    #[test]
+    fn a_workflow_action_reaches_its_own_host_and_pane() {
+        let (ui, workspace, commands, host) = isolation_window();
+        let (kind, id) = kind_and_id(host);
+        let first = workspace.single_pane().expect("one pane");
+        workspace.change_pane(&ui, first, |layout| layout.split_beside(first).is_ok());
+        ui.invoke_show_pane_surface(1, "Logs".into());
+        apply_isolation_data(&ui, &workspace, isolation_data(&host.id(), true, "round"));
+
+        ui.invoke_workflow_action(
+            1,
+            kind.clone(),
+            id.clone(),
+            ISOLATION_WORKFLOW.into(),
+            "details".into(),
+        );
+        assert_eq!(
+            shown(&workspace),
+            [(host, Surface::Isolation), (host, Surface::Overview)],
+            "only the pane it was pressed in moves"
+        );
+
+        ui.invoke_workflow_action(2, kind, id, "another-workflow".into(), "gone".into());
+        assert!(
+            commands.try_recv().is_err(),
+            "an unknown workflow does nothing"
+        );
     }
 
     #[test]
     fn a_round_that_still_needs_its_mods_accepts_no_feedback_until_recovered() {
-        let ui = test_window();
-        let (sender, commands) = std::sync::mpsc::channel();
-        let flow = Rc::new(RefCell::new(IsolationFlowState::default()));
-        register_isolation_actions(&ui, &sender, &flow);
-        let host = ephervex_model::InstanceId::new().to_string();
-        ui.set_selected_instance_id(host.as_str().into());
-        let mut blocked = isolation_data(&host, true, "round");
+        let (ui, workspace, commands, host) = isolation_window();
+        let (kind, id) = kind_and_id(host);
+        let mut blocked = isolation_data(&host.id(), true, "round");
         blocked.recovery = "running".to_owned();
-        apply_isolation_data(&ui, blocked, false, &flow);
+        apply_isolation_data(&ui, &workspace, blocked);
 
-        assert_eq!(ui.get_isolation_recovery(), "running");
-        let actions: Vec<_> = ui
-            .get_active_workflow_actions()
+        assert_eq!(first_view(&ui).isolation_recovery, "running");
+        let actions: Vec<_> = first_view(&ui)
+            .workflow_actions
             .iter()
             .map(|action| action.id.to_string())
             .collect();
         assert_eq!(actions, ["details"]);
         assert_eq!(
-            ui.get_active_workflow_summary(),
+            first_view(&ui).workflow_summary,
             lookup("gui-isolation-recovery-summary")
         );
-        ui.invoke_answer_isolation("client".into(), host.as_str().into(), "present".into());
-        ui.invoke_undo_isolation("client".into(), host.as_str().into());
-        ui.invoke_finish_isolation("client".into(), host.as_str().into());
+        ui.invoke_answer_isolation(kind.clone(), id.clone(), "present".into());
+        ui.invoke_undo_isolation(kind.clone(), id.clone());
+        ui.invoke_finish_isolation(kind.clone(), id.clone());
         assert!(
             commands.try_recv().is_err(),
             "no feedback against unapplied mods"
         );
 
-        ui.invoke_retry_isolation_recovery("client".into(), host.as_str().into());
-        ui.invoke_retry_isolation_recovery("client".into(), host.as_str().into());
+        ui.invoke_retry_isolation_recovery(kind.clone(), id.clone());
+        ui.invoke_retry_isolation_recovery(kind.clone(), id.clone());
         let sent: Vec<_> = commands.try_iter().collect();
         assert_eq!(sent.len(), 1, "{sent:?}");
         let Command::RecoverIsolation { request, .. } = sent[0] else {
@@ -9279,28 +9387,31 @@ mod tests {
         );
 
         // The host was still running: the worker says so again.
-        let mut still_blocked = isolation_data(&host, true, "round");
+        let mut still_blocked = isolation_data(&host.id(), true, "round");
         still_blocked.recovery = "failed".to_owned();
         still_blocked.recovery_detail = "The jar is missing.".to_owned();
-        apply_isolation_data(&ui, still_blocked, false, &flow);
-        assert!(flow.borrow_mut().settle(request));
+        apply_isolation_data(&ui, &workspace, still_blocked);
+        assert!(workspace.isolation.borrow_mut().settle(request));
         clear_host_busy(&ui);
-        assert_eq!(ui.get_isolation_recovery_detail(), "The jar is missing.");
-        ui.invoke_answer_isolation("client".into(), host.as_str().into(), "present".into());
+        assert_eq!(
+            first_view(&ui).isolation_recovery_detail,
+            "The jar is missing."
+        );
+        ui.invoke_answer_isolation(kind.clone(), id.clone(), "present".into());
         assert!(commands.try_recv().is_err());
 
         // A later retry succeeds, and the round can be answered.
-        ui.invoke_retry_isolation_recovery("client".into(), host.as_str().into());
+        ui.invoke_retry_isolation_recovery(kind.clone(), id.clone());
         let Ok(Command::RecoverIsolation { request, .. }) = commands.try_recv() else {
             panic!("a failed recovery can be retried");
         };
-        apply_isolation_data(&ui, isolation_data(&host, true, "round"), false, &flow);
-        assert!(flow.borrow_mut().settle(request));
+        apply_isolation_data(&ui, &workspace, isolation_data(&host.id(), true, "round"));
+        assert!(workspace.isolation.borrow_mut().settle(request));
         clear_host_busy(&ui);
-        assert_eq!(ui.get_isolation_recovery(), "");
-        ui.invoke_retry_isolation_recovery("client".into(), host.as_str().into());
+        assert_eq!(first_view(&ui).isolation_recovery, "");
+        ui.invoke_retry_isolation_recovery(kind.clone(), id.clone());
         assert!(commands.try_recv().is_err(), "nothing to recover any more");
-        ui.invoke_answer_isolation("client".into(), host.as_str().into(), "present".into());
+        ui.invoke_answer_isolation(kind, id, "present".into());
         assert!(matches!(
             commands.try_recv(),
             Ok(Command::AnswerIsolation { .. })
@@ -9309,34 +9420,37 @@ mod tests {
 
     #[test]
     fn a_pending_isolation_change_refuses_every_other_change_until_it_settles() {
-        let ui = test_window();
-        let (sender, commands) = std::sync::mpsc::channel();
-        let flow = Rc::new(RefCell::new(IsolationFlowState::default()));
-        register_isolation_actions(&ui, &sender, &flow);
-        let host = active_round(&ui, &flow);
+        let (ui, workspace, commands, host) = isolation_window();
+        let (kind, id) = kind_and_id(host);
+        apply_isolation_data(&ui, &workspace, isolation_data(&host.id(), true, "round"));
 
-        ui.invoke_undo_isolation("client".into(), host.as_str().into());
-        ui.invoke_undo_isolation("client".into(), host.as_str().into());
-        ui.invoke_finish_isolation("client".into(), host.as_str().into());
-        ui.invoke_cancel_isolation("client".into(), host.as_str().into());
-        ui.invoke_answer_isolation("client".into(), host.as_str().into(), "gone".into());
+        ui.invoke_undo_isolation(kind.clone(), id.clone());
+        ui.invoke_undo_isolation(kind.clone(), id.clone());
+        ui.invoke_finish_isolation(kind.clone(), id.clone());
+        ui.invoke_cancel_isolation(kind.clone(), id.clone());
+        ui.invoke_answer_isolation(kind.clone(), id.clone(), "gone".into());
         let sent: Vec<_> = commands.try_iter().collect();
         assert_eq!(sent.len(), 1, "{sent:?}");
         let Command::UndoIsolation { request, .. } = sent[0] else {
             panic!("the first change is the one sent: {sent:?}");
         };
 
-        assert!(!flow.borrow_mut().settle(request.wrapping_add(1)));
-        ui.invoke_cancel_isolation("client".into(), host.as_str().into());
+        assert!(
+            !workspace
+                .isolation
+                .borrow_mut()
+                .settle(request.wrapping_add(1))
+        );
+        ui.invoke_cancel_isolation(kind.clone(), id.clone());
         assert!(
             commands.try_recv().is_err(),
             "an unrelated settle releases nothing"
         );
 
-        assert!(flow.borrow_mut().settle(request));
+        assert!(workspace.isolation.borrow_mut().settle(request));
         clear_host_busy(&ui);
         assert_eq!(ui.get_host_busy_id(), "");
-        ui.invoke_cancel_isolation("client".into(), host.as_str().into());
+        ui.invoke_cancel_isolation(kind, id);
         assert!(matches!(
             commands.try_recv(),
             Ok(Command::CancelIsolation { .. })
@@ -9345,25 +9459,26 @@ mod tests {
 
     #[test]
     fn a_setup_cannot_be_discarded_while_its_start_is_pending() {
-        let ui = test_window();
-        let (sender, commands) = std::sync::mpsc::channel();
-        let flow = Rc::new(RefCell::new(IsolationFlowState::default()));
-        register_isolation_actions(&ui, &sender, &flow);
-        let host = ephervex_model::InstanceId::new().to_string();
-        ui.set_selected_instance_id(host.as_str().into());
-        apply_isolation_data(&ui, isolation_data(&host, false, "setup"), true, &flow);
-        let generation = flow.borrow().generation;
+        let (ui, workspace, commands, host) = isolation_window();
+        let (kind, id) = kind_and_id(host);
+        apply_isolation_data(&ui, &workspace, isolation_data(&host.id(), false, "setup"));
+        let generation = workspace
+            .isolation
+            .borrow()
+            .setup(host)
+            .expect("loaded")
+            .generation;
 
-        ui.invoke_start_isolation("client".into(), host.as_str().into(), false, false);
-        ui.invoke_start_isolation("client".into(), host.as_str().into(), false, false);
-        ui.invoke_discard_isolation_setup("client".into(), host.as_str().into());
+        ui.invoke_start_isolation(kind.clone(), id.clone(), false, false);
+        ui.invoke_start_isolation(kind.clone(), id.clone(), false, false);
+        ui.invoke_discard_isolation_setup(kind, id);
 
         assert_eq!(commands.try_iter().count(), 1);
         assert!(
-            flow.borrow().accepts(generation),
+            workspace.isolation.borrow().accepts(host, generation),
             "the start's result stays wanted"
         );
-        assert_eq!(ui.get_isolation_phase(), "setup");
+        assert_eq!(first_view(&ui).isolation_phase, "setup");
         assert_eq!(
             ui.get_host_busy_text(),
             lookup("operation-starting-isolation")
@@ -9386,21 +9501,23 @@ mod tests {
     /// A window with the Diagnostics surface opened on one client.
     fn integrity_surface() -> (
         AppWindow,
+        Workspace,
         std::sync::mpsc::Receiver<Command>,
-        Rc<RefCell<IntegrityFlowState>>,
         InstalledHost,
     ) {
         let ui = test_window();
-        let (sender, commands) = std::sync::mpsc::channel();
-        let flow = Rc::new(RefCell::new(IntegrityFlowState::default()));
-        register_integrity_actions(&ui, &sender, &flow);
-        let host = InstalledHost::Instance(ephervex_model::InstanceId::new());
-        ui.invoke_open_integrity("client".into(), host.id().into());
+        let (workspace, commands) = test_workspace_sending(&ui);
+        register_integrity_actions(&ui, &workspace.commands, &workspace);
+        register_bundle_actions(&ui, &workspace.commands, &workspace);
+        let host = client_host();
+        workspace.open(&ui, host, Surface::Diagnostics);
         assert!(
-            matches!(commands.try_recv(), Ok(Command::PlanDiagnosticBundle(planned)) if planned == host),
+            commands
+                .try_iter()
+                .any(|command| matches!(command, Command::PlanDiagnosticBundle(planned) if planned == host)),
             "opening the surface asks what a bundle could carry"
         );
-        (ui, commands, flow, host)
+        (ui, workspace, commands, host)
     }
 
     fn sent_request(commands: &std::sync::mpsc::Receiver<Command>) -> u64 {
@@ -9414,10 +9531,10 @@ mod tests {
 
     #[test]
     fn each_integrity_answer_stays_distinct_and_repairs_are_listed_first() {
-        let (ui, commands, flow, host) = integrity_surface();
+        let (ui, workspace, commands, host) = integrity_surface();
         ui.invoke_verify_host("client".into(), host.id().into());
         let request = sent_request(&commands);
-        assert_eq!(ui.get_integrity_state(), "verifying");
+        assert_eq!(first_view(&ui).integrity_state, "verifying");
 
         let data = backend::VerificationData {
             files: vec![
@@ -9429,16 +9546,22 @@ mod tests {
             ],
             shared: None,
         };
-        apply_host_verified(&ui, &mut flow.borrow_mut(), host, request, &data);
+        apply_host_verified(
+            &workspace,
+            &mut workspace.integrity.borrow_mut(),
+            host,
+            request,
+            &data,
+        );
 
-        assert_eq!(ui.get_integrity_state(), "checked");
-        assert!(!ui.get_integrity_healthy());
+        assert_eq!(first_view(&ui).integrity_state, "checked");
+        assert!(!first_view(&ui).integrity_healthy);
         assert_eq!(
-            ui.get_integrity_summary(),
+            first_view(&ui).integrity_summary,
             lookup_args("gui-integrity-problems", [("count", Arg::from(3))]).as_str()
         );
-        let rows: Vec<(String, String, String)> = ui
-            .get_integrity_findings()
+        let rows: Vec<(String, String, String)> = first_view(&ui)
+            .integrity_findings
             .iter()
             .map(|row| {
                 (
@@ -9462,8 +9585,8 @@ mod tests {
                 handling.to_owned()
             ))
         );
-        let targets: Vec<String> = ui
-            .get_integrity_repair_targets()
+        let targets: Vec<String> = first_view(&ui)
+            .integrity_repair_targets
             .iter()
             .map(|path| path.to_string())
             .collect();
@@ -9472,8 +9595,8 @@ mod tests {
             ["mods/gone.jar", "mods/Zeta.jar"],
             "only what a repair can fetch"
         );
-        let unrepairable: Vec<String> = ui
-            .get_integrity_unrepairable()
+        let unrepairable: Vec<String> = first_view(&ui)
+            .integrity_unrepairable
             .iter()
             .map(|path| path.to_string())
             .collect();
@@ -9487,15 +9610,15 @@ mod tests {
         ] {
             let part = lookup_args(message, [("count", Arg::from(1))]);
             assert!(
-                ui.get_integrity_counts().contains(part.as_str()),
+                first_view(&ui).integrity_counts.contains(part.as_str()),
                 "{message}"
             );
         }
 
-        ui.invoke_filter_integrity_findings("zeta".into());
-        assert_eq!(ui.get_integrity_findings().row_count(), 1);
+        ui.invoke_filter_integrity_findings("client".into(), host.id().into(), "zeta".into());
+        assert_eq!(first_view(&ui).integrity_findings.row_count(), 1);
         assert_eq!(
-            ui.get_integrity_finding_total(),
+            first_view(&ui).integrity_finding_total,
             4,
             "the filter hides, it does not drop"
         );
@@ -9503,7 +9626,7 @@ mod tests {
 
     #[test]
     fn a_host_with_nothing_wrong_is_reported_healthy_with_nothing_to_repair() {
-        let (ui, commands, flow, host) = integrity_surface();
+        let (ui, workspace, commands, host) = integrity_surface();
         ui.invoke_verify_host("client".into(), host.id().into());
         let request = sent_request(&commands);
         let data = backend::VerificationData {
@@ -9519,17 +9642,23 @@ mod tests {
                 loader_libraries_uncovered: true,
             })),
         };
-        apply_host_verified(&ui, &mut flow.borrow_mut(), host, request, &data);
+        apply_host_verified(
+            &workspace,
+            &mut workspace.integrity.borrow_mut(),
+            host,
+            request,
+            &data,
+        );
 
-        assert!(ui.get_integrity_healthy());
+        assert!(first_view(&ui).integrity_healthy);
         assert_eq!(
-            ui.get_integrity_summary(),
+            first_view(&ui).integrity_summary,
             lookup("gui-integrity-healthy").as_str()
         );
-        assert_eq!(ui.get_integrity_repair_targets().row_count(), 0);
-        assert_eq!(ui.get_integrity_unrepairable().row_count(), 0);
-        let notes: Vec<String> = ui
-            .get_integrity_shared_notes()
+        assert_eq!(first_view(&ui).integrity_repair_targets.row_count(), 0);
+        assert_eq!(first_view(&ui).integrity_unrepairable.row_count(), 0);
+        let notes: Vec<String> = first_view(&ui)
+            .integrity_shared_notes
             .iter()
             .map(|note| note.to_string())
             .collect();
@@ -9544,25 +9673,62 @@ mod tests {
     }
 
     #[test]
-    fn a_late_verification_of_another_host_is_not_shown() {
-        let (ui, commands, flow, first) = integrity_surface();
+    fn a_verification_lands_only_on_its_own_host() {
+        let (ui, workspace, commands, first) = integrity_surface();
+        let pane = workspace.single_pane().expect("one pane");
+        workspace.change_pane(&ui, pane, |layout| layout.split_beside(pane).is_ok());
+        let second = server_host();
+        ui.invoke_follow_host(2, "server".into(), second.id().into(), "Diagnostics".into());
+        commands.try_iter().for_each(drop);
         ui.invoke_verify_host("client".into(), first.id().into());
         let request = sent_request(&commands);
-        let second = InstalledHost::Server(ephervex_model::ServerId::new());
-        ui.invoke_open_integrity("server".into(), second.id().into());
-        assert_eq!(ui.get_integrity_state(), "unchecked");
 
         let data = backend::VerificationData {
             files: vec![verified("mods/gone.jar", "absent", true)],
             shared: None,
         };
-        apply_host_verified(&ui, &mut flow.borrow_mut(), first, request, &data);
-        assert_eq!(ui.get_integrity_state(), "unchecked");
-        assert_eq!(ui.get_integrity_repair_targets().row_count(), 0);
+        apply_host_verified(
+            &workspace,
+            &mut workspace.integrity.borrow_mut(),
+            first,
+            request,
+            &data,
+        );
+        let views = ui.get_host_views();
+        let client_view = views.row_data(0).expect("client");
+        let server_view = views.row_data(1).expect("server");
+        assert_eq!(client_view.integrity_state, "checked");
+        assert_eq!(client_view.integrity_repair_targets.row_count(), 1);
+        assert_eq!(server_view.integrity_state, "unchecked");
+        assert_eq!(server_view.integrity_repair_targets.row_count(), 0);
+    }
 
-        ui.invoke_open_integrity("client".into(), first.id().into());
+    #[test]
+    fn a_late_verification_of_a_host_that_left_is_not_shown() {
+        let (ui, workspace, commands, first) = integrity_surface();
+        ui.invoke_verify_host("client".into(), first.id().into());
+        let request = sent_request(&commands);
+        let second = server_host();
+        workspace.open(&ui, second, Surface::Diagnostics);
+        assert_eq!(first_view(&ui).integrity_state, "unchecked");
+
+        let data = backend::VerificationData {
+            files: vec![verified("mods/gone.jar", "absent", true)],
+            shared: None,
+        };
+        apply_host_verified(
+            &workspace,
+            &mut workspace.integrity.borrow_mut(),
+            first,
+            request,
+            &data,
+        );
+        assert_eq!(first_view(&ui).integrity_state, "unchecked");
+        assert_eq!(first_view(&ui).integrity_repair_targets.row_count(), 0);
+
+        workspace.open(&ui, first, Surface::Diagnostics);
         assert_eq!(
-            ui.get_integrity_state(),
+            first_view(&ui).integrity_state,
             "verifying",
             "coming back finds the verification still running"
         );
@@ -9570,16 +9736,21 @@ mod tests {
 
     #[test]
     fn one_verification_or_repair_runs_at_a_time() {
-        let (ui, commands, flow, host) = integrity_surface();
+        let (ui, workspace, commands, host) = integrity_surface();
         ui.invoke_verify_host("client".into(), host.id().into());
         ui.invoke_verify_host("client".into(), host.id().into());
         ui.invoke_repair_host("client".into(), host.id().into());
         let request = sent_request(&commands);
         assert!(commands.try_recv().is_err(), "a second request waits");
 
-        settle_integrity(&ui, &mut flow.borrow_mut(), request);
+        settle_integrity(
+            &ui,
+            &workspace,
+            &mut workspace.integrity.borrow_mut(),
+            request,
+        );
         assert_eq!(
-            ui.get_integrity_state(),
+            first_view(&ui).integrity_state,
             "unchecked",
             "a verification that ended without a result leaves the earlier state"
         );
@@ -9592,7 +9763,7 @@ mod tests {
 
     #[test]
     fn a_repair_claims_the_host_and_waits_for_a_change_already_running() {
-        let (ui, commands, flow, host) = integrity_surface();
+        let (ui, workspace, commands, host) = integrity_surface();
         ui.set_host_busy_kind("client".into());
         ui.set_host_busy_id("elsewhere".into());
         ui.invoke_repair_host("client".into(), host.id().into());
@@ -9612,25 +9783,30 @@ mod tests {
 
         // Isolation reads the same state, so it waits for the repair.
         let (isolation_sender, isolation_commands) = std::sync::mpsc::channel();
-        let isolation = Rc::new(RefCell::new(IsolationFlowState::default()));
-        register_isolation_actions(&ui, &isolation_sender, &isolation);
-        isolation.borrow_mut().host = Some(host);
+        register_isolation_actions(&ui, &isolation_sender, &workspace);
+        workspace.open(&ui, host, Surface::Isolation);
+        apply_isolation_data(&ui, &workspace, isolation_data(&host.id(), false, "setup"));
         ui.invoke_start_isolation("client".into(), host.id().into(), false, false);
         assert!(isolation_commands.try_recv().is_err());
 
-        settle_integrity(&ui, &mut flow.borrow_mut(), request);
+        settle_integrity(
+            &ui,
+            &workspace,
+            &mut workspace.integrity.borrow_mut(),
+            request,
+        );
         assert_eq!(ui.get_host_busy_id(), "");
     }
 
     #[test]
     fn a_repair_leaves_its_findings_stale_until_the_check_after_it() {
-        let (ui, commands, flow, host) = integrity_surface();
+        let (ui, workspace, commands, host) = integrity_surface();
         ui.invoke_repair_host("client".into(), host.id().into());
         let request = sent_request(&commands);
 
         apply_host_repaired(
-            &ui,
-            &flow.borrow(),
+            &workspace,
+            &workspace.integrity.borrow(),
             host,
             request,
             &backend::RepairData {
@@ -9640,15 +9816,15 @@ mod tests {
                 ..backend::RepairData::default()
             },
         );
-        assert_eq!(ui.get_integrity_state(), "stale");
-        assert!(ui.get_integrity_repair_failed());
+        assert_eq!(first_view(&ui).integrity_state, "stale");
+        assert!(first_view(&ui).integrity_repair_failed);
         assert_eq!(
-            ui.get_integrity_recovery().row_count(),
+            first_view(&ui).integrity_recovery.row_count(),
             1,
             "what a failed rollback left behind stays named"
         );
         assert!(
-            ui.get_integrity_repair_result().contains(
+            first_view(&ui).integrity_repair_result.contains(
                 lookup_args("gui-integrity-repaired", [("count", Arg::from(1))]).as_str()
             )
         );
@@ -9657,15 +9833,21 @@ mod tests {
             files: vec![verified("mods/gone.jar", "intact", false)],
             shared: None,
         };
-        apply_host_verified(&ui, &mut flow.borrow_mut(), host, request, &data);
-        assert_eq!(ui.get_integrity_state(), "checked");
+        apply_host_verified(
+            &workspace,
+            &mut workspace.integrity.borrow_mut(),
+            host,
+            request,
+            &data,
+        );
+        assert_eq!(first_view(&ui).integrity_state, "checked");
         assert!(
-            ui.get_integrity_healthy(),
+            first_view(&ui).integrity_healthy,
             "no stale damaged row survives the repair"
         );
-        assert_eq!(ui.get_integrity_findings().row_count(), 0);
+        assert_eq!(first_view(&ui).integrity_findings.row_count(), 0);
         assert!(
-            !ui.get_integrity_repair_result().is_empty(),
+            !first_view(&ui).integrity_repair_result.is_empty(),
             "the repair's own result stays"
         );
     }
@@ -9681,17 +9863,14 @@ mod tests {
     /// Diagnostics opened on a client, with the planner's usual offer.
     fn planned_bundle() -> (
         AppWindow,
+        Workspace,
         std::sync::mpsc::Receiver<Command>,
-        Rc<RefCell<IntegrityFlowState>>,
         InstalledHost,
     ) {
-        let (ui, commands, flow, host) = integrity_surface();
-        let (sender, bundle_commands) = std::sync::mpsc::channel();
-        register_bundle_actions(&ui, &sender, &flow);
-        drop(commands);
+        let (ui, workspace, commands, host) = integrity_surface();
         apply_bundle_plan(
-            &ui,
-            &mut flow.borrow_mut(),
+            &workspace,
+            &mut workspace.integrity.borrow_mut(),
             host,
             vec![
                 bundle_part("logs/latest.log", "game_log"),
@@ -9702,11 +9881,12 @@ mod tests {
                 bundle_part("instance/instance.json", "record"),
             ],
         );
-        (ui, bundle_commands, flow, host)
+        (ui, workspace, commands, host)
     }
 
     fn chosen_rows(ui: &AppWindow) -> Vec<String> {
-        ui.get_bundle_parts()
+        first_view(ui)
+            .bundle_parts
             .iter()
             .filter(|row| row.selected)
             .map(|row| row.name.to_string())
@@ -9715,9 +9895,9 @@ mod tests {
 
     #[test]
     fn a_bundle_plan_becomes_rows_with_only_the_newest_files_chosen() {
-        let (ui, _commands, _flow, _host) = planned_bundle();
+        let (ui, _workspace, _commands, _host) = planned_bundle();
         assert_eq!(
-            ui.get_bundle_parts().row_count(),
+            first_view(&ui).bundle_parts.row_count(),
             6,
             "every offered part is a row"
         );
@@ -9731,18 +9911,28 @@ mod tests {
             ],
             "older logs and reports are offered, not taken"
         );
-        assert_eq!(ui.get_bundle_selected_count(), 4);
+        assert_eq!(first_view(&ui).bundle_selected_count, 4);
         assert_eq!(
-            ui.get_bundle_parts().row_data(0).expect("row").kind,
+            first_view(&ui).bundle_parts.row_data(0).expect("row").kind,
             lookup("gui-bundle-kind-game-log").as_str()
         );
     }
 
     #[test]
     fn the_chosen_parts_are_what_the_export_asks_for() {
-        let (ui, commands, flow, host) = planned_bundle();
-        ui.invoke_toggle_bundle_part("instance/recipe.json".into(), false);
-        ui.invoke_toggle_bundle_part("logs/2026-01-01-1.log.gz".into(), true);
+        let (ui, workspace, commands, host) = planned_bundle();
+        ui.invoke_toggle_bundle_part(
+            "client".into(),
+            host.id().into(),
+            "instance/recipe.json".into(),
+            false,
+        );
+        ui.invoke_toggle_bundle_part(
+            "client".into(),
+            host.id().into(),
+            "logs/2026-01-01-1.log.gz".into(),
+            true,
+        );
         ui.invoke_export_bundle("client".into(), host.id().into());
         ui.invoke_export_bundle("client".into(), host.id().into());
 
@@ -9760,38 +9950,48 @@ mod tests {
                 "instance/instance.json",
             ]
         );
-        assert!(ui.get_bundle_exporting());
-        ui.invoke_toggle_bundle_part("instance/recipe.json".into(), true);
+        assert!(first_view(&ui).bundle_exporting);
+        ui.invoke_toggle_bundle_part(
+            "client".into(),
+            host.id().into(),
+            "instance/recipe.json".into(),
+            true,
+        );
         assert_eq!(
-            ui.get_bundle_selected_count(),
+            first_view(&ui).bundle_selected_count,
             4,
             "the choice is fixed while it is written"
         );
 
-        settle_bundle(&ui, &mut flow.borrow_mut(), *request);
-        assert!(!ui.get_bundle_exporting());
+        settle_bundle(&workspace, &mut workspace.integrity.borrow_mut(), *request);
+        assert!(!first_view(&ui).bundle_exporting);
     }
 
     #[test]
     fn an_empty_bundle_choice_is_never_exported() {
-        let (ui, commands, _flow, host) = planned_bundle();
-        ui.invoke_select_all_bundle_parts(false);
-        assert_eq!(ui.get_bundle_selected_count(), 0);
+        let (ui, _workspace, commands, host) = planned_bundle();
+        ui.invoke_select_all_bundle_parts("client".into(), host.id().into(), false);
+        assert_eq!(first_view(&ui).bundle_selected_count, 0);
         ui.invoke_export_bundle("client".into(), host.id().into());
         assert!(commands.try_recv().is_err());
-        assert!(!ui.get_bundle_exporting());
+        assert!(!first_view(&ui).bundle_exporting);
 
-        ui.invoke_select_all_bundle_parts(true);
-        assert_eq!(ui.get_bundle_selected_count(), 6);
+        ui.invoke_select_all_bundle_parts("client".into(), host.id().into(), true);
+        assert_eq!(first_view(&ui).bundle_selected_count, 6);
     }
 
     #[test]
     fn a_new_plan_of_the_same_host_keeps_the_users_choice() {
-        let (ui, _commands, flow, host) = planned_bundle();
-        ui.invoke_toggle_bundle_part("logs/latest.log".into(), false);
+        let (ui, workspace, _commands, host) = planned_bundle();
+        ui.invoke_toggle_bundle_part(
+            "client".into(),
+            host.id().into(),
+            "logs/latest.log".into(),
+            false,
+        );
         apply_bundle_plan(
-            &ui,
-            &mut flow.borrow_mut(),
+            &workspace,
+            &mut workspace.integrity.borrow_mut(),
             host,
             vec![
                 bundle_part("logs/latest.log", "game_log"),
@@ -9803,7 +10003,7 @@ mod tests {
 
     #[test]
     fn an_export_outcome_is_shown_only_for_its_own_host() {
-        let (ui, commands, flow, host) = planned_bundle();
+        let (ui, workspace, commands, host) = planned_bundle();
         ui.invoke_export_bundle("client".into(), host.id().into());
         let Ok(Command::ExportDiagnosticBundle { request, .. }) = commands.try_recv() else {
             panic!("an export");
@@ -9814,23 +10014,44 @@ mod tests {
             unreadable: vec!["logs/latest.log".to_owned()],
             bytes: 4096,
         };
-        apply_bundle_exported(&ui, &flow.borrow(), host, request, &report);
-        assert_eq!(ui.get_bundle_result_path(), "/home/user/bundle.zip");
-        assert!(ui.get_bundle_result().contains("/home/user/bundle.zip"));
+        apply_bundle_exported(
+            &workspace,
+            &workspace.integrity.borrow(),
+            host,
+            request,
+            &report,
+        );
+        assert_eq!(first_view(&ui).bundle_result_path, "/home/user/bundle.zip");
         assert!(
-            ui.get_bundle_result().contains("logs/latest.log"),
+            first_view(&ui)
+                .bundle_result
+                .contains("/home/user/bundle.zip")
+        );
+        assert!(
+            first_view(&ui).bundle_result.contains("logs/latest.log"),
             "what could not be read is named"
         );
 
-        apply_bundle_export_failed(&ui, &flow.borrow(), host, request, "The disk is full.");
-        assert_eq!(ui.get_bundle_error(), "The disk is full.");
-        assert_eq!(ui.get_bundle_result(), "");
+        apply_bundle_export_failed(
+            &workspace,
+            &workspace.integrity.borrow(),
+            host,
+            request,
+            "The disk is full.",
+        );
+        assert_eq!(first_view(&ui).bundle_error, "The disk is full.");
+        assert_eq!(first_view(&ui).bundle_result, "");
 
-        let other = InstalledHost::Server(ephervex_model::ServerId::new());
-        ui.invoke_open_integrity("server".into(), other.id().into());
-        apply_bundle_exported(&ui, &flow.borrow(), host, request, &report);
+        workspace.open(&ui, server_host(), Surface::Diagnostics);
+        apply_bundle_exported(
+            &workspace,
+            &workspace.integrity.borrow(),
+            host,
+            request,
+            &report,
+        );
         assert_eq!(
-            ui.get_bundle_result(),
+            first_view(&ui).bundle_result,
             "",
             "another host's export is not shown here"
         );
@@ -9838,7 +10059,7 @@ mod tests {
 
     #[test]
     fn stopping_integrity_work_cancels_its_reported_operation() {
-        let (ui, commands, flow, host) = integrity_surface();
+        let (ui, workspace, commands, host) = integrity_surface();
         ui.invoke_verify_host("client".into(), host.id().into());
         let _ = sent_request(&commands);
         let activity = ActivityData {
@@ -9856,8 +10077,13 @@ mod tests {
             entity: host.id(),
             time: String::new(),
         };
-        apply_integrity_activity(&ui, &mut flow.borrow_mut(), &activity);
-        assert_eq!(ui.get_integrity_progress(), "mods/big.jar");
+        apply_integrity_activity(
+            &ui,
+            &workspace,
+            &mut workspace.integrity.borrow_mut(),
+            &activity,
+        );
+        assert_eq!(first_view(&ui).integrity_progress, "mods/big.jar");
 
         ui.invoke_stop_integrity_work();
         assert!(matches!(
@@ -9912,77 +10138,74 @@ mod tests {
         assert_eq!(ui.get_host_busy_text(), stage.as_str());
     }
 
-    fn planned_setup(
-        ui: &AppWindow,
-        flow: &Rc<RefCell<IsolationFlowState>>,
-        basis: u64,
-    ) -> InstalledHost {
-        let id = ephervex_model::InstanceId::new();
-        ui.set_selected_instance_id(id.to_string().into());
-        ui.set_workspace_tab("Isolation".into());
-        let mut setup = isolation_data(&id.to_string(), false, "setup");
+    fn planned_setup(basis: u64) -> (AppWindow, Workspace, InstalledHost) {
+        let (ui, workspace, _, host) = isolation_window();
+        let mut setup = isolation_data(&host.id(), false, "setup");
         setup.basis = Some(basis);
-        setup.candidates = vec![backend::IsolationCandidateData {
-            path: "mods/a.jar".to_owned(),
-            display_path: "a.jar".to_owned(),
-            name: "A".to_owned(),
-        }];
-        apply_isolation_data(ui, setup, true, flow);
-        InstalledHost::Instance(id)
+        setup.candidates = candidates(&["a"]);
+        apply_isolation_data(&ui, &workspace, setup);
+        (ui, workspace, host)
     }
 
     #[test]
     fn a_mod_change_retires_a_setup_planned_before_it() {
-        let ui = test_window();
-        let flow = Rc::new(RefCell::new(IsolationFlowState::default()));
-        let host = planned_setup(&ui, &flow, 7);
-        flow.borrow_mut().pinned.insert(PathBuf::from("mods/a.jar"));
+        let (ui, workspace, host) = planned_setup(7);
+        if let Some(setup) = workspace.isolation.borrow_mut().setup_mut(host) {
+            setup.pinned.insert(PathBuf::from("mods/a.jar"));
+        }
 
-        apply_isolation_basis(&ui, &mut flow.borrow_mut(), host, 7);
+        apply_isolation_basis(&ui, &workspace, host, 7);
         assert_eq!(
-            ui.get_isolation_phase(),
+            first_view(&ui).isolation_phase,
             "setup",
             "an unchanged host keeps its setup"
         );
-        let other = InstalledHost::Instance(ephervex_model::InstanceId::new());
-        apply_isolation_basis(&ui, &mut flow.borrow_mut(), other, 8);
+        let other = client_host();
+        apply_isolation_basis(&ui, &workspace, other, 8);
         assert_eq!(
-            ui.get_isolation_phase(),
+            first_view(&ui).isolation_phase,
             "setup",
             "another host's change is not this one's"
         );
 
-        apply_isolation_basis(&ui, &mut flow.borrow_mut(), host, 8);
-        assert_eq!(ui.get_isolation_phase(), "none");
-        assert_eq!(ui.get_workspace_tab(), "Isolation");
-        assert_eq!(ui.get_isolation_candidates().row_count(), 0);
-        assert!(flow.borrow().pinned.is_empty());
-        assert!(flow.borrow().setup_basis.is_none());
+        apply_isolation_basis(&ui, &workspace, host, 8);
+        assert_eq!(first_view(&ui).isolation_phase, "none");
+        assert_eq!(first_view(&ui).isolation_candidates.row_count(), 0);
+        let flow = workspace.isolation.borrow();
+        let setup = flow.setup(host).expect("loaded");
+        assert!(setup.pinned.is_empty());
+        assert!(setup.setup_basis.is_none());
     }
 
     #[test]
     fn a_mod_change_never_discards_an_active_session_or_a_start_in_flight() {
-        let ui = test_window();
-        let flow = Rc::new(RefCell::new(IsolationFlowState::default()));
-        let host = planned_setup(&ui, &flow, 7);
-        flow.borrow_mut()
+        let (ui, workspace, host) = planned_setup(7);
+        workspace
+            .isolation
+            .borrow_mut()
             .dispatch(host, IsolationMutation::Start)
             .expect("a start is sent");
-        apply_isolation_basis(&ui, &mut flow.borrow_mut(), host, 8);
-        assert_eq!(ui.get_isolation_phase(), "setup");
+        apply_isolation_basis(&ui, &workspace, host, 8);
+        assert_eq!(first_view(&ui).isolation_phase, "setup");
 
-        let request = flow.borrow().pending.map(|pending| pending.request);
-        flow.borrow_mut().settle(request.unwrap_or_default());
-        apply_isolation_data(&ui, isolation_data(&host.id(), true, "round"), true, &flow);
-        apply_isolation_basis(&ui, &mut flow.borrow_mut(), host, 9);
-        assert_eq!(ui.get_isolation_phase(), "round");
-        assert!(ui.get_isolation_active());
+        let request = workspace
+            .isolation
+            .borrow()
+            .pending
+            .map(|pending| pending.request);
+        workspace
+            .isolation
+            .borrow_mut()
+            .settle(request.unwrap_or_default());
+        apply_isolation_data(&ui, &workspace, isolation_data(&host.id(), true, "round"));
+        apply_isolation_basis(&ui, &workspace, host, 9);
+        assert_eq!(first_view(&ui).isolation_phase, "round");
+        assert!(first_view(&ui).isolation_active);
     }
 
     #[test]
     fn isolation_candidate_filtering_preserves_the_pinned_selection() {
-        let ui = test_window();
-        let mut flow = IsolationFlowState {
+        let mut setup = IsolationSetup {
             candidates: vec![
                 backend::IsolationCandidateData {
                     path: "mods/alpha.jar".to_owned(),
@@ -9996,19 +10219,18 @@ mod tests {
                 },
             ],
             query: "beta".to_owned(),
-            ..IsolationFlowState::default()
+            ..IsolationSetup::default()
         };
-        flow.pinned.insert(PathBuf::from("mods/beta.jar"));
+        setup.pinned.insert(PathBuf::from("mods/beta.jar"));
 
-        render_isolation_candidates(&ui, &flow);
+        let rows = isolation_candidate_rows(&setup);
 
-        let rows = ui.get_isolation_candidates();
-        assert_eq!(rows.row_count(), 1);
-        let row = rows
-            .row_data(0)
-            .expect("the matching candidate is rendered");
-        assert_eq!(row.name, "Beta Library");
-        assert!(row.selected, "filtering must not clear a pinned candidate");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "Beta Library");
+        assert!(
+            rows[0].selected,
+            "filtering must not clear a pinned candidate"
+        );
     }
 
     /// A standalone server is named for its exact target, the same way a new
@@ -10133,19 +10355,54 @@ mod tests {
         );
     }
 
-    /// A query typed against one instance must not be left filtering the mods
-    /// of the next one the user opens.
+    /// Each shown host keeps its own list and filter: a filter typed for one
+    /// host never narrows another's, and a list for one never lands on the other.
     #[test]
-    fn changing_host_is_reported_so_the_query_can_be_cleared() {
-        let mut lists = ModLists::default();
+    fn each_shown_host_keeps_its_own_mod_list_and_filter() {
+        let ui = test_window();
+        let workspace = test_workspace(&ui);
+        let (client, server) = (client_host(), server_host());
+        workspace.open(&ui, client, Surface::Mods);
+        let first = workspace.single_pane().expect("one pane");
+        workspace.change_pane(&ui, first, |layout| layout.split_beside(first).is_ok());
+        ui.invoke_follow_host(2, "server".into(), server.id().into(), "Mods".into());
 
-        assert!(lists.replace("client", "instance-a", vec![mod_row("A", "a.jar", "")]));
-        assert!(!lists.replace("client", "instance-a", vec![mod_row("A", "a.jar", "")]));
-        assert!(lists.replace("client", "instance-b", Vec::new()));
+        let mut mods = workspace.mods.borrow_mut();
+        assert!(mods.apply_list(
+            client,
+            vec![
+                mod_row("Sodium", "sodium.jar", ""),
+                mod_row("Iris", "iris.jar", "")
+            ],
+            String::new(),
+        ));
+        assert!(mods.apply_list(
+            server,
+            vec![mod_row("Lithium", "lithium.jar", "")],
+            String::new()
+        ));
+        assert!(mods.filter(client, "iris"));
         assert!(
-            lists.replace("server", "server-a", Vec::new()),
-            "the two lists track their hosts separately"
+            !mods.apply_list(client_host(), Vec::new(), String::new()),
+            "a list for a host no pane shows lands nowhere"
         );
+        drop(mods);
+        for host in [client, server] {
+            mod_views::publish(&workspace, &workspace.mods.borrow(), host);
+        }
+
+        let views = ui.get_host_views();
+        let titles = |index: usize| -> Vec<String> {
+            views
+                .row_data(index)
+                .expect("view")
+                .mods
+                .iter()
+                .map(|row| row.title.to_string())
+                .collect()
+        };
+        assert_eq!(titles(0), ["Iris"], "the client's own filter");
+        assert_eq!(titles(1), ["Lithium"], "the server's list is unfiltered");
     }
 
     /// A file dropped on the window carries no cursor position, so what it is
@@ -10154,36 +10411,78 @@ mod tests {
     #[test]
     fn a_drop_belongs_to_whichever_dialog_is_asking_for_an_archive() {
         let ui = test_window();
+        let closed = WorkspaceState::default();
 
         ui.set_modal(SharedString::default());
-        assert_eq!(drop_intent(&ui), DropIntent::Import);
+        assert_eq!(drop_intent(&ui, &closed), DropIntent::Import);
 
         ui.set_modal("create-server".into());
         assert_eq!(
-            drop_intent(&ui),
+            drop_intent(&ui, &closed),
             DropIntent::ServerPack(ServerPackTarget::NewServer)
         );
 
         ui.set_modal("import".into());
         ui.set_import_create_server(false);
         assert_eq!(
-            drop_intent(&ui),
+            drop_intent(&ui, &closed),
             DropIntent::Import,
             "an import with no server wanted is still asking for the pack"
         );
 
         ui.set_import_create_server(true);
         assert_eq!(
-            drop_intent(&ui),
+            drop_intent(&ui, &closed),
             DropIntent::ServerPack(ServerPackTarget::Import),
             "the pack is already chosen by the time that toggle can be reached"
         );
 
         ui.set_modal("delete-server".into());
         assert_eq!(
-            drop_intent(&ui),
+            drop_intent(&ui, &closed),
             DropIntent::Ignored,
             "a file let go over a confirmation is a misplaced gesture"
+        );
+    }
+
+    /// A jar let go over a visible Mods list goes to that list's host, and
+    /// with two hosts' lists on screen there is no telling which was meant.
+    #[test]
+    fn a_dropped_jar_goes_to_the_one_mods_list_on_screen() {
+        let ui = test_window();
+        let workspace = test_workspace(&ui);
+        let (client, server) = (client_host(), server_host());
+        ui.set_modal(SharedString::default());
+
+        workspace.open(&ui, client, Surface::Mods);
+        assert_eq!(
+            drop_intent(&ui, &workspace.state.borrow()),
+            DropIntent::Mods(client)
+        );
+
+        let first = workspace.single_pane().expect("one pane");
+        workspace.change_pane(&ui, first, |layout| layout.split_beside(first).is_ok());
+        let second = PaneId::from_raw(2);
+        ui.invoke_show_pane_surface(2, "Mods".into());
+        assert_eq!(
+            drop_intent(&ui, &workspace.state.borrow()),
+            DropIntent::Mods(client),
+            "two panes on one host's list are still one list"
+        );
+
+        workspace.change_pane(&ui, second, |layout| {
+            layout.show_host(second, server).is_ok()
+        });
+        assert_eq!(
+            drop_intent(&ui, &workspace.state.borrow()),
+            DropIntent::Import,
+            "two hosts' lists leave the drop without a target"
+        );
+
+        ui.invoke_close_workspace();
+        assert_eq!(
+            drop_intent(&ui, &workspace.state.borrow()),
+            DropIntent::Import
         );
     }
 
@@ -10218,70 +10517,426 @@ mod tests {
         );
     }
 
-    /// Start is offered from four places. Every one of them has to leave the
-    /// user watching the output the run is about to produce, which means
-    /// selecting the server and choosing both the page and the workspace that
-    /// the console is a tab of.
+    fn test_workspace(ui: &AppWindow) -> Workspace {
+        test_workspace_sending(ui).0
+    }
+
+    /// A workspace whose commands can be read back.
+    fn test_workspace_sending(ui: &AppWindow) -> (Workspace, std::sync::mpsc::Receiver<Command>) {
+        let (sender, commands) = std::sync::mpsc::channel();
+        let workspace = Workspace {
+            state: Rc::default(),
+            lifecycle: Rc::default(),
+            logs: Rc::new(RefCell::new(LogViews::new(sender.clone()))),
+            mods: Rc::default(),
+            browser: Rc::default(),
+            isolation: Rc::default(),
+            integrity: Rc::default(),
+            commands: sender,
+        };
+        register_workspace(ui, &workspace);
+        log_views::register(ui, &workspace.logs);
+        (workspace, commands)
+    }
+
+    fn client_host() -> InstalledHost {
+        InstalledHost::Instance(ephervex_model::InstanceId::new())
+    }
+
+    fn server_host() -> InstalledHost {
+        InstalledHost::Server(ephervex_model::ServerId::new())
+    }
+
+    /// Every pane's host and surface, in reading order.
+    fn shown(workspace: &Workspace) -> Vec<(InstalledHost, Surface)> {
+        workspace
+            .state
+            .borrow()
+            .layout()
+            .map(|layout| {
+                layout
+                    .panes()
+                    .iter()
+                    .map(|placed| (placed.pane.host(), placed.pane.surface()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// A workspace listing one client and one server, as a snapshot fills it.
+    fn listed_workspace(ui: &AppWindow) -> (Workspace, InstalledHost, InstalledHost) {
+        let workspace = test_workspace(ui);
+        let (client, server) = (client_host(), server_host());
+        workspace.state.borrow_mut().set_rows(
+            vec![InstanceRow {
+                id: client.id().into(),
+                name: "Repro Client".into(),
+                ..InstanceRow::default()
+            }],
+            vec![ServerRow {
+                id: server.id().into(),
+                name: "Repro Server".into(),
+                can_restart: true,
+                ..ServerRow::default()
+            }],
+        );
+        (workspace, client, server)
+    }
+
+    fn pane_labels(ui: &AppWindow) -> Vec<String> {
+        ui.get_workspace_panes()
+            .iter()
+            .map(|pane| pane.label.to_string())
+            .collect()
+    }
+
+    /// The pane controls change the shape one supported step at a time, and
+    /// every pane is named by where it is, its host, and its surface.
     #[test]
-    fn showing_a_servers_console_selects_it_and_opens_the_console_tab() {
+    fn the_pane_controls_move_between_the_supported_shapes() {
         let ui = test_window();
+        let (workspace, client, _) = listed_workspace(&ui);
+        workspace.open(&ui, client, Surface::Isolation);
+        assert_eq!(pane_labels(&ui), ["Repro Client, Isolation"]);
 
-        ui.set_workspace("instance".into());
-        ui.set_workspace_tab("Overview".into());
-        ui.set_log_query("stale search".into());
-        ui.set_log_follow(false);
+        ui.invoke_split_pane_beside(1);
+        assert_eq!(
+            shown(&workspace),
+            [(client, Surface::Isolation), (client, Surface::Overview)],
+            "the new pane shows the same host"
+        );
+        assert_eq!(
+            pane_labels(&ui),
+            [
+                "Left pane: Repro Client, Isolation",
+                "Right pane: Repro Client, Overview"
+            ]
+        );
+        ui.invoke_split_pane_beside(1);
+        assert_eq!(shown(&workspace).len(), 2, "there are only two columns");
 
-        show_server_console(&ui, "repro-server".into());
+        ui.invoke_split_pane_below(2);
+        ui.invoke_split_pane_below(1);
+        assert_eq!(
+            workspace
+                .state
+                .borrow()
+                .layout()
+                .map(WorkspaceLayout::shape),
+            Some(crate::workspace_layout::Shape::TwoByTwo)
+        );
+        assert_eq!(
+            pane_labels(&ui),
+            [
+                "Top left pane: Repro Client, Isolation",
+                "Bottom left pane: Repro Client, Overview",
+                "Top right pane: Repro Client, Overview",
+                "Bottom right pane: Repro Client, Overview"
+            ]
+        );
+        let offered: Vec<(bool, bool, bool)> = ui
+            .get_workspace_panes()
+            .iter()
+            .map(|pane| (pane.can_split_beside, pane.can_split_below, pane.can_close))
+            .collect();
+        assert_eq!(offered, [(false, false, true); 4]);
 
-        assert_eq!(ui.get_selected_server_id(), "repro-server");
+        for pane in [4, 3, 2] {
+            ui.invoke_close_pane(pane);
+        }
+        assert_eq!(shown(&workspace), [(client, Surface::Isolation)]);
+        assert!(
+            ui.get_workspace_open(),
+            "closing panes never leaves the workspace"
+        );
+        ui.invoke_close_pane(1);
+        assert_eq!(
+            shown(&workspace).len(),
+            1,
+            "the last pane is left with Back"
+        );
+    }
+
+    /// A pane can show any installed host, keeping its surface when the host
+    /// has it, and the host entering the workspace is loaded.
+    #[test]
+    fn a_pane_shows_whichever_installed_host_is_chosen() {
+        let ui = test_window();
+        let loaded = Rc::new(RefCell::new(Vec::new()));
+        let sink = Rc::clone(&loaded);
+        ui.on_load_server_workspace(move |id| sink.borrow_mut().push(id.to_string()));
+        let (workspace, client, server) = listed_workspace(&ui);
+        workspace.open(&ui, client, Surface::Logs);
+        ui.invoke_split_pane_beside(1);
+        ui.invoke_show_pane_surface(2, "Logs".into());
+
+        let names = |choices: ModelRc<WorkspaceHostChoice>| -> Vec<String> {
+            choices
+                .iter()
+                .map(|choice| choice.name.to_string())
+                .collect()
+        };
+        assert_eq!(names(ui.get_workspace_client_choices()), ["Repro Client"]);
+        assert_eq!(names(ui.get_workspace_server_choices()), ["Repro Server"]);
+
+        ui.invoke_choose_pane_host(2, "server".into(), server.id().into());
+        assert_eq!(
+            shown(&workspace),
+            [(client, Surface::Logs), (server, Surface::Logs)]
+        );
+        assert_eq!(loaded.borrow().as_slice(), [server.id()]);
+        let panes: Vec<(i32, i32)> = ui
+            .get_workspace_panes()
+            .iter()
+            .map(|pane| (pane.host, pane.surface_choice))
+            .collect();
+        let logs = |surfaces: &[Surface]| {
+            surfaces
+                .iter()
+                .position(|&surface| surface == Surface::Logs)
+                .and_then(|index| i32::try_from(index).ok())
+                .expect("logs")
+        };
+        assert_eq!(
+            panes,
+            [(0, logs(Surface::client())), (1, logs(Surface::server()))]
+        );
+        assert_eq!(
+            ui.get_workspace_back_label(),
+            lookup("gui-back-instances").as_str(),
+            "a split leaves for the page it was opened from"
+        );
+
+        ui.invoke_choose_pane_host(2, "client".into(), client.id().into());
+        ui.invoke_show_pane_surface(2, "Overview".into());
+        assert_eq!(ui.get_host_views().row_count(), 1);
+    }
+
+    /// The host picker lists running hosts first, a client ranked by what runs
+    /// on its card, offers each client's linked servers on its card, and lists
+    /// a linked server on its own only when the Servers page would.
+    #[test]
+    fn the_host_picker_lists_running_hosts_first_and_linked_servers_on_their_client() {
+        let ui = test_window();
+        let workspace = test_workspace(&ui);
+        let client = |id: &str, running: bool| InstanceRow {
+            id: id.into(),
+            name: id.into(),
+            can_kill: running,
+            ..InstanceRow::default()
+        };
+        let server = |id: &str, linked: &str, running: bool| ServerRow {
+            id: id.into(),
+            name: id.into(),
+            linked_client_id: linked.into(),
+            can_stop: running,
+            ..ServerRow::default()
+        };
+        let first = client_host();
+        workspace.state.borrow_mut().set_rows(
+            vec![
+                client(&first.id(), false),
+                client("idle", false),
+                client("playing", true),
+                client("both", true),
+                client("quiet", false),
+            ],
+            vec![
+                server("alone", "", false),
+                server("linked", &first.id(), true),
+                server("serving", "", true),
+                server("both-server", "both", true),
+                server("quiet-server", "quiet", false),
+            ],
+        );
+        workspace.open(&ui, first, Surface::Overview);
+        let names = |choices: ModelRc<WorkspaceHostChoice>| -> Vec<String> {
+            choices
+                .iter()
+                .map(|choice| choice.name.to_string())
+                .collect()
+        };
+        assert_eq!(
+            names(ui.get_workspace_client_choices()),
+            [
+                "both".to_owned(),
+                "playing".to_owned(),
+                first.id(),
+                "idle".to_owned(),
+                "quiet".to_owned()
+            ],
+            "running client and server, running client, running server, the rest"
+        );
+        assert_eq!(
+            names(ui.get_workspace_server_choices()),
+            ["serving", "alone"]
+        );
+        let linked: Vec<String> = ui
+            .get_workspace_client_choices()
+            .row_data(2)
+            .expect("the first client")
+            .linked
+            .iter()
+            .map(|server| server.id.to_string())
+            .collect();
+        assert_eq!(linked, ["linked"]);
+
+        ui.set_show_linked_servers(true);
+        workspace.refresh(&ui);
+        assert_eq!(
+            names(ui.get_workspace_server_choices()),
+            ["linked", "serving", "both-server", "alone", "quiet-server"]
+        );
+    }
+
+    /// A restart asked for from either of two panes on one server is one
+    /// restart, and both panes show it.
+    #[test]
+    fn a_restart_from_two_panes_on_one_host_is_one_restart() {
+        let ui = test_window();
+        let (workspace, _, server) = listed_workspace(&ui);
+        let (sender, commands) = std::sync::mpsc::channel();
+        register_restart_actions(&ui, &sender, &workspace.lifecycle);
+        workspace.open(&ui, server, Surface::Console);
+        ui.invoke_split_pane_beside(1);
+        ui.invoke_show_pane_surface(2, "Logs".into());
+
+        for _pane in [1, 2] {
+            ui.invoke_server_restart(server.id().into());
+        }
+        let sent: Vec<Command> = commands.try_iter().collect();
+        assert_eq!(sent.len(), 1, "the second pane's restart waits: {sent:?}");
+
+        workspace.refresh(&ui);
+        let panes: Vec<i32> = ui
+            .get_workspace_panes()
+            .iter()
+            .map(|pane| pane.host)
+            .collect();
+        assert_eq!(panes, [0, 0], "both panes read the one host view");
+        assert_eq!(
+            ui.get_host_views()
+                .row_data(0)
+                .expect("view")
+                .server
+                .restart_stage,
+            "stopping"
+        );
+    }
+
+    /// Two panes on one host read one view of it, and whatever a feature
+    /// reports about the host reaches both.
+    #[test]
+    fn a_host_in_two_panes_has_one_view_every_report_reaches() {
+        let ui = test_window();
+        let workspace = test_workspace(&ui);
+        let host = client_host();
+        workspace.open(&ui, host, Surface::Snapshots);
+        let first = workspace.single_pane().expect("one pane");
+        workspace.change_pane(&ui, first, |layout| layout.split_beside(first).is_ok());
+
+        let views = ui.get_host_views();
+        assert_eq!(views.row_count(), 1, "one host, one view");
+        let panes = ui.get_workspace_panes();
+        assert!(panes.iter().all(|pane| pane.host == 0));
+
+        assert!(workspace.update(host, |view| view.snapshot_total = "2 snapshots".into()));
+        assert_eq!(
+            views.row_data(0).expect("view").snapshot_total,
+            "2 snapshots"
+        );
+        assert!(
+            !workspace.update(client_host(), |view| view.snapshot_total = "wrong".into()),
+            "a report about a host no pane shows lands nowhere"
+        );
+        assert_eq!(
+            views.row_data(0).expect("view").snapshot_total,
+            "2 snapshots"
+        );
+    }
+
+    /// A host no pane shows any more keeps nothing, so showing it again asks
+    /// its features afresh rather than showing what they said before.
+    #[test]
+    fn a_host_leaving_the_workspace_forgets_what_was_reported() {
+        let ui = test_window();
+        let workspace = test_workspace(&ui);
+        let (first, second) = (server_host(), server_host());
+        workspace.open(&ui, first, Surface::Overview);
+        workspace.update(first, |view| view.crash_report = "crash.txt".into());
+        let pane = workspace.single_pane().expect("one pane");
+
+        workspace.change_pane(&ui, pane, |layout| layout.show_host(pane, second).is_ok());
+        assert!(!workspace.update(first, |view| view.crash_report = "late".into()));
+        workspace.change_pane(&ui, pane, |layout| layout.show_host(pane, first).is_ok());
+
+        assert_eq!(
+            ui.get_host_views().row_data(0).expect("view").crash_report,
+            ""
+        );
+    }
+
+    /// Start is offered from four places. Every one of them has to leave the
+    /// user watching the output the run is about to produce.
+    #[test]
+    fn showing_a_servers_console_opens_that_servers_console() {
+        let ui = test_window();
+        let workspace = test_workspace(&ui);
+        let server = server_host();
+
+        workspace.show_console(&ui, server);
+
+        assert_eq!(shown(&workspace), [(server, Surface::Console)]);
+        assert!(ui.get_workspace_open());
         assert_eq!(
             ui.get_page(),
             SERVERS_PAGE,
-            "the console is a branch of the servers page, and a page the \
-             workspace does not belong to renders nothing"
+            "a single server's workspace belongs to the servers page"
         );
-        assert_eq!(ui.get_workspace(), "server");
-        assert_eq!(ui.get_workspace_tab(), "Console");
+        let console = ui
+            .get_log_views()
+            .row_data(0)
+            .expect("the console has a viewer");
         assert!(
-            ui.get_log_follow(),
+            console.follow,
             "the output being waited for has not been written yet"
         );
-        assert_eq!(
-            ui.get_log_query(),
-            "",
-            "a search left over from another log would hide the run being started"
-        );
+        assert_eq!(console.mode, "live");
+        assert_eq!(console.query, "");
     }
 
     /// Started from a client's workspace, Back returns to that client.
     #[test]
     fn starting_a_linked_server_keeps_its_clients_workspace_as_the_way_back() {
         let ui = test_window();
+        let workspace = test_workspace(&ui);
+        let (client, server) = (client_host(), server_host());
+        workspace.open(&ui, client, Surface::Overview);
 
-        ui.set_page(INSTANCES_PAGE);
-        ui.set_workspace("instance".into());
-        ui.set_selected_instance_id("repro-client".into());
+        workspace.show_console(&ui, server);
 
-        show_server_console(&ui, "repro-server".into());
-
+        assert_eq!(shown(&workspace), [(server, Surface::Console)]);
         assert_eq!(ui.get_page(), SERVERS_PAGE);
-        assert_eq!(ui.get_server_workspace_return_client(), "repro-client");
+        assert_eq!(ui.get_workspace_back_label(), lookup("gui-back-instance"));
+        ui.invoke_workspace_back();
+        assert_eq!(shown(&workspace), [(client, Surface::Overview)]);
+        assert_eq!(ui.get_page(), INSTANCES_PAGE);
+        assert!(ui.get_workspace_open());
     }
 
-    /// Started from the servers list there is no client to go back to, and a
-    /// value left over from an earlier visit would send Back to an instance the
-    /// user never came from.
+    /// Started from the servers list there is no client to go back to, so
+    /// Back leaves the workspace.
     #[test]
-    fn starting_a_server_from_the_servers_list_clears_a_stale_way_back() {
+    fn starting_a_server_from_the_servers_list_has_no_way_back() {
         let ui = test_window();
+        let workspace = test_workspace(&ui);
 
-        ui.set_page(SERVERS_PAGE);
-        ui.set_workspace(SharedString::default());
-        ui.set_server_workspace_return_client("some-other-client".into());
+        workspace.show_console(&ui, server_host());
+        assert_eq!(ui.get_workspace_back_label(), lookup("gui-back-servers"));
+        ui.invoke_workspace_back();
 
-        show_server_console(&ui, "repro-server".into());
-
-        assert_eq!(ui.get_server_workspace_return_client(), "");
+        assert!(!ui.get_workspace_open());
+        assert!(shown(&workspace).is_empty());
     }
 
     /// Started from inside the server workspace, whatever brought the user
@@ -10289,14 +10944,33 @@ mod tests {
     #[test]
     fn starting_a_server_from_its_own_workspace_keeps_the_way_back() {
         let ui = test_window();
+        let workspace = test_workspace(&ui);
+        let (client, server) = (client_host(), server_host());
+        workspace.open(&ui, client, Surface::Overview);
+        ui.invoke_follow_host(1, "server".into(), server.id().into(), "Overview".into());
 
-        ui.set_page(SERVERS_PAGE);
-        ui.set_workspace("server".into());
-        ui.set_server_workspace_return_client("repro-client".into());
+        workspace.show_console(&ui, server);
 
-        show_server_console(&ui, "repro-server".into());
+        assert_eq!(shown(&workspace), [(server, Surface::Console)]);
+        ui.invoke_workspace_back();
+        assert_eq!(shown(&workspace), [(client, Surface::Overview)]);
+    }
 
-        assert_eq!(ui.get_server_workspace_return_client(), "repro-client");
+    /// A split is the user's own arrangement; starting a server from one of
+    /// its panes does not rearrange it.
+    #[test]
+    fn starting_a_server_leaves_a_split_workspace_as_it_is() {
+        let ui = test_window();
+        let workspace = test_workspace(&ui);
+        let (client, server) = (client_host(), server_host());
+        workspace.open(&ui, client, Surface::Mods);
+        let first = workspace.single_pane().expect("one pane");
+        workspace.change_pane(&ui, first, |layout| layout.split_beside(first).is_ok());
+        let before = shown(&workspace);
+
+        workspace.show_console(&ui, server);
+
+        assert_eq!(shown(&workspace), before);
     }
 
     fn activity(id: &str, status_kind: &'static str) -> ActivityData {
@@ -10420,11 +11094,18 @@ mod tests {
     #[test]
     fn linked_pending_servers_are_not_filtered_to_the_selected_instance() {
         let ui = test_window();
-        ui.set_selected_instance_id("client-a".into());
+        let workspace = test_workspace(&ui);
+        let (client_a, client_b) = (client_host(), client_host());
+        workspace.open(&ui, client_a, Surface::Overview);
+        let first_pane = workspace.single_pane().expect("one pane");
+        workspace.change_pane(&ui, first_pane, |layout| {
+            layout.split_beside(first_pane).is_ok()
+        });
+        ui.invoke_follow_host(2, "client".into(), client_b.id().into(), "Overview".into());
 
         let first = CreationKey::Server {
             name: "First Server".to_owned(),
-            client: "client-a".to_owned(),
+            client: client_a.id(),
             minecraft: String::new(),
             loader: String::new(),
             loader_version: String::new(),
@@ -10436,7 +11117,7 @@ mod tests {
         let CreationKey::Server { client, name, .. } = &mut second else {
             unreachable!()
         };
-        *client = "client-b".to_owned();
+        *client = client_b.id();
         *name = "Second Server".to_owned();
 
         let mut tracker = CreationTracker::default();
@@ -10451,21 +11132,25 @@ mod tests {
             .map(|row| row.linked_client_id.to_string())
             .collect();
         assert_eq!(linked_client_ids.len(), 2);
-        assert!(linked_client_ids.contains(&"client-a".to_owned()));
+        assert!(linked_client_ids.contains(&client_a.id()));
         assert!(
-            linked_client_ids.contains(&"client-b".to_owned()),
+            linked_client_ids.contains(&client_b.id()),
             "an instance's pending linked server must show up on its own card \
              even while a different instance is selected"
         );
 
-        // The workspace's own list is the narrowed one, so that page renders
-        // only what it means to show rather than hiding the rest in place.
-        let on_the_open_instance: Vec<String> = ui
-            .get_selected_instance_pending_servers()
-            .iter()
-            .map(|row| row.linked_client_id.to_string())
-            .collect();
-        assert_eq!(on_the_open_instance, ["client-a".to_owned()]);
+        // Each client's workspace view holds its own narrowed list, so a pane
+        // renders only what it means to show rather than hiding the rest.
+        let views = ui.get_host_views();
+        assert_eq!(views.row_count(), 2);
+        for view in views.iter() {
+            let own: Vec<String> = view
+                .pending_servers
+                .iter()
+                .map(|row| row.linked_client_id.to_string())
+                .collect();
+            assert_eq!(own, [view.id.to_string()]);
+        }
     }
 
     fn disk_usage_report() -> ephervex_core::DiskUsageReport {
@@ -10689,7 +11374,6 @@ mod tests {
             can_restart: true,
             ..ServerRow::default()
         };
-        ui.set_servers(model(vec![server_row.clone()]));
         ui.set_global_servers(model(vec![server_row]));
         let (sender, commands) = std::sync::mpsc::channel();
         let lifecycle = Rc::new(RefCell::new(HostLifecycle::default()));
@@ -10725,15 +11409,23 @@ mod tests {
     #[test]
     fn every_row_showing_a_host_carries_its_restart_stage() {
         let (ui, commands, lifecycle, _client, server) = restart_window();
+        ui.set_host_views(model(vec![HostView {
+            kind: "server".into(),
+            server: ui.get_global_servers().row_data(0).expect("row"),
+            ..HostView::default()
+        }]));
         ui.invoke_server_restart(server.to_string().into());
         let Ok(Command::RestartHost { host, request }) = commands.try_recv() else {
             panic!("a restart");
         };
         let stages = |ui: &AppWindow| -> Vec<String> {
-            [ui.get_servers(), ui.get_global_servers()]
-                .iter()
-                .map(|list| list.row_data(0).expect("row").restart_stage.to_string())
-                .collect()
+            [
+                ui.get_global_servers().row_data(0).expect("row"),
+                ui.get_host_views().row_data(0).expect("view").server,
+            ]
+            .iter()
+            .map(|row| row.restart_stage.to_string())
+            .collect()
         };
         assert_eq!(stages(&ui), ["stopping", "stopping"]);
 
@@ -10967,12 +11659,16 @@ mod tests {
             declared.len()
         );
 
-        let controller = include_str!("controller.rs");
-        let main = include_str!("main.rs");
+        let rust = [
+            include_str!("controller.rs"),
+            include_str!("controller/log_views.rs"),
+            include_str!("controller/workspace.rs"),
+            include_str!("main.rs"),
+        ];
         for name in declared {
             let handler = format!("on_{}(", name.replace('-', "_"));
             assert!(
-                controller.contains(&handler) || main.contains(&handler),
+                rust.iter().any(|source| source.contains(&handler)),
                 "`{name}` is declared on the window and nothing handles it, so the control \
                  that invokes it does nothing"
             );
@@ -10982,9 +11678,9 @@ mod tests {
     #[test]
     fn modrinth_search_does_not_reuse_the_server_filter() {
         let source = include_str!("ui.rs");
-        assert!(source.contains("text <=> root.mod-query"));
+        assert!(source.contains("root.search-mods(host.id, host.browser-provider, self.text)"));
         assert!(source.contains("text <=> root.server-query"));
-        assert!(!source.contains("search-mods(root.selected-instance-id, root.server-query)"));
+        assert!(!source.contains("root.server-query)"));
     }
 
     #[test]
@@ -11397,10 +12093,10 @@ mod tests {
     fn card_workspace_actions_select_the_target_before_opening_it() {
         let source = include_str!("ui.rs");
         assert!(source.contains(
-            "open-workspace(id) => { root.selected-instance-id = id; root.selected-instance-index = index; root.select-instance(id); root.workspace = \"instance\";"
+            "open-workspace(id) => { root.selected-instance-id = id; root.selected-instance-index = index; root.select-instance(id); root.open-workspace(\"client\", id, \"Overview\");"
         ));
         assert!(source.contains(
-            "open-workspace(id) => { root.selected-global-server-id = id; root.selected-global-server-index = index; root.selected-server-id = id; root.server-workspace-return-client = \"\"; root.select-server(id); root.workspace = \"server\";"
+            "open-workspace(id) => { root.selected-global-server-id = id; root.selected-global-server-index = index; root.select-server(id); root.open-workspace(\"server\", id, \"Overview\");"
         ));
         // A card's own touch area has to be declared before the layout holding
         // its buttons, so that it sits under them. Slint resolves a pointer
@@ -11471,24 +12167,27 @@ mod tests {
         assert!(!source.contains(&format!(
             r#"label: GuiI18n.text("{logs}"); selected: root.page == 2"#
         )));
-        assert!(source.contains("root.load-diagnostics(\"client\""));
-        assert!(source.contains("root.load-diagnostics(\"server\""));
+        // Logs is a surface of each host's workspace, read through that pane's viewer.
+        assert!(source.contains("if host.available && pane.surface == \"Logs\""));
+        assert!(source.contains("root.log-show(pane.id, \"files\")"));
     }
 
     #[test]
     fn snapshot_management_is_contextual_for_clients_and_servers() {
         let source = include_str!("ui.rs");
+        let controller = include_str!("controller.rs");
         let replacement_note = "gui-snapshot-replacement-note";
-        assert!(source.contains("root.load-snapshots(\"client\", root.selected-instance-id)"));
-        assert!(source.contains("root.load-snapshots(\"server\", root.selected-server-id)"));
+        // Opening the surface loads the snapshots of the host its pane shows.
+        assert!(controller.contains("ui.invoke_load_snapshots(kind, id);"));
         assert!(source.contains("root.snapshot-safety-copy = true"));
         assert!(source.contains(&format!("GuiI18n.text(\"{replacement_note}\")")));
-        assert!(source.contains("root.snapshots-have-plain-copies"));
+        assert!(source.contains("host.snapshots-have-plain-copies"));
         assert_eq!(
             source
                 .matches("root.pending-snapshot-deletion-note = ")
                 .count(),
-            4
+            6,
+            "every Delete, including the ones a narrow overview moves to a row of their own"
         );
         assert!(source.contains("text: root.pending-snapshot-deletion-note"));
     }
@@ -11931,9 +12630,22 @@ mod tests {
     #[test]
     fn a_crash_report_reaches_its_viewer_with_no_tab_left_in_it() {
         let ui = test_window();
+        let (sender, _commands) = std::sync::mpsc::channel();
+        let mut logs = LogViews::new(sender);
+        logs.attach(&ui);
+        let instance = ephervex_model::InstanceId::new();
+        let pane = PaneId::from_raw(1);
+        let name = "crash-2026-09-18_16.54.00-client.txt";
+        logs.sync(&[(pane, InstalledHost::Instance(instance), Surface::Logs)]);
+        logs.show(pane, log_views::LogMode::Crashes);
+        logs.open_file(pane, name);
         apply_diagnostic_content(
             &ui,
-            DiagnosticContent {
+            &mut logs,
+            &DiagnosticContent {
+                scope: ephervex_core::DiagnosticScope::Client(instance),
+                kind: backend::parse_diagnostic_kind("crash-report").expect("kind"),
+                name: name.to_owned(),
                 title: "crash-2026-09-18_16.54.00-client.txt".to_owned(),
                 path: "/tmp/crash-reports/crash-2026-09-18_16.54.00-client.txt".to_owned(),
                 text: "java.lang.Throwable\n\tat net.minecraft.Util.run(Util.java:12)\n".to_owned(),
@@ -11942,7 +12654,7 @@ mod tests {
                 matches: None,
             },
         );
-        let shown = ui.get_diagnostic_content();
+        let shown = ui.get_log_views().row_data(0).expect("viewer").report;
         assert!(
             !shown.contains('\t'),
             "a tab left in the report has no glyph"
@@ -12007,11 +12719,11 @@ mod tests {
         assert!(source.contains("selectable-input.copy()"));
         assert!(source.contains("selectable-input.select-all()"));
         assert!(source.contains(
-            "SelectableText { text: root.diagnostic-content; font-size: root.technical-text-size * 1px; }"
+            "SelectableText { text: log-view.report; font-size: root.technical-text-size * 1px; }"
         ));
 
         assert!(source.contains("component LiveLogViewer inherits Rectangle"));
-        assert!(source.contains("root.copy-live-log()"));
+        assert!(source.contains("root.log-copy(pane.id)"));
         // The row's own pointer area, declared after the text item so it takes
         // the press before a single-element selection can begin.
         assert!(source.contains("select := TouchArea"));
@@ -12193,12 +12905,11 @@ mod tests {
     #[test]
     fn linked_server_workspace_and_pending_creation_remain_contextual() {
         let source = include_str!("ui.rs");
-        assert!(source.contains("for server in root.linked-servers"));
-        assert!(source.contains("root.selected-server-id = server.id"));
+        assert!(source.contains("for server in host.linked-servers"));
+        assert!(source.contains("root.follow-host(pane.id, \"server\", server.id, \"Overview\")"));
         // Scoped by the model it renders rather than by hiding rows, which
         // would leave the room they would have taken behind them.
-        assert!(source.contains("for pending in root.selected-instance-pending-servers"));
-        assert!(source.contains("root.server-workspace-return-client"));
+        assert!(source.contains("for pending in host.pending-servers"));
         assert!(source.contains("name + \" Server\""));
     }
 
@@ -12234,7 +12945,7 @@ mod tests {
         assert!(source.contains("root.configured-mod-catalog"));
         assert!(source.contains("gui-preferred-mod-catalog-unrecognized"));
         // It lives in the settings surface that already exists.
-        assert!(source.contains("root.workspace-tab == \"Providers & APIs\""));
+        assert!(source.contains("root.settings-tab == \"Providers & APIs\""));
     }
 
     #[test]
@@ -12242,8 +12953,11 @@ mod tests {
         let source = include_str!("controller.rs");
         // The lifecycle point the preference applies at, and the same reset a
         // chip click uses, so an in-flight search cannot survive the move.
-        assert!(source.contains("presentation::catalog_to_open_on("));
-        assert!(source.contains("fn show_mod_catalog(ui: &AppWindow, provider: &str)"));
+        assert!(source.contains("presentation::catalog_to_open_on(&preferred, default)"));
+        assert!(
+            include_str!("controller/mod_views.rs")
+                .contains("fn switch(&mut self, provider: &str)")
+        );
         // Applying a settings snapshot writes the three settings properties and
         // never the browser's own catalog: saving an unrelated setting must not
         // move a browser the user is in the middle of reading.

@@ -2,6 +2,8 @@
 //! repair, and the reasons Repair waits.
 #![allow(clippy::expect_used, clippy::panic)]
 
+mod support;
+
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -68,26 +70,23 @@ fn blockers_shown(ui: &AppWindow) -> Vec<&'static str> {
 fn checked_surface(ui: &AppWindow, server_host: bool, running: bool) {
     if server_host {
         server_workspace(ui, server(running));
-        ui.set_integrity_host_kind("server".into());
-        ui.set_integrity_host_id("server".into());
     } else {
         let mut row = instance();
         row.can_kill = running;
         row.can_launch = !running;
         client_workspace(ui, row);
-        ui.set_integrity_host_kind("client".into());
-        ui.set_integrity_host_id("host".into());
     }
     ui.set_host_busy_kind(SharedString::default());
     ui.set_host_busy_id(SharedString::default());
-    ui.set_active_workflow_id(SharedString::default());
-    ui.set_workspace_tab("Diagnostics".into());
-    ui.set_integrity_state("checked".into());
-    ui.set_integrity_summary(
-        lookup_args("gui-integrity-problems", [("count", Arg::from(1))]).into(),
-    );
-    ui.set_integrity_repair_targets(strings(&["mods/gone.jar"]));
-    ui.set_integrity_unrepairable(strings(&[]));
+    support::set_surface(ui, 1, "Diagnostics");
+    support::update_host(ui, 0, |view| {
+        view.isolation_active = false;
+        view.integrity_state = "checked".into();
+        view.integrity_summary =
+            lookup_args("gui-integrity-problems", [("count", Arg::from(1))]).into();
+        view.integrity_repair_targets = strings(&["mods/gone.jar"]);
+        view.integrity_unrepairable = strings(&[]);
+    });
     settle(ui);
 }
 
@@ -98,28 +97,23 @@ fn host_kinds() -> [(bool, &'static str, &'static str); 2] {
 #[test]
 fn diagnostics_is_a_surface_of_client_and_server_workspaces() {
     let ui = window();
-    let opened = Rc::new(RefCell::new(Vec::new()));
-    let sink = Rc::clone(&opened);
-    ui.on_open_integrity(move |kind, id| {
-        sink.borrow_mut().push((kind.to_string(), id.to_string()));
-    });
-    for (server_host, kind, id) in host_kinds() {
+    let requests = support::follow_surface_requests(&ui);
+    for (server_host, kind, _) in host_kinds() {
         if server_host {
             server_workspace(&ui, server(false));
         } else {
             client_workspace(&ui, instance());
         }
-        ui.set_workspace_tab("Overview".into());
         settle(&ui);
 
         tab(&ui, "gui-diagnostics-tab").mock_single_click(PointerEventButton::Left);
         settle(&ui);
 
-        assert_eq!(ui.get_workspace_tab(), "Diagnostics");
         assert_eq!(
-            opened.borrow().last(),
-            Some(&(kind.to_owned(), id.to_owned()))
+            requests.borrow().last(),
+            Some(&(1, "Diagnostics".to_owned()))
         );
+        assert_eq!(support::surface(&ui, 0), "Diagnostics");
         assert!(enabled(&ui, "gui-integrity-verify"), "{kind}");
     }
 }
@@ -182,11 +176,9 @@ fn a_running_host_holds_repair_and_says_to_stop_it() {
 #[test]
 fn an_isolation_session_holds_repair_with_its_own_reason() {
     let ui = window();
-    for (server_host, kind, id) in host_kinds() {
+    for (server_host, kind, _) in host_kinds() {
         checked_surface(&ui, server_host, false);
-        ui.set_isolation_host_kind(kind.into());
-        ui.set_isolation_host_id(id.into());
-        ui.set_active_workflow_id("mod-isolation".into());
+        support::update_host(&ui, 0, |view| view.isolation_active = true);
         settle(&ui);
         assert!(!enabled(&ui, "gui-integrity-repair"), "{kind}");
         assert_eq!(
@@ -222,8 +214,10 @@ fn findings_nothing_can_fetch_offer_no_repair_and_say_why() {
     let ui = window();
     for (server_host, kind, _) in host_kinds() {
         checked_surface(&ui, server_host, false);
-        ui.set_integrity_repair_targets(strings(&[]));
-        ui.set_integrity_unrepairable(strings(&["mods/shipped.jar"]));
+        support::update_host(&ui, 0, |view| {
+            view.integrity_repair_targets = strings(&[]);
+            view.integrity_unrepairable = strings(&["mods/shipped.jar"]);
+        });
         settle(&ui);
         assert!(find_button(&ui, "gui-integrity-repair").is_none(), "{kind}");
         assert!(visible(
@@ -245,18 +239,13 @@ fn shared_launch_files_are_described_for_what_each_host_kind_supports() {
 #[test]
 fn diagnostics_links_to_the_logs_surface() {
     let ui = window();
-    let logs = Rc::new(RefCell::new(Vec::new()));
-    let sink = Rc::clone(&logs);
-    ui.on_open_live_log(move |kind, id| sink.borrow_mut().push((kind.to_string(), id.to_string())));
-    for (server_host, kind, id) in host_kinds() {
+    let requests = support::follow_surface_requests(&ui);
+    for (server_host, _, _) in host_kinds() {
         checked_surface(&ui, server_host, false);
         button(&ui, "gui-integrity-open-logs").mock_single_click(PointerEventButton::Left);
         settle(&ui);
-        assert_eq!(ui.get_workspace_tab(), "Logs");
-        assert_eq!(
-            logs.borrow().last(),
-            Some(&(kind.to_owned(), id.to_owned()))
-        );
+        assert_eq!(requests.borrow().last(), Some(&(1, "Logs".to_owned())));
+        assert_eq!(support::surface(&ui, 0), "Logs");
     }
 }
 
@@ -282,8 +271,13 @@ fn offered_bundle_parts_are_choices_and_export_waits_for_one() {
     let ui = window();
     let toggles = Rc::new(RefCell::new(Vec::new()));
     let toggle_sink = Rc::clone(&toggles);
-    ui.on_toggle_bundle_part(move |name, selected| {
-        toggle_sink.borrow_mut().push((name.to_string(), selected));
+    ui.on_toggle_bundle_part(move |kind, id, name, selected| {
+        toggle_sink.borrow_mut().push((
+            kind.to_string(),
+            id.to_string(),
+            name.to_string(),
+            selected,
+        ));
     });
     let exports = Rc::new(RefCell::new(Vec::new()));
     let export_sink = Rc::clone(&exports);
@@ -294,8 +288,10 @@ fn offered_bundle_parts_are_choices_and_export_waits_for_one() {
     });
     for (server_host, kind, id) in host_kinds() {
         checked_surface(&ui, server_host, false);
-        ui.set_bundle_parts(bundle_rows(true));
-        ui.set_bundle_selected_count(1);
+        support::update_host(&ui, 0, |view| {
+            view.bundle_parts = bundle_rows(true);
+            view.bundle_selected_count = 1;
+        });
         settle(&ui);
 
         assert!(visible(&ui, &lookup("gui-bundle-privacy")), "{kind}");
@@ -306,7 +302,12 @@ fn offered_bundle_parts_are_choices_and_export_waits_for_one() {
         switch.invoke_accessible_default_action();
         assert_eq!(
             toggles.borrow().last(),
-            Some(&("logs/latest.log".to_owned(), false))
+            Some(&(
+                kind.to_owned(),
+                id.to_owned(),
+                "logs/latest.log".to_owned(),
+                false
+            ))
         );
 
         assert!(enabled(&ui, "gui-bundle-export"));
@@ -316,8 +317,10 @@ fn offered_bundle_parts_are_choices_and_export_waits_for_one() {
             Some(&(kind.to_owned(), id.to_owned()))
         );
 
-        ui.set_bundle_parts(bundle_rows(false));
-        ui.set_bundle_selected_count(0);
+        support::update_host(&ui, 0, |view| {
+            view.bundle_parts = bundle_rows(false);
+            view.bundle_selected_count = 0;
+        });
         settle(&ui);
         assert!(!enabled(&ui, "gui-bundle-export"));
         assert!(visible(&ui, &lookup("gui-bundle-choose-one")));
@@ -332,10 +335,12 @@ fn an_exported_bundle_says_where_it_went_and_can_be_shown() {
     ui.on_open_bundle_folder(move |path| sink.borrow_mut().push(path.to_string()));
     for (server_host, _, _) in host_kinds() {
         checked_surface(&ui, server_host, false);
-        ui.set_bundle_parts(bundle_rows(true));
-        ui.set_bundle_selected_count(1);
-        ui.set_bundle_result("Saved one file to /home/user/bundle.zip.".into());
-        ui.set_bundle_result_path("/home/user/bundle.zip".into());
+        support::update_host(&ui, 0, |view| {
+            view.bundle_parts = bundle_rows(true);
+            view.bundle_selected_count = 1;
+            view.bundle_result = "Saved one file to /home/user/bundle.zip.".into();
+            view.bundle_result_path = "/home/user/bundle.zip".into();
+        });
         settle(&ui);
         assert!(visible(&ui, "Saved one file to /home/user/bundle.zip."));
         button(&ui, "gui-bundle-show-folder").mock_single_click(PointerEventButton::Left);
@@ -344,35 +349,26 @@ fn an_exported_bundle_says_where_it_went_and_can_be_shown() {
             Some("/home/user/bundle.zip")
         );
 
-        ui.set_bundle_result(SharedString::default());
-        ui.set_bundle_result_path(SharedString::default());
-        ui.set_bundle_error("The disk is full.".into());
+        support::update_host(&ui, 0, |view| {
+            view.bundle_result = SharedString::default();
+            view.bundle_result_path = SharedString::default();
+            view.bundle_error = "The disk is full.".into();
+        });
         settle(&ui);
         assert!(
             visible(&ui, "The disk is full."),
             "a failed export stays on screen"
         );
-        ui.set_bundle_error(SharedString::default());
     }
 }
 
 fn client_workspace(ui: &AppWindow, row: InstanceRow) {
-    ui.set_loading(false);
-    ui.set_page(0);
-    ui.set_workspace("instance".into());
-    ui.set_instances(ModelRc::new(VecModel::from(vec![row])));
-    ui.set_selected_instance_index(0);
-    ui.set_selected_instance_id("host".into());
+    support::show_client(ui, row, "Overview");
     settle(ui);
 }
 
 fn server_workspace(ui: &AppWindow, row: ServerRow) {
-    ui.set_loading(false);
-    ui.set_page(1);
-    ui.set_workspace("server".into());
-    ui.set_servers(ModelRc::new(VecModel::from(vec![row])));
-    ui.set_selected_server_index(0);
-    ui.set_selected_server_id("server".into());
+    support::show_server(ui, row, "Overview");
     settle(ui);
 }
 

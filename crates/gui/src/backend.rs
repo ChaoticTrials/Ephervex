@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::str::FromStr as _;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -517,8 +517,11 @@ pub enum Command {
         id: ServerId,
         name: String,
     },
+    /// Starts, or restarts from the beginning, one log source. Every view on
+    /// that source receives what it sends.
     OpenLiveLog(LiveLogSource),
-    CloseLiveLog,
+    /// Stops following a source no view reads any more.
+    CloseLiveLog(LiveLogSource),
     SaveServerProperties {
         server: ServerId,
         network: ServerNetworkSettings,
@@ -1253,6 +1256,10 @@ pub struct DiagnosticData {
 
 #[derive(Debug, Clone)]
 pub struct DiagnosticContent {
+    /// The file this is, which is what decides the views it belongs in.
+    pub scope: DiagnosticScope,
+    pub kind: DiagnosticKind,
+    pub name: String,
     pub title: String,
     pub path: String,
     pub text: String,
@@ -1388,6 +1395,8 @@ pub struct IsolationData {
 
 #[derive(Debug, Clone)]
 pub struct ServerWorkspaceData {
+    /// The server these are, which is the view they belong in.
+    pub server: String,
     pub motd: String,
     pub max_players: String,
     pub difficulty: String,
@@ -1500,7 +1509,13 @@ pub enum Event {
         kind: String,
     },
     DiagnosticContent(DiagnosticContent),
-    DiagnosticUnavailable(String),
+    /// A diagnostic file could not be read, with the reason to show in its place.
+    DiagnosticUnavailable {
+        scope: DiagnosticScope,
+        kind: DiagnosticKind,
+        name: String,
+        message: String,
+    },
     HostSnapshots(HostSnapshotsData),
     Isolation {
         generation: u64,
@@ -1982,7 +1997,9 @@ fn run_worker(
         send_error(&events, &error);
     }
     send_snapshot(&app, &events);
-    let live_log_generation = Arc::new(AtomicU64::new(0));
+    // One tail per client log being read, each stopped on its own, so two
+    // views can follow two clients at once.
+    let mut client_tails: HashMap<InstanceId, Arc<AtomicBool>> = HashMap::new();
     let refreshed_mods: RefreshedHosts = Arc::new(Mutex::new(HashSet::new()));
     let changing: ChangingHosts = Arc::new(Mutex::new(HashMap::new()));
     let launches: RunningLaunches = Arc::new(Mutex::new(HashMap::new()));
@@ -2097,6 +2114,11 @@ fn run_worker(
                             error: false,
                         });
                         send_snapshot(&app, &events);
+                        // The form starts over from what was stored, which
+                        // also says whether anything is pinned now.
+                        if let Ok(runtime) = instance_runtime_data(&app, instance) {
+                            let _ = events.send(Event::InstanceRuntime(runtime));
+                        }
                     }
                     // Shown on the screen the fields are on, not as a toast the
                     // user has to catch: a refused save leaves them looking at
@@ -2838,7 +2860,7 @@ fn run_worker(
                     },
                     move |app, reporter, cancel| async move {
                         let _in_flight = in_flight;
-                        app.begin_isolation_reporting(
+                        let begun = app.begin_isolation_reporting(
                             host,
                             IsolationRequest {
                                 pinned,
@@ -2847,7 +2869,14 @@ fn run_worker(
                             },
                             &reporter,
                             &cancel,
-                        )?;
+                        );
+                        // Starting takes a safety snapshot, which a Snapshots
+                        // view of this host shows at once, even when a later
+                        // step of the start failed.
+                        if let Ok(data) = host_snapshots_data(&app, host) {
+                            let _ = reports.send(Event::HostSnapshots(data));
+                        }
+                        begun?;
                         send_isolation_state(&app, host, generation, true, &reports, &refreshed);
                         send_host_mods(&app, host, &reports, &refreshed, false);
                         Ok(OperationReport::Reported)
@@ -3816,10 +3845,14 @@ fn run_worker(
                 delete_mod(&app, host, &path, name, &events, &refreshed_mods);
             }
             Command::OpenLiveLog(source) => {
-                open_live_log(&app, source, &events, &live_log_generation);
+                open_live_log(&app, source, &events, &mut client_tails);
             }
-            Command::CloseLiveLog => {
-                live_log_generation.fetch_add(1, Ordering::Relaxed);
+            Command::CloseLiveLog(source) => {
+                if let LiveLogSource::Client(instance) = source
+                    && let Some(stop) = client_tails.remove(&instance)
+                {
+                    stop.store(true, Ordering::Relaxed);
+                }
             }
             Command::SaveServerProperties {
                 server,
@@ -5345,6 +5378,7 @@ fn send_server_workspace(app: &App, server: ServerId, events: &Sender<Event>) {
         let record = app.server(server)?;
         let properties = app.server_properties(server)?;
         Ok::<_, CoreError>(ServerWorkspaceData {
+            server: server.to_string(),
             motd: properties
                 .get("motd")
                 .unwrap_or_else(|| lookup("gui-default-motd")),
@@ -5367,11 +5401,7 @@ fn send_server_workspace(app: &App, server: ServerId, events: &Sender<Event>) {
         Ok(workspace) => {
             let _ = events.send(Event::ServerWorkspace(workspace));
         }
-        Err(error) => {
-            let message = localized_error(&error);
-            let _ = events.send(Event::DiagnosticUnavailable(message.clone()));
-            send_error(events, &error);
-        }
+        Err(error) => send_error(events, &error),
     }
 }
 
@@ -5379,9 +5409,8 @@ fn open_live_log(
     app: &App,
     source: LiveLogSource,
     events: &Sender<Event>,
-    generation: &Arc<AtomicU64>,
+    client_tails: &mut HashMap<InstanceId, Arc<AtomicBool>>,
 ) {
-    let current_generation = generation.fetch_add(1, Ordering::Relaxed).saturating_add(1);
     match source.clone() {
         // A file is read once. There is no tail to follow: a rotated log is
         // finished, and the one being written to is reachable as the live view.
@@ -5422,68 +5451,78 @@ fn open_live_log(
             }
             Err(error) => send_error(events, &error),
         },
-        LiveLogSource::Client(instance) => {
-            let mut tail = match app.client_log_tail(instance) {
-                Ok(tail) => tail,
+        LiveLogSource::Client(instance) => follow_client_log(app, instance, events, client_tails),
+    }
+}
+
+/// Tails one client's `latest.log` on a thread of its own until its stop flag
+/// is raised.
+fn follow_client_log(
+    app: &App,
+    instance: InstanceId,
+    events: &Sender<Event>,
+    client_tails: &mut HashMap<InstanceId, Arc<AtomicBool>>,
+) {
+    let mut tail = match app.client_log_tail(instance) {
+        Ok(tail) => tail,
+        Err(error) => {
+            send_error(events, &error);
+            return;
+        }
+    };
+    // A second open of the same client restarts its tail, so every
+    // view on it receives the whole log again.
+    let stop = Arc::new(AtomicBool::new(false));
+    if let Some(previous) = client_tails.insert(instance, Arc::clone(&stop)) {
+        previous.store(true, Ordering::Relaxed);
+    }
+    let paths = app.paths().clone();
+    let events = events.clone();
+    if let Err(error) = thread::Builder::new()
+        .name("ephervex-client-log-tail".to_owned())
+        .spawn(move || {
+            let app = match App::open_at(paths) {
+                Ok(app) => app,
                 Err(error) => {
-                    send_error(events, &error);
+                    send_error(&events, &error);
                     return;
                 }
             };
-            let paths = app.paths().clone();
-            let events = events.clone();
-            let generation = Arc::clone(generation);
-            if let Err(error) = thread::Builder::new()
-                .name("ephervex-client-log-tail".to_owned())
-                .spawn(move || {
-                    let app = match App::open_at(paths) {
-                        Ok(app) => app,
-                        Err(error) => {
-                            send_error(&events, &error);
-                            return;
+            let mut first = true;
+            while !stop.load(Ordering::Relaxed) {
+                match app.poll_client_log(&mut tail) {
+                    Ok(mut update) => {
+                        if app
+                            .launch_state(instance)
+                            .is_ok_and(|state| state.is_none())
+                            && let Some(line) = tail.finish_partial_line()
+                        {
+                            update.lines.push(line);
                         }
-                    };
-                    let mut first = true;
-                    while generation.load(Ordering::Relaxed) == current_generation {
-                        match app.poll_client_log(&mut tail) {
-                            Ok(mut update) => {
-                                if app
-                                    .launch_state(instance)
-                                    .is_ok_and(|state| state.is_none())
-                                    && let Some(line) = tail.finish_partial_line()
-                                {
-                                    update.lines.push(line);
-                                }
-                                let has_update = first
-                                    || update.reset
-                                    || !update.lines.is_empty()
-                                    || update.skipped_bytes > 0;
-                                if has_update {
-                                    let _ = events.send(Event::LiveLog(LiveLogUpdate {
-                                        source: LiveLogSource::Client(instance),
-                                        reset: first || update.reset,
-                                        missing: update.missing,
-                                        source_truncated: update.skipped_bytes > 0,
-                                        lines: update
-                                            .lines
-                                            .into_iter()
-                                            .map(LiveLogLine::Client)
-                                            .collect(),
-                                    }));
-                                }
-                                first = false;
-                            }
-                            Err(error) => {
-                                tracing::warn!(%error, "client latest.log tail poll failed");
-                            }
+                        let has_update = first
+                            || update.reset
+                            || !update.lines.is_empty()
+                            || update.skipped_bytes > 0;
+                        if has_update {
+                            let _ = events.send(Event::LiveLog(LiveLogUpdate {
+                                source: LiveLogSource::Client(instance),
+                                reset: first || update.reset,
+                                missing: update.missing,
+                                source_truncated: update.skipped_bytes > 0,
+                                lines: update.lines.into_iter().map(LiveLogLine::Client).collect(),
+                            }));
                         }
-                        thread::sleep(Duration::from_millis(120));
+                        first = false;
                     }
-                })
-            {
-                tracing::error!(%error, "could not start the client latest.log tail");
+                    Err(error) => {
+                        tracing::warn!(%error, "client latest.log tail poll failed");
+                    }
+                }
+                thread::sleep(Duration::from_millis(120));
             }
-        }
+        })
+    {
+        tracing::error!(%error, "could not start the client latest.log tail");
     }
 }
 
@@ -5561,6 +5600,9 @@ fn send_diagnostic_content(
                 text.insert_str(0, &format!("[{summary}]\n\n"));
             }
             let _ = events.send(Event::DiagnosticContent(DiagnosticContent {
+                scope,
+                kind,
+                name: name.to_owned(),
                 title: format!(
                     "{} | {} | {}",
                     scope_entity(app, scope),
@@ -5575,8 +5617,12 @@ fn send_diagnostic_content(
             }));
         }
         Err(error) => {
-            let message = localized_error(&error);
-            let _ = events.send(Event::DiagnosticUnavailable(message.clone()));
+            let _ = events.send(Event::DiagnosticUnavailable {
+                scope,
+                kind,
+                name: name.to_owned(),
+                message: localized_error(&error),
+            });
             send_error(events, &error);
         }
     }

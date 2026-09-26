@@ -75,7 +75,7 @@ fn overview(instances: &[InstanceRow]) -> AppWindow {
     let ui = window();
     ui.set_loading(false);
     ui.set_page(0);
-    ui.set_workspace(SharedString::default());
+    ui.set_workspace_open(false);
     ui.set_instance_filter("all".into());
     ui.set_instances(ModelRc::new(VecModel::from(instances.to_vec())));
     settle(&ui);
