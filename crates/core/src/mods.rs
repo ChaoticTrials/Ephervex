@@ -767,9 +767,11 @@ fn carry_current_state(enriched: &mut ManagedModSnapshot, current: ManagedModSna
         let Some(current) = now.remove(&entry.logical_path) else {
             return false;
         };
-        if current.file_name == entry.file_name && current.origin == entry.origin {
+        if same_artifact(entry, &current) {
             entry.presence = current.presence;
             entry.size = current.size;
+            entry.client = current.client;
+            entry.server = current.server;
             true
         } else {
             replaced.push(current);
@@ -781,6 +783,34 @@ fn carry_current_state(enriched: &mut ManagedModSnapshot, current: ManagedModSna
     enriched.source = current.source;
     enriched.mods_are_the_users = current.mods_are_the_users;
     sort_for_display(&mut enriched.mods);
+}
+
+/// Whether `listed`, as the metadata fetch found it, is still the jar `now`
+/// lists at its path: the same file, the same exact identity, and no hash or
+/// size that says otherwise. An identity the fetch itself found for a jar
+/// that had none is no difference; that jar is compared by content instead.
+fn same_artifact(listed: &ManagedModEntry, now: &ManagedModEntry) -> bool {
+    let identity =
+        listed.identity == now.identity || (may_be_identified(now) && !listed.hashes.is_empty());
+    listed.file_name == now.file_name
+        && listed.origin == now.origin
+        && listed.original_identity == now.original_identity
+        && identity
+        && hashes_agree(&listed.hashes, &now.hashes)
+        && listed
+            .size
+            .zip(now.size)
+            .is_none_or(|(before, after)| before == after)
+}
+
+/// No digest of one algorithm differs between the two. Algorithms only one
+/// side has say nothing either way.
+fn hashes_agree(listed: &[Hash], now: &[Hash]) -> bool {
+    listed.iter().all(|before| {
+        now.iter()
+            .filter(|after| after.algorithm == before.algorithm)
+            .all(|after| after == before)
+    })
 }
 
 /// By the name on screen, case-insensitively, with the logical path breaking a
@@ -2770,11 +2800,8 @@ mod tests {
         assert_eq!(error.failing_path().as_deref(), Some(path.as_path()));
     }
 
-    /// A list whose metadata arrived after the host changed shows the host as
-    /// it is now, keeping the metadata only for the jars still there.
-    #[test]
-    fn an_enriched_list_shows_what_changed_while_it_was_fetched() {
-        let entry = |path: &str, file: &str, presence: ModPresence| ManagedModEntry {
+    fn listed_entry(path: &str, file: &str, presence: ModPresence) -> ManagedModEntry {
+        ManagedModEntry {
             logical_path: PathBuf::from(path),
             file_name: file.to_owned(),
             origin: ModOrigin::PackDeclared,
@@ -2788,49 +2815,169 @@ mod tests {
             details: None,
             cached: None,
             icon: None,
-        };
-        let snapshot = |mods| ManagedModSnapshot {
+        }
+    }
+
+    fn decorated(mut entry: ManagedModEntry) -> ManagedModEntry {
+        entry.icon = Some(PathBuf::from("/cache/icon.png"));
+        entry
+    }
+
+    fn listed_snapshot(mods: Vec<ManagedModEntry>) -> ManagedModSnapshot {
+        ManagedModSnapshot {
             host: InstalledHost::Instance(ephervex_model::InstanceId::new()),
             source: None,
             mods,
             metadata: MetadataAvailability::Provider,
             mods_are_the_users: false,
-        };
-        let mut decorated = entry("mods/a.jar", "a.jar", ModPresence::Installed);
-        decorated.icon = Some(PathBuf::from("/cache/a.png"));
-        let mut enriched = snapshot(vec![
-            decorated,
-            entry("mods/b-1.jar", "b-1.jar", ModPresence::Installed),
-            entry("mods/gone.jar", "gone.jar", ModPresence::Installed),
-        ]);
-        let current = snapshot(vec![
-            entry("mods/a.jar", "a.jar", ModPresence::Disabled),
-            entry("mods/b-1.jar", "b-2.jar", ModPresence::Installed),
-            entry("mods/new.jar", "new.jar", ModPresence::Installed),
-        ]);
+        }
+    }
 
-        carry_current_state(&mut enriched, current);
+    fn sha1(fill: char) -> Hash {
+        Hash::new(HashAlgorithm::Sha1, &fill.to_string().repeat(40)).expect("a sha1 digest")
+    }
 
-        let shown: Vec<(&str, &str, ModPresence, bool)> = enriched
+    /// After reconciling, each entry's path, file, presence, whether it kept
+    /// the fetched metadata, and its identity.
+    fn reconciled(
+        enriched: Vec<ManagedModEntry>,
+        current: Vec<ManagedModEntry>,
+    ) -> Vec<(String, String, ModPresence, bool, ModIdentity)> {
+        let mut enriched = listed_snapshot(enriched);
+        carry_current_state(&mut enriched, listed_snapshot(current));
+        enriched
             .mods
-            .iter()
+            .into_iter()
             .map(|entry| {
                 (
-                    entry.logical_path.to_str().unwrap_or_default(),
-                    entry.file_name.as_str(),
+                    entry.logical_path.display().to_string(),
+                    entry.file_name,
                     entry.presence,
                     entry.icon.is_some(),
+                    entry.identity,
                 )
             })
-            .collect();
+            .collect()
+    }
+
+    /// A list whose metadata arrived after the host changed shows the host as
+    /// it is now: a jar disabled meanwhile keeps its metadata and shows its
+    /// current state, a jar replaced under another name shows undecorated,
+    /// and jars added or removed meanwhile are listed as they are now.
+    #[test]
+    fn an_enriched_list_shows_what_changed_while_it_was_fetched() {
+        let shown = reconciled(
+            vec![
+                decorated(listed_entry("mods/a.jar", "a.jar", ModPresence::Installed)),
+                decorated(listed_entry(
+                    "mods/b-1.jar",
+                    "b-1.jar",
+                    ModPresence::Installed,
+                )),
+                listed_entry("mods/gone.jar", "gone.jar", ModPresence::Installed),
+            ],
+            vec![
+                listed_entry("mods/a.jar", "a.jar", ModPresence::Disabled),
+                listed_entry("mods/b-1.jar", "b-2.jar", ModPresence::Installed),
+                listed_entry("mods/new.jar", "new.jar", ModPresence::Installed),
+            ],
+        );
+        let identity = || version_identity("PROJ", "VER");
         assert_eq!(
             shown,
             [
-                ("mods/a.jar", "a.jar", ModPresence::Disabled, true),
-                ("mods/b-1.jar", "b-2.jar", ModPresence::Installed, false),
-                ("mods/new.jar", "new.jar", ModPresence::Installed, false),
+                (
+                    "mods/a.jar".to_owned(),
+                    "a.jar".to_owned(),
+                    ModPresence::Disabled,
+                    true,
+                    identity()
+                ),
+                (
+                    "mods/b-1.jar".to_owned(),
+                    "b-2.jar".to_owned(),
+                    ModPresence::Installed,
+                    false,
+                    identity()
+                ),
+                (
+                    "mods/new.jar".to_owned(),
+                    "new.jar".to_owned(),
+                    ModPresence::Installed,
+                    false,
+                    identity()
+                ),
             ]
         );
+    }
+
+    /// A jar updated in place, under the same name and origin, is a different
+    /// artifact: metadata fetched for the release it replaced is not shown
+    /// for it, and its own identity and hash are.
+    #[test]
+    fn a_jar_updated_under_the_same_name_drops_metadata_fetched_for_the_old_one() {
+        let mut old = decorated(listed_entry(
+            "mods/foo.jar",
+            "foo.jar",
+            ModPresence::Installed,
+        ));
+        old.hashes = vec![sha1('a')];
+        let mut updated = listed_entry("mods/foo.jar", "foo.jar", ModPresence::Installed);
+        updated.identity = version_identity("PROJ", "VER-B");
+        updated.hashes = vec![sha1('b')];
+
+        let mut enriched = listed_snapshot(vec![old.clone()]);
+        carry_current_state(&mut enriched, listed_snapshot(vec![updated]));
+        let entry = &enriched.mods[0];
+        assert_eq!(entry.identity, version_identity("PROJ", "VER-B"));
+        assert_eq!(entry.hashes, [sha1('b')]);
+        assert!(
+            entry.icon.is_none(),
+            "no metadata of the release it replaced"
+        );
+
+        // The same recorded release with other content is no match either.
+        let mut rewritten = listed_entry("mods/foo.jar", "foo.jar", ModPresence::Installed);
+        rewritten.hashes = vec![sha1('c')];
+        let mut enriched = listed_snapshot(vec![old]);
+        carry_current_state(&mut enriched, listed_snapshot(vec![rewritten]));
+        assert_eq!(enriched.mods[0].hashes, [sha1('c')]);
+        assert!(enriched.mods[0].icon.is_none());
+    }
+
+    /// What the fetch found for a hand-placed jar, its identity included, is
+    /// kept while the jar is the same size, and dropped when a jar of another
+    /// size took its name.
+    #[test]
+    fn a_hand_placed_jar_keeps_the_identity_the_fetch_found_while_it_is_unchanged() {
+        let unidentified = |size: u64, presence: ModPresence| ManagedModEntry {
+            origin: ModOrigin::HandPlaced,
+            identity: ModIdentity::Unresolved,
+            size: Some(size),
+            ..listed_entry("mods/hand.jar", "hand.jar", presence)
+        };
+        let mut found = decorated(unidentified(10, ModPresence::Installed));
+        found.identity = version_identity("FOUND", "FOUND-1");
+        found.hashes = vec![sha1('d')];
+
+        let shown = reconciled(
+            vec![found.clone()],
+            vec![unidentified(10, ModPresence::Disabled)],
+        );
+        assert_eq!(
+            shown,
+            [(
+                "mods/hand.jar".to_owned(),
+                "hand.jar".to_owned(),
+                ModPresence::Disabled,
+                true,
+                version_identity("FOUND", "FOUND-1")
+            )]
+        );
+
+        let shown = reconciled(vec![found], vec![unidentified(11, ModPresence::Installed)]);
+        assert!(!shown[0].3, "a jar of another size is another jar");
+        assert_eq!(shown[0].4, ModIdentity::Unresolved);
     }
 
     /// What is remembered is split by what each field is a fact about, because
