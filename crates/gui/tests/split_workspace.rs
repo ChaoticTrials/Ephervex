@@ -592,6 +592,33 @@ fn header_actions_act_on_their_panes_host() {
     assert_eq!(restarted.borrow().as_slice(), ["server"]);
 }
 
+/// A workflow's banner is left to the pane that shows the workflow's own
+/// surface, and every pane on the host carries it when none does.
+#[test]
+fn a_workflow_banner_is_left_to_the_pane_showing_the_workflow() {
+    let ui = window();
+    split(
+        &ui,
+        vec![
+            placed(1, CLIENT, "Isolation", 0, 0, false),
+            placed(2, CLIENT, "Mods", 1, 0, false),
+        ],
+    );
+    let banner =
+        |pane: i32| in_pane(&ui, pane, "Isolation in progress", AccessibleRole::Text).len();
+    support::update_host(&ui, 0, |view| {
+        view.workflow_id = "mod-isolation".into();
+        view.workflow_title = "Isolation in progress".into();
+        view.workflow_pane = 1;
+    });
+    settle(&ui);
+    assert_eq!((banner(1), banner(2)), (1, 0));
+
+    support::update_host(&ui, 0, |view| view.workflow_pane = 0);
+    settle(&ui);
+    assert_eq!((banner(1), banner(2)), (1, 1));
+}
+
 /// A split has one way out, above its panes.
 #[test]
 fn a_split_leaves_from_its_toolbar() {

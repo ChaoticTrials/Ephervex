@@ -5894,6 +5894,7 @@ fn apply_isolation_data(ui: &AppWindow, workspace: &Workspace, data: IsolationDa
             view.isolation_query = SharedString::default();
         }
         view.workflow_id = workflow.id;
+        view.workflow_surface = workflow.surface;
         view.workflow_title = workflow.title;
         view.workflow_summary = workflow.summary;
         view.workflow_actions = workflow.actions;
@@ -6667,6 +6668,8 @@ fn publish_isolation_candidates(
 /// What an isolation session puts in its host's workflow area.
 struct WorkflowPresentation {
     id: SharedString,
+    /// The surface that shows the workflow in full.
+    surface: SharedString,
     title: SharedString,
     summary: SharedString,
     actions: ModelRc<WorkflowActionRow>,
@@ -6722,6 +6725,7 @@ fn isolation_workflow(data: &IsolationData) -> WorkflowPresentation {
         } else {
             SharedString::default()
         },
+        surface: Surface::Isolation.id().into(),
         title: if data.active {
             lookup("gui-isolation-active").into()
         } else {
@@ -9187,6 +9191,29 @@ mod tests {
             isolation_commands.try_recv().is_err(),
             "nothing was asked of the session"
         );
+    }
+
+    /// An active round's banner belongs to the pane showing the round in
+    /// full; the other panes on that host leave it out, and get it back when
+    /// no pane shows the round.
+    #[test]
+    fn the_isolation_banner_stays_with_the_pane_showing_the_round() {
+        let (ui, workspace, _, host) = isolation_window();
+        apply_isolation_data(&ui, &workspace, isolation_data(&host.id(), true, "round"));
+        assert_eq!(first_view(&ui).workflow_pane, 1);
+
+        ui.invoke_split_pane_beside(1);
+        ui.invoke_show_pane_surface(2, "Mods".into());
+        assert_eq!(
+            first_view(&ui).workflow_pane,
+            1,
+            "the Isolation pane keeps it"
+        );
+
+        ui.invoke_show_pane_surface(1, "Logs".into());
+        assert_eq!(first_view(&ui).workflow_pane, 0, "no pane shows the round");
+        ui.invoke_show_pane_surface(2, "Isolation".into());
+        assert_eq!(first_view(&ui).workflow_pane, 2);
     }
 
     #[test]

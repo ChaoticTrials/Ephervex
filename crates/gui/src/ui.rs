@@ -742,6 +742,10 @@ slint::slint! {
         workflow-title: string,
         workflow-summary: string,
         workflow-actions: [WorkflowActionRow],
+        // The surface that shows the workflow in full, and the first pane
+        // showing it, or 0 for none: the other panes leave the banner to it.
+        workflow-surface: string,
+        workflow-pane: int,
         // What the Diagnostics surface shows for the host: "unchecked",
         // "verifying", "checked", or "stale". Empty is "unchecked".
         integrity-state: string,
@@ -2095,6 +2099,9 @@ slint::slint! {
         in property <string> workflow-title;
         in property <string> workflow-summary;
         in property <[WorkflowActionRow]> workflow-actions;
+        // Whether this pane carries the workflow's banner. False when another
+        // pane on the same host shows the workflow's own surface.
+        in property <bool> workflow-here: true;
         // A workflow is changing this host's files, so nothing may start it.
         in property <bool> busy;
         in property <string> busy-text;
@@ -2182,7 +2189,7 @@ slint::slint! {
                 if root.restart-visible : AppButton { text: GuiI18n.text("gui-restart"); enabled: root.restart-enabled && !root.occupied; hint: root.restart-hint; clicked => { root.restart(); } }
                 AppButton { text: root.primary-label; tone: root.primary-tone; enabled: root.primary-enabled && !root.occupied; clicked => { root.primary(); } }
             }
-            if root.workflow-id != "" : Rectangle {
+            if root.workflow-id != "" && root.workflow-here : Rectangle {
                 height: max(64px, workflow-copy.preferred-height + 24px);
                 border-radius: 7px;
                 border-width: 1px;
@@ -5155,6 +5162,7 @@ slint::slint! {
                                     restart-hint: self.is-client && host.client.can-kill && !host.client.can-restart ? GuiI18n.text("gui-restart-client-unavailable") : "";
                                     restart-stage: self.is-client ? host.client.restart-stage : host.server.restart-stage;
                                     workflow-id: host.workflow-id;
+                                    workflow-here: host.workflow-pane == 0 || host.workflow-pane == pane.id;
                                     busy: root.host-busy-kind == host.kind && root.host-busy-id == host.id;
                                     busy-text: root.host-busy-text;
                                     workflow-title: host.workflow-title;

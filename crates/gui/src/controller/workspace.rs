@@ -135,6 +135,7 @@ impl WorkspaceState {
             && let Some(mut row) = self.host_views.row_data(index)
         {
             change_row(&mut row, reported);
+            row.workflow_pane = workflow_pane(self.layout.as_ref(), host, &row.workflow_surface);
             self.host_views.set_row_data(index, row);
         }
         true
@@ -232,6 +233,7 @@ impl WorkspaceState {
             InstalledHost::Instance(_) => self.client_surfaces.clone(),
             InstalledHost::Server(_) => self.server_surfaces.clone(),
         };
+        view.workflow_pane = workflow_pane(self.layout.as_ref(), host, &view.workflow_surface);
         view.available = false;
         match host {
             InstalledHost::Instance(_) => {
@@ -405,6 +407,23 @@ fn back_label(ui: &AppWindow, layout: &WorkspaceLayout, hosts: &[InstalledHost])
     } else {
         "gui-back-instances"
     }
+}
+
+/// The first pane, in reading order, showing `host` on the surface its
+/// workflow is shown in full on, or 0 when none does. Pane ids start at 1.
+fn workflow_pane(layout: Option<&WorkspaceLayout>, host: InstalledHost, surface: &str) -> i32 {
+    let Some(surface) = Surface::parse(surface) else {
+        return 0;
+    };
+    layout
+        .and_then(|layout| {
+            layout
+                .panes()
+                .into_iter()
+                .find(|placed| placed.pane.host() == host && placed.pane.surface() == surface)
+        })
+        .and_then(|placed| i32::try_from(placed.pane.id().get()).ok())
+        .unwrap_or(0)
 }
 
 fn host_name(view: &HostView) -> &str {
