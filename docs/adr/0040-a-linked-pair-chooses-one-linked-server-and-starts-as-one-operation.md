@@ -58,7 +58,8 @@ there is no path from one start back to another. The frontend holds one
 in-flight pair start per pair, identified by a generation, and refuses a second
 until the first settles. The worker settles it exactly once, including on
 failure, cancellation, or refusal. Restart is a different operation and never
-consults the pair.
+consults the pair. A client that came up with its pair can be restarted, and
+its restart relaunches only the client, joining the same server target.
 
 **Failure keeps the pair and the running side.** A failed pair start reports
 which side failed. A server that started is left running, and the pair is

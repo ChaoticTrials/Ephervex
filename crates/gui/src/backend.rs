@@ -14,19 +14,20 @@ use ephervex_core::ManagedMutationReport;
 use ephervex_core::live_diagnostics::TailedLine;
 use ephervex_core::{
     App, AuthEvent, AuthObserver, CancellationToken, ClientFolder, ClientModOutcome, ClientModPlan,
-    CoreError, CoreResult, CrashReview, DeclaredProject, DiagnosticKind, DiagnosticRequest,
-    DiagnosticScope, ErrorChain, EulaStatus, ImportRequest, InstalledHost, IsolationError,
-    IsolationPlan, IsolationReconciliation, IsolationReport, IsolationRequest, IsolationSession,
-    LaunchAndConnectEvent, LaunchAndConnectObserver, LaunchAndConnectOptions, LaunchEvent,
-    LaunchObserver, LaunchOptions, LinkedModOutcome, LinkedModPlan, LinkedModRequest, LinkedStart,
-    LinkedTargetPlan, LinkedTargetResult, LinkedTargetState, LocalModOffer, LocalModPlan,
-    LocalModReport, LoginOptions, ManagedModEntry, ManagedModSnapshot, MetadataAvailability,
-    ModInstallPlan, ModMutability, ModMutation, ModMutationPlan, ModPresence, ModSearchQuery,
-    MutationRestriction, NewClient, NewServer, OperationReporter, OptionalSelection, PackAnalysis,
-    Paths, PlannedOutcome, ProcessMonitor, ProgressSink, ProviderFileIdentity, RoundAnswer,
-    SearchOptions, ServerCommit, ServerContentSource, ServerCreateOptions, ServerEvent,
-    ServerFolder, ServerNetworkSettings, ServerObserver, ServerRecord, SideRequirement,
-    SnapshotOrigin, SnapshotRestoreOptions, SuspectReason, WatchTarget,
+    ConnectionTarget, CoreError, CoreResult, CrashReview, DeclaredProject, DiagnosticKind,
+    DiagnosticRequest, DiagnosticScope, ErrorChain, EulaStatus, ImportRequest, InstalledHost,
+    IsolationError, IsolationPlan, IsolationReconciliation, IsolationReport, IsolationRequest,
+    IsolationSession, LaunchAndConnectEvent, LaunchAndConnectObserver, LaunchAndConnectOptions,
+    LaunchEvent, LaunchFeatures, LaunchObserver, LaunchOptions, LinkedModOutcome, LinkedModPlan,
+    LinkedModRequest, LinkedStart, LinkedTargetPlan, LinkedTargetResult, LinkedTargetState,
+    LocalModOffer, LocalModPlan, LocalModReport, LoginOptions, ManagedModEntry, ManagedModSnapshot,
+    MetadataAvailability, ModInstallPlan, ModMutability, ModMutation, ModMutationPlan, ModPresence,
+    ModSearchQuery, MutationRestriction, NewClient, NewServer, OperationReporter,
+    OptionalSelection, PackAnalysis, Paths, PlannedOutcome, ProcessMonitor, ProgressSink,
+    ProviderFileIdentity, RoundAnswer, SearchOptions, ServerCommit, ServerContentSource,
+    ServerCreateOptions, ServerEvent, ServerFolder, ServerNetworkSettings, ServerObserver,
+    ServerRecord, SideRequirement, SnapshotOrigin, SnapshotRestoreOptions, SuspectReason,
+    WatchTarget,
 };
 use ephervex_core::{
     ConfiguredPreferences, LanguageAvailability, LanguageEntry, MinecraftPreferencePreview,
@@ -1829,6 +1830,9 @@ type RunningLaunches = Arc<Mutex<HashMap<InstanceId, RunningLaunch>>>;
 struct RunningLaunch {
     generation: u64,
     account: Option<String>,
+    /// The server the game was launched straight into, which a restart
+    /// joins again without starting it.
+    connect: Option<ConnectionTarget>,
     /// Becomes true once the launch has returned: the game has exited and its
     /// lock is released, which is what a restart waits for.
     finished: tokio::sync::watch::Receiver<bool>,
@@ -1843,6 +1847,7 @@ fn register_launch(
     events: &Sender<Event>,
     instance: InstanceId,
     account: Option<String>,
+    connect: Option<ConnectionTarget>,
 ) -> (u64, tokio::sync::watch::Sender<bool>) {
     static NEXT: AtomicU64 = AtomicU64::new(1);
     let generation = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -1853,6 +1858,7 @@ fn register_launch(
             RunningLaunch {
                 generation,
                 account,
+                connect,
                 finished,
             },
         );
@@ -2365,6 +2371,7 @@ fn run_worker(
                     entity: String::new(),
                     account,
                     additional,
+                    connect: None,
                 },
             ),
             Command::StartLinked {
@@ -2397,7 +2404,10 @@ fn run_worker(
                         spawn_connect(
                             app.paths().clone(),
                             &events,
-                            Arc::clone(&cancellations),
+                            LaunchTracking {
+                                cancellations: Arc::clone(&cancellations),
+                                launches: Arc::clone(&launches),
+                            },
                             ConnectRun {
                                 client,
                                 server,
@@ -2418,6 +2428,7 @@ fn run_worker(
                                 entity: String::new(),
                                 account: None,
                                 additional: None,
+                                connect: None,
                             },
                         ),
                         InstalledHost::Server(server) => {
@@ -2440,7 +2451,10 @@ fn run_worker(
                 spawn_connect(
                     paths,
                     &events,
-                    Arc::clone(&cancellations),
+                    LaunchTracking {
+                        cancellations: Arc::clone(&cancellations),
+                        launches: Arc::clone(&launches),
+                    },
                     ConnectRun {
                         client,
                         server,
@@ -5769,6 +5783,38 @@ struct ClientLaunch {
     entity: String,
     account: Option<String>,
     additional: Option<String>,
+    /// A server to join straight after startup.
+    connect: Option<ConnectionTarget>,
+}
+
+/// What one exclusive client launch asks core for.
+fn launch_options(
+    account: Option<String>,
+    additional: Option<String>,
+    connect: Option<ConnectionTarget>,
+) -> LaunchOptions {
+    LaunchOptions {
+        features: connect.map_or_else(LaunchFeatures::none, |target| {
+            LaunchFeatures::none().direct_connect(target)
+        }),
+        install_java_if_missing: true,
+        account,
+        additional,
+        ..LaunchOptions::default()
+    }
+}
+
+/// The launch a restart starts in place of `running`: the same account, and
+/// the same server joined straight away when it was. Only the client starts,
+/// so restarting a client that came up with its pair never starts the server.
+fn relaunch(instance: InstanceId, entity: String, running: &RunningLaunch) -> ClientLaunch {
+    ClientLaunch {
+        instance,
+        entity,
+        account: running.account.clone(),
+        additional: None,
+        connect: running.connect,
+    }
 }
 
 /// Told once whether a launch became the instance's running game; see
@@ -5788,6 +5834,7 @@ fn spawn_launch(
         entity,
         account,
         additional,
+        connect,
     } = launch;
     spawn_detached(
         paths.clone(),
@@ -5817,7 +5864,7 @@ fn spawn_launch(
             // instance's own Stop and Restart act on.
             let registered = additional
                 .is_none()
-                .then(|| register_launch(&launches, &events, instance, account.clone()));
+                .then(|| register_launch(&launches, &events, instance, account.clone(), connect));
             // Whether this launch became the instance's running game, for a
             // restart waiting to find out. The recorded game is the evidence,
             // not the first line it prints.
@@ -5850,12 +5897,7 @@ fn spawn_launch(
                 let result = app
                     .launch(
                         instance,
-                        &LaunchOptions {
-                            install_java_if_missing: true,
-                            account,
-                            additional,
-                            ..LaunchOptions::default()
-                        },
+                        &launch_options(account, additional, connect),
                         &observer,
                         &cancel,
                     )
@@ -6177,12 +6219,7 @@ fn spawn_client_restart(
                         &events,
                         tracking.cancellations,
                         tracking.launches,
-                        ClientLaunch {
-                            instance,
-                            entity: entity.clone(),
-                            account: running.account.clone(),
-                            additional: None,
-                        },
+                        relaunch(instance, entity.clone(), &running),
                         Some(sender),
                     );
                     async move {
@@ -6491,12 +6528,11 @@ struct ConnectRun {
 // The three observers intentionally stay in one scope so their channel and
 // runtime ownership cannot drift apart from the combined operation.
 #[allow(clippy::too_many_lines)]
-fn spawn_connect(
-    paths: Paths,
-    events: &Sender<Event>,
-    cancellations: CancellationRegistry,
-    run: ConnectRun,
-) {
+fn spawn_connect(paths: Paths, events: &Sender<Event>, tracking: LaunchTracking, run: ConnectRun) {
+    let LaunchTracking {
+        cancellations,
+        launches,
+    } = tracking;
     let ConnectRun {
         client,
         server,
@@ -6524,10 +6560,25 @@ fn spawn_connect(
                 let refresh_paths = paths.clone();
                 let refresh_events = events.clone();
                 let ready = Arc::clone(&server_ready);
+                // The client is registered once the server is ready, with the
+                // target it joins, so a restart joins it again the same way.
+                let registered = Arc::new(Mutex::new(None));
+                let registering = Arc::clone(&registered);
+                let registry = Arc::clone(&launches);
                 let connect_forward = tokio::spawn(async move {
                     while let Some(event) = connect_events.recv().await {
-                        if matches!(event, LaunchAndConnectEvent::ServerReady { .. }) {
+                        if let LaunchAndConnectEvent::ServerReady { target } = event {
                             ready.store(true, Ordering::SeqCst);
+                            let entry = register_launch(
+                                &registry,
+                                &refresh_events,
+                                client,
+                                None,
+                                Some(target),
+                            );
+                            if let Ok(mut registered) = registering.lock() {
+                                *registered = Some(entry);
+                            }
                         }
                         refresh_snapshot(&refresh_paths, &refresh_events);
                     }
@@ -6647,6 +6698,13 @@ fn spawn_connect(
                     settled.take();
                 }
                 release_launch_cancellation(&cancellations, client, &launch_operation);
+                // As for a plain launch: announced only once everything this
+                // one held is released, so a restart cannot start early.
+                let entry = registered.lock().ok().and_then(|mut entry| entry.take());
+                if let Some((generation, finished)) = entry {
+                    unregister_launch(&launches, &events, client, generation);
+                    let _ = finished.send(true);
+                }
                 if let Ok(app) = App::open_at(paths.clone()) {
                     send_snapshot(&app, &events);
                 }
@@ -9036,6 +9094,43 @@ mod tests {
         );
     }
 
+    /// A client that came up with its pair is registered with the server it
+    /// joined, and restarting it joins that server again as the same account,
+    /// starting nothing else.
+    #[test]
+    fn a_restart_joins_the_server_the_client_was_launched_into() {
+        let launches: RunningLaunches = Arc::new(Mutex::new(HashMap::new()));
+        let (events, received) = mpsc::channel();
+        let instance = InstanceId::new();
+        let target = ConnectionTarget {
+            address: std::net::IpAddr::from([127, 0, 0, 1]),
+            port: std::num::NonZeroU16::new(25565).expect("nonzero port"),
+        };
+        register_launch(&launches, &events, instance, None, Some(target));
+
+        assert!(received.try_iter().any(|event| matches!(
+            event,
+            Event::LaunchContext { instance: id, restartable: true } if id == instance
+        )));
+        let running = launches
+            .lock()
+            .expect("launches")
+            .remove(&instance)
+            .expect("registered");
+        let again = relaunch(instance, "Repro Client".to_owned(), &running);
+        assert_eq!(again.connect, Some(target));
+        assert_eq!(again.additional, None);
+        assert_eq!(
+            launch_options(again.account, again.additional, again.connect).features,
+            LaunchFeatures::none().direct_connect(target)
+        );
+        assert_eq!(
+            launch_options(None, None, None).features,
+            LaunchFeatures::none(),
+            "a plain launch joins nothing"
+        );
+    }
+
     fn settles(received: &std::sync::mpsc::Receiver<Event>) -> Vec<u64> {
         received
             .try_iter()
@@ -9397,6 +9492,7 @@ mod tests {
             &events,
             instance,
             Some("second-account".to_owned()),
+            None,
         );
         let running = launches
             .lock()
@@ -9448,8 +9544,8 @@ mod tests {
         let launches: RunningLaunches = Arc::new(Mutex::new(HashMap::new()));
         let (events, _received) = mpsc::channel();
         let instance = InstanceId::new();
-        let (old, _) = register_launch(&launches, &events, instance, None);
-        let (new, _) = register_launch(&launches, &events, instance, None);
+        let (old, _) = register_launch(&launches, &events, instance, None, None);
+        let (new, _) = register_launch(&launches, &events, instance, None, None);
 
         unregister_launch(&launches, &events, instance, old);
         assert_eq!(

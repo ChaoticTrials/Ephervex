@@ -262,11 +262,14 @@ A client restart reuses the ordinary launch path. Only an exclusive launch this
 run of the desktop started can be restarted, because only for those is the
 launch request known: it is kept in memory for as long as the launch runs and
 holds an account reference, never a credential. A client started by another
-Ephervex process, alongside another launch, or by Launch & Connect is not
-offered a restart. The restart stops the game the way its Stop does, waits for
+Ephervex process or alongside another launch is not offered a restart. A
+client started by Launch & Connect, including a pair start, becomes
+restartable once its server is ready, and its launch request also records the
+server it joined. The restart stops the game the way its Stop does, waits for
 that launch to return and for nothing to hold the instance, then launches it
-again as the same account; if the game is not seen to stop within a bound,
-nothing is started. The replacement counts as started only once the instance's
+again as the same account, joining the same server when it did; if the game
+is not seen to stop within a bound, nothing is started. Restart starts only
+the client, so it never starts or restarts that server. The replacement counts as started only once the instance's
 lock records its game, with the start time that proves the process, and that
 game is still the one recorded a few seconds later. A JVM that prints an error
 and exits, or exits before it is recorded, is a failed start, whatever it
@@ -559,7 +562,8 @@ pair" on both hosts' rows so every pane agrees. The worker settles it exactly
 once through a drop guard: when the client is running, or when the run fails,
 is refused, or is canceled. A failure names the side that failed, from whether
 the server became ready, and leaves a server that started running. Restart
-never consults the pair.
+never consults the pair: restarting a client that came up with its pair
+relaunches only the client, joining the same server.
 
 ## Linked client direct-connect flow
 
