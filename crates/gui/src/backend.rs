@@ -6340,6 +6340,10 @@ fn forward_launch_event(
             }
             refresh_snapshot(paths, events);
         }
+        // Starting is announced before the game's process exists; this is
+        // the first point at which the lock records it, so the row stops
+        // saying Starting.
+        LaunchEvent::Running { .. } => refresh_snapshot(paths, events),
         LaunchEvent::Failed { message_id, .. } => {
             let _ = events.send(Event::Toast {
                 message: lookup(message_id),
@@ -9128,6 +9132,29 @@ mod tests {
             launch_options(None, None, None).features,
             LaunchFeatures::none(),
             "a plain launch joins nothing"
+        );
+    }
+
+    /// The game is recorded only after Starting is announced, so the row is
+    /// read again once it runs.
+    #[test]
+    fn a_running_game_refreshes_the_rows_that_said_it_was_starting() {
+        let base = tempfile::tempdir().expect("a disposable root");
+        let paths = ephervex_core::Paths::rooted_at(base.path());
+        let (events, received) = mpsc::channel();
+        forward_launch_event(
+            &events,
+            "Repro Client",
+            &Mutex::new(None),
+            &Arc::new(Mutex::new(HashMap::new())),
+            &CancellationToken::new(),
+            &paths,
+            LaunchEvent::Running { pid: 1 },
+        );
+        assert!(
+            received
+                .try_iter()
+                .any(|event| matches!(event, Event::Snapshot(_)))
         );
     }
 
