@@ -48,3 +48,4 @@ so the reasoning trail survives.
 | [0040](0040-a-linked-pair-chooses-one-linked-server-and-starts-as-one-operation.md) | A linked pair chooses one linked server and starts as one operation | Accepted |
 | [0041](0041-a-theme-is-a-complete-color-palette.md) | A theme is a complete color palette | Accepted |
 | [0042](0042-user-themes-are-toml-files-over-a-built-in-parent.md) | User themes are TOML files over a built-in parent | Accepted |
+| [0043](0043-diagnostics-explains-and-changes-nothing-until-a-previewed-fix-is-applied.md) | Diagnostics explains, and changes nothing until a previewed fix is applied | Accepted |

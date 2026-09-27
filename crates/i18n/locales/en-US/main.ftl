@@ -1119,6 +1119,7 @@ gui-isolation-busy-finish = Finishing isolation and keeping the tested setup
 gui-isolation-busy = Isolation is still changing this host's mods. Try again once that finishes.
 gui-snapshot-busy = A snapshot of this host is still being taken or restored. Try again once that finishes.
 gui-repair-busy = A repair is still replacing this host's files. Try again once it finishes.
+gui-fix-busy = A fix is still changing this host. Try again once it finishes.
 gui-isolation-busy-recover = Reapplying the current round's mod setup
 gui-isolation-reapplied = This host's mods did not match the current isolation round, so Ephervex reapplied the round's mod setup. Test the round before answering.
 gui-isolation-recovery-summary = The current round's mod setup must be reapplied before it can be answered.
@@ -1130,54 +1131,20 @@ gui-snapshot-created = Snapshot created.
 gui-snapshot-restored = Snapshot restored.
 gui-snapshot-renamed = Snapshot renamed.
 gui-snapshot-deleted = Snapshot deleted.
-## Diagnostics: verification and repair
+## Diagnostics: file integrity and bundles
 
 gui-diagnostics-tab = Diagnostics
 operation-verifying-host = Verifying files
-operation-repairing-host = Repairing files
 operation-stage-checking-shared-files = Checking shared launch files
-operation-stage-rechecking-host = Checking the files again
+operation-stage-diagnosing-again = Diagnosing again
 operation-stage-checking-java = Checking Java
 operation-stage-checking-mods = Checking mod requirements
-gui-integrity-title = Files
-gui-integrity-detail = Checks every file this host records against the checksum recorded for it. Nothing is changed or downloaded.
-gui-integrity-verify = Verify files
-gui-integrity-stop = Stop
 gui-integrity-open-logs = Open logs
-gui-integrity-unchecked = Not checked yet. Verifying reads every recorded file, which can take a while for a large pack.
 gui-integrity-nothing-recorded = Nothing is recorded for this host, so there is nothing to check.
-gui-integrity-healthy = No problems found.
-gui-integrity-problems = { $count ->
-    [one] One recorded file is missing or damaged.
-   *[other] { $count } recorded files are missing or damaged.
-}
-gui-integrity-count-intact = { $count } intact
-gui-integrity-count-absent = { $count } missing
-gui-integrity-count-corrupt = { $count } damaged
-gui-integrity-count-unreadable = { $count } unreadable
-gui-integrity-count-unverifiable = { $count } with no checksum to check against
-gui-integrity-checked-at = Checked at { $value }
-gui-integrity-stale = The files may have changed since this check. Verify again to see what is on disk now.
-gui-integrity-findings = Findings
-gui-integrity-filter = Filter findings
-gui-integrity-no-match = No findings match "{ $value }".
 gui-integrity-absent = Missing
 gui-integrity-corrupt = Damaged
 gui-integrity-unreadable = Unreadable
 gui-integrity-unverifiable = No checksum
-gui-integrity-repair-title = Repair
-gui-integrity-repair-detail = Repair fetches each file below from its recorded source and checks it before replacing the broken copy. A file that cannot be fetched is left exactly where it was, and a mod that was turned off stays off.
-gui-integrity-repair-targets = { $count ->
-    [one] Repair will replace this file:
-   *[other] Repair will replace these { $count } files:
-}
-gui-integrity-unrepairable = { $count ->
-    [one] This file cannot be repaired here. The pack shipped it inside itself, so there is no address to fetch it from. Re-import the pack to get it back:
-   *[other] These { $count } files cannot be repaired here. The pack shipped them inside itself, so there is no address to fetch them from. Re-import the pack to get them back:
-}
-gui-integrity-repair = Repair files
-gui-integrity-repair-blocked-running = Stop this host to repair it. A repair moves jars the game may have open.
-gui-integrity-repair-blocked-isolation = Finish or cancel mod isolation to repair this host. A repair would put back mods the current round turned off.
 gui-integrity-repaired = { $count ->
     [0] Nothing needed replacing.
     [one] Repaired one file.
@@ -1195,7 +1162,6 @@ gui-integrity-repair-failed = { $count ->
 gui-integrity-recovery = A broken file could not be put back after its repair failed. What was moved aside is kept here for review, and this host needs attention before it is changed again:
 gui-integrity-shared-title = Shared launch files
 gui-integrity-shared-detail = The Minecraft client JAR and libraries every instance of this release shares. Repair does not replace these.
-gui-integrity-shared-servers = Shared launch files are checked for clients only. This server's own recorded files are checked above.
 gui-integrity-shared-not-cached = Not checked: this Minecraft release has not been launched yet, so there is nothing cached to check against.
 gui-integrity-shared-sound = { $count ->
     [one] One shared file checked, and it is intact.
@@ -1211,7 +1177,6 @@ gui-integrity-shared-waiting = { $count ->
 }
 gui-integrity-shared-loader = The loader's own libraries are not part of this check.
 operation-exporting-diagnostic-bundle = Writing the diagnostic bundle
-gui-bundle-title = Diagnostic bundle
 gui-bundle-detail = Collects the files you choose into one zip file saved on this computer, to attach to a bug report yourself. Nothing is uploaded.
 gui-bundle-privacy = Files are copied exactly as they are. Logs and crash reports contain whatever the game and its mods wrote, which can include server addresses, player names, or file paths, so choose only what you are willing to share. Ephervex never offers its configuration file, credentials, or tokens.
 gui-bundle-empty = This host has no logs, crash reports, or recorded state to bundle yet.
@@ -1238,7 +1203,188 @@ gui-bundle-kind-launcher-log = Ephervex log
 gui-bundle-kind-recipe = Recorded contents
 gui-bundle-kind-record = Host record
 gui-host-change-wait = Another host's files are still being changed. Try again once that finishes.
-gui-integrity-wait = Another verification or repair is still running. Stop it or wait for it to finish.
+## Diagnostics: configuration and failure analysis
+
+operation-diagnosing-host = Diagnosing
+operation-applying-fix = Applying a fix
+gui-diagnosis-title = Diagnostics
+gui-diagnosis-detail = Checks whether this host is configured correctly for what it runs. Nothing changes unless you apply a fix.
+gui-diagnosis-diagnose = Diagnose
+gui-diagnosis-diagnose-again = Diagnose again
+gui-diagnosis-stop = Stop
+gui-diagnosis-unchecked-title = Not diagnosed yet
+gui-diagnosis-unchecked = Diagnose checks Java, JVM settings, mod requirements, the last start's log and crash reports, and every recorded file. Hashing files can take a while on a large pack.
+gui-diagnosis-working = Diagnosing...
+gui-diagnosis-healthy = No problems found
+gui-diagnosis-problems = { $count ->
+    [one] 1 problem found
+   *[other] { $count } problems found
+}
+gui-diagnosis-incomplete = Java could not be checked
+gui-diagnosis-summary = Checked at { $time }. { $count ->
+    [0] No customizations.
+    [one] 1 valid customization.
+   *[other] { $count } valid customizations.
+}
+gui-diagnosis-summary-quick = Checked at { $time } after the last run failed. Recorded files were not hashed.
+gui-diagnosis-failed = Diagnosis could not finish
+gui-diagnosis-canceled = Diagnosis stopped before it finished. Nothing was changed.
+gui-diagnosis-stale = The host changed. The last result stays on screen until it is checked again.
+gui-diagnosis-likely-cause = Likely cause
+gui-diagnosis-customized-detail = Differs from what Ephervex would choose and still works. Not a problem.
+gui-diagnosis-other-findings = Other findings ({ $count })
+gui-diagnosis-show = Show
+gui-diagnosis-requires = requires { $value }
+gui-diagnosis-problems-heading = { $count ->
+    [one] Problem
+   *[other] Problems ({ $count })
+}
+gui-diagnosis-customized-heading = Valid, customized ({ $count })
+gui-diagnosis-copy-report-hint = Diagnose this host first. The report summarizes what a diagnosis found.
+gui-diagnosis-hide = Hide
+gui-diagnosis-badge-problem = Problem
+gui-diagnosis-badge-customized = Customized
+gui-diagnosis-checked-title = What was checked
+gui-diagnosis-check-ok = OK
+gui-diagnosis-check-problem = Problem
+gui-diagnosis-check-customized = Customized
+gui-diagnosis-check-skipped = Not checked
+gui-diagnosis-failure-context = Opened after a failed run: { $value }
+gui-diagnosis-support-title = Report a problem
+gui-diagnosis-support-detail = A readable summary to paste into a bug report or support thread. Paths in your home folder are shortened and JVM argument values are left out.
+gui-diagnosis-copy-report = Copy technical report
+gui-diagnosis-bundle-show = Prepare diagnostic bundle
+gui-diagnosis-bundle-hide = Hide diagnostic bundle
+gui-diagnosis-more-files = { $count } more
+gui-diagnosis-wait = Another diagnosis or fix is still running. Stop it or wait for it to finish.
+gui-diagnosis-open-mods = Open Mods
+gui-diagnosis-open-settings = Open settings
+gui-diagnosis-open-java-settings = Open Java settings
+gui-diagnosis-open-log = Open log
+gui-diagnosis-open-crash-report = Open crash report
+gui-diagnosis-review-fix = Review fix
+gui-diagnosis-use-recommended-java = Use recommended Java
+gui-diagnosis-java-pinned-host = Chosen in this host's settings.
+gui-diagnosis-java-pinned-launcher = Chosen by the preferred Java path in Settings.
+gui-diagnosis-java-major = This runtime is Java { $found }.
+gui-diagnosis-java-too-old = It is { $found }, older than the { $minimum } the loader needs.
+gui-diagnosis-java-too-new = It is { $found }, newer than the { $maximum } the loader accepts.
+gui-diagnosis-java-architecture = It is built for { $found }, and this host needs { $expected }.
+gui-diagnosis-java-requires = Minecraft { $minecraft } requires Java { $major }.
+gui-diagnosis-java-incompatible = The selected Java cannot run this host
+gui-diagnosis-java-unusable = The selected Java path is not a usable runtime
+gui-diagnosis-java-detection-off = No Java runtime to use
+gui-diagnosis-java-none-installed = No compatible Java is installed
+gui-diagnosis-java-detection-off-detail = Java detection is off in Settings and no Java path is set.
+gui-diagnosis-java-download-off-detail = Automatic Java download is off in Settings.
+gui-diagnosis-java-custom = Custom Java { $version }
+gui-diagnosis-java-satisfies = It satisfies what Minecraft { $minecraft } requires (Java { $major }). Ephervex would otherwise choose a runtime automatically.
+gui-diagnosis-required-by = Required by { $name }.
+gui-diagnosis-required-by-others = Required by { $name } and { $count ->
+    [one] 1 other mod.
+   *[other] { $count } other mods.
+}
+gui-diagnosis-dependency-disabled = { $name } is turned off
+gui-diagnosis-dependency-missing = { $name } is not installed
+gui-diagnosis-dependency-missing-detail = Install it from the Mods page. Diagnostics does not choose a version for you.
+gui-diagnosis-conflict = { $name } does not work with { $other }
+gui-diagnosis-conflict-detail = Its recorded relations say so. Turn one of them off to test without it.
+gui-diagnosis-loader-missing = { $requester } requires { $dependency }, which is not installed
+gui-diagnosis-loader-version = { $requester } requires another version of { $dependency } (found { $actual })
+gui-diagnosis-loader-range = Accepted versions: { $range }
+gui-diagnosis-loader-detail = Reported by the loader when this host last started.
+gui-diagnosis-hand-placed = { $count ->
+    [one] 1 hand-placed mod
+   *[other] { $count } hand-placed mods
+}
+gui-diagnosis-hand-placed-detail = Jars in the mods folder that Ephervex did not install.
+gui-diagnosis-crash = The last run crashed
+gui-diagnosis-crash-names = The crash report names: { $names }
+gui-diagnosis-files-damaged = { $count ->
+    [one] 1 recorded file is missing or damaged
+   *[other] { $count } recorded files are missing or damaged
+}
+gui-diagnosis-files-restorable = { $count ->
+    [one] 1 can be restored from its recorded source.
+   *[other] { $count } can be restored from their recorded sources.
+}
+gui-diagnosis-files-unrestorable = { $count ->
+    [one] 1 has no recorded source. Import the pack again to restore it.
+   *[other] { $count } have no recorded source. Import the pack again to restore them.
+}
+gui-diagnosis-shared-damaged = { $count ->
+    [one] 1 shared launch file is damaged
+   *[other] { $count } shared launch files are damaged
+}
+gui-diagnosis-jvm-args-host = Custom JVM arguments
+gui-diagnosis-jvm-args-launcher = Launcher-wide JVM arguments
+gui-diagnosis-jvm-args-host-detail = { $count ->
+    [one] This host sets 1 JVM argument of its own.
+   *[other] This host sets { $count } JVM arguments of its own.
+}
+gui-diagnosis-jvm-args-launcher-detail = { $count ->
+    [one] 1 JVM argument from Settings applies to every host.
+   *[other] { $count } JVM arguments from Settings apply to every host.
+}
+gui-diagnosis-memory = Custom memory settings
+gui-diagnosis-memory-default = default
+gui-diagnosis-memory-detail = Minimum { $min }, maximum { $max }.
+gui-diagnosis-check-java = Java
+gui-diagnosis-check-java-pinned = { $version }, chosen by a setting. Requires Java { $major }.
+gui-diagnosis-check-java-managed = { $version }, managed by Ephervex. Requires Java { $major }.
+gui-diagnosis-check-java-automatic = { $version }, chosen automatically. Requires Java { $major }.
+gui-diagnosis-check-java-download = Java { $major } is downloaded at the next launch.
+gui-diagnosis-check-java-refused = No usable runtime.
+gui-diagnosis-check-failed = Could not be checked: { $error }
+gui-diagnosis-check-mods = Mod requirements
+gui-diagnosis-check-mods-value = { $enabled } enabled, { $disabled } turned off. Requirements recorded for { $answered }, unknown for { $unanswered }.
+gui-diagnosis-check-log = Last start's log
+gui-diagnosis-check-log-none = No log from a previous start.
+gui-diagnosis-check-log-refused = The loader refused to start.
+gui-diagnosis-check-log-clean = No loader refusal.
+gui-diagnosis-check-crash = Crash reports
+gui-diagnosis-check-crash-none = No crash since the last start.
+gui-diagnosis-check-crash-found = Crashed after the last start: { $report }
+gui-diagnosis-check-files = Recorded files
+gui-diagnosis-check-files-skipped = Not checked in this pass. Diagnose hashes them.
+gui-diagnosis-check-files-value = { $count } checked: { $intact } intact, { $problems } missing or damaged, { $unverifiable } without a checksum.
+gui-fix-title = Proposed changes
+gui-fix-loading = Working out what would change...
+gui-fix-cancel = Cancel
+gui-fix-apply = Apply
+gui-fix-applying = Applying...
+gui-fix-preview-failed = The change could not be previewed: { $error }
+gui-fix-enable = Enable
+gui-fix-restore = Restore
+gui-fix-current = Current
+gui-fix-recommended = Recommended
+gui-fix-java-unknown-version = Version could not be read
+gui-fix-java-version = Java { $version }
+gui-fix-java-managed = Ephervex managed Java { $version }
+gui-fix-java-download = Ephervex managed Java { $major }, downloaded at the next launch
+gui-fix-java-requires = This host requires Java { $major }.
+gui-fix-enable-note = No files will be removed.
+gui-fix-java-note = This changes only this host's Java selection. Its memory and JVM arguments stay as they are.
+gui-fix-restore-note = Each file is fetched from its recorded source and checked before it replaces the broken copy. No other files change.
+gui-fix-nothing-left = Nothing needs to change anymore. Diagnose again to see the current state.
+gui-fix-blocked-running = Stop this host to apply this change.
+gui-fix-blocked-isolation = Finish or cancel mod isolation to apply this change.
+gui-fix-enabled = { $count ->
+    [one] Enabled 1 mod.
+   *[other] Enabled { $count } mods.
+}
+gui-fix-enabled-partly = Enabled { $count } of { $total } mods. These did not change:
+gui-fix-java-applied = This host now uses automatic Java selection.
+gui-fix-java-not-applied = The Java selection did not change:
+gui-run-failed-client = The last launch failed
+gui-run-crashed = Minecraft crashed
+gui-run-failed-server = The server stopped with an error
+gui-run-exited-with-error = Minecraft exited with an error.
+gui-run-server-exited-with-error = The server exited with an error.
+gui-run-likely-cause = Likely cause: { $cause }
+gui-run-no-cause = Diagnostics found no configuration problem. The crash report or log has the details.
+gui-run-open-diagnostics = Open Diagnostics
+gui-run-dismiss = Dismiss
 
 operation-creating-snapshot = Creating snapshot
 operation-restoring-snapshot = Restoring snapshot

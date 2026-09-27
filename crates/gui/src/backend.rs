@@ -14,20 +14,20 @@ use ephervex_core::ManagedMutationReport;
 use ephervex_core::live_diagnostics::TailedLine;
 use ephervex_core::{
     App, AuthEvent, AuthObserver, CancellationToken, ClientFolder, ClientModOutcome, ClientModPlan,
-    ConnectionTarget, CoreError, CoreResult, CrashReview, DeclaredProject, DiagnosticKind,
-    DiagnosticRequest, DiagnosticScope, ErrorChain, EulaStatus, ImportRequest, InstalledHost,
-    IsolationError, IsolationPlan, IsolationReconciliation, IsolationReport, IsolationRequest,
-    IsolationSession, LaunchAndConnectEvent, LaunchAndConnectObserver, LaunchAndConnectOptions,
-    LaunchEvent, LaunchFeatures, LaunchObserver, LaunchOptions, LinkedModOutcome, LinkedModPlan,
-    LinkedModRequest, LinkedStart, LinkedTargetPlan, LinkedTargetResult, LinkedTargetState,
-    LocalModOffer, LocalModPlan, LocalModReport, LoginOptions, ManagedModEntry, ManagedModSnapshot,
-    MetadataAvailability, ModInstallPlan, ModMutability, ModMutation, ModMutationPlan, ModPresence,
-    ModSearchQuery, MutationRestriction, NewClient, NewServer, OperationReporter,
-    OptionalSelection, PackAnalysis, Paths, PlannedOutcome, ProcessMonitor, ProgressSink,
-    ProviderFileIdentity, RoundAnswer, SearchOptions, ServerCommit, ServerContentSource,
-    ServerCreateOptions, ServerEvent, ServerFolder, ServerNetworkSettings, ServerObserver,
-    ServerRecord, SideRequirement, SnapshotOrigin, SnapshotRestoreOptions, SuspectReason,
-    WatchTarget,
+    ConnectionTarget, CoreError, CoreResult, CrashReview, DeclaredProject, DiagnosisRequest,
+    DiagnosticFix, DiagnosticKind, DiagnosticRequest, DiagnosticScope, ErrorChain, EulaStatus,
+    ImportRequest, InstalledHost, IsolationError, IsolationPlan, IsolationReconciliation,
+    IsolationReport, IsolationRequest, IsolationSession, LaunchAndConnectEvent,
+    LaunchAndConnectObserver, LaunchAndConnectOptions, LaunchEvent, LaunchFeatures, LaunchObserver,
+    LaunchOptions, LinkedModOutcome, LinkedModPlan, LinkedModRequest, LinkedStart,
+    LinkedTargetPlan, LinkedTargetResult, LinkedTargetState, LocalModOffer, LocalModPlan,
+    LocalModReport, LoginOptions, ManagedModEntry, ManagedModSnapshot, MetadataAvailability,
+    ModInstallPlan, ModMutability, ModMutation, ModMutationPlan, ModPresence, ModSearchQuery,
+    MutationRestriction, NewClient, NewServer, OperationReporter, OptionalSelection, PackAnalysis,
+    Paths, PlannedOutcome, ProcessMonitor, ProgressSink, ProviderFileIdentity, RoundAnswer,
+    SearchOptions, ServerCommit, ServerContentSource, ServerCreateOptions, ServerEvent,
+    ServerFolder, ServerNetworkSettings, ServerObserver, ServerRecord, SideRequirement,
+    SnapshotOrigin, SnapshotRestoreOptions, SuspectReason, WatchTarget,
 };
 use ephervex_core::{
     ConfiguredPreferences, LanguageAvailability, LanguageEntry, MinecraftPreferencePreview,
@@ -39,6 +39,7 @@ use ephervex_model::{
     OperationStatus, ServerId, SnapshotId, StorageClass,
 };
 
+use crate::diagnosis_view::{self, DiagnosisView, OutcomeView, PreviewView};
 use crate::presentation::{
     ActivityPresentation, ImportErrorKind, ImportFailure, ImportPresentation, InstancePresentation,
     ModImpactPresentation, ModRequirementPresentation, PairPresentation, ServerPresentation,
@@ -286,16 +287,24 @@ pub enum Command {
         generation: u64,
         request: u64,
     },
-    /// Checks a host's recorded files against their recorded digests, and a
-    /// client's shared launch files as well.
-    VerifyHost {
+    /// Diagnoses a host's configuration, hashing its recorded files when asked.
+    DiagnoseHost {
         host: InstalledHost,
         request: u64,
+        integrity: bool,
     },
-    /// Replaces what a host is missing or holding wrongly, then checks again.
-    RepairHost {
+    /// Works out what a fix would change, changing nothing.
+    PreviewFix {
         host: InstalledHost,
         request: u64,
+        fix: DiagnosticFix,
+    },
+    /// Applies a previewed fix, then diagnoses the host again.
+    ApplyFix {
+        host: InstalledHost,
+        request: u64,
+        fix: DiagnosticFix,
+        integrity: bool,
     },
     /// Measures what Ephervex's own directories hold.
     MeasureDiskUsage {
@@ -1309,40 +1318,6 @@ pub struct HostSnapshotsData {
     pub has_plain_copies: bool,
 }
 
-/// One recorded file, as a verification found it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VerifiedFileData {
-    pub path: String,
-    /// The core answer, by its stable identifier.
-    pub integrity: &'static str,
-    /// Nothing is wrong with it, which includes having nothing to prove.
-    pub sound: bool,
-    /// A repair would replace it, because it is wrong and has an address.
-    pub repairable: bool,
-}
-
-/// What checking a client's shared launch files found.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SharedArtifactData {
-    /// Nothing is cached for the release yet, so nothing could be checked.
-    pub metadata_cached: bool,
-    pub checked: usize,
-    /// Present with the wrong bytes, or unreadable.
-    pub faults: Vec<VerifiedFileData>,
-    /// Not downloaded yet, which a launch does and which is not damage.
-    pub not_yet_fetched: usize,
-    pub loader_libraries_uncovered: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VerificationData {
-    /// Every file the host records, in the order core checked them.
-    pub files: Vec<VerifiedFileData>,
-    /// `None` for a server, whose shared files core does not check; an error
-    /// message when the check itself could not run.
-    pub shared: Option<Result<SharedArtifactData, String>>,
-}
-
 /// One thing a diagnostic bundle could carry, as the core planner offers it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BundlePartData {
@@ -1361,20 +1336,6 @@ pub struct BundleExportData {
     /// Chosen and could not be read, such as a log that rotated away.
     pub unreadable: Vec<String>,
     pub bytes: u64,
-}
-
-/// What one repair did.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct RepairData {
-    pub repaired: Vec<String>,
-    /// Attempted and not fixed, so trying again can help.
-    pub failed: Vec<String>,
-    /// Wrong, with no address to fetch it from again.
-    pub unrepairable: Vec<String>,
-    /// Launcher scratch a failed rollback left behind for review.
-    pub recovery: Vec<String>,
-    /// The repair was canceled before it reached every file.
-    pub stopped: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1572,22 +1533,42 @@ pub enum Event {
         instance: InstanceId,
         restartable: bool,
     },
-    /// What a verification found on one host.
-    HostVerified {
+    /// What a diagnosis of one host found.
+    HostDiagnosed {
         host: InstalledHost,
         request: u64,
-        data: VerificationData,
+        view: Box<DiagnosisView>,
     },
-    /// What a repair did. The verification after it says what is on disk now.
-    HostRepaired {
+    /// A diagnosis ended without a result.
+    DiagnosisFailed {
         host: InstalledHost,
         request: u64,
-        data: RepairData,
+        message: String,
+        canceled: bool,
     },
-    /// A verification or repair the controller sent has finished, whichever
-    /// way it ended. Sent after any result it produced.
-    IntegritySettled {
+    /// What a fix would change, or why that could not be worked out.
+    FixPreviewed {
+        host: InstalledHost,
         request: u64,
+        preview: Result<PreviewView, String>,
+    },
+    /// What applying a fix did. A diagnosis of the host follows it.
+    FixApplied {
+        host: InstalledHost,
+        request: u64,
+        outcome: OutcomeView,
+    },
+    /// A diagnosis or fix the controller sent has finished, whichever way it
+    /// ended. Sent after any result it produced.
+    DiagnosisSettled {
+        request: u64,
+    },
+    /// A run ended in failure, with a diagnosis of the host made without
+    /// hashing its files, when one could be made.
+    RunFailed {
+        host: InstalledHost,
+        failure: String,
+        view: Option<Box<DiagnosisView>>,
     },
     /// One measurement of Ephervex's storage.
     DiskUsage {
@@ -3108,7 +3089,11 @@ fn run_worker(
                     },
                 );
             }
-            Command::VerifyHost { host, request } => {
+            Command::DiagnoseHost {
+                host,
+                request,
+                integrity,
+            } => {
                 let paths = app.paths().clone();
                 let reports = events.clone();
                 spawn_async_operation(
@@ -3116,61 +3101,98 @@ fn run_worker(
                     &events,
                     Arc::clone(&cancellations),
                     AsyncOperationRequest {
-                        title: "operation-verifying-host",
+                        title: "operation-diagnosing-host",
                         entity: host.id(),
                         allow_cancel: true,
-                        finished: Some(Event::IntegritySettled { request }),
+                        finished: Some(Event::DiagnosisSettled { request }),
                     },
                     move |app, reporter, cancel| async move {
-                        let data = verification_data(&app, host, &reporter, &cancel).await?;
-                        let _ = reports.send(Event::HostVerified {
-                            host,
-                            request,
-                            data,
-                        });
+                        report_diagnosis(
+                            &app, &reports, host, request, integrity, &reporter, &cancel,
+                        )
+                        .await?;
                         Ok(OperationReport::Reported)
                     },
                 );
             }
-            Command::RepairHost { host, request } => {
+            Command::PreviewFix { host, request, fix } => {
+                spawn_detached(
+                    app.paths().clone(),
+                    events.clone(),
+                    move |app, events, runtime| {
+                        let preview = runtime
+                            .block_on(app.preview_fix(host, &fix))
+                            .map(|preview| diagnosis_view::preview_view(&preview))
+                            .map_err(|error| localized_error(&error));
+                        let _ = events.send(Event::FixPreviewed {
+                            host,
+                            request,
+                            preview,
+                        });
+                    },
+                );
+            }
+            Command::ApplyFix {
+                host,
+                request,
+                fix,
+                integrity,
+            } => {
                 if refuse_while_changing(&changing, host, &events) {
-                    let _ = events.send(Event::IntegritySettled { request });
+                    let _ = events.send(Event::DiagnosisSettled { request });
                     continue;
                 }
                 let paths = app.paths().clone();
                 let reports = events.clone();
                 let refreshed = Arc::clone(&refreshed_mods);
-                let in_flight = HostChangeInFlight::mark(&changing, host, "gui-repair-busy");
+                let in_flight = HostChangeInFlight::mark(&changing, host, "gui-fix-busy");
                 spawn_async_operation(
                     paths,
                     &events,
                     Arc::clone(&cancellations),
                     AsyncOperationRequest {
-                        title: "operation-repairing-host",
+                        title: "operation-applying-fix",
                         entity: host.id(),
                         allow_cancel: true,
-                        finished: Some(Event::IntegritySettled { request }),
+                        finished: Some(Event::DiagnosisSettled { request }),
                     },
                     move |app, reporter, cancel| async move {
                         let _in_flight = in_flight;
-                        let report = app.repair_host(host, &reporter, &cancel).await?;
-                        let stopped = cancel.is_cancelled();
-                        let _ = reports.send(Event::HostRepaired {
+                        let outcome = match app.apply_fix(host, &fix, &reporter, &cancel).await {
+                            Ok(outcome) => diagnosis_view::outcome_view(
+                                &fix,
+                                &outcome,
+                                cancel.is_cancelled(),
+                                &localized_error,
+                            ),
+                            Err(error) => {
+                                let _ = reports.send(Event::FixApplied {
+                                    host,
+                                    request,
+                                    outcome: OutcomeView {
+                                        message: localized_error(&error),
+                                        failed: true,
+                                        changed: false,
+                                        lines: Vec::new(),
+                                    },
+                                });
+                                return Err(error);
+                            }
+                        };
+                        let _ = reports.send(Event::FixApplied {
                             host,
                             request,
-                            data: repair_data(&report, stopped),
+                            outcome,
                         });
                         send_host_mods(&app, host, &reports, &refreshed, false);
-                        // What the repair meant to do is not evidence of what
-                        // is on disk now; only checking again is.
-                        if !stopped {
-                            reporter.set_stage(Some("operation-stage-rechecking-host".to_owned()));
-                            let data = verification_data(&app, host, &reporter, &cancel).await?;
-                            let _ = reports.send(Event::HostVerified {
-                                host,
-                                request,
-                                data,
-                            });
+                        // What the fix meant to do is not evidence of what the
+                        // host holds now; only diagnosing again is.
+                        if !cancel.is_cancelled() {
+                            reporter.set_stage(Some("operation-stage-diagnosing-again".to_owned()));
+                            report_diagnosis(
+                                &app, &reports, host, request, integrity, &reporter, &cancel,
+                            )
+                            .await?;
                         }
                         Ok(OperationReport::Reported)
                     },
@@ -4716,61 +4738,95 @@ fn bundle_file_name(host: InstalledHost) -> String {
 }
 
 /// Checks a host, and a client's shared launch files, for the Diagnostics surface.
-async fn verification_data(
+/// Diagnoses a host and reports the result, or why there is none.
+async fn report_diagnosis(
     app: &App,
+    events: &Sender<Event>,
     host: InstalledHost,
+    request: u64,
+    integrity: bool,
     reporter: &OperationReporter,
     cancel: &CancellationToken,
-) -> CoreResult<VerificationData> {
-    let report = app.verify_host(host, reporter, cancel).await?;
-    let files = report.files.iter().map(verified_file_data).collect();
-    let shared = match host {
-        InstalledHost::Instance(instance) => {
-            reporter.set_stage(Some("operation-stage-checking-shared-files".to_owned()));
-            Some(
-                app.verify_shared_artifacts(instance)
-                    .await
-                    .map(|shared| SharedArtifactData {
-                        metadata_cached: shared.metadata_cached,
-                        checked: shared.files.len(),
-                        faults: shared.faults().map(verified_file_data).collect(),
-                        not_yet_fetched: shared.not_yet_fetched().count(),
-                        loader_libraries_uncovered: shared.loader_libraries_uncovered,
-                    })
-                    .map_err(|error| localized_error(&error)),
-            )
+) -> CoreResult<()> {
+    match app
+        .diagnose_host(host, DiagnosisRequest { integrity }, reporter, cancel)
+        .await
+    {
+        Ok(diagnosis) => {
+            let _ = events.send(Event::HostDiagnosed {
+                host,
+                request,
+                view: Box::new(diagnosis_view::diagnosis_view(&diagnosis, &localized_error)),
+            });
+            Ok(())
         }
-        InstalledHost::Server(_) => None,
-    };
-    Ok(VerificationData { files, shared })
-}
-
-fn verified_file_data(file: &ephervex_core::VerifiedFile) -> VerifiedFileData {
-    VerifiedFileData {
-        path: file.logical_path.display().to_string(),
-        integrity: file.integrity.as_str(),
-        sound: file.integrity.is_sound(),
-        repairable: file.integrity.is_repairable() && file.has_source,
+        Err(error) => {
+            let _ = events.send(Event::DiagnosisFailed {
+                host,
+                request,
+                message: localized_error(&error),
+                canceled: error.is_cancellation(),
+            });
+            Err(error)
+        }
     }
 }
 
-fn repair_data(report: &ephervex_core::RepairReport, stopped: bool) -> RepairData {
-    let paths = |paths: &[PathBuf]| {
-        paths
-            .iter()
-            .map(|path| path.display().to_string())
-            .collect()
+/// Explains a run that just failed with a diagnosis that hashes nothing, so
+/// it is quick and never mistaken for the full check.
+async fn explain_failed_run(
+    app: &App,
+    events: &Sender<Event>,
+    host: InstalledHost,
+    failure: Option<String>,
+) {
+    let Some(failure) = failure else {
+        return;
     };
-    RepairData {
-        repaired: paths(&report.repaired),
-        failed: paths(&report.failed),
-        unrepairable: paths(&report.unrepairable),
-        recovery: report
-            .recovery_issues
-            .iter()
-            .map(|issue| issue.path.display().to_string())
-            .collect(),
-        stopped,
+    let view = app
+        .diagnose_host(
+            host,
+            DiagnosisRequest::default(),
+            &OperationReporter::silent("diagnosing-failed-run"),
+            &CancellationToken::new(),
+        )
+        .await
+        .ok()
+        .map(|diagnosis| Box::new(diagnosis_view::diagnosis_view(&diagnosis, &localized_error)));
+    let _ = events.send(Event::RunFailed {
+        host,
+        failure,
+        view,
+    });
+}
+
+/// What went wrong with a server run that is worth explaining.
+fn server_failure(result: &CoreResult<ephervex_core::ServerExit>) -> Option<String> {
+    match result {
+        Ok(exit) if exit.code.is_some_and(|code| code != 0) => {
+            Some(lookup("gui-run-server-exited-with-error"))
+        }
+        Err(error) if !error.is_cancellation() => Some(localized_error(error)),
+        _ => None,
+    }
+}
+
+/// What went wrong with a client launch that is worth explaining. A stop the
+/// user asked for, a signal, and a sign-in the launch is waiting on are not.
+fn launch_failure(
+    result: &CoreResult<ephervex_core::LaunchOutcome>,
+    stopped: bool,
+) -> Option<String> {
+    if stopped {
+        return None;
+    }
+    match result {
+        Ok(outcome) => outcome
+            .exit
+            .is_some_and(|exit| exit.code.is_some_and(|code| code != 0))
+            .then(|| lookup("gui-run-exited-with-error")),
+        Err(error) if error.is_cancellation() || error.requires_interactive_login() => None,
+        Err(error) => Some(localized_error(error)),
     }
 }
 
@@ -5929,6 +5985,8 @@ fn spawn_launch(
                 if let Ok(app) = App::open_at(paths) {
                     send_snapshot(&app, &events);
                 }
+                let failure = launch_failure(&result, cancel.is_cancelled());
+                explain_failed_run(&app, &events, InstalledHost::Instance(instance), failure).await;
             });
         },
     );
@@ -6363,6 +6421,7 @@ fn forward_launch_event(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn spawn_server(paths: Paths, events: &Sender<Event>, server: ServerId, entity: String) {
     spawn_detached(
         paths.clone(),
@@ -6417,7 +6476,7 @@ fn spawn_server(paths: Paths, events: &Sender<Event>, server: ServerId, entity: 
                 let result = app.start_server(server, None, &observer).await;
                 drop(observer);
                 let _ = forward.await;
-                match result {
+                match &result {
                     Ok(exit) => {
                         let failed = exit.code != Some(0);
                         let id = observed_operation
@@ -6448,19 +6507,21 @@ fn spawn_server(paths: Paths, events: &Sender<Event>, server: ServerId, entity: 
                             id,
                             &lookup("gui-activity-starting-server"),
                             &entity,
-                            &localized_error(&error),
+                            &localized_error(error),
                             "failed",
                             false,
                             true,
                             false,
                         );
-                        send_error(&events, &error);
+                        send_error(&events, error);
                     }
                 }
                 if let Ok(app) = App::open_at(paths) {
                     send_snapshot(&app, &events);
                     send_server_workspace(&app, server, &events);
                 }
+                let failure = server_failure(&result);
+                explain_failed_run(&app, &events, InstalledHost::Server(server), failure).await;
             });
         },
     );
@@ -7769,7 +7830,7 @@ fn loader_selection(loader: &str, version: &str) -> Result<LoaderSelection, Core
     }
 }
 
-fn localized_error(error: &CoreError) -> String {
+pub(crate) fn localized_error(error: &CoreError) -> String {
     // `message_args` deliberately excludes the values these accessors expose
     // (see their doc comments), so a message or an action that reads one of
     // their placeholders renders it literally unless every one of them is
@@ -9680,33 +9741,6 @@ mod tests {
             server_restart_outcome(Ok(ControlResponse::Refused("stopping".to_owned()))),
             RestartOutcome::Interrupted(detail) if detail == "stopping"
         ));
-    }
-
-    #[test]
-    fn only_a_damaged_file_with_an_address_is_offered_to_repair() {
-        use ephervex_core::{Integrity, VerifiedFile};
-        let file = |integrity, has_source| {
-            verified_file_data(&VerifiedFile {
-                logical_path: PathBuf::from("mods/a.jar"),
-                integrity,
-                has_source,
-            })
-        };
-
-        assert!(file(Integrity::Absent, true).repairable);
-        assert!(file(Integrity::Corrupt, true).repairable);
-        assert!(file(Integrity::Unreadable, true).repairable);
-        let shipped = file(Integrity::Corrupt, false);
-        assert!(
-            !shipped.repairable && !shipped.sound,
-            "wrong, with nowhere to fetch it from"
-        );
-        let unproven = file(Integrity::Unverifiable, false);
-        assert!(
-            !unproven.repairable && unproven.sound,
-            "nothing proves it wrong"
-        );
-        assert!(!file(Integrity::Intact, true).repairable);
     }
 
     #[test]

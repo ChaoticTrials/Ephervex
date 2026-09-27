@@ -1,5 +1,6 @@
-//! The Diagnostics surface of client and server workspaces: verification,
-//! repair, and the reasons Repair waits.
+//! The Diagnostics surface of client and server workspaces: its states, its
+//! findings, the fix preview, the failed-run notice, and what a bug report can
+//! carry.
 #![allow(clippy::expect_used, clippy::panic)]
 
 mod support;
@@ -7,7 +8,10 @@ mod support;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use ephervex_gui::ui::{AppWindow, BundlePartRow, GuiI18n, InstanceRow, ServerRow};
+use ephervex_gui::ui::{
+    AppWindow, BundlePartRow, DiagnosticCheckRow, DiagnosticFindingRow, FixChangeRow, GuiI18n,
+    InstanceRow, ServerRow, Theme,
+};
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use i_slint_backend_testing::{
     AccessibleRole, ElementHandle, TestingBackend, TestingBackendOptions,
@@ -53,21 +57,36 @@ fn tab(ui: &AppWindow, message: &str) -> ElementHandle {
         .unwrap_or_else(|| panic!("no workspace tab labeled {message}"))
 }
 
-const REPAIR_BLOCKERS: [&str; 2] = [
-    "gui-integrity-repair-blocked-running",
-    "gui-integrity-repair-blocked-isolation",
-];
+fn finding(key: &str, problem: bool, title: &str, fix: &str, route: &str) -> DiagnosticFindingRow {
+    DiagnosticFindingRow {
+        key: key.into(),
+        problem,
+        title: title.into(),
+        detail: "Required by Create.".into(),
+        chain: strings(&["Create", "Flywheel"]),
+        files: strings(&[]),
+        more_files: SharedString::default(),
+        fix_label: if fix.is_empty() {
+            SharedString::default()
+        } else {
+            lookup(fix).into()
+        },
+        route: route.into(),
+        route_label: if route.is_empty() {
+            SharedString::default()
+        } else {
+            lookup("gui-diagnosis-open-mods").into()
+        },
+    }
+}
 
-fn blockers_shown(ui: &AppWindow) -> Vec<&'static str> {
-    REPAIR_BLOCKERS
-        .into_iter()
-        .filter(|message| visible(ui, &lookup(message)))
-        .collect()
+fn rows<T: Clone + 'static>(rows: Vec<T>) -> ModelRc<T> {
+    ModelRc::new(VecModel::from(rows))
 }
 
 /// Opens Diagnostics on the client or the server workspace with a finished
-/// verification that found one file a repair can replace.
-fn checked_surface(ui: &AppWindow, server_host: bool, running: bool) {
+/// diagnosis: one problem a fix addresses, and one customization.
+fn diagnosed_surface(ui: &AppWindow, server_host: bool, running: bool) {
     if server_host {
         server_workspace(ui, server(running));
     } else {
@@ -80,12 +99,25 @@ fn checked_surface(ui: &AppWindow, server_host: bool, running: bool) {
     ui.set_host_busy_id(SharedString::default());
     support::set_surface(ui, 1, "Diagnostics");
     support::update_host(ui, 0, |view| {
-        view.isolation_active = false;
-        view.integrity_state = "checked".into();
-        view.integrity_summary =
-            lookup_args("gui-integrity-problems", [("count", Arg::from(1))]).into();
-        view.integrity_repair_targets = strings(&["mods/gone.jar"]);
-        view.integrity_unrepairable = strings(&[]);
+        view.diagnosis_state = "result".into();
+        view.diagnosis_summary =
+            lookup_args("gui-diagnosis-problems", [("count", Arg::from(1))]).into();
+        view.diagnosis_detail = "Checked at 12:00.".into();
+        view.diagnosis_problems = rows(vec![finding(
+            "p0",
+            true,
+            "Flywheel is turned off",
+            "gui-diagnosis-review-fix",
+            "mods",
+        )]);
+        view.diagnosis_customized =
+            rows(vec![finding("c0", false, "Custom JVM arguments", "", "")]);
+        view.diagnosis_checks = rows(vec![DiagnosticCheckRow {
+            label: lookup("gui-diagnosis-check-java").into(),
+            value: "21.0.8, chosen automatically.".into(),
+            state: "ok".into(),
+            state_label: lookup("gui-diagnosis-check-ok").into(),
+        }]);
     });
     settle(ui);
 }
@@ -114,126 +146,216 @@ fn diagnostics_is_a_surface_of_client_and_server_workspaces() {
             Some(&(1, "Diagnostics".to_owned()))
         );
         assert_eq!(support::surface(&ui, 0), "Diagnostics");
-        assert!(enabled(&ui, "gui-integrity-verify"), "{kind}");
+        assert!(enabled(&ui, "gui-diagnosis-diagnose"), "{kind}");
+        assert!(
+            visible(&ui, &lookup("gui-diagnosis-unchecked-title")),
+            "opening Diagnostics runs nothing on its own"
+        );
+        assert!(
+            !enabled(&ui, "gui-diagnosis-copy-report"),
+            "there is nothing to report before a diagnosis"
+        );
     }
 }
 
 #[test]
-fn verifying_calls_the_host_the_surface_is_open_on() {
+fn diagnosing_asks_for_the_host_the_surface_is_open_on() {
     let ui = window();
-    let verified = Rc::new(RefCell::new(Vec::new()));
-    let sink = Rc::clone(&verified);
-    ui.on_verify_host(move |kind, id| sink.borrow_mut().push((kind.to_string(), id.to_string())));
+    let asked = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&asked);
+    ui.on_diagnose_host(move |kind, id| sink.borrow_mut().push((kind.to_string(), id.to_string())));
     for (server_host, kind, id) in host_kinds() {
-        checked_surface(&ui, server_host, false);
-        button(&ui, "gui-integrity-verify").mock_single_click(PointerEventButton::Left);
+        diagnosed_surface(&ui, server_host, false);
+        button(&ui, "gui-diagnosis-diagnose-again").mock_single_click(PointerEventButton::Left);
         assert_eq!(
-            verified.borrow().last(),
+            asked.borrow().last(),
             Some(&(kind.to_owned(), id.to_owned()))
         );
     }
 }
 
 #[test]
-fn a_repairable_finding_offers_repair_once_nothing_is_in_its_way() {
+fn problems_and_customizations_say_which_they_are_in_words() {
     let ui = window();
-    let repairs = Rc::new(RefCell::new(Vec::new()));
-    let sink = Rc::clone(&repairs);
-    ui.on_repair_host(move |kind, id| sink.borrow_mut().push((kind.to_string(), id.to_string())));
-    for (server_host, kind, id) in host_kinds() {
-        checked_surface(&ui, server_host, false);
-        assert!(enabled(&ui, "gui-integrity-repair"), "{kind}");
-        assert!(blockers_shown(&ui).is_empty());
-        assert!(
-            visible(&ui, "mods/gone.jar"),
-            "the preview names what repair touches"
-        );
-        button(&ui, "gui-integrity-repair").mock_single_click(PointerEventButton::Left);
-        assert_eq!(
-            repairs.borrow().last(),
-            Some(&(kind.to_owned(), id.to_owned()))
-        );
-    }
-}
-
-#[test]
-fn a_running_host_holds_repair_and_says_to_stop_it() {
-    let ui = window();
+    let reviewed = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&reviewed);
+    ui.on_review_fix(move |_, _, key| sink.borrow_mut().push(key.to_string()));
     for (server_host, kind, _) in host_kinds() {
-        checked_surface(&ui, server_host, true);
-        assert!(!enabled(&ui, "gui-integrity-repair"), "{kind}");
-        assert_eq!(
-            blockers_shown(&ui),
-            ["gui-integrity-repair-blocked-running"]
-        );
+        diagnosed_surface(&ui, server_host, false);
         assert!(
-            enabled(&ui, "gui-integrity-verify"),
-            "reading files is safe while the host runs"
+            visible(
+                &ui,
+                &format!(
+                    "{}: Flywheel is turned off",
+                    lookup("gui-diagnosis-badge-problem")
+                )
+            ),
+            "{kind}"
         );
-    }
-}
-
-#[test]
-fn an_isolation_session_holds_repair_with_its_own_reason() {
-    let ui = window();
-    for (server_host, kind, _) in host_kinds() {
-        checked_surface(&ui, server_host, false);
-        support::update_host(&ui, 0, |view| view.isolation_active = true);
-        settle(&ui);
-        assert!(!enabled(&ui, "gui-integrity-repair"), "{kind}");
-        assert_eq!(
-            blockers_shown(&ui),
-            ["gui-integrity-repair-blocked-isolation"]
-        );
-    }
-}
-
-#[test]
-fn a_repair_in_progress_shows_progress_rather_than_a_blocker() {
-    let ui = window();
-    for (server_host, kind, id) in host_kinds() {
-        checked_surface(&ui, server_host, false);
-        ui.set_host_busy_kind(kind.into());
-        ui.set_host_busy_id(id.into());
-        ui.set_host_busy_text("Downloading files".into());
-        settle(&ui);
-
-        assert!(!enabled(&ui, "gui-integrity-repair"), "{kind}");
-        assert!(!enabled(&ui, "gui-integrity-verify"));
-        assert!(blockers_shown(&ui).is_empty());
-        assert!(visible(&ui, "Downloading files"));
-        assert!(
-            enabled(&ui, "gui-integrity-stop"),
-            "the repair can be stopped"
-        );
-    }
-}
-
-#[test]
-fn findings_nothing_can_fetch_offer_no_repair_and_say_why() {
-    let ui = window();
-    for (server_host, kind, _) in host_kinds() {
-        checked_surface(&ui, server_host, false);
-        support::update_host(&ui, 0, |view| {
-            view.integrity_repair_targets = strings(&[]);
-            view.integrity_unrepairable = strings(&["mods/shipped.jar"]);
-        });
-        settle(&ui);
-        assert!(find_button(&ui, "gui-integrity-repair").is_none(), "{kind}");
         assert!(visible(
             &ui,
-            &lookup_args("gui-integrity-unrepairable", [("count", Arg::from(1))])
+            &format!(
+                "{}: Custom JVM arguments",
+                lookup("gui-diagnosis-badge-customized")
+            )
         ));
+        assert!(
+            visible(
+                &ui,
+                &lookup_args("gui-diagnosis-requires", [("value", Arg::from("Flywheel"))])
+            ),
+            "the chain says why the dependency is needed"
+        );
+        assert!(visible(&ui, &lookup("gui-diagnosis-checked-title")));
+        ElementHandle::find_by_accessible_label(
+            &ui,
+            &format!(
+                "{}: Flywheel is turned off",
+                lookup("gui-diagnosis-review-fix")
+            ),
+        )
+        .next()
+        .expect("the fix names the finding it is for")
+        .mock_single_click(PointerEventButton::Left);
+        assert_eq!(reviewed.borrow().last().map(String::as_str), Some("p0"));
     }
 }
 
 #[test]
-fn shared_launch_files_are_described_for_what_each_host_kind_supports() {
+fn after_a_failed_run_the_likely_cause_leads_and_customizations_fold_away() {
     let ui = window();
-    checked_surface(&ui, false, false);
-    assert!(visible(&ui, &lookup("gui-integrity-shared-detail")));
-    checked_surface(&ui, true, false);
-    assert!(visible(&ui, &lookup("gui-integrity-shared-servers")));
+    diagnosed_surface(&ui, false, false);
+    support::update_host(&ui, 0, |view| {
+        view.diagnosis_failure = lookup("gui-run-exited-with-error").into();
+    });
+    settle(&ui);
+
+    assert!(visible(&ui, &lookup("gui-diagnosis-likely-cause")));
+    let customized = format!(
+        "{}: Custom JVM arguments",
+        lookup("gui-diagnosis-badge-customized")
+    );
+    assert!(
+        !visible(&ui, &customized),
+        "a customization does not compete with the likely cause"
+    );
+    ElementHandle::find_by_accessible_label(
+        &ui,
+        &format!(
+            "{}: {}",
+            lookup("gui-diagnosis-show"),
+            lookup_args("gui-diagnosis-other-findings", [("count", Arg::from(1))])
+        ),
+    )
+    .next()
+    .expect("other findings can be shown")
+    .mock_single_click(PointerEventButton::Left);
+    settle(&ui);
+    assert!(visible(&ui, &customized), "and are not hidden completely");
+}
+
+#[test]
+fn a_running_diagnosis_offers_stop_and_holds_diagnose() {
+    let ui = window();
+    let stopped = Rc::new(RefCell::new(0));
+    let sink = Rc::clone(&stopped);
+    ui.on_stop_diagnosis(move || *sink.borrow_mut() += 1);
+    diagnosed_surface(&ui, false, false);
+    support::update_host(&ui, 0, |view| {
+        view.diagnosis_state = "working".into();
+        view.diagnosis_progress = "mods/big.jar".into();
+    });
+    settle(&ui);
+    assert!(visible(&ui, "mods/big.jar"));
+    assert!(!enabled(&ui, "gui-diagnosis-diagnose-again"));
+    button(&ui, "gui-diagnosis-stop").mock_single_click(PointerEventButton::Left);
+    assert_eq!(*stopped.borrow(), 1);
+}
+
+#[test]
+fn a_diagnosis_that_could_not_finish_says_so_apart_from_its_findings() {
+    let ui = window();
+    diagnosed_surface(&ui, true, false);
+    support::update_host(&ui, 0, |view| {
+        view.diagnosis_state = "failed".into();
+        view.diagnosis_error = "The version metadata could not be read.".into();
+    });
+    settle(&ui);
+    assert!(visible(&ui, &lookup("gui-diagnosis-failed")));
+    assert!(visible(&ui, "The version metadata could not be read."));
+}
+
+fn preview(ui: &AppWindow, blocked: &str) {
+    support::update_host(ui, 0, |view| {
+        view.fix_state = "ready".into();
+        view.fix_title = "Flywheel is turned off".into();
+        view.fix_changes = rows(vec![FixChangeRow {
+            action: lookup("gui-fix-enable").into(),
+            name: "Flywheel".into(),
+            detail: "mods/flywheel.jar".into(),
+        }]);
+        view.fix_notes = strings(&[&lookup("gui-fix-enable-note")]);
+        view.fix_blocked = blocked.into();
+    });
+    settle(ui);
+}
+
+#[test]
+fn a_preview_is_the_confirmation_and_apply_waits_for_what_is_in_its_way() {
+    let ui = window();
+    let applied = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&applied);
+    ui.on_apply_fix(move |kind, id| sink.borrow_mut().push((kind.to_string(), id.to_string())));
+    for (server_host, kind, id) in host_kinds() {
+        diagnosed_surface(&ui, server_host, false);
+        preview(&ui, &lookup("gui-fix-blocked-running"));
+        assert!(visible(&ui, &lookup("gui-fix-title")), "{kind}");
+        assert!(visible(&ui, &lookup("gui-fix-enable-note")));
+        assert!(visible(&ui, &lookup("gui-fix-blocked-running")));
+        assert!(!enabled(&ui, "gui-fix-apply"));
+
+        preview(&ui, "");
+        assert!(enabled(&ui, "gui-fix-apply"));
+        button(&ui, "gui-fix-apply").mock_single_click(PointerEventButton::Left);
+        assert_eq!(
+            applied.borrow().last(),
+            Some(&(kind.to_owned(), id.to_owned()))
+        );
+
+        support::update_host(&ui, 0, |view| view.fix_state = "applying".into());
+        settle(&ui);
+        assert!(!enabled(&ui, "gui-fix-apply"));
+        assert!(!enabled(&ui, "gui-fix-cancel"));
+        support::update_host(&ui, 0, |view| view.fix_state = SharedString::default());
+    }
+}
+
+#[test]
+fn a_failed_run_is_explained_on_the_client_overview_with_a_way_to_diagnostics() {
+    let ui = window();
+    let requests = support::follow_surface_requests(&ui);
+    client_workspace(&ui, instance());
+    support::update_host(&ui, 0, |view| {
+        view.run_failure_title = lookup("gui-run-crashed").into();
+        view.run_failure = lookup("gui-run-exited-with-error").into();
+        view.run_likely_cause = lookup_args(
+            "gui-run-likely-cause",
+            [("cause", Arg::from("Flywheel is turned off"))],
+        )
+        .into();
+        view.run_crash_report = "crash-2026-09-27_12.00.00-client.txt".into();
+    });
+    settle(&ui);
+
+    assert_eq!(support::surface(&ui, 0), "Overview");
+    assert!(visible(&ui, &lookup("gui-run-crashed")));
+    assert!(find_button(&ui, "gui-diagnosis-open-crash-report").is_some());
+    button(&ui, "gui-run-open-diagnostics").mock_single_click(PointerEventButton::Left);
+    settle(&ui);
+    assert_eq!(
+        requests.borrow().last(),
+        Some(&(1, "Diagnostics".to_owned()))
+    );
 }
 
 #[test]
@@ -241,11 +363,71 @@ fn diagnostics_links_to_the_logs_surface() {
     let ui = window();
     let requests = support::follow_surface_requests(&ui);
     for (server_host, _, _) in host_kinds() {
-        checked_surface(&ui, server_host, false);
+        diagnosed_surface(&ui, server_host, false);
         button(&ui, "gui-integrity-open-logs").mock_single_click(PointerEventButton::Left);
         settle(&ui);
         assert_eq!(requests.borrow().last(), Some(&(1, "Logs".to_owned())));
         assert_eq!(support::surface(&ui, 0), "Logs");
+    }
+}
+
+/// Two panes side by side on the smallest window: each pane is at its minimum
+/// width, and nothing in the left one may reach into the right one.
+#[test]
+fn every_action_stays_inside_its_pane_at_the_smallest_split() {
+    let ui = window();
+    // Only as wide as the window may be, and tall enough that a 1.5x surface
+    // is still on screen for the testing backend to find.
+    ui.window().set_size(PhysicalSize::new(980, 3000));
+    for scale in [1.0, 1.5] {
+        ui.global::<Theme>().set_text_scale(scale);
+        for (server_host, kind, _) in host_kinds() {
+            diagnosed_surface(&ui, server_host, false);
+            preview(&ui, "");
+            let pane = |id: i32, column: i32| {
+                let mut pane = support::pane(id, 0, "Diagnostics");
+                pane.column = column;
+                pane.can_split_beside = false;
+                pane.can_close = true;
+                pane
+            };
+            ui.set_workspace_panes(rows(vec![pane(1, 0), pane(2, 1)]));
+            settle(&ui);
+            let width = ui
+                .window()
+                .size()
+                .to_logical(ui.window().scale_factor())
+                .width;
+            for message in [
+                lookup("gui-diagnosis-diagnose-again"),
+                format!(
+                    "{}: Flywheel is turned off",
+                    lookup("gui-diagnosis-review-fix")
+                ),
+                lookup("gui-fix-apply"),
+                lookup("gui-diagnosis-copy-report"),
+                lookup("gui-diagnosis-bundle-show"),
+            ] {
+                let mut placed: Vec<(f32, f32)> =
+                    ElementHandle::find_by_accessible_label(&ui, &message)
+                        .filter(|element| element.accessible_role() == Some(AccessibleRole::Button))
+                        .map(|element| {
+                            let x = element.absolute_position().x;
+                            (x, x + element.size().width)
+                        })
+                        .collect();
+                placed.sort_by(|left, right| left.0.total_cmp(&right.0));
+                assert_eq!(placed.len(), 2, "{kind} at {scale}: one {message} per pane");
+                assert!(
+                    placed[0].1 <= placed[1].0,
+                    "{kind} at {scale}: {message} in the left pane reaches the right one: {placed:?}"
+                );
+                assert!(
+                    placed[1].1 <= width + 0.5,
+                    "{kind} at {scale}: {message} leaves the window: {placed:?}"
+                );
+            }
+        }
     }
 }
 
@@ -264,6 +446,16 @@ fn bundle_rows(selected: bool) -> ModelRc<BundlePartRow> {
             selected: false,
         },
     ]))
+}
+
+/// The bundle sits behind its own disclosure: a readable report comes first.
+fn open_bundle(ui: &AppWindow) {
+    assert!(
+        !visible(ui, &lookup("gui-bundle-privacy")),
+        "the bundle is not the primary result"
+    );
+    button(ui, "gui-diagnosis-bundle-show").mock_single_click(PointerEventButton::Left);
+    settle(ui);
 }
 
 #[test]
@@ -287,12 +479,13 @@ fn offered_bundle_parts_are_choices_and_export_waits_for_one() {
             .push((kind.to_string(), id.to_string()));
     });
     for (server_host, kind, id) in host_kinds() {
-        checked_surface(&ui, server_host, false);
+        diagnosed_surface(&ui, server_host, false);
         support::update_host(&ui, 0, |view| {
             view.bundle_parts = bundle_rows(true);
             view.bundle_selected_count = 1;
         });
         settle(&ui);
+        open_bundle(&ui);
 
         assert!(visible(&ui, &lookup("gui-bundle-privacy")), "{kind}");
         let switch = ElementHandle::find_by_accessible_label(&ui, "logs/latest.log")
@@ -324,6 +517,8 @@ fn offered_bundle_parts_are_choices_and_export_waits_for_one() {
         settle(&ui);
         assert!(!enabled(&ui, "gui-bundle-export"));
         assert!(visible(&ui, &lookup("gui-bundle-choose-one")));
+        button(&ui, "gui-diagnosis-bundle-hide").mock_single_click(PointerEventButton::Left);
+        settle(&ui);
     }
 }
 
@@ -334,7 +529,7 @@ fn an_exported_bundle_says_where_it_went_and_can_be_shown() {
     let sink = Rc::clone(&opened);
     ui.on_open_bundle_folder(move |path| sink.borrow_mut().push(path.to_string()));
     for (server_host, _, _) in host_kinds() {
-        checked_surface(&ui, server_host, false);
+        diagnosed_surface(&ui, server_host, false);
         support::update_host(&ui, 0, |view| {
             view.bundle_parts = bundle_rows(true);
             view.bundle_selected_count = 1;
@@ -342,6 +537,7 @@ fn an_exported_bundle_says_where_it_went_and_can_be_shown() {
             view.bundle_result_path = "/home/user/bundle.zip".into();
         });
         settle(&ui);
+        open_bundle(&ui);
         assert!(visible(&ui, "Saved one file to /home/user/bundle.zip."));
         button(&ui, "gui-bundle-show-folder").mock_single_click(PointerEventButton::Left);
         assert_eq!(
@@ -359,6 +555,8 @@ fn an_exported_bundle_says_where_it_went_and_can_be_shown() {
             visible(&ui, "The disk is full."),
             "a failed export stays on screen"
         );
+        button(&ui, "gui-diagnosis-bundle-hide").mock_single_click(PointerEventButton::Left);
+        settle(&ui);
     }
 }
 
@@ -479,7 +677,7 @@ fn window() -> AppWindow {
     });
     // Tall enough that the whole surface is on screen: the testing backend
     // finds only what is within the window, and the bundle choice sits below
-    // the verification results.
+    // the findings.
     ui.window().set_size(PhysicalSize::new(1480, 1400));
     ui.show().expect("show");
     ui

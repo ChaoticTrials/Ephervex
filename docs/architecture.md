@@ -181,6 +181,7 @@ exhaustion with an actionable error.
 | Managed mod install, update, and removal | Old jars move to `.launcher/retired/`; new jars land; the retained recipe is atomically published. | Pre-publication failure removes new jars and restores retired jars. Any failed compensation is returned as a typed recovery issue and persists `InterruptedMutation` attention. Post-publication cleanup failures are also reported. |
 | Dependency-aware enable, disable, and delete | One planned batch applies ordered file changes using the same recorded dependency graph. | Failure rolls back the batch. Any launcher-owned staging or retired content left behind is reported on the next reconciliation. |
 | Verification repair | Replacement bytes are verified before they replace a managed file. | A failed repair keeps or restores the prior file; leftover transaction state remains visible for reconciliation. |
+| Diagnostic fix | Only the changes its preview listed are applied, each on its own: a mod rename, one runtime-settings update, or a verification repair. | Each change is reported as applied or not, so a partial fix is visible. The host is diagnosed again rather than assumed fixed. |
 | Snapshot restore | A durable journal names only fixed host parts. Each live part moves into the restore transaction before its staged replacement is renamed into place. | Failure rolls every published part back. On restart, reconciliation recognizes the versioned journal and restores the complete pre-restore state. Unknown or ambiguous staging is left untouched and receives host attention. |
 | Mod isolation round | The versioned session records the next exact configuration before the dependency-aware batch applies it. | Resume reapplies the intended configuration idempotently. Cancel restores the pre-isolation snapshot; finish retains it and leaves the smallest tested configuration enabled. |
 | Diagnostic bundle export | A caller-selected set is written to the requested local archive. | Failure is reported against the output path. Source logs are never changed or scrubbed. |
@@ -250,8 +251,8 @@ searches, isolation, Diagnostics and bundles, workflow status) writes by host,
 so every pane on a host reads the same state. What a single pane is looking at
 stays with the pane: each Logs or Console pane has its own log viewer, and the
 worker follows each client's log for as long as a pane reads it. The
-single-flight guards (the isolation change, the verification or repair, a
-host's restart, the host-change claim) stay in the controller and the worker,
+single-flight guards (the isolation change, the diagnosis or fix, a host's
+restart, the host-change claim) stay in the controller and the worker,
 so two panes on one host cannot start the same work twice. A pane whose host is
 deleted stays in place, says so, and can be pointed at another host or closed.
 
@@ -268,11 +269,11 @@ same boundary can carry another durable developer workflow without moving its
 state into the visual container.
 
 One host-change state says which host a change is rewriting and what it is
-doing. An isolation change and a repair both claim it, so the workspace header,
-the Isolation answers, and Diagnostics read one answer, and each refuses to
-start while the other holds it. The worker keeps the matching guard: while an
-isolation start or cancel, a repair, or a snapshot capture or restore rewrites a
-host, launching or starting it and starting another of those changes on it are
+doing. An isolation change and a diagnostic fix both claim it, so the workspace
+header, the Isolation answers, and Diagnostics read one answer, and each refuses
+to start while the other holds it. The worker keeps the matching guard: while an
+isolation start or cancel, a diagnostic fix, or a snapshot capture or restore
+rewrites a host, launching or starting it and starting another of those changes on it are
 refused with a message naming the change in progress.
 
 ### Restart

@@ -241,18 +241,6 @@ impl FindingKind {
             | Self::HandPlacedMods { .. } => FindingClass::Customized,
         }
     }
-
-    /// Whether this is about the host's Java runtime.
-    #[must_use]
-    pub const fn concerns_java(&self) -> bool {
-        matches!(
-            self,
-            Self::JavaIncompatible { .. }
-                | Self::JavaUnusable { .. }
-                | Self::JavaUnavailable { .. }
-                | Self::JavaCustomized { .. }
-        )
-    }
 }
 
 /// A change Diagnostics can preview and then apply on request.

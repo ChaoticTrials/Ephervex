@@ -37,20 +37,21 @@ use crate::presentation::{
     validate_port,
 };
 use crate::ui::{
-    AccountRow, ActivityRow, AppWindow, BlockedFileRow, BundlePartRow, DiagnosticRow, DiskUsageRow,
-    GuiI18n, HostView, ImpactRow, ImportDuplicateRow, ImportOptionRow, InstanceRow,
-    IntegrityFindingRow, IsolationCandidateRow, JavaRow, LicenseRow, LinkedTargetRow,
-    LocalModClashRow, LogChunk, ModRow, ModSearchRow, ModVersionRow, PendingEntityRow,
-    PromoteServerRow, PropertyRules, RelationRow, RunningRow, ServerRow, SnapshotRow, Theme,
-    WindowSizePreview, WorkflowActionRow,
+    AccountRow, ActivityRow, AppWindow, BlockedFileRow, DiagnosticRow, DiskUsageRow, GuiI18n,
+    HostView, ImpactRow, ImportDuplicateRow, ImportOptionRow, InstanceRow, IsolationCandidateRow,
+    JavaRow, LicenseRow, LinkedTargetRow, LocalModClashRow, LogChunk, ModRow, ModSearchRow,
+    ModVersionRow, PendingEntityRow, PromoteServerRow, PropertyRules, RelationRow, RunningRow,
+    ServerRow, SnapshotRow, Theme, WindowSizePreview, WorkflowActionRow,
 };
 use crate::window_aspect;
 use crate::workspace_layout::{PaneId, Revealed, Surface, WorkspaceLayout};
 
+mod diagnosis_flow;
 mod log_views;
 mod mod_views;
 mod workspace;
 
+use diagnosis_flow::DiagnosisFlowState;
 use log_views::LogViews;
 use mod_views::ModViews;
 use workspace::{PaneChange, WorkspaceState};
@@ -1647,189 +1648,6 @@ fn register_restart_actions(
     });
 }
 
-/// Verification or repair, the work the Diagnostics surface asks the worker for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum IntegrityWork {
-    Verify,
-    Repair,
-}
-
-impl IntegrityWork {
-    /// The reported operation whose stage the surface shows, and which
-    /// stopping the work cancels.
-    const fn operation(self) -> &'static str {
-        match self {
-            Self::Verify => "operation-verifying-host",
-            Self::Repair => "operation-repairing-host",
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct PendingIntegrity {
-    request: u64,
-    host: InstalledHost,
-    work: IntegrityWork,
-    /// The operation's id once it first reports, which is what Stop cancels.
-    operation: Option<String>,
-}
-
-/// What one shown host's Diagnostics surface holds.
-#[derive(Debug, Default)]
-struct IntegrityHost {
-    /// Whether the surface holds a finished verification of the host.
-    checked: bool,
-    /// Every finding worth listing, kept whole for the filter.
-    findings: Vec<backend::VerifiedFileData>,
-    query: String,
-    bundle: BundleChoice,
-}
-
-/// Verification and repair as the window follows them: what each shown host's
-/// surface holds, and the one verification or repair the worker has not
-/// finished, whichever host it is for.
-#[derive(Debug, Default)]
-struct IntegrityFlowState {
-    hosts: HashMap<InstalledHost, IntegrityHost>,
-    last_request: u64,
-    /// The one verification or repair the worker has not finished. A second
-    /// request, from any view of any host, is refused here before a second
-    /// command can queue behind it.
-    pending: Option<PendingIntegrity>,
-}
-
-/// What the Diagnostics surface is choosing to put in a bundle for its host.
-#[derive(Debug, Default)]
-struct BundleChoice {
-    /// Everything the core planner offered, in its order.
-    parts: Vec<backend::BundlePartData>,
-    /// Chosen by name, which is the handle the planner gave each part.
-    selected: HashSet<String>,
-    /// Whether `parts` came from a plan yet, so a later plan of the same
-    /// host keeps the user's choices rather than the defaults.
-    planned: bool,
-    last_request: u64,
-    /// The export the worker has not finished.
-    pending: Option<u64>,
-}
-
-impl BundleChoice {
-    /// Takes a fresh plan. The first one chooses the newest game log, the
-    /// newest crash report, and the host's own recorded state, rather than
-    /// every file there is; a later one keeps whatever is still offered.
-    fn plan(&mut self, parts: Vec<backend::BundlePartData>) {
-        if self.planned {
-            self.selected
-                .retain(|name| parts.iter().any(|part| &part.name == name));
-        } else {
-            let mut newest_log = false;
-            let mut newest_crash = false;
-            self.selected = parts
-                .iter()
-                .filter(|part| match part.kind {
-                    "game_log" => !std::mem::replace(&mut newest_log, true),
-                    "crash_report" => !std::mem::replace(&mut newest_crash, true),
-                    "recipe" | "record" => true,
-                    _ => false,
-                })
-                .map(|part| part.name.clone())
-                .collect();
-        }
-        self.parts = parts;
-        self.planned = true;
-    }
-
-    /// The chosen names, in the order the planner offered them.
-    fn chosen(&self) -> Vec<String> {
-        self.parts
-            .iter()
-            .filter(|part| self.selected.contains(&part.name))
-            .map(|part| part.name.clone())
-            .collect()
-    }
-
-    fn dispatch(&mut self) -> Option<u64> {
-        if self.pending.is_some() || self.selected.is_empty() {
-            return None;
-        }
-        self.last_request = self.last_request.wrapping_add(1);
-        self.pending = Some(self.last_request);
-        Some(self.last_request)
-    }
-}
-
-impl IntegrityFlowState {
-    /// Makes sure the surface has a place for `host`, answering whether it is new.
-    fn open(&mut self, host: InstalledHost) -> bool {
-        if self.hosts.contains_key(&host) {
-            return false;
-        }
-        self.hosts.insert(host, IntegrityHost::default());
-        true
-    }
-
-    fn host(&self, host: InstalledHost) -> Option<&IntegrityHost> {
-        self.hosts.get(&host)
-    }
-
-    fn host_mut(&mut self, host: InstalledHost) -> Option<&mut IntegrityHost> {
-        self.hosts.get_mut(&host)
-    }
-
-    /// Forgets the surfaces of hosts the workspace no longer shows. Work still
-    /// running finishes; its result has nowhere to go.
-    fn follow(&mut self, shown: &[InstalledHost]) {
-        self.hosts.retain(|host, _| shown.contains(host));
-    }
-
-    /// Claims the single in-flight integrity work, or refuses while one runs.
-    fn dispatch(&mut self, host: InstalledHost, work: IntegrityWork) -> Option<u64> {
-        if self.pending.is_some() {
-            return None;
-        }
-        self.last_request = self.last_request.wrapping_add(1);
-        self.pending = Some(PendingIntegrity {
-            request: self.last_request,
-            host,
-            work,
-            operation: None,
-        });
-        Some(self.last_request)
-    }
-
-    /// Releases the work the worker reports finished.
-    fn settle(&mut self, request: u64) -> Option<PendingIntegrity> {
-        if self
-            .pending
-            .as_ref()
-            .is_some_and(|pending| pending.request == request)
-        {
-            self.pending.take()
-        } else {
-            None
-        }
-    }
-
-    /// Whether a result belongs on a surface as it is now: the host is shown,
-    /// and the result answers the newest request.
-    fn accepts(&self, host: InstalledHost, request: u64) -> bool {
-        self.hosts.contains_key(&host) && request == self.last_request
-    }
-
-    /// Whether an export's outcome answers the newest export of a shown host.
-    fn accepts_export(&self, host: InstalledHost, request: u64) -> bool {
-        self.host(host)
-            .is_some_and(|surface| request == surface.bundle.last_request)
-    }
-
-    fn working_on(&self, host: InstalledHost) -> Option<IntegrityWork> {
-        self.pending
-            .as_ref()
-            .filter(|pending| pending.host == host)
-            .map(|pending| pending.work)
-    }
-}
-
 /// Tracks one archive at a time through analysis, optional resolution,
 /// optional-file selection, and submission.
 ///
@@ -2296,7 +2114,7 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
     let browser = Rc::new(ModBrowser::default());
     let local_mods = Rc::new(RefCell::new(LocalModDrop::default()));
     let isolation_flow = Rc::new(RefCell::new(IsolationFlowState::default()));
-    let integrity_flow = Rc::new(RefCell::new(IntegrityFlowState::default()));
+    let diagnosis_flow = Rc::new(RefCell::new(DiagnosisFlowState::default()));
     let lifecycle = Rc::new(RefCell::new(HostLifecycle::default()));
     let disk_usage = Rc::new(RefCell::new(DiskUsageState::default()));
     let workspace = Workspace {
@@ -2306,7 +2124,7 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
         mods: Rc::default(),
         browser: Rc::clone(&browser),
         isolation: Rc::clone(&isolation_flow),
-        integrity: Rc::clone(&integrity_flow),
+        diagnosis: Rc::clone(&diagnosis_flow),
         commands: backend.commands.clone(),
     };
     register_i18n(ui);
@@ -2684,8 +2502,7 @@ fn register_callbacks(
     register_mod_state_actions(ui, commands, local_mods);
     register_snapshot_actions(ui, commands);
     register_isolation_actions(ui, commands, workspace);
-    register_integrity_actions(ui, commands, workspace);
-    register_bundle_actions(ui, commands, workspace);
+    diagnosis_flow::register(ui, commands, workspace);
     register_restart_actions(ui, commands, lifecycle);
     register_disk_usage_actions(ui, commands, disk_usage);
     log_views::register(ui, &workspace.logs);
@@ -4464,9 +4281,9 @@ struct Workspace {
     browser: Rc<ModBrowser>,
     /// Each shown host's isolation setup, and the one isolation change in flight.
     isolation: Rc<RefCell<IsolationFlowState>>,
-    /// Each shown host's Diagnostics surface, and the one verification or
-    /// repair in flight.
-    integrity: Rc<RefCell<IntegrityFlowState>>,
+    /// Each shown host's Diagnostics surface, and the one diagnosis or fix
+    /// in flight.
+    diagnosis: Rc<RefCell<DiagnosisFlowState>>,
     /// What a surface asks the worker for when a pane opens it.
     commands: Sender<Command>,
 }
@@ -4529,7 +4346,7 @@ impl Workspace {
         let catalog = presentation::catalog_to_open_on(&preferred, default).unwrap_or(default);
         self.mods.borrow_mut().follow(&shown, catalog);
         self.isolation.borrow_mut().follow(&shown);
-        self.integrity.borrow_mut().follow(&shown);
+        self.diagnosis.borrow_mut().follow(&shown);
         for &host in entered {
             mod_views::publish(self, &self.mods.borrow(), host);
             load_host(ui, host);
@@ -4606,11 +4423,14 @@ impl Workspace {
             return HostStart::Refused;
         }
         let Some((client, server)) = self.state.borrow().pair_starting_together(host) else {
+            diagnosis_flow::forget_run(self, host);
             return HostStart::Alone;
         };
         let Some(operation) = lifecycle.begin_pair_start(client, server) else {
             return HostStart::Refused;
         };
+        diagnosis_flow::forget_run(self, client);
+        diagnosis_flow::forget_run(self, server);
         stamp_host_lifecycle(ui, &lifecycle);
         HostStart::Paired {
             operation,
@@ -4703,7 +4523,7 @@ fn apply_pane_change(ui: &AppWindow, workspace: &Workspace, change: PaneChange) 
     let id = SharedString::from(host.id());
     match surface {
         Surface::Snapshots => ui.invoke_load_snapshots(host.kind().into(), id),
-        Surface::Diagnostics => open_integrity(workspace, &workspace.commands, host),
+        Surface::Diagnostics => diagnosis_flow::open(workspace, &workspace.commands, host),
         Surface::Mods if matches!(host, InstalledHost::Server(_)) => {
             ui.invoke_load_server_mods(id);
         }
@@ -6212,643 +6032,6 @@ fn refuse_while_host_changes(ui: &slint::Weak<AppWindow>) -> bool {
     true
 }
 
-/// Puts a host's Diagnostics surface into its view as the flow holds it.
-fn show_integrity(workspace: &Workspace, state: &IntegrityFlowState, host: InstalledHost) {
-    let Some(surface) = state.host(host) else {
-        return;
-    };
-    let shown = match state.working_on(host) {
-        Some(IntegrityWork::Verify) => "verifying",
-        _ if surface.checked => "checked",
-        _ => "unchecked",
-    };
-    let (total, findings) = integrity_findings(surface);
-    let bundle = bundle_view(&surface.bundle);
-    workspace.update(host, |view| {
-        view.integrity_state = shown.into();
-        view.integrity_finding_total = total;
-        view.integrity_findings = findings;
-        view.integrity_query = surface.query.as_str().into();
-        write_bundle(view, bundle);
-    });
-}
-
-/// The word for one core integrity answer.
-fn integrity_label(integrity: &str) -> &'static str {
-    match integrity {
-        "absent" => "gui-integrity-absent",
-        "corrupt" => "gui-integrity-corrupt",
-        "unreadable" => "gui-integrity-unreadable",
-        _ => "gui-integrity-unverifiable",
-    }
-}
-
-fn integrity_row(file: &backend::VerifiedFileData) -> IntegrityFindingRow {
-    IntegrityFindingRow {
-        path: file.path.clone().into(),
-        integrity: file.integrity.into(),
-        label: lookup(integrity_label(file.integrity)).into(),
-        handling: if file.repairable {
-            "repair"
-        } else if file.sound {
-            "info"
-        } else {
-            "manual"
-        }
-        .into(),
-    }
-}
-
-/// A surface's findings through its filter, and how many there are in all.
-fn integrity_findings(surface: &IntegrityHost) -> (i32, ModelRc<IntegrityFindingRow>) {
-    let query = surface.query.trim().to_lowercase();
-    (
-        i32::try_from(surface.findings.len()).unwrap_or(i32::MAX),
-        model(
-            surface
-                .findings
-                .iter()
-                .filter(|file| query.is_empty() || file.path.to_lowercase().contains(&query))
-                .map(integrity_row)
-                .collect(),
-        ),
-    )
-}
-
-/// Shows what a verification found, if its host is still shown.
-fn apply_host_verified(
-    workspace: &Workspace,
-    state: &mut IntegrityFlowState,
-    host: InstalledHost,
-    request: u64,
-    data: &backend::VerificationData,
-) {
-    if !state.accepts(host, request) {
-        return;
-    }
-    let count = |integrity: &str| {
-        data.files
-            .iter()
-            .filter(|file| file.integrity == integrity)
-            .count()
-    };
-    let problems = data.files.iter().filter(|file| !file.sound).count();
-    let shared_faults = match &data.shared {
-        Some(Ok(shared)) => shared.faults.len(),
-        _ => 0,
-    };
-    let summary = if problems > 0 {
-        lookup_args("gui-integrity-problems", [("count", Arg::from(problems))])
-    } else if shared_faults > 0 {
-        lookup_args(
-            "gui-integrity-shared-faults",
-            [("count", Arg::from(shared_faults))],
-        )
-    } else if data.files.is_empty() {
-        lookup("gui-integrity-nothing-recorded")
-    } else {
-        lookup("gui-integrity-healthy")
-    };
-    let counts: Vec<String> = [
-        ("intact", "gui-integrity-count-intact"),
-        ("absent", "gui-integrity-count-absent"),
-        ("corrupt", "gui-integrity-count-corrupt"),
-        ("unreadable", "gui-integrity-count-unreadable"),
-        ("unverifiable", "gui-integrity-count-unverifiable"),
-    ]
-    .into_iter()
-    .filter_map(|(integrity, message)| {
-        let found = count(integrity);
-        (found > 0).then(|| lookup_args(message, [("count", Arg::from(found))]))
-    })
-    .collect();
-
-    // What a repair would act on comes first, then what it cannot fix, then
-    // what nothing proves either way.
-    let mut findings: Vec<backend::VerifiedFileData> = data
-        .files
-        .iter()
-        .filter(|file| file.integrity != "intact")
-        .cloned()
-        .collect();
-    let rank = |file: &backend::VerifiedFileData| {
-        if file.repairable {
-            0
-        } else if !file.sound {
-            1
-        } else {
-            2
-        }
-    };
-    findings.sort_by(|left, right| {
-        rank(left)
-            .cmp(&rank(right))
-            .then_with(|| left.path.to_lowercase().cmp(&right.path.to_lowercase()))
-            .then_with(|| left.path.cmp(&right.path))
-    });
-    let repair_targets = findings
-        .iter()
-        .filter(|file| file.repairable)
-        .map(|file| file.path.clone())
-        .collect();
-    let unrepairable = findings
-        .iter()
-        .filter(|file| !file.sound && !file.repairable)
-        .map(|file| file.path.clone())
-        .collect();
-    let Some(surface) = state.host_mut(host) else {
-        return;
-    };
-    surface.checked = true;
-    surface.findings = findings;
-    let (total, rows) = integrity_findings(surface);
-
-    let (shared_summary, shared_faults_rows, shared_notes) =
-        shared_integrity_view(data.shared.as_ref());
-    let checked_at = lookup_args(
-        "gui-integrity-checked-at",
-        [(
-            "value",
-            Arg::from(chrono::Local::now().format("%H:%M").to_string()),
-        )],
-    );
-    workspace.update(host, |view| {
-        view.integrity_summary = summary.into();
-        view.integrity_healthy = problems == 0 && shared_faults == 0;
-        view.integrity_counts = counts.join(", ").into();
-        view.integrity_checked_at = checked_at.into();
-        view.integrity_repair_targets = string_model(repair_targets);
-        view.integrity_unrepairable = string_model(unrepairable);
-        view.integrity_shared_summary = shared_summary.into();
-        view.integrity_shared_faults = model(shared_faults_rows);
-        view.integrity_shared_notes = string_model(shared_notes);
-        view.integrity_state = "checked".into();
-        view.integrity_finding_total = total;
-        view.integrity_findings = rows;
-    });
-}
-
-/// The shared launch files section: a summary, the damaged files, and notes
-/// about what was not checked or not fetched yet. Empty for a server.
-fn shared_integrity_view(
-    shared: Option<&Result<backend::SharedArtifactData, String>>,
-) -> (String, Vec<IntegrityFindingRow>, Vec<String>) {
-    let shared = match shared {
-        None => return (String::new(), Vec::new(), Vec::new()),
-        Some(Err(message)) => return (message.clone(), Vec::new(), Vec::new()),
-        Some(Ok(shared)) => shared,
-    };
-    let summary = if !shared.metadata_cached {
-        lookup("gui-integrity-shared-not-cached")
-    } else if shared.faults.is_empty() {
-        lookup_args(
-            "gui-integrity-shared-sound",
-            [("count", Arg::from(shared.checked))],
-        )
-    } else {
-        lookup_args(
-            "gui-integrity-shared-faults",
-            [("count", Arg::from(shared.faults.len()))],
-        )
-    };
-    let mut notes = Vec::new();
-    if shared.not_yet_fetched > 0 {
-        notes.push(lookup_args(
-            "gui-integrity-shared-waiting",
-            [("count", Arg::from(shared.not_yet_fetched))],
-        ));
-    }
-    if shared.loader_libraries_uncovered {
-        notes.push(lookup("gui-integrity-shared-loader"));
-    }
-    (
-        summary,
-        shared.faults.iter().map(integrity_row).collect(),
-        notes,
-    )
-}
-
-/// Shows what a repair did. Its findings are out of date until the check
-/// that follows it arrives.
-fn apply_host_repaired(
-    workspace: &Workspace,
-    state: &IntegrityFlowState,
-    host: InstalledHost,
-    request: u64,
-    data: &backend::RepairData,
-) {
-    if !state.accepts(host, request) {
-        return;
-    }
-    let repaired = Arg::from(data.repaired.len());
-    let mut result = if data.stopped {
-        lookup_args("gui-integrity-repair-stopped", [("count", repaired)])
-    } else {
-        lookup_args("gui-integrity-repaired", [("count", repaired)])
-    };
-    if !data.failed.is_empty() {
-        result.push(' ');
-        result.push_str(&lookup_args(
-            "gui-integrity-repair-failed",
-            [("count", Arg::from(data.failed.len()))],
-        ));
-    }
-    workspace.update(host, |view| {
-        view.integrity_repair_result = result.into();
-        view.integrity_repair_failed = !data.failed.is_empty();
-        view.integrity_recovery = string_model(data.recovery.clone());
-        view.integrity_state = "stale".into();
-    });
-}
-
-/// Releases finished integrity work and whatever it held on screen.
-fn settle_integrity(
-    ui: &AppWindow,
-    workspace: &Workspace,
-    state: &mut IntegrityFlowState,
-    request: u64,
-) {
-    let Some(pending) = state.settle(request) else {
-        return;
-    };
-    if pending.work == IntegrityWork::Repair && ui.get_host_busy_id() == pending.host.id() {
-        clear_host_busy(ui);
-    }
-    // A verification that ended without a result, canceled or failed, leaves
-    // what was on screen before it.
-    if let Some(surface) = state.host(pending.host) {
-        let before = if surface.checked {
-            "checked"
-        } else {
-            "unchecked"
-        };
-        workspace.update(pending.host, |view| {
-            if view.integrity_state == "verifying" {
-                view.integrity_state = before.into();
-            }
-        });
-    }
-}
-
-/// Records the running work's operation, so it can be stopped, and shows the
-/// stage it reports.
-fn apply_integrity_activity(
-    ui: &AppWindow,
-    workspace: &Workspace,
-    state: &mut IntegrityFlowState,
-    activity: &ActivityData,
-) {
-    let Some(pending) = state.pending.as_mut() else {
-        return;
-    };
-    if activity.entity != pending.host.id()
-        || activity.item.title != lookup(pending.work.operation())
-        || !matches!(activity.item.status_kind, "queued" | "running")
-    {
-        return;
-    }
-    pending.operation = Some(activity.item.id.clone());
-    if activity.item.detail.is_empty() {
-        return;
-    }
-    match pending.work {
-        IntegrityWork::Verify => {
-            let detail = SharedString::from(activity.item.detail.as_str());
-            workspace.update(pending.host, |view| view.integrity_progress = detail);
-        }
-        IntegrityWork::Repair if ui.get_host_busy_id() == pending.host.id() => {
-            ui.set_host_busy_text(activity.item.detail.clone().into());
-        }
-        IntegrityWork::Repair => {}
-    }
-}
-
-/// The bundle choice as it stands, ready for a host view.
-struct BundleView {
-    count: i32,
-    selection: SharedString,
-    parts: ModelRc<BundlePartRow>,
-}
-
-fn bundle_view(bundle: &BundleChoice) -> BundleView {
-    let chosen: Vec<&backend::BundlePartData> = bundle
-        .parts
-        .iter()
-        .filter(|part| bundle.selected.contains(&part.name))
-        .collect();
-    let bytes: u64 = chosen.iter().map(|part| part.size_bytes).sum();
-    BundleView {
-        count: i32::try_from(chosen.len()).unwrap_or(i32::MAX),
-        selection: lookup_args(
-            "gui-bundle-selection",
-            [
-                ("count", Arg::from(chosen.len())),
-                (
-                    "size",
-                    Arg::from(ephervex_model::format_binary_bytes(bytes)),
-                ),
-            ],
-        )
-        .into(),
-        parts: model(
-            bundle
-                .parts
-                .iter()
-                .map(|part| BundlePartRow {
-                    name: part.name.clone().into(),
-                    kind: lookup(bundle_kind_label(part.kind)).into(),
-                    size: ephervex_model::format_binary_bytes(part.size_bytes).into(),
-                    selected: bundle.selected.contains(&part.name),
-                })
-                .collect(),
-        ),
-    }
-}
-
-fn write_bundle(view: &mut HostView, bundle: BundleView) {
-    view.bundle_selected_count = bundle.count;
-    view.bundle_selection = bundle.selection;
-    view.bundle_parts = bundle.parts;
-}
-
-fn render_bundle(workspace: &Workspace, host: InstalledHost, bundle: &BundleChoice) {
-    let view = bundle_view(bundle);
-    workspace.update(host, |host_view| write_bundle(host_view, view));
-}
-
-/// The word for one core bundle part kind.
-fn bundle_kind_label(kind: &str) -> &'static str {
-    match kind {
-        "game_log" => "gui-bundle-kind-game-log",
-        "crash_report" => "gui-bundle-kind-crash-report",
-        "launcher_log" => "gui-bundle-kind-launcher-log",
-        "recipe" => "gui-bundle-kind-recipe",
-        _ => "gui-bundle-kind-record",
-    }
-}
-
-/// Takes the planner's offer for a shown host.
-fn apply_bundle_plan(
-    workspace: &Workspace,
-    state: &mut IntegrityFlowState,
-    host: InstalledHost,
-    parts: Vec<backend::BundlePartData>,
-) {
-    let Some(surface) = state.host_mut(host) else {
-        return;
-    };
-    surface.bundle.plan(parts);
-    render_bundle(workspace, host, &surface.bundle);
-}
-
-fn apply_bundle_exported(
-    workspace: &Workspace,
-    state: &IntegrityFlowState,
-    host: InstalledHost,
-    request: u64,
-    report: &backend::BundleExportData,
-) {
-    if !state.accepts_export(host, request) {
-        return;
-    }
-    let path = report.path.display().to_string();
-    let mut result = lookup_args(
-        "gui-bundle-exported",
-        [
-            ("count", Arg::from(report.included)),
-            (
-                "size",
-                Arg::from(ephervex_model::format_binary_bytes(report.bytes)),
-            ),
-            ("path", Arg::from(path.as_str())),
-        ],
-    );
-    if !report.unreadable.is_empty() {
-        result.push(' ');
-        result.push_str(&lookup_args(
-            "gui-bundle-unreadable",
-            [("value", Arg::from(report.unreadable.join(", ")))],
-        ));
-    }
-    workspace.update(host, |view| {
-        view.bundle_error = SharedString::default();
-        view.bundle_result = result.into();
-        view.bundle_result_path = path.into();
-    });
-}
-
-fn apply_bundle_export_failed(
-    workspace: &Workspace,
-    state: &IntegrityFlowState,
-    host: InstalledHost,
-    request: u64,
-    message: &str,
-) {
-    if !state.accepts_export(host, request) {
-        return;
-    }
-    workspace.update(host, |view| {
-        view.bundle_result = SharedString::default();
-        view.bundle_result_path = SharedString::default();
-        view.bundle_error = message.into();
-    });
-}
-
-/// Releases a finished export, whichever shown host it was for.
-fn settle_bundle(workspace: &Workspace, state: &mut IntegrityFlowState, request: u64) {
-    for (&host, surface) in &mut state.hosts {
-        if surface.bundle.pending == Some(request) {
-            surface.bundle.pending = None;
-            workspace.update(host, |view| view.bundle_exporting = false);
-        }
-    }
-}
-
-/// Opens a host's Diagnostics surface: keeps what it already holds, and asks
-/// for the bundle offer again, since the logs it can carry change whenever the
-/// game runs.
-fn open_integrity(workspace: &Workspace, commands: &Sender<Command>, host: InstalledHost) {
-    let mut state = workspace.integrity.borrow_mut();
-    state.open(host);
-    show_integrity(workspace, &state, host);
-    drop(state);
-    send(commands, Command::PlanDiagnosticBundle(host));
-}
-
-fn register_integrity_actions(ui: &AppWindow, commands: &Sender<Command>, workspace: &Workspace) {
-    let sender = commands.clone();
-    let views = workspace.clone();
-    let weak = ui.as_weak();
-    ui.on_verify_host(move |kind, id| {
-        let (Some(host), Some(ui)) = (backend::parse_mod_host(&kind, &id), weak.upgrade()) else {
-            return;
-        };
-        let mut state = views.integrity.borrow_mut();
-        if state.host(host).is_none() {
-            return;
-        }
-        let Some(request) = state.dispatch(host, IntegrityWork::Verify) else {
-            ui.invoke_present_toast(lookup("gui-integrity-wait").into(), true);
-            return;
-        };
-        views.update(host, |view| {
-            view.integrity_state = "verifying".into();
-            view.integrity_progress = SharedString::default();
-            view.integrity_repair_result = SharedString::default();
-            view.integrity_repair_failed = false;
-            view.integrity_recovery = string_model(Vec::new());
-        });
-        send(&sender, Command::VerifyHost { host, request });
-    });
-
-    let sender = commands.clone();
-    let views = workspace.clone();
-    let weak = ui.as_weak();
-    ui.on_repair_host(move |kind, id| {
-        let (Some(host), Some(ui)) = (backend::parse_mod_host(&kind, &id), weak.upgrade()) else {
-            return;
-        };
-        let mut state = views.integrity.borrow_mut();
-        if state.host(host).is_none() {
-            return;
-        }
-        if state.pending.is_some() {
-            ui.invoke_present_toast(lookup("gui-integrity-wait").into(), true);
-            return;
-        }
-        if refuse_while_host_changes(&weak) {
-            return;
-        }
-        let Some(request) = state.dispatch(host, IntegrityWork::Repair) else {
-            return;
-        };
-        ui.set_host_busy_kind(isolation_host_kind(host).into());
-        ui.set_host_busy_id(host.id().into());
-        ui.set_host_busy_text(lookup("operation-repairing-host").into());
-        send(&sender, Command::RepairHost { host, request });
-    });
-
-    let sender = commands.clone();
-    let views = workspace.clone();
-    ui.on_stop_integrity_work(move || {
-        let operation = views
-            .integrity
-            .borrow()
-            .pending
-            .as_ref()
-            .and_then(|pending| pending.operation.clone());
-        if let Some(operation) = operation {
-            send(&sender, Command::CancelOperation(operation));
-        }
-    });
-
-    let views = workspace.clone();
-    ui.on_filter_integrity_findings(move |kind, id, query| {
-        let Some(host) = backend::parse_mod_host(&kind, &id) else {
-            return;
-        };
-        let mut state = views.integrity.borrow_mut();
-        let Some(surface) = state.host_mut(host) else {
-            return;
-        };
-        query.as_str().clone_into(&mut surface.query);
-        let (total, rows) = integrity_findings(surface);
-        views.update(host, |view| {
-            view.integrity_query = query;
-            view.integrity_finding_total = total;
-            view.integrity_findings = rows;
-        });
-    });
-}
-
-/// The diagnostic bundle choice on the Diagnostics surface.
-fn register_bundle_actions(ui: &AppWindow, commands: &Sender<Command>, workspace: &Workspace) {
-    let views = workspace.clone();
-    ui.on_toggle_bundle_part(move |kind, id, name, selected| {
-        let Some(host) = backend::parse_mod_host(&kind, &id) else {
-            return;
-        };
-        let mut state = views.integrity.borrow_mut();
-        let Some(surface) = state.host_mut(host) else {
-            return;
-        };
-        if surface.bundle.pending.is_some() {
-            return;
-        }
-        if selected {
-            surface.bundle.selected.insert(name.into());
-        } else {
-            surface.bundle.selected.remove(name.as_str());
-        }
-        render_bundle(&views, host, &surface.bundle);
-    });
-
-    let views = workspace.clone();
-    ui.on_select_all_bundle_parts(move |kind, id, selected| {
-        let Some(host) = backend::parse_mod_host(&kind, &id) else {
-            return;
-        };
-        let mut state = views.integrity.borrow_mut();
-        let Some(surface) = state.host_mut(host) else {
-            return;
-        };
-        if surface.bundle.pending.is_some() {
-            return;
-        }
-        surface.bundle.selected = if selected {
-            surface
-                .bundle
-                .parts
-                .iter()
-                .map(|part| part.name.clone())
-                .collect()
-        } else {
-            HashSet::new()
-        };
-        render_bundle(&views, host, &surface.bundle);
-    });
-
-    let sender = commands.clone();
-    let views = workspace.clone();
-    ui.on_export_bundle(move |kind, id| {
-        let Some(host) = backend::parse_mod_host(&kind, &id) else {
-            return;
-        };
-        let mut state = views.integrity.borrow_mut();
-        let Some(surface) = state.host_mut(host) else {
-            return;
-        };
-        // An empty selection is refused rather than written as an archive
-        // holding nothing but its manifest.
-        let Some(request) = surface.bundle.dispatch() else {
-            return;
-        };
-        let names = surface.bundle.chosen();
-        views.update(host, |view| {
-            view.bundle_exporting = true;
-            view.bundle_error = SharedString::default();
-        });
-        send(
-            &sender,
-            Command::ExportDiagnosticBundle {
-                host,
-                request,
-                names,
-            },
-        );
-    });
-
-    let sender = commands.clone();
-    ui.on_open_bundle_folder(move |path| {
-        if !path.is_empty() {
-            send(
-                &sender,
-                Command::OpenBundleFolder(PathBuf::from(path.as_str())),
-            );
-        }
-    });
-}
-
 const fn isolation_host_kind(host: InstalledHost) -> &'static str {
     match host {
         InstalledHost::Instance(_) => "client",
@@ -7643,10 +6826,10 @@ fn apply_event(
         Event::JavaRuntimes(rows) => ui.set_java_runtimes(model(java_rows(rows))),
         Event::Activity(activity) => {
             apply_isolation_stage(ui, &workspace.isolation.borrow(), &activity);
-            apply_integrity_activity(
+            diagnosis_flow::apply_activity(
                 ui,
                 workspace,
-                &mut workspace.integrity.borrow_mut(),
+                &mut workspace.diagnosis.borrow_mut(),
                 &activity,
             );
             apply_disk_usage_activity(ui, &mut disk_usage.borrow_mut(), &activity);
@@ -7689,40 +6872,75 @@ fn apply_event(
             }
             stamp_host_lifecycle(ui, &lifecycle.borrow());
         }
-        Event::HostVerified {
+        Event::HostDiagnosed {
             host,
             request,
-            data,
-        } => apply_host_verified(
+            view,
+        } => diagnosis_flow::apply_diagnosed(
             workspace,
-            &mut workspace.integrity.borrow_mut(),
+            &mut workspace.diagnosis.borrow_mut(),
             host,
             request,
-            &data,
+            *view,
         ),
-        Event::HostRepaired {
+        Event::DiagnosisFailed {
             host,
             request,
-            data,
-        } => apply_host_repaired(
+            message,
+            canceled,
+        } => diagnosis_flow::apply_diagnosis_failed(
             workspace,
-            &workspace.integrity.borrow(),
+            &mut workspace.diagnosis.borrow_mut(),
             host,
             request,
-            &data,
+            message,
+            canceled,
         ),
-        Event::IntegritySettled { request } => {
-            settle_integrity(
+        Event::FixPreviewed {
+            host,
+            request,
+            preview,
+        } => diagnosis_flow::apply_fix_previewed(
+            workspace,
+            &mut workspace.diagnosis.borrow_mut(),
+            host,
+            request,
+            preview,
+        ),
+        Event::FixApplied {
+            host,
+            request,
+            outcome,
+        } => diagnosis_flow::apply_fix_applied(
+            workspace,
+            &mut workspace.diagnosis.borrow_mut(),
+            host,
+            request,
+            outcome,
+        ),
+        Event::DiagnosisSettled { request } => {
+            diagnosis_flow::settle(
                 ui,
                 workspace,
-                &mut workspace.integrity.borrow_mut(),
+                &mut workspace.diagnosis.borrow_mut(),
                 request,
             );
         }
+        Event::RunFailed {
+            host,
+            failure,
+            view,
+        } => diagnosis_flow::apply_run_failed(
+            workspace,
+            &mut workspace.diagnosis.borrow_mut(),
+            host,
+            failure,
+            view.map(|view| *view),
+        ),
         Event::BundlePlanned { host, parts } => {
-            apply_bundle_plan(
+            diagnosis_flow::apply_bundle_plan(
                 workspace,
-                &mut workspace.integrity.borrow_mut(),
+                &mut workspace.diagnosis.borrow_mut(),
                 host,
                 parts,
             );
@@ -7731,9 +6949,9 @@ fn apply_event(
             host,
             request,
             report,
-        } => apply_bundle_exported(
+        } => diagnosis_flow::apply_bundle_exported(
             workspace,
-            &workspace.integrity.borrow(),
+            &workspace.diagnosis.borrow(),
             host,
             request,
             &report,
@@ -7742,15 +6960,19 @@ fn apply_event(
             host,
             request,
             message,
-        } => apply_bundle_export_failed(
+        } => diagnosis_flow::apply_bundle_export_failed(
             workspace,
-            &workspace.integrity.borrow(),
+            &workspace.diagnosis.borrow(),
             host,
             request,
             &message,
         ),
         Event::BundleSettled { request } => {
-            settle_bundle(workspace, &mut workspace.integrity.borrow_mut(), request);
+            diagnosis_flow::settle_bundle(
+                workspace,
+                &mut workspace.diagnosis.borrow_mut(),
+                request,
+            );
         }
         Event::Toast { message, error } => {
             ui.invoke_present_toast(message.into(), error);
@@ -9297,10 +8519,11 @@ fn to_i32(value: usize) -> i32 {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use crate::diagnosis_view::{DiagnosisView, FindingView, OutcomeView, PreviewView};
     use crate::presentation::ActivityPresentation;
     use crate::test_support::{ui_declaration, ui_markup};
     use crate::ui::WorkspaceHostChoice;
-    use ephervex_core::ArtifactCacheLimit;
+    use ephervex_core::{ArtifactCacheLimit, DiagnosticFix, FindingClass};
     use ephervex_i18n::has;
 
     use super::*;
@@ -9784,21 +9007,58 @@ mod tests {
         );
     }
 
-    fn verified(
-        path: &str,
-        integrity: &'static str,
-        repairable: bool,
-    ) -> backend::VerifiedFileData {
-        backend::VerifiedFileData {
-            path: path.to_owned(),
-            integrity,
-            sound: matches!(integrity, "intact" | "unverifiable"),
-            repairable,
+    fn finding(title: &str, problem: bool, fix: Option<DiagnosticFix>) -> FindingView {
+        FindingView {
+            class: if problem {
+                FindingClass::Problem
+            } else {
+                FindingClass::Customized
+            },
+            title: title.to_owned(),
+            detail: String::new(),
+            chain: Vec::new(),
+            files: Vec::new(),
+            fix_label: if fix.is_some() {
+                lookup("gui-diagnosis-review-fix")
+            } else {
+                String::new()
+            },
+            fix,
+            route: None,
         }
     }
 
+    fn diagnosis(problems: Vec<FindingView>, customized: Vec<FindingView>) -> DiagnosisView {
+        DiagnosisView {
+            healthy: problems.is_empty(),
+            incomplete: false,
+            problems,
+            customized,
+            checks: Vec::new(),
+            integrity_checked: true,
+            report: "Ephervex diagnostic report".to_owned(),
+            crash_report: None,
+        }
+    }
+
+    fn enable_flywheel() -> DiagnosticFix {
+        DiagnosticFix::EnableMods(vec![PathBuf::from("mods/flywheel.jar")])
+    }
+
+    /// One problem with a fix, and one customization.
+    fn mixed() -> DiagnosisView {
+        diagnosis(
+            vec![finding(
+                "Flywheel is turned off",
+                true,
+                Some(enable_flywheel()),
+            )],
+            vec![finding("Custom JVM arguments", false, None)],
+        )
+    }
+
     /// A window with the Diagnostics surface opened on one client.
-    fn integrity_surface() -> (
+    fn diagnostics_surface() -> (
         AppWindow,
         Workspace,
         std::sync::mpsc::Receiver<Command>,
@@ -9806,8 +9066,7 @@ mod tests {
     ) {
         let ui = test_window();
         let (workspace, commands) = test_workspace_sending(&ui);
-        register_integrity_actions(&ui, &workspace.commands, &workspace);
-        register_bundle_actions(&ui, &workspace.commands, &workspace);
+        diagnosis_flow::register(&ui, &workspace.commands, &workspace);
         let host = client_host();
         workspace.open(&ui, host, Surface::Diagnostics);
         assert!(
@@ -9821,266 +9080,354 @@ mod tests {
 
     fn sent_request(commands: &std::sync::mpsc::Receiver<Command>) -> u64 {
         match commands.try_recv() {
-            Ok(Command::VerifyHost { request, .. } | Command::RepairHost { request, .. }) => {
+            Ok(Command::DiagnoseHost { request, .. } | Command::ApplyFix { request, .. }) => {
                 request
             }
-            other => panic!("expected integrity work, got {other:?}"),
+            other => panic!("expected diagnostics work, got {other:?}"),
         }
     }
 
-    #[test]
-    fn each_integrity_answer_stays_distinct_and_repairs_are_listed_first() {
-        let (ui, workspace, commands, host) = integrity_surface();
-        ui.invoke_verify_host("client".into(), host.id().into());
-        let request = sent_request(&commands);
-        assert_eq!(first_view(&ui).integrity_state, "verifying");
-
-        let data = backend::VerificationData {
-            files: vec![
-                verified("mods/sound.jar", "intact", false),
-                verified("mods/shipped.jar", "unverifiable", false),
-                verified("mods/Zeta.jar", "corrupt", true),
-                verified("mods/gone.jar", "absent", true),
-                verified("mods/locked.jar", "unreadable", false),
-            ],
-            shared: None,
-        };
-        apply_host_verified(
-            &workspace,
-            &mut workspace.integrity.borrow_mut(),
+    fn diagnosed(workspace: &Workspace, host: InstalledHost, request: u64, view: DiagnosisView) {
+        diagnosis_flow::apply_diagnosed(
+            workspace,
+            &mut workspace.diagnosis.borrow_mut(),
             host,
             request,
-            &data,
+            view,
         );
+    }
 
-        assert_eq!(first_view(&ui).integrity_state, "checked");
-        assert!(!first_view(&ui).integrity_healthy);
-        assert_eq!(
-            first_view(&ui).integrity_summary,
-            lookup_args("gui-integrity-problems", [("count", Arg::from(3))]).as_str()
+    fn settled(ui: &AppWindow, workspace: &Workspace, request: u64) {
+        diagnosis_flow::settle(
+            ui,
+            workspace,
+            &mut workspace.diagnosis.borrow_mut(),
+            request,
         );
-        let rows: Vec<(String, String, String)> = first_view(&ui)
-            .integrity_findings
-            .iter()
-            .map(|row| {
-                (
-                    row.path.to_string(),
-                    row.integrity.to_string(),
-                    row.handling.to_string(),
-                )
-            })
-            .collect();
-        let expected = [
-            ("mods/gone.jar", "absent", "repair"),
-            ("mods/Zeta.jar", "corrupt", "repair"),
-            ("mods/locked.jar", "unreadable", "manual"),
-            ("mods/shipped.jar", "unverifiable", "info"),
-        ];
-        assert_eq!(
-            rows,
-            expected.map(|(path, integrity, handling)| (
-                path.to_owned(),
-                integrity.to_owned(),
-                handling.to_owned()
-            ))
-        );
-        let targets: Vec<String> = first_view(&ui)
-            .integrity_repair_targets
-            .iter()
-            .map(|path| path.to_string())
-            .collect();
-        assert_eq!(
-            targets,
-            ["mods/gone.jar", "mods/Zeta.jar"],
-            "only what a repair can fetch"
-        );
-        let unrepairable: Vec<String> = first_view(&ui)
-            .integrity_unrepairable
-            .iter()
-            .map(|path| path.to_string())
-            .collect();
-        assert_eq!(unrepairable, ["mods/locked.jar"]);
-        for message in [
-            "gui-integrity-count-intact",
-            "gui-integrity-count-absent",
-            "gui-integrity-count-corrupt",
-            "gui-integrity-count-unreadable",
-            "gui-integrity-count-unverifiable",
-        ] {
-            let part = lookup_args(message, [("count", Arg::from(1))]);
-            assert!(
-                first_view(&ui).integrity_counts.contains(part.as_str()),
-                "{message}"
-            );
-        }
+    }
 
-        ui.invoke_filter_integrity_findings("client".into(), host.id().into(), "zeta".into());
-        assert_eq!(first_view(&ui).integrity_findings.row_count(), 1);
+    /// Diagnoses the client of [`diagnostics_surface`] and shows `view`.
+    fn shown_result(
+        view: DiagnosisView,
+    ) -> (
+        AppWindow,
+        Workspace,
+        std::sync::mpsc::Receiver<Command>,
+        InstalledHost,
+    ) {
+        let (ui, workspace, commands, host) = diagnostics_surface();
+        ui.invoke_diagnose_host("client".into(), host.id().into());
+        let request = sent_request(&commands);
+        diagnosed(&workspace, host, request, view);
+        settled(&ui, &workspace, request);
+        (ui, workspace, commands, host)
+    }
+
+    #[test]
+    fn a_diagnosis_shows_problems_apart_from_valid_customizations() {
+        let (ui, workspace, commands, host) = diagnostics_surface();
+        assert_eq!(first_view(&ui).diagnosis_state, "unchecked");
+        ui.invoke_diagnose_host("client".into(), host.id().into());
+        let Ok(Command::DiagnoseHost {
+            request, integrity, ..
+        }) = commands.try_recv()
+        else {
+            panic!("a diagnosis");
+        };
+        assert!(integrity, "a diagnosis the user asks for hashes files");
+        assert_eq!(first_view(&ui).diagnosis_state, "working");
+
+        diagnosed(&workspace, host, request, mixed());
+        settled(&ui, &workspace, request);
+
+        let view = first_view(&ui);
+        assert_eq!(view.diagnosis_state, "result");
+        assert!(!view.diagnosis_healthy);
         assert_eq!(
-            first_view(&ui).integrity_finding_total,
-            4,
-            "the filter hides, it does not drop"
+            view.diagnosis_summary,
+            lookup_args("gui-diagnosis-problems", [("count", Arg::from(1))]).as_str()
+        );
+        let problem = view.diagnosis_problems.row_data(0).expect("a problem");
+        assert!(problem.problem);
+        assert_eq!(problem.key, "p0");
+        assert!(!problem.fix_label.is_empty());
+        let customized = view
+            .diagnosis_customized
+            .row_data(0)
+            .expect("a customization");
+        assert!(!customized.problem, "a customization is never a problem");
+        assert!(customized.fix_label.is_empty());
+    }
+
+    #[test]
+    fn a_host_with_only_customizations_is_healthy() {
+        let (ui, _workspace, _commands, _host) = shown_result(diagnosis(
+            Vec::new(),
+            vec![finding("Custom Java 21.0.8", false, None)],
+        ));
+        let view = first_view(&ui);
+        assert!(view.diagnosis_healthy);
+        assert_eq!(
+            view.diagnosis_summary,
+            lookup("gui-diagnosis-healthy").as_str()
+        );
+        assert_eq!(view.diagnosis_customized.row_count(), 1);
+    }
+
+    #[test]
+    fn a_failed_diagnosis_is_not_mistaken_for_one_that_found_problems() {
+        let (ui, workspace, commands, host) = shown_result(mixed());
+        ui.invoke_diagnose_host("client".into(), host.id().into());
+        let request = sent_request(&commands);
+        diagnosis_flow::apply_diagnosis_failed(
+            &workspace,
+            &mut workspace.diagnosis.borrow_mut(),
+            host,
+            request,
+            "The version metadata could not be read.".to_owned(),
+            false,
+        );
+        settled(&ui, &workspace, request);
+
+        let view = first_view(&ui);
+        assert_eq!(view.diagnosis_state, "failed");
+        assert_eq!(
+            view.diagnosis_error,
+            "The version metadata could not be read."
+        );
+        assert!(
+            !view.diagnosis_summary.is_empty(),
+            "the earlier result stays readable under the failure"
         );
     }
 
     #[test]
-    fn a_host_with_nothing_wrong_is_reported_healthy_with_nothing_to_repair() {
-        let (ui, workspace, commands, host) = integrity_surface();
-        ui.invoke_verify_host("client".into(), host.id().into());
+    fn a_stopped_diagnosis_says_it_stopped_and_that_nothing_changed() {
+        let (ui, workspace, commands, host) = diagnostics_surface();
+        ui.invoke_diagnose_host("client".into(), host.id().into());
         let request = sent_request(&commands);
-        let data = backend::VerificationData {
-            files: vec![
-                verified("mods/sound.jar", "intact", false),
-                verified("mods/shipped.jar", "unverifiable", false),
-            ],
-            shared: Some(Ok(backend::SharedArtifactData {
-                metadata_cached: true,
-                checked: 40,
-                faults: Vec::new(),
-                not_yet_fetched: 3,
-                loader_libraries_uncovered: true,
-            })),
-        };
-        apply_host_verified(
+        diagnosis_flow::apply_diagnosis_failed(
             &workspace,
-            &mut workspace.integrity.borrow_mut(),
+            &mut workspace.diagnosis.borrow_mut(),
             host,
             request,
-            &data,
+            String::new(),
+            true,
         );
-
-        assert!(first_view(&ui).integrity_healthy);
+        settled(&ui, &workspace, request);
+        assert_eq!(first_view(&ui).diagnosis_state, "canceled");
         assert_eq!(
-            first_view(&ui).integrity_summary,
-            lookup("gui-integrity-healthy").as_str()
-        );
-        assert_eq!(first_view(&ui).integrity_repair_targets.row_count(), 0);
-        assert_eq!(first_view(&ui).integrity_unrepairable.row_count(), 0);
-        let notes: Vec<String> = first_view(&ui)
-            .integrity_shared_notes
-            .iter()
-            .map(|note| note.to_string())
-            .collect();
-        assert_eq!(
-            notes,
-            [
-                lookup_args("gui-integrity-shared-waiting", [("count", Arg::from(3))]),
-                lookup("gui-integrity-shared-loader"),
-            ],
-            "a shared file not downloaded yet is reported as that, not as damage"
+            first_view(&ui).diagnosis_error,
+            lookup("gui-diagnosis-canceled").as_str()
         );
     }
 
     #[test]
-    fn a_verification_lands_only_on_its_own_host() {
-        let (ui, workspace, commands, first) = integrity_surface();
+    fn a_diagnosis_lands_only_on_its_own_host() {
+        let (ui, workspace, commands, first) = diagnostics_surface();
         let pane = workspace.single_pane().expect("one pane");
         workspace.change_pane(&ui, pane, |layout| layout.split_beside(pane).is_ok());
         let second = server_host();
         ui.invoke_follow_host(2, "server".into(), second.id().into(), "Diagnostics".into());
         commands.try_iter().for_each(drop);
-        ui.invoke_verify_host("client".into(), first.id().into());
+        ui.invoke_diagnose_host("client".into(), first.id().into());
         let request = sent_request(&commands);
 
-        let data = backend::VerificationData {
-            files: vec![verified("mods/gone.jar", "absent", true)],
-            shared: None,
-        };
-        apply_host_verified(
-            &workspace,
-            &mut workspace.integrity.borrow_mut(),
-            first,
-            request,
-            &data,
-        );
+        diagnosed(&workspace, first, request, mixed());
         let views = ui.get_host_views();
         let client_view = views.row_data(0).expect("client");
         let server_view = views.row_data(1).expect("server");
-        assert_eq!(client_view.integrity_state, "checked");
-        assert_eq!(client_view.integrity_repair_targets.row_count(), 1);
-        assert_eq!(server_view.integrity_state, "unchecked");
-        assert_eq!(server_view.integrity_repair_targets.row_count(), 0);
+        assert_eq!(client_view.diagnosis_problems.row_count(), 1);
+        assert_eq!(server_view.diagnosis_state, "unchecked");
+        assert_eq!(server_view.diagnosis_problems.row_count(), 0);
     }
 
     #[test]
-    fn a_late_verification_of_a_host_that_left_is_not_shown() {
-        let (ui, workspace, commands, first) = integrity_surface();
-        ui.invoke_verify_host("client".into(), first.id().into());
+    fn a_late_diagnosis_of_a_host_that_left_is_not_shown() {
+        let (ui, workspace, commands, first) = diagnostics_surface();
+        ui.invoke_diagnose_host("client".into(), first.id().into());
         let request = sent_request(&commands);
-        let second = server_host();
-        workspace.open(&ui, second, Surface::Diagnostics);
-        assert_eq!(first_view(&ui).integrity_state, "unchecked");
+        workspace.open(&ui, server_host(), Surface::Diagnostics);
 
-        let data = backend::VerificationData {
-            files: vec![verified("mods/gone.jar", "absent", true)],
-            shared: None,
-        };
-        apply_host_verified(
-            &workspace,
-            &mut workspace.integrity.borrow_mut(),
-            first,
-            request,
-            &data,
-        );
-        assert_eq!(first_view(&ui).integrity_state, "unchecked");
-        assert_eq!(first_view(&ui).integrity_repair_targets.row_count(), 0);
+        diagnosed(&workspace, first, request, mixed());
+        assert_eq!(first_view(&ui).diagnosis_problems.row_count(), 0);
 
         workspace.open(&ui, first, Surface::Diagnostics);
         assert_eq!(
-            first_view(&ui).integrity_state,
-            "verifying",
-            "coming back finds the verification still running"
+            first_view(&ui).diagnosis_state,
+            "working",
+            "coming back finds the diagnosis still running"
         );
+        assert_eq!(first_view(&ui).diagnosis_problems.row_count(), 0);
     }
 
     #[test]
-    fn one_verification_or_repair_runs_at_a_time() {
-        let (ui, workspace, commands, host) = integrity_surface();
-        ui.invoke_verify_host("client".into(), host.id().into());
-        ui.invoke_verify_host("client".into(), host.id().into());
-        ui.invoke_repair_host("client".into(), host.id().into());
+    fn one_diagnosis_or_fix_runs_at_a_time_whichever_pane_asks() {
+        let (ui, workspace, commands, host) = shown_result(mixed());
+        let pane = workspace.single_pane().expect("one pane");
+        workspace.change_pane(&ui, pane, |layout| layout.split_beside(pane).is_ok());
+        ui.invoke_follow_host(2, "client".into(), host.id().into(), "Diagnostics".into());
+        commands.try_iter().for_each(drop);
+
+        ui.invoke_diagnose_host("client".into(), host.id().into());
+        ui.invoke_diagnose_host("client".into(), host.id().into());
         let request = sent_request(&commands);
         assert!(commands.try_recv().is_err(), "a second request waits");
 
-        settle_integrity(
-            &ui,
-            &workspace,
-            &mut workspace.integrity.borrow_mut(),
-            request,
-        );
+        settled(&ui, &workspace, request);
         assert_eq!(
-            first_view(&ui).integrity_state,
-            "unchecked",
-            "a verification that ended without a result leaves the earlier state"
+            first_view(&ui).diagnosis_state,
+            "result",
+            "a diagnosis that ended without a result leaves the earlier one"
         );
-        ui.invoke_verify_host("client".into(), host.id().into());
+        ui.invoke_diagnose_host("client".into(), host.id().into());
         assert!(matches!(
             commands.try_recv(),
-            Ok(Command::VerifyHost { .. })
+            Ok(Command::DiagnoseHost { .. })
         ));
     }
 
+    /// Opens the preview of the result's first problem and answers it.
+    fn ready_preview(
+        ui: &AppWindow,
+        workspace: &Workspace,
+        commands: &std::sync::mpsc::Receiver<Command>,
+        host: InstalledHost,
+    ) {
+        ui.invoke_review_fix("client".into(), host.id().into(), "p0".into());
+        let Ok(Command::PreviewFix { request, fix, .. }) = commands.try_recv() else {
+            panic!("a preview");
+        };
+        assert_eq!(fix, enable_flywheel());
+        diagnosis_flow::apply_fix_previewed(
+            workspace,
+            &mut workspace.diagnosis.borrow_mut(),
+            host,
+            request,
+            Ok(PreviewView {
+                changes: vec![crate::diagnosis_view::ChangeView {
+                    action: lookup("gui-fix-enable"),
+                    name: "Flywheel".to_owned(),
+                    detail: "mods/flywheel.jar".to_owned(),
+                }],
+                notes: vec![lookup("gui-fix-enable-note")],
+                blocked: String::new(),
+            }),
+        );
+    }
+
     #[test]
-    fn a_repair_claims_the_host_and_waits_for_a_change_already_running() {
-        let (ui, workspace, commands, host) = integrity_surface();
+    fn a_fix_is_applied_only_from_its_preview_and_only_once() {
+        let (ui, workspace, commands, host) = shown_result(mixed());
+        ui.invoke_review_fix("client".into(), host.id().into(), "p0".into());
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::PreviewFix { .. })
+        ));
+        assert_eq!(first_view(&ui).fix_state, "loading");
+        ui.invoke_apply_fix("client".into(), host.id().into());
+        assert!(
+            commands.try_recv().is_err(),
+            "nothing is applied before its preview is on screen"
+        );
+        ui.invoke_cancel_fix("client".into(), host.id().into());
+        assert_eq!(first_view(&ui).fix_state, "");
+
+        ready_preview(&ui, &workspace, &commands, host);
+        assert_eq!(first_view(&ui).fix_state, "ready");
+        assert_eq!(first_view(&ui).fix_changes.row_count(), 1);
+
+        ui.invoke_apply_fix("client".into(), host.id().into());
+        ui.invoke_apply_fix("client".into(), host.id().into());
+        let Ok(Command::ApplyFix { fix, integrity, .. }) = commands.try_recv() else {
+            panic!("an apply");
+        };
+        assert_eq!(fix, enable_flywheel());
+        assert!(integrity, "the diagnosis after it checks what this one did");
+        assert!(commands.try_recv().is_err(), "a second apply waits");
+        assert_eq!(first_view(&ui).fix_state, "applying");
+        assert_eq!(ui.get_host_busy_id(), host.id().as_str());
+
+        ui.invoke_cancel_fix("client".into(), host.id().into());
+        assert_eq!(
+            first_view(&ui).fix_state,
+            "applying",
+            "a fix already applying cannot be closed"
+        );
+    }
+
+    #[test]
+    fn a_late_preview_of_a_review_that_was_closed_is_ignored() {
+        let (ui, workspace, commands, host) = shown_result(mixed());
+        ui.invoke_review_fix("client".into(), host.id().into(), "p0".into());
+        let Ok(Command::PreviewFix { request: first, .. }) = commands.try_recv() else {
+            panic!("a preview");
+        };
+        ui.invoke_cancel_fix("client".into(), host.id().into());
+        ui.invoke_review_fix("client".into(), host.id().into(), "p0".into());
+        diagnosis_flow::apply_fix_previewed(
+            &workspace,
+            &mut workspace.diagnosis.borrow_mut(),
+            host,
+            first,
+            Err("gone".to_owned()),
+        );
+        assert_eq!(first_view(&ui).fix_state, "loading");
+    }
+
+    #[test]
+    fn an_applied_fix_leaves_the_result_stale_until_the_diagnosis_after_it() {
+        let (ui, workspace, commands, host) = shown_result(mixed());
+        ready_preview(&ui, &workspace, &commands, host);
+        ui.invoke_apply_fix("client".into(), host.id().into());
+        let request = sent_request(&commands);
+
+        diagnosis_flow::apply_fix_applied(
+            &workspace,
+            &mut workspace.diagnosis.borrow_mut(),
+            host,
+            request,
+            OutcomeView {
+                message: lookup_args("gui-fix-enabled", [("count", Arg::from(1))]),
+                failed: false,
+                changed: true,
+                lines: Vec::new(),
+            },
+        );
+        assert_eq!(first_view(&ui).fix_state, "");
+        assert!(first_view(&ui).diagnosis_stale);
+        assert!(!first_view(&ui).fix_result.is_empty());
+
+        diagnosed(&workspace, host, request, diagnosis(Vec::new(), Vec::new()));
+        settled(&ui, &workspace, request);
+        let view = first_view(&ui);
+        assert!(!view.diagnosis_stale);
+        assert!(view.diagnosis_healthy, "no problem survives the fix");
+        assert!(!view.fix_result.is_empty(), "what the fix did stays named");
+        assert_eq!(ui.get_host_busy_id(), "");
+    }
+
+    #[test]
+    fn an_apply_waits_for_a_change_already_running_and_holds_isolation_back() {
+        let (ui, workspace, commands, host) = shown_result(mixed());
+        ready_preview(&ui, &workspace, &commands, host);
         ui.set_host_busy_kind("client".into());
         ui.set_host_busy_id("elsewhere".into());
-        ui.invoke_repair_host("client".into(), host.id().into());
+        ui.invoke_apply_fix("client".into(), host.id().into());
         assert!(
             commands.try_recv().is_err(),
             "an isolation change owns the host state"
         );
+        assert_eq!(first_view(&ui).fix_state, "ready");
 
         clear_host_busy(&ui);
-        ui.invoke_repair_host("client".into(), host.id().into());
+        ui.invoke_apply_fix("client".into(), host.id().into());
         let request = sent_request(&commands);
-        assert_eq!(ui.get_host_busy_id(), host.id().as_str());
         assert_eq!(
             ui.get_host_busy_text(),
-            lookup("operation-repairing-host").as_str()
+            lookup("operation-applying-fix").as_str()
         );
 
-        // Isolation reads the same state, so it waits for the repair.
         let (isolation_sender, isolation_commands) = std::sync::mpsc::channel();
         register_isolation_actions(&ui, &isolation_sender, &workspace);
         workspace.open(&ui, host, Surface::Isolation);
@@ -10088,67 +9435,72 @@ mod tests {
         ui.invoke_start_isolation("client".into(), host.id().into(), false, false);
         assert!(isolation_commands.try_recv().is_err());
 
-        settle_integrity(
-            &ui,
-            &workspace,
-            &mut workspace.integrity.borrow_mut(),
-            request,
-        );
+        settled(&ui, &workspace, request);
         assert_eq!(ui.get_host_busy_id(), "");
     }
 
     #[test]
-    fn a_repair_leaves_its_findings_stale_until_the_check_after_it() {
-        let (ui, workspace, commands, host) = integrity_surface();
-        ui.invoke_repair_host("client".into(), host.id().into());
-        let request = sent_request(&commands);
+    fn a_failed_run_explains_itself_beside_the_host_without_opening_anything() {
+        let ui = test_window();
+        let (workspace, _commands) = test_workspace_sending(&ui);
+        diagnosis_flow::register(&ui, &workspace.commands, &workspace);
+        let host = client_host();
+        workspace.open(&ui, host, Surface::Overview);
+        let mut view = mixed();
+        view.crash_report = Some("crash-2026-09-27_12.00.00-client.txt".to_owned());
 
-        apply_host_repaired(
+        diagnosis_flow::apply_run_failed(
             &workspace,
-            &workspace.integrity.borrow(),
+            &mut workspace.diagnosis.borrow_mut(),
             host,
-            request,
-            &backend::RepairData {
-                repaired: vec!["mods/gone.jar".to_owned()],
-                failed: vec!["mods/far.jar".to_owned()],
-                recovery: vec!["/instance/.launcher/retired/far.jar".to_owned()],
-                ..backend::RepairData::default()
-            },
+            lookup("gui-run-exited-with-error"),
+            Some(view),
         );
-        assert_eq!(first_view(&ui).integrity_state, "stale");
-        assert!(first_view(&ui).integrity_repair_failed);
+
         assert_eq!(
-            first_view(&ui).integrity_recovery.row_count(),
-            1,
-            "what a failed rollback left behind stays named"
+            ui.get_workspace_panes()
+                .row_data(0)
+                .expect("the pane")
+                .surface,
+            "Overview",
+            "nothing navigates"
         );
-        assert!(
-            first_view(&ui).integrity_repair_result.contains(
-                lookup_args("gui-integrity-repaired", [("count", Arg::from(1))]).as_str()
-            )
+        let shown = first_view(&ui);
+        assert_eq!(shown.run_failure_title, lookup("gui-run-crashed").as_str());
+        assert!(shown.run_likely_cause.contains("Flywheel is turned off"));
+        assert_eq!(
+            shown.run_crash_report,
+            "crash-2026-09-27_12.00.00-client.txt"
+        );
+        assert_eq!(shown.diagnosis_state, "result");
+        assert_eq!(
+            shown.diagnosis_failure,
+            lookup("gui-run-exited-with-error").as_str(),
+            "Diagnostics opens on the failure it was made for"
         );
 
-        let data = backend::VerificationData {
-            files: vec![verified("mods/gone.jar", "intact", false)],
-            shared: None,
-        };
-        apply_host_verified(
+        ui.invoke_dismiss_run_failure("client".into(), host.id().into());
+        assert_eq!(first_view(&ui).run_failure_title, "");
+    }
+
+    #[test]
+    fn a_failed_run_does_not_replace_a_diagnosis_the_user_started() {
+        let (ui, workspace, commands, host) = diagnostics_surface();
+        ui.invoke_diagnose_host("client".into(), host.id().into());
+        let request = sent_request(&commands);
+        diagnosis_flow::apply_run_failed(
             &workspace,
-            &mut workspace.integrity.borrow_mut(),
+            &mut workspace.diagnosis.borrow_mut(),
             host,
-            request,
-            &data,
+            lookup("gui-run-exited-with-error"),
+            Some(mixed()),
         );
-        assert_eq!(first_view(&ui).integrity_state, "checked");
-        assert!(
-            first_view(&ui).integrity_healthy,
-            "no stale damaged row survives the repair"
-        );
-        assert_eq!(first_view(&ui).integrity_findings.row_count(), 0);
-        assert!(
-            !first_view(&ui).integrity_repair_result.is_empty(),
-            "the repair's own result stays"
-        );
+        assert_eq!(first_view(&ui).diagnosis_state, "working");
+        assert!(!first_view(&ui).run_failure_title.is_empty());
+
+        diagnosed(&workspace, host, request, diagnosis(Vec::new(), Vec::new()));
+        assert_eq!(first_view(&ui).diagnosis_failure, "");
+        assert!(first_view(&ui).diagnosis_healthy);
     }
 
     fn bundle_part(name: &str, kind: &'static str) -> backend::BundlePartData {
@@ -10166,10 +9518,10 @@ mod tests {
         std::sync::mpsc::Receiver<Command>,
         InstalledHost,
     ) {
-        let (ui, workspace, commands, host) = integrity_surface();
-        apply_bundle_plan(
+        let (ui, workspace, commands, host) = diagnostics_surface();
+        diagnosis_flow::apply_bundle_plan(
             &workspace,
-            &mut workspace.integrity.borrow_mut(),
+            &mut workspace.diagnosis.borrow_mut(),
             host,
             vec![
                 bundle_part("logs/latest.log", "game_log"),
@@ -10262,7 +9614,7 @@ mod tests {
             "the choice is fixed while it is written"
         );
 
-        settle_bundle(&workspace, &mut workspace.integrity.borrow_mut(), *request);
+        diagnosis_flow::settle_bundle(&workspace, &mut workspace.diagnosis.borrow_mut(), *request);
         assert!(!first_view(&ui).bundle_exporting);
     }
 
@@ -10288,9 +9640,9 @@ mod tests {
             "logs/latest.log".into(),
             false,
         );
-        apply_bundle_plan(
+        diagnosis_flow::apply_bundle_plan(
             &workspace,
-            &mut workspace.integrity.borrow_mut(),
+            &mut workspace.diagnosis.borrow_mut(),
             host,
             vec![
                 bundle_part("logs/latest.log", "game_log"),
@@ -10313,9 +9665,9 @@ mod tests {
             unreadable: vec!["logs/latest.log".to_owned()],
             bytes: 4096,
         };
-        apply_bundle_exported(
+        diagnosis_flow::apply_bundle_exported(
             &workspace,
-            &workspace.integrity.borrow(),
+            &workspace.diagnosis.borrow(),
             host,
             request,
             &report,
@@ -10331,9 +9683,9 @@ mod tests {
             "what could not be read is named"
         );
 
-        apply_bundle_export_failed(
+        diagnosis_flow::apply_bundle_export_failed(
             &workspace,
-            &workspace.integrity.borrow(),
+            &workspace.diagnosis.borrow(),
             host,
             request,
             "The disk is full.",
@@ -10342,9 +9694,9 @@ mod tests {
         assert_eq!(first_view(&ui).bundle_result, "");
 
         workspace.open(&ui, server_host(), Surface::Diagnostics);
-        apply_bundle_exported(
+        diagnosis_flow::apply_bundle_exported(
             &workspace,
-            &workspace.integrity.borrow(),
+            &workspace.diagnosis.borrow(),
             host,
             request,
             &report,
@@ -10357,14 +9709,14 @@ mod tests {
     }
 
     #[test]
-    fn stopping_integrity_work_cancels_its_reported_operation() {
-        let (ui, workspace, commands, host) = integrity_surface();
-        ui.invoke_verify_host("client".into(), host.id().into());
+    fn stopping_a_diagnosis_cancels_its_reported_operation() {
+        let (ui, workspace, commands, host) = diagnostics_surface();
+        ui.invoke_diagnose_host("client".into(), host.id().into());
         let _ = sent_request(&commands);
         let activity = ActivityData {
             item: crate::presentation::ActivityPresentation {
                 id: "operation-7".to_owned(),
-                title: lookup("operation-verifying-host"),
+                title: lookup("operation-diagnosing-host"),
                 status: String::new(),
                 status_kind: "running",
                 detail: "mods/big.jar".to_owned(),
@@ -10376,15 +9728,15 @@ mod tests {
             entity: host.id(),
             time: String::new(),
         };
-        apply_integrity_activity(
+        diagnosis_flow::apply_activity(
             &ui,
             &workspace,
-            &mut workspace.integrity.borrow_mut(),
+            &mut workspace.diagnosis.borrow_mut(),
             &activity,
         );
-        assert_eq!(first_view(&ui).integrity_progress, "mods/big.jar");
+        assert_eq!(first_view(&ui).diagnosis_progress, "mods/big.jar");
 
-        ui.invoke_stop_integrity_work();
+        ui.invoke_stop_diagnosis();
         assert!(matches!(
             commands.try_recv(),
             Ok(Command::CancelOperation(operation)) if operation == "operation-7"
@@ -10830,7 +10182,7 @@ mod tests {
             mods: Rc::default(),
             browser: Rc::default(),
             isolation: Rc::default(),
-            integrity: Rc::default(),
+            diagnosis: Rc::default(),
             commands: sender,
         };
         register_workspace(ui, &workspace);
@@ -10956,6 +10308,50 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    fn fail_run(workspace: &Workspace, host: InstalledHost) {
+        diagnosis_flow::apply_run_failed(
+            workspace,
+            &mut workspace.diagnosis.borrow_mut(),
+            host,
+            lookup("gui-run-exited-with-error"),
+            None,
+        );
+    }
+
+    fn run_notices(ui: &AppWindow) -> Vec<String> {
+        ui.get_host_views()
+            .iter()
+            .map(|view| view.run_failure_title.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn starting_a_host_again_forgets_its_failed_run() {
+        let ui = test_window();
+        let (workspace, _commands, client, _server) = paired_workspace(&ui);
+        workspace.open(&ui, client, Surface::Overview);
+        fail_run(&workspace, client);
+        assert_eq!(run_notices(&ui), [lookup("gui-run-failed-client")]);
+
+        ui.invoke_launch_client(client.id().into());
+        assert_eq!(run_notices(&ui), [String::new()]);
+    }
+
+    #[test]
+    fn a_pair_start_forgets_both_sides_failed_runs() {
+        let ui = test_window();
+        let (workspace, _commands, client, server) = paired_workspace_starting_together(&ui, true);
+        workspace.open(&ui, client, Surface::Overview);
+        ui.invoke_split_pane_beside(1);
+        ui.invoke_show_linked_pair(1, "server".into(), server.id().into());
+        fail_run(&workspace, client);
+        fail_run(&workspace, server);
+        assert!(run_notices(&ui).iter().all(|notice| !notice.is_empty()));
+
+        ui.invoke_launch_client(client.id().into());
+        assert!(run_notices(&ui).iter().all(String::is_empty));
     }
 
     #[test]
@@ -12483,6 +11879,7 @@ mod tests {
 
         let rust = [
             include_str!("controller.rs"),
+            include_str!("controller/diagnosis_flow.rs"),
             include_str!("controller/log_views.rs"),
             include_str!("controller/workspace.rs"),
             include_str!("main.rs"),

@@ -1,33 +1,13 @@
-// The Diagnostics surface: integrity findings and diagnostic bundles.
+// The Diagnostics surface: whether a host is configured correctly, what a
+// failed run points at, the fixes it can preview, and what to attach to a
+// bug report.
 
 import { ScrollView, Spinner } from "std-widgets.slint";
-import { AppButton, Pill, TextField, Toggle } from "../components/controls.slint";
+import { AppButton, Pill, Toggle } from "../components/controls.slint";
 import { BodyText, Divider, Heading, SectionTitle } from "../components/text.slint";
 import { GuiI18n } from "../globals.slint";
-import { BundlePartRow, IntegrityFindingRow } from "../models.slint";
+import { BundlePartRow, DiagnosticCheckRow, DiagnosticFindingRow, FixChangeRow, HostView } from "../models.slint";
 import { Theme } from "../theme.slint";
-
-export component IntegrityFindingList inherits Rectangle {
-    in property <[IntegrityFindingRow]> items;
-    border-radius: 6px;
-    border-width: 1px;
-    border-color: Theme.border;
-    background: Theme.background;
-    height: min(280px, list.preferred-height + 2px);
-    ScrollView {
-        viewport-width: self.width;
-        list := VerticalLayout {
-            padding: 8px;
-            spacing: 6px;
-            alignment: start;
-            for item in root.items : HorizontalLayout {
-                spacing: 10px;
-                BodyText { text: item.path; horizontal-stretch: 1; wrap: word-wrap; font-size: Theme.caption-size; }
-                VerticalLayout { alignment: center; Pill { text: item.label; tone-color: item.handling == "info" ? Theme.text-secondary : item.handling == "repair" ? Theme.warning : Theme.danger; } }
-            }
-        }
-    }
-}
 
 // The choice of what goes into one local diagnostic archive. Every row is
 // one the core planner offered; nothing else can be added here.
@@ -44,12 +24,13 @@ export component DiagnosticBundlePanel inherits VerticalLayout {
     callback export();
     callback open-folder();
     spacing: 8px;
-    SectionTitle { title: GuiI18n.text("gui-bundle-title"); detail: GuiI18n.text("gui-bundle-detail"); }
+    BodyText { text: GuiI18n.text("gui-bundle-detail"); color: Theme.text-muted; wrap: word-wrap; }
     BodyText { text: GuiI18n.text("gui-bundle-privacy"); color: Theme.text-secondary; wrap: word-wrap; }
     if root.parts.length == 0 : BodyText { text: GuiI18n.text("gui-bundle-empty"); color: Theme.text-muted; wrap: word-wrap; }
+    if root.parts.length > 0 : BodyText { text: root.selection; color: Theme.text-secondary; wrap: word-wrap; }
     if root.parts.length > 0 : HorizontalLayout {
         spacing: 8px;
-        BodyText { text: root.selection; color: Theme.text-secondary; horizontal-stretch: 1; vertical-alignment: center; }
+        alignment: start;
         AppButton { text: GuiI18n.text("gui-bundle-select-all"); enabled: !root.exporting; clicked => { root.select-all(true); } }
         AppButton { text: GuiI18n.text("gui-bundle-select-none"); enabled: !root.exporting; clicked => { root.select-all(false); } }
     }
@@ -80,154 +61,397 @@ export component DiagnosticBundlePanel inherits VerticalLayout {
     }
     if root.parts.length > 0 && root.selected-count == 0 : BodyText { text: GuiI18n.text("gui-bundle-choose-one"); color: Theme.warning; wrap: word-wrap; }
     if root.error != "" : BodyText { text: root.error; color: Theme.danger; wrap: word-wrap; }
-    if root.result != "" : HorizontalLayout {
+    if root.result != "" : BodyText { text: root.result; wrap: word-wrap; }
+    if root.parts.length > 0 || root.result-path != "" : HorizontalLayout {
         spacing: 8px;
-        BodyText { text: root.result; horizontal-stretch: 1; wrap: word-wrap; vertical-alignment: center; }
-        if root.result-path != "" : AppButton { text: GuiI18n.text("gui-bundle-show-folder"); clicked => { root.open-folder(); } }
-    }
-    if root.parts.length > 0 : HorizontalLayout {
-        if root.exporting : Spinner { indeterminate: true; width: 16px; height: 16px; }
+        if root.exporting : VerticalLayout { alignment: center; Spinner { indeterminate: true; width: 16px; height: 16px; } }
         Rectangle { horizontal-stretch: 1; }
-        AppButton { text: GuiI18n.text("gui-bundle-export"); tone: "primary"; enabled: root.selected-count > 0 && !root.exporting; clicked => { root.export(); } }
+        if root.result-path != "" : AppButton { text: GuiI18n.text("gui-bundle-show-folder"); clicked => { root.open-folder(); } }
+        if root.parts.length > 0 : AppButton { text: GuiI18n.text("gui-bundle-export"); tone: "primary"; enabled: root.selected-count > 0 && !root.exporting; clicked => { root.export(); } }
     }
 }
 
-// Verification and repair for one host, from the files core records for
-// it. The state it shows belongs to the controller; this only lays it out.
+// Rows that wrap are components that size themselves: a wrapped text inside
+// a repeated layout does not report the height it grows to.
+component ChainStep inherits Rectangle {
+    in property <string> text;
+    in property <int> depth;
+    // The requirement that is not met, which ends the chain.
+    in property <bool> unmet;
+    height: step.preferred-height;
+    step := HorizontalLayout {
+        padding-left: root.depth * 16px;
+        BodyText {
+            text: root.text;
+            color: root.unmet ? Theme.warning : Theme.text;
+            font-weight: root.unmet ? 600 : 400;
+            wrap: word-wrap;
+            horizontal-stretch: 1;
+        }
+    }
+}
+
+component CheckRow inherits Rectangle {
+    in property <DiagnosticCheckRow> check;
+    height: row.preferred-height;
+    row := VerticalLayout {
+        spacing: 2px;
+        HorizontalLayout {
+            spacing: 10px;
+            Pill {
+                text: root.check.state-label;
+                min-content-width: 88px;
+                tone-color: root.check.state == "problem" ? Theme.warning : root.check.state == "ok" ? Theme.success : Theme.text-secondary;
+            }
+            BodyText { text: root.check.label; color: Theme.text; overflow: elide; horizontal-stretch: 1; }
+        }
+        BodyText { text: root.check.value; color: Theme.text-secondary; font-size: Theme.caption-size; wrap: word-wrap; }
+    }
+}
+
+component ChangeRow inherits Rectangle {
+    in property <FixChangeRow> change;
+    height: row.preferred-height;
+    row := VerticalLayout {
+        spacing: 2px;
+        HorizontalLayout {
+            spacing: 10px;
+            Pill { text: root.change.action; min-content-width: 112px; tone-color: Theme.accent; }
+            BodyText { text: root.change.name; color: Theme.text; wrap: word-wrap; horizontal-stretch: 1; }
+        }
+        if root.change.detail != "" : BodyText { text: root.change.detail; color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
+    }
+}
+
+// One finding. The badge says in words whether it is a problem, so the
+// border color is never the only signal.
+component FindingCard inherits Rectangle {
+    in property <DiagnosticFindingRow> item;
+    // Whether an action that changes the host can start now.
+    in property <bool> can-act;
+    callback review-fix(string);
+    callback open-route(string);
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: root.item.problem ? Theme.warning.with-alpha(0.7) : Theme.border;
+    background: Theme.surface;
+    height: card.preferred-height;
+    accessible-role: groupbox;
+    accessible-label: (root.item.problem ? GuiI18n.text("gui-diagnosis-badge-problem") : GuiI18n.text("gui-diagnosis-badge-customized")) + ": " + root.item.title;
+    card := VerticalLayout {
+        padding: 12px;
+        spacing: 6px;
+        HorizontalLayout {
+            spacing: 8px;
+            VerticalLayout { alignment: start; Pill { text: root.item.problem ? GuiI18n.text("gui-diagnosis-badge-problem") : GuiI18n.text("gui-diagnosis-badge-customized"); tone-color: root.item.problem ? Theme.warning : Theme.text-secondary; } }
+            Heading { text: root.item.title; font-size: Theme.row-heading-size; wrap: word-wrap; horizontal-stretch: 1; }
+        }
+        // Why a dependency is needed, one requirement per line, ending in
+        // the one that is not met.
+        if root.item.chain.length > 0 : VerticalLayout {
+            spacing: 2px;
+            for step[index] in root.item.chain : ChainStep {
+                text: index == 0 ? step : GuiI18n.value("gui-diagnosis-requires", step);
+                depth: index;
+                unmet: index == root.item.chain.length - 1;
+            }
+        }
+        if root.item.detail != "" : BodyText { text: root.item.detail; wrap: word-wrap; }
+        if root.item.files.length > 0 : VerticalLayout {
+            spacing: 2px;
+            for file in root.item.files : BodyText { text: file; color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
+            if root.item.more-files != "" : BodyText { text: root.item.more-files; color: Theme.text-muted; font-size: Theme.caption-size; }
+        }
+        if root.item.fix-label != "" || root.item.route != "" : HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+            if root.item.fix-label != "" : AppButton {
+                text: root.item.fix-label;
+                accessible-name: root.item.fix-label + ": " + root.item.title;
+                tone: root.item.problem ? "primary" : "secondary";
+                enabled: root.can-act;
+                clicked => { root.review-fix(root.item.key); }
+            }
+            if root.item.route != "" : AppButton { text: root.item.route-label; clicked => { root.open-route(root.item.route); } }
+        }
+    }
+}
+
+component CheckList inherits Rectangle {
+    in property <[DiagnosticCheckRow]> checks;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Theme.border;
+    background: Theme.surface;
+    height: rows.preferred-height;
+    rows := VerticalLayout {
+        padding: 12px;
+        spacing: 8px;
+        for check in root.checks : CheckRow { check: check; }
+    }
+}
+
+// The change a fix would make, shown before anything changes. This is the
+// confirmation: Apply does it, and nothing asks again.
+component FixPanel inherits Rectangle {
+    in property <HostView> host;
+    in property <bool> can-apply;
+    callback cancel();
+    callback apply();
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Theme.accent;
+    background: Theme.elevated;
+    height: panel.preferred-height;
+    accessible-role: groupbox;
+    accessible-label: GuiI18n.text("gui-fix-title");
+    panel := VerticalLayout {
+        padding: 14px;
+        spacing: 8px;
+        Heading { text: GuiI18n.text("gui-fix-title"); font-size: Theme.row-heading-size; }
+        BodyText { text: root.host.fix-title; color: Theme.text-secondary; wrap: word-wrap; }
+        if root.host.fix-state == "loading" : HorizontalLayout {
+            spacing: 8px;
+            VerticalLayout { alignment: center; Spinner { indeterminate: true; width: 16px; height: 16px; } }
+            BodyText { text: GuiI18n.text("gui-fix-loading"); horizontal-stretch: 1; wrap: word-wrap; }
+        }
+        if root.host.fix-state == "failed" : BodyText { text: root.host.fix-error; color: Theme.danger; wrap: word-wrap; }
+        if root.host.fix-state == "ready" || root.host.fix-state == "applying" : VerticalLayout {
+            spacing: 6px;
+            for change in root.host.fix-changes : ChangeRow { change: change; }
+            for note in root.host.fix-notes : BodyText { text: note; wrap: word-wrap; }
+            if root.host.fix-blocked != "" : BodyText { text: root.host.fix-blocked; color: Theme.warning; wrap: word-wrap; }
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            if root.host.fix-state == "applying" : VerticalLayout { alignment: center; Spinner { indeterminate: true; width: 16px; height: 16px; } }
+            if root.host.fix-state == "applying" : BodyText { text: GuiI18n.text("gui-fix-applying"); vertical-alignment: center; }
+            Rectangle { horizontal-stretch: 1; }
+            AppButton { text: GuiI18n.text("gui-fix-cancel"); enabled: root.host.fix-state != "applying"; clicked => { root.cancel(); } }
+            AppButton {
+                text: GuiI18n.text("gui-fix-apply");
+                tone: "primary";
+                enabled: root.can-apply && root.host.fix-state == "ready" && root.host.fix-blocked == "" && root.host.fix-changes.length > 0;
+                clicked => { root.apply(); }
+            }
+        }
+    }
+}
+
+// Beside a host whose run just failed: what failed, what a quick diagnosis
+// thinks caused it, and where to look next. It never opens anything by itself.
+export component RunFailureNotice inherits Rectangle {
+    in property <HostView> host;
+    callback open-diagnostics();
+    callback open-crash-report();
+    callback open-log();
+    callback dismiss();
+    property <bool> narrow: self.width < 560px;
+    height: content.preferred-height;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Theme.danger.with-alpha(0.6);
+    background: Theme.danger.with-alpha(0.08);
+    accessible-role: groupbox;
+    accessible-label: root.host.run-failure-title;
+    content := VerticalLayout {
+        padding: 12px;
+        spacing: 6px;
+        Text { text: root.host.run-failure-title; color: Theme.danger; font-size: Theme.row-heading-size; font-weight: 600; wrap: word-wrap; }
+        BodyText { text: root.host.run-failure; wrap: word-wrap; }
+        if root.host.run-likely-cause != "" : BodyText { text: root.host.run-likely-cause; color: Theme.text; wrap: word-wrap; }
+        if !root.narrow : HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+            AppButton { text: GuiI18n.text("gui-run-open-diagnostics"); tone: "primary"; clicked => { root.open-diagnostics(); } }
+            if root.host.run-crash-report != "" : AppButton { text: GuiI18n.text("gui-diagnosis-open-crash-report"); clicked => { root.open-crash-report(); } }
+            AppButton { text: GuiI18n.text("gui-diagnosis-open-log"); clicked => { root.open-log(); } }
+            AppButton { text: GuiI18n.text("gui-run-dismiss"); clicked => { root.dismiss(); } }
+        }
+        if root.narrow : VerticalLayout {
+            spacing: 8px;
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: start;
+                AppButton { text: GuiI18n.text("gui-run-open-diagnostics"); tone: "primary"; clicked => { root.open-diagnostics(); } }
+                AppButton { text: GuiI18n.text("gui-run-dismiss"); clicked => { root.dismiss(); } }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: start;
+                if root.host.run-crash-report != "" : AppButton { text: GuiI18n.text("gui-diagnosis-open-crash-report"); clicked => { root.open-crash-report(); } }
+                AppButton { text: GuiI18n.text("gui-diagnosis-open-log"); clicked => { root.open-log(); } }
+            }
+        }
+    }
+}
+
+// Diagnostics for one host. The state belongs to the controller and is the
+// same in every pane on the host; which sections are expanded is this
+// pane's own.
 export component DiagnosticsSurface inherits Rectangle {
-    in property <bool> shared-supported;
-    in property <bool> host-running;
-    // A change is rewriting this host, such as the repair this started.
+    in property <HostView> host;
+    // A change is rewriting this host, such as a fix this started.
     in property <bool> busy;
-    in property <bool> isolation-active;
-    // "unchecked", "verifying", "checked", or "stale".
-    in property <string> state;
-    in property <string> progress;
-    in property <string> summary;
-    in property <bool> healthy;
-    in property <string> counts;
-    in property <string> checked-at;
-    in property <[IntegrityFindingRow]> findings;
-    in property <int> finding-total;
-    // The filter the findings are narrowed by, owned by the host.
-    in property <string> query;
-    in property <[string]> repair-targets;
-    in property <[string]> unrepairable;
-    in property <string> shared-summary;
-    in property <[IntegrityFindingRow]> shared-faults;
-    in property <[string]> shared-notes;
-    in property <string> repair-result;
-    in property <bool> repair-failed;
-    in property <[string]> recovery;
-    in property <[BundlePartRow]> bundle-parts;
-    in property <string> bundle-selection;
-    in property <int> bundle-selected-count;
-    in property <bool> bundle-exporting;
-    in property <string> bundle-result;
-    in property <string> bundle-result-path;
-    in property <string> bundle-error;
-    callback verify();
+    callback diagnose();
     callback stop();
-    callback repair();
-    callback filter(string);
+    callback review-fix(string);
+    callback cancel-fix();
+    callback apply-fix();
+    callback open-route(string);
+    callback copy-report();
     callback open-logs();
     callback toggle-bundle-part(string, bool);
     callback select-all-bundle-parts(bool);
     callback export-bundle();
     callback open-bundle-folder();
-    // What Repair waits for the user to do. A repair already running is
-    // progress, which the workspace banner shows, not a requirement.
-    property <string> repair-requirement: root.busy ? ""
-        : root.host-running ? "running"
-        : root.isolation-active ? "isolation"
-        : "";
-    property <bool> working: root.state == "verifying" || root.busy;
+    property <string> state: root.host.diagnosis-state == "" ? "unchecked" : root.host.diagnosis-state;
+    property <bool> working: root.state == "working" || root.busy;
+    property <bool> after-failure: root.host.diagnosis-failure != "";
+    property <bool> has-result: root.host.diagnosis-summary != "";
+    property <bool> show-other: false;
+    property <bool> show-bundle: false;
     ScrollView {
         viewport-width: self.width;
-        VerticalLayout {
+        body := VerticalLayout {
+            property <bool> narrow: self.width < 560px;
             alignment: start;
             width: min(parent.width, 980px);
             spacing: 12px;
             HorizontalLayout {
                 spacing: 10px;
-                SectionTitle { title: GuiI18n.text("gui-integrity-title"); detail: GuiI18n.text("gui-integrity-detail"); horizontal-stretch: 1; }
-                VerticalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-integrity-open-logs"); clicked => { root.open-logs(); } } }
-                if root.working : VerticalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-integrity-stop"); clicked => { root.stop(); } } }
-                VerticalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-integrity-verify"); tone: "primary"; enabled: !root.working; clicked => { root.verify(); } } }
+                SectionTitle { title: GuiI18n.text("gui-diagnosis-title"); detail: GuiI18n.text("gui-diagnosis-detail"); horizontal-stretch: 1; }
+                if !body.narrow && root.working : VerticalLayout { alignment: start; AppButton { text: GuiI18n.text("gui-diagnosis-stop"); clicked => { root.stop(); } } }
+                if !body.narrow : VerticalLayout { alignment: start; AppButton { text: root.has-result ? GuiI18n.text("gui-diagnosis-diagnose-again") : GuiI18n.text("gui-diagnosis-diagnose"); tone: "primary"; enabled: !root.working; clicked => { root.diagnose(); } } }
             }
-            if root.state == "verifying" : HorizontalLayout {
+            if body.narrow : HorizontalLayout {
                 spacing: 8px;
-                Spinner { indeterminate: true; width: 16px; height: 16px; }
-                BodyText { text: root.progress != "" ? root.progress : GuiI18n.text("operation-verifying-host"); horizontal-stretch: 1; wrap: word-wrap; }
+                alignment: start;
+                AppButton { text: root.has-result ? GuiI18n.text("gui-diagnosis-diagnose-again") : GuiI18n.text("gui-diagnosis-diagnose"); tone: "primary"; enabled: !root.working; clicked => { root.diagnose(); } }
+                if root.working : AppButton { text: GuiI18n.text("gui-diagnosis-stop"); clicked => { root.stop(); } }
             }
-            if root.state == "unchecked" : BodyText { text: GuiI18n.text("gui-integrity-unchecked"); color: Theme.text-secondary; wrap: word-wrap; }
-            if root.state == "checked" || root.state == "stale" : Rectangle {
+            if root.after-failure : BodyText { text: GuiI18n.value("gui-diagnosis-failure-context", root.host.diagnosis-failure); color: Theme.danger; wrap: word-wrap; }
+            // The overall state first, in words and not only in color.
+            status := Rectangle {
+                property <color> tone: root.state == "failed" ? Theme.danger
+                    : root.state == "result" && root.host.diagnosis-healthy ? Theme.success
+                    : root.state == "result" ? Theme.warning
+                    : Theme.border;
                 border-radius: 8px;
                 border-width: 1px;
-                border-color: root.state == "stale" ? Theme.border : root.healthy ? Theme.success : Theme.warning;
+                border-color: self.tone;
                 background: Theme.surface;
                 height: outcome.preferred-height;
                 outcome := VerticalLayout {
                     padding: 14px;
                     spacing: 5px;
-                    Heading { text: root.summary; font-size: Theme.row-heading-size; color: root.state == "stale" ? Theme.text-secondary : root.healthy ? Theme.success : Theme.warning; wrap: word-wrap; }
-                    if root.counts != "" : BodyText { text: root.counts; color: Theme.text-secondary; wrap: word-wrap; }
-                    if root.checked-at != "" : BodyText { text: root.checked-at; color: Theme.text-muted; font-size: Theme.caption-size; }
-                    if root.state == "stale" : BodyText { text: GuiI18n.text("gui-integrity-stale"); color: Theme.text-secondary; wrap: word-wrap; }
+                    if root.state == "unchecked" : Heading { text: GuiI18n.text("gui-diagnosis-unchecked-title"); font-size: Theme.row-heading-size; wrap: word-wrap; }
+                    if root.state == "unchecked" : BodyText { text: GuiI18n.text("gui-diagnosis-unchecked"); wrap: word-wrap; }
+                    if root.state == "working" : HorizontalLayout {
+                        spacing: 8px;
+                        VerticalLayout { alignment: center; Spinner { indeterminate: true; width: 16px; height: 16px; } }
+                        BodyText { text: root.host.diagnosis-progress != "" ? root.host.diagnosis-progress : GuiI18n.text("gui-diagnosis-working"); horizontal-stretch: 1; wrap: word-wrap; }
+                    }
+                    if root.state == "failed" : Heading { text: GuiI18n.text("gui-diagnosis-failed"); font-size: Theme.row-heading-size; color: Theme.danger; wrap: word-wrap; }
+                    if root.state == "failed" || root.state == "canceled" : BodyText { text: root.host.diagnosis-error; wrap: word-wrap; }
+                    // A result stays readable under a run or a failure that
+                    // came after it, set apart so it cannot be mistaken for
+                    // the newest answer.
+                    if root.has-result && root.state != "unchecked" : VerticalLayout {
+                        spacing: 4px;
+                        if root.state != "result" : Divider { }
+                        Heading { text: root.host.diagnosis-summary; font-size: Theme.row-heading-size; color: root.state == "result" ? status.tone : Theme.text-secondary; wrap: word-wrap; }
+                        BodyText { text: root.host.diagnosis-detail; color: Theme.text-muted; wrap: word-wrap; }
+                        if root.host.diagnosis-stale : BodyText { text: GuiI18n.text("gui-diagnosis-stale"); color: Theme.text-secondary; wrap: word-wrap; }
+                    }
                 }
             }
-            if root.repair-result != "" : Rectangle {
+            if root.host.fix-state != "" : FixPanel {
+                host: root.host;
+                can-apply: !root.working;
+                cancel => { root.cancel-fix(); }
+                apply => { root.apply-fix(); }
+            }
+            if root.host.fix-result != "" : Rectangle {
                 border-radius: 8px;
                 border-width: 1px;
-                border-color: root.repair-failed || root.recovery.length > 0 ? Theme.danger : Theme.border;
+                border-color: root.host.fix-result-failed ? Theme.danger : Theme.border;
                 background: Theme.surface;
-                height: result.preferred-height;
-                result := VerticalLayout {
+                height: fixed.preferred-height;
+                fixed := VerticalLayout {
                     padding: 12px;
-                    spacing: 5px;
-                    BodyText { text: root.repair-result; wrap: word-wrap; }
-                    if root.recovery.length > 0 : BodyText { text: GuiI18n.text("gui-integrity-recovery"); color: Theme.danger; wrap: word-wrap; }
-                    for path in root.recovery : BodyText { text: path; color: Theme.text-secondary; font-size: Theme.caption-size; wrap: word-wrap; }
+                    spacing: 4px;
+                    BodyText { text: root.host.fix-result; color: Theme.text; wrap: word-wrap; }
+                    for line in root.host.fix-result-lines : BodyText { text: line; color: Theme.text-secondary; font-size: Theme.caption-size; wrap: word-wrap; }
                 }
             }
-            if root.state == "checked" && root.finding-total > 0 : VerticalLayout {
+            if root.has-result && root.host.diagnosis-problems.length > 0 : VerticalLayout {
+                spacing: 8px;
+                Heading { text: root.after-failure ? GuiI18n.text("gui-diagnosis-likely-cause") : GuiI18n.count("gui-diagnosis-problems-heading", root.host.diagnosis-problems.length); font-size: Theme.section-size; wrap: word-wrap; }
+                for item in root.host.diagnosis-problems : FindingCard {
+                    item: item;
+                    can-act: !root.working && root.host.fix-state != "applying";
+                    review-fix(key) => { root.review-fix(key); }
+                    open-route(route) => { root.open-route(route); }
+                }
+            }
+            // A customization is not a problem, and after a failed run it is
+            // not what the user came for, so there it starts folded away.
+            if root.has-result && root.host.diagnosis-customized.length > 0 : VerticalLayout {
                 spacing: 8px;
                 HorizontalLayout {
                     spacing: 8px;
-                    Heading { text: GuiI18n.text("gui-integrity-findings"); font-size: Theme.row-heading-size; horizontal-stretch: 1; vertical-alignment: center; }
-                    TextField { property <string> shown-query: root.query; changed shown-query => { self.text = self.shown-query; } init => { self.text = root.query; } placeholder: GuiI18n.text("gui-integrity-filter"); accessible-label: GuiI18n.text("gui-integrity-filter"); input-type: InputType.search; width: 220px; edited(text) => { root.filter(text); } }
+                    Heading {
+                        text: root.after-failure ? GuiI18n.count("gui-diagnosis-other-findings", root.host.diagnosis-customized.length) : GuiI18n.count("gui-diagnosis-customized-heading", root.host.diagnosis-customized.length);
+                        font-size: Theme.section-size;
+                        wrap: word-wrap;
+                        horizontal-stretch: 1;
+                    }
+                    if root.after-failure : VerticalLayout {
+                        alignment: center;
+                        AppButton {
+                            text: root.show-other ? GuiI18n.text("gui-diagnosis-hide") : GuiI18n.text("gui-diagnosis-show");
+                            accessible-name: (root.show-other ? GuiI18n.text("gui-diagnosis-hide") : GuiI18n.text("gui-diagnosis-show")) + ": " + GuiI18n.count("gui-diagnosis-other-findings", root.host.diagnosis-customized.length);
+                            clicked => { root.show-other = !root.show-other; }
+                        }
+                    }
                 }
-                if root.findings.length == 0 : BodyText { text: GuiI18n.value("gui-integrity-no-match", root.query); color: Theme.text-muted; wrap: word-wrap; }
-                if root.findings.length > 0 : IntegrityFindingList { items: root.findings; }
+                if !root.after-failure || root.show-other : BodyText { text: GuiI18n.text("gui-diagnosis-customized-detail"); color: Theme.text-muted; wrap: word-wrap; }
+                if !root.after-failure || root.show-other : VerticalLayout {
+                    spacing: 8px;
+                    for item in root.host.diagnosis-customized : FindingCard {
+                        item: item;
+                        can-act: !root.working && root.host.fix-state != "applying";
+                        review-fix(key) => { root.review-fix(key); }
+                        open-route(route) => { root.open-route(route); }
+                    }
+                }
             }
-            if root.state == "checked" && (root.repair-targets.length > 0 || root.unrepairable.length > 0) : VerticalLayout {
+            if root.has-result && root.host.diagnosis-checks.length > 0 : VerticalLayout {
                 spacing: 8px;
-                Divider { }
-                SectionTitle { title: GuiI18n.text("gui-integrity-repair-title"); detail: GuiI18n.text("gui-integrity-repair-detail"); }
-                if root.repair-targets.length > 0 : BodyText { text: GuiI18n.count("gui-integrity-repair-targets", root.repair-targets.length); wrap: word-wrap; }
-                for path in root.repair-targets : BodyText { text: path; color: Theme.text-secondary; font-size: Theme.caption-size; wrap: word-wrap; }
-                if root.unrepairable.length > 0 : BodyText { text: GuiI18n.count("gui-integrity-unrepairable", root.unrepairable.length); color: Theme.warning; wrap: word-wrap; }
-                for path in root.unrepairable : BodyText { text: path; color: Theme.text-secondary; font-size: Theme.caption-size; wrap: word-wrap; }
-                if root.repair-targets.length > 0 && root.repair-requirement != "" : BodyText { text: GuiI18n.text(root.repair-requirement == "running" ? "gui-integrity-repair-blocked-running" : "gui-integrity-repair-blocked-isolation"); color: Theme.warning; wrap: word-wrap; }
-                if root.repair-targets.length > 0 : HorizontalLayout {
-                    Rectangle { horizontal-stretch: 1; }
-                    AppButton { text: GuiI18n.text("gui-integrity-repair"); tone: "primary"; enabled: !root.working && root.repair-requirement == ""; clicked => { root.repair(); } }
-                }
+                Heading { text: GuiI18n.text("gui-diagnosis-checked-title"); font-size: Theme.section-size; }
+                CheckList { checks: root.host.diagnosis-checks; }
             }
             Divider { }
-            SectionTitle { title: GuiI18n.text("gui-integrity-shared-title"); detail: root.shared-supported ? GuiI18n.text("gui-integrity-shared-detail") : GuiI18n.text("gui-integrity-shared-servers"); }
-            if root.shared-supported && root.shared-summary != "" : BodyText { text: root.shared-summary; wrap: word-wrap; }
-            if root.shared-supported && root.shared-faults.length > 0 : IntegrityFindingList { items: root.shared-faults; }
-            for note in root.shared-notes : BodyText { text: note; color: Theme.text-secondary; wrap: word-wrap; }
-            Divider { }
-            DiagnosticBundlePanel {
-                parts: root.bundle-parts;
-                selection: root.bundle-selection;
-                selected-count: root.bundle-selected-count;
-                exporting: root.bundle-exporting;
-                result: root.bundle-result;
-                result-path: root.bundle-result-path;
-                error: root.bundle-error;
+            SectionTitle { title: GuiI18n.text("gui-diagnosis-support-title"); detail: GuiI18n.text("gui-diagnosis-support-detail"); }
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: start;
+                AppButton { text: GuiI18n.text("gui-diagnosis-copy-report"); enabled: root.has-result; hint: GuiI18n.text("gui-diagnosis-copy-report-hint"); clicked => { root.copy-report(); } }
+                AppButton { text: GuiI18n.text("gui-integrity-open-logs"); clicked => { root.open-logs(); } }
+            }
+            HorizontalLayout {
+                alignment: start;
+                AppButton { text: root.show-bundle ? GuiI18n.text("gui-diagnosis-bundle-hide") : GuiI18n.text("gui-diagnosis-bundle-show"); clicked => { root.show-bundle = !root.show-bundle; } }
+            }
+            if root.show-bundle : DiagnosticBundlePanel {
+                parts: root.host.bundle-parts;
+                selection: root.host.bundle-selection;
+                selected-count: root.host.bundle-selected-count;
+                exporting: root.host.bundle-exporting;
+                result: root.host.bundle-result;
+                result-path: root.host.bundle-result-path;
+                error: root.host.bundle-error;
                 toggle(name, value) => { root.toggle-bundle-part(name, value); }
                 select-all(value) => { root.select-all-bundle-parts(value); }
                 export => { root.export-bundle(); }
