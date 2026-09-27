@@ -82,8 +82,8 @@ pub use connection::{
     LaunchAndConnectOutcome, ServerPreparation,
 };
 pub use crash_analysis::{
-    CrashAnalysis, CrashReview, CrashSuspect, SuspectConfidence, SuspectReason, SuspectedMod,
-    analyze_crash_report,
+    CrashAnalysis, CrashReview, CrashSuspect, LoaderReportedDependency, SuspectConfidence,
+    SuspectReason, SuspectedMod, analyze_crash_report, loader_dependency_failures,
 };
 pub use curseforge::StoredApiKey;
 pub use declared_relations::{DeclaredProject, ProjectAvailability};

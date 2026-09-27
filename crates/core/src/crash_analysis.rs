@@ -488,6 +488,63 @@ fn quoted_after(line: &str, marker: &str) -> Option<String> {
     (!id.is_empty()).then(|| id.to_owned())
 }
 
+/// One mandatory dependency the Forge or NeoForge loader refused to start
+/// without, as its mod sorter logged it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoaderReportedDependency {
+    /// The mod id that is missing or at the wrong version.
+    pub mod_id: String,
+    /// The mod id that asked for it.
+    pub requested_by: String,
+    /// The version range as the requesting mod declared it, exact.
+    pub expected_range: String,
+    /// The version found, or `None` when nothing was installed.
+    pub actual: Option<String>,
+}
+
+/// What FML's mod sorter logs before it refuses to load. Forge and NeoForge
+/// share the wording, and each following line names one dependency.
+const UNMET_MANDATORY_HEADER: &str = "Missing or unsupported mandatory dependencies:";
+
+/// The mandatory dependencies a Forge or NeoForge run's log says it lacked.
+///
+/// Empty for any other loader and for a log that reached no such refusal.
+/// Nothing is inferred: every field is the loader's own text.
+#[must_use]
+pub fn loader_dependency_failures(log: &str) -> Vec<LoaderReportedDependency> {
+    let mut found: Vec<LoaderReportedDependency> = Vec::new();
+    let mut lines = log.lines();
+    while let Some(line) = lines.next() {
+        if !line.contains(UNMET_MANDATORY_HEADER) {
+            continue;
+        }
+        for entry in lines.by_ref() {
+            let Some(parsed) = loader_dependency_line(entry.trim()) else {
+                break;
+            };
+            if !found.contains(&parsed) {
+                found.push(parsed);
+            }
+        }
+    }
+    found
+}
+
+/// `Mod ID: 'a', Requested by: 'b', Expected range: '[1,)', Actual version: 'c'`
+fn loader_dependency_line(line: &str) -> Option<LoaderReportedDependency> {
+    let rest = line.strip_prefix("Mod ID: '")?;
+    let (mod_id, rest) = rest.split_once("', Requested by: '")?;
+    let (requested_by, rest) = rest.split_once("', Expected range: '")?;
+    let (expected_range, rest) = rest.split_once("', Actual version: '")?;
+    let actual = rest.strip_suffix('\'')?;
+    Some(LoaderReportedDependency {
+        mod_id: mod_id.to_owned(),
+        requested_by: requested_by.to_owned(),
+        expected_range: expected_range.to_owned(),
+        actual: (actual != "[MISSING]").then(|| actual.to_owned()),
+    })
+}
+
 /// A suspect, and the row in the host's own mods it corresponds to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SuspectedMod {
@@ -620,6 +677,45 @@ mod tests {
     #![allow(clippy::expect_used, clippy::panic)]
 
     use super::*;
+
+    /// The block FML's mod sorter logs, as `latest.log` carries it.
+    const UNMET_DEPENDENCY_LOG: &str = "\
+[12:00:01] [main/INFO] [net.neoforged.fml.loading.ModSorter/LOADING]: Found 3 mod requirements (3 mandatory, 0 optional)
+[12:00:01] [main/INFO] [net.neoforged.fml.loading.ModSorter/LOADING]: Found 2 mod requirements missing (2 mandatory, 0 optional)
+[12:00:01] [main/ERROR] [net.neoforged.fml.loading.ModSorter/LOADING]: Missing or unsupported mandatory dependencies:
+\tMod ID: 'bar', Requested by: 'foo', Expected range: '[3.0,)', Actual version: '2.4'
+\tMod ID: 'registrate', Requested by: 'flywheel', Expected range: '[1.3,)', Actual version: '[MISSING]'
+[12:00:02] [main/INFO] [net.neoforged.fml.loading.ImmediateWindowHandler/]: Loading ImmediateWindowProvider fmlearlywindow
+";
+
+    #[test]
+    fn the_loader_s_unmet_dependencies_are_read_exactly_as_it_logged_them() {
+        let found = loader_dependency_failures(UNMET_DEPENDENCY_LOG);
+
+        assert_eq!(
+            found,
+            [
+                LoaderReportedDependency {
+                    mod_id: "bar".to_owned(),
+                    requested_by: "foo".to_owned(),
+                    expected_range: "[3.0,)".to_owned(),
+                    actual: Some("2.4".to_owned()),
+                },
+                LoaderReportedDependency {
+                    mod_id: "registrate".to_owned(),
+                    requested_by: "flywheel".to_owned(),
+                    expected_range: "[1.3,)".to_owned(),
+                    actual: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_log_without_the_refusal_reports_no_loader_dependency() {
+        assert!(loader_dependency_failures(DEFERRED_TASK_LOG).is_empty());
+        assert!(loader_dependency_failures("").is_empty());
+    }
 
     /// A mod loading failure whose section header carries no id, where the
     /// failing frames are one mod's compatibility support for another.
