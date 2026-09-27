@@ -66,7 +66,8 @@ release, because the headless tests find elements by it.
 | Module | Holds |
 |---|---|
 | `app.slint` | `AppWindow`: the properties and callbacks Rust reads and invokes, the navigation shell, its pages, and its modals |
-| `theme.slint` | The `Theme` global, the one place colors, text sizes, and shared measurements are written |
+| `theme.slint` | The `Theme` global: the color tokens every surface reads, text sizes, and shared measurements |
+| `palettes.slint` | `ThemePalette` and the built-in palettes, the one place colors are written |
 | `globals.slint` | `GuiI18n` and `PropertyRules`, globals whose answers Rust supplies |
 | `models.slint` | The row and view structs Rust fills models with |
 | `components/` | Text primitives, controls, and artwork shared by every surface |
@@ -81,6 +82,37 @@ and reports what the user asked for.
 
 Tests that read the markup as text go through `test_support::UI_SOURCES`, which
 a test keeps in step with the files on disk.
+
+### Theme and palettes
+
+`Theme`'s color tokens are the contract between the markup and whatever decides
+the colors (ADR 0041). Each token reads the field of the same name on
+`Theme.palette`, a `ThemePalette` that sets every color token and the scheme
+the shipped widgets paint in. Components read tokens and never the palette, so
+none of them knows which palette is active.
+
+The built-in palettes, Dark and Light, live in the `BuiltInPalettes` global.
+The theme preference is a separate value: `crates/gui/src/palette.rs` resolves
+it to one complete palette and writes it to `Theme`, and is the only place that
+chooses one. Adding a built-in palette is a `BuiltInPalettes` entry, a scheme
+that resolves to it, and its label in the theme list.
+
+User themes are TOML files in the `themes` folder under the configuration
+directory (ADR 0042, format in `docs/themes.md`). `crates/gui/src/theme_files.rs`
+reads them on the backend thread whenever the settings snapshot is built, and
+the snapshot carries the usable themes and a localized line for every file
+problem. `palette.rs` resolves a user theme by starting from its built-in
+parent and replacing the colors the file sets, so a user theme is complete by
+construction. A chosen user theme whose file is gone or unusable paints in the
+default palette, and the recorded choice stays.
+
+Text sizes, the resolved monospace family, and the shared measurements stay in
+`Theme` outside the palette. Several of them are layout invariants (fixed row
+heights that virtualized lists and scroll arithmetic depend on, pane and tab
+geometry), and a palette never changes them.
+
+A theme file can set colors only. Token names are part of its format, so a
+token can be added but never renamed or removed.
 
 ## Instance and shared-storage model
 
@@ -1267,7 +1299,14 @@ user chose, even one that happens to match that default; and a value this build
 cannot resolve, which a newer Ephervex may have written. The third is reported
 as itself and written back unchanged rather than read as one of the values this
 build does know, and it costs the user that one setting instead of the whole
-file. The preferred mod catalog under `[mods]` is stored this way.
+file. The preferred mod catalog under `[mods]` is stored this way. The
+interface theme under `[display]` (`color_scheme`, holding `dark`, `light`, or
+`user:<id>` for a theme file) is stored as text for the same reason, so a theme
+added later does not make an older build refuse the file. It
+always records a name older builds read, so nothing recorded and the default
+scheme are the same value there. A name this build cannot resolve paints in the
+default palette and is written back unchanged until the user picks another
+theme.
 
 Errors are typed by domain and composed through `CoreError`. User-visible text
 uses Fluent message IDs and typed arguments, while paths, versions, hashes, and

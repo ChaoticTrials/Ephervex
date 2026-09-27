@@ -36,9 +36,8 @@ use ephervex_model::{
 };
 use ephervex_options::{OptionsCompatibility, OptionsFeed};
 use ephervex_storage::{
-    ApplicationColorScheme, ApplicationTextScale, ClientRecord, Config, FileDisposition,
-    JavaConfig, NewClient, Paths, ReconciliationReport, Registry, ServerRecord, Storage,
-    TechnicalTextSize,
+    ApplicationTextScale, ApplicationTheme, ClientRecord, Config, FileDisposition, JavaConfig,
+    NewClient, Paths, ReconciliationReport, Registry, ServerRecord, Storage, TechnicalTextSize,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{instrument, warn};
@@ -92,11 +91,11 @@ pub struct JavaPlan {
 }
 
 /// Ephervex interface display preferences exposed to frontends.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApplicationDisplaySettings {
     pub text_scale: ApplicationTextScale,
     pub technical_text_size: TechnicalTextSize,
-    pub color_scheme: ApplicationColorScheme,
+    pub theme: ApplicationTheme,
     pub show_linked_servers: bool,
 }
 
@@ -350,11 +349,11 @@ impl App {
 
     /// Returns Ephervex interface preferences without involving Minecraft settings.
     #[must_use]
-    pub const fn application_display_settings(&self) -> ApplicationDisplaySettings {
+    pub fn application_display_settings(&self) -> ApplicationDisplaySettings {
         ApplicationDisplaySettings {
             text_scale: self.storage.config.display.text_scale,
             technical_text_size: self.storage.config.display.technical_text_size,
-            color_scheme: self.storage.config.display.color_scheme,
+            theme: self.storage.config.display.theme(),
             show_linked_servers: self.storage.config.display.show_linked_servers,
         }
     }
@@ -412,12 +411,12 @@ impl App {
         &mut self,
         text_scale: ApplicationTextScale,
         technical_text_size: TechnicalTextSize,
-        color_scheme: ApplicationColorScheme,
+        theme: &ApplicationTheme,
     ) -> CoreResult<()> {
         self.mutate_config(|config| {
             config.display.text_scale = text_scale;
             config.display.technical_text_size = technical_text_size;
-            config.display.color_scheme = color_scheme;
+            config.display.set_theme(theme);
         })
     }
 
@@ -1462,6 +1461,7 @@ fn loader_build_is_available(listing: &LoaderVersionListing, selected: &str) -> 
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use ephervex_model::{LoaderSelection, StorageClass};
+    use ephervex_storage::ApplicationColorScheme;
 
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1842,7 +1842,7 @@ mod tests {
             ApplicationDisplaySettings {
                 text_scale: ApplicationTextScale::Default,
                 technical_text_size: TechnicalTextSize::Default,
-                color_scheme: ApplicationColorScheme::Dark,
+                theme: ApplicationTheme::BuiltIn(ApplicationColorScheme::Dark),
                 show_linked_servers: false,
             }
         );
@@ -1850,7 +1850,7 @@ mod tests {
         app.set_application_display_settings(
             ApplicationTextScale::Large,
             TechnicalTextSize::Comfortable,
-            ApplicationColorScheme::Light,
+            &ApplicationTheme::BuiltIn(ApplicationColorScheme::Light),
         )
         .expect("save display settings");
         assert!(app.config().minecraft_preferences.is_empty());
@@ -1861,9 +1861,37 @@ mod tests {
             ApplicationDisplaySettings {
                 text_scale: ApplicationTextScale::Large,
                 technical_text_size: TechnicalTextSize::Comfortable,
-                color_scheme: ApplicationColorScheme::Light,
+                theme: ApplicationTheme::BuiltIn(ApplicationColorScheme::Light),
                 show_linked_servers: false,
             }
+        );
+    }
+
+    /// The settings page saves every display choice together, so changing the
+    /// text size must not replace a theme a newer build recorded.
+    #[test]
+    fn saving_display_settings_keeps_a_theme_this_build_does_not_know() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        app.mutate_config(|config| "high_contrast".clone_into(&mut config.display.color_scheme))
+            .expect("record a newer scheme");
+        assert_eq!(
+            app.application_display_settings().theme,
+            ApplicationTheme::default()
+        );
+
+        app.set_application_display_settings(
+            ApplicationTextScale::Large,
+            TechnicalTextSize::Default,
+            &ApplicationTheme::default(),
+        )
+        .expect("save display settings");
+
+        let reopened = app_rooted_at(base.path());
+        assert_eq!(reopened.config().display.color_scheme, "high_contrast");
+        assert_eq!(
+            reopened.application_display_settings().text_scale,
+            ApplicationTextScale::Large
         );
     }
 

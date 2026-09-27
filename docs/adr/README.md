@@ -46,3 +46,5 @@ so the reasoning trail survives.
 | [0038](0038-a-diagnostic-bundle-is-a-chosen-verbatim-local-copy.md) | A diagnostic bundle is a chosen, verbatim, local copy | Accepted |
 | [0039](0039-a-split-workspace-composes-host-views-and-owns-no-feature-state.md) | A split workspace composes host views and owns no feature state | Accepted |
 | [0040](0040-a-linked-pair-chooses-one-linked-server-and-starts-as-one-operation.md) | A linked pair chooses one linked server and starts as one operation | Accepted |
+| [0041](0041-a-theme-is-a-complete-color-palette.md) | A theme is a complete color palette | Accepted |
+| [0042](0042-user-themes-are-toml-files-over-a-built-in-parent.md) | User themes are TOML files over a built-in parent | Accepted |

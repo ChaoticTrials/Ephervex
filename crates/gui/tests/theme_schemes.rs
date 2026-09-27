@@ -1,21 +1,28 @@
-//! The interface's two color schemes.
+//! The interface's built-in palettes.
 //!
 //! Every color the frontend paints with is named in the theme and resolves
-//! through one switch. What is worth proving is that the switch reaches all of
-//! them: a token that kept a single value is invisible until somebody is
-//! looking at a dark card on a light page.
+//! through the active palette. What is worth proving is that changing palette
+//! reaches all of them: a token that kept a single value is invisible until
+//! somebody is looking at a dark card on a light page.
 
 #![allow(clippy::expect_used)]
 
-use ephervex_gui::ui::{AppWindow, Theme};
+use ephervex_gui::ui::{AppWindow, BuiltInPalettes, Theme};
 use i_slint_backend_testing::{TestingBackend, TestingBackendOptions};
+use slint::language::ColorScheme;
 use slint::{Color, ComponentHandle};
 
 #[test]
 fn the_light_scheme_lifts_every_surface_and_darkens_every_foreground() {
     let ui = window();
     let theme = ui.global::<Theme>();
-    assert!(theme.get_dark(), "dark is what an untouched install gets");
+    let palettes = ui.global::<BuiltInPalettes>();
+    assert_eq!(
+        theme.get_palette(),
+        palettes.get_dark(),
+        "dark is what an untouched install gets"
+    );
+    assert_eq!(theme.get_widget_scheme(), ColorScheme::Dark);
 
     let surfaces = |theme: &Theme<'_>| {
         [
@@ -35,7 +42,8 @@ fn the_light_scheme_lifts_every_surface_and_darkens_every_foreground() {
     };
 
     let (dark_surfaces, dark_foregrounds) = (surfaces(&theme), foregrounds(&theme));
-    theme.set_dark(false);
+    theme.set_palette(palettes.get_light());
+    assert_eq!(theme.get_widget_scheme(), ColorScheme::Light);
     let (light_surfaces, light_foregrounds) = (surfaces(&theme), foregrounds(&theme));
 
     for ((name, dark), (_, light)) in dark_surfaces.iter().zip(&light_surfaces) {

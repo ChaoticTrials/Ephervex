@@ -7221,12 +7221,7 @@ fn register_general_settings(ui: &AppWindow, commands: &Sender<Command>) {
     let sender = commands.clone();
     let weak = ui.as_weak();
     ui.on_save_general_settings(
-        move |text_scale,
-              technical_text_size,
-              color_scheme,
-              show_globally,
-              make_operator,
-              level| {
+        move |text_scale, technical_text_size, theme, show_globally, make_operator, level| {
             let display = u16::try_from(text_scale)
                 .ok()
                 .and_then(ephervex_core::ApplicationTextScale::from_percent)
@@ -7235,20 +7230,18 @@ fn register_general_settings(ui: &AppWindow, commands: &Sender<Command>) {
                         .ok()
                         .and_then(ephervex_core::TechnicalTextSize::from_pixels),
                 )
-                .zip(ephervex_core::ApplicationColorScheme::from_name(
-                    color_scheme.as_str(),
-                ));
+                .zip(ephervex_core::ApplicationTheme::from_stored(theme.as_str()));
             let operator_level = u8::try_from(level)
                 .ok()
                 .and_then(ephervex_model::OperatorPermissionLevel::from_value);
             match (display, operator_level) {
-                (Some(((text_scale, technical_text_size), color_scheme)), Some(operator_level)) => {
+                (Some(((text_scale, technical_text_size), theme)), Some(operator_level)) => {
                     send(
                         &sender,
                         Command::SaveGeneralSettings {
                             text_scale,
                             technical_text_size,
-                            color_scheme,
+                            theme,
                             show_globally,
                             make_operator,
                             operator_level,
@@ -8407,6 +8400,35 @@ fn apply_artifact_cache_status(ui: &AppWindow, status: ArtifactCacheStatusData) 
     ui.set_artifact_cache_clearing(false);
 }
 
+/// The theme list, the chosen theme, and the palette it paints in.
+fn apply_theme_settings(
+    ui: &AppWindow,
+    theme: &ephervex_core::ApplicationTheme,
+    user_themes: &crate::theme_files::UserThemes,
+    themes_folder: &str,
+) {
+    let choices = crate::palette::theme_choices(&user_themes.themes);
+    ui.set_theme_labels(model(
+        choices
+            .iter()
+            .map(|choice| SharedString::from(choice.label.as_str()))
+            .collect(),
+    ));
+    ui.set_theme_ids(model(
+        choices
+            .iter()
+            .map(|choice| SharedString::from(choice.theme.to_stored()))
+            .collect(),
+    ));
+    ui.set_theme_index(
+        i32::try_from(crate::palette::choice_index(&choices, theme)).unwrap_or_default(),
+    );
+    ui.set_application_theme(theme.to_stored().into());
+    ui.set_themes_folder(themes_folder.into());
+    ui.set_theme_problems(user_themes.problems.join("\n").into());
+    crate::palette::apply_theme(ui, theme, &user_themes.themes);
+}
+
 fn apply_snapshot(
     ui: &AppWindow,
     snapshot: Snapshot,
@@ -8465,9 +8487,12 @@ fn apply_snapshot(
     ui.set_technical_text_size(i32::from(settings.technical_text_size_pixels));
     ui.global::<Theme>()
         .set_text_scale(f32::from(settings.text_scale_percent) / 100.0);
-    ui.set_application_color_scheme(settings.color_scheme.clone().into());
-    ui.global::<Theme>()
-        .set_dark(settings.color_scheme != ephervex_core::ApplicationColorScheme::Light.as_str());
+    apply_theme_settings(
+        ui,
+        &settings.theme,
+        &settings.user_themes,
+        &settings.themes_folder,
+    );
     ui.set_java_auto_detect(settings.java_auto_detect);
     ui.set_java_auto_download(settings.java_auto_download);
     ui.set_java_memory_min(settings.java_memory_min.to_string().into());
@@ -11957,6 +11982,62 @@ mod tests {
         (ui, commands, state)
     }
 
+    fn modrinth_theme(accent: slint::Color) -> crate::theme_files::UserThemes {
+        crate::theme_files::UserThemes {
+            themes: vec![crate::theme_files::UserTheme {
+                id: "modrinth".to_owned(),
+                name: "Modrinth".to_owned(),
+                parent: ephervex_core::ApplicationColorScheme::Dark,
+                colors: vec![("accent", accent)],
+            }],
+            problems: vec!["broken.toml: Skipped.".to_owned()],
+        }
+    }
+
+    #[test]
+    fn the_theme_list_shows_user_themes_with_the_chosen_one_selected_and_painted() {
+        let ui = test_window();
+        let accent = slint::Color::from_argb_u8(255, 1, 2, 3);
+        let chosen = ephervex_core::ApplicationTheme::User("modrinth".to_owned());
+
+        apply_theme_settings(&ui, &chosen, &modrinth_theme(accent), "/config/themes");
+
+        let labels: Vec<SharedString> = ui.get_theme_labels().iter().collect();
+        assert_eq!(
+            labels,
+            [
+                lookup("gui-color-scheme-dark"),
+                lookup("gui-color-scheme-light"),
+                "Modrinth".to_owned()
+            ]
+        );
+        let ids: Vec<SharedString> = ui.get_theme_ids().iter().collect();
+        assert_eq!(ids, ["dark", "light", "user:modrinth"]);
+        assert_eq!(ui.get_theme_index(), 2);
+        assert_eq!(ui.get_application_theme(), "user:modrinth");
+        assert_eq!(ui.get_themes_folder(), "/config/themes");
+        assert_eq!(ui.get_theme_problems(), "broken.toml: Skipped.");
+        assert_eq!(ui.global::<Theme>().get_accent(), accent);
+    }
+
+    #[test]
+    fn choosing_a_user_theme_saves_it_as_a_user_theme() {
+        let ui = test_window();
+        let (sender, commands) = std::sync::mpsc::channel();
+        register_general_settings(&ui, &sender);
+
+        ui.invoke_save_general_settings(100, 12, "user:modrinth".into(), false, true, 4);
+
+        let sent: Vec<_> = commands.try_iter().collect();
+        let [Command::SaveGeneralSettings { theme, .. }] = sent.as_slice() else {
+            panic!("one save: {sent:?}");
+        };
+        assert_eq!(
+            *theme,
+            ephervex_core::ApplicationTheme::User("modrinth".to_owned())
+        );
+    }
+
     #[test]
     fn measuring_asks_once_and_shows_progress_until_it_settles() {
         let (ui, commands, state) = disk_usage_window();
@@ -12463,24 +12544,28 @@ mod tests {
         assert!(!source.contains("root.remove-account(account.name)"));
     }
 
-    /// The markup, split where the `Theme` global ends.
+    /// The markup outside the `Theme` global and the palettes it reads.
     ///
-    /// Before the split is the one place a color belongs. After it is markup,
-    /// where a literal is a token nobody named and a scheme nobody checked.
-    fn theme_and_markup(source: &str) -> (&str, String) {
-        let theme =
-            ui_declaration(source, "export global Theme {").expect("the markup declares the theme");
-        let global = source.find(theme).expect("the theme is part of the markup");
-        let markup = format!("{}{}", &source[..global], &source[global + theme.len()..]);
-        (theme, markup)
+    /// Those are the one place a color or a text size is written. Anywhere
+    /// else, a literal is a token nobody named and a palette nobody checked.
+    fn markup_outside_the_theme() -> String {
+        let source = crate::test_support::UI_SOURCES
+            .iter()
+            .filter(|(path, _)| *path != "palettes.slint")
+            .map(|(_, source)| *source)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let theme = ui_declaration(&source, "export global Theme {")
+            .expect("the markup declares the theme");
+        source.replacen(theme, "", 1)
     }
 
-    /// Every color the interface paints with is named in `Theme`, so a second
-    /// color scheme is a matter of giving each name a second value rather than
-    /// of finding the places that never asked for one.
+    /// Every color the interface paints with is named in `Theme`, so another
+    /// palette is a matter of giving each name a value rather than of finding
+    /// the places that never asked for one.
     #[test]
     fn every_interface_color_is_named_in_the_theme_global() {
-        let (_, markup) = theme_and_markup(ui_markup());
+        let markup = markup_outside_the_theme();
         // Comments may quote a color they are explaining.
         let markup: String = markup
             .lines()
@@ -12507,20 +12592,6 @@ mod tests {
         assert!(hex.is_empty(), "colors written in the markup: {hex:?}");
     }
 
-    /// A token with one value is a token that breaks whichever scheme it was
-    /// not written for, and nothing on screen says which one that is.
-    #[test]
-    fn every_theme_color_carries_both_schemes() {
-        let (theme, _) = theme_and_markup(ui_markup());
-        let single: Vec<&str> = theme
-            .lines()
-            .map(str::trim)
-            .filter(|line| line.starts_with("out property <color> "))
-            .filter(|line| !line.contains("dark ?"))
-            .collect();
-        assert!(single.is_empty(), "colors with one scheme: {single:#?}");
-    }
-
     /// The shipped widgets paint from their own palette, so a window that
     /// repaints itself and leaves that palette alone puts a light ComboBox on
     /// a dark page.
@@ -12537,7 +12608,7 @@ mod tests {
     /// written from a property rather than as a literal.
     #[test]
     fn every_interface_text_size_follows_the_typography_scale() {
-        let (_, markup) = theme_and_markup(ui_markup());
+        let markup = markup_outside_the_theme();
         let literals: Vec<&str> = markup
             .match_indices("font-size:")
             .map(|(at, _)| markup[at..].lines().next().unwrap_or_default())

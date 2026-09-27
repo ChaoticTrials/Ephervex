@@ -252,8 +252,7 @@ impl TechnicalTextSize {
 }
 
 /// Which of Ephervex's own color schemes the interface paints in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ApplicationColorScheme {
     #[default]
     Dark,
@@ -287,18 +286,114 @@ impl ApplicationColorScheme {
     }
 }
 
+/// The theme the interface paints in, as the preference records it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApplicationTheme {
+    BuiltIn(ApplicationColorScheme),
+    /// A theme file in the user's themes folder, by its file stem.
+    User(String),
+}
+
+impl Default for ApplicationTheme {
+    fn default() -> Self {
+        Self::BuiltIn(ApplicationColorScheme::default())
+    }
+}
+
+impl ApplicationTheme {
+    /// Marks a recorded name as a user theme, so no file can shadow a
+    /// built-in scheme or one a later build adds.
+    const USER_PREFIX: &'static str = "user:";
+
+    /// Longest file stem a user theme may have.
+    pub const MAX_USER_ID_LENGTH: usize = 64;
+
+    /// A user theme, if `id` is a usable file stem: lowercase ASCII letters,
+    /// digits, `-` and `_`, starting with a letter or digit.
+    #[must_use]
+    pub fn user(id: &str) -> Option<Self> {
+        let usable = id.len() <= Self::MAX_USER_ID_LENGTH
+            && id
+                .chars()
+                .next()
+                .is_some_and(|first| first.is_ascii_lowercase() || first.is_ascii_digit())
+            && id
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_'));
+        usable.then(|| Self::User(id.to_owned()))
+    }
+
+    /// Resolves a recorded name, or `None` for one this build does not know.
+    #[must_use]
+    pub fn from_stored(name: &str) -> Option<Self> {
+        match name.strip_prefix(Self::USER_PREFIX) {
+            Some(id) => Self::user(id),
+            None => ApplicationColorScheme::from_name(name).map(Self::BuiltIn),
+        }
+    }
+
+    /// The name this theme is recorded under.
+    #[must_use]
+    pub fn to_stored(&self) -> String {
+        match self {
+            Self::BuiltIn(scheme) => scheme.as_str().to_owned(),
+            Self::User(id) => format!("{}{id}", Self::USER_PREFIX),
+        }
+    }
+}
+
 /// Display preferences for Ephervex itself.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ApplicationDisplayConfig {
     pub text_scale: ApplicationTextScale,
     pub technical_text_size: TechnicalTextSize,
-    pub color_scheme: ApplicationColorScheme,
+    /// The chosen theme, by its recorded name. See [`ApplicationTheme`].
+    ///
+    /// Text rather than an enum because the set of themes grows: one a newer
+    /// Ephervex wrote costs this build that one setting, not the whole file.
+    /// Resolved by [`Self::theme`].
+    pub color_scheme: String,
     /// Whether linked servers also appear in the global Servers list.
     pub show_linked_servers: bool,
     /// Keys this build does not know about. See [`Config::unknown`].
     #[serde(flatten)]
     pub unknown: toml::Table,
+}
+
+impl Default for ApplicationDisplayConfig {
+    fn default() -> Self {
+        Self {
+            text_scale: ApplicationTextScale::default(),
+            technical_text_size: TechnicalTextSize::default(),
+            color_scheme: ApplicationColorScheme::default().as_str().to_owned(),
+            show_linked_servers: false,
+            unknown: toml::Table::new(),
+        }
+    }
+}
+
+impl ApplicationDisplayConfig {
+    /// The recorded theme, or the default for a name this build does not
+    /// know.
+    ///
+    /// A user theme is returned whether or not its file still exists; that is
+    /// for whoever reads the themes folder to decide.
+    #[must_use]
+    pub fn theme(&self) -> ApplicationTheme {
+        ApplicationTheme::from_stored(&self.color_scheme).unwrap_or_default()
+    }
+
+    /// Records a theme.
+    ///
+    /// A recorded name this build does not know is kept while it resolves to
+    /// the same theme, so saving the other display settings leaves a newer
+    /// build's choice in place.
+    pub fn set_theme(&mut self, theme: &ApplicationTheme) {
+        if self.theme() != *theme {
+            self.color_scheme = theme.to_stored();
+        }
+    }
 }
 
 /// One managed Minecraft preference.
@@ -1741,6 +1836,108 @@ reference = ""
         assert!(rewritten.contains("future_top_level"));
         assert!(rewritten.contains("nested"));
         assert_eq!(Config::from_toml_str(&rewritten).expect("re-parse"), config);
+    }
+
+    fn with_color_scheme(line: &str) -> String {
+        DEFAULT_CONFIG_EXAMPLE.replace(
+            "show_linked_servers = false",
+            &format!("show_linked_servers = false\n{line}"),
+        )
+    }
+
+    fn user_theme(id: &str) -> ApplicationTheme {
+        ApplicationTheme::user(id).expect("a usable theme id")
+    }
+
+    #[test]
+    fn recorded_themes_load_as_the_theme_they_name() {
+        let missing = Config::from_toml_str(DEFAULT_CONFIG_EXAMPLE).expect("parse");
+        assert_eq!(
+            missing.display.theme(),
+            ApplicationTheme::BuiltIn(ApplicationColorScheme::Dark)
+        );
+        for (line, theme) in [
+            (
+                "color_scheme = \"dark\"",
+                ApplicationTheme::BuiltIn(ApplicationColorScheme::Dark),
+            ),
+            (
+                "color_scheme = \"light\"",
+                ApplicationTheme::BuiltIn(ApplicationColorScheme::Light),
+            ),
+            ("color_scheme = \"user:modrinth\"", user_theme("modrinth")),
+        ] {
+            let config = Config::from_toml_str(&with_color_scheme(line)).expect("parse");
+            assert_eq!(config.display.theme(), theme, "{line}");
+        }
+    }
+
+    /// Older builds read the built-in schemes as an enum, so a file this build
+    /// writes for one has to keep naming it the way they read it.
+    #[test]
+    fn every_theme_is_written_by_a_name_that_round_trips() {
+        let default = Config::default().to_toml_string().expect("serialize");
+        assert!(default.contains("color_scheme = \"dark\""));
+
+        for (theme, written) in [
+            (
+                ApplicationTheme::BuiltIn(ApplicationColorScheme::Light),
+                "color_scheme = \"light\"",
+            ),
+            (user_theme("modrinth"), "color_scheme = \"user:modrinth\""),
+        ] {
+            let mut config = Config::default();
+            config.display.set_theme(&theme);
+            let text = config.to_toml_string().expect("serialize");
+            assert!(text.contains(written), "{text}");
+            let parsed = Config::from_toml_str(&text).expect("re-parse");
+            assert_eq!(parsed.display.theme(), theme);
+            assert_eq!(parsed.display, config.display);
+        }
+    }
+
+    /// A theme a newer build added costs this build the one setting. It paints
+    /// in the default, and the recorded name survives until the user picks a
+    /// different theme.
+    #[test]
+    fn a_theme_this_build_does_not_know_is_kept_rather_than_refused() {
+        let text = with_color_scheme("color_scheme = \"high_contrast\"");
+        let mut config = Config::from_toml_str(&text).expect("the rest of the file still loads");
+        assert_eq!(config.display.theme(), ApplicationTheme::default());
+
+        config.display.set_theme(&ApplicationTheme::default());
+        let rewritten = config.to_toml_string().expect("serialize");
+        assert!(rewritten.contains("color_scheme = \"high_contrast\""));
+
+        config
+            .display
+            .set_theme(&ApplicationTheme::BuiltIn(ApplicationColorScheme::Light));
+        assert_eq!(config.display.color_scheme, "light");
+    }
+
+    #[test]
+    fn a_user_theme_id_is_a_plain_file_stem() {
+        for usable in ["modrinth", "my-theme_2", "9lives"] {
+            assert!(ApplicationTheme::user(usable).is_some(), "{usable}");
+        }
+        let too_long = "a".repeat(ApplicationTheme::MAX_USER_ID_LENGTH + 1);
+        for unusable in [
+            "",
+            "-dash",
+            "Upper",
+            "dot.ted",
+            "../escape",
+            "sp ace",
+            &too_long,
+        ] {
+            assert!(ApplicationTheme::user(unusable).is_none(), "{unusable}");
+            assert!(
+                ApplicationTheme::from_stored(&format!("user:{unusable}")).is_none(),
+                "{unusable}"
+            );
+        }
+        // Without the prefix a name is a built-in scheme or nothing.
+        assert_eq!(ApplicationTheme::from_stored("modrinth"), None);
     }
 
     #[test]

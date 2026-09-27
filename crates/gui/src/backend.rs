@@ -620,7 +620,7 @@ pub enum Command {
     SaveGeneralSettings {
         text_scale: ephervex_core::ApplicationTextScale,
         technical_text_size: ephervex_core::TechnicalTextSize,
-        color_scheme: ephervex_core::ApplicationColorScheme,
+        theme: ephervex_core::ApplicationTheme,
         show_globally: bool,
         make_operator: bool,
         operator_level: ephervex_model::OperatorPermissionLevel,
@@ -799,8 +799,11 @@ pub struct SettingsData {
     pub mod_catalog_origin: SettingOrigin,
     pub text_scale_percent: u16,
     pub technical_text_size_pixels: u16,
-    /// Which color scheme the interface paints in, as its stable identifier.
-    pub color_scheme: String,
+    /// Which theme the interface paints in.
+    pub theme: ephervex_core::ApplicationTheme,
+    /// The themes the user added, read from [`Self::themes_folder`].
+    pub user_themes: crate::theme_files::UserThemes,
+    pub themes_folder: String,
     pub show_linked_servers: bool,
     /// Whether a mod change acts on the mods its relations name.
     pub follow_mod_dependencies: bool,
@@ -4216,7 +4219,7 @@ fn run_worker(
             Command::SaveGeneralSettings {
                 text_scale,
                 technical_text_size,
-                color_scheme,
+                theme,
                 show_globally,
                 make_operator,
                 operator_level,
@@ -4226,7 +4229,7 @@ fn run_worker(
                 // failure in either is reported as itself and leaves the other
                 // where it was.
                 let saved = app
-                    .set_application_display_settings(text_scale, technical_text_size, color_scheme)
+                    .set_application_display_settings(text_scale, technical_text_size, &theme)
                     .and_then(|()| {
                         app.set_linked_server_settings(show_globally, make_operator, operator_level)
                     });
@@ -4540,6 +4543,10 @@ fn snapshot(app: &App) -> Result<Snapshot, CoreError> {
 fn application_settings(app: &App) -> Result<SettingsData, CoreError> {
     let api = app.api_settings()?;
     let display = app.application_display_settings();
+    let themes_folder = app
+        .paths()
+        .config_dir()
+        .join(crate::theme_files::THEMES_FOLDER);
     let storage = app.persistent_storage_settings();
     let java = app.java_settings();
     let server = app.server_application_settings();
@@ -4573,7 +4580,9 @@ fn application_settings(app: &App) -> Result<SettingsData, CoreError> {
         mod_catalog_origin: origin(catalog.chosen),
         text_scale_percent: display.text_scale.percent(),
         technical_text_size_pixels: display.technical_text_size.pixels(),
-        color_scheme: display.color_scheme.as_str().to_owned(),
+        theme: display.theme,
+        user_themes: crate::theme_files::read_user_themes(&themes_folder),
+        themes_folder: themes_folder.display().to_string(),
         show_linked_servers: display.show_linked_servers,
         follow_mod_dependencies: app.follow_mod_dependencies(),
         warn_on_dependency_impact: app.warn_on_dependency_impact(),

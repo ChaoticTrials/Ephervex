@@ -79,6 +79,7 @@ import { SnapshotPanel } from "workspace/snapshots.slint";
 
 export { GuiI18n } from "globals.slint";
 export { PropertyRules } from "globals.slint";
+export { BuiltInPalettes, ThemePalette } from "palettes.slint";
 export { Theme } from "theme.slint";
 export { WindowSizePreview } from "settings/minecraft-defaults.slint";
 export * from "models.slint";
@@ -97,7 +98,7 @@ export component AppWindow inherits Window {
     // and repaints every ComboBox, ScrollView, ListView, Slider and Spinner
     // when it changes. Moved with this window's scheme so a widget never
     // sits light on a dark page. `init` runs before the first frame.
-    property <ColorScheme> widget-scheme: Theme.dark ? ColorScheme.dark : ColorScheme.light;
+    property <ColorScheme> widget-scheme: Theme.widget-scheme;
     init => { Palette.color-scheme = self.widget-scheme; }
     changed widget-scheme => { Palette.color-scheme = self.widget-scheme; }
 
@@ -515,7 +516,15 @@ export component AppWindow inherits Window {
     in-out property <bool> artifact-cache-clearing;
     in-out property <int> application-text-scale: 100;
     in-out property <int> technical-text-size: 12;
-    in-out property <string> application-color-scheme: "dark";
+    // The chosen theme by its recorded name, and the theme list: labels to
+    // show, recorded names in the same order, and where the choice sits.
+    in-out property <string> application-theme: "dark";
+    in-out property <[string]> theme-labels: [GuiI18n.text("gui-color-scheme-dark"), GuiI18n.text("gui-color-scheme-light")];
+    in-out property <[string]> theme-ids: ["dark", "light"];
+    in-out property <int> theme-index: 0;
+    // Where theme files go, and what was wrong with the ones found there.
+    in-out property <string> themes-folder;
+    in-out property <string> theme-problems;
     in-out property <string> java-memory-min: "512";
     in-out property <string> java-memory-max: "4096";
     in-out property <string> java-preferred-path;
@@ -1410,21 +1419,21 @@ export component AppWindow inherits Window {
                                     width: root.settings-two-columns ? (parent.width - 14px) / 2 : parent.width;
                                     title: GuiI18n.text("gui-show-linked-servers");
                                     detail: GuiI18n.text("gui-show-linked-servers-detail");
-                                    Toggle { accessible-name: GuiI18n.text("gui-show-linked-servers"); checked <=> root.show-linked-servers; toggled => { root.save-general-settings(root.application-text-scale, root.technical-text-size, root.application-color-scheme, root.show-linked-servers, root.make-default-account-operator, root.operator-permission-level); } }
+                                    Toggle { accessible-name: GuiI18n.text("gui-show-linked-servers"); checked <=> root.show-linked-servers; toggled => { root.save-general-settings(root.application-text-scale, root.technical-text-size, root.application-theme, root.show-linked-servers, root.make-default-account-operator, root.operator-permission-level); } }
                                 }
                                 SettingCard {
                                     row: 2; col: 0;
                                     width: root.settings-two-columns ? (parent.width - 14px) / 2 : parent.width;
                                     title: GuiI18n.text("gui-default-account-operator");
                                     detail: GuiI18n.text("gui-default-account-operator-detail");
-                                    Toggle { accessible-name: GuiI18n.text("gui-default-account-operator"); checked <=> root.make-default-account-operator; toggled => { root.save-general-settings(root.application-text-scale, root.technical-text-size, root.application-color-scheme, root.show-linked-servers, root.make-default-account-operator, root.operator-permission-level); } }
+                                    Toggle { accessible-name: GuiI18n.text("gui-default-account-operator"); checked <=> root.make-default-account-operator; toggled => { root.save-general-settings(root.application-text-scale, root.technical-text-size, root.application-theme, root.show-linked-servers, root.make-default-account-operator, root.operator-permission-level); } }
                                 }
                                 SettingCard {
                                     row: 3; col: 0;
                                     width: root.settings-two-columns ? (parent.width - 14px) / 2 : parent.width;
                                     title: GuiI18n.text("gui-default-operator-level");
                                     detail: GuiI18n.text("gui-default-operator-level-detail");
-                                    ComboBox { accessible-label: GuiI18n.text("gui-default-operator-level"); width: 220px; model: [GuiI18n.text("gui-operator-level-1"), GuiI18n.text("gui-operator-level-2"), GuiI18n.text("gui-operator-level-3"), GuiI18n.text("gui-operator-level-4")]; current-index: root.operator-permission-level - 1; selected(value) => { root.operator-permission-level = value == GuiI18n.text("gui-operator-level-1") ? 1 : value == GuiI18n.text("gui-operator-level-2") ? 2 : value == GuiI18n.text("gui-operator-level-3") ? 3 : 4; root.save-general-settings(root.application-text-scale, root.technical-text-size, root.application-color-scheme, root.show-linked-servers, root.make-default-account-operator, root.operator-permission-level); } }
+                                    ComboBox { accessible-label: GuiI18n.text("gui-default-operator-level"); width: 220px; model: [GuiI18n.text("gui-operator-level-1"), GuiI18n.text("gui-operator-level-2"), GuiI18n.text("gui-operator-level-3"), GuiI18n.text("gui-operator-level-4")]; current-index: root.operator-permission-level - 1; selected(value) => { root.operator-permission-level = value == GuiI18n.text("gui-operator-level-1") ? 1 : value == GuiI18n.text("gui-operator-level-2") ? 2 : value == GuiI18n.text("gui-operator-level-3") ? 3 : 4; root.save-general-settings(root.application-text-scale, root.technical-text-size, root.application-theme, root.show-linked-servers, root.make-default-account-operator, root.operator-permission-level); } }
                                 }
                                 SettingCard {
                                     row: root.settings-two-columns ? 1 : 5;
@@ -1432,15 +1441,16 @@ export component AppWindow inherits Window {
                                     width: root.settings-two-columns ? (parent.width - 14px) / 2 : parent.width;
                                     title: GuiI18n.text("gui-application-text-size");
                                     detail: GuiI18n.text("gui-application-text-size-detail");
-                                    ComboBox { width: 190px; model: [GuiI18n.text("gui-text-scale-90"), GuiI18n.text("gui-text-scale-100"), GuiI18n.text("gui-text-scale-110"), GuiI18n.text("gui-text-scale-125")]; current-index: root.application-text-scale == 90 ? 0 : root.application-text-scale == 110 ? 2 : root.application-text-scale == 125 ? 3 : 1; selected(value) => { root.application-text-scale = value == GuiI18n.text("gui-text-scale-90") ? 90 : value == GuiI18n.text("gui-text-scale-110") ? 110 : value == GuiI18n.text("gui-text-scale-125") ? 125 : 100; root.save-general-settings(root.application-text-scale, root.technical-text-size, root.application-color-scheme, root.show-linked-servers, root.make-default-account-operator, root.operator-permission-level); } }
+                                    ComboBox { width: 190px; model: [GuiI18n.text("gui-text-scale-90"), GuiI18n.text("gui-text-scale-100"), GuiI18n.text("gui-text-scale-110"), GuiI18n.text("gui-text-scale-125")]; current-index: root.application-text-scale == 90 ? 0 : root.application-text-scale == 110 ? 2 : root.application-text-scale == 125 ? 3 : 1; selected(value) => { root.application-text-scale = value == GuiI18n.text("gui-text-scale-90") ? 90 : value == GuiI18n.text("gui-text-scale-110") ? 110 : value == GuiI18n.text("gui-text-scale-125") ? 125 : 100; root.save-general-settings(root.application-text-scale, root.technical-text-size, root.application-theme, root.show-linked-servers, root.make-default-account-operator, root.operator-permission-level); } }
                                 }
                                 SettingCard {
                                     row: root.settings-two-columns ? 2 : 6;
                                     col: root.settings-two-columns ? 1 : 0;
                                     width: root.settings-two-columns ? (parent.width - 14px) / 2 : parent.width;
                                     title: GuiI18n.text("gui-application-color-scheme");
-                                    detail: GuiI18n.text("gui-application-color-scheme-detail");
-                                    ComboBox { width: 190px; model: [GuiI18n.text("gui-color-scheme-dark"), GuiI18n.text("gui-color-scheme-light")]; current-index: root.application-color-scheme == "light" ? 1 : 0; selected(value) => { root.application-color-scheme = value == GuiI18n.text("gui-color-scheme-light") ? "light" : "dark"; root.save-general-settings(root.application-text-scale, root.technical-text-size, root.application-color-scheme, root.show-linked-servers, root.make-default-account-operator, root.operator-permission-level); } }
+                                    detail: GuiI18n.value("gui-application-color-scheme-detail", root.themes-folder);
+                                    note: root.theme-problems;
+                                    ComboBox { width: 190px; accessible-label: GuiI18n.text("gui-application-color-scheme"); model: root.theme-labels; current-index <=> root.theme-index; selected(value) => { root.application-theme = root.theme-ids[self.current-index]; root.save-general-settings(root.application-text-scale, root.technical-text-size, root.application-theme, root.show-linked-servers, root.make-default-account-operator, root.operator-permission-level); } }
                                 }
                                 SettingCard {
                                     row: root.settings-two-columns ? 3 : 7;
@@ -1448,7 +1458,7 @@ export component AppWindow inherits Window {
                                     width: root.settings-two-columns ? (parent.width - 14px) / 2 : parent.width;
                                     title: GuiI18n.text("gui-technical-text-size");
                                     detail: GuiI18n.text("gui-technical-text-size-detail");
-                                    ComboBox { width: 190px; model: [GuiI18n.text("gui-technical-size-11"), GuiI18n.text("gui-technical-size-12"), GuiI18n.text("gui-technical-size-14"), GuiI18n.text("gui-technical-size-16")]; current-index: root.technical-text-size == 11 ? 0 : root.technical-text-size == 14 ? 2 : root.technical-text-size == 16 ? 3 : 1; selected(value) => { root.technical-text-size = value == GuiI18n.text("gui-technical-size-11") ? 11 : value == GuiI18n.text("gui-technical-size-14") ? 14 : value == GuiI18n.text("gui-technical-size-16") ? 16 : 12; root.save-general-settings(root.application-text-scale, root.technical-text-size, root.application-color-scheme, root.show-linked-servers, root.make-default-account-operator, root.operator-permission-level); } }
+                                    ComboBox { width: 190px; model: [GuiI18n.text("gui-technical-size-11"), GuiI18n.text("gui-technical-size-12"), GuiI18n.text("gui-technical-size-14"), GuiI18n.text("gui-technical-size-16")]; current-index: root.technical-text-size == 11 ? 0 : root.technical-text-size == 14 ? 2 : root.technical-text-size == 16 ? 3 : 1; selected(value) => { root.technical-text-size = value == GuiI18n.text("gui-technical-size-11") ? 11 : value == GuiI18n.text("gui-technical-size-14") ? 14 : value == GuiI18n.text("gui-technical-size-16") ? 16 : 12; root.save-general-settings(root.application-text-scale, root.technical-text-size, root.application-theme, root.show-linked-servers, root.make-default-account-operator, root.operator-permission-level); } }
                                 }
                             }
                             // The same decision the mod dialog's own "do

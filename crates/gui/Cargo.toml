@@ -34,6 +34,8 @@ copypasta.workspace = true
 rfd.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+# User theme files in the themes folder. See `theme_files`.
+toml.workspace = true
 
 # Keeping a window on an aspect ratio is the window manager's job, and X11 is
 # where a window can ask for it. Linux only, because no other display protocol

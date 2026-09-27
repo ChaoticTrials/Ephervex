@@ -32,12 +32,15 @@ These instructions apply to the entire repository unless a more specific `AGENTS
 ## User interface
 
 - The desktop frontend's design tokens live in the `Theme` global. Colors and text sizes are named there and referenced by name everywhere else.
-- Never write a literal color in markup. No `#rrggbb`, `#rrggbbaa`, `rgb()`, `rgba()`, `hsv()`, or `oklch()` outside `Theme`. `transparent` is not a color literal. Deriving from a token with `.with-alpha()`, `.darker()`, or `.brighter()` is fine; inventing a value is not.
+- Color values are written only in the built-in palettes in `palettes.slint`. Each `Theme` color token reads the active palette's field of the same name. Components never read the palette or branch on which one is active.
+- Never write a literal color in markup. No `#rrggbb`, `#rrggbbaa`, `rgb()`, `rgba()`, `hsv()`, or `oklch()` outside the built-in palettes. `transparent` is not a color literal. Deriving from a token with `.with-alpha()`, `.darker()`, or `.brighter()` is fine; inventing a value is not.
 - Never write a literal font size in markup, so interface text follows the text size the user chose. The separate size the diagnostics and console views use is the one exception, and it is read from a property rather than written out.
-- Every `Theme` color carries a value for each supported color scheme. A token with a single value is a token that breaks one scheme.
-- Keep the shipped widgets in step: the std-widget palette's color scheme is written from the same preference the tokens read, so a widget never sits light on a dark page.
+- Every built-in palette sets every color token. Slint fills a field a palette leaves out with transparent, so a missing one still compiles.
+- Palettes hold colors only. Text sizes, the monospace family, and shared measurements are never a palette's to change.
+- Palette token names are part of the user theme file format (`docs/themes.md`). Add tokens freely, but never rename or remove one, and document a new one there.
+- Keep the shipped widgets in step: the std-widget palette's color scheme is written from the active palette's `widget-scheme`, so a widget never sits light on a dark page.
 - A measurement several unrelated places must agree on, such as a control height, a navigation column width, or a fixed row height that scroll arithmetic depends on, belongs in `Theme`. Ordinary padding and spacing does not.
-- A new token belongs in `Theme` with a comment saying what it is for, not inline at its first use.
+- A new token belongs in `Theme` with a comment saying what it is for, not inline at its first use. A new color token is also a `ThemePalette` field that every built-in palette sets.
 
 ## Language and spelling
 

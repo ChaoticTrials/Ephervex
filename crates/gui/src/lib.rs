@@ -6,7 +6,9 @@ pub mod controller;
 pub mod file_drop;
 pub mod minecraft_defaults;
 pub mod monospace;
+mod palette;
 pub mod presentation;
+pub mod theme_files;
 // Slint's generated bindings contain framework-owned unsafe blocks, unwraps,
 // and undocumented public items. Keep the exceptions on that generated module;
 // handwritten GUI Rust stays under the workspace-wide lints.

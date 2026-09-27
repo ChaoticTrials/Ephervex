@@ -47,6 +47,7 @@ pub(crate) const UI_SOURCES: &[(&str, &str)] = &[
         include_str!("../ui/home/host-cards.slint"),
     ),
     ("models.slint", include_str!("../ui/models.slint")),
+    ("palettes.slint", include_str!("../ui/palettes.slint")),
     (
         "settings/application.slint",
         include_str!("../ui/settings/application.slint"),

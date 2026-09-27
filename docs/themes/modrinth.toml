@@ -1,0 +1,63 @@
+# A dark theme in the colors of the Modrinth website.
+#
+# Copy this file to ~/.config/ephervex/themes/modrinth.toml and choose
+# "Modrinth" under Settings > General > Interface theme. See docs/themes.md
+# for the format.
+#
+# Every color is set here so the file also lists what a theme can change.
+# A theme of your own only needs the colors it changes; the rest come from
+# its parent.
+
+format_version = 1
+name = "Modrinth"
+parent = "dark"
+
+[colors]
+# Surfaces, from the window floor up to a popover.
+background = "#16181c"
+surface = "#1d1f23"
+elevated = "#26292f"
+overlay = "#33363d"
+border = "#34363c"
+bar = "#111316"
+well = "#0e0f12"
+
+# Selection and toggles, tinted with the brand green.
+selection = "#1a2f23"
+selection-card = "#182a20"
+selection-strong = "#1f4a31"
+toggle-on = "#128a45"
+capture-active = "#153a26"
+
+# Tones.
+accent = "#1bd96a"
+accent-secondary = "#4f9cff"
+success = "#1bd96a"
+warning = "#ffa347"
+danger = "#ff496e"
+
+# Filled buttons. The primary green is deeper than the brand green so the
+# light caption on it stays readable.
+primary-fill = "#0f7a3c"
+primary-fill-hover = "#118444"
+danger-fill = "#6e2233"
+danger-fill-hover = "#8a2a40"
+
+# Text.
+text = "#ecf9fb"
+text-secondary = "#b0bac5"
+text-muted = "#7c8591"
+on-danger = "#fff0f3"
+log-error = "#ff7a93"
+
+# Server marks, catalogs and loaders.
+server = "#c78aff"
+modrinth = "#1bd96a"
+curseforge = "#f16436"
+vanilla = "#91bd59"
+forge = "#5981c0"
+neoforge = "#c0664d"
+
+# What is drawn over the window.
+shadow = "#00000099"
+scrim = "#000000a6"

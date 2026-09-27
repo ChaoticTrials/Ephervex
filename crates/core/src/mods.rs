@@ -3572,7 +3572,9 @@ mod tests {
         app.set_application_display_settings(
             ephervex_storage::ApplicationTextScale::Large,
             ephervex_storage::TechnicalTextSize::Compact,
-            ephervex_storage::ApplicationColorScheme::Light,
+            &ephervex_storage::ApplicationTheme::BuiltIn(
+                ephervex_storage::ApplicationColorScheme::Light,
+            ),
         )
         .expect("display");
         let before = app.config().clone();

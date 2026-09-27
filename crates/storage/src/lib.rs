@@ -50,9 +50,10 @@ pub use atomic::{AtomicWriteOptions, sync_parent, write_atomic, write_bytes_atom
 pub use clone::{CloneMethod, CloneReport, clone_file, clone_tree, clone_tree_with_check};
 pub use config::{
     AccountConfig, AccountLookup, ApiConfig, ApplicationColorScheme, ApplicationDisplayConfig,
-    ApplicationTextScale, ArtifactCacheLimitMode, CONFIG_SCHEMA_VERSION, CacheConfig, Config,
-    ConfigError, EulaConfig, ImportConfig, JavaConfig, LinkedPairConfig, ModsConfig, NetworkAccess,
-    PreferenceSetting, SECRET_KEY_MARKERS, ServerDefaults, TechnicalTextSize,
+    ApplicationTextScale, ApplicationTheme, ArtifactCacheLimitMode, CONFIG_SCHEMA_VERSION,
+    CacheConfig, Config, ConfigError, EulaConfig, ImportConfig, JavaConfig, LinkedPairConfig,
+    ModsConfig, NetworkAccess, PreferenceSetting, SECRET_KEY_MARKERS, ServerDefaults,
+    TechnicalTextSize,
 };
 pub use diagnostics::{
     CrashSummary, DEFAULT_VIEW_BYTES, DiagnosticEntry, DiagnosticError, DiagnosticKind,
