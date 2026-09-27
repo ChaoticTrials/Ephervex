@@ -1,0 +1,85 @@
+// Local development shortcuts. Every action targets the displayed server.
+import { ComboBox } from "std-widgets.slint";
+import { AppButton, TextField } from "../components/controls.slint";
+import { BodyText } from "../components/text.slint";
+import { GuiI18n } from "../globals.slint";
+import { Theme } from "../theme.slint";
+
+export component ServerFiles inherits Rectangle {
+    callback open-location(string);
+    callback show-surface(string);
+    height: content.preferred-height;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Theme.border;
+    background: Theme.surface;
+    content := VerticalLayout {
+        padding: 12px;
+        spacing: 8px;
+        if root.width >= 620px : HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+            AppButton { text: GuiI18n.text("gui-open-server-folder"); clicked => { root.open-location("server"); } }
+            AppButton { text: GuiI18n.text("gui-server-properties-shortcut"); clicked => { root.show-surface("Properties"); } }
+        }
+        if root.width < 620px : VerticalLayout {
+            spacing: 8px;
+            AppButton { text: GuiI18n.text("gui-open-server-folder"); clicked => { root.open-location("server"); } }
+            AppButton { text: GuiI18n.text("gui-server-properties-shortcut"); clicked => { root.show-surface("Properties"); } }
+        }
+        BodyText { text: GuiI18n.text("gui-server-files-detail"); wrap: word-wrap; }
+        HorizontalLayout {
+            spacing: 8px;
+            location := ComboBox {
+                horizontal-stretch: 1;
+                min-width: 0px;
+                accessible-label: GuiI18n.text("gui-server-folder-location");
+                model: [GuiI18n.text("gui-server-config-folder"), GuiI18n.text("gui-server-game-logs"), GuiI18n.text("gui-crash-reports"), GuiI18n.text("gui-server-capture-folder"), GuiI18n.text("gui-server-mods"), GuiI18n.text("gui-server-managed-folder")];
+                current-index: 0;
+            }
+            AppButton {
+                text: GuiI18n.text("gui-open-folder");
+                clicked => { root.open-location(location.current-index == 0 ? "config" : location.current-index == 1 ? "logs" : location.current-index == 2 ? "crash-reports" : location.current-index == 3 ? "capture" : location.current-index == 4 ? "mods" : "root"); }
+            }
+        }
+        BodyText { text: GuiI18n.text("gui-server-log-locations-detail"); wrap: word-wrap; font-size: Theme.caption-size; }
+    }
+}
+
+// The draft belongs to this viewer; delivery and availability belong to the server.
+export component ServerCommandInput inherits HorizontalLayout {
+    in property <string> server-id;
+    in property <bool> available;
+    in property <int> completion;
+    in property <bool> delivered;
+    property <string> pending-command;
+    callback send(string) -> bool;
+    spacing: 8px;
+    vertical-stretch: 0;
+
+    changed server-id => { command-field.text = ""; root.pending-command = ""; }
+    changed completion => {
+        if root.delivered && root.pending-command != "" && command-field.text == root.pending-command {
+            command-field.text = "";
+        }
+        root.pending-command = "";
+    }
+    function submit() {
+        if root.available && command-field.text != "" {
+            root.pending-command = root.send(command-field.text) ? command-field.text : "";
+        }
+    }
+    command-field := TextField {
+        placeholder: GuiI18n.text("gui-enter-server-command");
+        accessible-name: GuiI18n.text("gui-enter-server-command");
+        enabled: root.available;
+        horizontal-stretch: 1;
+        accepted => { root.submit(); }
+    }
+    AppButton {
+        text: GuiI18n.text("gui-send");
+        tone: "primary";
+        enabled: root.available && command-field.text != "";
+        clicked => { root.submit(); }
+    }
+}

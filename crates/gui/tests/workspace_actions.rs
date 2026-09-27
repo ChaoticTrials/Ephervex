@@ -12,7 +12,7 @@ mod support;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use ephervex_gui::ui::{AppWindow, GuiI18n, InstanceRow};
+use ephervex_gui::ui::{AppWindow, GuiI18n, InstanceRow, ServerRow};
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use i_slint_backend_testing::{
     AccessibleRole, ElementHandle, TestingBackend, TestingBackendOptions,
@@ -50,6 +50,40 @@ fn the_client_workspace_opens_the_clients_own_folder() {
         servers.borrow().is_empty(),
         "and never a server's folder in its place"
     );
+}
+
+#[test]
+fn server_overview_shortcuts_target_its_files_and_existing_surfaces() {
+    let ui = window();
+    ui.window().set_size(PhysicalSize::new(900, 900));
+    let requests = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&requests);
+    ui.on_open_server_location(move |id, location| {
+        sink.borrow_mut()
+            .push((id.to_string(), location.to_string()));
+    });
+    support::show_server(
+        &ui,
+        ServerRow {
+            id: "repro-server".into(),
+            name: "Repro server".into(),
+            ..ServerRow::default()
+        },
+        "Overview",
+    );
+    let surfaces = support::follow_surface_requests(&ui);
+    settle(&ui);
+    widest(&ui, &lookup("gui-open-server-folder"))
+        .expect("server folder shortcut")
+        .invoke_accessible_default_action();
+    assert_eq!(
+        requests.borrow().as_slice(),
+        [("repro-server".to_owned(), "server".to_owned())]
+    );
+    widest(&ui, &lookup("gui-server-properties-shortcut"))
+        .expect("properties shortcut")
+        .invoke_accessible_default_action();
+    assert_eq!(surfaces.borrow().as_slice(), [(1, "Properties".to_owned())]);
 }
 
 /// A vanilla instance has no build to change, so the row the folder button

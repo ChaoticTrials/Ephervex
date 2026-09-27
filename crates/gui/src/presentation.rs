@@ -356,7 +356,10 @@ impl ServerPresentation {
             can_stop: controlled,
             can_restart: controlled,
             can_kill: controlled,
-            can_send_command: controlled,
+            can_send_command: matches!(
+                status.runtime,
+                RuntimeClassification::Controlled { child: Some(_), .. }
+            ),
             can_connect: false,
             connect_reason: String::new(),
             destructive_recovery: uncertain,
@@ -1605,6 +1608,9 @@ mod tests {
                 child: None,
             }));
         assert_eq!(starting.state_kind, "starting");
+        assert!(!starting.can_send_command);
+        assert!(!stopped.can_send_command);
+        assert!(!uncertain.can_send_command);
 
         let mut child = supervisor;
         child.role = ephervex_core::ProcessRole::JavaChild;
@@ -1613,6 +1619,7 @@ mod tests {
             child: Some(child),
         }));
         assert_eq!(running.state_kind, "running");
+        assert!(running.can_send_command);
     }
 
     #[test]

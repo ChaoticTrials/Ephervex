@@ -31,6 +31,7 @@ import {
     SelectableText,
     TooltipCard
 } from "components/text.slint";
+import { ServerFiles, ServerCommandInput } from "workspace/server-tools.slint";
 import { GuiI18n } from "globals.slint";
 import { ActivityCard, RunningCard } from "home/activity-cards.slint";
 import {
@@ -564,6 +565,7 @@ export component AppWindow inherits Window {
     callback clear-linked-pair(string);
     callback open-client-folder(string);
     callback open-server-folder(string);
+    callback open-server-location(string, string);
     // Making a temporary instance persistent. The destination and the
     // servers are read before the dialog opens, so the user decides with
     // the list in front of them rather than after the fact.
@@ -669,7 +671,7 @@ export component AppWindow inherits Window {
     callback stop-disk-usage();
     callback open-storage-location(string, int);
     callback server-kill(string);
-    callback server-console(string, string);
+    callback server-console(string, string) -> bool;
     // A pane's log viewer, every callback naming the pane first.
     // (pane, "live" | "files" | "crashes")
     callback log-show(int, string);
@@ -1079,6 +1081,8 @@ export component AppWindow inherits Window {
                                 primary-label: self.is-client ? (host.client.can-kill ? GuiI18n.text("gui-stop-game") : GuiI18n.text("gui-launch")) : (host.server.can-stop ? GuiI18n.text("gui-stop") : GuiI18n.text("gui-start"));
                                 primary-tone: self.is-client && host.client.can-kill ? "danger" : "primary";
                                 primary-enabled: host.available && (self.is-client ? host.client.can-launch || host.client.can-kill : host.server.can-start || host.server.can-stop);
+                                kill-visible: !self.is-client;
+                                kill-enabled: host.available && !self.is-client && host.server.can-kill;
                                 restart-visible: true;
                                 restart-enabled: host.available && (self.is-client ? host.client.can-kill && host.client.can-restart : host.server.can-restart);
                                 restart-hint: self.is-client && host.client.can-kill && !host.client.can-restart ? GuiI18n.text("gui-restart-client-unavailable") : "";
@@ -1100,6 +1104,7 @@ export component AppWindow inherits Window {
                                     }
                                 }
                                 restart => { if self.is-client { root.client-restart(host.id); } else { root.server-restart(host.id); } }
+                                kill => { root.pending-action-id = host.id; root.pending-action-name = host.server.name; root.modal = "kill"; }
                                 launch-as(account, alongside) => { root.launch-client-as(host.id, account, alongside); }
                                 add-account => { root.close-workspace(); root.page = 4; root.settings-tab = "Accounts"; }
                                 surface-selected(surface) => { root.show-pane-surface(pane.id, surface); }
@@ -1265,15 +1270,16 @@ export component AppWindow inherits Window {
                                 // is filtered, and what is selected belong to this
                                 // pane alone.
                                 if host.available && pane.surface == "Logs" : VerticalLayout { spacing: 9px;
+                                    if !is-client && log-view.mode != "live" : BodyText { text: GuiI18n.text("gui-server-files-log-detail"); wrap: word-wrap; }
                                     HorizontalLayout { spacing: 8px;
-                                        FilterChip { text: GuiI18n.text("gui-live-latest-log"); accessible-name: GuiI18n.text("gui-live-latest-log"); selected: log-view.mode == "live"; clicked => { root.log-show(pane.id, "live"); } }
+                                        FilterChip { text: is-client ? GuiI18n.text("gui-live-latest-log") : GuiI18n.text("gui-server-captured-output"); accessible-name: self.text; selected: log-view.mode == "live"; clicked => { root.log-show(pane.id, "live"); } }
                                         FilterChip { text: GuiI18n.text("gui-log-files"); accessible-name: GuiI18n.text("gui-log-files"); selected: log-view.mode == "files"; clicked => { root.log-show(pane.id, "files"); } }
                                         FilterChip { text: GuiI18n.text("gui-crash-reports"); accessible-name: GuiI18n.text("gui-crash-reports"); selected: log-view.mode == "crashes"; clicked => { root.log-show(pane.id, "crashes"); } }
                                         Rectangle { horizontal-stretch: 1; }
                                         // Only the crash reports carry one. A log file is read
                                         // through the console, which has a search of its own.
                                         if log-view.mode == "crashes" : HorizontalLayout { spacing: 8px; horizontal-stretch: 0; report-search := TextField { placeholder: GuiI18n.text("gui-search-open-report"); input-type: InputType.search; width: 250px; accepted => { root.log-search-report(pane.id, self.text); } } AppButton { text: GuiI18n.text("gui-find"); enabled: log-view.file != ""; clicked => { root.log-search-report(pane.id, report-search.text); } } }
-                                        AppButton { text: GuiI18n.text("gui-folder"); clicked => { root.log-open-folder(pane.id); } }
+                                        AppButton { text: GuiI18n.text("gui-folder"); clicked => { if !is-client && log-view.mode == "live" { root.open-server-location(host.id, "capture"); } else { root.log-open-folder(pane.id); } } }
                                     }
                                     // The log being written to, followed as it grows.
                                     if log-view.mode == "live" : LiveLogViewer {
@@ -1300,6 +1306,14 @@ export component AppWindow inherits Window {
                                     }
                                 }
                                 if host.available && host.kind == "server" && pane.surface == "Overview" : ScrollView { viewport-width: self.visible-width; server-overview := VerticalLayout { alignment: start; width: min(parent.width, 980px); spacing: 12px; property <bool> narrow: self.width < 620px; Heading { text: GuiI18n.text("gui-dedicated-server"); overflow: elide; } BodyText { text: host.server.state-detail; wrap: word-wrap; }
+                                    ServerFiles {
+                                        open-location(location) => { root.open-server-location(host.id, location); }
+                                        show-surface(surface) => { root.show-pane-surface(pane.id, surface); }
+                                    }
+                                    HorizontalLayout { spacing: 8px; alignment: start;
+                                        AppButton { text: GuiI18n.text("gui-open-console"); clicked => { root.show-pane-surface(pane.id, "Console"); } }
+                                        AppButton { text: GuiI18n.text("gui-crash-reports"); clicked => { root.show-pane-surface(pane.id, "Logs"); root.log-show(pane.id, "crashes"); } }
+                                    }
                                     if host.crash-report != "" : CrashNotice { report: host.crash-report; failure: host.crash-failure; client-code-on-server: host.crash-client-code-on-server; suggested: host.crash-suggested; review => { root.show-pane-surface(pane.id, "Mods"); } } Rectangle { border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface; VerticalLayout { padding: 18px; spacing: 7px;
                                     HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-exact-target"); } BodyText { text: GuiI18n.values("gui-target-summary", host.server.minecraft, host.server.loader); overflow: elide; horizontal-stretch: 1; } }
                                     HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-runtime"); } BodyText { text: host.server.state + " | " + host.server.state-detail; overflow: elide; horizontal-stretch: 1; } }
@@ -1319,12 +1333,19 @@ export component AppWindow inherits Window {
                                     delete(id, label) => { root.snapshot-host-kind = host.kind; root.snapshot-host-id = host.id; root.snapshot-action-id = id; root.snapshot-action-label = label; root.modal-error = ""; root.modal = "snapshot-delete"; }
                                 }
                                 if host.available && host.kind == "server" && pane.surface == "Console" : VerticalLayout { spacing: 10px;
-                                    ActionRow { BodyText { text: GuiI18n.value("gui-bounded-output", host.server.state); color: host.server.can-send-command ? Theme.success : Theme.text-secondary; } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-restart"); enabled: host.server.can-restart && host.server.restart-stage == ""; clicked => { root.server-restart(host.id); } } AppButton { text: GuiI18n.text("gui-stop"); enabled: host.server.can-stop; clicked => { root.server-stop(host.id); } } AppButton { text: GuiI18n.text("gui-kill"); tone: "danger"; enabled: host.server.can-kill; clicked => { root.pending-action-id = host.id; root.pending-action-name = host.server.name; root.modal = "kill"; } } }
+                                    if host.server.console-status != "" : BodyText { text: host.server.console-status; wrap: word-wrap; }
                                     LiveLogViewer {
+                                        vertical-stretch: 1;
                                         chunks: log-view.chunks; has-content: log-view.has-content; status: log-view.status; history-truncated: log-view.history-truncated; pending-lines: log-view.pending-lines; content-columns: log-view.content-columns; font-size: root.technical-text-size * 1px; query: log-view.query; wrap-lines: log-view.wrap-lines; follow: log-view.follow; trace-enabled: log-view.trace-enabled; debug-enabled: log-view.debug-enabled; info-enabled: log-view.info-enabled; warn-enabled: log-view.warn-enabled; error-enabled: log-view.error-enabled; fatal-enabled: log-view.fatal-enabled; other-enabled: log-view.other-enabled; revision: log-view.revision; selection-start-row: log-view.selection-start-row; selection-start-offset: log-view.selection-start-offset; selection-end-row: log-view.selection-end-row; selection-end-offset: log-view.selection-end-offset; has-selection: log-view.has-selection; selection-revision: log-view.selection-revision;
                                         set-level(level, enabled) => { root.log-set-level(pane.id, level, enabled); } search(query) => { root.log-search(pane.id, query); } copy => { root.log-copy(pane.id); } copy-selection => { root.log-copy-selection(pane.id); } select-at(row, column, extend) => { root.log-select-at(pane.id, row, column, extend); } select-word-at(row, column) => { root.log-select-word-at(pane.id, row, column); } select-all => { root.log-select-all(pane.id); } follow-changed(follow) => { root.log-follow(pane.id, follow); } wrap-changed(wrap) => { root.log-wrap(pane.id, wrap); }
                                     }
-                                    ActionRow { command-field := TextField { placeholder: host.server.can-send-command ? GuiI18n.text("gui-enter-server-command") : GuiI18n.text("gui-start-server-command"); enabled: host.server.can-send-command; horizontal-stretch: 1; accepted => { root.server-console(host.id, self.text); self.text = ""; } } AppButton { text: GuiI18n.text("gui-send"); tone: "primary"; enabled: host.server.can-send-command && command-field.text != ""; clicked => { root.server-console(host.id, command-field.text); command-field.text = ""; } } }
+                                    ServerCommandInput {
+                                        server-id: host.id;
+                                        available: host.server.can-send-command;
+                                        completion: host.server.console-completion;
+                                        delivered: host.server.console-delivered;
+                                        send(command) => { root.server-console(host.id, command); }
+                                    }
                                 }
                                 if host.available && host.kind == "server" && pane.surface == "Mods" : VerticalLayout { spacing: 10px;
                                     HorizontalLayout { spacing: 8px; SectionTitle { title: GuiI18n.text("gui-server-mods"); detail: GuiI18n.text("gui-server-mods-detail"); horizontal-stretch: 1; } VerticalLayout { alignment: center; TextField { property <string> host-query: host.mods-query; changed host-query => { self.text = self.host-query; } init => { self.text = self.host-query; } placeholder: GuiI18n.text("gui-filter-mods"); accessible-label: GuiI18n.text("gui-filter-mods"); input-type: InputType.search; width: 200px; edited(text) => { root.filter-mods("server", host.id, text); } } } VerticalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-add-local-mods"); clicked => { root.pick-local-mods("server", host.id); } } } VerticalLayout { alignment: center; IconButton { icon: @image-url("../../../assets/icons/refresh.svg"); accessible-name: GuiI18n.text("gui-refresh-mod-details"); clicked => { root.refresh-mods("server", host.id); } } } }

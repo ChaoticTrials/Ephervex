@@ -2779,3 +2779,26 @@ gui-linked-skipped = Skipped
 gui-linked-failed = Failed
 gui-linked-partial = Some targets were not changed. Each one is listed with its own result.
 gui-linked-all-applied = Every selected target was changed.
+
+# Local development server shortcuts and control feedback.
+gui-open-server-folder = Open Server Folder
+gui-server-properties-shortcut = Server Properties
+gui-server-folder-location = Server folder location
+gui-server-config-folder = Mod configuration
+gui-server-game-logs = Minecraft logs
+gui-server-capture-folder = Ephervex captured output
+gui-server-managed-folder = Server root and Ephervex metadata
+gui-server-files-detail = Edit server.properties and arbitrary server files with your usual tools. Mod configuration is in config when the mod uses that folder.
+gui-server-log-locations-detail = Minecraft logs and crash reports are available after the server writes them. Ephervex captured output is stored separately.
+gui-server-captured-output = Captured output
+gui-server-files-log-detail = These files are written by Minecraft or the server software.
+gui-server-console-busy = Console input is busy. Wait for the current server operation to finish.
+gui-server-console-unavailable = Console input requires a running server with a live Ephervex control channel. Ephervex cannot take control of an orphaned process. Retained output is still available.
+gui-state-stopping = Stopping
+gui-server-stopping-detail = Waiting for this server to stop. This affects every view of the server.
+gui-server-restarting-detail = Restarting this server. This affects every view of the server.
+gui-server-failed-detail = The server failed to start or exited unexpectedly. Open Console for captured output or Logs for server files and crash reports.
+gui-server-control-refused = Server control was refused: { $value }
+gui-server-control-unconfirmed = The server did not confirm the request. Check its status and output before retrying.
+gui-server-control-result = { $first }: { $second }
+gui-server-console-channel-lost = Server input is unavailable. Check the output and server status. Stop the server, or use Kill if it cannot stop, then start it again.

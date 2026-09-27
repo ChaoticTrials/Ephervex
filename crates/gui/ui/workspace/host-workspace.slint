@@ -160,6 +160,9 @@ export component HostWorkspace inherits Rectangle {
     in property <string> primary-label;
     in property <string> primary-tone: "primary";
     in property <bool> primary-enabled;
+    // A forced stop, for a server that no longer answers Stop.
+    in property <bool> kill-visible;
+    in property <bool> kill-enabled;
     in property <bool> restart-visible;
     in property <bool> restart-enabled;
     // Why Restart is unavailable while the host runs, shown on hover.
@@ -193,6 +196,7 @@ export component HostWorkspace inherits Rectangle {
     callback open-folder();
     callback primary();
     callback restart();
+    callback kill();
     callback launch-as(string, bool);
     callback add-account();
     callback surface-selected(string);
@@ -237,6 +241,7 @@ export component HostWorkspace inherits Rectangle {
                 }
                 VerticalLayout { alignment: center; Pill { text: root.restart-stage != "" ? GuiI18n.text("gui-state-restarting") : root.status; tone-color: root.restart-stage != "" || root.status-kind == "starting" ? Theme.warning : root.status-kind == "running" ? Theme.success : Theme.text-secondary; } }
                 if root.paired && root.width >= 420px : VerticalLayout { alignment: center; Pill { text: GuiI18n.text("gui-paired"); tone-color: Theme.accent; } }
+                if root.kill-visible : AppButton { text: GuiI18n.text("gui-kill"); accessible-name: GuiI18n.values("gui-pane-action", GuiI18n.text("gui-kill"), root.pane-label); tone: "danger"; enabled: root.kill-enabled; clicked => { root.kill(); } }
                 if root.restart-visible : AppButton { text: GuiI18n.text("gui-restart"); accessible-name: GuiI18n.values("gui-pane-action", GuiI18n.text("gui-restart"), root.pane-label); enabled: root.restart-enabled && !root.occupied; hint: root.restart-hint; clicked => { root.restart(); } }
                 AppButton { text: root.primary-label; accessible-name: GuiI18n.values("gui-pane-action", root.primary-label, root.pane-label); tone: root.primary-tone; enabled: root.primary-enabled && !root.primary-waits; clicked => { root.primary(); } }
             }
@@ -268,6 +273,7 @@ export component HostWorkspace inherits Rectangle {
                 launch-as(account, alongside) => { root.launch-as(account, alongside); }
                 add-account => { root.add-account(); }
             }
+            if root.kill-visible : AppButton { text: GuiI18n.text("gui-kill"); tone: "danger"; enabled: root.kill-enabled; clicked => { root.kill(); } }
             if root.restart-visible : AppButton { text: GuiI18n.text("gui-restart"); enabled: root.restart-enabled && !root.occupied; hint: root.restart-hint; clicked => { root.restart(); } }
             AppButton { text: root.primary-label; tone: root.primary-tone; enabled: root.primary-enabled && !root.primary-waits; clicked => { root.primary(); } }
         }

@@ -647,8 +647,13 @@ impl App {
         // is the workspace's one way of naming an operation. Created before the
         // span so every line the preparation logs carries it.
         let operation = OperationReporter::silent("operation-starting-server").id();
-        self.prepare_server_start_operation(id, explicit_java, observer, operation)
-            .await
+        let result = self
+            .prepare_server_start_operation(id, explicit_java, observer, operation)
+            .await;
+        if result.is_err() {
+            observer.emit(ephervex_server::ServerEvent::Finished { exit: None });
+        }
+        result
     }
 
     #[tracing::instrument(
@@ -741,6 +746,9 @@ impl App {
             }
             Err(error) => tracing::warn!(%operation, %error, "server supervision failed"),
         }
+        observer.emit(ephervex_server::ServerEvent::Finished {
+            exit: exit.as_ref().ok().copied(),
+        });
         Ok(exit?)
     }
 
@@ -1366,6 +1374,120 @@ mod tests {
     use fastnbt::Value;
 
     use super::*;
+
+    #[tokio::test]
+    async fn server_observers_receive_one_terminal_result_for_the_complete_run() {
+        for code in [0, 7] {
+            let root = tempfile::tempdir().expect("root");
+            let (observer, mut events) = ServerObserver::channel();
+            let prepared = PreparedServerStart {
+                command: ephervex_server::ServerCommand {
+                    java: PathBuf::from("/bin/sh"),
+                    arguments: vec!["-c".to_owned(), format!("exit {code}")],
+                    working_directory: root.path().join("server"),
+                },
+                root: root.path().to_path_buf(),
+                capture: root.path().join("capture"),
+                operation: OperationReporter::silent("test-server-run").id(),
+            };
+            let exit = App::run_prepared_server(prepared, &observer)
+                .await
+                .expect("run");
+            assert_eq!(exit.code, Some(code));
+            let events: Vec<_> = std::iter::from_fn(|| events.try_recv().ok()).collect();
+            assert!(
+                matches!(events.last(), Some(ephervex_server::ServerEvent::Finished { exit: Some(exit) }) if exit.code == Some(code))
+            );
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(event, ephervex_server::ServerEvent::Finished { .. }))
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn restarting_a_server_emits_no_terminal_result_until_the_replacement_stops() {
+        let root = tempfile::tempdir().expect("root");
+        let server_root = root.path().to_path_buf();
+        let (observer, mut events) = ServerObserver::channel();
+        let prepared = PreparedServerStart {
+            command: ephervex_server::ServerCommand {
+                java: PathBuf::from("/bin/sh"),
+                arguments: vec![
+                    "-c".to_owned(),
+                    "while read -r line; do [ \"$line\" = stop ] && exit 0; done".to_owned(),
+                ],
+                working_directory: root.path().join("server"),
+            },
+            root: server_root.clone(),
+            capture: root.path().join("capture"),
+            operation: OperationReporter::silent("test-server-restart").id(),
+        };
+        let run = tokio::spawn(async move { App::run_prepared_server(prepared, &observer).await });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while let Some(event) = events.recv().await {
+                if matches!(event, ephervex_server::ServerEvent::Started { .. }) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("started");
+        assert!(matches!(
+            send_control(&server_root, &ControlAction::Restart)
+                .await
+                .expect("restart"),
+            ControlResponse::Restarted { .. }
+        ));
+        let before_stop: Vec<_> = std::iter::from_fn(|| events.try_recv().ok()).collect();
+        assert!(
+            !before_stop
+                .iter()
+                .any(|event| matches!(event, ephervex_server::ServerEvent::Finished { .. }))
+        );
+        assert!(matches!(
+            send_control(&server_root, &ControlAction::Stop)
+                .await
+                .expect("stop"),
+            ControlResponse::Exited(_)
+        ));
+        run.await.expect("join").expect("run");
+        let after_stop: Vec<_> = std::iter::from_fn(|| events.try_recv().ok()).collect();
+        assert_eq!(
+            after_stop
+                .iter()
+                .filter(|event| matches!(event, ephervex_server::ServerEvent::Finished { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_server_preparation_failure_finishes_its_observer() {
+        let root = tempfile::tempdir().expect("root");
+        let app = App::open_at(ephervex_storage::Paths::rooted_at(root.path())).expect("app");
+        let (observer, mut events) = ServerObserver::channel();
+        assert!(
+            app.start_server(ServerId::new(), None, &observer)
+                .await
+                .is_err()
+        );
+        let events: Vec<_> = std::iter::from_fn(|| events.try_recv().ok()).collect();
+        assert!(matches!(
+            events.last(),
+            Some(ephervex_server::ServerEvent::Finished { exit: None })
+        ));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, ephervex_server::ServerEvent::Finished { .. }))
+                .count(),
+            1
+        );
+    }
 
     fn test_app(base: &Path) -> App {
         App::open_at(Paths::rooted_at(base)).expect("open app")

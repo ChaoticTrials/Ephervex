@@ -93,6 +93,9 @@ export struct ServerRow {
     can-restart: bool,
     can-kill: bool,
     can-send-command: bool,
+    console-status: string,
+    console-completion: int,
+    console-delivered: bool,
     can-connect: bool,
     connect-reason: string,
     // Where a restart of this host is: "stopping", "starting", or empty.

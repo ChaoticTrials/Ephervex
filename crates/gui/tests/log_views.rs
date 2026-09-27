@@ -73,7 +73,7 @@ fn a_log_that_fits_offers_nothing_to_scroll_to() {
 
 /// The three ways one entity's logs are read, on one tab.
 #[test]
-fn a_servers_logs_offer_the_live_log_saved_files_and_crash_reports() {
+fn server_logs_distinguish_captured_output_from_saved_files_and_crash_reports() {
     let ui = window();
     let opened: Rc<RefCell<Vec<(i32, String)>>> = Rc::default();
     let record = Rc::clone(&opened);
@@ -91,7 +91,11 @@ fn a_servers_logs_offer_the_live_log_saved_files_and_crash_reports() {
     server_logs(&ui);
     settle(&ui);
 
-    for chip in ["gui-live-latest-log", "gui-log-files", "gui-crash-reports"] {
+    for chip in [
+        "gui-server-captured-output",
+        "gui-log-files",
+        "gui-crash-reports",
+    ] {
         assert!(
             ElementHandle::find_by_accessible_label(&ui, &lookup(chip))
                 .next()
@@ -335,6 +339,176 @@ fn double_clicking_a_console_line_selects_the_word_under_it() {
     );
 }
 
+#[test]
+fn console_gives_extra_height_to_output_and_offers_each_lifecycle_action_once() {
+    let ui = window();
+    server_console(&ui);
+    running_console(&ui);
+    for split in [false, true] {
+        if split {
+            let mut second = support::pane(2, 0, "Console");
+            second.column = 1;
+            ui.set_workspace_panes(ModelRc::new(VecModel::from(vec![
+                support::pane(1, 0, "Console"),
+                second,
+            ])));
+        }
+        for size in [PhysicalSize::new(1480, 900), PhysicalSize::new(1480, 1200)] {
+            ui.window().set_size(size);
+            settle(&ui);
+            let expected = if split { 2 } else { 1 };
+            for action in ["gui-restart", "gui-stop", "gui-kill"] {
+                let count = ElementHandle::find_by_element_type_name(&ui, "AppButton")
+                    .filter(|element| {
+                        element
+                            .accessible_label()
+                            .is_some_and(|label| label.starts_with(&lookup(action)))
+                    })
+                    .filter(|element| element.size().width > 0.0)
+                    .count();
+                assert_eq!(count, expected, "{action} appears once per pane");
+            }
+            let viewers: Vec<_> = ElementHandle::find_by_element_type_name(&ui, "LiveLogViewer")
+                .filter(|element| element.size().width > 0.0)
+                .collect();
+            assert_eq!(viewers.len(), expected);
+            for viewer in viewers {
+                assert!(
+                    viewer.absolute_position().y < 400.0,
+                    "console header must stay compact: {:?}",
+                    viewer.absolute_position()
+                );
+                assert!(
+                    viewer.size().height
+                        > f32::from(u16::try_from(size.height).expect("test window height")) * 0.5,
+                    "output should receive the spare height: {:?}",
+                    viewer.size()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn enter_and_send_clear_the_command_only_after_confirmed_delivery() {
+    let ui = window();
+    server_console(&ui);
+    running_console(&ui);
+    let sent = record_console_commands(&ui);
+    settle(&ui);
+    for click_send in [false, true] {
+        let field = command_inputs(&ui).remove(0);
+        field.mock_single_click(PointerEventButton::Left);
+        key(&ui, "list");
+        if click_send {
+            ElementHandle::find_by_accessible_label(&ui, &lookup("gui-send"))
+                .next()
+                .expect("send")
+                .mock_single_click(PointerEventButton::Left);
+        } else {
+            key(&ui, &SharedString::from(slint::platform::Key::Return));
+        }
+        settle(&ui);
+        assert_eq!(field.accessible_value().as_deref(), Some("list"));
+        assert!(!support::host(&ui, 0).server.can_send_command);
+        complete_console_command(&ui, true);
+        assert_eq!(field.accessible_value().as_deref(), Some(""));
+    }
+    assert_eq!(sent.borrow().as_slice(), ["list", "list"]);
+}
+
+#[test]
+fn console_failure_preserves_text_and_another_panes_delivery_cannot_clear_it() {
+    let ui = window();
+    server_console(&ui);
+    running_console(&ui);
+    let mut second = support::pane(2, 0, "Console");
+    second.column = 1;
+    ui.set_workspace_panes(ModelRc::new(VecModel::from(vec![
+        support::pane(1, 0, "Console"),
+        second,
+    ])));
+    let sent = record_console_commands(&ui);
+    settle(&ui);
+    let fields = command_inputs(&ui);
+    assert_eq!(fields.len(), 2);
+    for field in &fields {
+        field.mock_single_click(PointerEventButton::Left);
+        key(&ui, "list");
+    }
+    fields[0].mock_single_click(PointerEventButton::Left);
+    key(&ui, &SharedString::from(slint::platform::Key::Return));
+    complete_console_command(&ui, false);
+    assert_eq!(fields[0].accessible_value().as_deref(), Some("list"));
+    fields[1].mock_single_click(PointerEventButton::Left);
+    key(&ui, &SharedString::from(slint::platform::Key::Return));
+    complete_console_command(&ui, true);
+    assert_eq!(fields[1].accessible_value().as_deref(), Some(""));
+    assert_eq!(fields[0].accessible_value().as_deref(), Some("list"));
+    assert_eq!(sent.borrow().as_slice(), ["list", "list"]);
+
+    // A request refused before queueing must not wait for another pane's receipt.
+    ui.on_server_console(|_, _| false);
+    fields[0].mock_single_click(PointerEventButton::Left);
+    key(&ui, &SharedString::from(slint::platform::Key::Return));
+    let accepted = record_console_commands(&ui);
+    fields[1].mock_single_click(PointerEventButton::Left);
+    key(&ui, "list");
+    key(&ui, &SharedString::from(slint::platform::Key::Return));
+    complete_console_command(&ui, true);
+    assert_eq!(fields[0].accessible_value().as_deref(), Some("list"));
+    assert_eq!(fields[1].accessible_value().as_deref(), Some(""));
+    assert_eq!(accepted.borrow().as_slice(), ["list"]);
+}
+
+fn running_console(ui: &AppWindow) {
+    support::update_host(ui, 0, |host| {
+        host.server.state = "Running".into();
+        host.server.state_kind = "running".into();
+        host.server.state_detail = "Controlled by Ephervex".into();
+        host.server.can_start = false;
+        host.server.can_stop = true;
+        host.server.can_restart = true;
+        host.server.can_kill = true;
+        host.server.can_send_command = true;
+    });
+}
+
+fn record_console_commands(ui: &AppWindow) -> Rc<RefCell<Vec<String>>> {
+    let sent = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&sent);
+    let weak = ui.as_weak();
+    ui.on_server_console(move |server, command| {
+        assert_eq!(server, "repro-server");
+        sink.borrow_mut().push(command.to_string());
+        if let Some(ui) = weak.upgrade() {
+            support::update_host(&ui, 0, |host| host.server.can_send_command = false);
+        }
+        true
+    });
+    sent
+}
+
+fn complete_console_command(ui: &AppWindow, delivered: bool) {
+    support::update_host(ui, 0, |host| {
+        host.server.console_completion += 1;
+        host.server.console_delivered = delivered;
+        host.server.can_send_command = true;
+    });
+    settle(ui);
+}
+
+fn command_inputs(ui: &AppWindow) -> Vec<ElementHandle> {
+    ElementHandle::find_by_accessible_label(ui, &lookup("gui-enter-server-command"))
+        .flat_map(|field| {
+            field
+                .query_descendants()
+                .match_inherits("TextInput")
+                .find_all()
+        })
+        .collect()
+}
+
 fn hold_control(ui: &AppWindow) {
     ui.window().dispatch_event(WindowEvent::KeyPressed {
         text: slint::platform::Key::Control.into(),
@@ -569,6 +743,9 @@ fn server() -> ServerRow {
         can_restart: false,
         can_kill: false,
         can_send_command: false,
+        console_status: SharedString::default(),
+        console_completion: 0,
+        console_delivered: false,
         can_connect: false,
         connect_reason: SharedString::default(),
         restart_stage: SharedString::default(),

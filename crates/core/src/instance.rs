@@ -596,6 +596,25 @@ impl App {
         )?)
     }
 
+    /// Resolves retained stdout/stderr capture without creating an empty log folder.
+    pub fn server_capture_folder(&self, server: ServerId) -> CoreResult<Option<PathBuf>> {
+        self.server(server)?;
+        Ok(ephervex_storage::folders::resolve(
+            self.paths().server_capture_dir(server),
+            ephervex_storage::MissingFolder::Disable,
+        )?)
+    }
+
+    /// Opens Ephervex's retained stdout/stderr capture for this server.
+    /// Minecraft's own log files remain in `ServerFolder::Logs`.
+    pub fn open_server_capture_folder(&self, server: ServerId) -> CoreResult<Option<PathBuf>> {
+        let path = self.server_capture_folder(server)?;
+        if let Some(path) = &path {
+            open_folder(path);
+        }
+        Ok(path)
+    }
+
     /// Hands one of a server's folders to the desktop's file manager.
     #[instrument(skip(self))]
     pub fn open_server_folder(
@@ -1012,5 +1031,69 @@ mod tests {
             .client_folder(InstanceId::new(), ClientFolder::Mods)
             .expect_err("no such instance");
         assert_eq!(error.message_id(), "error-registry-instance-unknown");
+    }
+    #[test]
+    fn server_shortcuts_resolve_the_selected_servers_real_files_and_capture() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let create = |name| {
+            app.registry_for_services()
+                .create_server(ephervex_storage::NewServer::new(
+                    name,
+                    "1.20.1",
+                    LoaderSelection::vanilla(),
+                ))
+                .expect("server")
+        };
+        let first = create("First");
+        let second = create("Second");
+        for server in [&first, &second] {
+            assert_eq!(
+                app.server_folder(server.id, ServerFolder::Server)
+                    .expect("game"),
+                Some(server.root.join("server"))
+            );
+            assert_eq!(
+                app.server_folder(server.id, ServerFolder::Config)
+                    .expect("config"),
+                Some(server.root.join("server/config"))
+            );
+            assert_eq!(
+                app.server_folder(server.id, ServerFolder::Logs)
+                    .expect("logs"),
+                None
+            );
+            assert_eq!(
+                app.server_folder(server.id, ServerFolder::CrashReports)
+                    .expect("crashes"),
+                None
+            );
+            assert_eq!(app.server_capture_folder(server.id).expect("capture"), None);
+        }
+        let logs = first.root.join("server/logs");
+        let crashes = first.root.join("server/crash-reports");
+        let capture = app.paths().server_capture_dir(first.id);
+        for path in [&logs, &crashes, &capture] {
+            std::fs::create_dir_all(path).expect("folder");
+        }
+        assert_eq!(
+            app.server_folder(first.id, ServerFolder::Logs)
+                .expect("logs"),
+            Some(logs)
+        );
+        assert_eq!(
+            app.server_folder(first.id, ServerFolder::CrashReports)
+                .expect("crashes"),
+            Some(crashes)
+        );
+        assert_eq!(
+            app.server_capture_folder(first.id).expect("capture"),
+            Some(capture)
+        );
+        assert_eq!(
+            app.server_capture_folder(second.id).expect("other capture"),
+            None
+        );
+        assert!(app.server_capture_folder(ServerId::new()).is_err());
     }
 }

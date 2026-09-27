@@ -49,11 +49,13 @@ use crate::workspace_layout::{PaneId, Revealed, Surface, WorkspaceLayout};
 mod diagnosis_flow;
 mod log_views;
 mod mod_views;
+mod server_tools;
 mod workspace;
 
 use diagnosis_flow::DiagnosisFlowState;
 use log_views::LogViews;
 use mod_views::ModViews;
+use server_tools::{ServerAction, ServerTools};
 use workspace::{PaneChange, WorkspaceState};
 
 pub struct Controller {
@@ -1437,6 +1439,7 @@ struct TrackedRestart {
 /// here before it can reach the worker.
 #[derive(Debug, Default)]
 struct HostLifecycle {
+    servers: ServerTools,
     last_request: u64,
     /// Keyed by host kind and id.
     restarts: HashMap<String, TrackedRestart>,
@@ -1465,7 +1468,10 @@ impl HostLifecycle {
     /// pair, is under way.
     fn request(&mut self, host: InstalledHost) -> Option<u64> {
         let key = lifecycle_key(host);
-        if self.restarts.contains_key(&key) || self.pair_starting(host) {
+        if matches!(host, InstalledHost::Server(id) if self.servers.busy(id))
+            || self.restarts.contains_key(&key)
+            || self.pair_starting(host)
+        {
             return None;
         }
         self.last_request = self.last_request.wrapping_add(1);
@@ -1523,8 +1529,18 @@ impl HostLifecycle {
 
     /// Ends the pair start the worker settled. An operation this controller
     /// is not tracking changes nothing.
-    fn settle_pair_start(&mut self, operation: u64) -> bool {
+    fn settle_pair_start(&mut self, operation: u64, server_completion_owned: bool) -> bool {
         let before = self.pair_starts.len();
+        if let Some(start) = self
+            .pair_starts
+            .iter()
+            .find(|start| start.operation == operation)
+            && !server_completion_owned
+            && let InstalledHost::Server(server) = start.server
+        {
+            self.servers
+                .apply(server, backend::ServerToolEvent::StartAbandoned);
+        }
         self.pair_starts
             .retain(|start| start.operation != operation);
         self.pair_starts.len() != before
@@ -1567,12 +1583,41 @@ impl HostLifecycle {
         };
         let host = InstalledHost::Server(server);
         let stage = self.stage_of(host);
-        let pair_starting = self.pair_starting(host);
-        let changed = row.restart_stage != stage || row.pair_starting != pair_starting;
+        let before = row.clone();
         row.restart_stage = stage.into();
-        row.pair_starting = pair_starting;
-        changed
+        row.pair_starting = self.pair_starting(host);
+        self.servers.stamp(server, row, !stage.is_empty());
+        *row != before
     }
+}
+
+/// Only classified failures enter the existing quick Diagnostics path.
+fn apply_server_tool_event(
+    ui: &AppWindow,
+    workspace: &Workspace,
+    server: ephervex_model::ServerId,
+    event: backend::ServerToolEvent,
+) {
+    if matches!(event, backend::ServerToolEvent::Started) {
+        diagnosis_flow::forget_run(workspace, InstalledHost::Server(server));
+    }
+    {
+        let mut lifecycle = workspace.lifecycle.borrow_mut();
+        if let Some(failure) = lifecycle.servers.apply(server, event)
+            && let Some(revision) = lifecycle.servers.failure_revision(server)
+        {
+            send(
+                &workspace.commands,
+                Command::ExplainServerFailure {
+                    server,
+                    failure,
+                    revision,
+                },
+            );
+        }
+    }
+    workspace.refresh(ui);
+    stamp_host_lifecycle(ui, &workspace.lifecycle.borrow());
 }
 
 /// Stamps each host row with its restart stage, and each client row with
@@ -1600,8 +1645,16 @@ fn stamp_host_lifecycle(ui: &AppWindow, lifecycle: &HostLifecycle) {
 }
 
 /// Ends a pair start the worker settled, in every view of both sides.
-fn apply_pair_start_settled(ui: &AppWindow, lifecycle: &RefCell<HostLifecycle>, operation: u64) {
-    if lifecycle.borrow_mut().settle_pair_start(operation) {
+fn apply_pair_start_settled(
+    ui: &AppWindow,
+    lifecycle: &RefCell<HostLifecycle>,
+    operation: u64,
+    server_completion_owned: bool,
+) {
+    if lifecycle
+        .borrow_mut()
+        .settle_pair_start(operation, server_completion_owned)
+    {
         stamp_host_lifecycle(ui, &lifecycle.borrow());
     }
 }
@@ -4429,6 +4482,13 @@ impl Workspace {
         let Some(operation) = lifecycle.begin_pair_start(client, server) else {
             return HostStart::Refused;
         };
+        if let InstalledHost::Server(id) = server {
+            let restarting = !lifecycle.stage_of(server).is_empty();
+            if !lifecycle.servers.claim_linked(id, restarting) {
+                lifecycle.settle_pair_start(operation, true);
+                return HostStart::Refused;
+            }
+        }
         diagnosis_flow::forget_run(self, client);
         diagnosis_flow::forget_run(self, server);
         stamp_host_lifecycle(ui, &lifecycle);
@@ -4665,9 +4725,28 @@ fn register_linked_pair(ui: &AppWindow, workspace: &Workspace) {
         ) else {
             return;
         };
+        let operation = {
+            let mut lifecycle = connect.lifecycle.borrow_mut();
+            let host = InstalledHost::Server(server);
+            let restarting = !lifecycle.stage_of(host).is_empty();
+            let Some(operation) = lifecycle.begin_pair_start(InstalledHost::Instance(client), host)
+            else {
+                return;
+            };
+            if !lifecycle.servers.claim_linked(server, restarting) {
+                lifecycle.settle_pair_start(operation, true);
+                return;
+            }
+            stamp_host_lifecycle(&ui, &lifecycle);
+            operation
+        };
         send(
             &connect.commands,
-            Command::LaunchAndConnect { client, server },
+            Command::LaunchAndConnect {
+                client,
+                server,
+                operation,
+            },
         );
         connect.show_pair(
             &ui,
@@ -4788,6 +4867,9 @@ fn register_host_starts(ui: &AppWindow, workspace: &Workspace) {
         let host = InstalledHost::Server(server);
         let pair = match start.claim_start(&ui, host) {
             HostStart::Alone => {
+                if !claim_server_start(&ui, &start, server) {
+                    return;
+                }
                 send(&start.commands, Command::StartServer(server));
                 None
             }
@@ -4823,6 +4905,24 @@ fn register_host_starts(ui: &AppWindow, workspace: &Workspace) {
             None => start.show_console(&ui, host),
         }
     });
+}
+
+/// Claims a standalone server start through the shared action guard.
+fn claim_server_start(
+    ui: &AppWindow,
+    workspace: &Workspace,
+    server: ephervex_model::ServerId,
+) -> bool {
+    let mut lifecycle = workspace.lifecycle.borrow_mut();
+    let restarting = !lifecycle.stage_of(InstalledHost::Server(server)).is_empty();
+    if !lifecycle
+        .servers
+        .request(server, ServerAction::Start, restarting)
+    {
+        return false;
+    }
+    stamp_host_lifecycle(ui, &lifecycle);
+    true
 }
 
 /// The instance workspace's Settings tab: Java/JVM overrides and the
@@ -4895,6 +4995,18 @@ fn register_server_actions(ui: &AppWindow, commands: &Sender<Command>, workspace
     });
 
     let sender = commands.clone();
+    ui.on_open_server_location(move |id, location| {
+        let Some(server) = backend::parse_server_id(&id) else {
+            return;
+        };
+        if location == "capture" {
+            send(&sender, Command::OpenServerCapture(server));
+        } else if let Some(folder) = ephervex_core::ServerFolder::parse(&location) {
+            send(&sender, Command::OpenServerLocation { server, folder });
+        }
+    });
+
+    let sender = commands.clone();
     ui.on_load_server_workspace(move |id| {
         if let Some(id) = backend::parse_server_id(&id) {
             send(&sender, Command::LoadServerWorkspace(id));
@@ -4904,33 +5016,38 @@ fn register_server_actions(ui: &AppWindow, commands: &Sender<Command>, workspace
     register_host_starts(ui, workspace);
 
     let sender = commands.clone();
+    let lifecycle = Rc::clone(&workspace.lifecycle);
+    let weak = ui.as_weak();
     ui.on_server_stop(move |id| {
         if let Some(id) = backend::parse_server_id(&id) {
+            let mut lifecycle = lifecycle.borrow_mut();
+            if !lifecycle.servers.request(id, ServerAction::Stop, false) {
+                return;
+            }
+            if let Some(ui) = weak.upgrade() {
+                stamp_host_lifecycle(&ui, &lifecycle);
+            }
             send(&sender, Command::StopServer(id));
         }
     });
 
     let sender = commands.clone();
+    let lifecycle = Rc::clone(&workspace.lifecycle);
+    let weak = ui.as_weak();
     ui.on_server_kill(move |id| {
         if let Some(id) = backend::parse_server_id(&id) {
+            let mut lifecycle = lifecycle.borrow_mut();
+            if !lifecycle.servers.request(id, ServerAction::Kill, false) {
+                return;
+            }
+            if let Some(ui) = weak.upgrade() {
+                stamp_host_lifecycle(&ui, &lifecycle);
+            }
             send(&sender, Command::KillServer(id));
         }
     });
 
-    let sender = commands.clone();
-    ui.on_server_console(move |id, command| {
-        if let Some(server) = backend::parse_server_id(&id)
-            && !command.trim().is_empty()
-        {
-            send(
-                &sender,
-                Command::SendConsole {
-                    server,
-                    command: command.into(),
-                },
-            );
-        }
-    });
+    register_server_console(ui, commands, &workspace.lifecycle);
 
     let sender = commands.clone();
     ui.on_accept_eula(move || send(&sender, Command::AcceptEula));
@@ -4938,6 +5055,51 @@ fn register_server_actions(ui: &AppWindow, commands: &Sender<Command>, workspace
     ui.on_revoke_eula(move || send(&sender, Command::RevokeEula));
     let sender = commands.clone();
     ui.on_open_eula_reference(move || send(&sender, Command::OpenEulaReference));
+}
+
+/// All console panes submit through the same per-server action guard.
+fn register_server_console(
+    ui: &AppWindow,
+    commands: &Sender<Command>,
+    lifecycle: &Rc<RefCell<HostLifecycle>>,
+) {
+    let sender = commands.clone();
+    let lifecycle = Rc::clone(lifecycle);
+    let weak = ui.as_weak();
+    ui.on_server_console(move |id, command| {
+        let Some(server) = backend::parse_server_id(&id) else {
+            return false;
+        };
+        if command.trim().is_empty() {
+            return false;
+        }
+        let mut lifecycle = lifecycle.borrow_mut();
+        let restarting = !lifecycle.stage_of(InstalledHost::Server(server)).is_empty();
+        if !lifecycle
+            .servers
+            .request(server, ServerAction::Console, restarting)
+        {
+            return false;
+        }
+        let queued = sender
+            .send(Command::SendConsole {
+                server,
+                command: command.into(),
+            })
+            .is_ok();
+        if !queued {
+            lifecycle.servers.apply(
+                server,
+                backend::ServerToolEvent::ConsoleFinished {
+                    outcome: backend::ConsoleOutcome::Rejected,
+                },
+            );
+        }
+        if let Some(ui) = weak.upgrade() {
+            stamp_host_lifecycle(&ui, &lifecycle);
+        }
+        queued
+    });
 }
 
 fn register_server_property_actions(ui: &AppWindow, commands: &Sender<Command>) {
@@ -6627,9 +6789,13 @@ fn apply_event(
                     .into(),
             );
         }
+        Event::ServerTool { server, event } => {
+            apply_server_tool_event(ui, workspace, server, event);
+        }
         Event::Snapshot(snapshot) => {
             let (clients, servers) =
                 apply_snapshot_event(ui, *snapshot, creations, minecraft, commands);
+            lifecycle.borrow_mut().servers.observe(&servers);
             workspace.state.borrow_mut().set_rows(clients, servers);
             workspace.refresh(ui);
             // A snapshot rebuilds the rows from records that know nothing of
@@ -6859,7 +7025,10 @@ fn apply_event(
                 stamp_host_lifecycle(ui, &lifecycle.borrow());
             }
         }
-        Event::PairStartSettled { operation } => apply_pair_start_settled(ui, lifecycle, operation),
+        Event::PairStartSettled {
+            operation,
+            server_completion_owned,
+        } => apply_pair_start_settled(ui, lifecycle, operation, server_completion_owned),
         Event::LaunchContext {
             instance,
             restartable,
@@ -6930,13 +7099,24 @@ fn apply_event(
             host,
             failure,
             view,
-        } => diagnosis_flow::apply_run_failed(
-            workspace,
-            &mut workspace.diagnosis.borrow_mut(),
-            host,
-            failure,
-            view.map(|view| *view),
-        ),
+            server_revision,
+        } => {
+            let current = match (host, server_revision) {
+                (InstalledHost::Server(server), Some(revision)) => {
+                    lifecycle.borrow().servers.failure_revision(server) == Some(revision)
+                }
+                _ => true,
+            };
+            if current {
+                diagnosis_flow::apply_run_failed(
+                    workspace,
+                    &mut workspace.diagnosis.borrow_mut(),
+                    host,
+                    failure,
+                    view.map(|view| *view),
+                );
+            }
+        }
         Event::BundlePlanned { host, parts } => {
             diagnosis_flow::apply_bundle_plan(
                 workspace,
@@ -7897,6 +8077,14 @@ fn server_row(item: crate::presentation::ServerPresentation) -> ServerRow {
         can_restart: item.can_restart,
         can_kill: item.can_kill,
         can_send_command: item.can_send_command,
+        console_completion: 0,
+        console_delivered: false,
+        console_status: if item.can_send_command {
+            String::new()
+        } else {
+            lookup("gui-server-console-unavailable")
+        }
+        .into(),
         can_connect: item.can_connect,
         connect_reason: item.connect_reason.into(),
         restart_stage: SharedString::default(),
@@ -10190,6 +10378,230 @@ mod tests {
         (workspace, commands)
     }
 
+    #[test]
+    fn disconnected_command_worker_refuses_submission_and_releases_the_server_guard() {
+        let ui = test_window();
+        let (workspace, commands) = test_workspace_sending(&ui);
+        register_server_actions(&ui, &workspace.commands, &workspace);
+        let server = ephervex_model::ServerId::new();
+        let row = ServerRow {
+            id: server.to_string().into(),
+            state_kind: "running".into(),
+            can_send_command: true,
+            ..ServerRow::default()
+        };
+        workspace
+            .lifecycle
+            .borrow_mut()
+            .servers
+            .observe(std::slice::from_ref(&row));
+        workspace.state.borrow_mut().set_rows(Vec::new(), vec![row]);
+        workspace.open(&ui, InstalledHost::Server(server), Surface::Console);
+        drop(commands);
+        assert!(!ui.invoke_server_console(server.to_string().into(), "list".into()));
+        let view = ui.get_host_views().row_data(0).expect("server view");
+        assert!(view.server.can_send_command);
+        assert!(!view.server.console_delivered);
+        assert!(!workspace.lifecycle.borrow().servers.busy(server));
+    }
+
+    #[test]
+    fn repeated_server_panes_share_command_delivery_and_target_the_displayed_host() {
+        let ui = test_window();
+        let (workspace, commands) = test_workspace_sending(&ui);
+        register_server_actions(&ui, &workspace.commands, &workspace);
+        let server = ephervex_model::ServerId::new();
+        let other = ephervex_model::ServerId::new();
+        let rows = [server, other].map(|id| ServerRow {
+            id: id.to_string().into(),
+            state_kind: "running".into(),
+            can_stop: true,
+            can_restart: true,
+            can_send_command: true,
+            ..ServerRow::default()
+        });
+        workspace.lifecycle.borrow_mut().servers.observe(&rows);
+        workspace
+            .state
+            .borrow_mut()
+            .set_rows(Vec::new(), rows.to_vec());
+        workspace.open(&ui, InstalledHost::Server(server), Surface::Console);
+        ui.invoke_split_pane_beside(1);
+        ui.invoke_show_pane_surface(2, "Console".into());
+        assert_eq!(ui.get_host_views().row_count(), 1);
+        assert_eq!(ui.get_workspace_panes().row_count(), 2);
+        commands.try_iter().for_each(drop);
+        assert!(!ui.invoke_server_console(server.to_string().into(), "   ".into()));
+        assert!(ui.invoke_server_console(server.to_string().into(), "list".into()));
+        assert!(!ui.invoke_server_console(server.to_string().into(), "say duplicate".into()));
+        let sent: Vec<_> = commands.try_iter().collect();
+        assert!(
+            matches!(sent.as_slice(), [Command::SendConsole { server: target, command }] if *target == server && command == "list")
+        );
+        assert!(
+            !ui.get_host_views()
+                .row_data(0)
+                .expect("server view")
+                .server
+                .can_send_command
+        );
+        workspace.lifecycle.borrow_mut().servers.apply(
+            server,
+            backend::ServerToolEvent::ConsoleFinished {
+                outcome: backend::ConsoleOutcome::Delivered,
+            },
+        );
+        workspace.refresh(&ui);
+        assert!(
+            ui.get_host_views()
+                .row_data(0)
+                .expect("server view")
+                .server
+                .can_send_command
+        );
+        commands.try_iter().for_each(drop);
+        ui.invoke_open_server_location(other.to_string().into(), "config".into());
+        ui.invoke_open_server_location(server.to_string().into(), "capture".into());
+        ui.invoke_open_server_location(server.to_string().into(), "../outside".into());
+        let sent: Vec<_> = commands.try_iter().collect();
+        assert!(
+            matches!(sent.as_slice(), [Command::OpenServerLocation { server: target, folder: ephervex_core::ServerFolder::Config }, Command::OpenServerCapture(captured)] if *target == other && *captured == server)
+        );
+    }
+
+    #[test]
+    fn intentional_server_controls_do_not_request_failure_diagnostics_in_either_order() {
+        for action in [ServerAction::Stop, ServerAction::Kill] {
+            for exit_first in [false, true] {
+                let ui = test_window();
+                let (workspace, commands, client, host) = paired_workspace(&ui);
+                let InstalledHost::Server(server) = host else {
+                    unreachable!()
+                };
+                let (clients, rows) = paired_rows(client, host, false, true);
+                workspace.lifecycle.borrow_mut().servers.observe(&rows);
+                workspace.state.borrow_mut().set_rows(clients, rows);
+                workspace.open(&ui, host, Surface::Console);
+                ui.invoke_split_pane_beside(1);
+                commands.try_iter().for_each(drop);
+                workspace
+                    .lifecycle
+                    .borrow_mut()
+                    .servers
+                    .apply(server, backend::ServerToolEvent::Started);
+                assert!(
+                    workspace
+                        .lifecycle
+                        .borrow_mut()
+                        .servers
+                        .request(server, action, false)
+                );
+                let exit = backend::ServerToolEvent::Finished {
+                    failure: Some("nonzero exit".to_owned()),
+                };
+                let control = backend::ServerToolEvent::StopFinished { succeeded: true };
+                for event in if exit_first {
+                    [exit, control]
+                } else {
+                    [control, exit]
+                } {
+                    apply_server_tool_event(&ui, &workspace, server, event);
+                }
+                assert!(
+                    commands
+                        .try_iter()
+                        .all(|event| !matches!(event, Command::ExplainServerFailure { .. }))
+                );
+                assert!(run_notices(&ui).iter().all(String::is_empty));
+            }
+        }
+    }
+
+    #[test]
+    fn a_genuine_server_failure_requests_one_diagnosis_without_navigation() {
+        let ui = test_window();
+        let (workspace, commands, _, host) = paired_workspace(&ui);
+        let InstalledHost::Server(server) = host else {
+            unreachable!()
+        };
+        workspace.open(&ui, host, Surface::Console);
+        commands.try_iter().for_each(drop);
+        apply_server_tool_event(
+            &ui,
+            &workspace,
+            server,
+            backend::ServerToolEvent::RestartFailed {
+                failure: "replacement failed".to_owned(),
+            },
+        );
+        apply_server_tool_event(
+            &ui,
+            &workspace,
+            server,
+            backend::ServerToolEvent::Finished {
+                failure: Some("replacement failed".to_owned()),
+            },
+        );
+        let sent: Vec<_> = commands.try_iter().collect();
+        assert!(
+            matches!(sent.as_slice(), [Command::ExplainServerFailure { server: id, failure, .. }]
+            if *id == server && failure == "replacement failed")
+        );
+        fail_run(&workspace, host);
+        assert!(!run_notices(&ui)[0].is_empty());
+        assert_eq!(shown(&workspace), [(host, Surface::Console)]);
+        apply_server_tool_event(&ui, &workspace, server, backend::ServerToolEvent::Started);
+        assert!(run_notices(&ui).iter().all(String::is_empty));
+    }
+
+    #[test]
+    fn linked_starts_claim_the_server_once_and_running_servers_remain_reusable() {
+        for from_client in [false, true] {
+            let ui = test_window();
+            let (workspace, commands, client, host) = paired_workspace_starting_together(&ui, true);
+            let InstalledHost::Server(server) = host else {
+                unreachable!()
+            };
+            if from_client {
+                ui.invoke_launch_client(client.id().into());
+            } else {
+                ui.invoke_server_start(host.id().into());
+            }
+            assert!(workspace.lifecycle.borrow().servers.busy(server));
+            ui.invoke_server_start(host.id().into());
+            let sent = starts(&commands);
+            assert_eq!(sent.len(), 1);
+            assert_eq!(sent[0].0, "pair");
+            apply_server_tool_event(&ui, &workspace, server, backend::ServerToolEvent::Started);
+            let (clients, rows) = paired_rows(client, host, true, true);
+            workspace.lifecycle.borrow_mut().servers.observe(&rows);
+            workspace.state.borrow_mut().set_rows(clients, rows);
+            apply_pair_start_settled(&ui, &workspace.lifecycle, sent[0].2, true);
+            assert!(!workspace.lifecycle.borrow().servers.busy(server));
+            assert!(!workspace.lifecycle.borrow().pair_starting(host));
+            assert!(
+                workspace
+                    .lifecycle
+                    .borrow_mut()
+                    .servers
+                    .claim_linked(server, false)
+            );
+            apply_server_tool_event(
+                &ui,
+                &workspace,
+                server,
+                backend::ServerToolEvent::Finished { failure: None },
+            );
+            let (_, rows) = paired_rows(client, host, true, false);
+            workspace.lifecycle.borrow_mut().servers.observe(&rows);
+            assert!(workspace.lifecycle.borrow_mut().servers.request(
+                server,
+                ServerAction::Start,
+                false
+            ));
+        }
+    }
+
     fn client_host() -> InstalledHost {
         InstalledHost::Instance(ephervex_model::InstanceId::new())
     }
@@ -10228,9 +10640,19 @@ mod tests {
                 id: server.id().into(),
                 name: "Repro Server".into(),
                 can_restart: true,
+                can_start: true,
                 ..ServerRow::default()
             }],
         );
+        workspace
+            .lifecycle
+            .borrow_mut()
+            .servers
+            .observe(&[ServerRow {
+                id: server.id().into(),
+                can_start: true,
+                ..ServerRow::default()
+            }]);
         (workspace, client, server)
     }
 
@@ -10272,6 +10694,10 @@ mod tests {
                 pair_start_together: start_together,
                 can_start: !running,
                 can_stop: running,
+                can_kill: running,
+                can_restart: running,
+                can_send_command: running,
+                state_kind: if running { "running" } else { "stopped" }.into(),
                 ..ServerRow::default()
             }],
         )
@@ -10282,6 +10708,7 @@ mod tests {
         register_host_starts(ui, &workspace);
         let (client, server) = (client_host(), server_host());
         let (clients, servers) = paired_rows(client, server, start_together, false);
+        workspace.lifecycle.borrow_mut().servers.observe(&servers);
         workspace.state.borrow_mut().set_rows(clients, servers);
         (workspace, commands, client, server)
     }
@@ -10366,6 +10793,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_standalone_server_start_claims_shared_state_before_sending() {
+        let ui = test_window();
+        let (workspace, commands, _, server) = paired_workspace(&ui);
+        workspace.open(&ui, server, Surface::Console);
+        ui.invoke_split_pane_beside(1);
+        ui.invoke_server_start(server.id().into());
+        ui.invoke_server_start(server.id().into());
+        assert_eq!(starts(&commands), [("start", server, 0)]);
+        let InstalledHost::Server(id) = server else {
+            unreachable!();
+        };
+        assert!(workspace.lifecycle.borrow().servers.busy(id));
+        assert!(!workspace.lifecycle.borrow().pair_starting(server));
+    }
+
     /// Launching the client is one pair start. The server coming up and the
     /// client running are not new triggers, so nothing else is sent.
     #[test]
@@ -10399,7 +10842,7 @@ mod tests {
         let (clients, servers) = paired_rows(client, server, true, true);
         workspace.state.borrow_mut().set_rows(clients, servers);
         workspace.refresh(&ui);
-        apply_pair_start_settled(&ui, &workspace.lifecycle, *operation);
+        apply_pair_start_settled(&ui, &workspace.lifecycle, *operation, false);
 
         assert_eq!(starting(&ui), [false, false]);
         assert!(
@@ -10463,16 +10906,16 @@ mod tests {
 
         ui.invoke_launch_client(client.id().into());
         let first = starts(&commands)[0].2;
-        apply_pair_start_settled(&ui, &workspace.lifecycle, first + 100);
+        apply_pair_start_settled(&ui, &workspace.lifecycle, first + 100, false);
         assert!(workspace.lifecycle.borrow().pair_starting(client));
 
-        apply_pair_start_settled(&ui, &workspace.lifecycle, first);
+        apply_pair_start_settled(&ui, &workspace.lifecycle, first, false);
         assert!(!workspace.lifecycle.borrow().pair_starting(client));
 
         ui.invoke_launch_client(client.id().into());
         let second = starts(&commands)[0].2;
         assert_ne!(second, first);
-        apply_pair_start_settled(&ui, &workspace.lifecycle, first);
+        apply_pair_start_settled(&ui, &workspace.lifecycle, first, false);
         assert!(
             workspace.lifecycle.borrow().pair_starting(client),
             "an earlier start's settle does not end a later one"
@@ -10507,7 +10950,7 @@ mod tests {
             starts(&commands).is_empty(),
             "no restart during a pair start"
         );
-        apply_pair_start_settled(&ui, &workspace.lifecycle, operation);
+        apply_pair_start_settled(&ui, &workspace.lifecycle, operation, false);
     }
 
     /// Every toast the window is asked to show, and whether it is an error.
@@ -10676,6 +11119,25 @@ mod tests {
             .try_iter()
             .filter(|command| matches!(command, Command::LaunchAndConnect { .. }))
             .count()
+    }
+
+    #[test]
+    fn launch_and_connect_reuses_a_running_server_without_duplicate_submissions() {
+        let ui = test_window();
+        let (workspace, commands, client, host) = paired_workspace(&ui);
+        let InstalledHost::Server(server) = host else {
+            unreachable!()
+        };
+        let (clients, rows) = paired_rows(client, host, false, true);
+        workspace.lifecycle.borrow_mut().servers.observe(&rows);
+        workspace.state.borrow_mut().set_rows(clients, rows);
+        ui.invoke_launch_and_connect(client.id().into(), host.id().into());
+        ui.invoke_launch_and_connect(client.id().into(), host.id().into());
+        ui.invoke_server_start(host.id().into());
+        let sent = starts(&commands);
+        assert_eq!(sent, [("connect", client, 0)]);
+        assert!(!workspace.lifecycle.borrow().servers.busy(server));
+        assert!(workspace.lifecycle.borrow().pair_starting(host));
     }
 
     #[test]

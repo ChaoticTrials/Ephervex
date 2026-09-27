@@ -276,6 +276,48 @@ isolation start or cancel, a diagnostic fix, or a snapshot capture or restore
 rewrites a host, launching or starting it and starting another of those changes on it are
 refused with a message naming the change in progress.
 
+### Local server tooling
+
+The server Overview opens the actual game directory containing
+`server.properties`. Its folder shortcuts use core's existing folder resolver
+for mod configuration, Minecraft logs, crash reports, mods, and the server root
+containing Ephervex metadata. Retained Ephervex stdout/stderr capture has its own
+core folder action because it lives in the shared state directory. Missing logs
+and crash reports are reported as unavailable; opening them does not create
+empty directories. Arbitrary file editing stays in the user's desktop tools.
+The Properties shortcut opens the existing structured server settings.
+
+The controller keeps pending starts, stops, console submissions, and observed
+run failures by server ID, alongside the existing host restart state. All views
+of a server share those guards and status. Snapshot values remain the baseline
+for runtime ownership, and completion releases controls even when setup or a
+control request fails. Failed status describes a run observed by this desktop
+session; retained output and Minecraft crash reports remain available after
+reopening Ephervex. Starting and Running describe process preparation and a
+spawned Java child, respectively, not whether Minecraft accepts connections.
+
+Console uses the existing supervisor control channel (ADR 0014). Only a
+confirmed write of a single nonempty command reports delivery. Stopping and
+restarting reject input, and a failed or timed-out stdin write disables further
+input for that child without abandoning process supervision or output capture.
+The same classified failure feeds the existing quick Diagnostics path. Control
+completion and final run completion can arrive in either order; only a genuine
+failure triggers diagnosis. Results for an earlier failed run are ignored after
+a new start. The server observer reports final completion separately from each
+child exit, so a linked run releases its server guard independently of the
+client and normal restarts do not produce failure notices.
+
+A new child gets a new input channel. Stop, kill, and console requests run off
+the GUI worker loop so another host can still be used while a server responds.
+Confirmed delivery clears the submitting pane's command field; a refused or
+failed send keeps it for correction. Feedback names the target server. Sending a command does not insert a synthetic log line.
+
+Logs distinguishes launcher-captured output from files written by Minecraft.
+Its folder action follows that distinction, and Overview offers direct paths
+to Console and crash reports. These shortcuts reuse the existing pane log
+viewers and source ownership; they do not add another subscription or change
+workspace composition (ADR 0039).
+
 ### Restart
 
 A restart stops a running host, waits until that exact host is observed

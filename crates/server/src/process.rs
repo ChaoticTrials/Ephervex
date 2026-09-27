@@ -63,6 +63,11 @@ pub enum ServerEvent {
         detail: String,
     },
     Exited(ServerExit),
+    /// The complete supervised run ended, after any restart. None means the
+    /// run could not be prepared or supervised; Exited describes each child.
+    Finished {
+        exit: Option<ServerExit>,
+    },
     /// The child exited for a restart, and its replacement is being started.
     Restarting,
 }
@@ -308,6 +313,7 @@ async fn supervise_child(
     let mut restart = false;
     // A stop already asked for. A restart cannot turn it back into a start.
     let mut stopping = false;
+    let mut input_available = true;
     let mut completion_waiters = Vec::new();
     loop {
         tokio::select! {
@@ -324,17 +330,42 @@ async fn supervise_child(
                     ControlAction::Status => {
                         let _ = request.response.send(ControlResponse::Running);
                     }
+                    ControlAction::Console(_) if stopping => {
+                        let _ = request.response.send(ControlResponse::Refused(
+                            "the server is stopping or restarting".to_owned(),
+                        ));
+                    }
+                    ControlAction::Console(_) if !input_available => {
+                        let _ = request.response.send(ControlResponse::Refused(
+                            "server input is unavailable".to_owned(),
+                        ));
+                    }
                     ControlAction::Console(command) => {
-                        if command.contains(['\0', '\n', '\r']) {
+                        if command.trim().is_empty() || command.contains(['\0', '\n', '\r']) {
                             let _ = request.response.send(ControlResponse::Refused(
                                 "console command must be one line".to_owned(),
                             ));
                             continue;
                         }
-                        stdin.write_all(command.as_bytes()).await.map_err(ServerError::ProcessIo)?;
-                        stdin.write_all(b"\n").await.map_err(ServerError::ProcessIo)?;
-                        stdin.flush().await.map_err(ServerError::ProcessIo)?;
-                        let _ = request.response.send(ControlResponse::Accepted);
+                        let result = tokio::time::timeout(Duration::from_secs(5), async {
+                            stdin.write_all(command.as_bytes()).await?;
+                            stdin.write_all(b"\n").await?;
+                            stdin.flush().await
+                        }).await;
+                        let response = if matches!(result, Ok(Ok(()))) {
+                            ControlResponse::Accepted
+                        } else {
+                            // A closed input pipe does not transfer process ownership
+                            // or stop output capture. Keep supervising the child.
+                            input_available = false;
+                            ControlResponse::Refused("server input is unavailable; command delivery was not confirmed".to_owned())
+                        };
+                        let _ = request.response.send(response);
+                    }
+                    ControlAction::Stop | ControlAction::Restart if !input_available => {
+                        let _ = request.response.send(ControlResponse::Refused(
+                            "server input is unavailable; use Kill to stop this server".to_owned(),
+                        ));
                     }
                     // An explicit stop or kill is the last word: a restart
                     // still waiting for the old child ends with it stopped.
@@ -504,7 +535,7 @@ pub async fn send_control(
     action: &ControlAction,
 ) -> ServerResult<ControlResponse> {
     if let ControlAction::Console(command) = action
-        && command.contains(['\0', '\n', '\r'])
+        && (command.trim().is_empty() || command.contains(['\0', '\n', '\r']))
     {
         return Err(ServerError::InvalidConsoleCommand);
     }
@@ -555,7 +586,18 @@ pub async fn send_control(
                     "server did not exit within 30 seconds",
                 ),
             })?,
-        ControlAction::Status | ControlAction::Console(_) => read.await,
+        ControlAction::Console(_) => {
+            tokio::time::timeout(CONTROL_TIMEOUT, read)
+                .await
+                .map_err(|_| ServerError::ControlUnavailable {
+                    path,
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "server did not confirm console input within 30 seconds",
+                    ),
+                })?
+        }
+        ControlAction::Status => read.await,
     }
     .map_err(ServerError::ProcessIo)?;
     if count == 0 {
@@ -658,14 +700,9 @@ mod tests {
         };
         let server_root = root.path().to_path_buf();
         let capture_path = capture.path().to_path_buf();
+        let (observer, mut events) = ServerObserver::channel();
         let task = tokio::spawn(async move {
-            ServerSupervisor::run(
-                &command,
-                &server_root,
-                &capture_path,
-                &ServerObserver::silent(),
-            )
-            .await
+            ServerSupervisor::run(&command, &server_root, &capture_path, &observer).await
         });
         for _ in 0..50 {
             if active_control_socket_path(root.path())
@@ -674,6 +711,12 @@ mod tests {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        for invalid in ["", "   ", "list\nstop", "list\rstop", "list\0stop"] {
+            assert!(matches!(
+                send_control(root.path(), &ControlAction::Console(invalid.to_owned())).await,
+                Err(ServerError::InvalidConsoleCommand)
+            ));
         }
         assert_eq!(
             send_control(root.path(), &ControlAction::Console("hello".to_owned()))
@@ -688,6 +731,18 @@ mod tests {
             ControlResponse::Exited(ServerExit { code: Some(0), .. })
         ));
         assert_eq!(task.await.expect("join").expect("supervise").code, Some(0));
+        let mut output = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if let ServerEvent::Output(line) = event {
+                output.push(line.text);
+            }
+        }
+        assert_eq!(output, ["got:hello", "got:stop"]);
+        assert!(
+            send_control(root.path(), &ControlAction::Console("list".to_owned()))
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -849,6 +904,15 @@ mod tests {
             async move { send_control(&root, &ControlAction::Restart).await }
         });
         tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(matches!(
+            send_control(
+                server.root.path(),
+                &ControlAction::Console("list".to_owned())
+            )
+            .await
+            .expect("console refusal"),
+            ControlResponse::Refused(_)
+        ));
         let stopped = send_control(server.root.path(), &ControlAction::Stop)
             .await
             .expect("stop");
@@ -874,6 +938,15 @@ mod tests {
             async move { send_control(&root, &ControlAction::Stop).await }
         });
         tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(matches!(
+            send_control(
+                server.root.path(),
+                &ControlAction::Console("list".to_owned())
+            )
+            .await
+            .expect("console refusal"),
+            ControlResponse::Refused(_)
+        ));
         let restart = send_control(server.root.path(), &ControlAction::Restart)
             .await
             .expect("answered");
@@ -931,5 +1004,69 @@ mod tests {
             .await,
             Err(ServerError::InvalidConsoleCommand)
         ));
+    }
+    #[tokio::test]
+    async fn closed_stdin_refuses_commands_without_abandoning_process_or_capture() {
+        let root = tempfile::tempdir().expect("root");
+        let capture = tempfile::tempdir().expect("capture");
+        std::fs::create_dir_all(root.path().join(".launcher")).expect("launcher");
+        let command = ServerCommand {
+            java: PathBuf::from("/bin/sh"),
+            arguments: vec![
+                "-c".to_owned(),
+                "exec 0<&-; echo input-closed; while :; do sleep 0.1; done".to_owned(),
+            ],
+            working_directory: root.path().join("server"),
+        };
+        let (observer, mut events) = ServerObserver::channel();
+        let server_root = root.path().to_path_buf();
+        let capture_path = capture.path().to_path_buf();
+        let task = tokio::spawn(async move {
+            ServerSupervisor::run(&command, &server_root, &capture_path, &observer).await
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(ServerEvent::Output(line)) = events.recv().await
+                    && line.text == "input-closed"
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("child closed stdin");
+        for _ in 0..2 {
+            assert!(matches!(
+                send_control(root.path(), &ControlAction::Console("list".to_owned()))
+                    .await
+                    .expect("answered"),
+                ControlResponse::Refused(_)
+            ));
+        }
+        for action in [ControlAction::Stop, ControlAction::Restart] {
+            assert!(matches!(
+                send_control(root.path(), &action).await.expect("refused"),
+                ControlResponse::Refused(_)
+            ));
+        }
+        assert!(
+            classify_runtime(root.path())
+                .expect("runtime")
+                .is_controlled()
+        );
+        assert!(!task.is_finished());
+        assert_eq!(
+            send_control(root.path(), &ControlAction::Status)
+                .await
+                .expect("status"),
+            ControlResponse::Running
+        );
+        assert!(matches!(
+            send_control(root.path(), &ControlAction::Kill)
+                .await
+                .expect("kill"),
+            ControlResponse::Exited(_)
+        ));
+        task.await.expect("join").expect("supervise");
     }
 }

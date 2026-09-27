@@ -10,6 +10,7 @@ use std::thread;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use ephervex_core::ControlResponse;
 use ephervex_core::ManagedMutationReport;
 use ephervex_core::live_diagnostics::TailedLine;
 use ephervex_core::{
@@ -193,9 +194,20 @@ pub enum Command {
     LaunchAndConnect {
         client: InstanceId,
         server: ServerId,
+        operation: u64,
     },
     OpenClientFolder(InstanceId),
     OpenServerFolder(ServerId),
+    OpenServerLocation {
+        server: ServerId,
+        folder: ServerFolder,
+    },
+    OpenServerCapture(ServerId),
+    ExplainServerFailure {
+        server: ServerId,
+        failure: String,
+        revision: u64,
+    },
     /// Find out whether duplicating this instance has a question to ask first.
     PlanDuplicate(InstanceId),
     /// A modpack address a link carried. Asks before it downloads, unless the
@@ -1397,8 +1409,29 @@ pub struct JavaData {
     pub compatible: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsoleOutcome {
+    Delivered,
+    Rejected,
+    Unavailable,
+}
+
+#[derive(Debug, Clone)]
+pub enum ServerToolEvent {
+    Started,
+    Finished { failure: Option<String> },
+    RestartFailed { failure: String },
+    StartAbandoned,
+    StopFinished { succeeded: bool },
+    ConsoleFinished { outcome: ConsoleOutcome },
+}
+
 #[derive(Debug, Clone)]
 pub enum Event {
+    ServerTool {
+        server: ServerId,
+        event: ServerToolEvent,
+    },
     Snapshot(Box<Snapshot>),
     InstanceRuntime(InstanceRuntimeData),
     /// How a creation shown as a pending card is getting on.
@@ -1518,6 +1551,8 @@ pub enum Event {
     /// refused or canceled.
     PairStartSettled {
         operation: u64,
+        // The server worker owns final completion once it takes the request.
+        server_completion_owned: bool,
     },
     /// Where one host's restart is. `None` once it has ended, whichever way.
     /// A `request` of 0 is a stage the server reported on its own, which
@@ -1569,6 +1604,8 @@ pub enum Event {
         host: InstalledHost,
         failure: String,
         view: Option<Box<DiagnosisView>>,
+        // A new server run invalidates a quick diagnosis still in flight.
+        server_revision: Option<u64>,
     },
     /// One measurement of Ephervex's storage.
     DiskUsage {
@@ -2362,9 +2399,10 @@ fn run_worker(
                 initiator,
                 operation,
             } => {
-                let settled = PairStartSettled {
+                let mut settled = PairStartSettled {
                     events: events.clone(),
                     operation,
+                    server_completion_owned: false,
                 };
                 match app.plan_linked_start(initiator) {
                     Ok(LinkedStart::Connect { client, server }) => {
@@ -2416,13 +2454,23 @@ fn run_worker(
                             },
                         ),
                         InstalledHost::Server(server) => {
+                            settled.server_completion_owned = true;
                             start_server(&app, &events, &changing, server);
                         }
                     },
                     Err(error) => send_error(&events, &error),
                 }
             }
-            Command::LaunchAndConnect { client, server } => {
+            Command::LaunchAndConnect {
+                client,
+                server,
+                operation,
+            } => {
+                let settled = PairStartSettled {
+                    events: events.clone(),
+                    operation,
+                    server_completion_owned: false,
+                };
                 if refuse_while_changing(&changing, InstalledHost::Instance(client), &events)
                     || refuse_while_changing(&changing, InstalledHost::Server(server), &events)
                 {
@@ -2432,6 +2480,9 @@ fn run_worker(
                 let entity = app
                     .client(client)
                     .map_or_else(|_| format!("{client} -> {server}"), |record| record.name);
+                let server_name = app
+                    .server(server)
+                    .map_or_else(|_| server.to_string(), |record| record.name);
                 spawn_connect(
                     paths,
                     &events,
@@ -2443,7 +2494,7 @@ fn run_worker(
                         client,
                         server,
                         entity,
-                        pair: None,
+                        pair: Some((settled, server_name)),
                     },
                 );
             }
@@ -2464,7 +2515,7 @@ fn run_worker(
             Command::OpenServerFolder(server) => {
                 report_sync(
                     &events,
-                    app.open_server_folder(server, ServerFolder::Root)
+                    app.open_server_folder(server, ServerFolder::Server)
                         .map(|path| {
                             path.map_or_else(
                                 || lookup("gui-folder-unavailable"),
@@ -2473,6 +2524,31 @@ fn run_worker(
                                 },
                             )
                         }),
+                );
+            }
+            Command::OpenServerLocation { server, folder } => {
+                report_server_folder(&events, app.open_server_folder(server, folder));
+            }
+            Command::OpenServerCapture(server) => {
+                report_server_folder(&events, app.open_server_capture_folder(server));
+            }
+            Command::ExplainServerFailure {
+                server,
+                failure,
+                revision,
+            } => {
+                spawn_detached(
+                    app.paths().clone(),
+                    events.clone(),
+                    move |app, events, runtime| {
+                        runtime.block_on(explain_failed_run(
+                            &app,
+                            &events,
+                            InstalledHost::Server(server),
+                            Some(failure),
+                            Some(revision),
+                        ));
+                    },
                 );
             }
             Command::PlanDuplicate(instance) => {
@@ -3639,13 +3715,7 @@ fn run_worker(
             }
             Command::StartServer(server) => start_server(&app, &events, &changing, server),
             Command::StopServer(server) => {
-                report_async_control(
-                    &runtime,
-                    &events,
-                    app.stop_server(server),
-                    "gui-stop-requested",
-                );
-                send_snapshot(&app, &events);
+                spawn_server_control(app.paths().clone(), &events, server, ServerControl::Stop);
             }
             Command::RestartHost { host, request } => {
                 let refused = |message: &str| {
@@ -3725,22 +3795,24 @@ fn run_worker(
                 }
             }
             Command::KillServer(server) => {
-                report_async_control(
-                    &runtime,
-                    &events,
-                    app.kill_server(server),
-                    "gui-force-kill-requested",
-                );
-                send_snapshot(&app, &events);
+                spawn_server_control(app.paths().clone(), &events, server, ServerControl::Kill);
             }
             Command::SendConsole { server, command } => {
-                report_async_control(
-                    &runtime,
+                if refuse_while_changing(&changing, InstalledHost::Server(server), &events) {
+                    let _ = events.send(Event::ServerTool {
+                        server,
+                        event: ServerToolEvent::ConsoleFinished {
+                            outcome: ConsoleOutcome::Rejected,
+                        },
+                    });
+                    continue;
+                }
+                spawn_server_control(
+                    app.paths().clone(),
                     &events,
-                    app.send_server_console(server, command),
-                    "gui-command-sent",
+                    server,
+                    ServerControl::Console(command),
                 );
-                send_server_workspace(&app, server, &events);
             }
             Command::LoadServerWorkspace(server) => {
                 // The crash notice comes with the workspace rather than with
@@ -4787,6 +4859,7 @@ async fn explain_failed_run(
     events: &Sender<Event>,
     host: InstalledHost,
     failure: Option<String>,
+    server_revision: Option<u64>,
 ) {
     let Some(failure) = failure else {
         return;
@@ -4805,15 +4878,14 @@ async fn explain_failed_run(
         host,
         failure,
         view,
+        server_revision,
     });
 }
 
 /// What went wrong with a server run that is worth explaining.
 fn server_failure(result: &CoreResult<ephervex_core::ServerExit>) -> Option<String> {
     match result {
-        Ok(exit) if exit.code.is_some_and(|code| code != 0) => {
-            Some(lookup("gui-run-server-exited-with-error"))
-        }
+        Ok(exit) if exit.code != Some(0) => Some(lookup("gui-run-server-exited-with-error")),
         Err(error) if !error.is_cancellation() => Some(localized_error(error)),
         _ => None,
     }
@@ -5827,6 +5899,10 @@ fn launch_client(
 /// Starts a server on its own, as its Start button does.
 fn start_server(app: &App, events: &Sender<Event>, changing: &ChangingHosts, server: ServerId) {
     if refuse_while_changing(changing, InstalledHost::Server(server), events) {
+        let _ = events.send(Event::ServerTool {
+            server,
+            event: ServerToolEvent::StartAbandoned,
+        });
         return;
     }
     let entity = app
@@ -5840,12 +5916,14 @@ fn start_server(app: &App, events: &Sender<Event>, changing: &ChangingHosts, ser
 struct PairStartSettled {
     events: Sender<Event>,
     operation: u64,
+    server_completion_owned: bool,
 }
 
 impl Drop for PairStartSettled {
     fn drop(&mut self) {
         let _ = self.events.send(Event::PairStartSettled {
             operation: self.operation,
+            server_completion_owned: self.server_completion_owned,
         });
     }
 }
@@ -5994,7 +6072,14 @@ fn spawn_launch(
                     send_snapshot(&app, &events);
                 }
                 let failure = launch_failure(&result, cancel.is_cancelled());
-                explain_failed_run(&app, &events, InstalledHost::Instance(instance), failure).await;
+                explain_failed_run(
+                    &app,
+                    &events,
+                    InstalledHost::Instance(instance),
+                    failure,
+                    None,
+                )
+                .await;
             });
         },
     );
@@ -6339,14 +6424,29 @@ fn spawn_server_restart(
     request: u64,
     in_flight: HostChangeInFlight,
 ) {
-    spawn_detached(
+    spawn_detached_with_setup_failure(
         paths.clone(),
         events.clone(),
+        move |events| {
+            let _ = events.send(Event::HostRestart {
+                host: InstalledHost::Server(server),
+                request,
+                stage: None,
+            });
+        },
         move |app, events, runtime| {
             let _in_flight = in_flight;
             let host = InstalledHost::Server(server);
             restart_stage_reporter(&events, host, request, &entity)(RestartStage::Stopping);
             let outcome = server_restart_outcome(runtime.block_on(app.restart_server(server)));
+            if matches!(outcome, RestartOutcome::StartFailed(_)) {
+                let _ = events.send(Event::ServerTool {
+                    server,
+                    event: ServerToolEvent::RestartFailed {
+                        failure: lookup("gui-server-failed-detail"),
+                    },
+                });
+            }
             report_restart_outcome(&events, host, request, &entity, &outcome);
             refresh_snapshot(&paths, &events);
             if let Ok(app) = App::open_at(paths) {
@@ -6429,11 +6529,18 @@ fn forward_launch_event(
     }
 }
 
-#[allow(clippy::too_many_lines)]
 fn spawn_server(paths: Paths, events: &Sender<Event>, server: ServerId, entity: String) {
-    spawn_detached(
+    spawn_detached_with_setup_failure(
         paths.clone(),
         events.clone(),
+        move |events| {
+            let _ = events.send(Event::ServerTool {
+                server,
+                event: ServerToolEvent::Finished {
+                    failure: Some(lookup("gui-server-failed-detail")),
+                },
+            });
+        },
         move |app, events, runtime| {
             let (observer, mut receiver) = ServerObserver::channel();
             let event_sender = events.clone();
@@ -6484,54 +6591,59 @@ fn spawn_server(paths: Paths, events: &Sender<Event>, server: ServerId, entity: 
                 let result = app.start_server(server, None, &observer).await;
                 drop(observer);
                 let _ = forward.await;
-                match &result {
-                    Ok(exit) => {
-                        let failed = exit.code != Some(0);
-                        let id = observed_operation
-                            .lock()
-                            .ok()
-                            .and_then(|observed| observed.clone())
-                            .unwrap_or_else(|| server.to_string());
-                        send_activity_state(
-                            &events,
-                            id,
-                            &lookup("gui-activity-server-run"),
-                            &entity,
-                            &lookup("gui-activity-server-exited"),
-                            if failed { "failed" } else { "completed" },
-                            false,
-                            failed,
-                            false,
-                        );
-                    }
-                    Err(error) => {
-                        let id = observed_operation
-                            .lock()
-                            .ok()
-                            .and_then(|observed| observed.clone())
-                            .unwrap_or_else(|| server.to_string());
-                        send_activity_state(
-                            &events,
-                            id,
-                            &lookup("gui-activity-starting-server"),
-                            &entity,
-                            &localized_error(error),
-                            "failed",
-                            false,
-                            true,
-                            false,
-                        );
-                        send_error(&events, error);
-                    }
-                }
+                report_server_run(&events, server, &entity, &observed_operation, &result);
                 if let Ok(app) = App::open_at(paths) {
                     send_snapshot(&app, &events);
                     send_server_workspace(&app, server, &events);
                 }
-                let failure = server_failure(&result);
-                explain_failed_run(&app, &events, InstalledHost::Server(server), failure).await;
+                let _ = events.send(Event::ServerTool {
+                    server,
+                    event: ServerToolEvent::Finished {
+                        failure: server_failure(&result),
+                    },
+                });
             });
         },
+    );
+}
+
+fn report_server_run(
+    events: &Sender<Event>,
+    server: ServerId,
+    entity: &str,
+    observed_operation: &Mutex<Option<String>>,
+    result: &CoreResult<ephervex_core::ServerExit>,
+) {
+    let id = observed_operation
+        .lock()
+        .ok()
+        .and_then(|observed| observed.clone())
+        .unwrap_or_else(|| server.to_string());
+    let (title, detail, failed) = match result {
+        Ok(exit) => (
+            lookup("gui-activity-server-run"),
+            lookup("gui-activity-server-exited"),
+            exit.code != Some(0),
+        ),
+        Err(error) => {
+            send_error(events, error);
+            (
+                lookup("gui-activity-starting-server"),
+                localized_error(error),
+                true,
+            )
+        }
+    };
+    send_activity_state(
+        events,
+        id,
+        &title,
+        entity,
+        &detail,
+        if failed { "failed" } else { "completed" },
+        false,
+        failed,
+        false,
     );
 }
 
@@ -6567,6 +6679,10 @@ fn forward_server_event(
                 error: false,
             });
             refresh_snapshot(paths, events);
+            let _ = events.send(Event::ServerTool {
+                server,
+                event: ServerToolEvent::Started,
+            });
         }
         ServerEvent::CapturePruned(_) | ServerEvent::CaptureUnavailable { .. } => {
             let _ = events.send(Event::LiveLog(LiveLogUpdate {
@@ -6596,6 +6712,30 @@ fn forward_server_event(
     }
 }
 
+/// Linked runs finish through their observer, independently of the client.
+fn forward_connect_server_event(
+    events: &Sender<Event>,
+    entity: &str,
+    paths: &Paths,
+    observed_operation: &Mutex<Option<String>>,
+    server: ServerId,
+    event: ServerEvent,
+) {
+    if let ServerEvent::Finished { exit } = event {
+        refresh_snapshot(paths, events);
+        let failure = match exit {
+            Some(exit) if exit.code == Some(0) => None,
+            _ => Some(lookup("gui-run-server-exited-with-error")),
+        };
+        let _ = events.send(Event::ServerTool {
+            server,
+            event: ServerToolEvent::Finished { failure },
+        });
+    } else {
+        forward_server_event(events, entity, paths, observed_operation, server, event);
+    }
+}
+
 /// One Launch & Connect run.
 struct ConnectRun {
     client: InstanceId,
@@ -6621,14 +6761,23 @@ fn spawn_connect(paths: Paths, events: &Sender<Event>, tracking: LaunchTracking,
         entity,
         pair,
     } = run;
-    let (settled, server_name) =
-        pair.map_or((None, None), |(settled, name)| (Some(settled), Some(name)));
+    let (settled, server_name) = pair.map_or((None, None), |(mut settled, name)| {
+        settled.server_completion_owned = true;
+        (Some(settled), Some(name))
+    });
     // Taken once the client is running, or when the run ends first.
     let settled = Arc::new(Mutex::new(settled));
     let server_ready = Arc::new(AtomicBool::new(false));
-    spawn_detached(
+    let server_preparation_reported = Arc::new(AtomicBool::new(false));
+    spawn_detached_with_setup_failure(
         paths.clone(),
         events.clone(),
+        move |events| {
+            let _ = events.send(Event::ServerTool {
+                server,
+                event: ServerToolEvent::StartAbandoned,
+            });
+        },
         move |mut app, events, runtime| {
             runtime.block_on(async move {
                 let (connect_observer, mut connect_events) = LaunchAndConnectObserver::channel();
@@ -6642,6 +6791,7 @@ fn spawn_connect(paths: Paths, events: &Sender<Event>, tracking: LaunchTracking,
                 let refresh_paths = paths.clone();
                 let refresh_events = events.clone();
                 let ready = Arc::clone(&server_ready);
+                let preparation_reported = Arc::clone(&server_preparation_reported);
                 // The client is registered once the server is ready, with the
                 // target it joins, so a restart joins it again the same way.
                 let registered = Arc::new(Mutex::new(None));
@@ -6649,6 +6799,10 @@ fn spawn_connect(paths: Paths, events: &Sender<Event>, tracking: LaunchTracking,
                 let registry = Arc::clone(&launches);
                 let connect_forward = tokio::spawn(async move {
                     while let Some(event) = connect_events.recv().await {
+                        let reused = matches!(event, LaunchAndConnectEvent::ReusingServer { .. });
+                        if reused || matches!(event, LaunchAndConnectEvent::StartingServer { .. }) {
+                            preparation_reported.store(true, Ordering::SeqCst);
+                        }
                         if let LaunchAndConnectEvent::ServerReady { target } = event {
                             ready.store(true, Ordering::SeqCst);
                             let entry = register_launch(
@@ -6663,6 +6817,12 @@ fn spawn_connect(paths: Paths, events: &Sender<Event>, tracking: LaunchTracking,
                             }
                         }
                         refresh_snapshot(&refresh_paths, &refresh_events);
+                        if reused {
+                            let _ = refresh_events.send(Event::ServerTool {
+                                server,
+                                event: ServerToolEvent::StartAbandoned,
+                            });
+                        }
                     }
                 });
                 let server_paths = paths.clone();
@@ -6679,7 +6839,7 @@ fn spawn_connect(paths: Paths, events: &Sender<Event>, tracking: LaunchTracking,
                                     Ok(ServerEvent::Output(line)) => {
                                         lines.push(LiveLogLine::Server(line));
                                     }
-                                    Ok(other) => forward_server_event(
+                                    Ok(other) => forward_connect_server_event(
                                         &server_event_sender,
                                         &server_entity,
                                         &server_paths,
@@ -6698,7 +6858,7 @@ fn spawn_connect(paths: Paths, events: &Sender<Event>, tracking: LaunchTracking,
                                 lines,
                             }));
                         } else {
-                            forward_server_event(
+                            forward_connect_server_event(
                                 &server_event_sender,
                                 &server_entity,
                                 &server_paths,
@@ -6752,6 +6912,12 @@ fn spawn_connect(paths: Paths, events: &Sender<Event>, tracking: LaunchTracking,
                 // Drained rather than aborted, so a readiness already reported
                 // is known before a failure is attributed to one side.
                 let _ = connect_forward.await;
+                if !server_preparation_reported.load(Ordering::SeqCst) {
+                    let _ = events.send(Event::ServerTool {
+                        server,
+                        event: ServerToolEvent::StartAbandoned,
+                    });
+                }
                 let _ = launch_forward.await;
                 match result {
                     Ok(outcome) => send_activity_state(
@@ -7798,15 +7964,110 @@ fn send_activity_state(
     }));
 }
 
-fn report_async_control<T>(
-    runtime: &tokio::runtime::Runtime,
-    events: &Sender<Event>,
-    future: impl std::future::Future<Output = Result<T, CoreError>>,
-    success_message_id: &str,
-) {
+fn report_server_folder(events: &Sender<Event>, result: Result<Option<PathBuf>, CoreError>) {
     report_sync(
         events,
-        runtime.block_on(future).map(|_| lookup(success_message_id)),
+        result.map(|path| {
+            path.map_or_else(
+                || lookup("gui-folder-unavailable"),
+                |path| localized_value("gui-opened-path", &path.display().to_string()),
+            )
+        }),
+    );
+}
+
+#[derive(Debug)]
+enum ServerControl {
+    Stop,
+    Kill,
+    Console(String),
+}
+
+impl ServerControl {
+    const fn completion(&self) -> ServerToolEvent {
+        match self {
+            Self::Console(_) => ServerToolEvent::ConsoleFinished {
+                outcome: ConsoleOutcome::Rejected,
+            },
+            Self::Stop | Self::Kill => ServerToolEvent::StopFinished { succeeded: false },
+        }
+    }
+
+    fn message(&self, response: ControlResponse) -> Result<String, String> {
+        match (self, response) {
+            (Self::Console(_), ControlResponse::Accepted) => Ok(lookup("gui-command-sent")),
+            (Self::Stop, ControlResponse::Exited(_)) => Ok(lookup("gui-stop-requested")),
+            (Self::Kill, ControlResponse::Exited(_)) => Ok(lookup("gui-force-kill-requested")),
+            (_, ControlResponse::Refused(reason) | ControlResponse::StartFailed(reason)) => {
+                Err(localized_value("gui-server-control-refused", &reason))
+            }
+            _ => Err(lookup("gui-server-control-unconfirmed")),
+        }
+    }
+}
+
+fn spawn_server_control(
+    paths: Paths,
+    events: &Sender<Event>,
+    server: ServerId,
+    control: ServerControl,
+) {
+    let completion = control.completion();
+    spawn_detached_with_setup_failure(
+        paths,
+        events.clone(),
+        move |events| {
+            let _ = events.send(Event::ServerTool {
+                server,
+                event: completion,
+            });
+        },
+        move |app, events, runtime| {
+            let result = runtime.block_on(async {
+                match &control {
+                    ServerControl::Stop => app.stop_server(server).await,
+                    ServerControl::Kill => app.kill_server(server).await,
+                    ServerControl::Console(command) => {
+                        app.send_server_console(server, command.clone()).await
+                    }
+                }
+            });
+            let completion = if matches!(&control, ServerControl::Console(_)) {
+                ServerToolEvent::ConsoleFinished {
+                    outcome: match &result {
+                        Ok(ControlResponse::Accepted) => ConsoleOutcome::Delivered,
+                        Err(error) if error.message_id() == "error-server-console-invalid" => {
+                            ConsoleOutcome::Rejected
+                        }
+                        _ => ConsoleOutcome::Unavailable,
+                    },
+                }
+            } else {
+                ServerToolEvent::StopFinished {
+                    succeeded: matches!(&result, Ok(ControlResponse::Exited(_))),
+                }
+            };
+            let message = result
+                .map_err(|error| localized_error(&error))
+                .and_then(|response| control.message(response));
+            let error = message.is_err();
+            let message = message.unwrap_or_else(|message| message);
+            let name = app
+                .server(server)
+                .map_or_else(|_| server.to_string(), |record| record.name);
+            let _ = events.send(Event::Toast {
+                message: lookup_args(
+                    "gui-server-control-result",
+                    [("first", Arg::from(name)), ("second", Arg::from(message))],
+                ),
+                error,
+            });
+            send_snapshot(&app, &events);
+            let _ = events.send(Event::ServerTool {
+                server,
+                event: completion,
+            });
+        },
     );
 }
 
@@ -9240,7 +9501,7 @@ mod tests {
         received
             .try_iter()
             .filter_map(|event| match event {
-                Event::PairStartSettled { operation } => Some(operation),
+                Event::PairStartSettled { operation, .. } => Some(operation),
                 _ => None,
             })
             .collect()
@@ -9253,10 +9514,12 @@ mod tests {
         drop(PairStartSettled {
             events: events.clone(),
             operation: 7,
+            server_completion_owned: false,
         });
         let held = Arc::new(Mutex::new(Some(PairStartSettled {
             events: events.clone(),
             operation: 8,
+            server_completion_owned: false,
         })));
         let running = Arc::clone(&held);
         if let Ok(mut settled) = running.lock() {
@@ -9269,6 +9532,7 @@ mod tests {
             let _settled = PairStartSettled {
                 events,
                 operation: 9,
+                server_completion_owned: false,
             };
             std::panic::resume_unwind(Box::new("the start failed"));
         });
@@ -9770,5 +10034,138 @@ mod tests {
         drop(in_flight);
         assert!(!refuse_while_changing(&hosts, host, &events));
         assert!(received.try_recv().is_err());
+    }
+    #[test]
+    fn linked_server_completion_targets_the_server_without_waiting_for_the_client() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = Paths::rooted_at(root.path());
+        let (events, received) = std::sync::mpsc::channel();
+        let server = ServerId::new();
+        forward_connect_server_event(
+            &events,
+            "server",
+            &paths,
+            &Mutex::new(None),
+            server,
+            ServerEvent::Finished {
+                exit: Some(ephervex_core::ServerExit {
+                    code: Some(9),
+                    signal: None,
+                }),
+            },
+        );
+        let completions: Vec<_> = received
+            .try_iter()
+            .filter_map(|event| match event {
+                Event::ServerTool {
+                    server,
+                    event: ServerToolEvent::Finished { failure },
+                } => Some((server, failure)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            completions,
+            [(server, Some(lookup("gui-run-server-exited-with-error")))]
+        );
+    }
+
+    #[test]
+    fn unexpected_server_exits_include_nonzero_codes_and_signals() {
+        assert!(
+            server_failure(&Ok(ephervex_core::ServerExit {
+                code: Some(0),
+                signal: None
+            }))
+            .is_none()
+        );
+        for exit in [
+            ephervex_core::ServerExit {
+                code: Some(1),
+                signal: None,
+            },
+            ephervex_core::ServerExit {
+                code: None,
+                signal: Some(9),
+            },
+        ] {
+            assert!(server_failure(&Ok(exit)).is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn classified_server_failures_use_the_existing_quick_diagnosis_path() {
+        let root = tempfile::tempdir().expect("root");
+        let app = App::open_at(Paths::rooted_at(root.path())).expect("app");
+        let (events, received) = std::sync::mpsc::channel();
+        let host = InstalledHost::Server(ServerId::new());
+        explain_failed_run(&app, &events, host, None, None).await;
+        assert!(received.try_recv().is_err());
+        explain_failed_run(
+            &app,
+            &events,
+            host,
+            Some("unexpected exit".to_owned()),
+            Some(1),
+        )
+        .await;
+        assert!(
+            matches!(received.try_recv().expect("failure"), Event::RunFailed { host: target, failure, .. }
+            if target == host && failure == "unexpected exit")
+        );
+        assert!(received.try_recv().is_err());
+    }
+
+    #[test]
+    fn console_feedback_requires_positive_delivery_confirmation() {
+        let command = ServerControl::Console("list".to_owned());
+        assert!(command.message(ControlResponse::Accepted).is_ok());
+        for response in [
+            ControlResponse::Running,
+            ControlResponse::Refused("input unavailable".to_owned()),
+            ControlResponse::StartFailed("start failed".to_owned()),
+            ControlResponse::Exited(ephervex_core::ServerExit {
+                code: Some(0),
+                signal: None,
+            }),
+        ] {
+            assert!(command.message(response).is_err());
+        }
+    }
+    #[test]
+    fn server_control_setup_failure_always_settles_the_pending_request() {
+        let temp = tempfile::tempdir().expect("temp");
+        let invalid = temp.path().join("not-a-directory");
+        std::fs::write(&invalid, b"file").expect("file");
+        let (events, received) = std::sync::mpsc::channel();
+        let server = ServerId::new();
+        spawn_server_control(
+            Paths::rooted_at(&invalid),
+            &events,
+            server,
+            ServerControl::Console("list".to_owned()),
+        );
+        loop {
+            let event = received
+                .recv_timeout(Duration::from_secs(5))
+                .expect("completion");
+            if let Event::ServerTool {
+                server: target,
+                event: ServerToolEvent::ConsoleFinished { outcome },
+            } = event
+            {
+                assert_eq!(target, server);
+                assert_eq!(
+                    outcome,
+                    ConsoleOutcome::Rejected,
+                    "setup failure does not establish a broken input pipe"
+                );
+                break;
+            }
+            assert!(
+                matches!(event, Event::Toast { error: true, .. }),
+                "unexpected event: {event:?}"
+            );
+        }
     }
 }

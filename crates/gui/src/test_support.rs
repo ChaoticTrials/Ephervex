@@ -82,6 +82,10 @@ pub(crate) const UI_SOURCES: &[(&str, &str)] = &[
         include_str!("../ui/workspace/mods.slint"),
     ),
     (
+        "workspace/server-tools.slint",
+        include_str!("../ui/workspace/server-tools.slint"),
+    ),
+    (
         "workspace/snapshots.slint",
         include_str!("../ui/workspace/snapshots.slint"),
     ),
