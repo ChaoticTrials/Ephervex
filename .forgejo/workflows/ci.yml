@@ -76,7 +76,4 @@ jobs:
       - name: Tests
         # Offline by contract: fixtures and loopback servers only, no Mojang,
         # Microsoft, Modrinth, CurseForge, Forge, or NeoForge service.
-        # Few jobs: the GUI unit tests alone take about 8 GB to compile.
-        env:
-          CARGO_BUILD_JOBS: 2
         run: cargo test --workspace
