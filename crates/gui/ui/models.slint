@@ -174,15 +174,40 @@ export struct IsolationCandidateRow {
     selected: bool,
 }
 
-// One recorded file a verification found something to say about.
-export struct IntegrityFindingRow {
-    path: string,
-    // The core answer: "absent", "corrupt", "unreadable", or "unverifiable".
-    integrity: string,
+// One finding of a diagnosis, as its card shows it.
+export struct DiagnosticFindingRow {
+    // The handle a fix or route action passes back.
+    key: string,
+    problem: bool,
+    title: string,
+    detail: string,
+    // Why a dependency is needed, outermost first, ending in the dependency.
+    chain: [string],
+    files: [string],
+    // How many files were left out of `files`, as text, or empty.
+    more-files: string,
+    // Empty when no safe fix can be determined.
+    fix-label: string,
+    // "mods", "settings", "java-settings", "log", "crash-report", or empty.
+    route: string,
+    route-label: string,
+}
+
+// One line of what a diagnosis checked.
+export struct DiagnosticCheckRow {
     label: string,
-    // "repair" when a repair replaces it, "manual" when it is wrong and
-    // nothing can fetch it again, "info" when nothing proves it either way.
-    handling: string,
+    value: string,
+    // "ok", "problem", "customized", or "skipped".
+    state: string,
+    // The state in words, so it never depends on color alone.
+    state-label: string,
+}
+
+// One change a fix preview proposes.
+export struct FixChangeRow {
+    action: string,
+    name: string,
+    detail: string,
 }
 
 // One thing a diagnostic bundle could carry, as the core planner offers it.
@@ -626,24 +651,39 @@ export struct HostView {
     workflow-surface: string,
     workflow-pane: int,
     // What the Diagnostics surface shows for the host: "unchecked",
-    // "verifying", "checked", or "stale". Empty is "unchecked".
-    integrity-state: string,
-    integrity-progress: string,
-    integrity-summary: string,
-    integrity-healthy: bool,
-    integrity-counts: string,
-    integrity-checked-at: string,
-    integrity-findings: [IntegrityFindingRow],
-    integrity-finding-total: int,
-    integrity-query: string,
-    integrity-repair-targets: [string],
-    integrity-unrepairable: [string],
-    integrity-shared-summary: string,
-    integrity-shared-faults: [IntegrityFindingRow],
-    integrity-shared-notes: [string],
-    integrity-repair-result: string,
-    integrity-repair-failed: bool,
-    integrity-recovery: [string],
+    // "working", "result", "failed", or "canceled". Empty is "unchecked".
+    diagnosis-state: string,
+    diagnosis-progress: string,
+    // The failed run a result was made for, or empty for one the user asked for.
+    diagnosis-failure: string,
+    diagnosis-healthy: bool,
+    diagnosis-summary: string,
+    diagnosis-detail: string,
+    // Why the newest diagnosis ended without a result.
+    diagnosis-error: string,
+    // The host changed after the result on screen, which is being checked again.
+    diagnosis-stale: bool,
+    diagnosis-problems: [DiagnosticFindingRow],
+    diagnosis-customized: [DiagnosticFindingRow],
+    diagnosis-checks: [DiagnosticCheckRow],
+    diagnosis-crash-report: string,
+    // The fix under review: "", "loading", "ready", "failed", or "applying".
+    fix-state: string,
+    fix-finding: string,
+    fix-title: string,
+    fix-changes: [FixChangeRow],
+    fix-notes: [string],
+    fix-blocked: string,
+    fix-error: string,
+    // What the newest applied fix did.
+    fix-result: string,
+    fix-result-failed: bool,
+    fix-result-lines: [string],
+    // A run that just failed, and what a quick diagnosis made of it.
+    run-failure: string,
+    run-failure-title: string,
+    run-likely-cause: string,
+    run-crash-report: string,
     // The diagnostic bundle being chosen for the host.
     bundle-parts: [BundlePartRow],
     bundle-selection: string,

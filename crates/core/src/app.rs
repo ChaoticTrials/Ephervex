@@ -986,7 +986,7 @@ impl App {
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn plan_java_for_selection(
+    pub(crate) async fn plan_java_for_selection(
         &self,
         minecraft_version: &str,
         required: RequiredJava,
@@ -1184,7 +1184,7 @@ impl App {
     /// that is genuinely not a supported release does not,
     /// because answering "Java 8" for a version that does not exist would be a
     /// plan for nothing.
-    async fn required_java(&self, minecraft_version: &str) -> CoreResult<RequiredJava> {
+    pub(crate) async fn required_java(&self, minecraft_version: &str) -> CoreResult<RequiredJava> {
         match self.minecraft_version(minecraft_version).await {
             Ok(metadata) => Ok(RequiredJava::resolve(&metadata)),
             Err(crate::CoreError::Minecraft(error)) if is_offline_failure(&error) => {

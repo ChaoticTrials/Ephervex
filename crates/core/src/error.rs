@@ -353,6 +353,10 @@ pub enum CoreError {
     #[error("this host cannot be repaired while {reason}")]
     RepairRefused { reason: RepairRefusal },
 
+    /// A diagnostic fix that would change a host something else holds.
+    #[error("this host cannot be changed while {reason}")]
+    ChangeRefused { reason: RepairRefusal },
+
     /// Working out which dependencies are still needed requires every root's
     /// project, and one of them has none.
     ///
@@ -482,6 +486,10 @@ impl CoreError {
             Self::ModFileNotAdded { .. } => "error-mod-file-not-added",
             Self::EntityNameInvalid { reason } => reason.message_id(),
             Self::RepairRefused { reason } => reason.message_id(),
+            Self::ChangeRefused { reason } => match reason {
+                RepairRefusal::HostRunning => "error-change-host-running",
+                RepairRefusal::IsolationActive => "error-change-isolation-active",
+            },
         }
     }
 
@@ -691,6 +699,7 @@ impl CoreError {
             | Self::LoaderChangeBlockedByMods { .. }
             | Self::ModCatalogPreferenceUnrecognized { .. }
             | Self::RepairRefused { .. }
+            | Self::ChangeRefused { .. }
             | Self::ArtworkUnusable { .. } => None,
         }
     }
@@ -760,6 +769,7 @@ impl CoreError {
             | Self::SingleInstanceUnavailable { .. }
             | Self::EntityNameInvalid { .. }
             | Self::RepairRefused { .. }
+            | Self::ChangeRefused { .. }
             | Self::ArtworkUnusable { .. } => None,
         }
     }

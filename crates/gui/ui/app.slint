@@ -69,7 +69,7 @@ import {
 import { DiskUsagePanel, OverrideCard } from "settings/application.slint";
 import { MinecraftPreferenceRowCard } from "settings/minecraft-defaults.slint";
 import { Theme } from "theme.slint";
-import { DiagnosticsSurface } from "workspace/diagnostics.slint";
+import { DiagnosticsSurface, RunFailureNotice } from "workspace/diagnostics.slint";
 import { ClientRuntimeForm, ServerPropertiesForm } from "workspace/host-settings.slint";
 import { HostPickerCard, HostWorkspace, WorkspaceTab } from "workspace/host-workspace.slint";
 import { IsolationSurface } from "workspace/isolation.slint";
@@ -729,11 +729,14 @@ export component AppWindow inherits Window {
     callback cancel-isolation(string, string);
     callback discard-isolation-setup(string, string);
     callback retry-isolation-recovery(string, string);
-    callback verify-host(string, string);
-    callback repair-host(string, string);
-    callback stop-integrity-work();
-    // (kind, id, query)
-    callback filter-integrity-findings(string, string, string);
+    callback diagnose-host(string, string);
+    callback stop-diagnosis();
+    // (kind, id, finding)
+    callback review-fix(string, string, string);
+    callback cancel-fix(string, string);
+    callback apply-fix(string, string);
+    callback copy-diagnosis-report(string, string);
+    callback dismiss-run-failure(string, string);
     // (kind, id, part, chosen)
     callback toggle-bundle-part(string, string, string, bool);
     // (kind, id, chosen)
@@ -1115,6 +1118,13 @@ export component AppWindow inherits Window {
                                         property <bool> narrow: self.width < 620px;
                                         Heading { text: GuiI18n.text("gui-reproduction-environment"); overflow: elide; }
                                         BodyText { text: GuiI18n.text("gui-reproduction-environment-detail"); wrap: word-wrap; }
+                                        if host.run-failure-title != "" : RunFailureNotice {
+                                            host: host;
+                                            open-diagnostics => { root.show-pane-surface(pane.id, "Diagnostics"); }
+                                            open-crash-report => { root.show-pane-surface(pane.id, "Logs"); root.log-show(pane.id, "crashes"); root.log-open-file(pane.id, host.run-crash-report); }
+                                            open-log => { root.show-pane-surface(pane.id, "Logs"); root.log-show(pane.id, "live"); }
+                                            dismiss => { root.dismiss-run-failure(host.kind, host.id); }
+                                        }
                                         Rectangle { border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface;
                                             HorizontalLayout { padding: 18px; spacing: 18px; LoaderGlyph { kind: host.client.loader-kind; } VerticalLayout { horizontal-stretch: 1; Heading { text: host.client.name; overflow: elide; } BodyText { text: GuiI18n.values("gui-target-summary", host.client.minecraft, host.client.loader); overflow: elide; } BodyText { text: host.client.storage + " | " + host.client.source; overflow: elide; } BodyText { text: host.client.path; color: Theme.text-muted; overflow: elide; } if host.client.paired-server-id != "" : BodyText { text: GuiI18n.value("gui-paired-with-host", host.client.paired-server-name); color: Theme.accent; overflow: elide; } } if host.client.paired-server-id != "" && !host.pair-shown : VerticalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-pair-show-beside"); enabled: host.pair-room; hint: host.pair-room ? "" : GuiI18n.text("gui-pair-no-room"); clicked => { root.show-linked-pair(pane.id, "server", host.client.paired-server-id); } } } }
                                         }
@@ -1230,24 +1240,22 @@ export component AppWindow inherits Window {
                                     delete(id, label) => { root.snapshot-host-kind = host.kind; root.snapshot-host-id = host.id; root.snapshot-action-id = id; root.snapshot-action-label = label; root.modal-error = ""; root.modal = "snapshot-delete"; }
                                 }
                                 if host.available && pane.surface == "Diagnostics" : DiagnosticsSurface {
-                                    // A server has no shared launch files to check.
-                                    shared-supported: is-client;
-                                    host-running: is-client ? host.client.can-kill : host.server.can-stop;
+                                    host: host;
                                     busy: root.host-busy-kind == host.kind && root.host-busy-id == host.id;
-                                    isolation-active: host.isolation-active;
-                                    state: host.integrity-state == "" ? "unchecked" : host.integrity-state;
-                                    progress: host.integrity-progress; summary: host.integrity-summary; healthy: host.integrity-healthy; counts: host.integrity-counts; checked-at: host.integrity-checked-at;
-                                    findings: host.integrity-findings; finding-total: host.integrity-finding-total; query: host.integrity-query;
-                                    repair-targets: host.integrity-repair-targets; unrepairable: host.integrity-unrepairable;
-                                    shared-summary: host.integrity-shared-summary; shared-faults: host.integrity-shared-faults; shared-notes: host.integrity-shared-notes;
-                                    repair-result: host.integrity-repair-result; repair-failed: host.integrity-repair-failed; recovery: host.integrity-recovery;
-                                    verify => { root.verify-host(host.kind, host.id); }
-                                    stop => { root.stop-integrity-work(); }
-                                    repair => { root.repair-host(host.kind, host.id); }
-                                    filter(query) => { root.filter-integrity-findings(host.kind, host.id, query); }
+                                    diagnose => { root.diagnose-host(host.kind, host.id); }
+                                    stop => { root.stop-diagnosis(); }
+                                    review-fix(key) => { root.review-fix(host.kind, host.id, key); }
+                                    cancel-fix => { root.cancel-fix(host.kind, host.id); }
+                                    apply-fix => { root.apply-fix(host.kind, host.id); }
+                                    copy-report => { root.copy-diagnosis-report(host.kind, host.id); }
                                     open-logs => { root.show-pane-surface(pane.id, "Logs"); }
-                                    bundle-parts: host.bundle-parts; bundle-selection: host.bundle-selection; bundle-selected-count: host.bundle-selected-count;
-                                    bundle-exporting: host.bundle-exporting; bundle-result: host.bundle-result; bundle-result-path: host.bundle-result-path; bundle-error: host.bundle-error;
+                                    open-route(route) => {
+                                        if route == "mods" { root.show-pane-surface(pane.id, "Mods"); }
+                                        if route == "settings" { root.show-pane-surface(pane.id, "Settings"); }
+                                        if route == "java-settings" { root.close-workspace(); root.page = 4; root.settings-tab = "Java"; root.load-java-runtimes(); }
+                                        if route == "log" { root.show-pane-surface(pane.id, "Logs"); root.log-show(pane.id, "live"); }
+                                        if route == "crash-report" { root.show-pane-surface(pane.id, "Logs"); root.log-show(pane.id, "crashes"); root.log-open-file(pane.id, host.diagnosis-crash-report); }
+                                    }
                                     toggle-bundle-part(name, value) => { root.toggle-bundle-part(host.kind, host.id, name, value); }
                                     select-all-bundle-parts(value) => { root.select-all-bundle-parts(host.kind, host.id, value); }
                                     export-bundle => { root.export-bundle(host.kind, host.id); }

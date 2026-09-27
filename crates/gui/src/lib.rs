@@ -3,6 +3,7 @@
 pub mod backend;
 pub mod binding_capture;
 pub mod controller;
+pub mod diagnosis_view;
 pub mod file_drop;
 pub mod minecraft_defaults;
 pub mod monospace;

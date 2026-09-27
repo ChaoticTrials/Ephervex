@@ -14,15 +14,16 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use ephervex_download::OperationReporter;
-use ephervex_mod_platform::ModVersionInfo;
-use ephervex_model::{ModOrigin, ModProvider, ModRelationKind};
+use ephervex_download::{CacheLayout, OperationReporter, hash_file};
+use ephervex_mod_platform::{ModVersionInfo, curseforge_fingerprint};
+use ephervex_model::{Hash, HashAlgorithm, ModOrigin, ModProvider, ModRelationKind};
 use ephervex_pack::{ModIdentity, PackRecipe, RecipeRelation, RelationTarget, SourceStore};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument, warn};
 
 use crate::app::App;
 use crate::error::{CoreError, CoreResult};
+use crate::mod_display_cache::{self, RememberedDisplay};
 use crate::mods::{InstalledHost, ModPresence, recipe_relations};
 
 /// What a dependency refresh learned.
@@ -206,6 +207,55 @@ impl ModRelations {
     pub fn is_empty(&self) -> bool {
         self.requires.is_empty() && self.required_by.is_empty()
     }
+}
+
+/// A required mod that a mod which loads does not have.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnmetRequirement {
+    pub dependency: UnmetDependency,
+    /// Why it is needed, the outermost mod first and the one that declares
+    /// the requirement last. Every step loads, or is required by one that does.
+    pub chain: Vec<ImpactedMod>,
+    /// How many needed mods declare it directly, the last step included.
+    pub required_by: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnmetDependency {
+    /// No jar here is the one the relation names.
+    Missing {
+        /// The remembered catalog title, the recorded jar, or the bare id the
+        /// catalog stated, in that order of preference.
+        name: String,
+        project_id: Option<String>,
+        /// The catalog the relation's project id belongs to.
+        provider: Option<ModProvider>,
+        /// Whether the absence is proven. A project id only names a jar in
+        /// its own catalog, so a jar identified in another catalog, or in
+        /// none, may be the one required until that catalog says otherwise.
+        proven: bool,
+    },
+    /// The jar is here and turned off.
+    Disabled(ImpactedMod),
+}
+
+/// An enabled mod whose recorded relations say it does not work with another
+/// enabled mod.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclaredConflict {
+    pub declared_by: ImpactedMod,
+    pub conflicts_with: ImpactedMod,
+}
+
+/// What a host's recorded relations say it is missing, for Diagnostics.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RequirementProblems {
+    pub unmet: Vec<UnmetRequirement>,
+    pub conflicts: Vec<DeclaredConflict>,
+    /// Enabled mods with no recorded answer, so nothing is claimed about them.
+    pub unanswered: usize,
+    /// Enabled mods whose relations are recorded.
+    pub answered: usize,
 }
 
 /// What a frontend does about a mod change that affects other mods.
@@ -422,6 +472,219 @@ impl App {
             .collect())
     }
 
+    /// Every requirement of a loading mod this host does not meet, and every
+    /// declared conflict between two enabled mods.
+    ///
+    /// Offline and pure, from recorded relations only. A mod nothing recorded
+    /// relations for is counted, never assumed to need nothing.
+    pub fn requirement_problems(&self, host: InstalledHost) -> CoreResult<RequirementProblems> {
+        let graph = ModGraph::build(self, host)?;
+        let cache = CacheLayout::new(self.paths().cache_dir());
+        let mut remembered: BTreeMap<ModProvider, RememberedDisplay> = BTreeMap::new();
+        let mut title = |provider: Option<ModProvider>, project: &str| {
+            let provider = provider?;
+            remembered
+                .entry(provider)
+                .or_insert_with(|| mod_display_cache::read(&cache, provider.as_str()))
+                .compose(project, None)
+                .map(|display| display.title)
+        };
+        Ok(graph.requirement_problems(&mut title))
+    }
+
+    /// Settles, by asking catalogs, what [`Self::requirement_problems`] could
+    /// not prove offline.
+    ///
+    /// A requirement names a project in its own catalog. Every jar here not
+    /// identified in that catalog is identified there by its bytes: Modrinth
+    /// by SHA-1, CurseForge by fingerprint. A jar that turns out to be the
+    /// project settles the requirement, or makes it a turned-off one; none
+    /// being it proves the absence. A catalog that cannot answer leaves the
+    /// requirement unproven. Titles are fetched for proven absences that only
+    /// have an id to show. Nothing learned is recorded (ADR 0037).
+    pub(crate) async fn confirm_unmet_requirements(
+        &self,
+        host: InstalledHost,
+        problems: &mut RequirementProblems,
+        reporter: &OperationReporter,
+        cancel: &CancellationToken,
+    ) {
+        let unproven: BTreeSet<ModProvider> = problems
+            .unmet
+            .iter()
+            .filter_map(|unmet| match &unmet.dependency {
+                UnmetDependency::Missing {
+                    provider: Some(provider),
+                    proven: false,
+                    ..
+                } => Some(*provider),
+                _ => None,
+            })
+            .collect();
+        let (Ok(graph), Ok(layout)) = (ModGraph::build(self, host), self.host_layout(host)) else {
+            return;
+        };
+        for catalog in unproven {
+            let Some(found) = self
+                .recognize_in(catalog, &graph, &layout.game_dir, cancel)
+                .await
+            else {
+                continue;
+            };
+            problems.unmet.retain_mut(|unmet| {
+                let UnmetDependency::Missing {
+                    provider: Some(provider),
+                    project_id: Some(project),
+                    proven,
+                    ..
+                } = &mut unmet.dependency
+                else {
+                    return true;
+                };
+                if *provider != catalog {
+                    return true;
+                }
+                match found.get(project.as_str()) {
+                    None => {
+                        *proven = true;
+                        true
+                    }
+                    Some(present) if present.presence == ModPresence::Disabled => {
+                        unmet.dependency = UnmetDependency::Disabled(present.clone());
+                        true
+                    }
+                    Some(_) => false,
+                }
+            });
+        }
+        self.name_unmet_requirements(problems, reporter, cancel)
+            .await;
+    }
+
+    /// Which project each jar not identified in `catalog` is there, keyed by
+    /// project id. `None` when the catalog could not be asked about all of them.
+    async fn recognize_in(
+        &self,
+        catalog: ModProvider,
+        graph: &ModGraph,
+        game_dir: &Path,
+        cancel: &CancellationToken,
+    ) -> Option<BTreeMap<String, ImpactedMod>> {
+        let mut candidates: Vec<(Hash, u32, &ImpactedMod)> = Vec::new();
+        for entry in graph.entries.iter().filter(|entry| {
+            entry.mod_entry.presence != ModPresence::Missing && entry.provider != Some(catalog)
+        }) {
+            let installed = game_dir.join(&entry.mod_entry.logical_path);
+            let path = if entry.mod_entry.presence == ModPresence::Disabled {
+                ephervex_pack::disabled_path(&installed)
+            } else {
+                installed
+            };
+            let digest = hash_file(&path, HashAlgorithm::Sha1).await.ok()?;
+            let bytes = tokio::fs::read(&path).await.ok()?;
+            candidates.push((digest, curseforge_fingerprint(&bytes), &entry.mod_entry));
+        }
+        if candidates.is_empty() {
+            return Some(BTreeMap::new());
+        }
+        let recognized = match catalog {
+            ModProvider::Modrinth => {
+                let digests: Vec<Hash> = candidates
+                    .iter()
+                    .map(|(digest, ..)| digest.clone())
+                    .collect();
+                self.modrinth_catalog()
+                    .ok()?
+                    .recognize(&digests, cancel)
+                    .await
+            }
+            ModProvider::CurseForge => {
+                let api = self.curseforge_api().ok()?;
+                if !api.has_credential().unwrap_or(false) {
+                    return None;
+                }
+                let wanted: Vec<(u32, Hash)> = candidates
+                    .iter()
+                    .map(|(digest, fingerprint, _)| (*fingerprint, digest.clone()))
+                    .collect();
+                match api.begin_operation() {
+                    Ok(operation) => operation.fingerprints(&wanted, cancel).await,
+                    Err(error) => Err(error),
+                }
+            }
+            // A catalog this build cannot identify files in cannot settle anything.
+            _ => return None,
+        };
+        let recognized = match recognized {
+            Ok(recognized) => recognized,
+            Err(error) => {
+                warn!(%error, provider = %catalog, "could not identify jars to settle a requirement");
+                return None;
+            }
+        };
+        Some(
+            candidates
+                .into_iter()
+                .filter_map(|(digest, _, entry)| {
+                    let file = recognized.get(digest.digest())?;
+                    (file.provider == catalog).then(|| (file.project_id.clone(), entry.clone()))
+                })
+                .collect(),
+        )
+    }
+
+    /// Replaces a bare project id with the catalog's title, where it has one.
+    async fn name_unmet_requirements(
+        &self,
+        problems: &mut RequirementProblems,
+        reporter: &OperationReporter,
+        cancel: &CancellationToken,
+    ) {
+        for catalog in [ModProvider::Modrinth, ModProvider::CurseForge] {
+            let ids: Vec<String> = problems
+                .unmet
+                .iter()
+                .filter_map(|unmet| match &unmet.dependency {
+                    UnmetDependency::Missing {
+                        name,
+                        project_id: Some(project),
+                        provider: Some(provider),
+                        proven: true,
+                    } if *provider == catalog && name == project => Some(project.clone()),
+                    _ => None,
+                })
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            if ids.is_empty() {
+                continue;
+            }
+            let Ok(provider) = self.mod_provider(catalog) else {
+                continue;
+            };
+            let projects = match provider.projects_by_id(&ids, reporter, cancel).await {
+                Ok(projects) => projects,
+                Err(error) => {
+                    warn!(%error, provider = %catalog, "could not name a missing requirement");
+                    continue;
+                }
+            };
+            for unmet in &mut problems.unmet {
+                if let UnmetDependency::Missing {
+                    name,
+                    project_id: Some(project),
+                    provider: Some(provider),
+                    ..
+                } = &mut unmet.dependency
+                    && *provider == catalog
+                    && let Some(found) = projects.iter().find(|found| &found.id == project)
+                {
+                    name.clone_from(&found.title);
+                }
+            }
+        }
+    }
+
     /// Deletes several mods' jars in one call.
     ///
     /// Ordered exactly as a disable is, and for the same reason: what
@@ -634,6 +897,8 @@ pub(crate) struct ModGraph {
 #[derive(Debug)]
 pub(crate) struct GraphEntry {
     pub(crate) mod_entry: ImpactedMod,
+    /// The catalog this mod's relations were stated by.
+    provider: Option<ModProvider>,
     /// What this mod's catalog said it needs, when anything asked.
     relations: Option<Vec<RecipeRelation>>,
 }
@@ -745,6 +1010,7 @@ impl ModGraph {
             }
             by_file_name.insert(entry.file_name.to_ascii_lowercase(), entries.len());
             entries.push(GraphEntry {
+                provider: entry.identity.provider(),
                 mod_entry: ImpactedMod {
                     logical_path: entry.logical_path.clone(),
                     name: entry.display_name().to_owned(),
@@ -765,6 +1031,196 @@ impl ModGraph {
     }
 
     /// The mod a relation is about, whichever way the catalog named it.
+    /// A required project no jar here matches, keyed so every mod requiring
+    /// it lands on one entry.
+    fn absent(
+        &self,
+        entry: &GraphEntry,
+        relation: &RecipeRelation,
+        title: &mut dyn FnMut(Option<ModProvider>, &str) -> Option<String>,
+    ) -> (String, UnmetDependency) {
+        let project_id = relation.target.project_id().map(ToOwned::to_owned);
+        let name = project_id
+            .as_deref()
+            .and_then(|project| title(entry.provider, project))
+            .unwrap_or_else(|| relation.target.display_name().to_owned());
+        let proven = project_id.is_none() || self.all_identified_in(entry.provider);
+        (
+            format!(
+                "absent:{:?}:{}",
+                entry.provider,
+                relation.target.display_name().to_lowercase()
+            ),
+            UnmetDependency::Missing {
+                name,
+                project_id,
+                provider: entry.provider,
+                proven,
+            },
+        )
+    }
+
+    /// Whether every jar here is identified in `catalog`, which is what lets
+    /// a project id that matches none of them prove an absence.
+    fn all_identified_in(&self, catalog: Option<ModProvider>) -> bool {
+        catalog.is_some()
+            && self
+                .entries
+                .iter()
+                .filter(|entry| entry.mod_entry.presence != ModPresence::Missing)
+                .all(|entry| entry.provider == catalog)
+    }
+
+    /// Mods that load, and everything they require that is here to turn on.
+    fn needed(&self) -> BTreeSet<usize> {
+        let mut needed: BTreeSet<usize> = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.mod_entry.presence == ModPresence::Installed)
+            .map(|(index, _)| index)
+            .collect();
+        let mut frontier: Vec<usize> = needed.iter().copied().collect();
+        while let Some(current) = frontier.pop() {
+            for relation in self.entries[current].relations.iter().flatten() {
+                if relation.kind != ModRelationKind::Required {
+                    continue;
+                }
+                if let Some(found) = self.target_of(relation)
+                    && self.entries[found].mod_entry.presence == ModPresence::Disabled
+                    && needed.insert(found)
+                {
+                    frontier.push(found);
+                }
+            }
+        }
+        needed
+    }
+
+    /// The needed mods that require `index`, in list order.
+    fn needed_requirers(&self, index: usize, needed: &BTreeSet<usize>) -> Vec<usize> {
+        needed
+            .iter()
+            .copied()
+            .filter(|&candidate| {
+                candidate != index && self.declares(candidate, index, ModRelationKind::Required)
+            })
+            .collect()
+    }
+
+    /// Why `requirer` is needed: walks up through whatever requires it until a
+    /// mod nothing needed requires, preferring the first in list order.
+    fn chain_to(&self, requirer: usize, needed: &BTreeSet<usize>) -> Vec<ImpactedMod> {
+        let mut chain = vec![requirer];
+        let mut current = requirer;
+        while let Some(parent) = self
+            .needed_requirers(current, needed)
+            .into_iter()
+            .find(|parent| !chain.contains(parent))
+        {
+            chain.push(parent);
+            current = parent;
+        }
+        chain
+            .into_iter()
+            .rev()
+            .map(|index| self.entries[index].mod_entry.clone())
+            .collect()
+    }
+
+    pub(crate) fn requirement_problems(
+        &self,
+        title: &mut dyn FnMut(Option<ModProvider>, &str) -> Option<String>,
+    ) -> RequirementProblems {
+        let needed = self.needed();
+        // Keyed so that every mod requiring the same thing lands on one entry.
+        let mut unmet: Vec<(String, UnmetDependency, Vec<usize>)> = Vec::new();
+        let mut conflicts = Vec::new();
+        let mut note = |key: String, dependency: UnmetDependency, requirer: usize| {
+            if let Some((_, _, requirers)) = unmet.iter_mut().find(|(known, ..)| *known == key) {
+                if !requirers.contains(&requirer) {
+                    requirers.push(requirer);
+                }
+            } else {
+                unmet.push((key, dependency, vec![requirer]));
+            }
+        };
+        for &requirer in &needed {
+            let entry = &self.entries[requirer];
+            for relation in entry.relations.iter().flatten() {
+                let found = self.target_of(relation);
+                match (relation.kind, found) {
+                    (ModRelationKind::Required, None) => {
+                        let (key, dependency) = self.absent(entry, relation, title);
+                        note(key, dependency, requirer);
+                    }
+                    (ModRelationKind::Required, Some(found)) => {
+                        let target = &self.entries[found].mod_entry;
+                        match target.presence {
+                            ModPresence::Installed => {}
+                            ModPresence::Disabled => note(
+                                format!("file:{}", target.logical_path.display()),
+                                UnmetDependency::Disabled(target.clone()),
+                                requirer,
+                            ),
+                            ModPresence::Missing => note(
+                                format!("file:{}", target.logical_path.display()),
+                                UnmetDependency::Missing {
+                                    name: target.name.clone(),
+                                    project_id: target.project_id.clone(),
+                                    provider: self.entries[found].provider,
+                                    proven: true,
+                                },
+                                requirer,
+                            ),
+                        }
+                    }
+                    (ModRelationKind::Incompatible, Some(found))
+                        if entry.mod_entry.presence == ModPresence::Installed
+                            && self.entries[found].mod_entry.presence == ModPresence::Installed =>
+                    {
+                        let pair = (requirer.min(found), requirer.max(found));
+                        if !conflicts.iter().any(|(known, _)| *known == pair) {
+                            conflicts.push((
+                                pair,
+                                DeclaredConflict {
+                                    declared_by: entry.mod_entry.clone(),
+                                    conflicts_with: self.entries[found].mod_entry.clone(),
+                                },
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let enabled = self
+            .entries
+            .iter()
+            .filter(|entry| entry.mod_entry.presence == ModPresence::Installed);
+        let answered = enabled
+            .clone()
+            .filter(|entry| entry.mod_entry.knowledge == DependencyKnowledge::Recorded)
+            .count();
+        RequirementProblems {
+            unmet: unmet
+                .into_iter()
+                .map(|(_, dependency, requirers)| UnmetRequirement {
+                    dependency,
+                    chain: self.chain_to(requirers[0], &needed),
+                    required_by: requirers.len(),
+                })
+                .collect(),
+            conflicts: conflicts
+                .into_iter()
+                .map(|(_, conflict)| conflict)
+                .collect(),
+            unanswered: enabled.count() - answered,
+            answered,
+        }
+    }
+
     fn target_of(&self, relation: &RecipeRelation) -> Option<usize> {
         match &relation.target {
             RelationTarget::Project { project_id, .. } => self.by_project.get(project_id),
@@ -1304,6 +1760,146 @@ mod tests {
         assert_eq!(relations.requires[0].name, "AABBCCDD");
         assert_eq!(relations.requires[0].presence, None);
         assert_eq!(relations.requires[0].logical_path, None);
+    }
+
+    const REGISTRATE: &str = "RgStr8te";
+
+    /// Create needs Flywheel, Flywheel needs Registrate, and Registrate is not
+    /// here. `extra` adds files to the recipe; `disabled` jars are written
+    /// with the disabled suffix.
+    fn requirement_host(
+        base: &std::path::Path,
+        extra: Vec<PackFileRecipe>,
+        disabled: &[&str],
+    ) -> (App, InstalledHost) {
+        let (app, instance, root) = instance_with_unasked_mods(base);
+        let store = SourceStore::new(ephervex_storage::metadata::source_dir(&root));
+        let mut recipe = store.read_recipe().expect("recipe");
+        recipe.files = vec![
+            with_relations(
+                recorded("Create.jar", "CreateId", "c1"),
+                &[("FlywheelId", ModRelationKind::Required)],
+            ),
+            with_relations(
+                recorded("Flywheel.jar", "FlywheelId", "f1"),
+                &[(REGISTRATE, ModRelationKind::Required)],
+            ),
+        ];
+        recipe.files.extend(extra);
+        let game = ephervex_storage::metadata::client_game_dir(&root).join("mods");
+        std::fs::create_dir_all(&game).expect("mods dir");
+        for file in &recipe.files {
+            let name = file.file_name();
+            let jar = if disabled.contains(&name) {
+                ephervex_pack::disabled_path(&game.join(name))
+            } else {
+                game.join(name)
+            };
+            std::fs::write(jar, b"jar").expect("write jar");
+        }
+        store.write_recipe(&recipe).expect("write");
+        (app, InstalledHost::Instance(instance))
+    }
+
+    fn chain(requirement: &UnmetRequirement) -> Vec<&str> {
+        requirement
+            .chain
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn a_missing_requirement_is_explained_by_the_chain_that_needs_it() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, host) = requirement_host(base.path(), Vec::new(), &[]);
+
+        let problems = app.requirement_problems(host).expect("problems");
+
+        assert_eq!(problems.unmet.len(), 1);
+        let missing = &problems.unmet[0];
+        assert_eq!(
+            missing.dependency,
+            UnmetDependency::Missing {
+                name: REGISTRATE.to_owned(),
+                project_id: Some(REGISTRATE.to_owned()),
+                provider: Some(ModProvider::Modrinth),
+                proven: true,
+            },
+            "with no remembered title the catalog's own id is all there is"
+        );
+        assert_eq!(chain(missing), ["Create.jar", "Flywheel.jar"]);
+        assert_eq!(missing.required_by, 1);
+        assert_eq!((problems.answered, problems.unanswered), (2, 0));
+    }
+
+    #[test]
+    fn a_disabled_requirement_is_reported_as_turned_off_rather_than_missing() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, host) = requirement_host(
+            base.path(),
+            vec![with_relations(
+                recorded("Registrate.jar", REGISTRATE, "r1"),
+                &[],
+            )],
+            &["Registrate.jar"],
+        );
+
+        let problems = app.requirement_problems(host).expect("problems");
+
+        assert_eq!(problems.unmet.len(), 1);
+        let UnmetDependency::Disabled(disabled) = &problems.unmet[0].dependency else {
+            panic!("expected a disabled requirement: {:?}", problems.unmet[0]);
+        };
+        assert_eq!(disabled.logical_path, Path::new("mods/Registrate.jar"));
+        assert_eq!(chain(&problems.unmet[0]), ["Create.jar", "Flywheel.jar"]);
+    }
+
+    #[test]
+    fn what_a_turned_off_mod_requires_matters_only_when_something_needs_it() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, host) = requirement_host(
+            base.path(),
+            vec![
+                with_relations(recorded("Registrate.jar", REGISTRATE, "r1"), &[]),
+                with_relations(
+                    recorded("Unused.jar", "UnusedId", "u1"),
+                    &[("NowhereId", ModRelationKind::Required)],
+                ),
+            ],
+            &["Unused.jar"],
+        );
+
+        let problems = app.requirement_problems(host).expect("problems");
+
+        assert!(
+            problems.unmet.is_empty(),
+            "nothing loads Unused.jar, so what it lacks stops nothing: {:?}",
+            problems.unmet
+        );
+    }
+
+    #[test]
+    fn a_declared_conflict_between_two_enabled_mods_is_named_once() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, host) = requirement_host(
+            base.path(),
+            vec![
+                with_relations(recorded("Registrate.jar", REGISTRATE, "r1"), &[]),
+                with_relations(
+                    recorded("Rival.jar", "RivalId", "v1"),
+                    &[("CreateId", ModRelationKind::Incompatible)],
+                ),
+            ],
+            &[],
+        );
+
+        let problems = app.requirement_problems(host).expect("problems");
+
+        assert!(problems.unmet.is_empty());
+        assert_eq!(problems.conflicts.len(), 1);
+        assert_eq!(problems.conflicts[0].declared_by.name, "Rival.jar");
+        assert_eq!(problems.conflicts[0].conflicts_with.name, "Create.jar");
     }
 
     #[test]
@@ -2220,5 +2816,191 @@ mod tests {
             closure_of(&plan, "Feature.jar"),
             ["Feature.jar", "Library.jar"]
         );
+    }
+
+    const JEI_MODRINTH: &str = "u6dRKJwZ";
+    const JEI_CURSEFORGE: &str = "238222";
+    const BIOMES_O_PLENTY: &str = "220318";
+    const JEI_BYTES: &[u8] = b"just enough items";
+
+    /// A Modrinth pack whose overrides brought CurseForge jars: JER requires
+    /// JEI and Dynamic Trees BOP requires Biomes O' Plenty, both by CurseForge
+    /// project. JEI is here, identified on Modrinth; Biomes O' Plenty is not.
+    async fn mixed_catalog_host(base: &Path) -> (App, InstalledHost, MockServer) {
+        use std::sync::Arc;
+
+        use ephervex_auth::{CredentialStore, MemoryStore};
+        use ephervex_model::SecretString;
+
+        let server = MockServer::start().await;
+        let jei_sha1 = {
+            use sha1::{Digest as _, Sha1};
+            hex::encode(Sha1::digest(JEI_BYTES))
+        };
+        Mock::given(method("POST"))
+            .and(route("/v1/fingerprints"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                format!(
+                    r#"{{"data":{{"exactMatches":[{{"id":{JEI_CURSEFORGE},"file":{{"id":5101366,"modId":{JEI_CURSEFORGE},"isAvailable":true,"fileName":"jei.jar","hashes":[{{"value":"{jei_sha1}","algo":1}}],"dependencies":[]}}}}]}}}}"#
+                ),
+                "application/json",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(route("/v1/categories"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                r#"{"data":[{"id":6,"gameId":432,"name":"Mods","slug":"mc-mods","isClass":true}]}"#,
+                "application/json",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(route("/v1/mods"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                format!(
+                    r#"{{"data":[{{"id":{BIOMES_O_PLENTY},"gameId":432,"name":"Biomes O' Plenty","slug":"biomes-o-plenty","classId":6}}]}}"#
+                ),
+                "application/json",
+            ))
+            .mount(&server)
+            .await;
+
+        let (mut app, instance, root) = instance_with_unasked_mods(base);
+        let store = SourceStore::new(ephervex_storage::metadata::source_dir(&root));
+        let mut recipe = store.read_recipe().expect("recipe");
+        let mut jer = curseforge_recorded("JER.jar", "240630", "2715254");
+        jer.relations = Some(vec![RecipeRelation {
+            kind: ModRelationKind::Required,
+            target: RelationTarget::Project {
+                project_id: JEI_CURSEFORGE.to_owned(),
+                version_id: None,
+            },
+        }]);
+        let mut trees = curseforge_recorded("DynamicTreesBOP.jar", "309565", "3036133");
+        trees.relations = Some(vec![RecipeRelation {
+            kind: ModRelationKind::Required,
+            target: RelationTarget::Project {
+                project_id: BIOMES_O_PLENTY.to_owned(),
+                version_id: None,
+            },
+        }]);
+        recipe.files = vec![
+            with_relations(recorded("JEI.jar", JEI_MODRINTH, "jei1"), &[]),
+            jer,
+            trees,
+        ];
+        store.write_recipe(&recipe).expect("write");
+        let mods = ephervex_storage::metadata::client_game_dir(&root).join("mods");
+        std::fs::create_dir_all(&mods).expect("mods dir");
+        std::fs::write(mods.join("JEI.jar"), JEI_BYTES).expect("write jar");
+        std::fs::write(mods.join("JER.jar"), b"jer").expect("write jar");
+        std::fs::write(mods.join("DynamicTreesBOP.jar"), b"trees").expect("write jar");
+
+        let credentials = MemoryStore::new();
+        ephervex_auth::set_curseforge_api_key(&credentials, &SecretString::new(CURSEFORGE_KEY))
+            .expect("store the key");
+        let credentials: Arc<dyn CredentialStore> = Arc::new(credentials);
+        app.use_loopback_curseforge(&format!("{}/v1", server.uri()), credentials)
+            .expect("loopback curseforge");
+        (app, InstalledHost::Instance(instance), server)
+    }
+
+    fn missing(problems: &RequirementProblems) -> Vec<(String, bool)> {
+        problems
+            .unmet
+            .iter()
+            .filter_map(|unmet| match &unmet.dependency {
+                UnmetDependency::Missing { name, proven, .. } => Some((name.clone(), *proven)),
+                UnmetDependency::Disabled(_) => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_requirement_named_in_another_catalog_is_not_claimed_missing_offline() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, host, _server) = mixed_catalog_host(base.path()).await;
+
+        let problems = app.requirement_problems(host).expect("problems");
+
+        assert_eq!(
+            missing(&problems),
+            [
+                (BIOMES_O_PLENTY.to_owned(), false),
+                (JEI_CURSEFORGE.to_owned(), false)
+            ],
+            "JEI.jar is only identified on Modrinth, so neither absence is proven"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_catalog_settles_a_requirement_a_jar_from_another_catalog_meets() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, host, server) = mixed_catalog_host(base.path()).await;
+        let mut problems = app.requirement_problems(host).expect("problems");
+
+        app.confirm_unmet_requirements(
+            host,
+            &mut problems,
+            &OperationReporter::silent("test-confirm"),
+            &CancellationToken::new(),
+        )
+        .await;
+
+        assert_eq!(
+            missing(&problems),
+            [("Biomes O' Plenty".to_owned(), true)],
+            "CurseForge identified JEI.jar as the required project, and named the one that is absent"
+        );
+        let fingerprinted = server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|request| request.url.path() == "/v1/fingerprints")
+            .count();
+        assert_eq!(
+            fingerprinted, 1,
+            "only jars CurseForge had not identified are asked about"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_turned_off_jar_the_catalog_identifies_is_reported_as_turned_off() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, host, _server) = mixed_catalog_host(base.path()).await;
+        let root = app
+            .client(match host {
+                InstalledHost::Instance(id) => id,
+                InstalledHost::Server(_) => unreachable!("a client fixture"),
+            })
+            .expect("record")
+            .root;
+        let mods = ephervex_storage::metadata::client_game_dir(&root).join("mods");
+        std::fs::rename(
+            mods.join("JEI.jar"),
+            ephervex_pack::disabled_path(&mods.join("JEI.jar")),
+        )
+        .expect("turn JEI off");
+        let mut problems = app.requirement_problems(host).expect("problems");
+
+        app.confirm_unmet_requirements(
+            host,
+            &mut problems,
+            &OperationReporter::silent("test-confirm"),
+            &CancellationToken::new(),
+        )
+        .await;
+
+        let disabled: Vec<&Path> = problems
+            .unmet
+            .iter()
+            .filter_map(|unmet| match &unmet.dependency {
+                UnmetDependency::Disabled(entry) => Some(entry.logical_path.as_path()),
+                UnmetDependency::Missing { .. } => None,
+            })
+            .collect();
+        assert_eq!(disabled, [Path::new("mods/JEI.jar")]);
     }
 }

@@ -34,6 +34,7 @@ pub mod curseforge;
 pub mod curseforge_pack;
 pub mod declared_relations;
 pub mod dependencies;
+pub mod diagnosis;
 pub mod diagnostics;
 mod disk_usage;
 pub mod download_watch;
@@ -82,14 +83,20 @@ pub use connection::{
     LaunchAndConnectOutcome, ServerPreparation,
 };
 pub use crash_analysis::{
-    CrashAnalysis, CrashReview, CrashSuspect, SuspectConfidence, SuspectReason, SuspectedMod,
-    analyze_crash_report,
+    CrashAnalysis, CrashReview, CrashSuspect, LoaderReportedDependency, SuspectConfidence,
+    SuspectReason, SuspectedMod, analyze_crash_report, loader_dependency_failures,
 };
 pub use curseforge::StoredApiKey;
 pub use declared_relations::{DeclaredProject, ProjectAvailability};
 pub use dependencies::{
-    DependencyKnowledge, DependencyPolicy, DependencyRefreshReport, DependentMods, ImpactedMod,
-    ModRelations, RelatedMod, RequiredMods,
+    DeclaredConflict, DependencyKnowledge, DependencyPolicy, DependencyRefreshReport,
+    DependentMods, ImpactedMod, ModRelations, RelatedMod, RequiredMods, RequirementProblems,
+    UnmetDependency, UnmetRequirement,
+};
+pub use diagnosis::{
+    DiagnosisRequest, DiagnosticFix, Finding, FindingClass, FindingKind, FixOutcome, FixPreview,
+    HostDiagnosis, IntegrityCheck, JavaCheck, JavaLayer, JavaMismatch, JavaRuntimeSummary,
+    JavaUnavailable, ModCounts, ProposedChange, RecommendedJava,
 };
 pub use diagnostics::{
     ClientLogTail, DEFAULT_DIAGNOSTIC_BYTES, DiagnosticCatalog, DiagnosticRequest, DiagnosticScope,
