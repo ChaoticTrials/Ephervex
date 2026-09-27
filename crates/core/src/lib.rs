@@ -88,8 +88,9 @@ pub use crash_analysis::{
 pub use curseforge::StoredApiKey;
 pub use declared_relations::{DeclaredProject, ProjectAvailability};
 pub use dependencies::{
-    DependencyKnowledge, DependencyPolicy, DependencyRefreshReport, DependentMods, ImpactedMod,
-    ModRelations, RelatedMod, RequiredMods,
+    DeclaredConflict, DependencyKnowledge, DependencyPolicy, DependencyRefreshReport,
+    DependentMods, ImpactedMod, ModRelations, RelatedMod, RequiredMods, RequirementProblems,
+    UnmetDependency, UnmetRequirement,
 };
 pub use diagnostics::{
     ClientLogTail, DEFAULT_DIAGNOSTIC_BYTES, DiagnosticCatalog, DiagnosticRequest, DiagnosticScope,

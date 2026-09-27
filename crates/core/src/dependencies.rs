@@ -14,7 +14,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use ephervex_download::OperationReporter;
+use ephervex_download::{CacheLayout, OperationReporter};
 use ephervex_mod_platform::ModVersionInfo;
 use ephervex_model::{ModOrigin, ModProvider, ModRelationKind};
 use ephervex_pack::{ModIdentity, PackRecipe, RecipeRelation, RelationTarget, SourceStore};
@@ -23,6 +23,7 @@ use tracing::{info, instrument, warn};
 
 use crate::app::App;
 use crate::error::{CoreError, CoreResult};
+use crate::mod_display_cache::{self, RememberedDisplay};
 use crate::mods::{InstalledHost, ModPresence, recipe_relations};
 
 /// What a dependency refresh learned.
@@ -206,6 +207,49 @@ impl ModRelations {
     pub fn is_empty(&self) -> bool {
         self.requires.is_empty() && self.required_by.is_empty()
     }
+}
+
+/// A required mod that a mod which loads does not have.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnmetRequirement {
+    pub dependency: UnmetDependency,
+    /// Why it is needed, the outermost mod first and the one that declares
+    /// the requirement last. Every step loads, or is required by one that does.
+    pub chain: Vec<ImpactedMod>,
+    /// How many needed mods declare it directly, the last step included.
+    pub required_by: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnmetDependency {
+    /// No jar here is the one the relation names.
+    Missing {
+        /// The remembered catalog title, the recorded jar, or the bare id the
+        /// catalog stated, in that order of preference.
+        name: String,
+        project_id: Option<String>,
+    },
+    /// The jar is here and turned off.
+    Disabled(ImpactedMod),
+}
+
+/// An enabled mod whose recorded relations say it does not work with another
+/// enabled mod.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclaredConflict {
+    pub declared_by: ImpactedMod,
+    pub conflicts_with: ImpactedMod,
+}
+
+/// What a host's recorded relations say it is missing, for Diagnostics.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RequirementProblems {
+    pub unmet: Vec<UnmetRequirement>,
+    pub conflicts: Vec<DeclaredConflict>,
+    /// Enabled mods with no recorded answer, so nothing is claimed about them.
+    pub unanswered: usize,
+    /// Enabled mods whose relations are recorded.
+    pub answered: usize,
 }
 
 /// What a frontend does about a mod change that affects other mods.
@@ -422,6 +466,26 @@ impl App {
             .collect())
     }
 
+    /// Every requirement of a loading mod this host does not meet, and every
+    /// declared conflict between two enabled mods.
+    ///
+    /// Offline and pure, from recorded relations only. A mod nothing recorded
+    /// relations for is counted, never assumed to need nothing.
+    pub fn requirement_problems(&self, host: InstalledHost) -> CoreResult<RequirementProblems> {
+        let graph = ModGraph::build(self, host)?;
+        let cache = CacheLayout::new(self.paths().cache_dir());
+        let mut remembered: BTreeMap<ModProvider, RememberedDisplay> = BTreeMap::new();
+        let mut title = |provider: Option<ModProvider>, project: &str| {
+            let provider = provider?;
+            remembered
+                .entry(provider)
+                .or_insert_with(|| mod_display_cache::read(&cache, provider.as_str()))
+                .compose(project, None)
+                .map(|display| display.title)
+        };
+        Ok(graph.requirement_problems(&mut title))
+    }
+
     /// Deletes several mods' jars in one call.
     ///
     /// Ordered exactly as a disable is, and for the same reason: what
@@ -634,6 +698,8 @@ pub(crate) struct ModGraph {
 #[derive(Debug)]
 pub(crate) struct GraphEntry {
     pub(crate) mod_entry: ImpactedMod,
+    /// The catalog this mod's relations were stated by.
+    provider: Option<ModProvider>,
     /// What this mod's catalog said it needs, when anything asked.
     relations: Option<Vec<RecipeRelation>>,
 }
@@ -745,6 +811,7 @@ impl ModGraph {
             }
             by_file_name.insert(entry.file_name.to_ascii_lowercase(), entries.len());
             entries.push(GraphEntry {
+                provider: entry.identity.provider(),
                 mod_entry: ImpactedMod {
                     logical_path: entry.logical_path.clone(),
                     name: entry.display_name().to_owned(),
@@ -765,6 +832,162 @@ impl ModGraph {
     }
 
     /// The mod a relation is about, whichever way the catalog named it.
+    /// Mods that load, and everything they require that is here to turn on.
+    fn needed(&self) -> BTreeSet<usize> {
+        let mut needed: BTreeSet<usize> = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.mod_entry.presence == ModPresence::Installed)
+            .map(|(index, _)| index)
+            .collect();
+        let mut frontier: Vec<usize> = needed.iter().copied().collect();
+        while let Some(current) = frontier.pop() {
+            for relation in self.entries[current].relations.iter().flatten() {
+                if relation.kind != ModRelationKind::Required {
+                    continue;
+                }
+                if let Some(found) = self.target_of(relation)
+                    && self.entries[found].mod_entry.presence == ModPresence::Disabled
+                    && needed.insert(found)
+                {
+                    frontier.push(found);
+                }
+            }
+        }
+        needed
+    }
+
+    /// The needed mods that require `index`, in list order.
+    fn needed_requirers(&self, index: usize, needed: &BTreeSet<usize>) -> Vec<usize> {
+        needed
+            .iter()
+            .copied()
+            .filter(|&candidate| {
+                candidate != index && self.declares(candidate, index, ModRelationKind::Required)
+            })
+            .collect()
+    }
+
+    /// Why `requirer` is needed: walks up through whatever requires it until a
+    /// mod nothing needed requires, preferring the first in list order.
+    fn chain_to(&self, requirer: usize, needed: &BTreeSet<usize>) -> Vec<ImpactedMod> {
+        let mut chain = vec![requirer];
+        let mut current = requirer;
+        while let Some(parent) = self
+            .needed_requirers(current, needed)
+            .into_iter()
+            .find(|parent| !chain.contains(parent))
+        {
+            chain.push(parent);
+            current = parent;
+        }
+        chain
+            .into_iter()
+            .rev()
+            .map(|index| self.entries[index].mod_entry.clone())
+            .collect()
+    }
+
+    pub(crate) fn requirement_problems(
+        &self,
+        title: &mut dyn FnMut(Option<ModProvider>, &str) -> Option<String>,
+    ) -> RequirementProblems {
+        let needed = self.needed();
+        // Keyed so that every mod requiring the same thing lands on one entry.
+        let mut unmet: Vec<(String, UnmetDependency, Vec<usize>)> = Vec::new();
+        let mut conflicts = Vec::new();
+        let mut note = |key: String, dependency: UnmetDependency, requirer: usize| {
+            if let Some((_, _, requirers)) = unmet.iter_mut().find(|(known, ..)| *known == key) {
+                if !requirers.contains(&requirer) {
+                    requirers.push(requirer);
+                }
+            } else {
+                unmet.push((key, dependency, vec![requirer]));
+            }
+        };
+        for &requirer in &needed {
+            let entry = &self.entries[requirer];
+            for relation in entry.relations.iter().flatten() {
+                let found = self.target_of(relation);
+                match (relation.kind, found) {
+                    (ModRelationKind::Required, None) => {
+                        let project_id = relation.target.project_id().map(ToOwned::to_owned);
+                        let name = project_id
+                            .as_deref()
+                            .and_then(|project| title(entry.provider, project))
+                            .unwrap_or_else(|| relation.target.display_name().to_owned());
+                        note(
+                            format!("absent:{}", relation.target.display_name().to_lowercase()),
+                            UnmetDependency::Missing { name, project_id },
+                            requirer,
+                        );
+                    }
+                    (ModRelationKind::Required, Some(found)) => {
+                        let target = &self.entries[found].mod_entry;
+                        match target.presence {
+                            ModPresence::Installed => {}
+                            ModPresence::Disabled => note(
+                                format!("file:{}", target.logical_path.display()),
+                                UnmetDependency::Disabled(target.clone()),
+                                requirer,
+                            ),
+                            ModPresence::Missing => note(
+                                format!("file:{}", target.logical_path.display()),
+                                UnmetDependency::Missing {
+                                    name: target.name.clone(),
+                                    project_id: target.project_id.clone(),
+                                },
+                                requirer,
+                            ),
+                        }
+                    }
+                    (ModRelationKind::Incompatible, Some(found))
+                        if entry.mod_entry.presence == ModPresence::Installed
+                            && self.entries[found].mod_entry.presence == ModPresence::Installed =>
+                    {
+                        let pair = (requirer.min(found), requirer.max(found));
+                        if !conflicts.iter().any(|(known, _)| *known == pair) {
+                            conflicts.push((
+                                pair,
+                                DeclaredConflict {
+                                    declared_by: entry.mod_entry.clone(),
+                                    conflicts_with: self.entries[found].mod_entry.clone(),
+                                },
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let enabled = self
+            .entries
+            .iter()
+            .filter(|entry| entry.mod_entry.presence == ModPresence::Installed);
+        let answered = enabled
+            .clone()
+            .filter(|entry| entry.mod_entry.knowledge == DependencyKnowledge::Recorded)
+            .count();
+        RequirementProblems {
+            unmet: unmet
+                .into_iter()
+                .map(|(_, dependency, requirers)| UnmetRequirement {
+                    dependency,
+                    chain: self.chain_to(requirers[0], &needed),
+                    required_by: requirers.len(),
+                })
+                .collect(),
+            conflicts: conflicts
+                .into_iter()
+                .map(|(_, conflict)| conflict)
+                .collect(),
+            unanswered: enabled.count() - answered,
+            answered,
+        }
+    }
+
     fn target_of(&self, relation: &RecipeRelation) -> Option<usize> {
         match &relation.target {
             RelationTarget::Project { project_id, .. } => self.by_project.get(project_id),
@@ -1304,6 +1527,144 @@ mod tests {
         assert_eq!(relations.requires[0].name, "AABBCCDD");
         assert_eq!(relations.requires[0].presence, None);
         assert_eq!(relations.requires[0].logical_path, None);
+    }
+
+    const REGISTRATE: &str = "RgStr8te";
+
+    /// Create needs Flywheel, Flywheel needs Registrate, and Registrate is not
+    /// here. `extra` adds files to the recipe; `disabled` jars are written
+    /// with the disabled suffix.
+    fn requirement_host(
+        base: &std::path::Path,
+        extra: Vec<PackFileRecipe>,
+        disabled: &[&str],
+    ) -> (App, InstalledHost) {
+        let (app, instance, root) = instance_with_unasked_mods(base);
+        let store = SourceStore::new(ephervex_storage::metadata::source_dir(&root));
+        let mut recipe = store.read_recipe().expect("recipe");
+        recipe.files = vec![
+            with_relations(
+                recorded("Create.jar", "CreateId", "c1"),
+                &[("FlywheelId", ModRelationKind::Required)],
+            ),
+            with_relations(
+                recorded("Flywheel.jar", "FlywheelId", "f1"),
+                &[(REGISTRATE, ModRelationKind::Required)],
+            ),
+        ];
+        recipe.files.extend(extra);
+        let game = ephervex_storage::metadata::client_game_dir(&root).join("mods");
+        std::fs::create_dir_all(&game).expect("mods dir");
+        for file in &recipe.files {
+            let name = file.file_name();
+            let jar = if disabled.contains(&name) {
+                ephervex_pack::disabled_path(&game.join(name))
+            } else {
+                game.join(name)
+            };
+            std::fs::write(jar, b"jar").expect("write jar");
+        }
+        store.write_recipe(&recipe).expect("write");
+        (app, InstalledHost::Instance(instance))
+    }
+
+    fn chain(requirement: &UnmetRequirement) -> Vec<&str> {
+        requirement
+            .chain
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn a_missing_requirement_is_explained_by_the_chain_that_needs_it() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, host) = requirement_host(base.path(), Vec::new(), &[]);
+
+        let problems = app.requirement_problems(host).expect("problems");
+
+        assert_eq!(problems.unmet.len(), 1);
+        let missing = &problems.unmet[0];
+        assert_eq!(
+            missing.dependency,
+            UnmetDependency::Missing {
+                name: REGISTRATE.to_owned(),
+                project_id: Some(REGISTRATE.to_owned()),
+            },
+            "with no remembered title the catalog's own id is all there is"
+        );
+        assert_eq!(chain(missing), ["Create.jar", "Flywheel.jar"]);
+        assert_eq!(missing.required_by, 1);
+        assert_eq!((problems.answered, problems.unanswered), (2, 0));
+    }
+
+    #[test]
+    fn a_disabled_requirement_is_reported_as_turned_off_rather_than_missing() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, host) = requirement_host(
+            base.path(),
+            vec![with_relations(
+                recorded("Registrate.jar", REGISTRATE, "r1"),
+                &[],
+            )],
+            &["Registrate.jar"],
+        );
+
+        let problems = app.requirement_problems(host).expect("problems");
+
+        assert_eq!(problems.unmet.len(), 1);
+        let UnmetDependency::Disabled(disabled) = &problems.unmet[0].dependency else {
+            panic!("expected a disabled requirement: {:?}", problems.unmet[0]);
+        };
+        assert_eq!(disabled.logical_path, Path::new("mods/Registrate.jar"));
+        assert_eq!(chain(&problems.unmet[0]), ["Create.jar", "Flywheel.jar"]);
+    }
+
+    #[test]
+    fn what_a_turned_off_mod_requires_matters_only_when_something_needs_it() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, host) = requirement_host(
+            base.path(),
+            vec![
+                with_relations(recorded("Registrate.jar", REGISTRATE, "r1"), &[]),
+                with_relations(
+                    recorded("Unused.jar", "UnusedId", "u1"),
+                    &[("NowhereId", ModRelationKind::Required)],
+                ),
+            ],
+            &["Unused.jar"],
+        );
+
+        let problems = app.requirement_problems(host).expect("problems");
+
+        assert!(
+            problems.unmet.is_empty(),
+            "nothing loads Unused.jar, so what it lacks stops nothing: {:?}",
+            problems.unmet
+        );
+    }
+
+    #[test]
+    fn a_declared_conflict_between_two_enabled_mods_is_named_once() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, host) = requirement_host(
+            base.path(),
+            vec![
+                with_relations(recorded("Registrate.jar", REGISTRATE, "r1"), &[]),
+                with_relations(
+                    recorded("Rival.jar", "RivalId", "v1"),
+                    &[("CreateId", ModRelationKind::Incompatible)],
+                ),
+            ],
+            &[],
+        );
+
+        let problems = app.requirement_problems(host).expect("problems");
+
+        assert!(problems.unmet.is_empty());
+        assert_eq!(problems.conflicts.len(), 1);
+        assert_eq!(problems.conflicts[0].declared_by.name, "Rival.jar");
+        assert_eq!(problems.conflicts[0].conflicts_with.name, "Create.jar");
     }
 
     #[test]
