@@ -139,18 +139,27 @@ impl WorkspaceState {
         host: InstalledHost,
     ) -> Option<(InstalledHost, InstalledHost)> {
         let id = host.id();
-        let (client, server) = match host {
+        let (together, client, server) = match host {
             InstalledHost::Instance(_) => {
                 let row = self.clients.iter().find(|row| row.id == id.as_str())?;
-                row.pair_start_together.then_some(())?;
-                (id, row.paired_server_id.to_string())
+                (
+                    row.pair_start_together,
+                    id,
+                    row.paired_server_id.to_string(),
+                )
             }
             InstalledHost::Server(_) => {
                 let row = self.servers.iter().find(|row| row.id == id.as_str())?;
-                row.pair_start_together.then_some(())?;
-                (row.paired_client_id.to_string(), id)
+                (
+                    row.pair_start_together,
+                    row.paired_client_id.to_string(),
+                    id,
+                )
             }
         };
+        if !together {
+            return None;
+        }
         Some((
             InstalledHost::Instance(backend::parse_instance_id(&client)?),
             InstalledHost::Server(backend::parse_server_id(&server)?),
