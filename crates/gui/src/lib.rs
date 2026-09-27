@@ -7,10 +7,17 @@ pub mod file_drop;
 pub mod minecraft_defaults;
 pub mod monospace;
 pub mod presentation;
-// Slint's generated bindings contain framework-owned unsafe blocks. Keep the
-// exception on that generated module; handwritten GUI Rust stays under the
-// workspace-wide unsafe-code denial.
-#[allow(unsafe_code)]
+// Slint's generated bindings contain framework-owned unsafe blocks, unwraps,
+// and undocumented public items. Keep the exceptions on that generated module;
+// handwritten GUI Rust stays under the workspace-wide lints.
+#[allow(
+    unsafe_code,
+    unreachable_pub,
+    missing_debug_implementations,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::todo
+)]
 pub mod ui;
 pub mod window_aspect;
 pub mod window_events;

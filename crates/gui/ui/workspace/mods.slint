@@ -1,0 +1,269 @@
+// The Mods surface: mod cards, dependency impact and relation lists, and linked targets.
+
+import { ScrollView } from "std-widgets.slint";
+import { ModArtwork } from "../components/artwork.slint";
+import { AppButton, IconButton, Pill, Toggle } from "../components/controls.slint";
+import { BodyText } from "../components/text.slint";
+import { GuiI18n } from "../globals.slint";
+import { ImpactRow, LinkedTargetRow, ModRow, RelationRow } from "../models.slint";
+import { Theme } from "../theme.slint";
+
+// A boxed list of mods a dependency question named.
+//
+// Bounded and scrollable: a library in a two hundred mod pack names a lot
+// of dependents, and a dialog that grew past the window would put its own
+// buttons out of reach.
+export component ImpactList inherits Rectangle {
+    in property <[ImpactRow]> rows;
+    vertical-stretch: 1;
+    max-height: root.rows.length * 22px + 18px;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: Theme.border;
+    background: Theme.background;
+    ScrollView {
+        viewport-width: self.width;
+        VerticalLayout { alignment: start; padding: 9px; spacing: 3px;
+            for entry in root.rows : Text {
+                // A chain through other mods is worth saying, because it
+                // explains why a mod nothing obviously touches is listed.
+                text: entry.distance > 1 ? GuiI18n.values("gui-mod-impact-through", entry.name, entry.distance) : entry.name;
+                color: Theme.text-secondary;
+                font-size: Theme.label-size;
+                height: 19px;
+                overflow: elide;
+            }
+        }
+    }
+}
+
+// The recorded relations of one mod, in one direction.
+//
+// Fixed height rather than sized to its contents: the two sit side by side
+// on a mod's page, and a box that grew with its list would leave the pair
+// uneven and push the version list around as different mods are opened.
+export component RelationList inherits Rectangle {
+    in property <[RelationRow]> rows;
+    // What to show in place of an empty list.
+    in property <string> note;
+    // Tall enough for two rows carrying a project id under the name, which
+    // is the taller of the two shapes a row takes.
+    height: 96px * Theme.text-scale;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: Theme.border;
+    background: Theme.background;
+    ScrollView {
+        viewport-width: self.width;
+        VerticalLayout { alignment: start; padding: 9px; spacing: 3px;
+            if root.rows.length == 0 : BodyText {
+                text: root.note;
+                color: Theme.text-muted;
+                wrap: word-wrap;
+            }
+            for entry in root.rows : HorizontalLayout {
+                spacing: 6px;
+                height: entry.detail == "" ? 19px : 32px;
+                // The name a reader reads, with the id it resolves against
+                // under it rather than beside it: the id is what to quote
+                // in a bug report and never what to scan the list by.
+                VerticalLayout {
+                    alignment: center;
+                    horizontal-stretch: 1;
+                    Text {
+                        text: entry.name;
+                        color: Theme.text-secondary;
+                        font-size: Theme.label-size;
+                        overflow: elide;
+                    }
+                    if entry.detail != "" : Text {
+                        text: entry.detail;
+                        color: Theme.text-muted;
+                        font-size: Theme.caption-size;
+                        overflow: elide;
+                    }
+                }
+                // What the relation said, and how the jar stands, in that
+                // order: the kind is the durable fact, the state changes
+                // with every toggle.
+                Text {
+                    text: entry.kind;
+                    color: Theme.text-muted;
+                    font-size: Theme.caption-size;
+                    vertical-alignment: center;
+                }
+                if entry.state != "" : Text {
+                    text: entry.state;
+                    color: entry.attention ? Theme.warning : Theme.text-muted;
+                    font-size: Theme.caption-size;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}
+
+export component LinkedTargetsPanel inherits Rectangle {
+    in property <[LinkedTargetRow]> rows;
+    // Result lists are read-only; a confirmation's are not.
+    in property <bool> selectable: false;
+    callback toggled(int);
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: Theme.border;
+    background: Theme.background;
+    // Room for the first rows whatever the dialog around it works out, so
+    // a confirmation offering one server never hands it a scroll bar for a
+    // single line.
+    min-height: min(root.rows.length, 2) * 68px + 14px;
+    ScrollView {
+        viewport-width: self.width;
+        VerticalLayout { alignment: start; padding: 8px; spacing: 6px;
+            for row[index] in root.rows : Rectangle {
+                height: 62px;
+                border-radius: 5px;
+                border-width: row.selected ? 2px : 1px;
+                border-color: row.selected ? Theme.accent : Theme.border.with-alpha(0.6);
+                background: row.actionable || !root.selectable ? Theme.surface : Theme.surface.with-alpha(0.45);
+                // Under the row's content, so a click on the switch reaches
+                // the switch and a click anywhere else still selects.
+                TouchArea { enabled: root.selectable && row.actionable; mouse-cursor: pointer; clicked => { root.toggled(index); } }
+                HorizontalLayout { padding-left: 10px; padding-right: 10px; spacing: 10px;
+                    // A switch, because the state column says what the
+                    // operation would do to this server rather than whether
+                    // it was chosen, and a border weight is no answer to
+                    // "is this one selected".
+                    if root.selectable : VerticalLayout { alignment: center; Toggle { checked: row.selected; sets-its-own-position: false; enabled: row.actionable; accessible-name: row.name; toggled => { root.toggled(index); } } }
+                    // The explanation gets the full row width: a refusal is a
+                    // sentence, and eliding it to a column loses the reason.
+                    VerticalLayout { alignment: center; spacing: 1px; horizontal-stretch: 1;
+                        HorizontalLayout { spacing: 8px;
+                            Text { text: row.name; color: row.actionable || !root.selectable ? Theme.text : Theme.text-secondary; font-size: Theme.label-size; font-weight: 600; overflow: elide; horizontal-stretch: 1; }
+                            Text { text: row.detail; color: Theme.text-muted; font-size: Theme.caption-size; vertical-alignment: center; overflow: elide; horizontal-stretch: 0; }
+                        }
+                        Text { text: row.explanation; color: Theme.text-muted; font-size: Theme.caption-size; overflow: elide; }
+                    }
+                    VerticalLayout { alignment: center; max-width: 150px;
+                        // Muted while the row is off: what it would do is
+                        // still worth reading, but it is not what is about
+                        // to happen.
+                        if !row.blocked : Text { text: row.state; color: root.selectable && row.actionable && !row.selected ? Theme.text-muted : row.tone == "ok" ? Theme.success : row.tone == "error" ? Theme.danger : Theme.text-secondary; font-size: Theme.label-size; horizontal-alignment: right; overflow: elide; }
+                        if row.blocked : HorizontalLayout { Rectangle { horizontal-stretch: 1; } Pill { text: row.state; tone-color: row.tone == "error" ? Theme.danger : Theme.warning; } }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// One row of the Managed Mods list.
+//
+// Two lines of text and one badge. The provenance badge is the only badge:
+// everything else that distinguishes a row - an unknown version, a missing
+// file, the artwork's tone — is said in the place it belongs rather than
+// added as another chip.
+export component ModCard inherits Rectangle {
+    in property <ModRow> item;
+    // Whether this list lets a mod be turned off in place.
+    in property <bool> togglable;
+    // Whether this list can take a launcher-installed mod out of its host.
+    //
+    // A client's list can: removal resolves what the mod's dependencies
+    // leave orphaned and retires the jar. A server's cannot, so there the
+    // bin appears only for a jar the user placed themselves, which is
+    // theirs to delete whatever is listing it.
+    in property <bool> removable;
+    // Whether this host's mods are the user's, rather than a record of
+    // what a pack shipped. When they are, the bin takes a mod out of the
+    // instance for good; when they are not, it puts the jar aside so it
+    // can come back, which is how a crash gets bisected.
+    in property <bool> mods-are-the-users;
+    // Whether the bin takes this mod out of the host rather than only off
+    // disk. A mod whose release is not the user's to end - a library
+    // something else needs - keeps the reversible bin whatever the host
+    // says.
+    property <bool> bin-removes: root.removable && root.item.can-remove && root.mods-are-the-users;
+    callback manage(string);
+    callback toggle(string, bool);
+    callback delete-file(string, string);
+    callback restore-file(string);
+    height: 86px;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: root.item.suspect-confidence == "high" ? Theme.danger.with-alpha(0.7) : root.item.suspect-confidence != "" ? Theme.warning.with-alpha(0.6) : touch.has-hover && root.item.can-manage ? Theme.accent.with-alpha(0.7) : Theme.border;
+    background: Theme.background;
+    touch := TouchArea {
+        enabled: root.item.can-manage;
+        mouse-cursor: pointer;
+        clicked => { root.manage(root.item.logical-path); }
+    }
+    HorizontalLayout {
+        padding: 10px; spacing: 11px;
+        VerticalLayout { alignment: center; ModArtwork { icon: root.item.icon; origin-kind: root.item.origin-kind; } }
+        VerticalLayout {
+            alignment: center; spacing: 3px; horizontal-stretch: 1;
+            HorizontalLayout {
+                spacing: 8px;
+                Text {
+                    text: root.item.title;
+                    color: root.item.enabled ? Theme.text : Theme.text-muted;
+                    font-size: Theme.row-heading-size;
+                    font-weight: 600;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                    vertical-alignment: center;
+                }
+            }
+            Text {
+                text: root.item.provider-kind == "" ? root.item.version + " | " + root.item.provider : root.item.version;
+                color: root.item.version-known ? Theme.text-secondary : Theme.text-muted;
+                font-size: Theme.label-size;
+                overflow: elide;
+            }
+            Text {
+                // What the crash says outranks the descriptive line: a
+                // reader looking at a crashed server is looking for this.
+                text: root.item.suspect-reason != "" ? root.item.suspect-reason : root.item.deleted ? GuiI18n.text("gui-mod-file-deleted") : !root.item.enabled ? GuiI18n.text("gui-mod-disabled") : root.item.compatibility != "" ? root.item.compatibility : root.item.file-name;
+                color: root.item.suspect-confidence == "high" ? Theme.danger : root.item.suspect-confidence != "" ? Theme.warning : Theme.text-muted;
+                font-size: Theme.caption-size;
+                overflow: elide;
+            }
+        }
+        // The row's own trailing column: what this mod is on top, what can
+        // be done to it underneath. Kept out of the title row so the badges
+        // line up down the list however long a title runs, and so the bin
+        // sits under the badge that says whose file it is.
+        VerticalLayout {
+            alignment: center;
+            spacing: 6px;
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: end;
+                Pill { text: root.item.origin; tone-color: root.item.origin-kind == "pack" ? Theme.accent-secondary : root.item.origin-kind == "dependency" ? Theme.text-muted : root.item.origin-kind == "hand-placed" ? Theme.warning : Theme.accent; }
+                // Which catalog the mod came from, in that catalog's own
+                // color. Absent for an entry with no catalog identity,
+                // where the version line already says so.
+                if root.item.provider-kind != "" : Pill { text: root.item.provider; tone-color: root.item.provider-kind == "curseforge" ? Theme.curseforge : Theme.modrinth; }
+            }
+            // Both controls on one line under the badges, because they are
+            // the two things a reader does to a row and looking for them in
+            // two places is worse than either position.
+            //
+            // Declared after the card's own touch area so they take their
+            // own clicks instead of opening the mod manager behind them.
+            if root.togglable || root.item.can-delete-file || (root.removable && root.item.can-remove) : HorizontalLayout {
+                alignment: end;
+                spacing: 8px;
+                // Nothing to turn on or throw away while the jar is gone.
+                // The one thing left is putting it back.
+                if root.item.deleted : AppButton { text: GuiI18n.text("gui-restore-mod"); clicked => { root.restore-file(root.item.logical-path); } }
+                if !root.item.deleted && root.togglable : VerticalLayout { alignment: center; Toggle { checked: root.item.enabled; sets-its-own-position: false; accessible-name: GuiI18n.value("gui-mod-loads", root.item.title); toggled(on) => { root.toggle(root.item.logical-path, on); } } }
+                if !root.item.deleted && (root.item.can-delete-file || (root.removable && root.item.can-remove)) : IconButton {
+                    icon: @image-url("../../../../assets/icons/trash.svg");
+                    accessible-name: GuiI18n.value(root.item.can-delete-file && !root.bin-removes ? "gui-delete-mod" : "gui-remove-mod", root.item.title);
+                    clicked => { root.delete-file(root.item.logical-path, root.item.title); }
+                }
+            }
+        }
+    }
+}

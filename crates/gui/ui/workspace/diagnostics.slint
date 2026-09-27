@@ -1,0 +1,238 @@
+// The Diagnostics surface: integrity findings and diagnostic bundles.
+
+import { ScrollView, Spinner } from "std-widgets.slint";
+import { AppButton, Pill, TextField, Toggle } from "../components/controls.slint";
+import { BodyText, Divider, Heading, SectionTitle } from "../components/text.slint";
+import { GuiI18n } from "../globals.slint";
+import { BundlePartRow, IntegrityFindingRow } from "../models.slint";
+import { Theme } from "../theme.slint";
+
+export component IntegrityFindingList inherits Rectangle {
+    in property <[IntegrityFindingRow]> items;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: Theme.border;
+    background: Theme.background;
+    height: min(280px, list.preferred-height + 2px);
+    ScrollView {
+        viewport-width: self.width;
+        list := VerticalLayout {
+            padding: 8px;
+            spacing: 6px;
+            alignment: start;
+            for item in root.items : HorizontalLayout {
+                spacing: 10px;
+                BodyText { text: item.path; horizontal-stretch: 1; wrap: word-wrap; font-size: Theme.caption-size; }
+                VerticalLayout { alignment: center; Pill { text: item.label; tone-color: item.handling == "info" ? Theme.text-secondary : item.handling == "repair" ? Theme.warning : Theme.danger; } }
+            }
+        }
+    }
+}
+
+// The choice of what goes into one local diagnostic archive. Every row is
+// one the core planner offered; nothing else can be added here.
+export component DiagnosticBundlePanel inherits VerticalLayout {
+    in property <[BundlePartRow]> parts;
+    in property <string> selection;
+    in property <int> selected-count;
+    in property <bool> exporting;
+    in property <string> result;
+    in property <string> result-path;
+    in property <string> error;
+    callback toggle(string, bool);
+    callback select-all(bool);
+    callback export();
+    callback open-folder();
+    spacing: 8px;
+    SectionTitle { title: GuiI18n.text("gui-bundle-title"); detail: GuiI18n.text("gui-bundle-detail"); }
+    BodyText { text: GuiI18n.text("gui-bundle-privacy"); color: Theme.text-secondary; wrap: word-wrap; }
+    if root.parts.length == 0 : BodyText { text: GuiI18n.text("gui-bundle-empty"); color: Theme.text-muted; wrap: word-wrap; }
+    if root.parts.length > 0 : HorizontalLayout {
+        spacing: 8px;
+        BodyText { text: root.selection; color: Theme.text-secondary; horizontal-stretch: 1; vertical-alignment: center; }
+        AppButton { text: GuiI18n.text("gui-bundle-select-all"); enabled: !root.exporting; clicked => { root.select-all(true); } }
+        AppButton { text: GuiI18n.text("gui-bundle-select-none"); enabled: !root.exporting; clicked => { root.select-all(false); } }
+    }
+    if root.parts.length > 0 : Rectangle {
+        border-radius: 6px;
+        border-width: 1px;
+        border-color: Theme.border;
+        background: Theme.background;
+        height: min(300px, part-list.preferred-height + 2px);
+        ScrollView {
+            viewport-width: self.width;
+            part-list := VerticalLayout {
+                padding: 8px;
+                spacing: 6px;
+                alignment: start;
+                for part in root.parts : HorizontalLayout {
+                    spacing: 10px;
+                    VerticalLayout { alignment: center; Toggle { accessible-name: part.name; checked: part.selected; sets-its-own-position: false; enabled: !root.exporting; toggled(value) => { root.toggle(part.name, value); } } }
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        BodyText { text: part.name; wrap: word-wrap; }
+                        BodyText { text: part.kind; color: Theme.text-muted; font-size: Theme.caption-size; }
+                    }
+                    BodyText { text: part.size; color: Theme.text-secondary; vertical-alignment: center; }
+                }
+            }
+        }
+    }
+    if root.parts.length > 0 && root.selected-count == 0 : BodyText { text: GuiI18n.text("gui-bundle-choose-one"); color: Theme.warning; wrap: word-wrap; }
+    if root.error != "" : BodyText { text: root.error; color: Theme.danger; wrap: word-wrap; }
+    if root.result != "" : HorizontalLayout {
+        spacing: 8px;
+        BodyText { text: root.result; horizontal-stretch: 1; wrap: word-wrap; vertical-alignment: center; }
+        if root.result-path != "" : AppButton { text: GuiI18n.text("gui-bundle-show-folder"); clicked => { root.open-folder(); } }
+    }
+    if root.parts.length > 0 : HorizontalLayout {
+        if root.exporting : Spinner { indeterminate: true; width: 16px; height: 16px; }
+        Rectangle { horizontal-stretch: 1; }
+        AppButton { text: GuiI18n.text("gui-bundle-export"); tone: "primary"; enabled: root.selected-count > 0 && !root.exporting; clicked => { root.export(); } }
+    }
+}
+
+// Verification and repair for one host, from the files core records for
+// it. The state it shows belongs to the controller; this only lays it out.
+export component DiagnosticsSurface inherits Rectangle {
+    in property <bool> shared-supported;
+    in property <bool> host-running;
+    // A change is rewriting this host, such as the repair this started.
+    in property <bool> busy;
+    in property <bool> isolation-active;
+    // "unchecked", "verifying", "checked", or "stale".
+    in property <string> state;
+    in property <string> progress;
+    in property <string> summary;
+    in property <bool> healthy;
+    in property <string> counts;
+    in property <string> checked-at;
+    in property <[IntegrityFindingRow]> findings;
+    in property <int> finding-total;
+    // The filter the findings are narrowed by, owned by the host.
+    in property <string> query;
+    in property <[string]> repair-targets;
+    in property <[string]> unrepairable;
+    in property <string> shared-summary;
+    in property <[IntegrityFindingRow]> shared-faults;
+    in property <[string]> shared-notes;
+    in property <string> repair-result;
+    in property <bool> repair-failed;
+    in property <[string]> recovery;
+    in property <[BundlePartRow]> bundle-parts;
+    in property <string> bundle-selection;
+    in property <int> bundle-selected-count;
+    in property <bool> bundle-exporting;
+    in property <string> bundle-result;
+    in property <string> bundle-result-path;
+    in property <string> bundle-error;
+    callback verify();
+    callback stop();
+    callback repair();
+    callback filter(string);
+    callback open-logs();
+    callback toggle-bundle-part(string, bool);
+    callback select-all-bundle-parts(bool);
+    callback export-bundle();
+    callback open-bundle-folder();
+    // What Repair waits for the user to do. A repair already running is
+    // progress, which the workspace banner shows, not a requirement.
+    property <string> repair-requirement: root.busy ? ""
+        : root.host-running ? "running"
+        : root.isolation-active ? "isolation"
+        : "";
+    property <bool> working: root.state == "verifying" || root.busy;
+    ScrollView {
+        viewport-width: self.width;
+        VerticalLayout {
+            alignment: start;
+            width: min(parent.width, 980px);
+            spacing: 12px;
+            HorizontalLayout {
+                spacing: 10px;
+                SectionTitle { title: GuiI18n.text("gui-integrity-title"); detail: GuiI18n.text("gui-integrity-detail"); horizontal-stretch: 1; }
+                VerticalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-integrity-open-logs"); clicked => { root.open-logs(); } } }
+                if root.working : VerticalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-integrity-stop"); clicked => { root.stop(); } } }
+                VerticalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-integrity-verify"); tone: "primary"; enabled: !root.working; clicked => { root.verify(); } } }
+            }
+            if root.state == "verifying" : HorizontalLayout {
+                spacing: 8px;
+                Spinner { indeterminate: true; width: 16px; height: 16px; }
+                BodyText { text: root.progress != "" ? root.progress : GuiI18n.text("operation-verifying-host"); horizontal-stretch: 1; wrap: word-wrap; }
+            }
+            if root.state == "unchecked" : BodyText { text: GuiI18n.text("gui-integrity-unchecked"); color: Theme.text-secondary; wrap: word-wrap; }
+            if root.state == "checked" || root.state == "stale" : Rectangle {
+                border-radius: 8px;
+                border-width: 1px;
+                border-color: root.state == "stale" ? Theme.border : root.healthy ? Theme.success : Theme.warning;
+                background: Theme.surface;
+                height: outcome.preferred-height;
+                outcome := VerticalLayout {
+                    padding: 14px;
+                    spacing: 5px;
+                    Heading { text: root.summary; font-size: Theme.row-heading-size; color: root.state == "stale" ? Theme.text-secondary : root.healthy ? Theme.success : Theme.warning; wrap: word-wrap; }
+                    if root.counts != "" : BodyText { text: root.counts; color: Theme.text-secondary; wrap: word-wrap; }
+                    if root.checked-at != "" : BodyText { text: root.checked-at; color: Theme.text-muted; font-size: Theme.caption-size; }
+                    if root.state == "stale" : BodyText { text: GuiI18n.text("gui-integrity-stale"); color: Theme.text-secondary; wrap: word-wrap; }
+                }
+            }
+            if root.repair-result != "" : Rectangle {
+                border-radius: 8px;
+                border-width: 1px;
+                border-color: root.repair-failed || root.recovery.length > 0 ? Theme.danger : Theme.border;
+                background: Theme.surface;
+                height: result.preferred-height;
+                result := VerticalLayout {
+                    padding: 12px;
+                    spacing: 5px;
+                    BodyText { text: root.repair-result; wrap: word-wrap; }
+                    if root.recovery.length > 0 : BodyText { text: GuiI18n.text("gui-integrity-recovery"); color: Theme.danger; wrap: word-wrap; }
+                    for path in root.recovery : BodyText { text: path; color: Theme.text-secondary; font-size: Theme.caption-size; wrap: word-wrap; }
+                }
+            }
+            if root.state == "checked" && root.finding-total > 0 : VerticalLayout {
+                spacing: 8px;
+                HorizontalLayout {
+                    spacing: 8px;
+                    Heading { text: GuiI18n.text("gui-integrity-findings"); font-size: Theme.row-heading-size; horizontal-stretch: 1; vertical-alignment: center; }
+                    TextField { property <string> shown-query: root.query; changed shown-query => { self.text = self.shown-query; } init => { self.text = root.query; } placeholder: GuiI18n.text("gui-integrity-filter"); accessible-label: GuiI18n.text("gui-integrity-filter"); input-type: InputType.search; width: 220px; edited(text) => { root.filter(text); } }
+                }
+                if root.findings.length == 0 : BodyText { text: GuiI18n.value("gui-integrity-no-match", root.query); color: Theme.text-muted; wrap: word-wrap; }
+                if root.findings.length > 0 : IntegrityFindingList { items: root.findings; }
+            }
+            if root.state == "checked" && (root.repair-targets.length > 0 || root.unrepairable.length > 0) : VerticalLayout {
+                spacing: 8px;
+                Divider { }
+                SectionTitle { title: GuiI18n.text("gui-integrity-repair-title"); detail: GuiI18n.text("gui-integrity-repair-detail"); }
+                if root.repair-targets.length > 0 : BodyText { text: GuiI18n.count("gui-integrity-repair-targets", root.repair-targets.length); wrap: word-wrap; }
+                for path in root.repair-targets : BodyText { text: path; color: Theme.text-secondary; font-size: Theme.caption-size; wrap: word-wrap; }
+                if root.unrepairable.length > 0 : BodyText { text: GuiI18n.count("gui-integrity-unrepairable", root.unrepairable.length); color: Theme.warning; wrap: word-wrap; }
+                for path in root.unrepairable : BodyText { text: path; color: Theme.text-secondary; font-size: Theme.caption-size; wrap: word-wrap; }
+                if root.repair-targets.length > 0 && root.repair-requirement != "" : BodyText { text: GuiI18n.text(root.repair-requirement == "running" ? "gui-integrity-repair-blocked-running" : "gui-integrity-repair-blocked-isolation"); color: Theme.warning; wrap: word-wrap; }
+                if root.repair-targets.length > 0 : HorizontalLayout {
+                    Rectangle { horizontal-stretch: 1; }
+                    AppButton { text: GuiI18n.text("gui-integrity-repair"); tone: "primary"; enabled: !root.working && root.repair-requirement == ""; clicked => { root.repair(); } }
+                }
+            }
+            Divider { }
+            SectionTitle { title: GuiI18n.text("gui-integrity-shared-title"); detail: root.shared-supported ? GuiI18n.text("gui-integrity-shared-detail") : GuiI18n.text("gui-integrity-shared-servers"); }
+            if root.shared-supported && root.shared-summary != "" : BodyText { text: root.shared-summary; wrap: word-wrap; }
+            if root.shared-supported && root.shared-faults.length > 0 : IntegrityFindingList { items: root.shared-faults; }
+            for note in root.shared-notes : BodyText { text: note; color: Theme.text-secondary; wrap: word-wrap; }
+            Divider { }
+            DiagnosticBundlePanel {
+                parts: root.bundle-parts;
+                selection: root.bundle-selection;
+                selected-count: root.bundle-selected-count;
+                exporting: root.bundle-exporting;
+                result: root.bundle-result;
+                result-path: root.bundle-result-path;
+                error: root.bundle-error;
+                toggle(name, value) => { root.toggle-bundle-part(name, value); }
+                select-all(value) => { root.select-all-bundle-parts(value); }
+                export => { root.export-bundle(); }
+                open-folder => { root.open-bundle-folder(); }
+            }
+        }
+    }
+}

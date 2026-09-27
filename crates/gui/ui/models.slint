@@ -1,0 +1,663 @@
+// The row and view structs the Rust side fills models with.
+
+// One dependency Ephervex is built on. Generated from the real dependency
+// graph; nothing in the frontend decides what a package is licensed under.
+export struct LicenseRow {
+    name: string,
+    version: string,
+    // The package's own SPDX expression, exactly as its manifest declares
+    // it, which may offer a choice.
+    license: string,
+    // The full text or texts the package is covered by.
+    text: string,
+}
+
+// One notification on screen.
+export struct ToastRow {
+    // Stable for as long as this notification is shown, so dismissing one
+    // names the notification rather than a position that may have moved.
+    id: int,
+    message: string,
+    error: bool,
+    // How many identical notifications this panel stands for. Only shown
+    // once there is more than one.
+    repeats: int,
+}
+
+export struct InstanceRow {
+    snapshot-deletion-note: string,
+    id: string,
+    name: string,
+    minecraft: string,
+    loader: string,
+    loader-kind: string,
+    storage: string,
+    storage-kind: string,
+    source: string,
+    path: string,
+    updated: string,
+    linked-servers: int,
+    mods: int,
+    needs-attention: bool,
+    state: string,
+    state-kind: string,
+    can-launch: bool,
+    // Whether this launcher has a game running for the instance that it can
+    // stop. Not the negation of `can-launch`: an instance that needs
+    // attention cannot be launched and is not running either.
+    can-kill: bool,
+    connect-server-id: string,
+    connect-server-name: string,
+    can-connect: bool,
+    // What a linked server being built for this instance is doing, empty
+    // when none is. It is carried on the instance rather than listed
+    // beside it because the work belongs to this instance: a card of its
+    // own would be a second row for one thing.
+    creating-server-detail: string,
+    creating-server-progress: float,
+    creating-server-indeterminate: bool,
+    // Where a restart of this host is: "stopping", "starting", or empty.
+    // Carried on the row every view reads, so each one shows the same.
+    restart-stage: string,
+    // Whether this run launched the running game and so knows how to start
+    // it again the same way.
+    can-restart: bool,
+}
+
+export struct ServerRow {
+    snapshot-deletion-note: string,
+    id: string,
+    name: string,
+    minecraft: string,
+    loader: string,
+    loader-kind: string,
+    storage: string,
+    storage-kind: string,
+    relationship: string,
+    linked-client-id: string,
+    state: string,
+    state-kind: string,
+    state-detail: string,
+    address: string,
+    path: string,
+    installed: bool,
+    needs-attention: bool,
+    can-start: bool,
+    can-stop: bool,
+    can-restart: bool,
+    can-kill: bool,
+    can-send-command: bool,
+    can-connect: bool,
+    connect-reason: string,
+    // Where a restart of this host is: "stopping", "starting", or empty.
+    restart-stage: string,
+}
+
+export struct ImpactRow {
+    name: string,
+    // Where the jar is, which is what an action sends back.
+    logical-path: string,
+    // One is a direct dependent; more is a chain through other mods.
+    distance: int,
+}
+
+// One recorded relation, on the page of the mod it is about. Every string
+// arrives localized: the markup places these, it does not word them.
+export struct RelationRow {
+    name: string,
+    // The exact provider project id, when the name above is the catalog's
+    // own title. Empty when the name is already the id, so nothing is
+    // printed twice.
+    detail: string,
+    kind: string,
+    // How the jar stands here, empty when it is simply loading.
+    state: string,
+    attention: bool,
+}
+
+export struct ModRow {
+    project-id: string,
+    logical-path: string,
+    title: string,
+    file-name: string,
+    version: string,
+    version-known: bool,
+    provider: string,
+    // "modrinth", "curseforge", or empty for an entry with no catalog
+    // identity. The display string above is what a reader sees; this is
+    // what the row is colored by.
+    provider-kind: string,
+    origin: string,
+    origin-kind: string,
+    compatibility: string,
+    author: string,
+    icon: image,
+    // Whether the loader will load this mod. A disabled mod is installed
+    // and recorded; it is simply renamed out of the loader's way.
+    enabled: bool,
+    // The jar is gone and the instance still wants it, so the row offers to
+    // put it back instead of offering to delete it again.
+    deleted: bool,
+    pack-owned: bool,
+    can-manage: bool,
+    can-change-version: bool,
+    can-update: bool,
+    can-remove: bool,
+    // Whether the jar itself may be thrown away. True only for one the user
+    // put in the mods folder themselves, which is the only file here that
+    // is theirs rather than the launcher's.
+    can-delete-file: bool,
+    restriction: string,
+    // Why the newest crash report points at this mod, already localized.
+    // Empty for a mod no crash implicates.
+    suspect-reason: string,
+    // "high", "medium", or "low". Stated evidence outranks inferred, and
+    // the row is weighted accordingly.
+    suspect-confidence: string,
+}
+
+export struct IsolationCandidateRow {
+    path: string,
+    display-path: string,
+    name: string,
+    selected: bool,
+}
+
+// One recorded file a verification found something to say about.
+export struct IntegrityFindingRow {
+    path: string,
+    // The core answer: "absent", "corrupt", "unreadable", or "unverifiable".
+    integrity: string,
+    label: string,
+    // "repair" when a repair replaces it, "manual" when it is wrong and
+    // nothing can fetch it again, "info" when nothing proves it either way.
+    handling: string,
+}
+
+// One thing a diagnostic bundle could carry, as the core planner offers it.
+export struct BundlePartRow {
+    name: string,
+    kind: string,
+    size: string,
+    selected: bool,
+}
+
+// One part of Ephervex's storage, as the disk usage view shows it.
+export struct DiskUsageRow {
+    // The core category or retention identifier.
+    id: string,
+    label: string,
+    detail: string,
+    size: string,
+    // Share of the whole measurement, from 0 to 1.
+    fraction: float,
+    // Directories that are this part, where it has its own.
+    locations: [string],
+}
+
+// One surface a host workspace offers. The workspace chrome only knows
+// stable ids and labels; each host decides which surfaces it has.
+export struct WorkspaceSurfaceRow {
+    id: string,
+    label: string,
+}
+
+// A server reached through the client it is linked to.
+export struct WorkspaceLinkedChoice {
+    id: string,
+    name: string,
+    state: string,
+    state-kind: string,
+}
+
+// One host a pane can be pointed at, as the host picker's card shows it.
+export struct WorkspaceHostChoice {
+    kind: string,
+    id: string,
+    name: string,
+    summary: string,
+    loader-kind: string,
+    state: string,
+    state-kind: string,
+    // A client's linked servers, pickable from its card.
+    linked: [WorkspaceLinkedChoice],
+}
+
+// One action belonging to a durable workflow shown above every surface.
+// The workspace does not interpret the id, so isolation is not privileged
+// over another long-running developer workflow added later.
+export struct WorkflowActionRow {
+    id: string,
+    label: string,
+    tone: string,
+    enabled: bool,
+    requires-stopped: bool,
+}
+
+// One dropped jar whose name the mods folder already has.
+export struct LocalModClashRow {
+    source: string,
+    file-name: string,
+    // Whether the jar already there is one the loader is ignoring, which
+    // changes what replacing it means.
+    existing-is-disabled: bool,
+}
+
+export struct ModVersionRow {
+    version-id: string,
+    name: string,
+    number: string,
+    channel: string,
+    published: string,
+    installed: bool,
+    newest: bool,
+    // The project's author does not allow other launchers to download
+    // this release. A status on the release, not a reason to hide it:
+    // it can still be chosen, and a copy Ephervex already holds installs
+    // without the browser.
+    restricted: bool,
+}
+
+// One optional client component the import modal can offer. `logical-path`
+// is the stable identity a selection is toggled and submitted by;
+// `display` is what the row shows.
+// One temporary linked server that can move with its instance. `id` is the
+// identity a selection is toggled and submitted by; `display` is the name
+// the row shows.
+export struct PromoteServerRow {
+    id: string,
+    display: string,
+    selected: bool,
+}
+
+export struct ImportOptionRow {
+    logical-path: string,
+    display: string,
+    selected: bool,
+}
+
+// One file a provider refused to serve, still waiting on a watcher match
+// or a skip. `identity` is the opaque join key `skip-blocked-file`/
+// `open-blocked-file` are called with; the two lines are the project's
+// and the file's own names, falling back to their catalog ids.
+export struct BlockedFileRow {
+    identity: string,
+    project-line: string,
+    file-line: string,
+    browser-url: string,
+}
+
+// One project a manifest declared twice under different file ids.
+// Purely informational - the file that fits was already kept
+// automatically - so unlike BlockedFileRow this carries no identity to
+// act on.
+export struct ImportDuplicateRow {
+    project-line: string,
+    kept-line: string,
+    discarded-line: string,
+    matched-minecraft-version: bool,
+}
+
+// One linked server in a mod confirmation, or one finished target in a
+// result. The same shape serves both so the two cannot describe the same
+// server differently.
+export struct LinkedTargetRow {
+    id: string,
+    name: string,
+    detail: string,
+    state: string,
+    explanation: string,
+    tone: string,
+    actionable: bool,
+    // Whether `state` is a refusal rather than what this target is about
+    // to do. A refusal is one word and reads as a badge; what a target
+    // will do is a sentence and does not.
+    blocked: bool,
+    selected: bool,
+}
+
+export struct ModSearchRow {
+    project-id: string,
+    title: string,
+    description: string,
+    author: string,
+    // The project's cached artwork, or an empty image when there is none.
+    icon: image,
+    // A short, already-localized note about the result, such as whether it
+    // fits this instance. Not a number and not a catalog statistic.
+    note: string,
+    // Whether this instance already has the project. Decided against the
+    // managed mods list, so it follows an install without a re-search.
+    installed: bool,
+    // Whether an install for this project is queued or under way.
+    queued: bool,
+}
+
+export struct DiagnosticRow {
+    scope-kind: string,
+    scope-id: string,
+    entity: string,
+    kind: string,
+    name: string,
+    path: string,
+    modified: string,
+    size: string,
+    summary: string,
+}
+
+export struct SnapshotRow {
+    id: string,
+    label: string,
+    captured: string,
+    size: string,
+    mods: string,
+    origin: string,
+    copy-method: string,
+    uses-full-space: bool,
+}
+
+export struct RunningRow {
+    // "client" or "server", which decides where every action goes.
+    kind: string,
+    id: string,
+    // Which of that entity's launches this row is, empty for the first and
+    // for every server.
+    launch: string,
+    name: string,
+    pid: string,
+    uptime: string,
+    // Live CPU and memory. Empty on the first poll, because CPU is a rate
+    // and there is nothing yet to compare against.
+    usage: string,
+    last-line: string,
+    controllable: bool,
+    can-stop: bool,
+}
+
+export struct LogChunk {
+    text: string,
+    level: string,
+}
+
+// What one pane's log viewer shows. Each Logs or Console pane has its own.
+export struct LogView {
+    // "live", "files", or "crashes".
+    mode: string,
+    // The saved log or crash report open, by its listed name.
+    file: string,
+    files: [DiagnosticRow],
+    // The open crash report's text.
+    report: string,
+    chunks: [LogChunk],
+    has-content: bool,
+    status: string,
+    history-truncated: bool,
+    pending-lines: int,
+    content-columns: int,
+    // The search the rows are narrowed by.
+    query: string,
+    wrap-lines: bool,
+    follow: bool,
+    trace-enabled: bool,
+    debug-enabled: bool,
+    info-enabled: bool,
+    warn-enabled: bool,
+    error-enabled: bool,
+    fatal-enabled: bool,
+    other-enabled: bool,
+    revision: int,
+    // The selection in reading order, as byte offsets into each end's own
+    // row. -1 is no selection.
+    selection-start-row: int,
+    selection-start-offset: int,
+    selection-end-row: int,
+    selection-end-offset: int,
+    has-selection: bool,
+    selection-revision: int,
+}
+
+export struct ActivityRow {
+    id: string,
+    title: string,
+    entity: string,
+    status: string,
+    detail: string,
+    time: string,
+    progress: float,
+    indeterminate: bool,
+    active: bool,
+    failed: bool,
+    cancellable: bool,
+}
+
+export struct AccountRow {
+    id: string,
+    name: string,
+    kind: string,
+    is-default: bool,
+    credential-state: string,
+}
+
+export struct JavaRow {
+    path: string,
+    version: string,
+    vendor: string,
+    origin: string,
+    compatible: string,
+}
+
+// One product preference as the Minecraft defaults screen renders it.
+//
+// Everything a row needs and nothing it has to work out for itself: the
+// editor to use, the value to show, whether Ephervex applies it, and what
+// the previewed release does with it are all decided in Rust against the
+// bundled catalog and core's own compatibility answer.
+export struct MinecraftPreferenceRow {
+    id: string,
+    label: string,
+    technical-id: string,
+    // Non-empty on the first row of a group, so one flat list still reads
+    // as sections.
+    section-heading: string,
+    editor: string,
+    advanced: bool,
+    overridden: bool,
+    state-text: string,
+    can-reset: bool,
+    dirty: bool,
+    bool-value: bool,
+    // The numeric field's text, the window size's width, or the free-text
+    // value, depending on the editor.
+    text-value: string,
+    height-text: string,
+    number-value: float,
+    number-min: float,
+    number-max: float,
+    number-step: float,
+    number-readout: string,
+    number-hint: string,
+    // The window size picker's own presentation. Neither is stored.
+    aspect-index: int,
+    aspect-locked: bool,
+    enum-labels: [string],
+    enum-index: int,
+    binding-label: string,
+    invalid: bool,
+    validation: string,
+    notice: string,
+    status: string,
+    status-kind: string,
+    status-detail: string,
+}
+
+export struct PendingEntityRow {
+    id: string,
+    name: string,
+    target: string,
+    loader-kind: string,
+    storage: string,
+    storage-kind: string,
+    state: string,
+    server: bool,
+    linked-client-id: string,
+    // What the work is doing right now, and how far through it is. Empty
+    // and indeterminate for a creation with nothing to report.
+    detail: string,
+    progress: float,
+    indeterminate: bool,
+}
+
+// One host the workspace shows, as every pane showing it reads it. Built
+// once per host rather than per pane, so two panes on one host cannot
+// disagree about it.
+export struct HostView {
+    // "client" or "server".
+    kind: string,
+    id: string,
+    // False once the host has left the registry.
+    available: bool,
+    // The host's own row; only the one matching `kind` is filled.
+    client: InstanceRow,
+    server: ServerRow,
+    surfaces: [WorkspaceSurfaceRow],
+    // A client's linked servers, and those still being created.
+    linked-servers: [ServerRow],
+    pending-servers: [PendingEntityRow],
+    // The newest crash review; an empty report when the host never crashed.
+    crash-report: string,
+    crash-failure: string,
+    crash-client-code-on-server: bool,
+    crash-suggested: int,
+    snapshots: [SnapshotRow],
+    snapshot-total: string,
+    snapshots-have-plain-copies: bool,
+    // A client's runtime settings as stored. Empty where it follows the
+    // global setting.
+    runtime-java: string,
+    runtime-memory-min: string,
+    runtime-memory-max: string,
+    runtime-jvm-args: string,
+    runtime-pinned: bool,
+    runtime-global: string,
+    allow-pack-mod-changes: bool,
+    // Bumped each time the stored settings are read, so an open form
+    // starts over from them.
+    runtime-revision: int,
+    // A server's properties as stored, and the same kind of revision.
+    property-motd: string,
+    property-max-players: string,
+    property-difficulty: string,
+    property-gamemode: string,
+    property-allow-flight: bool,
+    property-pvp: bool,
+    property-allowlist: bool,
+    property-online-mode: bool,
+    // "Localhost", "LAN", or "Custom".
+    property-access: string,
+    property-address: string,
+    property-port: string,
+    properties-revision: int,
+    // The host's mods through the filter, the filter, and what the list
+    // has to say about itself.
+    mods: [ModRow],
+    mods-query: string,
+    mods-notice: string,
+    // A client's catalog browser: the catalog shown, the search on
+    // screen, and its results.
+    browser-provider: string,
+    browser-submitted: string,
+    browser-search-provider: string,
+    browser-loading: bool,
+    browser-ran: bool,
+    browser-notice: string,
+    browser-results: [ModSearchRow],
+    // Where the provider says its next page begins, or -1 once there is none.
+    browser-next-offset: int,
+    // The host's mod isolation, as its surface shows it. An empty phase is
+    // the same as "none": nothing is set up.
+    isolation-phase: string,
+    isolation-active: bool,
+    isolation-summary: string,
+    isolation-confidence: string,
+    isolation-round: int,
+    isolation-granularity: int,
+    isolation-candidates: [IsolationCandidateRow],
+    isolation-enabled: [string],
+    isolation-disabled: [string],
+    isolation-unrecorded: [string],
+    isolation-unidentifiable: [string],
+    isolation-missing: [string],
+    isolation-linked-servers: [string],
+    isolation-remaining-candidates: [string],
+    isolation-pinned: [string],
+    isolation-required-dependencies: [string],
+    isolation-history: [string],
+    // Why the session's round cannot be answered yet: "running" or "failed".
+    isolation-recovery: string,
+    isolation-recovery-detail: string,
+    isolation-reduced-confidence: bool,
+    isolation-accept-unrecorded: bool,
+    isolation-accept-missing: bool,
+    isolation-query: string,
+    // The durable workflow attached to the host, shown above every one of
+    // its surfaces. The workspace renders these without knowing which
+    // feature owns them.
+    workflow-id: string,
+    workflow-title: string,
+    workflow-summary: string,
+    workflow-actions: [WorkflowActionRow],
+    // The surface that shows the workflow in full, and the first pane
+    // showing it, or 0 for none: the other panes leave the banner to it.
+    workflow-surface: string,
+    workflow-pane: int,
+    // What the Diagnostics surface shows for the host: "unchecked",
+    // "verifying", "checked", or "stale". Empty is "unchecked".
+    integrity-state: string,
+    integrity-progress: string,
+    integrity-summary: string,
+    integrity-healthy: bool,
+    integrity-counts: string,
+    integrity-checked-at: string,
+    integrity-findings: [IntegrityFindingRow],
+    integrity-finding-total: int,
+    integrity-query: string,
+    integrity-repair-targets: [string],
+    integrity-unrepairable: [string],
+    integrity-shared-summary: string,
+    integrity-shared-faults: [IntegrityFindingRow],
+    integrity-shared-notes: [string],
+    integrity-repair-result: string,
+    integrity-repair-failed: bool,
+    integrity-recovery: [string],
+    // The diagnostic bundle being chosen for the host.
+    bundle-parts: [BundlePartRow],
+    bundle-selection: string,
+    bundle-selected-count: int,
+    bundle-exporting: bool,
+    bundle-result: string,
+    bundle-result-path: string,
+    bundle-error: string,
+}
+
+// One pane: which host view it shows, on which surface, and where.
+export struct WorkspacePaneRow {
+    // The pane's composition identity, which callbacks name it by.
+    id: int,
+    // Index into the window's host views.
+    host: int,
+    // Index into the window's log views, or -1 for a pane not on Logs or Console.
+    log: int,
+    surface: string,
+    // What assistive technology calls the pane: where it is, its host, and
+    // its surface, so two panes on one host are never named alike.
+    label: string,
+    // Index into the host's surfaces.
+    surface-choice: int,
+    column: int,
+    row: int,
+    // Whether the pane shares its column with a second pane.
+    stacked: bool,
+    can-split-beside: bool,
+    can-split-below: bool,
+    can-close: bool,
+}

@@ -54,6 +54,34 @@ Provider-neutral types stay neutral. A Modrinth project ID or CurseForge file ID
 belongs in an explicit provider/source field, not in a generic loader, file, or
 instance identity.
 
+## Desktop interface markup
+
+The desktop interface is written in standalone Slint modules under
+`crates/gui/ui`. `build.rs` compiles `app.slint` with `slint-build` in the
+`fluent` style, and `crates/gui/src/ui.rs` includes the generated bindings, so
+the markup is ordinary `.slint` source to Slint-aware editors and nothing about
+the build depends on one. Debug information is kept for every profile but
+release, because the headless tests find elements by it.
+
+| Module | Holds |
+|---|---|
+| `app.slint` | `AppWindow`: the properties and callbacks Rust reads and invokes, the navigation shell, its pages, and its modals |
+| `theme.slint` | The `Theme` global, the one place colors, text sizes, and shared measurements are written |
+| `globals.slint` | `GuiI18n` and `PropertyRules`, globals whose answers Rust supplies |
+| `models.slint` | The row and view structs Rust fills models with |
+| `components/` | Text primitives, controls, and artwork shared by every surface |
+| `workspace/` | A host workspace's chrome and its surfaces: mods, logs, isolation, diagnostics, snapshots, and host settings |
+| `home/` | The client and server cards, the inspector, and the Running and Activity cards |
+| `settings/` | Application settings panels and the Minecraft defaults screen with its window size picker |
+
+Rust sees only what `app.slint` exports: the globals and windows by name and the
+row structs through `export * from "models.slint"`. A new type Rust needs is
+exported there. Rust owns application and feature state; the markup renders it
+and reports what the user asked for.
+
+Tests that read the markup as text go through `test_support::UI_SOURCES`, which
+a test keeps in step with the files on disk.
+
 ## Instance and shared-storage model
 
 Instance directories contain mutable reproduction state: configuration, saves,

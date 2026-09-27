@@ -1,0 +1,46 @@
+// Loader glyphs and mod artwork, with the fallbacks drawn when no image is available.
+
+import { Theme } from "../theme.slint";
+
+export component LoaderGlyph inherits Rectangle {
+    in property <string> kind;
+    in property <bool> server: false;
+    width: 52px; height: 52px;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: server ? Theme.server : kind == "forge" ? Theme.forge : kind == "neoforge" ? Theme.neoforge : Theme.vanilla;
+    background: root.border-color.with-alpha(0.09);
+    // Every glyph is drawn in the same 48-unit box at the same stroke
+    // weight, so one geometry serves all of them and a server does not come
+    // out visibly heavier than the loader beside it in the same list.
+    //
+    // Colorized from the tile's own border, so the glyph and the frame
+    // around it can never disagree and the tones live in `Theme` alone.
+    Image {
+        x: 7px; y: 7px; width: 38px; height: 38px;
+        source: root.server ? @image-url("../../../../assets/icons/environment-server.svg") : root.kind == "forge" ? @image-url("../../../../assets/icons/environment-forge.svg") : root.kind == "neoforge" ? @image-url("../../../../assets/icons/environment-neoforge.svg") : @image-url("../../../../assets/icons/environment-vanilla.svg");
+        image-fit: contain;
+        colorize: root.border-color;
+    }
+}
+
+// A mod's artwork, or the same shape without it. The rectangle is drawn
+// whether or not an icon arrived, so a list whose images are still loading
+// - or that will never get any - has the same layout as one whose images
+// are all present.
+export component ModArtwork inherits Rectangle {
+    in property <image> icon;
+    in property <string> origin-kind;
+    // The tile's edge length. Everything inside is derived from it so a
+    // caller changes one number rather than three.
+    in property <length> size: 56px;
+    property <color> tone: root.origin-kind == "pack" ? Theme.accent-secondary : root.origin-kind == "dependency" ? Theme.text-muted : root.origin-kind == "hand-placed" ? Theme.warning : Theme.accent;
+    width: root.size; height: root.size;
+    border-radius: root.size / 7;
+    border-width: 1px;
+    border-color: root.tone.with-alpha(0.45);
+    background: root.tone.with-alpha(0.1);
+    clip: true;
+    if root.icon.width > 0 : Image { x: 3px; y: 3px; width: root.size - 6px; height: root.size - 6px; source: root.icon; image-fit: contain; }
+    if root.icon.width == 0 : Image { x: root.size / 4; y: root.size / 4; width: root.size / 2; height: root.size / 2; source: @image-url("../../../../assets/icons/semantic-mod.svg"); image-fit: contain; colorize: root.tone; }
+}

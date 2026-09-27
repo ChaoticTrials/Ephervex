@@ -1,0 +1,303 @@
+// The Isolation surface: setup, rounds, recovery, and results.
+
+import { ScrollView } from "std-widgets.slint";
+import { AcknowledgementToggle, AppButton, TextField, Toggle } from "../components/controls.slint";
+import { ActionRow, BodyText, Heading, SectionTitle } from "../components/text.slint";
+import { GuiI18n } from "../globals.slint";
+import { IsolationCandidateRow } from "../models.slint";
+import { Theme } from "../theme.slint";
+
+export component IsolationFilePanel inherits Rectangle {
+    in property <string> title;
+    in property <[string]> items;
+    in property <color> tone;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: root.tone;
+    background: Theme.surface;
+    VerticalLayout {
+        padding: 10px;
+        spacing: 6px;
+        Heading { text: root.title; font-size: Theme.row-heading-size; }
+        ScrollView {
+            viewport-width: self.width;
+            VerticalLayout {
+                alignment: start;
+                spacing: 4px;
+                for item in root.items : BodyText { text: item; font-size: Theme.caption-size; }
+            }
+        }
+    }
+}
+
+export component IsolationHistory inherits Rectangle {
+    in property <[string]> items;
+    visible: root.items.length > 0;
+    height: self.visible ? min(150px, root.items.length * 27px + 42px) : 0px;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: Theme.border;
+    background: Theme.surface;
+    VerticalLayout {
+        padding: 10px;
+        spacing: 5px;
+        Heading { text: GuiI18n.text("gui-isolation-history"); font-size: Theme.row-heading-size; }
+        ScrollView { viewport-width: self.width; VerticalLayout { alignment: start; spacing: 4px; for item in root.items : BodyText { text: item; font-size: Theme.caption-size; } } }
+    }
+}
+
+// Why the current round cannot be answered yet, with a way to try again.
+export component IsolationRecoveryNotice inherits Rectangle {
+    in property <string> recovery;
+    in property <string> detail;
+    in property <bool> busy;
+    callback retry();
+    border-radius: 7px;
+    border-width: 1px;
+    border-color: root.recovery == "failed" ? Theme.danger : Theme.warning;
+    background: Theme.surface;
+    HorizontalLayout {
+        padding: 12px;
+        spacing: 10px;
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: 4px;
+            BodyText { text: GuiI18n.text(root.recovery == "running" ? "gui-isolation-recovery-running" : "gui-isolation-recovery-failed"); wrap: word-wrap; }
+            if root.detail != "" : BodyText { text: root.detail; color: Theme.text-secondary; wrap: word-wrap; }
+        }
+        VerticalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-isolation-recovery-retry"); enabled: !root.busy; clicked => { root.retry(); } } }
+    }
+}
+
+export component IsolationResultGroups inherits ScrollView {
+    in property <[string]> remaining-candidates;
+    in property <[string]> pinned;
+    in property <[string]> required-dependencies;
+    viewport-width: self.width;
+    VerticalLayout {
+        alignment: start;
+        spacing: 8px;
+        SectionTitle { title: GuiI18n.text("gui-isolation-remaining-candidates"); detail: GuiI18n.text("gui-isolation-remaining-candidates-detail"); }
+        if root.remaining-candidates.length == 0 : BodyText { text: GuiI18n.text("gui-isolation-no-remaining-candidates"); color: Theme.text-secondary; wrap: word-wrap; }
+        for item in root.remaining-candidates : BodyText { text: item; color: Theme.text-secondary; }
+        if root.pinned.length > 0 : VerticalLayout {
+            spacing: 5px;
+            SectionTitle { title: GuiI18n.text("gui-isolation-pinned-result"); detail: GuiI18n.text("gui-isolation-pinned-result-detail"); }
+            for item in root.pinned : BodyText { text: item; color: Theme.text-secondary; }
+        }
+        if root.required-dependencies.length > 0 : VerticalLayout {
+            spacing: 5px;
+            SectionTitle { title: GuiI18n.text("gui-isolation-result-dependencies"); detail: GuiI18n.text("gui-isolation-result-dependencies-detail"); }
+            for item in root.required-dependencies : BodyText { text: item; color: Theme.text-secondary; }
+        }
+    }
+}
+
+export component IsolationSurface inherits Rectangle {
+    in property <string> phase;
+    in property <string> summary;
+    in property <string> confidence;
+    in property <int> round;
+    in property <int> granularity;
+    in property <[IsolationCandidateRow]> candidates;
+    in property <[string]> enabled-items;
+    in property <[string]> disabled-items;
+    in property <[string]> unrecorded;
+    in property <[string]> unidentifiable;
+    in property <[string]> missing;
+    in property <[string]> linked-servers;
+    in property <[string]> remaining-candidates;
+    in property <[string]> pinned;
+    in property <[string]> required-dependencies;
+    in property <[string]> history;
+    in property <bool> reduced-confidence;
+    in property <bool> busy;
+    in property <bool> host-running;
+    in property <string> recovery;
+    in property <string> recovery-detail;
+    // The filter the candidates are narrowed by, and the acknowledgements a
+    // reduced-confidence start needs. The host owns them, so every view of
+    // the host agrees; the controls ask for changes rather than make them.
+    in property <string> query;
+    in property <bool> accept-unrecorded;
+    in property <bool> accept-missing;
+    in property <string> error;
+    // The first thing Start waits for the user to do, named beside it.
+    // An isolation change in flight is progress, not a requirement: the
+    // workspace's progress banner already says what it is doing.
+    property <string> start-requirement: root.busy ? ""
+        : root.host-running ? "running"
+        : root.missing.length > 0 && !root.accept-missing ? "missing"
+        : root.unrecorded.length > 0 && !root.accept-unrecorded ? "unrecorded"
+        : "";
+    callback filter(string);
+    callback toggle-pin(string, bool);
+    // ("missing" | "unrecorded", accepted)
+    callback acknowledge(string, bool);
+    callback begin();
+    callback start-session(bool, bool);
+    callback answer(string);
+    callback undo();
+    callback finish();
+    callback cancel();
+    callback discard-setup();
+    callback retry-recovery();
+    callback close();
+    background: Theme.background;
+
+    if root.phase == "none" : VerticalLayout {
+        alignment: center;
+        spacing: 10px;
+        Heading { text: GuiI18n.text("gui-isolation-title"); horizontal-alignment: center; }
+        BodyText { text: GuiI18n.text("gui-isolation-empty-detail"); color: Theme.text-muted; horizontal-alignment: center; wrap: word-wrap; }
+        HorizontalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-isolation-start-setup"); tone: "primary"; enabled: !root.busy; clicked => { root.begin(); } } }
+    }
+    if root.phase == "setup" : HorizontalLayout {
+        spacing: 14px;
+        Rectangle {
+            horizontal-stretch: 1;
+            border-radius: 7px;
+            border-width: 1px;
+            border-color: Theme.border;
+            background: Theme.surface;
+            VerticalLayout {
+                padding: 14px;
+                spacing: 9px;
+                SectionTitle {
+                    vertical-stretch: 0;
+                    title: GuiI18n.text("gui-isolation-candidates");
+                    detail: GuiI18n.text("gui-isolation-pinned-detail");
+                }
+                TextField {
+                    vertical-stretch: 0;
+                    property <string> shown-query: root.query;
+                    changed shown-query => { self.text = self.shown-query; }
+                    init => { self.text = root.query; }
+                    placeholder: GuiI18n.text("gui-isolation-search");
+                    accessible-label: GuiI18n.text("gui-isolation-search");
+                    input-type: InputType.search;
+                    edited(value) => { root.filter(value); }
+                }
+                if root.candidates.length == 0 : Rectangle {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 8px;
+                        Heading { text: GuiI18n.text("gui-isolation-no-candidates"); horizontal-alignment: center; }
+                        BodyText { text: GuiI18n.text("gui-isolation-no-candidates-detail"); color: Theme.text-muted; horizontal-alignment: center; wrap: word-wrap; }
+                    }
+                }
+                if root.candidates.length > 0 : ScrollView {
+                    vertical-stretch: 1;
+                    viewport-width: self.width;
+                    VerticalLayout {
+                        alignment: start;
+                        spacing: 6px;
+                        for candidate in root.candidates : Rectangle {
+                            height: 52px;
+                            border-radius: 5px;
+                            border-width: 1px;
+                            border-color: candidate.selected ? Theme.accent : Theme.border;
+                            background: Theme.background;
+                            HorizontalLayout {
+                                padding-left: 10px; padding-right: 10px; spacing: 9px; cross-axis-alignment: center;
+                                Toggle { checked: candidate.selected; accessible-name: candidate.name; toggled(on) => { root.toggle-pin(candidate.path, on); } }
+                                VerticalLayout { alignment: center; horizontal-stretch: 1; BodyText { text: candidate.name; overflow: elide; } BodyText { text: candidate.display-path; color: Theme.text-muted; font-size: Theme.caption-size; overflow: elide; } }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Rectangle {
+            width: min(390px, parent.width * 0.38);
+            border-radius: 7px;
+            border-width: 1px;
+            border-color: Theme.border;
+            background: Theme.surface;
+            VerticalLayout {
+                padding: 14px;
+                spacing: 10px;
+                Heading { text: GuiI18n.text("gui-isolation-setup"); }
+                BodyText { text: root.summary; wrap: word-wrap; }
+                ScrollView {
+                    viewport-width: self.width;
+                    VerticalLayout {
+                        alignment: start;
+                        spacing: 7px;
+                        if root.missing.length > 0 : BodyText { text: GuiI18n.text("gui-isolation-missing"); color: Theme.danger; wrap: word-wrap; }
+                        for item in root.missing : BodyText { text: item; color: Theme.text-secondary; font-size: Theme.caption-size; wrap: word-wrap; }
+                        if root.unrecorded.length > 0 : BodyText { text: GuiI18n.count("gui-isolation-unrecorded", root.unrecorded.length); color: Theme.warning; wrap: word-wrap; }
+                        for item in root.unrecorded : BodyText { text: item; color: Theme.text-secondary; font-size: Theme.caption-size; wrap: word-wrap; }
+                        if root.unrecorded.length > 0 : BodyText { text: GuiI18n.text("gui-isolation-unrecorded-detail"); color: Theme.text-secondary; wrap: word-wrap; }
+                        if root.unidentifiable.length > 0 : BodyText { text: GuiI18n.count("gui-isolation-unidentifiable", root.unidentifiable.length); color: Theme.warning; wrap: word-wrap; }
+                        for item in root.unidentifiable : BodyText { text: item; color: Theme.text-secondary; font-size: Theme.caption-size; wrap: word-wrap; }
+                        if root.linked-servers.length > 0 : BodyText { text: GuiI18n.count("gui-isolation-linked-servers", root.linked-servers.length); color: Theme.text-secondary; wrap: word-wrap; }
+                    }
+                }
+                // Outside the scrolling warnings, so no list is long enough
+                // to hide the choices Start waits for.
+                if root.missing.length > 0 : AcknowledgementToggle { label: GuiI18n.text("gui-isolation-accept-missing"); enabled: !root.busy; checked: root.accept-missing; toggled(value) => { root.acknowledge("missing", value); } }
+                if root.unrecorded.length > 0 : AcknowledgementToggle { label: GuiI18n.text("gui-isolation-accept-unrecorded"); enabled: !root.busy; checked: root.accept-unrecorded; toggled(value) => { root.acknowledge("unrecorded", value); } }
+                if root.error != "" : BodyText { text: root.error; color: Theme.danger; wrap: word-wrap; }
+                if root.start-requirement != "" : BodyText { text: GuiI18n.text(root.start-requirement == "running" ? "gui-isolation-start-blocked-running" : root.start-requirement == "missing" ? "gui-isolation-start-blocked-missing" : "gui-isolation-start-blocked-unrecorded"); color: Theme.warning; wrap: word-wrap; }
+                ActionRow {
+                    AppButton { text: GuiI18n.text("gui-cancel"); enabled: !root.busy; clicked => { root.discard-setup(); } }
+                    Rectangle { horizontal-stretch: 1; }
+                    AppButton {
+                        text: GuiI18n.text("gui-isolation-start");
+                        tone: "primary";
+                        enabled: !root.busy && root.start-requirement == "";
+                        clicked => { root.start-session(root.accept-unrecorded, root.accept-missing); }
+                    }
+                }
+            }
+        }
+    }
+    if root.phase == "round" : VerticalLayout {
+        spacing: 10px;
+        VerticalLayout { Heading { text: GuiI18n.value("gui-isolation-round", root.round); font-size: Theme.section-size; } BodyText { text: GuiI18n.value("gui-isolation-granularity", root.granularity); color: Theme.text-muted; } }
+        if root.recovery != "" : IsolationRecoveryNotice { recovery: root.recovery; detail: root.recovery-detail; busy: root.busy; retry => { root.retry-recovery(); } }
+        if root.recovery == "" : BodyText { text: GuiI18n.text("gui-isolation-test-instruction"); color: Theme.warning; wrap: word-wrap; }
+        HorizontalLayout {
+            spacing: 10px;
+            IsolationFilePanel { horizontal-stretch: 1; title: GuiI18n.count("gui-isolation-enabled", root.enabled-items.length); items: root.enabled-items; tone: Theme.success; }
+            IsolationFilePanel { horizontal-stretch: 1; title: GuiI18n.count("gui-isolation-disabled", root.disabled-items.length); items: root.disabled-items; tone: Theme.border; }
+        }
+        IsolationHistory { items: root.history; }
+        if root.reduced-confidence : BodyText { text: GuiI18n.text("gui-isolation-reduced-confidence"); color: Theme.warning; wrap: word-wrap; }
+        if root.linked-servers.length > 0 : BodyText { text: GuiI18n.text("gui-isolation-linked-unchanged"); color: Theme.text-secondary; wrap: word-wrap; }
+        if root.error != "" : BodyText { text: root.error; color: Theme.danger; wrap: word-wrap; }
+        ActionRow { AppButton { text: GuiI18n.text("gui-isolation-undo"); enabled: !root.busy && root.recovery == "" && root.history.length > 0; clicked => { root.undo(); } } AppButton { text: GuiI18n.text("gui-isolation-cancel"); tone: "danger"; enabled: !root.busy; clicked => { root.cancel(); } } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-isolation-issue-gone"); enabled: !root.busy && root.recovery == ""; clicked => { root.answer("gone"); } } AppButton { text: GuiI18n.text("gui-isolation-issue-present"); tone: "primary"; enabled: !root.busy && root.recovery == ""; clicked => { root.answer("present"); } } }
+    }
+    if root.phase == "contradiction" : VerticalLayout {
+        spacing: 12px;
+        Heading { text: GuiI18n.text("gui-isolation-contradiction"); }
+        BodyText { text: GuiI18n.text("gui-isolation-contradiction-detail"); color: Theme.danger; wrap: word-wrap; }
+        if root.recovery != "" : IsolationRecoveryNotice { recovery: root.recovery; detail: root.recovery-detail; busy: root.busy; retry => { root.retry-recovery(); } }
+        IsolationHistory { items: root.history; }
+        if root.error != "" : BodyText { text: root.error; color: Theme.danger; wrap: word-wrap; }
+        ActionRow { AppButton { text: GuiI18n.text("gui-isolation-cancel"); tone: "danger"; enabled: !root.busy; clicked => { root.cancel(); } } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-isolation-undo"); tone: "primary"; enabled: !root.busy && root.recovery == ""; clicked => { root.undo(); } } }
+    }
+    if root.phase == "ready" : VerticalLayout {
+        spacing: 12px;
+        Heading { text: GuiI18n.text("gui-isolation-ready"); font-size: Theme.section-size; }
+        if root.recovery != "" : IsolationRecoveryNotice { recovery: root.recovery; detail: root.recovery-detail; busy: root.busy; retry => { root.retry-recovery(); } }
+        BodyText { text: GuiI18n.text(root.confidence == "one_minimal" ? "gui-isolation-one-minimal" : "gui-isolation-smallest"); wrap: word-wrap; }
+        IsolationResultGroups { remaining-candidates: root.remaining-candidates; pinned: root.pinned; required-dependencies: root.required-dependencies; }
+        IsolationHistory { items: root.history; }
+        if root.reduced-confidence : BodyText { text: GuiI18n.text("gui-isolation-reduced-confidence"); color: Theme.warning; wrap: word-wrap; }
+        BodyText { text: GuiI18n.text("gui-isolation-finish-snapshot"); color: Theme.text-muted; wrap: word-wrap; }
+        if root.error != "" : BodyText { text: root.error; color: Theme.danger; wrap: word-wrap; }
+        ActionRow { AppButton { text: GuiI18n.text("gui-isolation-undo"); enabled: !root.busy && root.recovery == ""; clicked => { root.undo(); } } AppButton { text: GuiI18n.text("gui-isolation-cancel"); tone: "danger"; enabled: !root.busy; clicked => { root.cancel(); } } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-isolation-finish"); tone: "primary"; enabled: !root.busy && root.recovery == ""; clicked => { root.finish(); } } }
+    }
+    if root.phase == "result" : VerticalLayout {
+        spacing: 12px;
+        Heading { text: GuiI18n.text("gui-isolation-finished"); font-size: Theme.section-size; }
+        BodyText { text: root.summary; wrap: word-wrap; }
+        IsolationResultGroups { remaining-candidates: root.remaining-candidates; pinned: root.pinned; required-dependencies: root.required-dependencies; }
+        if root.reduced-confidence : BodyText { text: GuiI18n.text("gui-isolation-reduced-confidence"); color: Theme.warning; wrap: word-wrap; }
+        BodyText { text: GuiI18n.text("gui-isolation-finished-detail"); color: Theme.text-muted; wrap: word-wrap; }
+        ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-close"); tone: "primary"; clicked => { root.close(); } } }
+    }
+}

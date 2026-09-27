@@ -1,0 +1,395 @@
+// The Logs and Console surfaces: the live log viewer, retained files, and the crash notice.
+
+import { ListView, ScrollView } from "std-widgets.slint";
+import { AppButton, FilterChip, IconButton, TextField } from "../components/controls.slint";
+import { BodyText } from "../components/text.slint";
+import { GuiI18n } from "../globals.slint";
+import { DiagnosticRow, LogChunk } from "../models.slint";
+import { Theme } from "../theme.slint";
+
+export component LiveLogViewer inherits Rectangle {
+    in property <[LogChunk]> chunks;
+    in property <bool> has-content;
+    in property <string> status;
+    in property <bool> history-truncated;
+    in property <int> pending-lines;
+    in property <int> content-columns: 80;
+    in property <length> font-size: Theme.label-size;
+    // The search the rows are narrowed by. The field starts from it and is
+    // reset whenever it changes, such as when another log is opened.
+    in property <string> query;
+    in property <bool> wrap-lines;
+    in property <bool> follow;
+    in property <bool> trace-enabled;
+    in property <bool> debug-enabled;
+    in property <bool> info-enabled;
+    in property <bool> warn-enabled;
+    in property <bool> error-enabled;
+    in property <bool> fatal-enabled;
+    in property <bool> other-enabled;
+    in property <int> revision;
+    // The selection, in reading order, as byte offsets into each end's own
+    // row. -1 means nothing is selected. Offsets rather than columns
+    // because that is what a text item takes, and a column is only a byte
+    // offset while the line stays ASCII.
+    in property <int> selection-start-row: -1;
+    in property <int> selection-start-offset;
+    in property <int> selection-end-row: -1;
+    in property <int> selection-end-offset;
+    in property <bool> has-selection;
+    in property <int> selection-revision;
+    callback set-level(string, bool);
+    callback search(string);
+    callback copy();
+    callback copy-selection();
+    callback select-at(int, int, bool);
+    callback select-word-at(int, int);
+    callback select-all();
+    callback follow-changed(bool);
+    callback wrap-changed(bool);
+    changed query => { search-field.text = root.query; }
+    // Ten characters wide divided by ten. Exact in a fixed-width family,
+    // and the reason the monospace family has to resolve before a column
+    // can be worked out from a pointer position.
+    private property <length> advance: probe.preferred-width / 10;
+    // Every row is one physical line, so they are all this tall, which is
+    // what lets the row under the pointer be counted rather than searched
+    // for.
+    private property <length> row-height: probe.preferred-height + 8px;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Theme.border;
+    background: Theme.well;
+
+    // Measured, never drawn. A hidden text still reports the size it would
+    // take, which is the only way to learn a font's advance, and a
+    // fixed-width family makes that one number true of every character.
+    probe := Text { visible: false; width: 0px; height: 0px; text: "0000000000"; font-family: Theme.mono-family; font-size: root.font-size; }
+
+    VerticalLayout {
+        spacing: 0px;
+        Rectangle {
+            height: Theme.control-height + 12px;
+            background: Theme.surface;
+            HorizontalLayout {
+                padding-left: 10px; padding-right: 10px; spacing: 6px; cross-axis-alignment: center;
+                all-levels := FilterChip { text: GuiI18n.text("gui-all"); accessible-name: GuiI18n.text("gui-filter-all-levels"); selected: root.trace-enabled && root.debug-enabled && root.info-enabled && root.warn-enabled && root.error-enabled && root.fatal-enabled && root.other-enabled; clicked => { root.set-level("all", !all-levels.selected); } }
+                FilterChip { text: "INFO"; accessible-name: GuiI18n.text("gui-filter-info"); selected: root.info-enabled; clicked => { root.set-level("info", !root.info-enabled); } }
+                FilterChip { text: "WARN"; accessible-name: GuiI18n.text("gui-filter-warn"); selected: root.warn-enabled; clicked => { root.set-level("warn", !root.warn-enabled); } }
+                FilterChip { text: "ERROR"; accessible-name: GuiI18n.text("gui-filter-error"); selected: root.error-enabled; clicked => { root.set-level("error", !root.error-enabled); } }
+                FilterChip { text: "DEBUG"; accessible-name: GuiI18n.text("gui-filter-debug"); selected: root.debug-enabled; clicked => { root.set-level("debug", !root.debug-enabled); } }
+                FilterChip { text: "TRACE"; accessible-name: GuiI18n.text("gui-filter-trace"); selected: root.trace-enabled; clicked => { root.set-level("trace", !root.trace-enabled); } }
+                FilterChip { text: "FATAL"; accessible-name: GuiI18n.text("gui-filter-fatal"); selected: root.fatal-enabled; clicked => { root.set-level("fatal", !root.fatal-enabled); } }
+                FilterChip { text: GuiI18n.text("gui-log-level-other"); accessible-name: GuiI18n.text("gui-filter-other"); selected: root.other-enabled; clicked => { root.set-level("other", !root.other-enabled); } }
+                Rectangle { horizontal-stretch: 1; }
+            }
+        }
+        Rectangle {
+            height: Theme.control-height + 12px;
+            background: Theme.surface;
+            HorizontalLayout {
+                padding-left: 10px; padding-right: 10px; spacing: 8px; cross-axis-alignment: center;
+                search-field := TextField { placeholder: GuiI18n.text("gui-search-retained-logs"); input-type: InputType.search; width: 230px; init => { self.text = root.query; } accepted => { root.search(self.text); } accessible-label: GuiI18n.text("gui-search-retained-logs"); }
+                AppButton { text: GuiI18n.text("gui-find"); clicked => { root.search(search-field.text); } }
+                FilterChip { text: GuiI18n.text("gui-wrap-lines"); accessible-name: GuiI18n.text("gui-wrap-lines"); selected: root.wrap-lines; clicked => { root.wrap-changed(!root.wrap-lines); } }
+                FilterChip { text: root.follow ? GuiI18n.text("gui-following") : GuiI18n.text("gui-jump-latest"); accessible-name: root.follow ? GuiI18n.text("gui-pause-following") : GuiI18n.text("gui-jump-latest"); selected: root.follow; clicked => { root.follow-changed(!root.follow); } }
+                AppButton { text: GuiI18n.text("gui-copy-selection"); enabled: root.has-selection; clicked => { root.copy-selection(); } }
+                AppButton { text: GuiI18n.text("gui-copy-retained"); enabled: root.has-content; clicked => { root.copy(); } }
+                Rectangle { horizontal-stretch: 1; }
+                if root.pending-lines > 0 : BodyText { text: GuiI18n.count("gui-new-log-lines", root.pending-lines); color: Theme.accent; font-size: Theme.caption-size; }
+            }
+        }
+        if root.status != "" || root.history-truncated : Rectangle {
+            height: 28px;
+            background: Theme.background;
+            HorizontalLayout {
+                padding-left: 10px; padding-right: 10px; spacing: 12px;
+                BodyText { text: root.status; color: Theme.text-muted; font-size: Theme.caption-size; }
+                if root.history-truncated : BodyText { text: GuiI18n.text("gui-retained-history-truncated"); color: Theme.warning; font-size: Theme.caption-size; }
+                Rectangle { horizontal-stretch: 1; }
+            }
+        }
+        if root.chunks.length == 0 : Rectangle { background: Theme.well; VerticalLayout { alignment: center; spacing: 6px; Text { text: GuiI18n.text("gui-no-log-output"); color: Theme.text; font-size: Theme.heading-size; horizontal-alignment: center; } BodyText { text: GuiI18n.text("gui-no-log-output-detail"); horizontal-alignment: center; } } }
+        if root.chunks.length > 0 : Rectangle {
+          keys := FocusScope {
+            key-pressed(event) => {
+                if event.modifiers.control && event.text == "c" {
+                    root.copy-selection();
+                    return accept;
+                }
+                if event.modifiers.control && event.text == "a" {
+                    root.select-all();
+                    return accept;
+                }
+                return reject;
+            }
+          }
+          output := ListView {
+            // Measured from the font rather than estimated from its size:
+            // the widest line has to be reachable exactly, not
+            // approximately.
+            viewport-width: root.wrap-lines ? self.visible-width : max(self.visible-width, root.content-columns * root.advance + 24px);
+            // A bar the user can find. Wrapped text has nowhere to go
+            // sideways, so the bar is gone rather than idle.
+            horizontal-scrollbar-policy: root.wrap-lines ? ScrollBarPolicy.always-off : ScrollBarPolicy.always-on;
+            private property <int> observed-revision: root.revision;
+            changed observed-revision => {
+                if root.follow {
+                    self.viewport-y = min(0px, self.visible-height - self.viewport-height);
+                }
+            }
+            for chunk[row] in root.chunks : Rectangle {
+                width: output.viewport-width;
+                // One line tall, except when wrapping turns one line into
+                // several: a row shorter than its own text overlaps the row
+                // under it.
+                height: root.wrap-lines ? chunk-input.preferred-height + 8px : root.row-height;
+                background: transparent;
+                accessible-role: text-input;
+                accessible-read-only: true;
+                accessible-value: chunk.text;
+                // The whole line when this row is inside the selection,
+                // and the part on the right side of the boundary when it
+                // is the first of it. An offset past the end of the text
+                // is clamped by the text item, so one very large number
+                // stands for "to the end of this line".
+                private property <int> selection-from: row == root.selection-start-row ? root.selection-start-offset : 0;
+                private property <int> selection-to: row == root.selection-end-row ? root.selection-end-offset : 2147483647;
+                private property <bool> selected: root.selection-start-row >= 0 && row >= root.selection-start-row && row <= root.selection-end-row;
+                // A selection is applied rather than bound, because a text
+                // item takes it as a call. Applied on init as well as on
+                // change, because the list is virtualized: a row scrolled
+                // into view is built after the selection was made and would
+                // otherwise come back empty-handed.
+                function apply-selection() {
+                    if self.selected {
+                        chunk-input.set-selection-offsets(self.selection-from, self.selection-to);
+                    } else {
+                        chunk-input.set-selection-offsets(0, 0);
+                    }
+                }
+                private property <int> observed-selection: root.selection-revision;
+                changed observed-selection => { self.apply-selection(); }
+                init => { self.apply-selection(); }
+                ContextMenuArea {
+                    Menu {
+                        MenuItem { title: GuiI18n.text("gui-copy-selection"); enabled: root.has-selection; activated => { root.copy-selection(); } }
+                        MenuItem { title: GuiI18n.text("gui-select-all"); enabled: root.chunks.length > 0; activated => { root.select-all(); } }
+                    }
+                    chunk-input := TextInput {
+                        x: 10px; y: 4px;
+                        width: root.wrap-lines ? output.visible-width - 20px : max(output.visible-width - 20px, self.preferred-width);
+                        height: self.preferred-height;
+                        text: chunk.text;
+                        color: chunk.level == "error" || chunk.level == "fatal" ? Theme.log-error : chunk.level == "warn" ? Theme.warning : chunk.level == "debug" || chunk.level == "trace" ? Theme.text-muted : Theme.text-secondary;
+                        selection-background-color: Theme.accent;
+                        selection-foreground-color: Theme.background;
+                        read-only: true;
+                        single-line: false;
+                        wrap: root.wrap-lines ? word-wrap : no-wrap;
+                        font-family: Theme.mono-family;
+                        font-size: root.font-size;
+                        accessible-label: GuiI18n.text("gui-log-output-block");
+                    }
+                }
+                // Declared last, so it takes the pointer before the text
+                // item can start a selection of its own. A text item's
+                // selection cannot leave the element it belongs to, which
+                // is the whole reason a drag never used to reach the next
+                // line.
+                //
+                // With every row one line of the same height, the row under
+                // the pointer is this row plus a count of row heights. No
+                // geometry is queried and no absolute position is needed,
+                // which is what keeps this correct inside a virtualized
+                // list.
+                //
+                // Wrapped lines are the documented exception: they are not
+                // uniform in height, so a drag then selects within its own
+                // row. Shift-clicking still reaches across rows, because
+                // that lands on a real row's own area and needs no
+                // arithmetic.
+                select := TouchArea {
+                    mouse-cursor: text;
+                    pointer-event(event) => {
+                        if event.kind == PointerEventKind.down {
+                            keys.focus();
+                            root.select-at(row, self.column-at(self.mouse-x), event.modifiers.shift);
+                        }
+                    }
+                    // Runs after the press that opened it, so it replaces
+                    // the caret that press placed rather than fighting it.
+                    double-clicked => {
+                        root.select-word-at(row, self.column-at(self.mouse-x));
+                    }
+                    moved => {
+                        if self.pressed {
+                            root.select-at(self.row-at(self.mouse-y), self.column-at(self.mouse-x), true);
+                            // Dragging past an edge keeps going. Stepped by
+                            // one row per movement rather than animated, so
+                            // the selection and the view stay in step.
+                            if self.absolute-position.y + self.mouse-y < output.absolute-position.y {
+                                output.viewport-y = min(0px, output.viewport-y + root.row-height);
+                            } else if self.absolute-position.y + self.mouse-y > output.absolute-position.y + output.visible-height {
+                                output.viewport-y = max(min(0px, output.visible-height - output.viewport-height), output.viewport-y - root.row-height);
+                            }
+                        }
+                    }
+                    // Rounded, not truncated: a caret sits between two
+                    // characters, so the column the pointer means is the
+                    // nearest gap rather than the one it has fully passed.
+                    // Truncating puts the boundary a whole character behind
+                    // the pointer, which reads as the wrong character being
+                    // highlighted.
+                    function column-at(x: length) -> int {
+                        return Math.max(0, Math.round((x - 10px) / root.advance));
+                    }
+                    function row-at(y: length) -> int {
+                        if root.wrap-lines {
+                            return row;
+                        }
+                        return Math.clamp(row + Math.floor(y / root.row-height), 0, root.chunks.length - 1);
+                    }
+                }
+            }
+          }
+          // The bottom is where a log is read from, and scrolling up is how
+          // it is left. Following only moves the view when the next line
+          // arrives, which is no help at all on a log that has stopped, so
+          // this moves it now and resumes following in one press.
+          //
+          // Shown only when there is somewhere to go: a view already at the
+          // end would offer a button that does nothing.
+          if output.viewport-y > output.visible-height - output.viewport-height + 2px : IconButton {
+              x: parent.width - self.width - 18px;
+              y: parent.height - self.height - 14px;
+              icon: @image-url("../../../../assets/icons/jump-to-end.svg");
+              accessible-name: GuiI18n.text("gui-jump-latest");
+              background: Theme.elevated;
+              clicked => {
+                  output.viewport-y = min(0px, output.visible-height - output.viewport-height);
+                  if !root.follow {
+                      root.follow-changed(true);
+                  }
+              }
+          }
+        }
+    }
+}
+
+// The list of files one diagnostics section holds.
+//
+// One component because logs and crash reports are listed the same way on
+// both workspaces, and four copies of a list drift.
+export component DiagnosticFileList inherits Rectangle {
+    in property <[DiagnosticRow]> items;
+    in property <string> selected;
+    // Crash reports are named in the warning color wherever they appear,
+    // because a crash report existing is itself the finding.
+    in property <bool> crash;
+    callback opened(string);
+    width: 270px;
+    background: Theme.surface;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Theme.border;
+    VerticalLayout {
+        padding: 8px;
+        spacing: 5px;
+        BodyText { text: GuiI18n.count("gui-diagnostic-files-count", root.items.length); }
+        ScrollView {
+            VerticalLayout {
+                spacing: 5px;
+                for item in root.items : Rectangle {
+                    height: 66px;
+                    background: open-area.has-hover ? Theme.elevated : Theme.background;
+                    border-radius: 6px;
+                    border-width: item.name == root.selected ? 2px : 1px;
+                    border-color: item.name == root.selected ? Theme.accent : open-area.has-hover ? Theme.accent.with-alpha(0.7) : Theme.border;
+                    accessible-role: button;
+                    accessible-label: item.name;
+                    accessible-action-default => { root.opened(item.name); }
+                    VerticalLayout {
+                        padding: 8px;
+                        Text { text: item.name; color: root.crash ? Theme.warning : Theme.text; overflow: elide; }
+                        BodyText { text: item.summary != "" ? item.summary : item.size; overflow: elide; font-size: Theme.caption-size; }
+                    }
+                    // Hover is the whole affordance here: without it a row
+                    // that opens on one press looks like a label.
+                    open-area := TouchArea { mouse-cursor: pointer; clicked => { root.opened(item.name); } }
+                }
+            }
+        }
+    }
+}
+
+// What one exact Minecraft release does with one row.
+//
+// The badge says it in words rather than in color alone, and carries the
+// full sentence as its accessible label so a screen reader gets the
+// reason, not just the verdict.
+// What the newest crash report says, above the list it points into.
+//
+// Two placements, one component: on a tab that is not the mods list it
+// offers to open that list, and on the mods list itself it offers to act on
+// it. The suggestion count is what decides whether acting is even possible;
+// a report naming only mods that are already disabled offers nothing.
+export component CrashNotice inherits Rectangle {
+    in property <string> report;
+    in property <string> failure;
+    in property <bool> client-code-on-server;
+    in property <int> suggested;
+    // Whether this sits on the panel whose rows carry the suspect marks.
+    in property <bool> beside-the-mods;
+    callback review();
+    callback disable-suggested();
+    height: content.preferred-height;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: Theme.danger.with-alpha(0.6);
+    background: Theme.danger.with-alpha(0.08);
+    content := HorizontalLayout {
+        padding: 10px;
+        spacing: 10px;
+        VerticalLayout {
+            alignment: center;
+            spacing: 3px;
+            horizontal-stretch: 1;
+            Text {
+                text: GuiI18n.text("gui-crash-title");
+                color: Theme.danger;
+                font-size: Theme.row-heading-size;
+                font-weight: 600;
+                overflow: elide;
+            }
+            // Exact, because the thrown type and its message are what a bug
+            // report has to quote.
+            BodyText {
+                text: root.failure != "" ? root.failure : root.report;
+                color: Theme.text-secondary;
+                font-size: Theme.caption-size;
+                wrap: word-wrap;
+            }
+            if root.client-code-on-server : BodyText {
+                text: GuiI18n.text("crash-client-code-on-server");
+                color: Theme.text-secondary;
+                font-size: Theme.caption-size;
+                wrap: word-wrap;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            if !root.beside-the-mods : AppButton {
+                text: GuiI18n.text("gui-crash-review-mods");
+                tone: "primary";
+                clicked => { root.review(); }
+            }
+            if root.beside-the-mods : AppButton {
+                text: GuiI18n.count("gui-crash-disable-suggested", root.suggested);
+                tone: "primary";
+                enabled: root.suggested > 0;
+                clicked => { root.disable-suggested(); }
+            }
+        }
+    }
+}

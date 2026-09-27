@@ -9000,6 +9000,7 @@ fn to_i32(value: usize) -> i32 {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use crate::presentation::ActivityPresentation;
+    use crate::test_support::{ui_declaration, ui_markup};
     use crate::ui::WorkspaceHostChoice;
     use ephervex_core::ArtifactCacheLimit;
     use ephervex_i18n::has;
@@ -11610,7 +11611,7 @@ mod tests {
     #[test]
     fn every_gui_message_id_exists_in_the_fluent_catalog() {
         for source in [
-            include_str!("ui.rs"),
+            ui_markup(),
             include_str!("controller.rs"),
             include_str!("backend.rs"),
             include_str!("presentation.rs"),
@@ -11639,12 +11640,10 @@ mod tests {
     fn window_callbacks(source: &str) -> Vec<String> {
         // A renamed component leaves nothing to scan, which the caller's count
         // assertion reports rather than this silently finding zero callbacks.
-        let window = source
-            .find("export component AppWindow inherits Window {")
-            .unwrap_or(source.len());
-        source[window..]
+        ui_declaration(source, "export component AppWindow inherits Window {")
+            .unwrap_or_default()
             .lines()
-            .filter_map(|line| line.strip_prefix("        callback "))
+            .filter_map(|line| line.strip_prefix("    callback "))
             .filter_map(|rest| rest.split('(').next())
             .map(str::to_owned)
             .collect()
@@ -11652,7 +11651,7 @@ mod tests {
 
     #[test]
     fn every_callback_the_window_declares_reaches_the_rust_side() {
-        let declared = window_callbacks(include_str!("ui.rs"));
+        let declared = window_callbacks(ui_markup());
         assert!(
             declared.len() > 50,
             "the parser found {} callbacks, so it is no longer reading the window component",
@@ -11677,7 +11676,7 @@ mod tests {
 
     #[test]
     fn modrinth_search_does_not_reuse_the_server_filter() {
-        let source = include_str!("ui.rs");
+        let source = ui_markup();
         assert!(source.contains("root.search-mods(host.id, host.browser-provider, self.text)"));
         assert!(source.contains("text <=> root.server-query"));
         assert!(!source.contains("root.server-query)"));
@@ -11693,7 +11692,7 @@ mod tests {
 
     #[test]
     fn creation_forms_use_catalog_models_for_exact_versions() {
-        let source = include_str!("ui.rs");
+        let source = ui_markup();
         assert!(source.contains("model: root.minecraft-releases"));
         assert!(source.contains("model: root.create-loader-versions"));
         assert!(source.contains("model: root.create-server-loader-versions"));
@@ -11715,7 +11714,7 @@ mod tests {
         assert_eq!(rows[0].id, "069a79f4-44e9-4726-a5be-fca90e38aaf5");
         assert_eq!(rows[0].name, "MelanX");
 
-        let source = include_str!("ui.rs");
+        let source = ui_markup();
         assert!(source.contains("root.set-default-account(account.id)"));
         assert!(source.contains("root.remove-account(account.id)"));
         assert!(!source.contains("root.set-default-account(account.name)"));
@@ -11726,15 +11725,12 @@ mod tests {
     ///
     /// Before the split is the one place a color belongs. After it is markup,
     /// where a literal is a token nobody named and a scheme nobody checked.
-    fn theme_and_markup(source: &str) -> (&str, &str) {
-        let global = source
-            .find("export global Theme {")
-            .expect("the markup opens with the theme");
-        let end = source[global..]
-            .find("\n    }\n")
-            .expect("and the theme is closed")
-            + global;
-        (&source[global..end], &source[end..])
+    fn theme_and_markup(source: &str) -> (&str, String) {
+        let theme =
+            ui_declaration(source, "export global Theme {").expect("the markup declares the theme");
+        let global = source.find(theme).expect("the theme is part of the markup");
+        let markup = format!("{}{}", &source[..global], &source[global + theme.len()..]);
+        (theme, markup)
     }
 
     /// Every color the interface paints with is named in `Theme`, so a second
@@ -11742,7 +11738,7 @@ mod tests {
     /// of finding the places that never asked for one.
     #[test]
     fn every_interface_color_is_named_in_the_theme_global() {
-        let (_, markup) = theme_and_markup(include_str!("ui.rs"));
+        let (_, markup) = theme_and_markup(ui_markup());
         // Comments may quote a color they are explaining.
         let markup: String = markup
             .lines()
@@ -11773,7 +11769,7 @@ mod tests {
     /// not written for, and nothing on screen says which one that is.
     #[test]
     fn every_theme_color_carries_both_schemes() {
-        let (theme, _) = theme_and_markup(include_str!("ui.rs"));
+        let (theme, _) = theme_and_markup(ui_markup());
         let single: Vec<&str> = theme
             .lines()
             .map(str::trim)
@@ -11788,7 +11784,7 @@ mod tests {
     /// a dark page.
     #[test]
     fn the_widget_palette_follows_the_interface_scheme() {
-        let source = include_str!("ui.rs");
+        let source = ui_markup();
         assert!(source.contains("Palette.color-scheme = self.widget-scheme"));
         assert!(source.contains("ListView, Palette, ScrollView"));
     }
@@ -11799,7 +11795,7 @@ mod tests {
     /// written from a property rather than as a literal.
     #[test]
     fn every_interface_text_size_follows_the_typography_scale() {
-        let (_, markup) = theme_and_markup(include_str!("ui.rs"));
+        let (_, markup) = theme_and_markup(ui_markup());
         let literals: Vec<&str> = markup
             .match_indices("font-size:")
             .map(|(at, _)| markup[at..].lines().next().unwrap_or_default())
@@ -11819,7 +11815,7 @@ mod tests {
     /// chosen diagnostics text size, so nothing on it pins one.
     #[test]
     fn no_control_on_the_console_toolbar_is_pinned_to_a_width() {
-        let source = include_str!("ui.rs");
+        let source = ui_markup();
         let start = source
             .find("gui-search-retained-logs")
             .expect("the console toolbar starts at its search field");
@@ -11836,7 +11832,7 @@ mod tests {
 
     #[test]
     fn context_menus_expose_entity_actions_without_redundant_inspector_deletion() {
-        let source = include_str!("ui.rs");
+        let source = ui_markup();
         for label in [
             "gui-open-workspace",
             "gui-launch",
@@ -12091,7 +12087,7 @@ mod tests {
 
     #[test]
     fn card_workspace_actions_select_the_target_before_opening_it() {
-        let source = include_str!("ui.rs");
+        let source = ui_markup();
         assert!(source.contains(
             "open-workspace(id) => { root.selected-instance-id = id; root.selected-instance-index = index; root.select-instance(id); root.open-workspace(\"client\", id, \"Overview\");"
         ));
@@ -12105,11 +12101,7 @@ mod tests {
         // user is proven in `tests/card_pointer_targets.rs`; this only keeps the
         // arrangement visible where it is written.
         for component in ["component InstanceCard", "component ServerCard"] {
-            let start = source.find(component).expect("the card component");
-            let end = source[start..]
-                .find("\n    component ")
-                .map_or(source.len(), |offset| start + offset);
-            let card = &source[start..end];
+            let card = ui_declaration(source, component).expect("the card component");
             let area = card
                 .find("card-area := TouchArea")
                 .expect("a card touch area");
@@ -12123,19 +12115,17 @@ mod tests {
 
     #[test]
     fn minecraft_defaults_have_one_axis_and_never_persist_per_row() {
-        let source = include_str!("ui.rs");
+        let source = ui_markup();
         // One axis: the value is the override. There is no second control
         // asking whether the value the user just chose should count.
         assert!(source.contains("checked: root.item.bool-value;"));
         // The management control this replaces must be gone from the row,
         // along with every property that fed it.
-        let start = source
-            .find("component MinecraftPreferenceRowCard inherits Rectangle")
-            .expect("the preference row component");
-        let end = source[start..]
-            .find("\n    component ")
-            .map_or(source.len(), |offset| start + offset);
-        let row = &source[start..end];
+        let row = ui_declaration(
+            source,
+            "component MinecraftPreferenceRowCard inherits Rectangle",
+        )
+        .expect("the preference row component");
         assert!(!row.contains("root.item.managed"));
         assert!(!row.contains("can-manage"));
         assert!(!row.contains("manage-hint"));
@@ -12154,7 +12144,7 @@ mod tests {
 
     #[test]
     fn activity_details_wrap_in_cards_with_content_driven_height() {
-        let source = include_str!("ui.rs");
+        let source = ui_markup();
         assert!(source.contains("component ActivityCard inherits Rectangle"));
         assert!(source.contains("height: max(102px, detail-text.preferred-height + 82px)"));
         assert!(source.contains("detail-text := BodyText { text: item.detail; visible: item.detail != \"\"; wrap: word-wrap; }"));
@@ -12162,7 +12152,7 @@ mod tests {
 
     #[test]
     fn global_navigation_keeps_diagnostics_contextual() {
-        let source = include_str!("ui.rs");
+        let source = ui_markup();
         let logs = "gui-logs";
         assert!(!source.contains(&format!(
             r#"label: GuiI18n.text("{logs}"); selected: root.page == 2"#
@@ -12174,7 +12164,7 @@ mod tests {
 
     #[test]
     fn snapshot_management_is_contextual_for_clients_and_servers() {
-        let source = include_str!("ui.rs");
+        let source = ui_markup();
         let controller = include_str!("controller.rs");
         let replacement_note = "gui-snapshot-replacement-note";
         // Opening the surface loads the snapshots of the host its pane shows.
@@ -12194,7 +12184,7 @@ mod tests {
 
     #[test]
     fn wide_forms_and_server_details_use_hard_readability_bounds() {
-        let source = include_str!("ui.rs");
+        let source = ui_markup();
         assert!(source.contains("width: min(parent.width, 980px)"));
         assert!(source.contains("width: min(parent.width, 1100px)"));
         assert!(!source.contains("max-width: 980px"));
@@ -12203,7 +12193,7 @@ mod tests {
 
     #[test]
     fn settings_use_scrollable_reusable_preference_rows() {
-        let source = include_str!("ui.rs");
+        let source = ui_markup();
         // One reusable row component drives every preference: nearly two
         // hundred hand-written rows would be a second copy of the catalog.
         assert!(source.contains("component MinecraftPreferenceRowCard inherits Rectangle"));
@@ -12244,14 +12234,12 @@ mod tests {
 
     #[test]
     fn minecraft_defaults_keep_release_rules_out_of_the_frontend() {
-        let source = include_str!("ui.rs");
-        let start = source
-            .find("component MinecraftPreferenceRowCard inherits Rectangle")
-            .expect("the preference row component");
-        let end = source[start..]
-            .find("\n    component ")
-            .map_or(source.len(), |offset| start + offset);
-        let row_component = &source[start..end];
+        let source = ui_markup();
+        let row_component = ui_declaration(
+            source,
+            "component MinecraftPreferenceRowCard inherits Rectangle",
+        )
+        .expect("the preference row component");
         // Which release does what is core's answer, delivered per row as a
         // status. A version compared inside the row would be a second,
         // unreviewable compatibility rule living in the frontend.
@@ -12266,7 +12254,7 @@ mod tests {
 
     #[test]
     fn the_window_size_is_picked_with_a_window_rather_than_a_drawing_of_one() {
-        let source = include_str!("ui.rs");
+        let source = ui_markup();
         // The picker is an actual window the window manager sizes, so what the
         // user sees on screen is the window they are asking Minecraft for.
         assert!(source.contains("export component WindowSizePreview inherits Window {"));
@@ -12276,11 +12264,11 @@ mod tests {
         );
         let controller = include_str!("controller.rs");
         let production = controller.split("#[cfg(test)]").next().unwrap_or_default();
-        let preview = source
-            .split("export component WindowSizePreview inherits Window {")
-            .nth(1)
-            .and_then(|rest| rest.split("\n    export component ").next())
-            .expect("the sizing window's own markup");
+        let preview = ui_declaration(
+            source,
+            "export component WindowSizePreview inherits Window {",
+        )
+        .expect("the sizing window's own markup");
         // The smallest window this build accepts is one rule in one place.
         assert!(preview.contains("min-width: root.minimum-edge;"));
         assert!(preview.contains("min-height: root.minimum-edge;"));
@@ -12303,13 +12291,11 @@ mod tests {
             "a platform without the property still gets a working picker"
         );
 
-        let start = source
-            .find("component MinecraftPreferenceRowCard inherits Rectangle")
-            .expect("the preference row component");
-        let end = source[start..]
-            .find("\n    component ")
-            .map_or(source.len(), |offset| start + offset);
-        let row_component = &source[start..end];
+        let row_component = ui_declaration(
+            source,
+            "component MinecraftPreferenceRowCard inherits Rectangle",
+        )
+        .expect("the preference row component");
         assert!(row_component.contains("root.open-window-preview(root.item.id)"));
         for drawn in ["preview-across", "preview-down", "can-resize"] {
             assert!(
@@ -12713,7 +12699,7 @@ mod tests {
     /// crash report is one element and keeps the native behavior.
     #[test]
     fn a_document_selects_natively_and_the_console_selects_across_rows() {
-        let source = include_str!("ui.rs");
+        let source = ui_markup();
         assert!(source.contains("accessible-read-only: true"));
         assert!(source.contains("read-only: true"));
         assert!(source.contains("selectable-input.copy()"));
@@ -12849,7 +12835,7 @@ mod tests {
 
     #[test]
     fn application_display_settings_use_shared_typography_and_separate_technical_text() {
-        let source = include_str!("ui.rs");
+        let source = ui_markup();
         assert!(source.contains("in-out property <float> text-scale: 1"));
         assert!(source.contains("default-font-size: Theme.body-size"));
         // Saved with the rest of the General page, by its one button.
@@ -12886,7 +12872,7 @@ mod tests {
     /// asserted here is the affordance, which is invisible to a click test.
     #[test]
     fn the_mod_name_that_opens_a_project_page_is_marked_as_a_link() {
-        let source = include_str!("ui.rs");
+        let source = ui_markup();
         let header = source
             .split("if root.modal == \"mod-manage\"")
             .nth(1)
@@ -12904,7 +12890,7 @@ mod tests {
 
     #[test]
     fn linked_server_workspace_and_pending_creation_remain_contextual() {
-        let source = include_str!("ui.rs");
+        let source = ui_markup();
         assert!(source.contains("for server in host.linked-servers"));
         assert!(source.contains("root.follow-host(pane.id, \"server\", server.id, \"Overview\")"));
         // Scoped by the model it renders rather than by hiding rows, which
@@ -12915,7 +12901,7 @@ mod tests {
 
     #[test]
     fn provider_and_storage_resets_use_explicit_application_callbacks() {
-        let source = include_str!("ui.rs");
+        let source = ui_markup();
         let backend = include_str!("backend.rs");
         assert!(source.contains("callback reset-microsoft-client-id()"));
         assert!(source.contains("callback reset-user-agent()"));
@@ -12930,7 +12916,7 @@ mod tests {
 
     #[test]
     fn the_preferred_catalog_row_shows_the_stored_value_and_writes_through_core() {
-        let source = include_str!("ui.rs");
+        let source = ui_markup();
         let backend = include_str!("backend.rs");
         // One callback into Rust, which is the only way the setting changes:
         // the view has no path to the settings file of its own.
@@ -12973,7 +12959,7 @@ mod tests {
 
     #[test]
     fn the_curseforge_credential_row_reports_presence_and_offers_set_replace_and_remove() {
-        let source = include_str!("ui.rs");
+        let source = ui_markup();
         // Presence is the only thing the view is told, and the three operations
         // are separate callbacks so removing cannot be expressed as saving an
         // empty value.
@@ -13135,7 +13121,7 @@ mod tests {
 
     #[test]
     fn the_cache_section_measures_on_demand_and_guards_a_second_clear() {
-        let source = include_str!("ui.rs");
+        let source = ui_markup();
         // Measuring walks the store, so it must not be on the ordinary refresh
         // path — only on opening the page that shows the figure.
         assert!(source.contains("root.measure-artifact-cache()"));

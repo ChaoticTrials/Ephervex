@@ -1,0 +1,170 @@
+// Text primitives and the tooltip card every surface writes with.
+
+import { ScrollView } from "std-widgets.slint";
+import { GuiI18n } from "../globals.slint";
+import { Theme } from "../theme.slint";
+
+export component BodyText inherits Text {
+    color: Theme.text-secondary;
+    font-size: Theme.body-size;
+    vertical-alignment: center;
+    vertical-stretch: 0;
+}
+
+export component Heading inherits Text {
+    color: Theme.text;
+    font-size: Theme.heading-size;
+    font-weight: 600;
+    vertical-alignment: center;
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
+}
+
+export component Eyebrow inherits Text {
+    color: Theme.text-muted;
+    font-size: Theme.caption-size;
+    font-weight: 600;
+    letter-spacing: 0.7px;
+    vertical-stretch: 0;
+}
+
+export component PageIntro inherits VerticalLayout {
+    in property <string> title;
+    in property <string> subtitle;
+    spacing: 5px;
+    horizontal-stretch: 1;
+    Heading { text: root.title; font-size: Theme.page-title-size; }
+    if root.subtitle != "" : BodyText {
+        text: root.subtitle;
+        color: Theme.text-secondary;
+        wrap: word-wrap;
+    }
+}
+
+export component SectionTitle inherits VerticalLayout {
+    in property <string> title;
+    in property <string> detail;
+    spacing: 4px;
+    Heading { text: root.title; font-size: Theme.section-size; }
+    if root.detail != "" : BodyText {
+        text: root.detail;
+        color: Theme.text-muted;
+        wrap: word-wrap;
+    }
+}
+
+// A row of controls sitting side by side.
+//
+// A layout with no spacing puts two buttons edge to edge, which reads as one
+// control. Every such row goes through this so the gap cannot be forgotten
+// one row at a time.
+export component ActionRow inherits HorizontalLayout {
+    spacing: 8px;
+}
+
+export component Divider inherits Rectangle {
+    height: 1px;
+    vertical-stretch: 0;
+    background: Theme.border;
+}
+
+// What a control has to say on hover: a disabled control's reason, or a
+// caption or title that did not fit and could not show the rest of
+// itself. Custom content for the built-in `Tooltip`, which renders it in
+// a real overlay above the whole window - not as an ordinary child
+// element, which whatever the layout places after it would be free to
+// paint over.
+export component TooltipCard inherits Rectangle {
+    in property <string> text;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: Theme.border;
+    background: Theme.overlay;
+    drop-shadow-color: Theme.shadow;
+    drop-shadow-blur: 10px;
+    drop-shadow-offset-y: 2px;
+    width: min(320px, note.preferred-width + 20px);
+    height: note.preferred-height + 14px;
+    note := Text {
+        x: 10px;
+        y: 7px;
+        width: parent.width - 20px;
+        text: root.text;
+        color: Theme.text-secondary;
+        font-size: Theme.caption-size;
+        wrap: word-wrap;
+    }
+}
+
+// A heading that says the whole thing on hover when it had to be cut short.
+//
+// It owns a touch area for the press, and hands it back out again:
+// without that, the strip of a card under its own title would stop
+// selecting the card.
+export component ElidedHeading inherits Rectangle {
+    in property <string> text;
+    in property <length> font-size: Theme.heading-size;
+    callback clicked();
+    callback double-clicked();
+    horizontal-stretch: 1;
+    vertical-stretch: 0;
+    height: title.preferred-height;
+    title := Text {
+        width: parent.width;
+        text: root.text;
+        color: Theme.text;
+        font-size: root.font-size;
+        font-weight: 600;
+        overflow: elide;
+        vertical-alignment: center;
+    }
+    area := TouchArea {
+        clicked => { root.clicked(); }
+        double-clicked => { root.double-clicked(); }
+    }
+    if title.preferred-width > title.width : Tooltip {
+        TooltipCard { text: root.text; }
+    }
+}
+
+export component FieldLabel inherits Text {
+    color: Theme.text-secondary;
+    font-size: Theme.label-size;
+}
+
+export component SelectableText inherits Rectangle {
+    in property <string> text;
+    in property <TextWrap> wrap: no-wrap;
+    in property <string> font-family: Theme.mono-family;
+    in property <length> font-size: Theme.label-size;
+    background: Theme.well;
+    forward-focus: selectable-input;
+    accessible-role: text-input;
+    accessible-read-only: true;
+    accessible-value: text;
+    ContextMenuArea {
+        Menu {
+            MenuItem { title: GuiI18n.text("gui-copy"); enabled: root.text != ""; activated => { selectable-input.copy(); } }
+            MenuItem { title: GuiI18n.text("gui-select-all"); enabled: root.text != ""; activated => { selectable-input.select-all(); } }
+        }
+        selectable-scroll := ScrollView {
+            viewport-width: root.wrap == TextWrap.no-wrap ? max(self.visible-width, selectable-input.preferred-width + 16px) : self.visible-width;
+            viewport-height: max(self.visible-height, selectable-input.preferred-height + 16px);
+            selectable-input := TextInput {
+                x: 8px; y: 8px;
+                width: root.wrap == TextWrap.no-wrap ? max(selectable-scroll.visible-width - 16px, self.preferred-width) : selectable-scroll.visible-width - 16px;
+                height: max(selectable-scroll.visible-height - 16px, self.preferred-height);
+                text: root.text;
+                color: Theme.text-secondary;
+                selection-background-color: Theme.accent;
+                selection-foreground-color: Theme.background;
+                read-only: true;
+                single-line: false;
+                wrap: root.wrap;
+                font-family: root.font-family;
+                font-size: root.font-size;
+                page-height: selectable-scroll.visible-height;
+            }
+        }
+    }
+}

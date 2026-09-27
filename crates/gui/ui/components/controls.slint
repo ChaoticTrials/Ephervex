@@ -1,0 +1,526 @@
+// Buttons, fields, toggles, pills, navigation items, and the small panels built from them.
+
+import { BodyText, Heading, TooltipCard } from "text.slint";
+import { GuiI18n } from "../globals.slint";
+import { AccountRow } from "../models.slint";
+import { Theme } from "../theme.slint";
+
+// One setting: what it is on the left, the control that changes it on the
+// right, in a box of its own.
+//
+// The control is whatever the caller puts inside, so a dropdown and a
+// switch produce the same card rather than two shapes that happen to look
+// alike. Its content sets its minimum, because the description wraps to a
+// different number of lines at every text scale, and it fills its row from
+// there so two cards side by side end level.
+export component SettingCard inherits Rectangle {
+    in property <string> title;
+    in property <string> detail;
+    min-height: card.preferred-height;
+    vertical-stretch: 1;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Theme.border;
+    background: Theme.surface;
+    card := HorizontalLayout {
+        padding: 16px;
+        spacing: 20px;
+        cross-axis-alignment: center;
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: 5px;
+            Heading { text: root.title; font-size: Theme.row-heading-size; }
+            if root.detail != "" : BodyText { text: root.detail; wrap: word-wrap; }
+        }
+        @children
+    }
+}
+
+export component AppButton inherits Rectangle {
+    in property <string> text;
+    // Why this button cannot be pressed, shown on hover while it is
+    // disabled.
+    //
+    // A disabled control that says nothing is a question the user cannot
+    // answer: the reason is always known here and is almost never guessable
+    // from the screen. Only shown while disabled, because a button that
+    // works needs no explanation.
+    in property <string> hint;
+    // What assistive technology hears, when the visible label is too short
+    // to be unambiguous on its own. Two "Browse..." buttons in one dialog
+    // read identically otherwise.
+    in property <string> accessible-name: root.text;
+    in property <string> tone: "secondary";
+    in property <bool> enabled: true;
+    callback clicked();
+    // Why it cannot be pressed, or the whole caption when the button was
+    // given less room than the caption needed. A button that works and
+    // shows its label has nothing to add.
+    private property <string> hover-note: !root.enabled && root.hint != ""
+        ? root.hint
+        : label.preferred-width > label.width ? root.text : "";
+    min-width: max(88px, label.preferred-width + 28px);
+    height: Theme.control-height;
+    horizontal-stretch: 0;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: !enabled ? Theme.border : tone == "primary" ? Theme.accent : tone == "danger" ? Theme.danger : Theme.border;
+    background: !enabled ? Theme.surface : area.pressed ? Theme.background : area.has-hover ? (tone == "primary" ? Theme.primary-fill-hover : tone == "danger" ? Theme.danger-fill-hover : Theme.elevated) : tone == "primary" ? Theme.primary-fill : tone == "danger" ? Theme.danger-fill : Theme.surface;
+    accessible-role: button;
+    accessible-label: root.accessible-name;
+    accessible-enabled: enabled;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+    // Held to the button's own width and elided there. `min-width` asks
+    // for room for the whole caption, but a layout that has none gives
+    // less, and a Rectangle does not clip what overflows it. The full text
+    // stays in `accessible-name`.
+    label := Text {
+        text: root.text;
+        width: root.width - 28px;
+        overflow: elide;
+        color: !root.enabled ? Theme.text-muted : root.tone == "danger" ? Theme.on-danger : Theme.text;
+        font-size: Theme.body-size;
+        font-weight: root.tone == "primary" ? 600 : 400;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    // Always enabled, so a disabled button still reports hover and can
+    // explain itself. The press is gated on `enabled` instead.
+    area := TouchArea {
+        mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.not-allowed;
+        clicked => { if root.enabled { root.clicked(); } }
+    }
+    if root.hover-note != "" : Tooltip {
+        TooltipCard { text: root.hover-note; }
+    }
+}
+
+// A star that says whether one Minecraft release is pinned, and toggles it.
+//
+// Colored rather than swapped for a second glyph when it is on: an outline
+// and a fill of the same shape read as one control in two states, where two
+// shapes read as two controls.
+export component FavoriteToggle inherits Rectangle {
+    in property <bool> favorite;
+    in property <string> version;
+    in property <bool> enabled: true;
+    callback toggled();
+    width: Theme.control-height;
+    height: Theme.control-height;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: !root.enabled ? Theme.border : root.favorite ? Theme.warning.with-alpha(0.7) : area.has-hover ? Theme.accent : Theme.border;
+    background: area.has-hover && root.enabled ? Theme.elevated : transparent;
+    accessible-role: button;
+    accessible-label: root.favorite ? GuiI18n.value("gui-unfavorite-version", root.version) : GuiI18n.value("gui-favorite-version", root.version);
+    accessible-enabled: root.enabled;
+    accessible-checkable: true;
+    accessible-checked: root.favorite;
+    accessible-action-default => { if root.enabled { root.toggled(); } }
+    Image {
+        x: 8px; y: 8px; width: parent.width - 16px; height: parent.height - 16px;
+        source: root.favorite ? @image-url("../../../../assets/icons/favorite-filled.svg") : @image-url("../../../../assets/icons/favorite.svg");
+        image-fit: contain;
+        colorize: !root.enabled ? Theme.text-muted : root.favorite ? Theme.warning : Theme.text-secondary;
+    }
+    area := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { root.toggled(); } }
+}
+
+export component IconButton inherits Rectangle {
+    in property <image> icon;
+    in property <string> accessible-name;
+    in property <bool> enabled: true;
+    callback clicked();
+    width: Theme.control-height;
+    height: Theme.control-height;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: area.has-hover ? Theme.accent : Theme.border;
+    background: area.has-hover ? Theme.elevated : transparent;
+    accessible-role: button;
+    accessible-label: accessible-name;
+    accessible-enabled: enabled;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+    // A disabled button keeps its border and loses its click, so the glyph
+    // has to go quiet too or the control still reads as available.
+    Image { x: 8px; y: 8px; width: parent.width - 16px; height: parent.height - 16px; source: root.icon; image-fit: contain; colorize: root.enabled ? Theme.text-secondary : Theme.text-muted; }
+    area := TouchArea { enabled: root.enabled; clicked => { root.clicked(); } }
+}
+
+export component TextField inherits Rectangle {
+    in-out property <string> text <=> input.text;
+    in property <string> placeholder;
+    in property <string> accessible-name: placeholder;
+    in property <bool> enabled: true;
+    in property <bool> invalid: false;
+    in property <InputType> input-type: InputType.text;
+    callback accepted();
+    callback edited(string);
+    callback focus-lost();
+    height: Theme.control-height;
+    min-width: 120px;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: invalid ? Theme.danger : input.has-focus ? Theme.accent : Theme.border;
+    background: Theme.background;
+    accessible-role: text-input;
+    accessible-label: accessible-name;
+    accessible-enabled: enabled;
+    input := TextInput {
+        x: 11px; width: parent.width - 22px; height: parent.height;
+        color: root.enabled ? Theme.text : Theme.text-muted;
+        font-size: Theme.body-size;
+        enabled: root.enabled;
+        input-type: root.input-type;
+        single-line: true;
+        vertical-alignment: center;
+        accepted => { root.accepted(); }
+        edited => { root.edited(self.text); }
+        // A field whose value is part of a larger draft has to be able to
+        // say "I am done" without the user pressing Enter.
+        changed has-focus => { if (!self.has-focus) { root.focus-lost(); } }
+    }
+    if root.text == "" : Text {
+        x: 11px; width: parent.width - 22px; height: parent.height;
+        text: root.placeholder;
+        color: Theme.text-muted;
+        font-size: Theme.body-size;
+        vertical-alignment: center;
+    }
+}
+
+export component FilterChip inherits Rectangle {
+    in property <string> text;
+    in property <string> accessible-name: text;
+    in property <bool> selected;
+    callback clicked();
+    height: Theme.control-height;
+    width: label.preferred-width + 24px;
+    horizontal-stretch: 0;
+    border-radius: 5px;
+    border-width: 1px;
+    border-color: selected ? Theme.accent : Theme.border;
+    background: selected ? Theme.selection-strong : area.has-hover ? Theme.elevated : transparent;
+    accessible-role: checkbox;
+    accessible-label: accessible-name;
+    accessible-checked: selected;
+    accessible-action-default => { root.clicked(); }
+    label := Text {
+        text: root.text;
+        color: root.selected ? Theme.accent : Theme.text-secondary;
+        font-size: Theme.caption-size;
+        font-weight: root.selected ? 600 : 400;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    area := TouchArea { clicked => { root.clicked(); } }
+}
+
+export component Toggle inherits Rectangle {
+    in-out property <bool> checked;
+    in property <bool> enabled: true;
+    in property <string> accessible-name;
+    // Whether clicking this switch *is* the change, or only asks for it.
+    //
+    // A settings switch decides its own position: the click is the change.
+    // A switch that asks does not, and must not, because what it asked for
+    // may be refused, or may happen to several rows at once. Its position
+    // has to come from what actually happened.
+    //
+    // This is not a preference. Assigning to `checked` here replaces the
+    // binding the caller gave it, permanently, for that one element - and a
+    // repeater reuses elements, so the row would go on reporting a click
+    // from minutes ago no matter what the list said.
+    in property <bool> sets-its-own-position: true;
+    callback toggled(bool);
+    width: 42px;
+    height: 23px;
+    horizontal-stretch: 0;
+    border-radius: 12px;
+    border-width: 1px;
+    border-color: checked ? Theme.accent : Theme.border;
+    background: checked ? Theme.toggle-on : Theme.background;
+    accessible-role: checkbox;
+    accessible-checked: checked;
+    accessible-enabled: enabled;
+    accessible-label: accessible-name;
+    accessible-action-default => { if root.enabled { root.request(); } }
+    Rectangle {
+        x: root.checked ? 21px : 3px;
+        y: 3px;
+        width: 17px; height: 17px;
+        border-radius: 9px;
+        background: root.enabled ? (root.checked ? Theme.accent : Theme.text-secondary) : Theme.text-muted;
+        animate x { duration: 100ms; }
+    }
+    TouchArea {
+        enabled: root.enabled;
+        clicked => { root.request(); }
+    }
+    function request() {
+        if root.sets-its-own-position {
+            root.checked = !root.checked;
+            root.toggled(root.checked);
+        } else {
+            root.toggled(!root.checked);
+        }
+    }
+}
+
+export component LabeledToggle inherits Rectangle {
+    in property <string> label;
+    in-out property <bool> checked;
+    in property <bool> enabled: true;
+    // See `Toggle`: false when the position has to come from what happened.
+    in property <bool> sets-its-own-position: true;
+    callback toggled(bool);
+    width: 210px;
+    height: 32px;
+    horizontal-stretch: 0;
+    HorizontalLayout { spacing: 10px;
+        BodyText { text: root.label; color: root.enabled ? Theme.text-secondary : Theme.text-muted; }
+        Rectangle { horizontal-stretch: 1; }
+        Toggle { accessible-name: root.label; checked <=> root.checked; enabled: root.enabled; sets-its-own-position: root.sets-its-own-position; toggled(value) => { root.toggled(value); } }
+    }
+}
+
+// An explicit choice a primary action waits for. The switch comes first
+// and the label wraps, so a long label can never push the switch out of a
+// narrow column; the label is part of the target, as a checkbox's is.
+export component AcknowledgementToggle inherits Rectangle {
+    in property <string> label;
+    // What is recorded. Pressing asks for the opposite through `toggled`.
+    in property <bool> checked;
+    in property <bool> enabled: true;
+    callback toggled(bool);
+    height: row.preferred-height;
+    row := HorizontalLayout {
+        spacing: 10px;
+        VerticalLayout { alignment: start; Toggle { accessible-name: root.label; checked: root.checked; enabled: root.enabled; sets-its-own-position: false; toggled(value) => { root.toggled(value); } } }
+        BodyText {
+            text: root.label;
+            color: root.enabled ? Theme.text : Theme.text-muted;
+            horizontal-stretch: 1;
+            vertical-alignment: top;
+            wrap: word-wrap;
+            TouchArea { clicked => { if root.enabled { root.toggled(!root.checked); } } }
+        }
+    }
+}
+
+// Launching as somebody other than the default account.
+//
+// Beside Launch rather than replacing it: the common case is one account,
+// and a launcher that made everyone choose every time would be worse for
+// it. Choosing here applies to one launch and never changes the default,
+// which is what makes it safe to use for a quick second client.
+export component LaunchAsButton inherits Rectangle {
+    in property <[AccountRow]> accounts;
+    in property <bool> enabled: true;
+    // Whether the instance is already running, so a launch from here is a
+    // second client rather than the first.
+    in property <bool> alongside;
+    // The account, and whether this is a second client alongside another.
+    callback launch-as(string, bool);
+    callback add-account();
+    // Sized the way `AppButton` is, so a row that pairs the two splits
+    // evenly instead of letting the other one absorb the slack.
+    min-width: max(88px, content.preferred-width);
+    height: Theme.control-height;
+    horizontal-stretch: 0;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: area.has-hover && root.enabled ? Theme.accent : Theme.border;
+    background: area.has-hover && root.enabled ? Theme.elevated : transparent;
+    accessible-role: button;
+    accessible-label: GuiI18n.text("gui-launch-as");
+    accessible-enabled: enabled;
+    accessible-action-default => { if root.enabled { menu.show({ x: 0, y: root.height }); } }
+    menu := ContextMenuArea {
+        Menu {
+            for account in root.accounts : MenuItem {
+                // The default is named like the rest. It is still the one
+                // plain Launch uses, and saying so twice would read as two
+                // different accounts.
+                title: account.is-default ? account.name + " (" + GuiI18n.text("gui-default") + ")" : account.name;
+                activated => { root.launch-as(account.id, root.alongside); }
+            }
+            MenuSeparator {}
+            MenuItem {
+                title: GuiI18n.text("gui-add-account");
+                activated => { root.add-account(); }
+            }
+        }
+    }
+    content := HorizontalLayout {
+        padding-left: 14px; padding-right: 14px; spacing: 5px; alignment: center;
+        Text {
+            text: GuiI18n.text("gui-launch-as");
+            color: root.enabled ? Theme.text : Theme.text-muted;
+            font-size: Theme.label-size;
+            vertical-alignment: center;
+        }
+        Text {
+            text: "\u{25be}";
+            color: root.enabled ? Theme.text-secondary : Theme.text-muted;
+            font-size: Theme.label-size;
+            vertical-alignment: center;
+        }
+    }
+    // Declared after the menu area, so a press opens the menu rather than
+    // being swallowed by the area that hosts it.
+    area := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { menu.show({ x: 0, y: root.height }); }
+    }
+}
+
+export component Pill inherits Rectangle {
+    in property <string> text;
+    in property <color> tone-color: Theme.text-secondary;
+    // A pill normally hugs its label. Where one stands in for a control it
+    // takes that control's size instead, so a column of rows does not jump
+    // between the two. An explicit width on the instance cannot do this:
+    // the width here is a binding on the same element and a laid-out child
+    // with a bound width is fixed at it.
+    in property <length> min-content-width: 0px;
+    in property <length> content-height: 24px;
+    height: root.content-height;
+    width: max(root.min-content-width, label.preferred-width + 18px);
+    horizontal-stretch: 0;
+    accessible-role: AccessibleRole.text;
+    accessible-label: root.text;
+    border-radius: 5px;
+    border-width: 1px;
+    border-color: root.tone-color.with-alpha(0.55);
+    background: root.tone-color.with-alpha(0.12);
+    label := Text {
+        text: root.text;
+        color: root.tone-color;
+        font-size: Theme.caption-size;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+export component NavItem inherits Rectangle {
+    in property <image> icon;
+    in property <string> label;
+    in property <bool> selected;
+    callback clicked();
+    height: 46px;
+    border-radius: 6px;
+    background: selected ? Theme.selection : area.has-hover ? Theme.elevated : transparent;
+    accessible-role: button;
+    accessible-label: label;
+    accessible-action-default => { root.clicked(); }
+    Rectangle { x: 0px; y: 8px; width: 3px; height: 30px; background: root.selected ? Theme.accent : transparent; border-radius: 2px; }
+    HorizontalLayout {
+        // `alignment` is the main axis only. Without the cross-axis rule a
+        // fixed-size image is pinned to the top of the row while the label,
+        // which has no fixed height, stretches and centers itself inside it.
+        cross-axis-alignment: center;
+        padding-left: 16px; padding-right: 12px; spacing: 13px;
+        // Colorized here rather than in the file, so the glyph follows the
+        // selected state along with the label and the marker beside it.
+        Image { source: root.icon; width: 22px; height: 22px; image-fit: contain; colorize: root.selected ? Theme.accent : Theme.text-secondary; }
+        Text { text: root.label; color: root.selected ? Theme.accent : Theme.text-secondary; font-size: Theme.row-heading-size; vertical-alignment: center; }
+    }
+    area := TouchArea { clicked => { root.clicked(); } }
+}
+
+export component SettingsNavItem inherits Rectangle {
+    in property <string> label;
+    in property <bool> selected;
+    callback clicked();
+    height: 42px;
+    border-radius: 6px;
+    background: selected ? Theme.selection : area.has-hover ? Theme.elevated : transparent;
+    accessible-role: button;
+    accessible-label: label;
+    accessible-action-default => { root.clicked(); }
+    Rectangle {
+        x: 0px; y: 7px; width: 3px; height: 28px;
+        border-radius: 2px;
+        background: root.selected ? Theme.accent : transparent;
+    }
+    Text {
+        x: 16px; width: parent.width - 26px; height: parent.height;
+        text: root.label;
+        color: root.selected ? Theme.accent : Theme.text-secondary;
+        font-size: Theme.body-size;
+        font-weight: root.selected ? 600 : 400;
+        vertical-alignment: center;
+    }
+    area := TouchArea { clicked => { root.clicked(); } }
+}
+
+// A layout at the root rather than a rectangle holding one.
+//
+// A layout fills the cross axis of the layout it sits in; a plain rectangle
+// takes the size of its own content. This is a tab body and a panel body,
+// so it has to fill: as a rectangle it turned a whole tab into a narrow
+// column of centred lines while every other tab, all of them layouts,
+// spanned the window.
+export component EmptyState inherits VerticalLayout {
+    in property <string> title;
+    in property <string> message;
+    // What is missing, said in a glyph as well as in the heading. The
+    // neutral environment mark stands for a list this application has
+    // nothing better to show, so a caller only names an icon when the
+    // absent thing has one of its own.
+    in property <image> icon: @image-url("../../../../assets/icons/environment-generic.svg");
+    callback primary();
+    callback secondary();
+    in property <string> primary-text;
+    in property <string> secondary-text;
+    alignment: center;
+    spacing: 10px;
+    padding: 32px;
+    // Centred as a block and kept to a readable measure, rather than one
+    // sentence stretched across a whole window.
+    HorizontalLayout {
+        alignment: center;
+        VerticalLayout {
+        max-width: 560px;
+        alignment: center; spacing: 10px;
+        HorizontalLayout { alignment: center; Image { source: root.icon; width: 64px; height: 64px; image-fit: contain; colorize: Theme.text-muted; } }
+        Heading { text: root.title; horizontal-alignment: center; }
+        BodyText { text: root.message; horizontal-alignment: center; wrap: word-wrap; }
+        Rectangle { height: 5px; }
+        HorizontalLayout {
+            alignment: center; spacing: 8px;
+            if root.secondary-text != "" : AppButton { text: root.secondary-text; clicked => { root.secondary(); } }
+            if root.primary-text != "" : AppButton { text: root.primary-text; tone: "primary"; clicked => { root.primary(); } }
+        }
+        }
+    }
+}
+
+export component ToastPanel inherits Rectangle {
+    in property <string> message;
+    in property <bool> error;
+    in property <int> repeats;
+    callback dismiss();
+    width: 420px;
+    height: max(72px, toast-message.preferred-height + 38px);
+    horizontal-stretch: 0;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: error ? Theme.danger.with-alpha(0.75) : Theme.success.with-alpha(0.75);
+    background: Theme.elevated;
+    Rectangle { x: 0px; y: 0px; width: 4px; height: parent.height; background: root.error ? Theme.danger : Theme.success; border-radius: 3px; }
+    HorizontalLayout { padding-left: 16px; padding-right: 10px; padding-top: 10px; padding-bottom: 10px; spacing: 10px; cross-axis-alignment: center;
+        VerticalLayout { horizontal-stretch: 1; spacing: 3px;
+            HorizontalLayout { spacing: 6px; cross-axis-alignment: center;
+                Heading { text: root.error ? GuiI18n.text("gui-notification-error") : GuiI18n.text("gui-notification-complete"); font-size: Theme.body-size; }
+                Rectangle { horizontal-stretch: 1; }
+                if root.repeats > 1 : Pill { text: GuiI18n.count("gui-notification-repeat", root.repeats); tone-color: root.error ? Theme.danger : Theme.success; content-height: 18px; }
+            }
+            toast-message := BodyText { text: root.message; color: Theme.text-secondary; wrap: word-wrap; }
+        }
+        IconButton { icon: @image-url("../../../../assets/icons/close.svg"); accessible-name: GuiI18n.text("gui-dismiss-notification"); width: 32px; height: 32px; clicked => { root.dismiss(); } }
+    }
+}

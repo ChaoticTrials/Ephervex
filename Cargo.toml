@@ -112,6 +112,9 @@ sha2 = "0.11.0"
 # from the desktop. The feature is explicitly unstable across Slint minor
 # releases, so what is built on it is one small handler in the frontend.
 slint = { version = "1.17.1", features = ["raw-window-handle-06", "unstable-winit-030"] }
+# Compiles the desktop frontend's standalone `.slint` sources at build time.
+# Kept at the same release as `slint`, whose generated code it has to match.
+slint-build = "1.17.1"
 sysinfo = "0.39.6"
 fontdb = "0.23.0"
 tar = "0.4.46"

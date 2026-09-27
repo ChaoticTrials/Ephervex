@@ -1,0 +1,328 @@
+// The client and server lists: host cards, the pending creation card, and the inspector.
+
+import { Spinner } from "std-widgets.slint";
+import { LoaderGlyph } from "../components/artwork.slint";
+import {
+    AppButton,
+    EmptyState,
+    IconButton,
+    LaunchAsButton,
+    Pill
+} from "../components/controls.slint";
+import { BodyText, Divider, ElidedHeading, Eyebrow, Heading } from "../components/text.slint";
+import { GuiI18n } from "../globals.slint";
+import { AccountRow, InstanceRow, PendingEntityRow, ServerRow } from "../models.slint";
+import { Theme } from "../theme.slint";
+
+export component PendingCard inherits Rectangle {
+    in property <PendingEntityRow> item;
+    height: Theme.card-height;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Theme.accent.with-alpha(0.7);
+    background: Theme.surface;
+    HorizontalLayout { padding: 15px; spacing: 16px; cross-axis-alignment: center;
+        LoaderGlyph { kind: item.loader-kind; server: item.server; }
+        VerticalLayout { horizontal-stretch: 1; spacing: 5px;
+            Heading { text: item.name; }
+            BodyText { text: item.target; wrap: word-wrap; }
+            // The third line, and only the third line: what the work is
+            // doing, underlined by how far along it is. A bar on a row of
+            // its own made this card one row taller than the instance row
+            // it turns into, which is the one thing it should match.
+            //
+            // The bar shows only where the work knows how far along it is.
+            // An indeterminate stage keeps the spinner and says nothing it
+            // cannot back up.
+            Rectangle {
+                height: detail-line.preferred-height + 6px;
+                detail-line := BodyText {
+                    y: 0px;
+                    width: parent.width;
+                    text: item.detail != "" ? item.detail : GuiI18n.text("gui-creation-pending-detail");
+                    color: Theme.text-muted;
+                    overflow: elide;
+                }
+                if !item.indeterminate : Rectangle {
+                    y: parent.height - 3px;
+                    height: 3px;
+                    width: parent.width;
+                    border-radius: 2px;
+                    background: Theme.border;
+                    Rectangle { x: 0px; width: parent.width * item.progress; height: parent.height; border-radius: 2px; background: Theme.accent; }
+                }
+            }
+        }
+        // The same trailing column an InstanceCard has, down to its width:
+        // what is being created becomes one of those rows, and a row that
+        // states the same two things in the same two places reads as the
+        // same list rather than as a preview of one. The spinner stands
+        // where the row's buttons will be once there is something to press.
+        VerticalLayout { width: 224px; alignment: center; spacing: 7px;
+            HorizontalLayout { alignment: center; spacing: 7px;
+                BodyText { text: item.storage; color: item.storage-kind == "temporary" ? Theme.warning : Theme.success; font-size: Theme.caption-size; }
+                Pill { text: item.state; tone-color: Theme.accent; }
+            }
+            HorizontalLayout { alignment: center; Spinner { indeterminate: true; width: 18px; height: 18px; } }
+        }
+    }
+}
+
+export component InstanceCard inherits Rectangle {
+    in property <InstanceRow> item;
+    in property <bool> selected;
+    callback choose(string);
+    callback launch(string);
+    callback kill(string);
+    callback open-workspace(string);
+    callback open-folder(string);
+    callback create-server(string, string);
+    callback duplicate(string);
+    callback make-persistent(string);
+    callback rename(string, string);
+    callback delete(string, string);
+    height: Theme.card-height;
+    border-radius: 8px;
+    border-width: selected ? 2px : 1px;
+    border-color: selected ? Theme.accent : Theme.border;
+    background: selected ? Theme.selection-card : card-area.has-hover ? Theme.elevated : Theme.surface;
+    accessible-role: button;
+    accessible-label: item.name;
+    accessible-action-default => { root.choose(item.id); }
+    // First, so it is *under* the card's own buttons rather than over
+    // them. A touch area declared after them takes the press first, and one
+    // that sets a width without an x is centered rather than left-aligned,
+    // which put it across the left of the Launch button and swallowed every
+    // click that landed on the label.
+    card-area := TouchArea {
+        clicked => { root.choose(item.id); }
+        double-clicked => { root.open-workspace(item.id); }
+    }
+    Rectangle {
+        x: 0px; y: 10px; width: 3px; height: parent.height - 20px;
+        border-radius: 2px;
+        background: root.selected ? Theme.accent : transparent;
+    }
+    HorizontalLayout {
+        padding: 15px; spacing: 16px;
+        LoaderGlyph { kind: item.loader-kind; }
+        VerticalLayout {
+            spacing: 5px;
+            horizontal-stretch: 1;
+            HorizontalLayout {
+                spacing: 9px;
+                ElidedHeading {
+                    text: item.name;
+                    clicked => { root.choose(item.id); }
+                    double-clicked => { root.open-workspace(item.id); }
+                }
+            }
+            BodyText { text: GuiI18n.values("gui-target-summary", item.minecraft, item.loader) + (item.mods > 0 ? " | " + GuiI18n.count("gui-managed-mods-count", item.mods) : ""); overflow: elide; }
+            // The third line says where the instance came from, unless a
+            // linked server is being built for it, in which case it says
+            // what that is doing and is underlined by how far along it is.
+            // The work gets this row rather than a row of its own, because
+            // it is this instance's work.
+            Rectangle {
+                height: source-line.preferred-height + (item.creating-server-detail != "" ? 6px : 0px);
+                source-line := BodyText {
+                    y: 0px;
+                    width: parent.width;
+                    text: item.creating-server-detail != "" ? item.creating-server-detail : item.linked-servers > 0 ? GuiI18n.count("gui-linked-servers-count", item.linked-servers) : GuiI18n.value("gui-source-instance", item.source);
+                    color: item.creating-server-detail != "" ? Theme.accent : item.linked-servers > 0 ? Theme.accent : Theme.text-muted;
+                    overflow: elide;
+                }
+                if item.creating-server-detail != "" && !item.creating-server-indeterminate : Rectangle {
+                    y: parent.height - 3px;
+                    height: 3px;
+                    width: parent.width;
+                    border-radius: 2px;
+                    background: Theme.border;
+                    Rectangle { x: 0px; width: parent.width * item.creating-server-progress; height: parent.height; border-radius: 2px; background: Theme.accent; }
+                }
+            }
+        }
+        VerticalLayout {
+            width: 224px; alignment: center; spacing: 7px;
+            HorizontalLayout {
+                alignment: center; spacing: 7px;
+                BodyText { text: item.storage; color: item.storage-kind == "temporary" ? Theme.warning : Theme.success; font-size: Theme.caption-size; }
+                Pill { text: item.restart-stage != "" ? GuiI18n.text("gui-state-restarting") : item.state; tone-color: item.restart-stage != "" ? Theme.warning : item.state-kind == "running" ? Theme.success : item.state-kind == "starting" ? Theme.warning : Theme.text-secondary; }
+                if item.creating-server-detail != "" : Pill { text: GuiI18n.text("gui-state-creating-server"); tone-color: Theme.accent; }
+                if item.needs-attention : Pill { text: GuiI18n.text("gui-attention"); tone-color: Theme.danger; }
+            }
+            HorizontalLayout { alignment: center; spacing: 7px;
+                if item.can-launch : AppButton { width: 150px; text: GuiI18n.text("gui-launch"); tone: "primary"; clicked => { root.launch(item.id); } }
+                if !item.can-launch && item.can-kill : AppButton { width: 150px; text: GuiI18n.text("gui-kill-instance"); tone: "danger"; clicked => { root.kill(item.id); } }
+                if !item.can-launch && !item.can-kill : Rectangle { width: 150px; }
+                IconButton { icon: @image-url("../../../../assets/icons/open-workspace.svg"); accessible-name: GuiI18n.text("gui-open-workspace"); clicked => { root.open-workspace(item.id); } }
+            }
+        }
+    }
+    ContextMenuArea {
+        Menu {
+            MenuItem { title: GuiI18n.text("gui-open-workspace"); activated => { root.open-workspace(item.id); } }
+            MenuItem { title: GuiI18n.text("gui-launch"); enabled: item.can-launch; activated => { root.launch(item.id); } }
+            MenuItem { title: GuiI18n.text("gui-kill-instance"); enabled: item.can-kill; activated => { root.kill(item.id); } }
+            MenuItem { title: GuiI18n.text("gui-open-folder"); activated => { root.open-folder(item.id); } }
+            MenuItem { title: GuiI18n.text("gui-create-linked-server"); activated => { root.create-server(item.id, item.name); } }
+            MenuSeparator { }
+            MenuItem { title: GuiI18n.text("gui-rename"); activated => { root.rename(item.id, item.name); } }
+            // Only a temporary instance has anywhere to go, and only a
+            // stopped one can be moved out from under itself.
+            // A menu entry has nowhere to put a hint, so a disabled one
+            // says why in its own title rather than greying out silently.
+            if item.storage-kind == "temporary" : MenuItem { title: item.can-kill ? GuiI18n.text("gui-make-persistent-while-running") : GuiI18n.text("gui-make-persistent"); enabled: !item.can-kill; activated => { root.make-persistent(item.id); } }
+            MenuItem { title: GuiI18n.text("gui-duplicate-instance"); activated => { root.duplicate(item.id); } }
+            MenuItem { title: GuiI18n.text("gui-delete-instance"); activated => { root.delete(item.id, item.name); } }
+        }
+    }
+}
+
+export component ServerCard inherits Rectangle {
+    in property <ServerRow> item;
+    in property <bool> selected;
+    callback choose(string);
+    callback primary(string);
+    callback open-workspace(string);
+    callback open-folder(string);
+    callback restart(string);
+    callback kill(string, string);
+    callback rename(string, string);
+    callback delete(string, string);
+    height: Theme.card-height;
+    border-radius: 8px;
+    border-width: selected ? 2px : 1px;
+    border-color: selected ? Theme.accent : Theme.border;
+    background: selected ? Theme.selection-card : card-area.has-hover ? Theme.elevated : Theme.surface;
+    accessible-role: button;
+    accessible-label: item.name;
+    accessible-action-default => { root.choose(item.id); }
+    // Under the card's buttons, not over them. See `InstanceCard`.
+    card-area := TouchArea {
+        clicked => { root.choose(item.id); }
+        double-clicked => { root.open-workspace(item.id); }
+    }
+    Rectangle {
+        x: 0px; y: 10px; width: 3px; height: parent.height - 20px;
+        border-radius: 2px;
+        background: root.selected ? Theme.accent : transparent;
+    }
+    HorizontalLayout {
+        padding: 15px; spacing: 16px;
+        LoaderGlyph { kind: item.loader-kind; server: true; }
+        VerticalLayout {
+            spacing: 5px;
+            horizontal-stretch: 1;
+            HorizontalLayout {
+                spacing: 9px;
+                ElidedHeading {
+                    text: item.name;
+                    clicked => { root.choose(item.id); }
+                    double-clicked => { root.open-workspace(item.id); }
+                }
+            }
+            BodyText { text: GuiI18n.values("gui-target-summary", item.minecraft, item.loader) + " | " + item.relationship; overflow: elide; }
+            BodyText { text: item.address + " | " + item.state-detail; color: Theme.text-muted; overflow: elide; }
+        }
+        VerticalLayout {
+            width: 224px; alignment: center; spacing: 7px;
+            HorizontalLayout {
+                alignment: center; spacing: 7px;
+                BodyText { text: item.storage; color: item.storage-kind == "temporary" ? Theme.warning : Theme.success; font-size: Theme.caption-size; }
+                Pill { text: item.restart-stage != "" ? GuiI18n.text("gui-state-restarting") : item.state; tone-color: item.restart-stage != "" ? Theme.warning : item.state-kind == "running" ? Theme.success : item.state-kind == "stopped" ? Theme.text-secondary : Theme.warning; }
+            }
+            HorizontalLayout { alignment: center; spacing: 7px;
+                if item.can-start || item.can-stop : AppButton {
+                    width: 150px;
+                    text: item.can-start ? GuiI18n.text("gui-start") : GuiI18n.text("gui-stop");
+                    tone: "primary";
+                    clicked => { root.primary(item.id); }
+                }
+                if !item.can-start && !item.can-stop : Rectangle { width: 150px; }
+                IconButton { icon: @image-url("../../../../assets/icons/open-workspace.svg"); accessible-name: GuiI18n.text("gui-open-server-workspace"); clicked => { root.open-workspace(item.id); } }
+            }
+        }
+    }
+    ContextMenuArea {
+        Menu {
+            MenuItem { title: GuiI18n.text("gui-open-server-workspace"); activated => { root.open-workspace(item.id); } }
+            MenuItem { title: item.can-start ? GuiI18n.text("gui-start") : GuiI18n.text("gui-stop"); enabled: item.can-start || item.can-stop; activated => { root.primary(item.id); } }
+            MenuItem { title: GuiI18n.text("gui-restart"); enabled: item.can-restart && item.restart-stage == ""; activated => { root.restart(item.id); } }
+            MenuItem { title: GuiI18n.text("gui-open-folder"); activated => { root.open-folder(item.id); } }
+            MenuSeparator { }
+            MenuItem { title: GuiI18n.text("gui-rename"); activated => { root.rename(item.id, item.name); } }
+            MenuItem { title: GuiI18n.text("gui-force-kill"); enabled: item.can-kill; activated => { root.kill(item.id, item.name); } }
+            MenuItem { title: GuiI18n.text("gui-delete-server"); activated => { root.delete(item.id, item.name); } }
+        }
+    }
+}
+
+export component InspectorLabel inherits BodyText { color: Theme.text-muted; width: 105px; }
+
+export component InstanceInspector inherits Rectangle {
+    in property <InstanceRow> item;
+    in property <bool> has-selection;
+    // The accounts a launch can be made as, for the control beside Launch.
+    in property <[AccountRow]> accounts;
+    callback launch(string);
+    callback launch-as(string, string, bool);
+    callback add-account();
+    callback kill(string);
+    callback connect(string, string);
+    callback open-folder(string);
+    callback workspace(string);
+    callback create-server(string, string);
+    callback diagnostics(string);
+    background: Theme.surface;
+    border-width: 1px;
+    border-color: Theme.border;
+    if !has-selection : EmptyState { title: GuiI18n.text("gui-no-instance-selected"); message: GuiI18n.text("gui-select-instance"); }
+    if has-selection : VerticalLayout {
+        alignment: start; padding: 22px; spacing: 14px;
+        HorizontalLayout {
+            spacing: 12px;
+            LoaderGlyph { kind: item.loader-kind; }
+            VerticalLayout {
+                spacing: 4px;
+                horizontal-stretch: 1;
+                ElidedHeading { text: item.name; font-size: Theme.item-title-size; }
+                BodyText { text: GuiI18n.values("gui-target-summary", item.minecraft, item.loader); color: Theme.text-muted; overflow: elide; }
+            }
+        }
+        Divider { }
+        Eyebrow { text: GuiI18n.text("gui-overview"); }
+        HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-status"); } BodyText { text: item.needs-attention ? GuiI18n.text("gui-needs-attention") : item.restart-stage != "" ? GuiI18n.text("gui-state-restarting") : item.state; color: item.needs-attention || item.restart-stage != "" ? Theme.warning : item.state-kind == "running" ? Theme.success : item.state-kind == "starting" ? Theme.warning : Theme.text-secondary; } }
+        HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-source"); } BodyText { text: item.source; } }
+        HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-mods"); } BodyText { text: GuiI18n.count("gui-managed-count", item.mods); } }
+        HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-storage"); } BodyText { text: item.storage; } }
+        BodyText { text: item.path; color: Theme.text-muted; overflow: elide; }
+        Divider { }
+        Eyebrow { text: GuiI18n.text("gui-actions"); }
+        // A paired row is split down the middle rather than by label
+        // length. A layout gives each child its preferred width and shares
+        // only the surplus, so two buttons whose captions differ come out
+        // visibly unequal and the block stops reading as a grid.
+        //
+        // Launch as keeps its place while the instance is running, because
+        // that is exactly when a second account is worth launching. What
+        // changes is what it means: a second client beside the first.
+        if item.can-launch || item.can-kill : HorizontalLayout { spacing: 8px;
+            if item.can-launch : AppButton { width: (parent.width - 8px) / 2; text: GuiI18n.text("gui-launch"); tone: "primary"; clicked => { root.launch(item.id); } }
+            if item.can-kill : AppButton { width: (parent.width - 8px) / 2; text: GuiI18n.text("gui-kill-instance"); tone: "danger"; clicked => { root.kill(item.id); } }
+            LaunchAsButton { width: (parent.width - 8px) / 2; accounts: root.accounts; alongside: item.can-kill; launch-as(account, alongside) => { root.launch-as(item.id, account, alongside); } add-account => { root.add-account(); } }
+        }
+        // A server's name is in this caption, so the button takes the
+        // width the panel has rather than asking for the width the name
+        // wants.
+        if item.connect-server-id != "" : AppButton { min-width: 88px; text: GuiI18n.value("gui-launch-connect", item.connect-server-name); enabled: item.can-connect; clicked => { root.connect(item.id, item.connect-server-id); } }
+        HorizontalLayout { spacing: 8px;
+            AppButton { width: (parent.width - 8px) / 2; text: GuiI18n.text("gui-open-workspace"); clicked => { root.workspace(item.id); } }
+            AppButton { width: (parent.width - 8px) / 2; text: GuiI18n.text("gui-open-folder"); clicked => { root.open-folder(item.id); } }
+        }
+        AppButton { text: GuiI18n.text("gui-create-linked-server"); clicked => { root.create-server(item.id, item.name); } }
+        Divider { }
+        Eyebrow { text: GuiI18n.text("gui-diagnostics"); }
+        AppButton { text: GuiI18n.text("gui-view-logs-crash-reports"); clicked => { root.diagnostics(item.id); } }
+    }
+}

@@ -1,0 +1,79 @@
+// The Snapshots surface and its snapshot cards.
+
+import { ScrollView } from "std-widgets.slint";
+import { AppButton, Pill } from "../components/controls.slint";
+import { BodyText, Heading, SectionTitle } from "../components/text.slint";
+import { GuiI18n } from "../globals.slint";
+import { SnapshotRow } from "../models.slint";
+import { Theme } from "../theme.slint";
+
+export component SnapshotCard inherits Rectangle {
+    in property <SnapshotRow> item;
+    callback restore();
+    callback rename();
+    callback delete();
+    height: 96px;
+    border-radius: 7px;
+    border-width: 1px;
+    border-color: Theme.border;
+    background: Theme.surface;
+    HorizontalLayout {
+        padding: 13px;
+        spacing: 12px;
+        cross-axis-alignment: center;
+        VerticalLayout {
+            spacing: 4px;
+            horizontal-stretch: 1;
+            Heading { text: root.item.label; font-size: Theme.row-heading-size; }
+            BodyText { text: root.item.captured + " | " + root.item.size + " | " + root.item.mods; color: Theme.text-secondary; }
+            BodyText { text: root.item.id; color: Theme.text-muted; font-size: Theme.caption-size; }
+        }
+        VerticalLayout {
+            alignment: center; spacing: 7px;
+            HorizontalLayout {
+                alignment: end; spacing: 7px;
+                Pill { text: root.item.origin; tone-color: Theme.accent-secondary; }
+                if root.item.uses-full-space : Pill { text: root.item.copy-method; tone-color: Theme.warning; }
+            }
+            HorizontalLayout {
+                alignment: end; spacing: 7px;
+                AppButton { text: GuiI18n.text("gui-snapshot-restore"); clicked => { root.restore(); } }
+                AppButton { text: GuiI18n.text("gui-rename"); clicked => { root.rename(); } }
+                AppButton { text: GuiI18n.text("gui-delete"); tone: "danger"; clicked => { root.delete(); } }
+            }
+        }
+    }
+}
+
+export component SnapshotPanel inherits Rectangle {
+    in property <[SnapshotRow]> items;
+    in property <string> total;
+    in property <bool> has-plain-copies;
+    callback create();
+    callback restore(string, string);
+    callback rename(string, string);
+    callback delete(string, string);
+    VerticalLayout {
+        spacing: 12px;
+        HorizontalLayout {
+            spacing: 10px;
+            SectionTitle { title: GuiI18n.text("gui-snapshots"); detail: GuiI18n.text("gui-snapshots-detail"); horizontal-stretch: 1; }
+            VerticalLayout { alignment: center; BodyText { text: GuiI18n.value("gui-snapshot-total", root.total); color: Theme.text-muted; } }
+            VerticalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-snapshot-create"); tone: "primary"; clicked => { root.create(); } } }
+        }
+        if root.has-plain-copies : BodyText { text: GuiI18n.text("gui-snapshot-copy-note"); color: Theme.warning; wrap: word-wrap; }
+        if root.items.length == 0 : Rectangle { vertical-stretch: 1; VerticalLayout { alignment: center; spacing: 8px; Heading { text: GuiI18n.text("gui-snapshot-none"); horizontal-alignment: center; } BodyText { text: GuiI18n.text("gui-snapshot-none-detail"); color: Theme.text-muted; wrap: word-wrap; horizontal-alignment: center; } } }
+        if root.items.length > 0 : ScrollView {
+            viewport-width: self.width;
+            VerticalLayout {
+                spacing: 9px;
+                for item in root.items : SnapshotCard {
+                    item: item;
+                    restore => { root.restore(item.id, item.label); }
+                    rename => { root.rename(item.id, item.label); }
+                    delete => { root.delete(item.id, item.label); }
+                }
+            }
+        }
+    }
+}

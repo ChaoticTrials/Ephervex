@@ -1,0 +1,17 @@
+// Globals whose answers come from the Rust side: localized text and validation rules.
+
+export global GuiI18n {
+    pure callback text(string) -> string;
+    pure callback count(string, int) -> string;
+    pure callback value(string, string) -> string;
+    pure callback values(string, string, string) -> string;
+}
+
+// Whether a server property value is acceptable, answered by the same
+// checks saving applies. Empty when it is; otherwise what is wrong.
+export global PropertyRules {
+    pure callback port-error(string) -> string;
+    // (address, whether a custom address is in use)
+    pure callback address-error(string, bool) -> string;
+    pure callback players-error(string) -> string;
+}
