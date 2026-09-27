@@ -29,6 +29,14 @@ report written after the last start, and, when asked, the recorded files'
 digests. Nothing is inferred from file names, and no conflict is guessed at
 without metadata that states it.
 
+A relation names a project in its requirer's own catalog, so it only proves an
+absence when every jar here is identified in that catalog. Otherwise Diagnose
+asks that catalog to identify the other jars by their bytes (SHA-1 on
+Modrinth, fingerprint on CurseForge), and the quick pass after a failed run,
+which asks nothing, counts the requirement as unconfirmed rather than missing.
+A missing project known only by id is named from the catalog, and neither
+answer is recorded (ADR 0037).
+
 **Manual by default.** Opening Diagnostics runs nothing. Diagnose checks
 configuration and hashes recorded files, with progress and cancellation. When
 a run fails, Ephervex runs a quick pass that hashes nothing, shows a notice

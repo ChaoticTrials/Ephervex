@@ -125,7 +125,10 @@ impl Fixture {
         self.app()
             .diagnose_host(
                 self.host(),
-                DiagnosisRequest { integrity },
+                DiagnosisRequest {
+                    integrity,
+                    ask_catalogs: false,
+                },
                 &OperationReporter::silent("diagnosing"),
                 &CancellationToken::new(),
             )

@@ -562,17 +562,25 @@ fn checks(diagnosis: &HostDiagnosis, localized: &dyn Fn(&CoreError) -> String) -
                 | FindingKind::DeclaredConflict(_)
         )
     });
+    let mut mods_value = lookup_args(
+        "gui-diagnosis-check-mods-value",
+        [
+            ("enabled", Arg::from(diagnosis.mods.enabled)),
+            ("disabled", Arg::from(diagnosis.mods.disabled)),
+            ("answered", Arg::from(diagnosis.mods.answered)),
+            ("unanswered", Arg::from(diagnosis.mods.unanswered)),
+        ],
+    );
+    if diagnosis.mods.unconfirmed > 0 {
+        mods_value.push(' ');
+        mods_value.push_str(&count(
+            "gui-diagnosis-check-mods-unconfirmed",
+            diagnosis.mods.unconfirmed,
+        ));
+    }
     checks.push(CheckView {
         label: lookup("gui-diagnosis-check-mods"),
-        value: lookup_args(
-            "gui-diagnosis-check-mods-value",
-            [
-                ("enabled", Arg::from(diagnosis.mods.enabled)),
-                ("disabled", Arg::from(diagnosis.mods.disabled)),
-                ("answered", Arg::from(diagnosis.mods.answered)),
-                ("unanswered", Arg::from(diagnosis.mods.unanswered)),
-            ],
-        ),
+        value: mods_value,
         state: if mods_problem { "problem" } else { "ok" },
     });
     let loader_problem = has(|kind| matches!(kind, FindingKind::LoaderReportedDependency(_)));
@@ -913,6 +921,8 @@ mod tests {
                 dependency: UnmetDependency::Missing {
                     name: "Registrate".to_owned(),
                     project_id: None,
+                    provider: None,
+                    proven: true,
                 },
                 chain: vec![impacted("Create"), impacted("Flywheel")],
                 required_by: 1,

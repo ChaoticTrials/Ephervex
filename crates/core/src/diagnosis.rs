@@ -324,6 +324,9 @@ pub struct ModCounts {
     pub answered: usize,
     /// Enabled mods nothing recorded relations for.
     pub unanswered: usize,
+    /// Required projects no catalog could confirm are absent, which are
+    /// therefore not reported as missing.
+    pub unconfirmed: usize,
 }
 
 /// What one diagnosis of a host found.
@@ -371,6 +374,20 @@ pub struct DiagnosisRequest {
     /// Hash every recorded file. Real work on a large pack, so a pass run on
     /// its own after a crash leaves it out.
     pub integrity: bool,
+    /// Ask catalogs to settle requirements that cannot be proven offline, and
+    /// to name missing projects that are known only by id.
+    pub ask_catalogs: bool,
+}
+
+impl DiagnosisRequest {
+    /// Everything a diagnosis can check, as one the user asks for.
+    #[must_use]
+    pub const fn full() -> Self {
+        Self {
+            integrity: true,
+            ask_catalogs: true,
+        }
+    }
 }
 
 /// One change a fix would make.
@@ -458,7 +475,9 @@ impl App {
 
         reporter.set_stage(Some("operation-stage-checking-mods".to_owned()));
         let snapshot = self.host_mod_snapshot(host)?;
-        let requirements = self.requirement_problems(host)?;
+        let (requirements, unconfirmed) = self
+            .settled_requirements(host, request, reporter, cancel)
+            .await?;
         let mods = ModCounts {
             enabled: snapshot
                 .mods
@@ -472,6 +491,7 @@ impl App {
                 .count(),
             answered: requirements.answered,
             unanswered: requirements.unanswered,
+            unconfirmed,
         };
 
         let mut findings = Vec::new();
@@ -517,21 +537,7 @@ impl App {
 
         findings.append(&mut java_customizations);
         findings.extend(jvm_findings(self, facts.jvm_override.as_ref()));
-        let hand_placed: Vec<String> = snapshot
-            .mods
-            .iter()
-            .filter(|entry| {
-                entry.origin == ephervex_model::ModOrigin::HandPlaced
-                    && entry.presence == ModPresence::Installed
-            })
-            .map(|entry| entry.file_name.clone())
-            .collect();
-        if !hand_placed.is_empty() {
-            findings.push(Finding {
-                kind: FindingKind::HandPlacedMods { names: hand_placed },
-                fix: None,
-            });
-        }
+        findings.extend(hand_placed_finding(&snapshot));
 
         let diagnosis = HostDiagnosis {
             host,
@@ -550,6 +556,33 @@ impl App {
             "diagnosed a host's configuration"
         );
         Ok(diagnosis)
+    }
+
+    /// What recorded relations say is unmet, settled by the catalogs when
+    /// asked, and how many absences are still unproven. Those are left out.
+    async fn settled_requirements(
+        &self,
+        host: InstalledHost,
+        request: DiagnosisRequest,
+        reporter: &OperationReporter,
+        cancel: &CancellationToken,
+    ) -> CoreResult<(crate::dependencies::RequirementProblems, usize)> {
+        let mut requirements = self.requirement_problems(host)?;
+        if request.ask_catalogs {
+            reporter.set_stage(Some("operation-stage-asking-catalogs".to_owned()));
+            self.confirm_unmet_requirements(host, &mut requirements, reporter, cancel)
+                .await;
+        }
+        let proven = |unmet: &UnmetRequirement| {
+            !matches!(
+                unmet.dependency,
+                UnmetDependency::Missing { proven: false, .. }
+            )
+        };
+        let before = requirements.unmet.len();
+        requirements.unmet.retain(proven);
+        let unconfirmed = before - requirements.unmet.len();
+        Ok((requirements, unconfirmed))
     }
 
     /// Shows what a fix would change. Changes nothing.
@@ -984,6 +1017,23 @@ fn java_refusal(
     }
 }
 
+/// Jars in `mods/` that nothing recorded, as one customization.
+fn hand_placed_finding(snapshot: &crate::mods::ManagedModSnapshot) -> Option<Finding> {
+    let names: Vec<String> = snapshot
+        .mods
+        .iter()
+        .filter(|entry| {
+            entry.origin == ephervex_model::ModOrigin::HandPlaced
+                && entry.presence == ModPresence::Installed
+        })
+        .map(|entry| entry.file_name.clone())
+        .collect();
+    (!names.is_empty()).then_some(Finding {
+        kind: FindingKind::HandPlacedMods { names },
+        fix: None,
+    })
+}
+
 fn integrity_findings(check: &IntegrityCheck) -> Vec<Finding> {
     let mut findings = Vec::new();
     let listed = |files: Vec<&crate::verify::VerifiedFile>| -> Vec<(PathBuf, Integrity)> {
@@ -1124,8 +1174,12 @@ impl HostDiagnosis {
 
         let _ = write!(
             out,
-            "\nMods: {} enabled, {} turned off; requirements recorded for {}, unknown for {}\n",
-            self.mods.enabled, self.mods.disabled, self.mods.answered, self.mods.unanswered
+            "\nMods: {} enabled, {} turned off; requirements recorded for {}, unknown for {}; {} required project(s) could not be confirmed missing\n",
+            self.mods.enabled,
+            self.mods.disabled,
+            self.mods.answered,
+            self.mods.unanswered,
+            self.mods.unconfirmed
         );
         out.push_str("\nIntegrity:\n");
         write_integrity(&mut out, self.integrity.as_ref(), home);

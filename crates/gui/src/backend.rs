@@ -4749,7 +4749,15 @@ async fn report_diagnosis(
     cancel: &CancellationToken,
 ) -> CoreResult<()> {
     match app
-        .diagnose_host(host, DiagnosisRequest { integrity }, reporter, cancel)
+        .diagnose_host(
+            host,
+            DiagnosisRequest {
+                integrity,
+                ask_catalogs: integrity,
+            },
+            reporter,
+            cancel,
+        )
         .await
     {
         Ok(diagnosis) => {

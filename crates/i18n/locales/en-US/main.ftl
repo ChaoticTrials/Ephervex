@@ -1139,6 +1139,7 @@ operation-stage-checking-shared-files = Checking shared launch files
 operation-stage-diagnosing-again = Diagnosing again
 operation-stage-checking-java = Checking Java
 operation-stage-checking-mods = Checking mod requirements
+operation-stage-asking-catalogs = Asking mod catalogs about requirements
 gui-integrity-open-logs = Open logs
 gui-integrity-nothing-recorded = Nothing is recorded for this host, so there is nothing to check.
 gui-integrity-absent = Missing
@@ -1338,6 +1339,10 @@ gui-diagnosis-check-java-refused = No usable runtime.
 gui-diagnosis-check-failed = Could not be checked: { $error }
 gui-diagnosis-check-mods = Mod requirements
 gui-diagnosis-check-mods-value = { $enabled } enabled, { $disabled } turned off. Requirements recorded for { $answered }, unknown for { $unanswered }.
+gui-diagnosis-check-mods-unconfirmed = { $count ->
+    [one] 1 required project could not be confirmed missing, because a jar here may be it under another catalog. Diagnose asks the catalogs.
+   *[other] { $count } required projects could not be confirmed missing, because a jar here may be them under another catalog. Diagnose asks the catalogs.
+}
 gui-diagnosis-check-log = Last start's log
 gui-diagnosis-check-log-none = No log from a previous start.
 gui-diagnosis-check-log-refused = The loader refused to start.
