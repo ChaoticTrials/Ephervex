@@ -1,0 +1,491 @@
+//! Diagnostics: what a host is configured with, what is wrong with it, and the
+//! fixes it previews before anything changes.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+use std::os::unix::fs::PermissionsExt as _;
+use std::path::{Path, PathBuf};
+
+use ephervex_core::{
+    App, CoreError, DiagnosisRequest, DiagnosticFix, FindingClass, FindingKind, HostDiagnosis,
+    InstalledHost, JavaLayer, JavaMismatch, Paths, ProposedChange, RecommendedJava,
+    UnmetDependency,
+};
+use ephervex_download::{
+    CacheLayout, ContentStore, FileExtension, MetadataCache, MetadataKey, OperationReporter,
+};
+use ephervex_minecraft::{VERSION_MANIFEST_CACHE_KEY, VERSION_MANIFEST_URL, VersionManifest};
+use ephervex_model::{InstanceId, JavaOverride, JvmSettings, LoaderSelection};
+use ephervex_storage::{LaunchLock, NewClient, Registry};
+use serde_json::json;
+use tokio_util::sync::CancellationToken;
+
+struct Fixture {
+    _directory: tempfile::TempDir,
+    paths: Paths,
+    root: PathBuf,
+    id: InstanceId,
+}
+
+impl Fixture {
+    /// A vanilla 1.21.1 client whose recipe declares each jar and the
+    /// projects it requires. Java is never looked for on this machine: only a
+    /// runtime a test pins is ever probed.
+    async fn with_mods(declared: &[(&str, &[&str])]) -> Self {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(directory.path());
+        let registry = Registry::open(paths.clone()).unwrap();
+        let client = registry
+            .create_client(NewClient::new(
+                "Diagnosis",
+                "1.21.1",
+                LoaderSelection::vanilla(),
+            ))
+            .unwrap();
+        registry.publish_client(&client).unwrap();
+        let fixture = Self {
+            _directory: directory,
+            paths,
+            root: client.root,
+            id: client.id,
+        };
+        let files = declared
+            .iter()
+            .map(|&(name, requires)| {
+                fixture.write(&format!("minecraft/mods/{name}.jar"), name.as_bytes());
+                json!({
+                    "logical_path": format!("mods/{name}.jar"), "hashes": [],
+                    "downloads": [], "size": name.len(), "client": "required", "server": "required",
+                    "origin": "user_selected",
+                    "identity": {"provider": "modrinth", "project_id": name, "version_id": format!("{name}1")},
+                    "relations": requires.iter().map(|name| json!({"kind":"required","target":{"project":{"project_id":name}}})).collect::<Vec<_>>(),
+                })
+            })
+            .collect::<Vec<_>>();
+        fixture.write_recipe(&files);
+        seed_minecraft(fixture.app().paths().cache_dir()).await;
+        let mut app = fixture.app();
+        let mut settings = app.java_settings();
+        settings.auto_detect = false;
+        settings.auto_download = false;
+        app.set_java_settings(&settings).unwrap();
+        fixture
+    }
+
+    fn app(&self) -> App {
+        App::open_at(self.paths.clone()).unwrap()
+    }
+
+    fn host(&self) -> InstalledHost {
+        InstalledHost::Instance(self.id)
+    }
+
+    fn write(&self, path: &str, bytes: &[u8]) {
+        let path = self.root.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    fn write_recipe(&self, files: &[serde_json::Value]) {
+        self.write(
+            ".launcher/source/recipe.json",
+            &serde_json::to_vec(&json!({
+                "recipe_version":1, "source_kind":"manual", "original_name":"Diagnosis",
+                "minecraft_version":"1.21.1","loader":{"kind":"vanilla","version":null},
+                "files":files, "override_layers":[], "provider_metadata":{"kind":"manual"},
+            }))
+            .unwrap(),
+        );
+    }
+
+    fn disable(&self, name: &str) {
+        let mods = self.root.join("minecraft/mods");
+        std::fs::rename(
+            mods.join(format!("{name}.jar")),
+            mods.join(format!("{name}.jar.disabled")),
+        )
+        .unwrap();
+    }
+
+    fn enabled(&self, name: &str) -> bool {
+        self.root
+            .join(format!("minecraft/mods/{name}.jar"))
+            .is_file()
+    }
+
+    /// Pins this host to a fake runtime reporting `version`.
+    fn pin_java(&self, version: &str, jvm: Option<JvmSettings>) -> PathBuf {
+        let java = fake_java(&self.root.join(format!("jdk-{version}")), version);
+        self.app()
+            .set_client_runtime_settings(self.id, Some(JavaOverride::new(&java)), jvm)
+            .unwrap();
+        java
+    }
+
+    async fn diagnose(&self, integrity: bool) -> HostDiagnosis {
+        self.app()
+            .diagnose_host(
+                self.host(),
+                DiagnosisRequest { integrity },
+                &OperationReporter::silent("diagnosing"),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap()
+    }
+}
+
+/// An executable that answers the property probe as a JVM of `version` would.
+fn fake_java(home: &Path, version: &str) -> PathBuf {
+    let executable = home.join("bin/java");
+    std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+    std::fs::write(
+        &executable,
+        format!(
+            "#!/bin/sh\ncat >&2 <<'EOF'\nProperty settings:\n    java.home = {home}\n    \
+             java.runtime.version = {version}+7\n    java.vendor = Eclipse Adoptium\n    \
+             java.version = {version}\n    os.arch = {arch}\nEOF\n",
+            home = home.display(),
+            arch = jvm_arch(),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    executable
+}
+
+const fn jvm_arch() -> &'static str {
+    if cfg!(target_arch = "aarch64") {
+        "aarch64"
+    } else {
+        "amd64"
+    }
+}
+
+/// Mojang's manifest and the release documents the fixtures cover, stored as
+/// fresh so resolving a release reaches no network.
+async fn seed_minecraft(cache: &Path) {
+    let layout = CacheLayout::new(cache);
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/minecraft");
+    let manifest_json = std::fs::read_to_string(fixtures.join("version_manifest_v2.json")).unwrap();
+    let manifest = VersionManifest::parse(&manifest_json).unwrap();
+    MetadataCache::new(layout.clone())
+        .store(
+            &MetadataKey::new(VERSION_MANIFEST_CACHE_KEY).unwrap(),
+            &VERSION_MANIFEST_URL.parse().unwrap(),
+            serde_json::value::RawValue::from_string(manifest_json).unwrap(),
+        )
+        .await
+        .unwrap();
+    let json = FileExtension::new("json").unwrap();
+    for record in &manifest.versions {
+        let Ok(document) = std::fs::read(fixtures.join(format!("{}.json", record.id))) else {
+            continue;
+        };
+        let path = layout.content(ContentStore::Metadata, &record.sha1, Some(&json));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &document).unwrap();
+    }
+}
+
+fn kinds(diagnosis: &HostDiagnosis, class: FindingClass) -> Vec<&FindingKind> {
+    diagnosis
+        .findings
+        .iter()
+        .filter(|finding| finding.class() == class)
+        .map(|finding| &finding.kind)
+        .collect()
+}
+
+#[tokio::test]
+async fn a_pinned_java_that_satisfies_the_release_is_a_customization_not_a_problem() {
+    let fixture = Fixture::with_mods(&[]).await;
+    fixture.pin_java("21.0.8", None);
+
+    let diagnosis = fixture.diagnose(false).await;
+
+    assert!(diagnosis.is_healthy(), "{:?}", diagnosis.findings);
+    let customized = kinds(&diagnosis, FindingClass::Customized);
+    assert!(
+        matches!(
+            customized.as_slice(),
+            [FindingKind::JavaCustomized {
+                layer: JavaLayer::Host,
+                required_major: 21,
+                ..
+            }]
+        ),
+        "{customized:?}"
+    );
+    assert_eq!(
+        diagnosis.findings[0].fix, None,
+        "with detection off there is nothing better to recommend"
+    );
+}
+
+#[tokio::test]
+async fn a_pinned_java_of_the_wrong_major_is_a_problem() {
+    let fixture = Fixture::with_mods(&[]).await;
+    fixture.pin_java("17.0.12", None);
+
+    let diagnosis = fixture.diagnose(false).await;
+
+    assert!(!diagnosis.is_healthy());
+    assert!(
+        matches!(
+            kinds(&diagnosis, FindingClass::Problem).as_slice(),
+            [FindingKind::JavaIncompatible {
+                layer: JavaLayer::Host,
+                required_major: 21,
+                mismatch: JavaMismatch::Major {
+                    required: 21,
+                    found: 17
+                },
+                ..
+            }]
+        ),
+        "{:?}",
+        diagnosis.findings
+    );
+    assert!(
+        diagnosis
+            .technical_report()
+            .contains("needs Java 21, found 17")
+    );
+}
+
+#[tokio::test]
+async fn using_the_recommended_java_previews_both_runtimes_and_changes_only_this_host() {
+    let fixture = Fixture::with_mods(&[]).await;
+    let mut app = fixture.app();
+    let launcher_java = fake_java(&fixture.root.join("launcher-jdk"), "21.0.8");
+    let mut settings = app.java_settings();
+    settings.preferred_path = Some(launcher_java.clone());
+    app.set_java_settings(&settings).unwrap();
+    let jvm = JvmSettings {
+        max_memory_mib: Some(4096),
+        ..JvmSettings::default()
+    };
+    let pinned = fixture.pin_java("17.0.12", Some(jvm.clone()));
+
+    let diagnosis = fixture.diagnose(false).await;
+    let fix = diagnosis.findings[0].fix.clone();
+    assert_eq!(fix, Some(DiagnosticFix::UseAutomaticJava));
+
+    let preview = app
+        .preview_fix(fixture.host(), fix.as_ref().unwrap())
+        .await
+        .unwrap();
+    let [
+        ProposedChange::UseJava {
+            current_path,
+            current_version,
+            recommended: RecommendedJava::Installed(recommended),
+            required_major: 21,
+        },
+    ] = preview.changes.as_slice()
+    else {
+        panic!("{:?}", preview.changes);
+    };
+    assert_eq!(current_path, &pinned);
+    assert_eq!(current_version.as_deref(), Some("17.0.12"));
+    assert_eq!(recommended.version, "21.0.8");
+    assert!(preview.blocked.is_none());
+    assert!(
+        app.client(fixture.id).unwrap().java_override.is_some(),
+        "a preview changes nothing"
+    );
+
+    let outcome = app
+        .apply_fix(
+            fixture.host(),
+            fix.as_ref().unwrap(),
+            &OperationReporter::silent("fixing"),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert!(outcome.is_complete());
+    let record = app.client(fixture.id).unwrap();
+    assert_eq!(record.java_override, None);
+    assert_eq!(
+        record.jvm_override,
+        Some(jvm),
+        "only the Java selection changes"
+    );
+}
+
+#[tokio::test]
+async fn custom_jvm_arguments_are_customized_and_the_report_leaves_out_their_values() {
+    let fixture = Fixture::with_mods(&[]).await;
+    fixture.pin_java(
+        "21.0.8",
+        Some(JvmSettings {
+            jvm_args: vec!["-Dsecret=hunter2".to_owned(), "-Xss4m".to_owned()],
+            ..JvmSettings::default()
+        }),
+    );
+
+    let diagnosis = fixture.diagnose(false).await;
+
+    assert!(diagnosis.is_healthy());
+    assert!(
+        kinds(&diagnosis, FindingClass::Customized)
+            .iter()
+            .any(|kind| matches!(
+                kind,
+                FindingKind::JvmArgumentsCustomized {
+                    layer: JavaLayer::Host,
+                    count: 2
+                }
+            ))
+    );
+    let report = diagnosis.technical_report();
+    assert!(!report.contains("hunter2"), "{report}");
+    assert!(report.contains("Result: no problems found"), "{report}");
+}
+
+#[tokio::test]
+async fn a_turned_off_requirement_is_enabled_only_after_its_preview_is_applied() {
+    let fixture = Fixture::with_mods(&[("create", &["flywheel"]), ("flywheel", &[])]).await;
+    fixture.pin_java("21.0.8", None);
+    fixture.disable("flywheel");
+    let app = fixture.app();
+
+    let diagnosis = fixture.diagnose(false).await;
+    let problems = kinds(&diagnosis, FindingClass::Problem);
+    let [FindingKind::DependencyDisabled(requirement)] = problems.as_slice() else {
+        panic!("{problems:?}");
+    };
+    assert!(matches!(
+        requirement.dependency,
+        UnmetDependency::Disabled(_)
+    ));
+    let fix = diagnosis.findings[0].fix.clone().unwrap();
+    assert_eq!(
+        fix,
+        DiagnosticFix::EnableMods(vec![PathBuf::from("mods/flywheel.jar")])
+    );
+
+    let preview = app.preview_fix(fixture.host(), &fix).await.unwrap();
+    assert_eq!(
+        preview.changes,
+        [ProposedChange::Enable {
+            name: "flywheel.jar".to_owned(),
+            logical_path: PathBuf::from("mods/flywheel.jar"),
+        }]
+    );
+    assert!(!fixture.enabled("flywheel"), "a preview changes nothing");
+
+    let outcome = app
+        .apply_fix(
+            fixture.host(),
+            &fix,
+            &OperationReporter::silent("fixing"),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome.applied, ["flywheel.jar"]);
+    assert!(fixture.enabled("flywheel"));
+    assert!(fixture.diagnose(false).await.is_healthy());
+}
+
+#[tokio::test]
+async fn a_fix_is_held_back_while_the_host_runs() {
+    let fixture = Fixture::with_mods(&[("create", &["flywheel"]), ("flywheel", &[])]).await;
+    fixture.disable("flywheel");
+    let app = fixture.app();
+    let fix = DiagnosticFix::EnableMods(vec![PathBuf::from("mods/flywheel.jar")]);
+    let launch = LaunchLock::acquire(&fixture.root).unwrap();
+
+    let preview = app.preview_fix(fixture.host(), &fix).await.unwrap();
+    assert!(preview.blocked.is_some());
+    let refused = app
+        .apply_fix(
+            fixture.host(),
+            &fix,
+            &OperationReporter::silent("fixing"),
+            &CancellationToken::new(),
+        )
+        .await;
+    assert!(matches!(refused, Err(CoreError::ChangeRefused { .. })));
+    assert!(!fixture.enabled("flywheel"));
+    drop(launch);
+}
+
+#[tokio::test]
+async fn a_crash_is_a_problem_only_when_it_came_after_the_last_start() {
+    let fixture = Fixture::with_mods(&[]).await;
+    fixture.pin_java("21.0.8", None);
+    fixture.write(
+        "minecraft/crash-reports/crash-2026-09-27_12.00.00-client.txt",
+        b"---- Minecraft Crash Report ----\nDescription: Ticking\n\njava.lang.IllegalStateException: boom\n",
+    );
+
+    let diagnosis = fixture.diagnose(false).await;
+    assert!(
+        kinds(&diagnosis, FindingClass::Problem)
+            .iter()
+            .any(|kind| matches!(kind, FindingKind::RecentCrash { .. })),
+        "never started from here, so the report is the newest evidence"
+    );
+
+    let registry = Registry::open(fixture.paths.clone()).unwrap();
+    let mut record = registry.client(fixture.id).unwrap();
+    record.last_launched_at = Some(chrono::Utc::now() + chrono::Duration::hours(1));
+    registry.update_client(&mut record).unwrap();
+
+    let diagnosis = fixture.diagnose(false).await;
+    assert!(diagnosis.recent_crash.is_none());
+    assert!(diagnosis.is_healthy(), "{:?}", diagnosis.findings);
+}
+
+#[tokio::test]
+async fn the_loader_s_refusal_in_the_last_log_is_a_problem() {
+    let fixture = Fixture::with_mods(&[]).await;
+    fixture.pin_java("21.0.8", None);
+    fixture.write(
+        "minecraft/logs/latest.log",
+        b"[12:00:01] [main/ERROR] [net.neoforged.fml.loading.ModSorter/LOADING]: Missing or unsupported mandatory dependencies:\n\
+          \tMod ID: 'bar', Requested by: 'foo', Expected range: '[3.0,)', Actual version: '2.4'\n",
+    );
+
+    let diagnosis = fixture.diagnose(false).await;
+
+    let problems = kinds(&diagnosis, FindingClass::Problem);
+    let [FindingKind::LoaderReportedDependency(reported)] = problems.as_slice() else {
+        panic!("{problems:?}");
+    };
+    assert_eq!(reported.expected_range, "[3.0,)");
+    assert_eq!(reported.actual.as_deref(), Some("2.4"));
+}
+
+#[tokio::test]
+async fn recorded_files_are_hashed_only_when_asked() {
+    let fixture = Fixture::with_mods(&[]).await;
+    fixture.pin_java("21.0.8", None);
+    fixture.write_recipe(&[json!({
+        "logical_path": "mods/gone.jar",
+        "hashes": [{"algorithm": "sha1", "digest": "da39a3ee5e6b4b0d3255bfef95601890afd80709"}],
+        "downloads": ["https://cdn.modrinth.com/data/x/gone.jar"], "size": 1,
+        "client": "required", "server": "required", "origin": "user_selected",
+    })]);
+
+    let quick = fixture.diagnose(false).await;
+    assert!(quick.integrity.is_none());
+    assert!(quick.is_healthy());
+
+    let full = fixture.diagnose(true).await;
+    assert!(full.integrity.is_some());
+    let problem = full
+        .findings
+        .iter()
+        .find(|finding| matches!(finding.kind, FindingKind::ManagedFilesDamaged { .. }))
+        .expect("the missing file is a problem");
+    assert_eq!(
+        problem.fix,
+        Some(DiagnosticFix::RestoreFiles(vec![PathBuf::from(
+            "mods/gone.jar"
+        )]))
+    );
+}

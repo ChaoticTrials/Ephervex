@@ -523,18 +523,29 @@ impl App {
 
 impl App {
     fn refuse_repair(&self, host: InstalledHost) -> CoreResult<()> {
+        match self.mutation_blocker(host)? {
+            Some(reason) => Err(CoreError::RepairRefused { reason }),
+            None => Ok(()),
+        }
+    }
+
+    /// What stops a change to this host's files right now: the host running,
+    /// or an isolation session owning which of its mods are enabled.
+    pub(crate) fn mutation_blocker(
+        &self,
+        host: InstalledHost,
+    ) -> CoreResult<Option<RepairRefusal>> {
         let running = match host {
             InstalledHost::Instance(id) => self.launch_state(id)?.is_some(),
             InstalledHost::Server(id) => self.server_status(id)?.runtime.may_be_running(),
         };
-        let reason = if running {
-            RepairRefusal::HostRunning
+        Ok(if running {
+            Some(RepairRefusal::HostRunning)
         } else if self.isolation_state(host)?.is_some() {
-            RepairRefusal::IsolationActive
+            Some(RepairRefusal::IsolationActive)
         } else {
-            return Ok(());
-        };
-        Err(CoreError::RepairRefused { reason })
+            None
+        })
     }
 }
 
