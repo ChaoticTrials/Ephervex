@@ -228,6 +228,15 @@ pub enum LayoutError {
     SurfaceNotOffered,
 }
 
+/// How [`WorkspaceLayout::reveal`] brought a host into view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Revealed {
+    /// A pane already showed the host, and nothing changed.
+    Shown(PaneId),
+    /// A new pane shows the host. Every existing pane is where it was, as it was.
+    Added(PaneId),
+}
+
 /// The one way back a single workspace remembers, set when one host's view
 /// opens another host, such as a client opening its linked server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -247,6 +256,18 @@ impl Column {
         match *self {
             Self::Whole(pane) => vec![pane],
             Self::Stacked { top, bottom } => vec![top, bottom],
+        }
+    }
+
+    fn contains(&self, id: PaneId) -> bool {
+        self.panes().iter().any(|pane| pane.id == id)
+    }
+
+    /// The column's pane when it is alone in it.
+    const fn whole(&self) -> Option<PaneId> {
+        match self {
+            Self::Whole(pane) => Some(pane.id),
+            Self::Stacked { .. } => None,
         }
     }
 
@@ -533,6 +554,54 @@ impl WorkspaceLayout {
             }
             Arrangement::Split { .. } => false,
         }
+    }
+
+    /// Shows `host` without changing any pane already there.
+    ///
+    /// The first pane in reading order that shows `host` is reused. Otherwise a
+    /// pane on `surface` is added in the smallest step the shapes allow: beside
+    /// a single pane, or below a full-height pane of a split. The right column
+    /// is tried first unless `from` is in it, so the new pane sits beside the
+    /// pane that asked. Every existing pane keeps its host, surface, column,
+    /// and row.
+    ///
+    /// # Errors
+    ///
+    /// [`LayoutError::NoRoom`] when no pane can be added without taking one
+    /// away, such as in 2:2. The layout is then unchanged.
+    pub fn reveal(
+        &mut self,
+        host: InstalledHost,
+        surface: Surface,
+        from: Option<PaneId>,
+    ) -> Result<Revealed, LayoutError> {
+        if let Some(shown) = self
+            .panes()
+            .into_iter()
+            .find(|placed| placed.pane.host == host)
+        {
+            return Ok(Revealed::Shown(shown.pane.id));
+        }
+        let added = match self.arrangement {
+            Arrangement::Single(pane) => self.split_beside(pane.id)?,
+            Arrangement::Split { left, right } => {
+                let (first, second) = if from.is_some_and(|id| right.contains(id)) {
+                    (left, right)
+                } else {
+                    (right, left)
+                };
+                let below = first
+                    .whole()
+                    .or_else(|| second.whole())
+                    .ok_or(LayoutError::NoRoom)?;
+                self.split_below(below)?
+            }
+        };
+        if let Some(pane) = self.pane_mut(added) {
+            pane.host = host;
+            pane.surface = surface.or_default_for(host);
+        }
+        Ok(Revealed::Added(added))
     }
 
     fn new_pane(&mut self, host: InstalledHost) -> Pane {
@@ -1086,5 +1155,233 @@ mod tests {
         let added = layout.split_beside(PaneId(1)).expect("split");
         assert_eq!(added, PaneId(3));
         assert_eq!(ids(&layout), [1, 3]);
+    }
+
+    /// Every pane's id, host, surface, column, and row, in reading order.
+    fn contents(layout: &WorkspaceLayout) -> Vec<(u32, InstalledHost, Surface, u8, u8)> {
+        layout
+            .panes()
+            .iter()
+            .map(|placed| {
+                (
+                    placed.pane.id.get(),
+                    placed.pane.host,
+                    placed.pane.surface,
+                    placed.placement.column,
+                    placed.placement.row,
+                )
+            })
+            .collect()
+    }
+
+    /// Each shape with a different host and a non-default surface in every pane.
+    fn arranged(shape: Shape) -> WorkspaceLayout {
+        let mut layout = WorkspaceLayout::single(client(), Surface::Mods);
+        if shape == Shape::Single {
+            return layout;
+        }
+        layout.split_beside(PaneId(1)).expect("beside");
+        layout.show_host(PaneId(2), server()).expect("host");
+        layout
+            .show_surface(PaneId(2), Surface::Console)
+            .expect("surface");
+        let stack = |layout: &mut WorkspaceLayout, below: u32, surface: Surface| {
+            let added = layout.split_below(PaneId(below)).expect("below");
+            layout.show_host(added, client()).expect("host");
+            layout.show_surface(added, surface).expect("surface");
+        };
+        match shape {
+            Shape::TwoByOne => stack(&mut layout, 1, Surface::Logs),
+            Shape::OneByTwo => stack(&mut layout, 2, Surface::Snapshots),
+            Shape::TwoByTwo => {
+                stack(&mut layout, 1, Surface::Logs);
+                stack(&mut layout, 2, Surface::Snapshots);
+            }
+            Shape::Single | Shape::OneByOne => {}
+        }
+        assert_eq!(layout.shape(), shape);
+        layout
+    }
+
+    const SHAPES: [Shape; 5] = [
+        Shape::Single,
+        Shape::OneByOne,
+        Shape::TwoByOne,
+        Shape::OneByTwo,
+        Shape::TwoByTwo,
+    ];
+
+    fn added(revealed: Result<Revealed, LayoutError>) -> Option<PaneId> {
+        match revealed {
+            Ok(Revealed::Added(pane)) => Some(pane),
+            _ => None,
+        }
+    }
+
+    /// Reveals `host` and checks that every pane already there is unchanged.
+    fn reveal_keeping_every_pane(
+        layout: &mut WorkspaceLayout,
+        host: InstalledHost,
+        from: Option<PaneId>,
+    ) -> PaneId {
+        let before = contents(layout);
+        let added =
+            added(layout.reveal(host, Surface::Console, from)).expect("room for one more pane");
+        let after = contents(layout);
+        assert_eq!(after.len(), before.len() + 1);
+        for pane in &before {
+            assert!(after.contains(pane), "{pane:?} is untouched");
+        }
+        let pane = layout.pane(added).expect("added pane");
+        assert_eq!(pane.host(), host);
+        assert_supported(layout);
+        added
+    }
+
+    #[test]
+    fn revealing_a_host_in_a_single_pane_adds_it_beside() {
+        let mut layout = arranged(Shape::Single);
+        let host = server();
+        let added = reveal_keeping_every_pane(&mut layout, host, Some(PaneId(1)));
+        assert_eq!(layout.shape(), Shape::OneByOne);
+        assert_eq!(
+            contents(&layout)[1],
+            (added.get(), host, Surface::Console, 1, 0)
+        );
+    }
+
+    #[test]
+    fn revealing_a_host_in_1_1_stacks_it_beside_the_pane_that_asked() {
+        let host = server();
+        let mut layout = arranged(Shape::OneByOne);
+        let added = reveal_keeping_every_pane(&mut layout, host, Some(PaneId(1)));
+        assert_eq!(layout.shape(), Shape::OneByTwo);
+        assert_eq!(
+            contents(&layout)[2],
+            (added.get(), host, Surface::Console, 1, 1)
+        );
+
+        let mut layout = arranged(Shape::OneByOne);
+        let added = reveal_keeping_every_pane(&mut layout, host, Some(PaneId(2)));
+        assert_eq!(layout.shape(), Shape::TwoByOne);
+        assert_eq!(
+            contents(&layout)[1],
+            (added.get(), host, Surface::Console, 0, 1)
+        );
+
+        let mut layout = arranged(Shape::OneByOne);
+        reveal_keeping_every_pane(&mut layout, host, None);
+        assert_eq!(layout.shape(), Shape::OneByTwo);
+    }
+
+    #[test]
+    fn revealing_a_host_in_2_1_fills_the_right_column() {
+        let host = server();
+        for from in [Some(PaneId(1)), Some(PaneId(2)), Some(PaneId(3)), None] {
+            let mut layout = arranged(Shape::TwoByOne);
+            let added = reveal_keeping_every_pane(&mut layout, host, from);
+            assert_eq!(layout.shape(), Shape::TwoByTwo);
+            assert_eq!(
+                contents(&layout)[3],
+                (added.get(), host, Surface::Console, 1, 1)
+            );
+        }
+    }
+
+    #[test]
+    fn revealing_a_host_in_1_2_fills_the_left_column() {
+        let host = server();
+        for from in [Some(PaneId(1)), Some(PaneId(2)), Some(PaneId(3)), None] {
+            let mut layout = arranged(Shape::OneByTwo);
+            let added = reveal_keeping_every_pane(&mut layout, host, from);
+            assert_eq!(layout.shape(), Shape::TwoByTwo);
+            assert_eq!(
+                contents(&layout)[1],
+                (added.get(), host, Surface::Console, 0, 1)
+            );
+        }
+    }
+
+    #[test]
+    fn a_full_workspace_is_left_exactly_as_it_is() {
+        let mut layout = arranged(Shape::TwoByTwo);
+        let before = layout.clone();
+        for from in [None, Some(PaneId(1)), Some(PaneId(4))] {
+            assert_eq!(
+                layout.reveal(server(), Surface::Console, from),
+                Err(LayoutError::NoRoom)
+            );
+            assert_eq!(layout, before);
+        }
+    }
+
+    #[test]
+    fn a_host_already_shown_is_revealed_where_it_is_and_nothing_changes() {
+        for shape in SHAPES {
+            let layout = arranged(shape);
+            for placed in layout.panes() {
+                let mut revealed = layout.clone();
+                let first = layout
+                    .panes()
+                    .into_iter()
+                    .find(|other| other.pane.host == placed.pane.host)
+                    .expect("shown")
+                    .pane
+                    .id;
+                assert_eq!(
+                    revealed.reveal(placed.pane.host, Surface::Overview, Some(placed.pane.id)),
+                    Ok(Revealed::Shown(first)),
+                    "{shape:?}"
+                );
+                assert_eq!(revealed, layout, "{shape:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_host_shown_twice_gets_no_further_pane() {
+        let host = server();
+        let mut layout = WorkspaceLayout::single(host, Surface::Console);
+        let logs = layout.split_beside(PaneId(1)).expect("split");
+        layout.show_surface(logs, Surface::Logs).expect("surface");
+        let before = layout.clone();
+
+        assert_eq!(
+            layout.reveal(host, Surface::Overview, Some(logs)),
+            Ok(Revealed::Shown(PaneId(1)))
+        );
+        assert_eq!(layout, before);
+    }
+
+    #[test]
+    fn revealing_the_same_host_again_adds_nothing_more() {
+        for shape in [
+            Shape::Single,
+            Shape::OneByOne,
+            Shape::TwoByOne,
+            Shape::OneByTwo,
+        ] {
+            let mut layout = arranged(shape);
+            let host = server();
+            let added = reveal_keeping_every_pane(&mut layout, host, Some(PaneId(1)));
+            let once = layout.clone();
+            assert_eq!(
+                layout.reveal(host, Surface::Console, Some(PaneId(1))),
+                Ok(Revealed::Shown(added))
+            );
+            assert_eq!(layout, once, "{shape:?}");
+        }
+    }
+
+    #[test]
+    fn a_revealed_host_opens_on_a_surface_it_offers() {
+        let mut layout = WorkspaceLayout::single(server(), Surface::Console);
+        let host = client();
+        let added =
+            added(layout.reveal(host, Surface::Console, None)).expect("a single pane has room");
+        assert_eq!(
+            layout.pane(added).expect("pane").surface(),
+            Surface::Overview
+        );
     }
 }

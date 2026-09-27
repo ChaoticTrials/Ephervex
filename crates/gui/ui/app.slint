@@ -9,6 +9,7 @@ import {
     FavoriteToggle,
     FilterChip,
     IconButton,
+    InlineToggle,
     LabeledToggle,
     NavItem,
     Pill,
@@ -548,6 +549,10 @@ export component AppWindow inherits Window {
     // more than one, and stopping should reach only the one asked for.
     callback kill-instance(string, string);
     callback launch-and-connect(string, string);
+    // (client, server, start together): pairs a client with one of its
+    // linked servers, or changes whether the pair starts together.
+    callback set-linked-pair(string, string, bool);
+    callback clear-linked-pair(string);
     callback open-client-folder(string);
     callback open-server-folder(string);
     // Making a temporary instance persistent. The destination and the
@@ -597,6 +602,8 @@ export component AppWindow inherits Window {
     callback show-pane-surface(int, string);
     // Points a pane at another host, as a link inside it does: (pane, kind, id, surface).
     callback follow-host(int, string, string, string);
+    // Shows a pane's paired host without changing any pane: (pane, kind, id).
+    callback show-linked-pair(int, string, string);
     // Adds a pane beside or below the pane, showing its host.
     callback split-pane-beside(int);
     callback split-pane-below(int);
@@ -1041,6 +1048,8 @@ export component AppWindow inherits Window {
                                 can-split-beside: pane.can-split-beside;
                                 can-split-below: pane.can-split-below;
                                 can-close: pane.can-close;
+                                paired: self.is-client ? host.client.paired-server-id != "" : host.server.paired-client-id != "";
+                                pair-starting: self.is-client ? host.client.pair-starting : host.server.pair-starting;
                                 choose-host => { root.pane-host-picker-pane = pane.id; root.pane-host-picker-kind = host.kind; root.pane-host-picker-id = host.id; root.modal = "pane-host"; }
                                 split-beside => { root.split-pane-beside(pane.id); }
                                 split-below => { root.split-pane-below(pane.id); }
@@ -1098,7 +1107,7 @@ export component AppWindow inherits Window {
                                         Heading { text: GuiI18n.text("gui-reproduction-environment"); overflow: elide; }
                                         BodyText { text: GuiI18n.text("gui-reproduction-environment-detail"); wrap: word-wrap; }
                                         Rectangle { border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface;
-                                            HorizontalLayout { padding: 18px; spacing: 18px; LoaderGlyph { kind: host.client.loader-kind; } VerticalLayout { horizontal-stretch: 1; Heading { text: host.client.name; overflow: elide; } BodyText { text: GuiI18n.values("gui-target-summary", host.client.minecraft, host.client.loader); overflow: elide; } BodyText { text: host.client.storage + " | " + host.client.source; overflow: elide; } BodyText { text: host.client.path; color: Theme.text-muted; overflow: elide; } } }
+                                            HorizontalLayout { padding: 18px; spacing: 18px; LoaderGlyph { kind: host.client.loader-kind; } VerticalLayout { horizontal-stretch: 1; Heading { text: host.client.name; overflow: elide; } BodyText { text: GuiI18n.values("gui-target-summary", host.client.minecraft, host.client.loader); overflow: elide; } BodyText { text: host.client.storage + " | " + host.client.source; overflow: elide; } BodyText { text: host.client.path; color: Theme.text-muted; overflow: elide; } if host.client.paired-server-id != "" : BodyText { text: GuiI18n.value("gui-paired-with-host", host.client.paired-server-name); color: Theme.accent; overflow: elide; } } if host.client.paired-server-id != "" && !host.pair-shown : VerticalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-pair-show-beside"); enabled: host.pair-room; hint: host.pair-room ? "" : GuiI18n.text("gui-pair-no-room"); clicked => { root.show-linked-pair(pane.id, "server", host.client.paired-server-id); } } } }
                                         }
                                         if !client-overview.narrow : HorizontalLayout { spacing: 10px;
                                             if host.client.loader-kind != "vanilla" : BodyText { text: GuiI18n.value("gui-loader-change-summary", host.client.loader); color: Theme.text-secondary; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
@@ -1118,8 +1127,9 @@ export component AppWindow inherits Window {
                                         for pending in host.pending-servers : PendingCard { item: pending; }
                                         for server in host.linked-servers : Rectangle { border-radius: 8px; border-width: 1px; border-color: server.needs-attention ? Theme.warning : Theme.border; background: Theme.surface; card := VerticalLayout { padding: 14px; spacing: 8px;
                                             // Every action on one row needs about this much room.
-                                            property <bool> narrow: self.width < 760px;
-                                            HorizontalLayout { spacing: 10px; Heading { text: server.name; font-size: Theme.row-heading-size; overflow: elide; horizontal-stretch: 1; } VerticalLayout { alignment: center; Pill { text: server.state; tone-color: server.state-kind == "running" ? Theme.success : server.needs-attention ? Theme.warning : Theme.text-secondary; } } BodyText { text: server.address; color: Theme.text-muted; vertical-alignment: center; } }
+                                            property <bool> narrow: self.width < 840px;
+                                            property <bool> paired: host.client.paired-server-id == server.id;
+                                            HorizontalLayout { spacing: 10px; Heading { text: server.name; font-size: Theme.row-heading-size; overflow: elide; horizontal-stretch: 1; } if card.paired : VerticalLayout { alignment: center; Pill { text: GuiI18n.text("gui-paired"); tone-color: Theme.accent; } } VerticalLayout { alignment: center; Pill { text: server.state; tone-color: server.state-kind == "running" ? Theme.success : server.needs-attention ? Theme.warning : Theme.text-secondary; } } BodyText { text: server.address; color: Theme.text-muted; vertical-alignment: center; } }
                                             BodyText { text: server.needs-attention ? GuiI18n.text("gui-server-needs-attention") : server.state-detail; color: server.needs-attention ? Theme.warning : Theme.text-secondary; wrap: word-wrap; }
                                             HorizontalLayout { spacing: 8px; alignment: start;
                                                 if !card.narrow : AppButton { text: GuiI18n.text("gui-open-server-workspace"); clicked => { root.follow-host(pane.id, "server", server.id, "Overview"); } }
@@ -1127,18 +1137,19 @@ export component AppWindow inherits Window {
                                                 AppButton { text: GuiI18n.text("gui-launch-client-connect"); enabled: server.can-connect; clicked => { root.launch-and-connect(host.id, server.id); } }
                                                 if !card.narrow : AppButton { text: GuiI18n.text("gui-open-folder"); clicked => { root.open-server-folder(server.id); } }
                                                 if !card.narrow && server.state-kind == "needs-recovery" : AppButton { text: GuiI18n.text("gui-repair-server"); tone: "primary"; clicked => { root.repair-server(server.id); } }
-                                                if !card.narrow : Rectangle { horizontal-stretch: 1; }
+                                                if !card.narrow : AppButton { text: card.paired ? GuiI18n.text("gui-unpair") : GuiI18n.text("gui-pair-this-server"); clicked => { if card.paired { root.clear-linked-pair(host.id); } else { root.set-linked-pair(host.id, server.id, false); } } }
                                                 if !card.narrow : AppButton { text: GuiI18n.text("gui-delete-server"); tone: "danger"; clicked => { root.pending-action-id = server.id; root.pending-action-name = server.name; root.pending-snapshot-deletion-note = server.snapshot-deletion-note; root.modal = "delete-server"; } }
                                             }
                                             if card.narrow : HorizontalLayout { spacing: 8px; alignment: start;
                                                 AppButton { text: GuiI18n.text("gui-open-server-workspace"); clicked => { root.follow-host(pane.id, "server", server.id, "Overview"); } }
                                                 AppButton { text: GuiI18n.text("gui-open-folder"); clicked => { root.open-server-folder(server.id); } }
                                             }
-                                            if card.narrow : HorizontalLayout { spacing: 8px;
+                                            if card.narrow : HorizontalLayout { spacing: 8px; alignment: start;
                                                 if server.state-kind == "needs-recovery" : AppButton { text: GuiI18n.text("gui-repair-server"); tone: "primary"; clicked => { root.repair-server(server.id); } }
-                                                Rectangle { horizontal-stretch: 1; }
+                                                AppButton { text: card.paired ? GuiI18n.text("gui-unpair") : GuiI18n.text("gui-pair-this-server"); clicked => { if card.paired { root.clear-linked-pair(host.id); } else { root.set-linked-pair(host.id, server.id, false); } } }
                                                 AppButton { text: GuiI18n.text("gui-delete-server"); tone: "danger"; clicked => { root.pending-action-id = server.id; root.pending-action-name = server.name; root.pending-snapshot-deletion-note = server.snapshot-deletion-note; root.modal = "delete-server"; } }
                                             }
+                                            if card.paired : InlineToggle { label: GuiI18n.text("gui-pair-start-together"); checked: host.client.pair-start-together; toggled(value) => { root.set-linked-pair(host.id, server.id, value); } }
                                         } }
                                     }
                                 }
@@ -1278,8 +1289,11 @@ export component AppWindow inherits Window {
                                     HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-network"); } BodyText { text: host.server.address; overflow: elide; horizontal-stretch: 1; } }
                                     HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-storage"); } BodyText { text: host.server.storage; overflow: elide; horizontal-stretch: 1; } }
                                     HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-relationship"); } BodyText { text: host.server.relationship; overflow: elide; horizontal-stretch: 1; } }
-                                } } HorizontalLayout { spacing: 8px; alignment: start; AppButton { text: GuiI18n.text("gui-view-logs"); clicked => { root.show-pane-surface(pane.id, "Logs"); } } if host.server.linked-client-id != "" : AppButton { text: GuiI18n.text("gui-launch-client-connect"); tone: "primary"; enabled: host.server.can-connect; clicked => { root.launch-and-connect(host.server.linked-client-id, host.id); } } if host.server.state-kind == "needs-recovery" : AppButton { text: GuiI18n.text("gui-repair-server"); tone: "primary"; clicked => { root.repair-server(host.id); } } if !server-overview.narrow : Rectangle { horizontal-stretch: 1; } if !server-overview.narrow : AppButton { text: GuiI18n.text("gui-delete-server"); tone: "danger"; clicked => { root.pending-action-id = host.id; root.pending-action-name = host.server.name; root.pending-snapshot-deletion-note = host.server.snapshot-deletion-note; root.modal = "delete-server"; } } }
-                                    if server-overview.narrow : HorizontalLayout { alignment: end; AppButton { text: GuiI18n.text("gui-delete-server"); tone: "danger"; clicked => { root.pending-action-id = host.id; root.pending-action-name = host.server.name; root.pending-snapshot-deletion-note = host.server.snapshot-deletion-note; root.modal = "delete-server"; } } } } }
+                                    if host.server.linked-client-id != "" : HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-paired-with"); } BodyText { text: host.server.paired-client-id != "" ? host.server.paired-client-name : GuiI18n.text("gui-not-paired"); overflow: elide; horizontal-stretch: 1; } }
+                                } }
+                                    HorizontalLayout { spacing: 8px; alignment: start; AppButton { text: GuiI18n.text("gui-view-logs"); clicked => { root.show-pane-surface(pane.id, "Logs"); } } if host.server.linked-client-id != "" : AppButton { text: GuiI18n.text("gui-launch-client-connect"); tone: "primary"; enabled: host.server.can-connect; clicked => { root.launch-and-connect(host.server.linked-client-id, host.id); } } if host.server.paired-client-id != "" && !host.pair-shown : AppButton { text: GuiI18n.text("gui-pair-show-beside"); enabled: host.pair-room; hint: host.pair-room ? "" : GuiI18n.text("gui-pair-no-room"); clicked => { root.show-linked-pair(pane.id, "client", host.server.paired-client-id); } } if host.server.state-kind == "needs-recovery" : AppButton { text: GuiI18n.text("gui-repair-server"); tone: "primary"; clicked => { root.repair-server(host.id); } } if !server-overview.narrow && host.server.linked-client-id != "" : AppButton { text: host.server.paired-client-id != "" ? GuiI18n.text("gui-unpair") : GuiI18n.text("gui-pair-with-client"); clicked => { if host.server.paired-client-id != "" { root.clear-linked-pair(host.server.paired-client-id); } else { root.set-linked-pair(host.server.linked-client-id, host.id, false); } } } if !server-overview.narrow : AppButton { text: GuiI18n.text("gui-delete-server"); tone: "danger"; clicked => { root.pending-action-id = host.id; root.pending-action-name = host.server.name; root.pending-snapshot-deletion-note = host.server.snapshot-deletion-note; root.modal = "delete-server"; } } }
+                                    if server-overview.narrow : HorizontalLayout { spacing: 8px; alignment: start; if host.server.linked-client-id != "" : AppButton { text: host.server.paired-client-id != "" ? GuiI18n.text("gui-unpair") : GuiI18n.text("gui-pair-with-client"); clicked => { if host.server.paired-client-id != "" { root.clear-linked-pair(host.server.paired-client-id); } else { root.set-linked-pair(host.server.linked-client-id, host.id, false); } } } AppButton { text: GuiI18n.text("gui-delete-server"); tone: "danger"; clicked => { root.pending-action-id = host.id; root.pending-action-name = host.server.name; root.pending-snapshot-deletion-note = host.server.snapshot-deletion-note; root.modal = "delete-server"; } } }
+                                    if host.server.paired-client-id != "" : InlineToggle { label: GuiI18n.text("gui-pair-start-together"); checked: host.server.pair-start-together; toggled(value) => { root.set-linked-pair(host.server.paired-client-id, host.id, value); } } } }
                                 if host.available && host.kind == "server" && pane.surface == "Snapshots" : SnapshotPanel {
                                     items: host.snapshots; total: host.snapshot-total; has-plain-copies: host.snapshots-have-plain-copies;
                                     create => { root.snapshot-host-kind = host.kind; root.snapshot-host-id = host.id; root.snapshot-action-label = ""; root.recompute-snapshot-label(); root.modal-error = ""; root.modal = "snapshot-create"; }

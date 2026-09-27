@@ -45,6 +45,7 @@ pub mod isolation;
 pub mod launch;
 pub mod licenses;
 pub mod linked_mods;
+pub mod linked_pair;
 mod linked_server_list;
 pub mod live_diagnostics;
 pub mod loader;
@@ -126,6 +127,7 @@ pub use linked_mods::{
     LinkedModRoot, LinkedTargetBlock, LinkedTargetFailure, LinkedTargetOutcome, LinkedTargetPlan,
     LinkedTargetResult, LinkedTargetState,
 };
+pub use linked_pair::{LinkedPair, LinkedStart};
 pub use loader::{IncompatibleMod, LoaderVersionChange, LoaderVersionPlan};
 pub use local_mods::{
     LocalModOffer, LocalModPlan, LocalModRefusal, LocalModReport, MAX_LOCAL_MOD_BYTES,

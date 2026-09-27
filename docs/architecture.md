@@ -262,11 +262,14 @@ A client restart reuses the ordinary launch path. Only an exclusive launch this
 run of the desktop started can be restarted, because only for those is the
 launch request known: it is kept in memory for as long as the launch runs and
 holds an account reference, never a credential. A client started by another
-Ephervex process, alongside another launch, or by Launch & Connect is not
-offered a restart. The restart stops the game the way its Stop does, waits for
+Ephervex process or alongside another launch is not offered a restart. A
+client started by Launch & Connect, including a pair start, becomes
+restartable once its server is ready, and its launch request also records the
+server it joined. The restart stops the game the way its Stop does, waits for
 that launch to return and for nothing to hold the instance, then launches it
-again as the same account; if the game is not seen to stop within a bound,
-nothing is started. The replacement counts as started only once the instance's
+again as the same account, joining the same server when it did; if the game
+is not seen to stop within a bound, nothing is started. Restart starts only
+the client, so it never starts or restarts that server. The replacement counts as started only once the instance's
 lock records its game, with the start time that proves the process, and that
 game is still the one recorded a few seconds later. A JVM that prints an error
 and exits, or exits before it is recorded, is a failed start, whatever it
@@ -514,6 +517,53 @@ Launcher capture is separate from Minecraft's own `server/logs/` and
 JSON Lines segments provide durable combined output. Retention and write
 failures are observable events; pipe draining continues when durable capture
 is unavailable.
+
+## Linked pairs
+
+A client is paired with one of its linked servers (ADR 0040): its first linked
+server by default, however it was created, or another one the user chose. A
+choice, or an unpairing, is launcher workflow state in `config.toml`, keyed by
+the client. Core resolves pairs against the registry on every read, so a
+deleted client or server, or a server that is no longer linked, is never a
+pair; a chosen server that disappears falls back to the first linked server.
+Unpairing leaves the link, and the mod sync and Launch & Connect built on it,
+untouched, and keeps the client unpaired while the server it declined stays
+its first.
+
+Either side's Overview names its counterpart and pairs, unpairs, and shows it
+beside, and every pane showing a paired host carries a Paired badge beside its
+state, whichever surface is shown. Show beside reveals the counterpart through the layout model rather than by
+arranging panes itself:
+
+- a pane that already shows the counterpart is reused and nothing changes;
+- otherwise one pane is added in the smallest step the shapes allow: a single
+  pane becomes 1:1, 1:1 gains a pane below whichever column the asking pane is
+  not in, 2:1 fills its right column, and 1:2 fills its left one;
+- every existing pane keeps its host, surface, column, and row; and
+- a 2:2 layout has no room and is left as it is, with a message instead.
+
+Launch & Connect shows both sides the same way as it starts them: the
+workspace opens on the client when it is closed, and whichever side is missing
+is added beside the other where there is room, a server on its Console.
+
+The pair belongs to the hosts, not to panes, so closing or retargeting a pane,
+leaving the workspace, and coming back never change it.
+
+A pair can start together. Launch or Start on either side then asks core what
+a fresh start means: with the client stopped it is one Launch & Connect run
+(the server is started or reused, and the client launches once the server
+accepts connections), and with the client already running only the server
+starts. Either way both sides are put on screen as Launch & Connect puts
+them. Nothing listens for a host having started in order to start another,
+so neither side's start can lead back to the other's. The controller holds one
+pair start per pair, keyed by an operation number, refuses a second Launch or
+Start of either side and a Restart until it settles, and stamps "starting the
+pair" on both hosts' rows so every pane agrees. The worker settles it exactly
+once through a drop guard: when the client is running, or when the run fails,
+is refused, or is canceled. A failure names the side that failed, from whether
+the server became ready, and leaves a server that started running. Restart
+never consults the pair: restarting a client that came up with its pair
+relaunches only the client, joining the same server.
 
 ## Linked client direct-connect flow
 

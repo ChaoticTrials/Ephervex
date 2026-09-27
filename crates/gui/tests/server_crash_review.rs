@@ -243,5 +243,9 @@ fn server() -> ServerRow {
         connect_reason: SharedString::default(),
         restart_stage: SharedString::default(),
         needs_attention: false,
+        paired_client_id: SharedString::default(),
+        paired_client_name: SharedString::default(),
+        pair_start_together: false,
+        pair_starting: false,
     }
 }

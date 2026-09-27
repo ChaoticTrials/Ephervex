@@ -115,6 +115,10 @@ fn instance(id: &str, name: &str) -> InstanceRow {
         creating_server_indeterminate: false,
         restart_stage: SharedString::default(),
         can_restart: false,
+        paired_server_id: SharedString::default(),
+        paired_server_name: SharedString::default(),
+        pair_start_together: false,
+        pair_starting: false,
     }
 }
 

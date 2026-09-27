@@ -176,12 +176,19 @@ export component HostWorkspace inherits Rectangle {
     // A workflow is changing this host's files, so nothing may start it.
     in property <bool> busy;
     in property <string> busy-text;
-    // A change or a restart is under way: the host's own actions wait, and
-    // the banner says what is happening rather than warning about it.
-    property <bool> occupied: root.busy || root.restart-stage != "";
+    // A start of this host's pair is under way.
+    in property <bool> pair-starting;
+    // A change, a restart, or a pair start is under way: the host's own
+    // actions wait, and the banner says what is happening rather than
+    // warning about it.
+    property <bool> occupied: root.busy || root.restart-stage != "" || root.pair-starting;
     property <string> occupied-text: root.busy ? root.busy-text
+        : root.pair-starting ? GuiI18n.text("gui-pair-starting")
         : root.restart-stage == "stopping" ? GuiI18n.text("gui-restart-stage-stopping")
         : GuiI18n.text("gui-restart-stage-starting");
+    // What the primary action waits for. A side that is already running can
+    // still be stopped during a pair start, which is how one is ended.
+    property <bool> primary-waits: root.busy || root.restart-stage != "" || (root.pair-starting && !root.host-running);
     callback back();
     callback open-folder();
     callback primary();
@@ -200,6 +207,8 @@ export component HostWorkspace inherits Rectangle {
     in property <bool> can-split-beside;
     in property <bool> can-split-below;
     in property <bool> can-close;
+    // Whether this host is one side of a linked pair.
+    in property <bool> paired;
     callback choose-host();
     callback split-beside();
     callback split-below();
@@ -227,8 +236,9 @@ export component HostWorkspace inherits Rectangle {
                     clicked => { root.choose-host(); }
                 }
                 VerticalLayout { alignment: center; Pill { text: root.restart-stage != "" ? GuiI18n.text("gui-state-restarting") : root.status; tone-color: root.restart-stage != "" || root.status-kind == "starting" ? Theme.warning : root.status-kind == "running" ? Theme.success : Theme.text-secondary; } }
+                if root.paired && root.width >= 420px : VerticalLayout { alignment: center; Pill { text: GuiI18n.text("gui-paired"); tone-color: Theme.accent; } }
                 if root.restart-visible : AppButton { text: GuiI18n.text("gui-restart"); accessible-name: GuiI18n.values("gui-pane-action", GuiI18n.text("gui-restart"), root.pane-label); enabled: root.restart-enabled && !root.occupied; hint: root.restart-hint; clicked => { root.restart(); } }
-                AppButton { text: root.primary-label; accessible-name: GuiI18n.values("gui-pane-action", root.primary-label, root.pane-label); tone: root.primary-tone; enabled: root.primary-enabled && !root.occupied; clicked => { root.primary(); } }
+                AppButton { text: root.primary-label; accessible-name: GuiI18n.values("gui-pane-action", root.primary-label, root.pane-label); tone: root.primary-tone; enabled: root.primary-enabled && !root.primary-waits; clicked => { root.primary(); } }
             }
             HorizontalLayout {
                 spacing: 8px;
@@ -247,6 +257,7 @@ export component HostWorkspace inherits Rectangle {
             AppButton { text: root.back-label; clicked => { root.back(); } }
             Heading { text: root.title; font-size: Theme.workspace-title-size; overflow: elide; }
             VerticalLayout { alignment: center; Pill { text: root.restart-stage != "" ? GuiI18n.text("gui-state-restarting") : root.status; tone-color: root.restart-stage != "" || root.status-kind == "starting" ? Theme.warning : root.status-kind == "running" ? Theme.success : Theme.text-secondary; } }
+            if root.paired : VerticalLayout { alignment: center; Pill { text: GuiI18n.text("gui-paired"); tone-color: Theme.accent; } }
             Rectangle { horizontal-stretch: 1; }
             if root.can-split-beside : IconButton { icon: @image-url("../../../../assets/icons/split-beside.svg"); accessible-name: GuiI18n.text("gui-workspace-split"); clicked => { root.split-beside(); } }
             AppButton { text: GuiI18n.text("gui-open-folder"); clicked => { root.open-folder(); } }
@@ -258,7 +269,7 @@ export component HostWorkspace inherits Rectangle {
                 add-account => { root.add-account(); }
             }
             if root.restart-visible : AppButton { text: GuiI18n.text("gui-restart"); enabled: root.restart-enabled && !root.occupied; hint: root.restart-hint; clicked => { root.restart(); } }
-            AppButton { text: root.primary-label; tone: root.primary-tone; enabled: root.primary-enabled && !root.occupied; clicked => { root.primary(); } }
+            AppButton { text: root.primary-label; tone: root.primary-tone; enabled: root.primary-enabled && !root.primary-waits; clicked => { root.primary(); } }
         }
         if root.workflow-id != "" && root.workflow-here : Rectangle {
             height: max(64px, workflow-copy.preferred-height + 24px);

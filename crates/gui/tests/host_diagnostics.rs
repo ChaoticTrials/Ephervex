@@ -400,6 +400,10 @@ fn instance() -> InstanceRow {
         creating_server_indeterminate: false,
         restart_stage: SharedString::default(),
         can_restart: false,
+        paired_server_id: SharedString::default(),
+        paired_server_name: SharedString::default(),
+        pair_start_together: false,
+        pair_starting: false,
     }
 }
 
@@ -435,6 +439,10 @@ fn server(running: bool) -> ServerRow {
         connect_reason: SharedString::default(),
         restart_stage: SharedString::default(),
         needs_attention: false,
+        paired_client_id: SharedString::default(),
+        paired_client_name: SharedString::default(),
+        pair_start_together: false,
+        pair_starting: false,
     }
 }
 

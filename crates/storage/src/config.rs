@@ -598,6 +598,30 @@ pub struct AccountConfig {
     pub unknown: toml::Table,
 }
 
+/// A client's paired linked server, keyed in [`Config::linked_pairs`] by the
+/// client's id. Without an entry, a client is paired with its first linked
+/// server.
+///
+/// Workflow state rather than the link itself: the server row owns
+/// `linked_client_id`, and a pair only chooses one of the servers already
+/// linked to its client (ADR 0040).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct LinkedPairConfig {
+    /// The paired server's id.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub server: String,
+    /// Whether starting either side also starts the other.
+    pub start_together: bool,
+    /// The first linked server the user unpaired, which is not paired again
+    /// by default while it stays the client's first linked server.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub unpaired_from: String,
+    /// Keys this build does not know about. See [`Config::unknown`].
+    #[serde(flatten)]
+    pub unknown: toml::Table,
+}
+
 /// Why an account reference did not resolve to exactly one account.
 ///
 /// Two outcomes rather than an `Option`, because they need different messages:
@@ -771,6 +795,10 @@ pub struct Config {
     /// one account ships, and the data model must not make a second one a
     /// schema change. Same arrangement as [`Self::minecraft_preferences`].
     pub accounts: BTreeMap<String, AccountConfig>,
+    /// Each client's chosen pair, keyed by the client's id. An entry whose
+    /// client is gone is ignored, and one whose server is gone or no longer
+    /// linked falls back to the client's first linked server.
+    pub linked_pairs: BTreeMap<String, LinkedPairConfig>,
     /// Top-level keys this build does not know about.
     ///
     /// Carried through a load/save cycle so that running an older Ephervex once
@@ -799,6 +827,7 @@ impl Default for Config {
             api: ApiConfig::default(),
             cache: CacheConfig::default(),
             accounts: BTreeMap::new(),
+            linked_pairs: BTreeMap::new(),
             unknown: toml::Table::new(),
         }
     }
@@ -1121,6 +1150,18 @@ impl Config {
                     .find_map(|account| find_secret_key(&account.unknown, "accounts"))
                     .map(|_| "accounts.<redacted>".to_owned())
             })
+            .or_else(|| {
+                self.linked_pairs
+                    .keys()
+                    .find(|key| looks_like_secret_key(key))
+                    .map(|_| "linked_pairs.<redacted>".to_owned())
+            })
+            .or_else(|| {
+                self.linked_pairs
+                    .values()
+                    .find_map(|pair| find_secret_key(&pair.unknown, "linked_pairs"))
+                    .map(|_| "linked_pairs.<redacted>".to_owned())
+            })
     }
 
     fn strip_secret_looking_keys(&mut self) {
@@ -1155,13 +1196,27 @@ impl Config {
             }
         }
 
+        for pair in self.linked_pairs.values_mut() {
+            while let Some(found) = find_secret_key(&pair.unknown, "linked_pairs") {
+                tracing::warn!(
+                    "discarding a credential-looking key from a linked pair; \
+                     secrets belong in the system keyring"
+                );
+                remove_nested(&mut pair.unknown, &found.leaf);
+            }
+        }
+
         let preference_count = self.minecraft_preferences.len();
         self.minecraft_preferences
             .retain(|key, _| !looks_like_secret_key(key));
         let account_count = self.accounts.len();
         self.accounts.retain(|key, _| !looks_like_secret_key(key));
+        let pair_count = self.linked_pairs.len();
+        self.linked_pairs
+            .retain(|key, _| !looks_like_secret_key(key));
         if self.minecraft_preferences.len() != preference_count
             || self.accounts.len() != account_count
+            || self.linked_pairs.len() != pair_count
         {
             tracing::warn!(
                 "discarding a credential-looking key from the configuration file; \
@@ -2076,6 +2131,52 @@ reference = ""
         let round_tripped =
             Config::from_toml_str(&config.to_toml_string().expect("serialize")).expect("reparse");
         assert_eq!(round_tripped, config);
+    }
+
+    #[test]
+    fn a_linked_pair_round_trips_with_keys_this_build_does_not_know() {
+        let text = format!(
+            "{DEFAULT_CONFIG_EXAMPLE}\n\
+             [linked_pairs.2f8a1c40-0000-4000-8000-000000000001]\n\
+             server = \"7c1e0b52-0000-4000-8000-000000000002\"\n\
+             start_together = true\n\
+             future_pair_field = \"kept\"\n"
+        );
+        let config = Config::from_toml_str(&text).expect("parse");
+        let pair = config
+            .linked_pairs
+            .get("2f8a1c40-0000-4000-8000-000000000001")
+            .expect("pair");
+        assert_eq!(pair.server, "7c1e0b52-0000-4000-8000-000000000002");
+        assert!(pair.start_together);
+
+        let round_tripped =
+            Config::from_toml_str(&config.to_toml_string().expect("serialize")).expect("reparse");
+        assert_eq!(round_tripped, config);
+        assert!(
+            Config::from_toml_str(DEFAULT_CONFIG_EXAMPLE)
+                .expect("parse")
+                .linked_pairs
+                .is_empty(),
+            "a file written before pairs existed has none"
+        );
+    }
+
+    #[test]
+    fn a_credential_hand_edited_into_a_linked_pair_is_dropped_on_load() {
+        let text = format!(
+            "{DEFAULT_CONFIG_EXAMPLE}\n\
+             [linked_pairs.2f8a1c40-0000-4000-8000-000000000001]\n\
+             server = \"7c1e0b52-0000-4000-8000-000000000002\"\n\
+             access_token = \"notreal\"\n"
+        );
+        let config = Config::from_toml_str(&text).expect("parse");
+        let pair = config
+            .linked_pairs
+            .get("2f8a1c40-0000-4000-8000-000000000001")
+            .expect("pair");
+        assert!(pair.unknown.is_empty());
+        assert_eq!(config.find_secret_looking_key(), None);
     }
 
     #[test]

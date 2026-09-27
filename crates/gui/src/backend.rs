@@ -14,19 +14,20 @@ use ephervex_core::ManagedMutationReport;
 use ephervex_core::live_diagnostics::TailedLine;
 use ephervex_core::{
     App, AuthEvent, AuthObserver, CancellationToken, ClientFolder, ClientModOutcome, ClientModPlan,
-    CoreError, CoreResult, CrashReview, DeclaredProject, DiagnosticKind, DiagnosticRequest,
-    DiagnosticScope, ErrorChain, EulaStatus, ImportRequest, InstalledHost, IsolationError,
-    IsolationPlan, IsolationReconciliation, IsolationReport, IsolationRequest, IsolationSession,
-    LaunchAndConnectObserver, LaunchAndConnectOptions, LaunchEvent, LaunchObserver, LaunchOptions,
-    LinkedModOutcome, LinkedModPlan, LinkedModRequest, LinkedTargetPlan, LinkedTargetResult,
-    LinkedTargetState, LocalModOffer, LocalModPlan, LocalModReport, LoginOptions, ManagedModEntry,
-    ManagedModSnapshot, MetadataAvailability, ModInstallPlan, ModMutability, ModMutation,
-    ModMutationPlan, ModPresence, ModSearchQuery, MutationRestriction, NewClient, NewServer,
-    OperationReporter, OptionalSelection, PackAnalysis, Paths, PlannedOutcome, ProcessMonitor,
-    ProgressSink, ProviderFileIdentity, RoundAnswer, SearchOptions, ServerCommit,
-    ServerContentSource, ServerCreateOptions, ServerEvent, ServerFolder, ServerNetworkSettings,
-    ServerObserver, ServerRecord, SideRequirement, SnapshotOrigin, SnapshotRestoreOptions,
-    SuspectReason, WatchTarget,
+    ConnectionTarget, CoreError, CoreResult, CrashReview, DeclaredProject, DiagnosticKind,
+    DiagnosticRequest, DiagnosticScope, ErrorChain, EulaStatus, ImportRequest, InstalledHost,
+    IsolationError, IsolationPlan, IsolationReconciliation, IsolationReport, IsolationRequest,
+    IsolationSession, LaunchAndConnectEvent, LaunchAndConnectObserver, LaunchAndConnectOptions,
+    LaunchEvent, LaunchFeatures, LaunchObserver, LaunchOptions, LinkedModOutcome, LinkedModPlan,
+    LinkedModRequest, LinkedStart, LinkedTargetPlan, LinkedTargetResult, LinkedTargetState,
+    LocalModOffer, LocalModPlan, LocalModReport, LoginOptions, ManagedModEntry, ManagedModSnapshot,
+    MetadataAvailability, ModInstallPlan, ModMutability, ModMutation, ModMutationPlan, ModPresence,
+    ModSearchQuery, MutationRestriction, NewClient, NewServer, OperationReporter,
+    OptionalSelection, PackAnalysis, Paths, PlannedOutcome, ProcessMonitor, ProgressSink,
+    ProviderFileIdentity, RoundAnswer, SearchOptions, ServerCommit, ServerContentSource,
+    ServerCreateOptions, ServerEvent, ServerFolder, ServerNetworkSettings, ServerObserver,
+    ServerRecord, SideRequirement, SnapshotOrigin, SnapshotRestoreOptions, SuspectReason,
+    WatchTarget,
 };
 use ephervex_core::{
     ConfiguredPreferences, LanguageAvailability, LanguageEntry, MinecraftPreferencePreview,
@@ -40,8 +41,8 @@ use ephervex_model::{
 
 use crate::presentation::{
     ActivityPresentation, ImportErrorKind, ImportFailure, ImportPresentation, InstancePresentation,
-    ModImpactPresentation, ModRequirementPresentation, ServerPresentation, diagnostic_kind_label,
-    diagnostic_scope_label,
+    ModImpactPresentation, ModRequirementPresentation, PairPresentation, ServerPresentation,
+    diagnostic_kind_label, diagnostic_scope_label,
 };
 
 type CancellationRegistry = Arc<Mutex<HashMap<String, CancellationToken>>>;
@@ -86,6 +87,22 @@ pub enum Command {
     SetAllowPackModVersionChanges {
         instance: InstanceId,
         allow: bool,
+    },
+    /// Pairs a client with one of its linked servers, or changes whether
+    /// the pair starts together.
+    SetLinkedPair {
+        client: InstanceId,
+        server: ServerId,
+        start_together: bool,
+    },
+    /// Unpairs a client. Its servers stay linked.
+    ClearLinkedPair(InstanceId),
+    /// A fresh start of a host whose pair starts together. Core decides
+    /// whether it starts alone or as one Launch & Connect run, and
+    /// [`Event::PairStartSettled`] follows exactly once, however it ends.
+    StartLinked {
+        initiator: InstalledHost,
+        operation: u64,
     },
     /// Clear the runtime evidence a server left behind when its supervisor died.
     RepairServer(ServerId),
@@ -1533,6 +1550,11 @@ pub enum Event {
         host: InstalledHost,
         basis: u64,
     },
+    /// A pair start is over: the client is running, it failed, or it was
+    /// refused or canceled.
+    PairStartSettled {
+        operation: u64,
+    },
     /// Where one host's restart is. `None` once it has ended, whichever way.
     /// A `request` of 0 is a stage the server reported on its own, which
     /// belongs to whatever restart is tracked for that host.
@@ -1808,6 +1830,9 @@ type RunningLaunches = Arc<Mutex<HashMap<InstanceId, RunningLaunch>>>;
 struct RunningLaunch {
     generation: u64,
     account: Option<String>,
+    /// The server the game was launched straight into, which a restart
+    /// joins again without starting it.
+    connect: Option<ConnectionTarget>,
     /// Becomes true once the launch has returned: the game has exited and its
     /// lock is released, which is what a restart waits for.
     finished: tokio::sync::watch::Receiver<bool>,
@@ -1822,6 +1847,7 @@ fn register_launch(
     events: &Sender<Event>,
     instance: InstanceId,
     account: Option<String>,
+    connect: Option<ConnectionTarget>,
 ) -> (u64, tokio::sync::watch::Sender<bool>) {
     static NEXT: AtomicU64 = AtomicU64::new(1);
     let generation = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -1832,6 +1858,7 @@ fn register_launch(
             RunningLaunch {
                 generation,
                 account,
+                connect,
                 finished,
             },
         );
@@ -2126,6 +2153,18 @@ fn run_worker(
                     Err(error) => send_modal_error(&events, &error),
                 }
             }
+            Command::SetLinkedPair {
+                client,
+                server,
+                start_together,
+            } => match app.set_linked_pair(client, server, start_together) {
+                Ok(_) => send_snapshot(&app, &events),
+                Err(error) => send_error(&events, &error),
+            },
+            Command::ClearLinkedPair(client) => match app.clear_linked_pair(client) {
+                Ok(()) => send_snapshot(&app, &events),
+                Err(error) => send_error(&events, &error),
+            },
             Command::SetAllowPackModVersionChanges { instance, allow } => {
                 // No toast. The toggle itself is the confirmation; a refusal
                 // is still reported, because then nothing on screen changed.
@@ -2321,27 +2360,83 @@ fn run_worker(
                 instance,
                 account,
                 additional,
+            } => launch_client(
+                &app,
+                &events,
+                &changing,
+                &cancellations,
+                &launches,
+                ClientLaunch {
+                    instance,
+                    entity: String::new(),
+                    account,
+                    additional,
+                    connect: None,
+                },
+            ),
+            Command::StartLinked {
+                initiator,
+                operation,
             } => {
-                if refuse_while_changing(&changing, InstalledHost::Instance(instance), &events) {
-                    continue;
-                }
-                let paths = app.paths().clone();
-                let entity = app
-                    .client(instance)
-                    .map_or_else(|_| instance.to_string(), |record| record.name);
-                spawn_launch(
-                    paths,
-                    &events,
-                    Arc::clone(&cancellations),
-                    Arc::clone(&launches),
-                    ClientLaunch {
-                        instance,
-                        entity,
-                        account,
-                        additional,
+                let settled = PairStartSettled {
+                    events: events.clone(),
+                    operation,
+                };
+                match app.plan_linked_start(initiator) {
+                    Ok(LinkedStart::Connect { client, server }) => {
+                        if refuse_while_changing(
+                            &changing,
+                            InstalledHost::Instance(client),
+                            &events,
+                        ) || refuse_while_changing(
+                            &changing,
+                            InstalledHost::Server(server),
+                            &events,
+                        ) {
+                            continue;
+                        }
+                        let entity = app
+                            .client(client)
+                            .map_or_else(|_| client.to_string(), |record| record.name);
+                        let server_name = app
+                            .server(server)
+                            .map_or_else(|_| server.to_string(), |record| record.name);
+                        spawn_connect(
+                            app.paths().clone(),
+                            &events,
+                            LaunchTracking {
+                                cancellations: Arc::clone(&cancellations),
+                                launches: Arc::clone(&launches),
+                            },
+                            ConnectRun {
+                                client,
+                                server,
+                                entity,
+                                pair: Some((settled, server_name)),
+                            },
+                        );
+                    }
+                    Ok(LinkedStart::Alone) => match initiator {
+                        InstalledHost::Instance(instance) => launch_client(
+                            &app,
+                            &events,
+                            &changing,
+                            &cancellations,
+                            &launches,
+                            ClientLaunch {
+                                instance,
+                                entity: String::new(),
+                                account: None,
+                                additional: None,
+                                connect: None,
+                            },
+                        ),
+                        InstalledHost::Server(server) => {
+                            start_server(&app, &events, &changing, server);
+                        }
                     },
-                    None,
-                );
+                    Err(error) => send_error(&events, &error),
+                }
             }
             Command::LaunchAndConnect { client, server } => {
                 if refuse_while_changing(&changing, InstalledHost::Instance(client), &events)
@@ -2356,10 +2451,16 @@ fn run_worker(
                 spawn_connect(
                     paths,
                     &events,
-                    Arc::clone(&cancellations),
-                    client,
-                    server,
-                    entity,
+                    LaunchTracking {
+                        cancellations: Arc::clone(&cancellations),
+                        launches: Arc::clone(&launches),
+                    },
+                    ConnectRun {
+                        client,
+                        server,
+                        entity,
+                        pair: None,
+                    },
                 );
             }
             Command::OpenClientFolder(instance) => {
@@ -3511,16 +3612,7 @@ fn run_worker(
                     }
                 }
             }
-            Command::StartServer(server) => {
-                if refuse_while_changing(&changing, InstalledHost::Server(server), &events) {
-                    continue;
-                }
-                let paths = app.paths().clone();
-                let entity = app
-                    .server(server)
-                    .map_or_else(|_| server.to_string(), |record| record.name);
-                spawn_server(paths, &events, server, entity);
-            }
+            Command::StartServer(server) => start_server(&app, &events, &changing, server),
             Command::StopServer(server) => {
                 report_async_control(
                     &runtime,
@@ -4362,9 +4454,11 @@ fn send_snapshot(app: &App, events: &Sender<Event>) {
 
 fn snapshot(app: &App) -> Result<Snapshot, CoreError> {
     let servers = app.list_servers()?;
+    let clients = app.list_clients()?;
+    let pairs = app.linked_pairs()?;
     let mut connection_states = std::collections::HashMap::new();
     let mut instance_rows = Vec::new();
-    for record in app.list_clients()? {
+    for record in &clients {
         let linked = servers
             .iter()
             .filter(|server| server.linked_client_id == Some(record.id))
@@ -4385,20 +4479,22 @@ fn snapshot(app: &App) -> Result<Snapshot, CoreError> {
         let managed_mods = app.managed_mods(record.id).map_or(0, |mods| mods.len());
         let launch_state = app.launch_state(record.id)?;
         let mut presentation = InstancePresentation::from_record(
-            &record,
+            record,
             linked.len(),
             managed_mods,
             launch_state.as_ref(),
             connections,
         );
+        presentation.pair = PairPresentation::of(record.id.into(), &pairs, &clients, &servers);
         presentation.snapshot_deletion_note =
             snapshot_deletion_note(app, InstalledHost::Instance(record.id));
         instance_rows.push(presentation);
     }
     let mut server_rows = Vec::new();
-    for server in servers {
+    for server in &servers {
         let status = app.server_status(server.id)?;
         let mut presentation = ServerPresentation::from_status(&status);
+        presentation.pair = PairPresentation::of(server.id.into(), &pairs, &clients, &servers);
         presentation.snapshot_deletion_note =
             snapshot_deletion_note(app, InstalledHost::Server(server.id));
         presentation.can_connect = connection_states.get(&server.id).copied().unwrap_or(false);
@@ -5628,12 +5724,97 @@ fn send_diagnostic_content(
     }
 }
 
+/// Launches a client on its own, as its Launch button does. The entity is
+/// read from the record here.
+fn launch_client(
+    app: &App,
+    events: &Sender<Event>,
+    changing: &ChangingHosts,
+    cancellations: &CancellationRegistry,
+    launches: &RunningLaunches,
+    mut launch: ClientLaunch,
+) {
+    let instance = launch.instance;
+    if refuse_while_changing(changing, InstalledHost::Instance(instance), events) {
+        return;
+    }
+    launch.entity = app
+        .client(instance)
+        .map_or_else(|_| instance.to_string(), |record| record.name);
+    spawn_launch(
+        app.paths().clone(),
+        events,
+        Arc::clone(cancellations),
+        Arc::clone(launches),
+        launch,
+        None,
+    );
+}
+
+/// Starts a server on its own, as its Start button does.
+fn start_server(app: &App, events: &Sender<Event>, changing: &ChangingHosts, server: ServerId) {
+    if refuse_while_changing(changing, InstalledHost::Server(server), events) {
+        return;
+    }
+    let entity = app
+        .server(server)
+        .map_or_else(|_| server.to_string(), |record| record.name);
+    spawn_server(app.paths().clone(), events, server, entity);
+}
+
+/// Settles one pair start when dropped, so a refusal, a failure, a
+/// cancellation, or a panic all release it exactly as a success does.
+struct PairStartSettled {
+    events: Sender<Event>,
+    operation: u64,
+}
+
+impl Drop for PairStartSettled {
+    fn drop(&mut self) {
+        let _ = self.events.send(Event::PairStartSettled {
+            operation: self.operation,
+        });
+    }
+}
+
 /// One client launch, as the thread that supervises it needs it.
 struct ClientLaunch {
     instance: InstanceId,
     entity: String,
     account: Option<String>,
     additional: Option<String>,
+    /// A server to join straight after startup.
+    connect: Option<ConnectionTarget>,
+}
+
+/// What one exclusive client launch asks core for.
+fn launch_options(
+    account: Option<String>,
+    additional: Option<String>,
+    connect: Option<ConnectionTarget>,
+) -> LaunchOptions {
+    LaunchOptions {
+        features: connect.map_or_else(LaunchFeatures::none, |target| {
+            LaunchFeatures::none().direct_connect(target)
+        }),
+        install_java_if_missing: true,
+        account,
+        additional,
+        ..LaunchOptions::default()
+    }
+}
+
+/// The launch a restart starts in place of `running`: the same account, and
+/// the same server joined straight away when it was. Only the client starts,
+/// so restarting a client that came up with its pair never starts the server.
+fn relaunch(instance: InstanceId, entity: String, running: &RunningLaunch) -> ClientLaunch {
+    ClientLaunch {
+        instance,
+        entity,
+        account: running.account.clone(),
+        additional: None,
+        connect: running.connect,
+    }
 }
 
 /// Told once whether a launch became the instance's running game; see
@@ -5653,6 +5834,7 @@ fn spawn_launch(
         entity,
         account,
         additional,
+        connect,
     } = launch;
     spawn_detached(
         paths.clone(),
@@ -5682,7 +5864,7 @@ fn spawn_launch(
             // instance's own Stop and Restart act on.
             let registered = additional
                 .is_none()
-                .then(|| register_launch(&launches, &events, instance, account.clone()));
+                .then(|| register_launch(&launches, &events, instance, account.clone(), connect));
             // Whether this launch became the instance's running game, for a
             // restart waiting to find out. The recorded game is the evidence,
             // not the first line it prints.
@@ -5715,12 +5897,7 @@ fn spawn_launch(
                 let result = app
                     .launch(
                         instance,
-                        &LaunchOptions {
-                            install_java_if_missing: true,
-                            account,
-                            additional,
-                            ..LaunchOptions::default()
-                        },
+                        &launch_options(account, additional, connect),
                         &observer,
                         &cancel,
                     )
@@ -6042,12 +6219,7 @@ fn spawn_client_restart(
                         &events,
                         tracking.cancellations,
                         tracking.launches,
-                        ClientLaunch {
-                            instance,
-                            entity: entity.clone(),
-                            account: running.account.clone(),
-                            additional: None,
-                        },
+                        relaunch(instance, entity.clone(), &running),
                         Some(sender),
                     );
                     async move {
@@ -6168,6 +6340,10 @@ fn forward_launch_event(
             }
             refresh_snapshot(paths, events);
         }
+        // Starting is announced before the game's process exists; this is
+        // the first point at which the lock records it, so the row stops
+        // saying Starting.
+        LaunchEvent::Running { .. } => refresh_snapshot(paths, events),
         LaunchEvent::Failed { message_id, .. } => {
             let _ = events.send(Event::Toast {
                 message: lookup(message_id),
@@ -6342,17 +6518,36 @@ fn forward_server_event(
     }
 }
 
+/// One Launch & Connect run.
+struct ConnectRun {
+    client: InstanceId,
+    server: ServerId,
+    /// The client's name.
+    entity: String,
+    /// Set when the run is a pair start: what settles it, and the server's name
+    /// for saying which side failed.
+    pair: Option<(PairStartSettled, String)>,
+}
+
 // The three observers intentionally stay in one scope so their channel and
 // runtime ownership cannot drift apart from the combined operation.
 #[allow(clippy::too_many_lines)]
-fn spawn_connect(
-    paths: Paths,
-    events: &Sender<Event>,
-    cancellations: CancellationRegistry,
-    client: InstanceId,
-    server: ServerId,
-    entity: String,
-) {
+fn spawn_connect(paths: Paths, events: &Sender<Event>, tracking: LaunchTracking, run: ConnectRun) {
+    let LaunchTracking {
+        cancellations,
+        launches,
+    } = tracking;
+    let ConnectRun {
+        client,
+        server,
+        entity,
+        pair,
+    } = run;
+    let (settled, server_name) =
+        pair.map_or((None, None), |(settled, name)| (Some(settled), Some(name)));
+    // Taken once the client is running, or when the run ends first.
+    let settled = Arc::new(Mutex::new(settled));
+    let server_ready = Arc::new(AtomicBool::new(false));
     spawn_detached(
         paths.clone(),
         events.clone(),
@@ -6368,8 +6563,27 @@ fn spawn_connect(
                 hold_cancellation(&cancellations, client.to_string(), &cancel);
                 let refresh_paths = paths.clone();
                 let refresh_events = events.clone();
+                let ready = Arc::clone(&server_ready);
+                // The client is registered once the server is ready, with the
+                // target it joins, so a restart joins it again the same way.
+                let registered = Arc::new(Mutex::new(None));
+                let registering = Arc::clone(&registered);
+                let registry = Arc::clone(&launches);
                 let connect_forward = tokio::spawn(async move {
-                    while connect_events.recv().await.is_some() {
+                    while let Some(event) = connect_events.recv().await {
+                        if let LaunchAndConnectEvent::ServerReady { target } = event {
+                            ready.store(true, Ordering::SeqCst);
+                            let entry = register_launch(
+                                &registry,
+                                &refresh_events,
+                                client,
+                                None,
+                                Some(target),
+                            );
+                            if let Ok(mut registered) = registering.lock() {
+                                *registered = Some(entry);
+                            }
+                        }
                         refresh_snapshot(&refresh_paths, &refresh_events);
                     }
                 });
@@ -6424,8 +6638,14 @@ fn spawn_connect(
                 let forwarded_launch_operation = Arc::clone(&launch_operation);
                 let forwarded_cancellations = Arc::clone(&cancellations);
                 let forwarded_token = cancel.clone();
+                let running_settles = Arc::clone(&settled);
                 let launch_forward = tokio::spawn(async move {
                     while let Some(event) = launch_events.recv().await {
+                        if matches!(event, LaunchEvent::Running { .. })
+                            && let Ok(mut settled) = running_settles.lock()
+                        {
+                            settled.take();
+                        }
                         forward_launch_event(
                             &launch_event_sender,
                             &launch_entity,
@@ -6451,7 +6671,9 @@ fn spawn_connect(
                 drop(connect_observer);
                 drop(server_observer);
                 drop(launch_observer);
-                connect_forward.abort();
+                // Drained rather than aborted, so a readiness already reported
+                // is known before a failure is attributed to one side.
+                let _ = connect_forward.await;
                 let _ = launch_forward.await;
                 match result {
                     Ok(outcome) => send_activity_state(
@@ -6465,9 +6687,28 @@ fn spawn_connect(
                         false,
                         false,
                     ),
-                    Err(error) => send_error(&events, &error),
+                    Err(error) => match &server_name {
+                        Some(server_name) => send_pair_start_failure(
+                            &events,
+                            &error,
+                            server_ready.load(Ordering::SeqCst),
+                            &entity,
+                            server_name,
+                        ),
+                        None => send_error(&events, &error),
+                    },
+                }
+                if let Ok(mut settled) = settled.lock() {
+                    settled.take();
                 }
                 release_launch_cancellation(&cancellations, client, &launch_operation);
+                // As for a plain launch: announced only once everything this
+                // one held is released, so a restart cannot start early.
+                let entry = registered.lock().ok().and_then(|mut entry| entry.take());
+                if let Some((generation, finished)) = entry {
+                    unregister_launch(&launches, &events, client, generation);
+                    let _ = finished.send(true);
+                }
                 if let Ok(app) = App::open_at(paths.clone()) {
                     send_snapshot(&app, &events);
                 }
@@ -6481,6 +6722,39 @@ fn spawn_connect(
             });
         },
     );
+}
+
+/// Says which side of a pair start failed. A server that became ready is left
+/// running.
+fn send_pair_start_failure(
+    events: &Sender<Event>,
+    error: &CoreError,
+    server_ready: bool,
+    client: &str,
+    server: &str,
+) {
+    tracing::warn!(
+        message_id = error.message_id(),
+        detail = %ErrorChain(error),
+        server_ready,
+        "pair start failed"
+    );
+    let message = if server_ready {
+        "gui-pair-start-client-failed"
+    } else {
+        "gui-pair-start-server-failed"
+    };
+    let _ = events.send(Event::Toast {
+        message: lookup_args(
+            message,
+            [
+                ("client", Arg::from(client)),
+                ("server", Arg::from(server)),
+                ("error", Arg::from(localized_error(error))),
+            ],
+        ),
+        error: true,
+    });
 }
 
 fn spawn_login(paths: Paths, events: &Sender<Event>) {
@@ -8824,6 +9098,142 @@ mod tests {
         );
     }
 
+    /// A client that came up with its pair is registered with the server it
+    /// joined, and restarting it joins that server again as the same account,
+    /// starting nothing else.
+    #[test]
+    fn a_restart_joins_the_server_the_client_was_launched_into() {
+        let launches: RunningLaunches = Arc::new(Mutex::new(HashMap::new()));
+        let (events, received) = mpsc::channel();
+        let instance = InstanceId::new();
+        let target = ConnectionTarget {
+            address: std::net::IpAddr::from([127, 0, 0, 1]),
+            port: std::num::NonZeroU16::new(25565).expect("nonzero port"),
+        };
+        register_launch(&launches, &events, instance, None, Some(target));
+
+        assert!(received.try_iter().any(|event| matches!(
+            event,
+            Event::LaunchContext { instance: id, restartable: true } if id == instance
+        )));
+        let running = launches
+            .lock()
+            .expect("launches")
+            .remove(&instance)
+            .expect("registered");
+        let again = relaunch(instance, "Repro Client".to_owned(), &running);
+        assert_eq!(again.connect, Some(target));
+        assert_eq!(again.additional, None);
+        assert_eq!(
+            launch_options(again.account, again.additional, again.connect).features,
+            LaunchFeatures::none().direct_connect(target)
+        );
+        assert_eq!(
+            launch_options(None, None, None).features,
+            LaunchFeatures::none(),
+            "a plain launch joins nothing"
+        );
+    }
+
+    /// The game is recorded only after Starting is announced, so the row is
+    /// read again once it runs.
+    #[test]
+    fn a_running_game_refreshes_the_rows_that_said_it_was_starting() {
+        let base = tempfile::tempdir().expect("a disposable root");
+        let paths = ephervex_core::Paths::rooted_at(base.path());
+        let (events, received) = mpsc::channel();
+        forward_launch_event(
+            &events,
+            "Repro Client",
+            &Mutex::new(None),
+            &Arc::new(Mutex::new(HashMap::new())),
+            &CancellationToken::new(),
+            &paths,
+            LaunchEvent::Running { pid: 1 },
+        );
+        assert!(
+            received
+                .try_iter()
+                .any(|event| matches!(event, Event::Snapshot(_)))
+        );
+    }
+
+    fn settles(received: &std::sync::mpsc::Receiver<Event>) -> Vec<u64> {
+        received
+            .try_iter()
+            .filter_map(|event| match event {
+                Event::PairStartSettled { operation } => Some(operation),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Refused, failed, canceled, or unwound: a pair start settles once.
+    #[test]
+    fn a_pair_start_settles_exactly_once_however_it_ends() {
+        let (events, received) = std::sync::mpsc::channel();
+        drop(PairStartSettled {
+            events: events.clone(),
+            operation: 7,
+        });
+        let held = Arc::new(Mutex::new(Some(PairStartSettled {
+            events: events.clone(),
+            operation: 8,
+        })));
+        let running = Arc::clone(&held);
+        if let Ok(mut settled) = running.lock() {
+            settled.take();
+        }
+        if let Ok(mut settled) = held.lock() {
+            settled.take();
+        }
+        let unwound = std::panic::catch_unwind(|| {
+            let _settled = PairStartSettled {
+                events,
+                operation: 9,
+            };
+            std::panic::resume_unwind(Box::new("the start failed"));
+        });
+        assert!(unwound.is_err());
+
+        assert_eq!(settles(&received), [7, 8, 9]);
+    }
+
+    #[test]
+    fn a_failed_pair_start_names_the_side_that_failed() {
+        let (events, received) = std::sync::mpsc::channel();
+        let error = CoreError::from(ephervex_core::ConnectError::ServerStoppedBeforeReady {
+            server: ServerId::new(),
+        });
+        send_pair_start_failure(&events, &error, false, "Repro Client", "Repro Server");
+        send_pair_start_failure(&events, &error, true, "Repro Client", "Repro Server");
+
+        let messages: Vec<(String, bool)> = received
+            .try_iter()
+            .filter_map(|event| match event {
+                Event::Toast { message, error } => Some((message, error)),
+                _ => None,
+            })
+            .collect();
+        let expected = |id: &str| {
+            lookup_args(
+                id,
+                [
+                    ("client", Arg::from("Repro Client")),
+                    ("server", Arg::from("Repro Server")),
+                    ("error", Arg::from(localized_error(&error))),
+                ],
+            )
+        };
+        assert_eq!(
+            messages,
+            [
+                (expected("gui-pair-start-server-failed"), true),
+                (expected("gui-pair-start-client-failed"), true)
+            ]
+        );
+    }
+
     fn busy_cache() -> CoreError {
         CoreError::from(ephervex_core::ArtifactCacheError::Busy {
             path: PathBuf::from("/cache/artifact-cache.lock"),
@@ -9109,6 +9519,7 @@ mod tests {
             &events,
             instance,
             Some("second-account".to_owned()),
+            None,
         );
         let running = launches
             .lock()
@@ -9160,8 +9571,8 @@ mod tests {
         let launches: RunningLaunches = Arc::new(Mutex::new(HashMap::new()));
         let (events, _received) = mpsc::channel();
         let instance = InstanceId::new();
-        let (old, _) = register_launch(&launches, &events, instance, None);
-        let (new, _) = register_launch(&launches, &events, instance, None);
+        let (old, _) = register_launch(&launches, &events, instance, None, None);
+        let (new, _) = register_launch(&launches, &events, instance, None, None);
 
         unregister_launch(&launches, &events, instance, old);
         assert_eq!(

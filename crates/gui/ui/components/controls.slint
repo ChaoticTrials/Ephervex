@@ -308,6 +308,28 @@ export component AcknowledgementToggle inherits Rectangle {
     }
 }
 
+// A one-line switch with its label beside it, both centered on one row.
+// Pressing either asks for the opposite through `toggled`.
+export component InlineToggle inherits Rectangle {
+    in property <string> label;
+    in property <bool> checked;
+    in property <bool> enabled: true;
+    callback toggled(bool);
+    height: row.preferred-height;
+    horizontal-stretch: 0;
+    row := HorizontalLayout {
+        spacing: 10px;
+        alignment: start;
+        VerticalLayout { alignment: center; Toggle { accessible-name: root.label; checked: root.checked; enabled: root.enabled; sets-its-own-position: false; toggled(value) => { root.toggled(value); } } }
+        BodyText {
+            text: root.label;
+            color: root.enabled ? Theme.text : Theme.text-muted;
+            vertical-alignment: center;
+            TouchArea { clicked => { if root.enabled { root.toggled(!root.checked); } } }
+        }
+    }
+}
+
 // Launching as somebody other than the default account.
 //
 // Beside Launch rather than replacing it: the common case is one account,
