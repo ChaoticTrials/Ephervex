@@ -515,6 +515,37 @@ JSON Lines segments provide durable combined output. Retention and write
 failures are observable events; pipe draining continues when durable capture
 is unavailable.
 
+## Linked pairs
+
+A client is paired with one of its linked servers (ADR 0040): its first linked
+server by default, however it was created, or another one the user chose. A
+choice, or an unpairing, is launcher workflow state in `config.toml`, keyed by
+the client. Core resolves pairs against the registry on every read, so a
+deleted client or server, or a server that is no longer linked, is never a
+pair; a chosen server that disappears falls back to the first linked server.
+Unpairing leaves the link, and the mod sync and Launch & Connect built on it,
+untouched, and keeps the client unpaired while the server it declined stays
+its first.
+
+Either side's Overview pairs and unpairs, and every pane showing a paired host
+names its counterpart above the host's surfaces, whichever surface is shown.
+Show beside reveals the counterpart through the layout model rather than by
+arranging panes itself:
+
+- a pane that already shows the counterpart is reused and nothing changes;
+- otherwise one pane is added in the smallest step the shapes allow: a single
+  pane becomes 1:1, 1:1 gains a pane below whichever column the asking pane is
+  not in, 2:1 fills its right column, and 1:2 fills its left one;
+- every existing pane keeps its host, surface, column, and row; and
+- a 2:2 layout has no room and is left as it is, with a message instead.
+
+Launch & Connect shows both sides the same way as it starts them: the
+workspace opens on the client when it is closed, and whichever side is missing
+is added beside the other where there is room.
+
+The pair belongs to the hosts, not to panes, so closing or retargeting a pane,
+leaving the workspace, and coming back never change it.
+
 ## Linked client direct-connect flow
 
 ```text

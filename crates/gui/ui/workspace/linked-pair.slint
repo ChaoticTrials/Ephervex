@@ -1,0 +1,48 @@
+// A client's linked pair, as the pane header and each side's Overview show it.
+
+import { AppButton, Pill } from "../components/controls.slint";
+import { BodyText } from "../components/text.slint";
+import { GuiI18n } from "../globals.slint";
+import { Theme } from "../theme.slint";
+
+// Which host this one is paired with, above every surface of its pane.
+export component PairBar inherits HorizontalLayout {
+    in property <string> name;
+    // Whether a pane already shows the other side, and whether one could be added.
+    in property <bool> shown;
+    in property <bool> room;
+    callback show-beside();
+    spacing: 8px;
+    Rectangle { horizontal-stretch: 1; }
+    VerticalLayout { alignment: center; Pill { text: GuiI18n.text("gui-paired"); tone-color: Theme.accent; } }
+    BodyText { text: root.name; color: Theme.text-secondary; vertical-alignment: center; overflow: elide; horizontal-stretch: 0; }
+    if !root.shown : AppButton {
+        text: GuiI18n.text("gui-pair-show-beside");
+        accessible-name: GuiI18n.value("gui-pair-show-beside-host", root.name);
+        enabled: root.room;
+        hint: root.room ? "" : GuiI18n.text("gui-pair-no-room");
+        clicked => { root.show-beside(); }
+    }
+}
+
+// Pairing and unpairing a client and one of its linked servers.
+export component PairControls inherits VerticalLayout {
+    in property <bool> paired;
+    in property <bool> shown;
+    in property <bool> room;
+    // What the button reads while this server and client are not the pair.
+    in property <string> pair-label;
+    callback pair();
+    callback unpair();
+    callback show-beside();
+    spacing: 8px;
+    alignment: start;
+    if !root.paired : HorizontalLayout { alignment: start; AppButton { text: root.pair-label; clicked => { root.pair(); } } }
+    if root.paired : HorizontalLayout {
+        spacing: 8px;
+        alignment: start;
+        VerticalLayout { alignment: center; Pill { text: GuiI18n.text("gui-paired"); tone-color: Theme.accent; } }
+        if !root.shown : AppButton { text: GuiI18n.text("gui-pair-show-beside"); enabled: root.room; hint: root.room ? "" : GuiI18n.text("gui-pair-no-room"); clicked => { root.show-beside(); } }
+        AppButton { text: GuiI18n.text("gui-unpair"); clicked => { root.unpair(); } }
+    }
+}

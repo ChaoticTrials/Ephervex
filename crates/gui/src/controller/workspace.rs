@@ -20,7 +20,9 @@ use crate::ui::{
     AppWindow, HostView, InstanceRow, PendingEntityRow, ServerRow, WorkspaceHostChoice,
     WorkspaceLinkedChoice, WorkspacePaneRow, WorkspaceSurfaceRow,
 };
-use crate::workspace_layout::{PaneId, Placement, Shape, Surface, WorkspaceLayout};
+use crate::workspace_layout::{
+    LayoutError, PaneId, Placement, Revealed, Shape, Surface, WorkspaceLayout,
+};
 
 /// The workspace's layout, and the rows its host views are built from.
 pub(super) struct WorkspaceState {
@@ -119,6 +121,35 @@ impl WorkspaceState {
         Some(PaneChange { before, after })
     }
 
+    /// Shows `host` without changing any pane, as [`WorkspaceLayout::reveal`]
+    /// does. `None` when no workspace is open.
+    pub(super) fn reveal(
+        &mut self,
+        host: InstalledHost,
+        surface: Surface,
+        from: Option<PaneId>,
+    ) -> Option<Result<Revealed, LayoutError>> {
+        Some(self.layout.as_mut()?.reveal(host, surface, from))
+    }
+
+    /// The name a host's row carries, or its id when no row names it.
+    pub(super) fn host_name(&self, host: InstalledHost) -> String {
+        let id = host.id();
+        let name = match host {
+            InstalledHost::Instance(_) => self
+                .clients
+                .iter()
+                .find(|row| row.id == id.as_str())
+                .map(|row| row.name.to_string()),
+            InstalledHost::Server(_) => self
+                .servers
+                .iter()
+                .find(|row| row.id == id.as_str())
+                .map(|row| row.name.to_string()),
+        };
+        name.unwrap_or(id)
+    }
+
     /// Changes what a feature reported about `host`, answering whether the
     /// workspace shows that host at all. A host no pane shows keeps nothing:
     /// opening it again asks its features afresh.
@@ -154,6 +185,15 @@ impl WorkspaceState {
                 .iter()
                 .any(|placed| placed.pane.host() == host && placed.pane.surface() == surface)
         })
+    }
+
+    /// The first pane, in reading order, showing `host`.
+    pub(super) fn first_pane_showing(&self, host: InstalledHost) -> Option<PaneId> {
+        self.layout
+            .as_ref()?
+            .panes()
+            .into_iter()
+            .find_map(|placed| (placed.pane.host() == host).then_some(placed.pane.id()))
     }
 
     /// What the only pane shows, when there is exactly one.
@@ -263,6 +303,7 @@ impl WorkspaceState {
                 }
             }
         }
+        (view.pair_shown, view.pair_room) = pair_placement(self.layout.as_ref(), &view);
         view
     }
 
@@ -419,6 +460,26 @@ fn back_label(ui: &AppWindow, layout: &WorkspaceLayout, hosts: &[InstalledHost])
     }
 }
 
+/// Whether a pane shows the host `view` is paired with, and whether one could
+/// be added for it without changing any pane.
+fn pair_placement(layout: Option<&WorkspaceLayout>, view: &HostView) -> (bool, bool) {
+    let counterpart = if view.kind == "client" {
+        backend::parse_server_id(&view.client.paired_server_id).map(InstalledHost::Server)
+    } else {
+        backend::parse_instance_id(&view.server.paired_client_id).map(InstalledHost::Instance)
+    };
+    let (Some(counterpart), Some(layout)) = (counterpart, layout) else {
+        return (false, false);
+    };
+    let shown = layout.hosts().contains(&counterpart);
+    let room = shown
+        || layout
+            .clone()
+            .reveal(counterpart, Surface::DEFAULT, None)
+            .is_ok();
+    (shown, room)
+}
+
 /// The first pane, in reading order, showing `host` on the surface its
 /// workflow is shown in full on, or 0 when none does. Pane ids start at 1.
 fn workflow_pane(layout: Option<&WorkspaceLayout>, host: InstalledHost, surface: &str) -> i32 {
@@ -483,6 +544,8 @@ fn change_row(row: &mut HostView, reported: &HostView) {
     updated.surfaces = row.surfaces.clone();
     updated.linked_servers = row.linked_servers.clone();
     updated.pending_servers = row.pending_servers.clone();
+    updated.pair_shown = row.pair_shown;
+    updated.pair_room = row.pair_room;
     *row = updated;
 }
 

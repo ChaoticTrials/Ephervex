@@ -45,7 +45,7 @@ use crate::ui::{
     WindowSizePreview, WorkflowActionRow,
 };
 use crate::window_aspect;
-use crate::workspace_layout::{PaneId, Surface, WorkspaceLayout};
+use crate::workspace_layout::{PaneId, Revealed, Surface, WorkspaceLayout};
 
 mod log_views;
 mod mod_views;
@@ -3347,16 +3347,6 @@ fn register_client_actions(
     });
 
     let sender = commands.clone();
-    ui.on_launch_and_connect(move |client, server| {
-        if let (Some(client), Some(server)) = (
-            backend::parse_instance_id(&client),
-            backend::parse_server_id(&server),
-        ) {
-            send(&sender, Command::LaunchAndConnect { client, server });
-        }
-    });
-
-    let sender = commands.clone();
     ui.on_open_client_folder(move |id| {
         if let Some(id) = backend::parse_instance_id(&id) {
             send(&sender, Command::OpenClientFolder(id));
@@ -4565,6 +4555,51 @@ impl Workspace {
         }
     }
 
+    /// Shows a pane's paired host, reusing a pane that shows it or adding one
+    /// where the layout has room. No pane already open is changed, and a
+    /// refusal is said rather than made room for.
+    /// `asked` is whether the user asked for exactly this, which is when a
+    /// host already on screen is worth saying so and a refusal is an error.
+    fn reveal_pair(&self, ui: &AppWindow, from: Option<PaneId>, host: InstalledHost, asked: bool) {
+        let surface = Surface::DEFAULT;
+        let Some(revealed) = self.state.borrow_mut().reveal(host, surface, from) else {
+            return;
+        };
+        let message = match revealed {
+            Ok(Revealed::Added(_)) => {
+                self.present(
+                    ui,
+                    Some(PaneChange {
+                        before: None,
+                        after: Some((host, surface)),
+                    }),
+                );
+                return;
+            }
+            Ok(Revealed::Shown(_)) if asked => "gui-pair-already-shown",
+            Ok(Revealed::Shown(_)) => return,
+            Err(_) => "gui-pair-no-room-for",
+        };
+        let name = self.state.borrow().host_name(host);
+        ui.invoke_present_toast(
+            lookup_args(message, [("value", Arg::from(name))]).into(),
+            asked && message == "gui-pair-no-room-for",
+        );
+    }
+
+    /// Puts both sides of a pair on screen as they start together: the
+    /// workspace opens on the client when it is closed, and a side missing
+    /// from it is added beside the other where the layout has room.
+    fn show_pair(&self, ui: &AppWindow, client: InstalledHost, server: InstalledHost) {
+        if self.state.borrow().layout().is_none() {
+            self.open(ui, client, Surface::DEFAULT);
+        }
+        for (host, beside) in [(server, client), (client, server)] {
+            let from = self.state.borrow().first_pane_showing(beside);
+            self.reveal_pair(ui, from, host, false);
+        }
+    }
+
     /// Brings a surface of `host` forward when the workspace is that host alone.
     fn reveal_surface(&self, ui: &AppWindow, host: InstalledHost, surface: Surface) {
         let Some((current, _)) = self.state.borrow().single_content() else {
@@ -4682,6 +4717,69 @@ fn register_workspace(ui: &AppWindow, workspace: &Workspace) {
     });
 
     register_pane_layout(ui, workspace);
+    register_linked_pair(ui, workspace);
+}
+
+/// Pairing a client with a linked server, showing a pane's paired host, and
+/// Launch & Connect, which shows both sides as it starts them.
+fn register_linked_pair(ui: &AppWindow, workspace: &Workspace) {
+    let sender = workspace.commands.clone();
+    ui.on_set_linked_pair(move |client, server, start_together| {
+        if let (Some(client), Some(server)) = (
+            backend::parse_instance_id(&client),
+            backend::parse_server_id(&server),
+        ) {
+            send(
+                &sender,
+                Command::SetLinkedPair {
+                    client,
+                    server,
+                    start_together,
+                },
+            );
+        }
+    });
+
+    let sender = workspace.commands.clone();
+    ui.on_clear_linked_pair(move |client| {
+        if let Some(client) = backend::parse_instance_id(&client) {
+            send(&sender, Command::ClearLinkedPair(client));
+        }
+    });
+
+    let weak = ui.as_weak();
+    let reveal = workspace.clone();
+    ui.on_show_linked_pair(move |pane, kind, id| {
+        let (Some(ui), Some(pane), Some(host)) = (
+            weak.upgrade(),
+            workspace::pane_id(pane),
+            workspace::parse_host(&kind, &id),
+        ) else {
+            return;
+        };
+        reveal.reveal_pair(&ui, Some(pane), host, true);
+    });
+
+    let weak = ui.as_weak();
+    let connect = workspace.clone();
+    ui.on_launch_and_connect(move |client, server| {
+        let (Some(ui), Some(client), Some(server)) = (
+            weak.upgrade(),
+            backend::parse_instance_id(&client),
+            backend::parse_server_id(&server),
+        ) else {
+            return;
+        };
+        send(
+            &connect.commands,
+            Command::LaunchAndConnect { client, server },
+        );
+        connect.show_pair(
+            &ui,
+            InstalledHost::Instance(client),
+            InstalledHost::Server(server),
+        );
+    });
 }
 
 /// Splitting the workspace, closing its panes, and pointing a pane at a host.
@@ -8278,6 +8376,15 @@ fn apply_instance_snapshot(
             creating_server_indeterminate: false,
             restart_stage: SharedString::default(),
             can_restart: false,
+            paired_server_id: item
+                .pair
+                .as_ref()
+                .map_or_else(SharedString::default, |pair| pair.id.clone().into()),
+            paired_server_name: item
+                .pair
+                .as_ref()
+                .map_or_else(SharedString::default, |pair| pair.name.clone().into()),
+            pair_start_together: item.pair.as_ref().is_some_and(|pair| pair.start_together),
         })
         .collect::<Vec<_>>();
     let all_rows = instance_rows.clone();
@@ -8390,6 +8497,15 @@ fn server_row(item: crate::presentation::ServerPresentation) -> ServerRow {
         can_connect: item.can_connect,
         connect_reason: item.connect_reason.into(),
         restart_stage: SharedString::default(),
+        paired_client_id: item
+            .pair
+            .as_ref()
+            .map_or_else(SharedString::default, |pair| pair.id.clone().into()),
+        paired_client_name: item
+            .pair
+            .as_ref()
+            .map_or_else(SharedString::default, |pair| pair.name.clone().into()),
+        pair_start_together: item.pair.as_ref().is_some_and(|pair| pair.start_together),
     }
 }
 
@@ -10582,6 +10698,274 @@ mod tests {
             }],
         );
         (workspace, client, server)
+    }
+
+    /// A workspace listing a client paired with its linked server.
+    fn paired_workspace(
+        ui: &AppWindow,
+    ) -> (
+        Workspace,
+        std::sync::mpsc::Receiver<Command>,
+        InstalledHost,
+        InstalledHost,
+    ) {
+        let (workspace, commands) = test_workspace_sending(ui);
+        let (client, server) = (client_host(), server_host());
+        workspace.state.borrow_mut().set_rows(
+            vec![InstanceRow {
+                id: client.id().into(),
+                name: "Repro Client".into(),
+                paired_server_id: server.id().into(),
+                paired_server_name: "Repro Server".into(),
+                ..InstanceRow::default()
+            }],
+            vec![ServerRow {
+                id: server.id().into(),
+                name: "Repro Server".into(),
+                linked_client_id: client.id().into(),
+                paired_client_id: client.id().into(),
+                paired_client_name: "Repro Client".into(),
+                ..ServerRow::default()
+            }],
+        );
+        (workspace, commands, client, server)
+    }
+
+    /// Every toast the window is asked to show, and whether it is an error.
+    fn toasts(ui: &AppWindow) -> Rc<RefCell<Vec<(String, bool)>>> {
+        let shown = Rc::new(RefCell::new(Vec::new()));
+        let sink = Rc::clone(&shown);
+        ui.on_present_toast(move |message, error| {
+            sink.borrow_mut().push((message.to_string(), error));
+        });
+        shown
+    }
+
+    fn pair_commands(commands: &std::sync::mpsc::Receiver<Command>) -> usize {
+        commands
+            .try_iter()
+            .filter(|command| {
+                matches!(
+                    command,
+                    Command::SetLinkedPair { .. } | Command::ClearLinkedPair(_)
+                )
+            })
+            .count()
+    }
+
+    #[test]
+    fn showing_the_pair_from_a_single_pane_adds_it_beside() {
+        let ui = test_window();
+        let (workspace, _, client, server) = paired_workspace(&ui);
+        workspace.open(&ui, client, Surface::Mods);
+        assert!(!first_view(&ui).pair_shown);
+        assert!(first_view(&ui).pair_room);
+
+        ui.invoke_show_linked_pair(1, "server".into(), server.id().into());
+
+        assert_eq!(
+            shown(&workspace),
+            [(client, Surface::Mods), (server, Surface::Overview)]
+        );
+        assert!(first_view(&ui).pair_shown);
+    }
+
+    #[test]
+    fn showing_the_pair_never_replaces_a_pane_of_a_full_workspace() {
+        let ui = test_window();
+        let toasts = toasts(&ui);
+        let (workspace, _, client, server) = paired_workspace(&ui);
+        workspace.open(&ui, client, Surface::Mods);
+        ui.invoke_split_pane_beside(1);
+        ui.invoke_split_pane_below(1);
+        ui.invoke_split_pane_below(2);
+        ui.invoke_show_pane_surface(2, "Logs".into());
+        let before = shown(&workspace);
+        let layout = workspace.state.borrow().layout().cloned();
+        assert!(!first_view(&ui).pair_room);
+
+        ui.invoke_show_linked_pair(4, "server".into(), server.id().into());
+
+        assert_eq!(shown(&workspace), before);
+        assert_eq!(workspace.state.borrow().layout().cloned(), layout);
+        assert_eq!(
+            toasts.borrow().as_slice(),
+            [(
+                lookup_args(
+                    "gui-pair-no-room-for",
+                    [("value", Arg::from("Repro Server"))]
+                ),
+                true
+            )]
+        );
+    }
+
+    #[test]
+    fn showing_a_pair_already_on_screen_changes_nothing() {
+        let ui = test_window();
+        let toasts = toasts(&ui);
+        let (workspace, _, client, server) = paired_workspace(&ui);
+        workspace.open(&ui, client, Surface::Overview);
+        ui.invoke_split_pane_beside(1);
+        ui.invoke_choose_pane_host(2, "server".into(), server.id().into());
+        ui.invoke_show_pane_surface(2, "Console".into());
+        let layout = workspace.state.borrow().layout().cloned();
+
+        ui.invoke_show_linked_pair(1, "server".into(), server.id().into());
+
+        assert_eq!(workspace.state.borrow().layout().cloned(), layout);
+        assert_eq!(toasts.borrow().len(), 1);
+        assert!(!toasts.borrow()[0].1, "nothing went wrong");
+    }
+
+    /// Two panes on the client read one view, and moving panes around or
+    /// leaving the workspace never touches the pair.
+    #[test]
+    fn the_pair_belongs_to_the_hosts_and_outlives_every_pane() {
+        let ui = test_window();
+        let (workspace, commands, client, server) = paired_workspace(&ui);
+        workspace.open(&ui, client, Surface::Overview);
+        ui.invoke_split_pane_beside(1);
+        ui.invoke_show_pane_surface(2, "Logs".into());
+        ui.invoke_show_linked_pair(1, "server".into(), server.id().into());
+
+        let panes = ui.get_workspace_panes();
+        let hosts: Vec<i32> = panes.iter().map(|pane| pane.host).collect();
+        assert_eq!(hosts, [0, 0, 1], "both client panes read one view");
+        let paired = |ui: &AppWindow| -> Vec<(String, String)> {
+            ui.get_host_views()
+                .iter()
+                .map(|view| {
+                    if view.kind == "client" {
+                        (
+                            view.id.to_string(),
+                            view.client.paired_server_id.to_string(),
+                        )
+                    } else {
+                        (
+                            view.id.to_string(),
+                            view.server.paired_client_id.to_string(),
+                        )
+                    }
+                })
+                .collect()
+        };
+        assert_eq!(
+            paired(&ui),
+            [(client.id(), server.id()), (server.id(), client.id())]
+        );
+
+        ui.invoke_close_pane(3);
+        ui.invoke_choose_pane_host(2, "server".into(), server.id().into());
+        ui.invoke_close_pane(2);
+        workspace.close(&ui);
+        workspace.open(&ui, client, Surface::Mods);
+
+        assert_eq!(paired(&ui), [(client.id(), server.id())]);
+        assert_eq!(
+            pair_commands(&commands),
+            0,
+            "the layout never asks to unpair"
+        );
+    }
+
+    #[test]
+    fn pairing_and_unpairing_go_to_the_worker() {
+        let ui = test_window();
+        let (_workspace, commands, client, server) = paired_workspace(&ui);
+        ui.invoke_set_linked_pair(client.id().into(), server.id().into(), true);
+        ui.invoke_clear_linked_pair(client.id().into());
+
+        let sent: Vec<Command> = commands.try_iter().collect();
+        assert!(matches!(
+            sent.as_slice(),
+            [
+                Command::SetLinkedPair {
+                    client: set_client,
+                    server: set_server,
+                    start_together: true,
+                },
+                Command::ClearLinkedPair(cleared),
+            ] if InstalledHost::Instance(*set_client) == client
+                && InstalledHost::Server(*set_server) == server
+                && InstalledHost::Instance(*cleared) == client
+        ));
+    }
+
+    fn connects(commands: &std::sync::mpsc::Receiver<Command>) -> usize {
+        commands
+            .try_iter()
+            .filter(|command| matches!(command, Command::LaunchAndConnect { .. }))
+            .count()
+    }
+
+    #[test]
+    fn launch_and_connect_puts_the_server_beside_the_client() {
+        let ui = test_window();
+        let (workspace, commands, client, server) = paired_workspace(&ui);
+        workspace.open(&ui, client, Surface::Mods);
+
+        ui.invoke_launch_and_connect(client.id().into(), server.id().into());
+
+        assert_eq!(connects(&commands), 1);
+        assert_eq!(
+            shown(&workspace),
+            [(client, Surface::Mods), (server, Surface::Overview)]
+        );
+    }
+
+    #[test]
+    fn launch_and_connect_from_the_server_puts_the_client_beside_it() {
+        let ui = test_window();
+        let (workspace, _, client, server) = paired_workspace(&ui);
+        workspace.open(&ui, server, Surface::Console);
+
+        ui.invoke_launch_and_connect(client.id().into(), server.id().into());
+
+        assert_eq!(
+            shown(&workspace),
+            [(server, Surface::Console), (client, Surface::Overview)]
+        );
+    }
+
+    #[test]
+    fn launch_and_connect_with_no_workspace_open_opens_both_sides() {
+        let ui = test_window();
+        let (workspace, _, client, server) = paired_workspace(&ui);
+
+        ui.invoke_launch_and_connect(client.id().into(), server.id().into());
+
+        assert_eq!(
+            shown(&workspace),
+            [(client, Surface::Overview), (server, Surface::Overview)]
+        );
+    }
+
+    #[test]
+    fn launch_and_connect_leaves_a_full_workspace_as_it_is() {
+        let ui = test_window();
+        let toasts = toasts(&ui);
+        let (workspace, commands, client, server) = paired_workspace(&ui);
+        workspace.open(&ui, client, Surface::Mods);
+        ui.invoke_split_pane_beside(1);
+        ui.invoke_split_pane_below(1);
+        ui.invoke_split_pane_below(2);
+        let layout = workspace.state.borrow().layout().cloned();
+
+        ui.invoke_launch_and_connect(client.id().into(), server.id().into());
+
+        assert_eq!(connects(&commands), 1, "the launch still goes ahead");
+        assert_eq!(workspace.state.borrow().layout().cloned(), layout);
+        assert_eq!(
+            toasts.borrow().as_slice(),
+            [(
+                lookup_args(
+                    "gui-pair-no-room-for",
+                    [("value", Arg::from("Repro Server"))]
+                ),
+                false
+            )]
+        );
     }
 
     fn pane_labels(ui: &AppWindow) -> Vec<String> {

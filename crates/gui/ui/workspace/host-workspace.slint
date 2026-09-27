@@ -5,6 +5,7 @@ import { LoaderGlyph } from "../components/artwork.slint";
 import { AppButton, IconButton, LaunchAsButton, Pill } from "../components/controls.slint";
 import { BodyText, Divider, Heading } from "../components/text.slint";
 import { GuiI18n } from "../globals.slint";
+import { PairBar } from "linked-pair.slint";
 import {
     AccountRow,
     WorkflowActionRow,
@@ -200,6 +201,11 @@ export component HostWorkspace inherits Rectangle {
     in property <bool> can-split-beside;
     in property <bool> can-split-below;
     in property <bool> can-close;
+    // The host this one is paired with, empty when it is not.
+    in property <string> pair-name;
+    in property <bool> pair-shown;
+    in property <bool> pair-room;
+    callback show-pair();
     callback choose-host();
     callback split-beside();
     callback split-below();
@@ -259,6 +265,12 @@ export component HostWorkspace inherits Rectangle {
             }
             if root.restart-visible : AppButton { text: GuiI18n.text("gui-restart"); enabled: root.restart-enabled && !root.occupied; hint: root.restart-hint; clicked => { root.restart(); } }
             AppButton { text: root.primary-label; tone: root.primary-tone; enabled: root.primary-enabled && !root.occupied; clicked => { root.primary(); } }
+        }
+        if root.pair-name != "" : PairBar {
+            name: root.pair-name;
+            shown: root.pair-shown;
+            room: root.pair-room;
+            show-beside => { root.show-pair(); }
         }
         if root.workflow-id != "" && root.workflow-here : Rectangle {
             height: max(64px, workflow-copy.preferred-height + 24px);

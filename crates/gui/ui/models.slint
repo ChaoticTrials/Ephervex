@@ -61,7 +61,11 @@ export struct InstanceRow {
     restart-stage: string,
     // Whether this run launched the running game and so knows how to start
     // it again the same way.
-    can-restart: bool,
+    can-restart: bool,    // The linked server this instance is paired with, empty when it is not,
+    // and whether starting either one starts the other.
+    paired-server-id: string,
+    paired-server-name: string,
+    pair-start-together: bool,
 }
 
 export struct ServerRow {
@@ -91,6 +95,10 @@ export struct ServerRow {
     connect-reason: string,
     // Where a restart of this host is: "stopping", "starting", or empty.
     restart-stage: string,
+    // The client this server is paired with, empty when it is not.
+    paired-client-id: string,
+    paired-client-name: string,
+    pair-start-together: bool,
 }
 
 export struct ImpactRow {
@@ -523,6 +531,10 @@ export struct HostView {
     // A client's linked servers, and those still being created.
     linked-servers: [ServerRow],
     pending-servers: [PendingEntityRow],
+    // Whether a pane shows this host's paired host, and whether one could
+    // be added for it without changing any pane.
+    pair-shown: bool,
+    pair-room: bool,
     // The newest crash review; an empty report when the host never crashed.
     crash-report: string,
     crash-failure: string,

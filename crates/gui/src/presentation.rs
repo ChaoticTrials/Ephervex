@@ -12,9 +12,10 @@ use ephervex_core::{
     ARTIFACT_CACHE_LIMIT_PRESETS, ArtifactCacheLimit, ArtifactCacheLimitError, BlockedProviderFile,
     ByteUnit, ClientRecord, DEFAULT_ARTIFACT_CACHE_LIMIT_BYTES, DeclaredProject,
     DependencyKnowledge, DependentMods, DiagnosticKind, DiagnosticScope, DuplicateFileReason,
-    DuplicateProviderFile, ImpactedMod, LaunchAndConnectAvailability, ModPresence, ModRelations,
-    NetworkAccess, PackAnalysis, PackSide, ProjectAvailability, ProviderFileIdentity, RelatedMod,
-    RequiredMods, RuntimeClassification, ServerRecord, ServerStatus, format_binary_bytes,
+    DuplicateProviderFile, ImpactedMod, InstalledHost, LaunchAndConnectAvailability, LinkedPair,
+    ModPresence, ModRelations, NetworkAccess, PackAnalysis, PackSide, ProjectAvailability,
+    ProviderFileIdentity, RelatedMod, RequiredMods, RuntimeClassification, ServerRecord,
+    ServerStatus, format_binary_bytes,
 };
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use ephervex_model::{
@@ -126,6 +127,45 @@ pub struct InstancePresentation {
     /// and is not running either, and offering to stop it would be a lie.
     pub can_kill: bool,
     pub launch_and_connect: Vec<ConnectPresentation>,
+    /// Filled in from the pairs, which a record knows nothing about.
+    pub pair: Option<PairPresentation>,
+}
+
+/// The other side of a host's linked pair.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PairPresentation {
+    pub id: String,
+    pub name: String,
+    pub start_together: bool,
+}
+
+impl PairPresentation {
+    /// The other side of `host`'s pair, named as its record names it.
+    #[must_use]
+    pub fn of(
+        host: InstalledHost,
+        pairs: &[LinkedPair],
+        clients: &[ClientRecord],
+        servers: &[ServerRecord],
+    ) -> Option<Self> {
+        let pair = pairs.iter().find(|pair| pair.includes(host))?;
+        let counterpart = pair.counterpart(host)?;
+        let name = match counterpart {
+            InstalledHost::Instance(id) => clients
+                .iter()
+                .find(|client| client.id == id)
+                .map(|client| client.name.clone()),
+            InstalledHost::Server(id) => servers
+                .iter()
+                .find(|server| server.id == id)
+                .map(|server| server.name.clone()),
+        };
+        Some(Self {
+            name: name.unwrap_or_else(|| counterpart.id()),
+            id: counterpart.id(),
+            start_together: pair.start_together,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -199,6 +239,7 @@ impl InstancePresentation {
                     }
                 })
                 .collect(),
+            pair: None,
         }
     }
 }
@@ -231,6 +272,8 @@ pub struct ServerPresentation {
     pub can_connect: bool,
     pub connect_reason: String,
     pub destructive_recovery: bool,
+    /// Filled in from the pairs, which a record knows nothing about.
+    pub pair: Option<PairPresentation>,
 }
 
 impl ServerPresentation {
@@ -318,6 +361,7 @@ impl ServerPresentation {
             connect_reason: String::new(),
             destructive_recovery: uncertain,
             snapshot_deletion_note: String::new(),
+            pair: None,
         }
     }
 }
@@ -1480,6 +1524,43 @@ mod tests {
         assert_eq!(item.state, lookup("gui-state-orphaned"));
         assert!(!item.can_launch, "a second game would share its directory");
         assert!(item.can_kill, "the proven force stop can still end it");
+    }
+
+    #[test]
+    fn each_side_of_a_pair_names_the_other_and_an_unpaired_host_names_none() {
+        let paired_client = client(StorageClass::Temporary, LoaderSelection::vanilla());
+        let other_client = client(StorageClass::Temporary, LoaderSelection::vanilla());
+        let mut paired_server = server(RuntimeClassification::Stopped).record;
+        paired_server.name = "Repro Server".to_owned();
+        paired_server.linked_client_id = Some(paired_client.id);
+        let pairs = [LinkedPair {
+            client: paired_client.id,
+            server: paired_server.id,
+            start_together: true,
+        }];
+        let clients = [paired_client.clone(), other_client.clone()];
+        let servers = [paired_server.clone()];
+
+        assert_eq!(
+            PairPresentation::of(paired_client.id.into(), &pairs, &clients, &servers),
+            Some(PairPresentation {
+                id: paired_server.id.to_string(),
+                name: "Repro Server".to_owned(),
+                start_together: true,
+            })
+        );
+        assert_eq!(
+            PairPresentation::of(paired_server.id.into(), &pairs, &clients, &servers),
+            Some(PairPresentation {
+                id: paired_client.id.to_string(),
+                name: paired_client.name,
+                start_together: true,
+            })
+        );
+        assert_eq!(
+            PairPresentation::of(other_client.id.into(), &pairs, &clients, &servers),
+            None
+        );
     }
 
     #[test]

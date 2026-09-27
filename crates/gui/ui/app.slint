@@ -72,6 +72,7 @@ import { DiagnosticsSurface } from "workspace/diagnostics.slint";
 import { ClientRuntimeForm, ServerPropertiesForm } from "workspace/host-settings.slint";
 import { HostPickerCard, HostWorkspace, WorkspaceTab } from "workspace/host-workspace.slint";
 import { IsolationSurface } from "workspace/isolation.slint";
+import { PairControls } from "workspace/linked-pair.slint";
 import { CrashNotice, DiagnosticFileList, LiveLogViewer } from "workspace/logs.slint";
 import { ImpactList, LinkedTargetsPanel, ModCard, RelationList } from "workspace/mods.slint";
 import { SnapshotPanel } from "workspace/snapshots.slint";
@@ -548,6 +549,10 @@ export component AppWindow inherits Window {
     // more than one, and stopping should reach only the one asked for.
     callback kill-instance(string, string);
     callback launch-and-connect(string, string);
+    // (client, server, start together): pairs a client with one of its
+    // linked servers, or changes whether the pair starts together.
+    callback set-linked-pair(string, string, bool);
+    callback clear-linked-pair(string);
     callback open-client-folder(string);
     callback open-server-folder(string);
     // Making a temporary instance persistent. The destination and the
@@ -597,6 +602,8 @@ export component AppWindow inherits Window {
     callback show-pane-surface(int, string);
     // Points a pane at another host, as a link inside it does: (pane, kind, id, surface).
     callback follow-host(int, string, string, string);
+    // Shows a pane's paired host without changing any pane: (pane, kind, id).
+    callback show-linked-pair(int, string, string);
     // Adds a pane beside or below the pane, showing its host.
     callback split-pane-beside(int);
     callback split-pane-below(int);
@@ -1041,6 +1048,13 @@ export component AppWindow inherits Window {
                                 can-split-beside: pane.can-split-beside;
                                 can-split-below: pane.can-split-below;
                                 can-close: pane.can-close;
+                                pair-name: self.is-client ? host.client.paired-server-name : host.server.paired-client-name;
+                                pair-shown: host.pair-shown;
+                                pair-room: host.pair-room;
+                                show-pair => {
+                                    if self.is-client { root.show-linked-pair(pane.id, "server", host.client.paired-server-id); }
+                                    else { root.show-linked-pair(pane.id, "client", host.server.paired-client-id); }
+                                }
                                 choose-host => { root.pane-host-picker-pane = pane.id; root.pane-host-picker-kind = host.kind; root.pane-host-picker-id = host.id; root.modal = "pane-host"; }
                                 split-beside => { root.split-pane-beside(pane.id); }
                                 split-below => { root.split-pane-below(pane.id); }
@@ -1138,6 +1152,15 @@ export component AppWindow inherits Window {
                                                 if server.state-kind == "needs-recovery" : AppButton { text: GuiI18n.text("gui-repair-server"); tone: "primary"; clicked => { root.repair-server(server.id); } }
                                                 Rectangle { horizontal-stretch: 1; }
                                                 AppButton { text: GuiI18n.text("gui-delete-server"); tone: "danger"; clicked => { root.pending-action-id = server.id; root.pending-action-name = server.name; root.pending-snapshot-deletion-note = server.snapshot-deletion-note; root.modal = "delete-server"; } }
+                                            }
+                                            PairControls {
+                                                paired: host.client.paired-server-id == server.id;
+                                                shown: host.pair-shown;
+                                                room: host.pair-room;
+                                                pair-label: GuiI18n.text("gui-pair-this-server");
+                                                pair => { root.set-linked-pair(host.id, server.id, false); }
+                                                unpair => { root.clear-linked-pair(host.id); }
+                                                show-beside => { root.show-linked-pair(pane.id, "server", server.id); }
                                             }
                                         } }
                                     }
@@ -1278,7 +1301,17 @@ export component AppWindow inherits Window {
                                     HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-network"); } BodyText { text: host.server.address; overflow: elide; horizontal-stretch: 1; } }
                                     HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-storage"); } BodyText { text: host.server.storage; overflow: elide; horizontal-stretch: 1; } }
                                     HorizontalLayout { InspectorLabel { text: GuiI18n.text("gui-relationship"); } BodyText { text: host.server.relationship; overflow: elide; horizontal-stretch: 1; } }
-                                } } HorizontalLayout { spacing: 8px; alignment: start; AppButton { text: GuiI18n.text("gui-view-logs"); clicked => { root.show-pane-surface(pane.id, "Logs"); } } if host.server.linked-client-id != "" : AppButton { text: GuiI18n.text("gui-launch-client-connect"); tone: "primary"; enabled: host.server.can-connect; clicked => { root.launch-and-connect(host.server.linked-client-id, host.id); } } if host.server.state-kind == "needs-recovery" : AppButton { text: GuiI18n.text("gui-repair-server"); tone: "primary"; clicked => { root.repair-server(host.id); } } if !server-overview.narrow : Rectangle { horizontal-stretch: 1; } if !server-overview.narrow : AppButton { text: GuiI18n.text("gui-delete-server"); tone: "danger"; clicked => { root.pending-action-id = host.id; root.pending-action-name = host.server.name; root.pending-snapshot-deletion-note = host.server.snapshot-deletion-note; root.modal = "delete-server"; } } }
+                                } }
+                                    if host.server.linked-client-id != "" : PairControls {
+                                        paired: host.server.paired-client-id != "";
+                                        shown: host.pair-shown;
+                                        room: host.pair-room;
+                                        pair-label: GuiI18n.text("gui-pair-with-client");
+                                        pair => { root.set-linked-pair(host.server.linked-client-id, host.id, false); }
+                                        unpair => { root.clear-linked-pair(host.server.paired-client-id); }
+                                        show-beside => { root.show-linked-pair(pane.id, "client", host.server.paired-client-id); }
+                                    }
+                                    HorizontalLayout { spacing: 8px; alignment: start; AppButton { text: GuiI18n.text("gui-view-logs"); clicked => { root.show-pane-surface(pane.id, "Logs"); } } if host.server.linked-client-id != "" : AppButton { text: GuiI18n.text("gui-launch-client-connect"); tone: "primary"; enabled: host.server.can-connect; clicked => { root.launch-and-connect(host.server.linked-client-id, host.id); } } if host.server.state-kind == "needs-recovery" : AppButton { text: GuiI18n.text("gui-repair-server"); tone: "primary"; clicked => { root.repair-server(host.id); } } if !server-overview.narrow : Rectangle { horizontal-stretch: 1; } if !server-overview.narrow : AppButton { text: GuiI18n.text("gui-delete-server"); tone: "danger"; clicked => { root.pending-action-id = host.id; root.pending-action-name = host.server.name; root.pending-snapshot-deletion-note = host.server.snapshot-deletion-note; root.modal = "delete-server"; } } }
                                     if server-overview.narrow : HorizontalLayout { alignment: end; AppButton { text: GuiI18n.text("gui-delete-server"); tone: "danger"; clicked => { root.pending-action-id = host.id; root.pending-action-name = host.server.name; root.pending-snapshot-deletion-note = host.server.snapshot-deletion-note; root.modal = "delete-server"; } } } } }
                                 if host.available && host.kind == "server" && pane.surface == "Snapshots" : SnapshotPanel {
                                     items: host.snapshots; total: host.snapshot-total; has-plain-copies: host.snapshots-have-plain-copies;

@@ -40,8 +40,8 @@ use ephervex_model::{
 
 use crate::presentation::{
     ActivityPresentation, ImportErrorKind, ImportFailure, ImportPresentation, InstancePresentation,
-    ModImpactPresentation, ModRequirementPresentation, ServerPresentation, diagnostic_kind_label,
-    diagnostic_scope_label,
+    ModImpactPresentation, ModRequirementPresentation, PairPresentation, ServerPresentation,
+    diagnostic_kind_label, diagnostic_scope_label,
 };
 
 type CancellationRegistry = Arc<Mutex<HashMap<String, CancellationToken>>>;
@@ -87,6 +87,15 @@ pub enum Command {
         instance: InstanceId,
         allow: bool,
     },
+    /// Pairs a client with one of its linked servers, or changes whether
+    /// the pair starts together.
+    SetLinkedPair {
+        client: InstanceId,
+        server: ServerId,
+        start_together: bool,
+    },
+    /// Unpairs a client. Its servers stay linked.
+    ClearLinkedPair(InstanceId),
     /// Clear the runtime evidence a server left behind when its supervisor died.
     RepairServer(ServerId),
     /// Stop the game this launcher started for one instance.
@@ -2126,6 +2135,18 @@ fn run_worker(
                     Err(error) => send_modal_error(&events, &error),
                 }
             }
+            Command::SetLinkedPair {
+                client,
+                server,
+                start_together,
+            } => match app.set_linked_pair(client, server, start_together) {
+                Ok(_) => send_snapshot(&app, &events),
+                Err(error) => send_error(&events, &error),
+            },
+            Command::ClearLinkedPair(client) => match app.clear_linked_pair(client) {
+                Ok(()) => send_snapshot(&app, &events),
+                Err(error) => send_error(&events, &error),
+            },
             Command::SetAllowPackModVersionChanges { instance, allow } => {
                 // No toast. The toggle itself is the confirmation; a refusal
                 // is still reported, because then nothing on screen changed.
@@ -4362,9 +4383,11 @@ fn send_snapshot(app: &App, events: &Sender<Event>) {
 
 fn snapshot(app: &App) -> Result<Snapshot, CoreError> {
     let servers = app.list_servers()?;
+    let clients = app.list_clients()?;
+    let pairs = app.linked_pairs()?;
     let mut connection_states = std::collections::HashMap::new();
     let mut instance_rows = Vec::new();
-    for record in app.list_clients()? {
+    for record in &clients {
         let linked = servers
             .iter()
             .filter(|server| server.linked_client_id == Some(record.id))
@@ -4385,20 +4408,22 @@ fn snapshot(app: &App) -> Result<Snapshot, CoreError> {
         let managed_mods = app.managed_mods(record.id).map_or(0, |mods| mods.len());
         let launch_state = app.launch_state(record.id)?;
         let mut presentation = InstancePresentation::from_record(
-            &record,
+            record,
             linked.len(),
             managed_mods,
             launch_state.as_ref(),
             connections,
         );
+        presentation.pair = PairPresentation::of(record.id.into(), &pairs, &clients, &servers);
         presentation.snapshot_deletion_note =
             snapshot_deletion_note(app, InstalledHost::Instance(record.id));
         instance_rows.push(presentation);
     }
     let mut server_rows = Vec::new();
-    for server in servers {
+    for server in &servers {
         let status = app.server_status(server.id)?;
         let mut presentation = ServerPresentation::from_status(&status);
+        presentation.pair = PairPresentation::of(server.id.into(), &pairs, &clients, &servers);
         presentation.snapshot_deletion_note =
             snapshot_deletion_note(app, InstalledHost::Server(server.id));
         presentation.can_connect = connection_states.get(&server.id).copied().unwrap_or(false);
