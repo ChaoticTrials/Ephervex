@@ -45,3 +45,4 @@ so the reasoning trail survives.
 | [0037](0037-a-declared-relation-is-resolved-against-the-catalog-and-never-recorded.md) | A declared relation is resolved against the catalog and never recorded | Accepted |
 | [0038](0038-a-diagnostic-bundle-is-a-chosen-verbatim-local-copy.md) | A diagnostic bundle is a chosen, verbatim, local copy | Accepted |
 | [0039](0039-a-split-workspace-composes-host-views-and-owns-no-feature-state.md) | A split workspace composes host views and owns no feature state | Accepted |
+| [0040](0040-a-linked-pair-chooses-one-linked-server-and-starts-as-one-operation.md) | A linked pair chooses one linked server and starts as one operation | Accepted |
