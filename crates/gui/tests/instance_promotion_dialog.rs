@@ -257,6 +257,7 @@ fn temporary_instance() -> InstanceRow {
         paired_server_id: SharedString::default(),
         paired_server_name: SharedString::default(),
         pair_start_together: false,
+        pair_starting: false,
     }
 }
 

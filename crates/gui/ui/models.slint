@@ -66,6 +66,8 @@ export struct InstanceRow {
     paired-server-id: string,
     paired-server-name: string,
     pair-start-together: bool,
+    // A start of the pair is under way, so neither side starts again.
+    pair-starting: bool,
 }
 
 export struct ServerRow {
@@ -99,6 +101,7 @@ export struct ServerRow {
     paired-client-id: string,
     paired-client-name: string,
     pair-start-together: bool,
+    pair-starting: bool,
 }
 
 export struct ImpactRow {

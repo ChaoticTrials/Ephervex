@@ -39,9 +39,56 @@ impl LinkedPair {
     }
 }
 
+/// What pressing Launch or Start on one side of a pair does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkedStart {
+    /// Start only the side asked for.
+    Alone,
+    /// One Launch & Connect run: start or reuse the server, then launch the
+    /// client connected to it.
+    Connect {
+        client: InstanceId,
+        server: ServerId,
+    },
+}
+
+/// Decides [`LinkedStart`] for a fresh start of `initiator`.
+///
+/// A start that goes both ways is one operation, so nothing it starts is ever
+/// a new trigger. A running client is never launched again: the server then
+/// starts alone. Restart never comes here.
+#[must_use]
+fn linked_start(
+    initiator: InstalledHost,
+    pair: Option<LinkedPair>,
+    client_running: bool,
+) -> LinkedStart {
+    match pair {
+        Some(pair) if pair.start_together && pair.includes(initiator) && !client_running => {
+            LinkedStart::Connect {
+                client: pair.client,
+                server: pair.server,
+            }
+        }
+        _ => LinkedStart::Alone,
+    }
+}
+
 impl App {
-    /// Every recorded pair whose client and server both still exist and are
-    /// still linked to each other. Anything else is stale and left out.
+    /// What a fresh start of `initiator` should do, from its current pair and
+    /// whether the pair's client is running.
+    pub fn plan_linked_start(&self, initiator: InstalledHost) -> CoreResult<LinkedStart> {
+        let pair = self.linked_pair_of(initiator)?;
+        let client_running = match pair {
+            Some(pair) => self.launch_state(pair.client)?.is_some(),
+            None => false,
+        };
+        Ok(linked_start(initiator, pair, client_running))
+    }
+
+    /// Every client's pair. A client's first linked server is its pair unless
+    /// the user paired another one or unpaired it; a recorded server that is
+    /// gone or no longer linked falls back to that first one.
     pub fn linked_pairs(&self) -> CoreResult<Vec<LinkedPair>> {
         let links = self.server_links()?;
         Ok(links
@@ -436,6 +483,91 @@ mod tests {
             .expect("unlink");
 
         assert!(world.app.linked_pairs().expect("pairs").is_empty());
+    }
+
+    fn pair(start_together: bool) -> LinkedPair {
+        LinkedPair {
+            client: InstanceId::new(),
+            server: ServerId::new(),
+            start_together,
+        }
+    }
+
+    #[test]
+    fn either_side_of_a_pair_that_starts_together_starts_both_as_one_operation() {
+        let pair = pair(true);
+        let both = LinkedStart::Connect {
+            client: pair.client,
+            server: pair.server,
+        };
+        assert_eq!(
+            linked_start(InstalledHost::Instance(pair.client), Some(pair), false),
+            both
+        );
+        assert_eq!(
+            linked_start(InstalledHost::Server(pair.server), Some(pair), false),
+            both
+        );
+    }
+
+    #[test]
+    fn a_running_client_is_never_launched_again() {
+        let pair = pair(true);
+        for initiator in [
+            InstalledHost::Server(pair.server),
+            InstalledHost::Instance(pair.client),
+        ] {
+            assert_eq!(
+                linked_start(initiator, Some(pair), true),
+                LinkedStart::Alone
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_paired_host_that_starts_together_starts_its_counterpart() {
+        let separate = pair(false);
+        let together = pair(true);
+        let cases = [
+            (InstalledHost::Instance(separate.client), Some(separate)),
+            (InstalledHost::Server(separate.server), Some(separate)),
+            (InstalledHost::Instance(InstanceId::new()), Some(together)),
+            (InstalledHost::Server(ServerId::new()), Some(together)),
+            (InstalledHost::Instance(together.client), None),
+        ];
+        for (initiator, pair) in cases {
+            assert_eq!(linked_start(initiator, pair, false), LinkedStart::Alone);
+        }
+    }
+
+    #[test]
+    fn the_planned_start_reads_the_current_pair() {
+        let mut world = world();
+        let client = world.client("Client");
+        let server = world.linked_server("Server", client);
+        let host = InstalledHost::Server(server);
+        assert_eq!(
+            world.app.plan_linked_start(host).expect("plan"),
+            LinkedStart::Alone
+        );
+
+        world
+            .app
+            .set_linked_pair(client, server, true)
+            .expect("pair");
+        assert_eq!(
+            world.app.plan_linked_start(host).expect("plan"),
+            LinkedStart::Connect { client, server }
+        );
+
+        world
+            .app
+            .set_linked_pair(client, server, false)
+            .expect("pair");
+        assert_eq!(
+            world.app.plan_linked_start(host).expect("plan"),
+            LinkedStart::Alone
+        );
     }
 
     #[test]

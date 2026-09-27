@@ -576,5 +576,6 @@ fn server() -> ServerRow {
         paired_client_id: SharedString::default(),
         paired_client_name: SharedString::default(),
         pair_start_together: false,
+        pair_starting: false,
     }
 }

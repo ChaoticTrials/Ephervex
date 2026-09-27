@@ -132,6 +132,31 @@ impl WorkspaceState {
         Some(self.layout.as_mut()?.reveal(host, surface, from))
     }
 
+    /// The client and server of `host`'s pair, when its rows say the pair
+    /// starts together.
+    pub(super) fn pair_starting_together(
+        &self,
+        host: InstalledHost,
+    ) -> Option<(InstalledHost, InstalledHost)> {
+        let id = host.id();
+        let (client, server) = match host {
+            InstalledHost::Instance(_) => {
+                let row = self.clients.iter().find(|row| row.id == id.as_str())?;
+                row.pair_start_together.then_some(())?;
+                (id, row.paired_server_id.to_string())
+            }
+            InstalledHost::Server(_) => {
+                let row = self.servers.iter().find(|row| row.id == id.as_str())?;
+                row.pair_start_together.then_some(())?;
+                (row.paired_client_id.to_string(), id)
+            }
+        };
+        Some((
+            InstalledHost::Instance(backend::parse_instance_id(&client)?),
+            InstalledHost::Server(backend::parse_server_id(&server)?),
+        ))
+    }
+
     /// The name a host's row carries, or its id when no row names it.
     pub(super) fn host_name(&self, host: InstalledHost) -> String {
         let id = host.id();

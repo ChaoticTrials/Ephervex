@@ -1442,6 +1442,17 @@ struct HostLifecycle {
     /// Clients whose running launch this run started, and which a restart
     /// therefore knows how to start again.
     restartable: HashSet<String>,
+    /// Pair starts sent to the worker and not yet settled.
+    pair_starts: Vec<PairStart>,
+}
+
+/// One start of a pair that is under way, identified by its operation so a
+/// late settle of an earlier one changes nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PairStart {
+    operation: u64,
+    client: InstalledHost,
+    server: InstalledHost,
 }
 
 fn lifecycle_key(host: InstalledHost) -> String {
@@ -1449,10 +1460,11 @@ fn lifecycle_key(host: InstalledHost) -> String {
 }
 
 impl HostLifecycle {
-    /// Claims a restart of `host`, or refuses while one is under way.
+    /// Claims a restart of `host`, or refuses while one, or a start of its
+    /// pair, is under way.
     fn request(&mut self, host: InstalledHost) -> Option<u64> {
         let key = lifecycle_key(host);
-        if self.restarts.contains_key(&key) {
+        if self.restarts.contains_key(&key) || self.pair_starting(host) {
             return None;
         }
         self.last_request = self.last_request.wrapping_add(1);
@@ -1493,6 +1505,36 @@ impl HostLifecycle {
         true
     }
 
+    /// Claims a start of the pair `client` and `server` form, or refuses
+    /// while one that includes either of them is under way.
+    fn begin_pair_start(&mut self, client: InstalledHost, server: InstalledHost) -> Option<u64> {
+        if self.pair_starting(client) || self.pair_starting(server) {
+            return None;
+        }
+        self.last_request = self.last_request.wrapping_add(1);
+        self.pair_starts.push(PairStart {
+            operation: self.last_request,
+            client,
+            server,
+        });
+        Some(self.last_request)
+    }
+
+    /// Ends the pair start the worker settled. An operation this controller
+    /// is not tracking changes nothing.
+    fn settle_pair_start(&mut self, operation: u64) -> bool {
+        let before = self.pair_starts.len();
+        self.pair_starts
+            .retain(|start| start.operation != operation);
+        self.pair_starts.len() != before
+    }
+
+    fn pair_starting(&self, host: InstalledHost) -> bool {
+        self.pair_starts
+            .iter()
+            .any(|start| start.client == host || start.server == host)
+    }
+
     fn stage_of(&self, host: InstalledHost) -> &'static str {
         self.restarts
             .get(&lifecycle_key(host))
@@ -1504,11 +1546,16 @@ impl HostLifecycle {
         let Some(instance) = backend::parse_instance_id(&row.id) else {
             return false;
         };
-        let stage = self.stage_of(InstalledHost::Instance(instance));
+        let host = InstalledHost::Instance(instance);
+        let stage = self.stage_of(host);
         let can_restart = self.restartable.contains(&instance.to_string());
-        let changed = row.restart_stage != stage || row.can_restart != can_restart;
+        let pair_starting = self.pair_starting(host);
+        let changed = row.restart_stage != stage
+            || row.can_restart != can_restart
+            || row.pair_starting != pair_starting;
         row.restart_stage = stage.into();
         row.can_restart = can_restart;
+        row.pair_starting = pair_starting;
         changed
     }
 
@@ -1517,9 +1564,12 @@ impl HostLifecycle {
         let Some(server) = backend::parse_server_id(&row.id) else {
             return false;
         };
-        let stage = self.stage_of(InstalledHost::Server(server));
-        let changed = row.restart_stage != stage;
+        let host = InstalledHost::Server(server);
+        let stage = self.stage_of(host);
+        let pair_starting = self.pair_starting(host);
+        let changed = row.restart_stage != stage || row.pair_starting != pair_starting;
         row.restart_stage = stage.into();
+        row.pair_starting = pair_starting;
         changed
     }
 }
@@ -1545,6 +1595,13 @@ fn stamp_host_lifecycle(ui: &AppWindow, lifecycle: &HostLifecycle) {
         stamp_rows(&view.linked_servers, |row: &mut ServerRow| {
             lifecycle.stamp_server(row)
         });
+    }
+}
+
+/// Ends a pair start the worker settled, in every view of both sides.
+fn apply_pair_start_settled(ui: &AppWindow, lifecycle: &RefCell<HostLifecycle>, operation: u64) {
+    if lifecycle.borrow_mut().settle_pair_start(operation) {
+        stamp_host_lifecycle(ui, &lifecycle.borrow());
     }
 }
 
@@ -3250,20 +3307,6 @@ fn next_launch_handle() -> String {
 /// Launching an instance, as the default account or as a chosen one.
 fn register_launch_actions(ui: &AppWindow, commands: &Sender<Command>) {
     let sender = commands.clone();
-    ui.on_launch_client(move |id| {
-        if let Some(instance) = backend::parse_instance_id(&id) {
-            send(
-                &sender,
-                Command::LaunchClient {
-                    instance,
-                    account: None,
-                    additional: None,
-                },
-            );
-        }
-    });
-
-    let sender = commands.clone();
     ui.on_launch_client_as(move |id, account, alongside| {
         let Some(instance) = backend::parse_instance_id(&id) else {
             return;
@@ -4555,13 +4598,41 @@ impl Workspace {
         }
     }
 
+    /// How a fresh Launch or Start of `host` goes, claiming a pair start
+    /// when its pair starts together.
+    fn claim_start(&self, ui: &AppWindow, host: InstalledHost) -> HostStart {
+        let mut lifecycle = self.lifecycle.borrow_mut();
+        if lifecycle.pair_starting(host) {
+            return HostStart::Refused;
+        }
+        let Some((client, server)) = self.state.borrow().pair_starting_together(host) else {
+            return HostStart::Alone;
+        };
+        let Some(operation) = lifecycle.begin_pair_start(client, server) else {
+            return HostStart::Refused;
+        };
+        stamp_host_lifecycle(ui, &lifecycle);
+        HostStart::Paired {
+            operation,
+            client,
+            server,
+        }
+    }
+
     /// Shows a pane's paired host, reusing a pane that shows it or adding one
     /// where the layout has room. No pane already open is changed, and a
     /// refusal is said rather than made room for.
+    ///
     /// `asked` is whether the user asked for exactly this, which is when a
     /// host already on screen is worth saying so and a refusal is an error.
-    fn reveal_pair(&self, ui: &AppWindow, from: Option<PaneId>, host: InstalledHost, asked: bool) {
-        let surface = Surface::DEFAULT;
+    fn reveal_pair(
+        &self,
+        ui: &AppWindow,
+        from: Option<PaneId>,
+        host: InstalledHost,
+        surface: Surface,
+        asked: bool,
+    ) {
         let Some(revealed) = self.state.borrow_mut().reveal(host, surface, from) else {
             return;
         };
@@ -4589,14 +4660,18 @@ impl Workspace {
 
     /// Puts both sides of a pair on screen as they start together: the
     /// workspace opens on the client when it is closed, and a side missing
-    /// from it is added beside the other where the layout has room.
+    /// from it is added beside the other where the layout has room, the
+    /// server on its console.
     fn show_pair(&self, ui: &AppWindow, client: InstalledHost, server: InstalledHost) {
         if self.state.borrow().layout().is_none() {
             self.open(ui, client, Surface::DEFAULT);
         }
-        for (host, beside) in [(server, client), (client, server)] {
+        for (host, beside, surface) in [
+            (server, client, Surface::Console),
+            (client, server, Surface::DEFAULT),
+        ] {
             let from = self.state.borrow().first_pane_showing(beside);
-            self.reveal_pair(ui, from, host, false);
+            self.reveal_pair(ui, from, host, surface, false);
         }
     }
 
@@ -4757,7 +4832,7 @@ fn register_linked_pair(ui: &AppWindow, workspace: &Workspace) {
         ) else {
             return;
         };
-        reveal.reveal_pair(&ui, Some(pane), host, true);
+        reveal.reveal_pair(&ui, Some(pane), host, Surface::DEFAULT, true);
     });
 
     let weak = ui.as_weak();
@@ -4825,29 +4900,107 @@ fn register_pane_layout(ui: &AppWindow, workspace: &Workspace) {
     });
 }
 
-/// Starting a server, which also puts its console on screen.
+/// How a fresh Launch or Start of a host goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostStart {
+    Alone,
+    /// A pair start with this operation.
+    Paired {
+        operation: u64,
+        client: InstalledHost,
+        server: InstalledHost,
+    },
+    /// A start of the host's pair is already under way.
+    Refused,
+}
+
+/// Launching a client and starting a server, each of which starts its pair
+/// when the pair starts together. A pair start puts both sides on screen, and
+/// starting a server alone puts its console on screen.
 ///
 /// Start is offered from the server card, the workspace header, and the
 /// overview, and every one of them would otherwise have to navigate for itself.
 /// Done once here, so all of them land on the output the run is about to
 /// produce.
-fn register_server_start(ui: &AppWindow, commands: &Sender<Command>, workspace: &Workspace) {
-    let sender = commands.clone();
+fn register_host_starts(ui: &AppWindow, workspace: &Workspace) {
     let weak = ui.as_weak();
-    let start_workspace = workspace.clone();
-    ui.on_server_start(move |id| {
-        let Some(server) = backend::parse_server_id(&id) else {
+    let launch = workspace.clone();
+    ui.on_launch_client(move |id| {
+        let (Some(ui), Some(instance)) = (weak.upgrade(), backend::parse_instance_id(&id)) else {
             return;
         };
-        send(&sender, Command::StartServer(server));
+        let host = InstalledHost::Instance(instance);
+        match launch.claim_start(&ui, host) {
+            HostStart::Alone => send(
+                &launch.commands,
+                Command::LaunchClient {
+                    instance,
+                    account: None,
+                    additional: None,
+                },
+            ),
+            HostStart::Paired {
+                operation,
+                client,
+                server,
+            } => {
+                send(
+                    &launch.commands,
+                    Command::StartLinked {
+                        initiator: host,
+                        operation,
+                    },
+                );
+                launch.show_pair(&ui, client, server);
+            }
+            HostStart::Refused => {
+                ui.invoke_present_toast(lookup("gui-pair-start-busy").into(), true);
+            }
+        }
+    });
+
+    let weak = ui.as_weak();
+    let start = workspace.clone();
+    ui.on_server_start(move |id| {
+        let (Some(ui), Some(server)) = (weak.upgrade(), backend::parse_server_id(&id)) else {
+            return;
+        };
+        let host = InstalledHost::Server(server);
+        let pair = match start.claim_start(&ui, host) {
+            HostStart::Alone => {
+                send(&start.commands, Command::StartServer(server));
+                None
+            }
+            HostStart::Paired {
+                operation,
+                client,
+                server,
+            } => {
+                send(
+                    &start.commands,
+                    Command::StartLinked {
+                        initiator: host,
+                        operation,
+                    },
+                );
+                Some((client, server))
+            }
+            HostStart::Refused => {
+                ui.invoke_present_toast(lookup("gui-pair-start-busy").into(), true);
+                return;
+            }
+        };
         // Views already on this server start over with the new run; a console
         // opened below reads it from the beginning on its own.
-        start_workspace
+        start
             .logs
             .borrow_mut()
             .reopen(&LiveLogSource::Server(server));
-        if let Some(ui) = weak.upgrade() {
-            start_workspace.show_console(&ui, InstalledHost::Server(server));
+        // A pair start shows both sides beside each other instead, which never
+        // moves a pane off the host it shows.
+        match pair {
+            Some((client, server)) => start.show_pair(&ui, client, server),
+            None => start.show_console(&ui, host),
         }
     });
 }
@@ -4928,7 +5081,7 @@ fn register_server_actions(ui: &AppWindow, commands: &Sender<Command>, workspace
         }
     });
 
-    register_server_start(ui, commands, workspace);
+    register_host_starts(ui, workspace);
 
     let sender = commands.clone();
     ui.on_server_stop(move |id| {
@@ -7530,6 +7683,7 @@ fn apply_event(
                 stamp_host_lifecycle(ui, &lifecycle.borrow());
             }
         }
+        Event::PairStartSettled { operation } => apply_pair_start_settled(ui, lifecycle, operation),
         Event::LaunchContext {
             instance,
             restartable,
@@ -8385,6 +8539,8 @@ fn apply_instance_snapshot(
                 .as_ref()
                 .map_or_else(SharedString::default, |pair| pair.name.clone().into()),
             pair_start_together: item.pair.as_ref().is_some_and(|pair| pair.start_together),
+            // Stamped from the lifecycle, which a snapshot knows nothing about.
+            pair_starting: false,
         })
         .collect::<Vec<_>>();
     let all_rows = instance_rows.clone();
@@ -8506,6 +8662,7 @@ fn server_row(item: crate::presentation::ServerPresentation) -> ServerRow {
             .as_ref()
             .map_or_else(SharedString::default, |pair| pair.name.clone().into()),
         pair_start_together: item.pair.as_ref().is_some_and(|pair| pair.start_together),
+        pair_starting: false,
     }
 }
 
@@ -10700,23 +10857,33 @@ mod tests {
         (workspace, client, server)
     }
 
-    /// A workspace listing a client paired with its linked server.
-    fn paired_workspace(
-        ui: &AppWindow,
-    ) -> (
+    type PairedWorkspace = (
         Workspace,
         std::sync::mpsc::Receiver<Command>,
         InstalledHost,
         InstalledHost,
-    ) {
-        let (workspace, commands) = test_workspace_sending(ui);
-        let (client, server) = (client_host(), server_host());
-        workspace.state.borrow_mut().set_rows(
+    );
+
+    /// A workspace listing a client paired with its linked server.
+    fn paired_workspace(ui: &AppWindow) -> PairedWorkspace {
+        paired_workspace_starting_together(ui, false)
+    }
+
+    fn paired_rows(
+        client: InstalledHost,
+        server: InstalledHost,
+        start_together: bool,
+        running: bool,
+    ) -> (Vec<InstanceRow>, Vec<ServerRow>) {
+        (
             vec![InstanceRow {
                 id: client.id().into(),
                 name: "Repro Client".into(),
                 paired_server_id: server.id().into(),
                 paired_server_name: "Repro Server".into(),
+                pair_start_together: start_together,
+                can_launch: !running,
+                can_kill: running,
                 ..InstanceRow::default()
             }],
             vec![ServerRow {
@@ -10725,10 +10892,201 @@ mod tests {
                 linked_client_id: client.id().into(),
                 paired_client_id: client.id().into(),
                 paired_client_name: "Repro Client".into(),
+                pair_start_together: start_together,
+                can_start: !running,
+                can_stop: running,
                 ..ServerRow::default()
             }],
-        );
+        )
+    }
+
+    fn paired_workspace_starting_together(ui: &AppWindow, start_together: bool) -> PairedWorkspace {
+        let (workspace, commands) = test_workspace_sending(ui);
+        register_host_starts(ui, &workspace);
+        let (client, server) = (client_host(), server_host());
+        let (clients, servers) = paired_rows(client, server, start_together, false);
+        workspace.state.borrow_mut().set_rows(clients, servers);
         (workspace, commands, client, server)
+    }
+
+    /// The starts sent, as (what, initiator).
+    fn starts(
+        commands: &std::sync::mpsc::Receiver<Command>,
+    ) -> Vec<(&'static str, InstalledHost, u64)> {
+        commands
+            .try_iter()
+            .filter_map(|command| match command {
+                Command::LaunchClient { instance, .. } => {
+                    Some(("launch", InstalledHost::Instance(instance), 0))
+                }
+                Command::StartServer(server) => Some(("start", InstalledHost::Server(server), 0)),
+                Command::LaunchAndConnect { client, .. } => {
+                    Some(("connect", InstalledHost::Instance(client), 0))
+                }
+                Command::StartLinked {
+                    initiator,
+                    operation,
+                } => Some(("pair", initiator, operation)),
+                Command::RestartHost { host, request } => Some(("restart", host, request)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_pair_that_does_not_start_together_starts_only_the_side_asked_for() {
+        let ui = test_window();
+        let (_workspace, commands, client, server) = paired_workspace(&ui);
+        ui.invoke_launch_client(client.id().into());
+        ui.invoke_server_start(server.id().into());
+        assert_eq!(
+            starts(&commands),
+            [("launch", client, 0), ("start", server, 0)]
+        );
+    }
+
+    /// Launching the client is one pair start. The server coming up and the
+    /// client running are not new triggers, so nothing else is sent.
+    #[test]
+    fn a_paired_launch_is_one_pair_start_and_nothing_starts_after_it() {
+        let ui = test_window();
+        let (workspace, commands, client, server) = paired_workspace_starting_together(&ui, true);
+        workspace.open(&ui, client, Surface::Overview);
+        ui.invoke_split_pane_beside(1);
+        ui.invoke_show_linked_pair(1, "server".into(), server.id().into());
+
+        ui.invoke_launch_client(client.id().into());
+        let sent = starts(&commands);
+        let [("pair", initiator, operation)] = sent.as_slice() else {
+            panic!("one pair start, not {sent:?}");
+        };
+        assert_eq!(*initiator, client);
+        let starting = |ui: &AppWindow| -> Vec<bool> {
+            ui.get_host_views()
+                .iter()
+                .map(|view| {
+                    if view.kind == "client" {
+                        view.client.pair_starting
+                    } else {
+                        view.server.pair_starting
+                    }
+                })
+                .collect()
+        };
+        assert_eq!(starting(&ui), [true, true], "both sides, in every pane");
+
+        let (clients, servers) = paired_rows(client, server, true, true);
+        workspace.state.borrow_mut().set_rows(clients, servers);
+        workspace.refresh(&ui);
+        apply_pair_start_settled(&ui, &workspace.lifecycle, *operation);
+
+        assert_eq!(starting(&ui), [false, false]);
+        assert!(
+            starts(&commands).is_empty(),
+            "nothing follows the pair start"
+        );
+    }
+
+    #[test]
+    fn a_pair_start_from_either_side_puts_both_sides_on_screen() {
+        let ui = test_window();
+        let (workspace, _, client, server) = paired_workspace_starting_together(&ui, true);
+        workspace.open(&ui, client, Surface::Mods);
+        ui.invoke_launch_client(client.id().into());
+        assert_eq!(
+            shown(&workspace),
+            [(client, Surface::Mods), (server, Surface::Console)]
+        );
+
+        let ui = test_window();
+        let (workspace, _, client, server) = paired_workspace_starting_together(&ui, true);
+        workspace.open(&ui, client, Surface::Overview);
+        ui.invoke_server_start(server.id().into());
+        assert_eq!(
+            shown(&workspace),
+            [(client, Surface::Overview), (server, Surface::Console)],
+            "the client's pane keeps showing the client"
+        );
+    }
+
+    /// Neither side can start again while its pair is starting, so there is
+    /// no path from one side's start back to the other's.
+    #[test]
+    fn a_start_of_either_side_waits_while_its_pair_is_starting() {
+        let ui = test_window();
+        let toasts = toasts(&ui);
+        let (_workspace, commands, client, server) = paired_workspace_starting_together(&ui, true);
+
+        ui.invoke_server_start(server.id().into());
+        ui.invoke_launch_client(client.id().into());
+        ui.invoke_server_start(server.id().into());
+
+        let sent = starts(&commands);
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        assert_eq!((sent[0].0, sent[0].1), ("pair", server));
+        assert_eq!(
+            toasts.borrow().as_slice(),
+            [
+                (lookup("gui-pair-start-busy"), true),
+                (lookup("gui-pair-start-busy"), true)
+            ]
+        );
+    }
+
+    /// However a pair start ends, its settle frees the pair, and a settle for
+    /// another start changes nothing.
+    #[test]
+    fn a_settled_pair_start_frees_the_pair_and_a_stale_settle_changes_nothing() {
+        let ui = test_window();
+        let (workspace, commands, client, _) = paired_workspace_starting_together(&ui, true);
+
+        ui.invoke_launch_client(client.id().into());
+        let first = starts(&commands)[0].2;
+        apply_pair_start_settled(&ui, &workspace.lifecycle, first + 100);
+        assert!(workspace.lifecycle.borrow().pair_starting(client));
+
+        apply_pair_start_settled(&ui, &workspace.lifecycle, first);
+        assert!(!workspace.lifecycle.borrow().pair_starting(client));
+
+        ui.invoke_launch_client(client.id().into());
+        let second = starts(&commands)[0].2;
+        assert_ne!(second, first);
+        apply_pair_start_settled(&ui, &workspace.lifecycle, first);
+        assert!(
+            workspace.lifecycle.borrow().pair_starting(client),
+            "an earlier start's settle does not end a later one"
+        );
+    }
+
+    /// Restart stops and starts its own side, never the pair, and waits
+    /// while the pair is starting.
+    #[test]
+    fn restart_never_starts_the_pair() {
+        let ui = test_window();
+        let (workspace, commands, client, server) = paired_workspace_starting_together(&ui, true);
+        register_restart_actions(&ui, &workspace.commands, &workspace.lifecycle);
+
+        ui.invoke_client_restart(client.id().into());
+        ui.invoke_server_restart(server.id().into());
+        let sent = starts(&commands);
+        assert_eq!(
+            sent.iter()
+                .map(|(what, host, _)| (*what, *host))
+                .collect::<Vec<_>>(),
+            [("restart", client), ("restart", server)]
+        );
+        for (_, host, request) in sent {
+            workspace.lifecycle.borrow_mut().apply(host, request, None);
+        }
+
+        ui.invoke_launch_client(client.id().into());
+        let operation = starts(&commands)[0].2;
+        ui.invoke_server_restart(server.id().into());
+        assert!(
+            starts(&commands).is_empty(),
+            "no restart during a pair start"
+        );
+        apply_pair_start_settled(&ui, &workspace.lifecycle, operation);
     }
 
     /// Every toast the window is asked to show, and whether it is an error.
@@ -10910,7 +11268,7 @@ mod tests {
         assert_eq!(connects(&commands), 1);
         assert_eq!(
             shown(&workspace),
-            [(client, Surface::Mods), (server, Surface::Overview)]
+            [(client, Surface::Mods), (server, Surface::Console)]
         );
     }
 
@@ -10937,7 +11295,7 @@ mod tests {
 
         assert_eq!(
             shown(&workspace),
-            [(client, Surface::Overview), (server, Surface::Overview)]
+            [(client, Surface::Overview), (server, Surface::Console)]
         );
     }
 

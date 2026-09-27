@@ -172,6 +172,7 @@ fn instance() -> InstanceRow {
         paired_server_id: SharedString::default(),
         paired_server_name: SharedString::default(),
         pair_start_together: false,
+        pair_starting: false,
     }
 }
 
@@ -210,6 +211,7 @@ fn server(running: bool) -> ServerRow {
         paired_client_id: SharedString::default(),
         paired_client_name: SharedString::default(),
         pair_start_together: false,
+        pair_starting: false,
     }
 }
 

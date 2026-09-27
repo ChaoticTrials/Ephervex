@@ -527,9 +527,9 @@ Unpairing leaves the link, and the mod sync and Launch & Connect built on it,
 untouched, and keeps the client unpaired while the server it declined stays
 its first.
 
-Either side's Overview pairs and unpairs, and every pane showing a paired host
-names its counterpart above the host's surfaces, whichever surface is shown.
-Show beside reveals the counterpart through the layout model rather than by
+Either side's Overview names its counterpart and pairs, unpairs, and shows it
+beside, and every pane showing a paired host carries a Paired badge beside its
+state, whichever surface is shown. Show beside reveals the counterpart through the layout model rather than by
 arranging panes itself:
 
 - a pane that already shows the counterpart is reused and nothing changes;
@@ -541,10 +541,25 @@ arranging panes itself:
 
 Launch & Connect shows both sides the same way as it starts them: the
 workspace opens on the client when it is closed, and whichever side is missing
-is added beside the other where there is room.
+is added beside the other where there is room, a server on its Console.
 
 The pair belongs to the hosts, not to panes, so closing or retargeting a pane,
 leaving the workspace, and coming back never change it.
+
+A pair can start together. Launch or Start on either side then asks core what
+a fresh start means: with the client stopped it is one Launch & Connect run
+(the server is started or reused, and the client launches once the server
+accepts connections), and with the client already running only the server
+starts. Either way both sides are put on screen as Launch & Connect puts
+them. Nothing listens for a host having started in order to start another,
+so neither side's start can lead back to the other's. The controller holds one
+pair start per pair, keyed by an operation number, refuses a second Launch or
+Start of either side and a Restart until it settles, and stamps "starting the
+pair" on both hosts' rows so every pane agrees. The worker settles it exactly
+once through a drop guard: when the client is running, or when the run fails,
+is refused, or is canceled. A failure names the side that failed, from whether
+the server became ready, and leaves a server that started running. Restart
+never consults the pair.
 
 ## Linked client direct-connect flow
 
