@@ -50,6 +50,7 @@ pub mod linked_pair;
 mod linked_server_list;
 pub mod live_diagnostics;
 pub mod loader;
+mod loader_version_range;
 pub mod local_mods;
 pub mod logging;
 pub mod minecraft_preferences;
@@ -96,7 +97,8 @@ pub use dependencies::{
 pub use diagnosis::{
     DiagnosisRequest, DiagnosticFix, Finding, FindingClass, FindingKind, FixOutcome, FixPreview,
     HostDiagnosis, IntegrityCheck, JavaCheck, JavaLayer, JavaMismatch, JavaRuntimeSummary,
-    JavaUnavailable, ModCounts, ProposedChange, RecommendedJava,
+    JavaUnavailable, LoaderReportedRequirement, LoaderRequest, ModCounts, ProposedChange,
+    RecommendedJava,
 };
 pub use diagnostics::{
     ClientLogTail, DEFAULT_DIAGNOSTIC_BYTES, DiagnosticCatalog, DiagnosticRequest, DiagnosticScope,

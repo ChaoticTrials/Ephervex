@@ -29,6 +29,12 @@ report written after the last start, and, when asked, the recorded files'
 digests. Nothing is inferred from file names, and no conflict is guessed at
 without metadata that states it.
 
+The loader names one line per asking mod, so its refusals are grouped by the
+mod they lack, and a group joins the relation finding about the same mod. The
+versions shown are the one range every asking mod accepts when that follows
+with certainty from Maven's range rules; otherwise each asking mod's range is
+shown as the loader wrote it.
+
 A relation names a project in its requirer's own catalog, so it only proves an
 absence when every jar here is identified in that catalog. Otherwise Diagnose
 asks that catalog to identify the other jars by their bytes (SHA-1 on

@@ -4,7 +4,8 @@
 use ephervex_core::{
     CoreError, DiagnosticFix, Finding, FindingClass, FindingKind, FixOutcome, FixPreview,
     HostDiagnosis, Integrity, IntegrityCheck, JavaCheck, JavaLayer, JavaMismatch, JavaUnavailable,
-    ProposedChange, RecommendedJava, RepairRefusal, UnmetDependency, UnmetRequirement,
+    LoaderReportedRequirement, ProposedChange, RecommendedJava, RepairRefusal, UnmetDependency,
+    UnmetRequirement,
 };
 use ephervex_i18n::{Arg, lookup, lookup_args};
 
@@ -186,6 +187,35 @@ fn mismatch_text(mismatch: &JavaMismatch) -> String {
     }
 }
 
+/// The versions the loader said the asking mods accept: one range when one
+/// satisfies them all, otherwise each distinct range with the mods asking it.
+fn accepted_versions(reported: &LoaderReportedRequirement) -> Vec<String> {
+    let ranges = reported.ranges_asked_for();
+    if let (Some(range), [(_, mods)]) = (&reported.accepted_range, ranges.as_slice()) {
+        return vec![
+            lookup_args(
+                "gui-diagnosis-loader-range",
+                [("range", Arg::from(range.as_str()))],
+            ),
+            lookup_args(
+                "gui-diagnosis-loader-asked-by",
+                [("mods", Arg::from(mods.join(", ")))],
+            ),
+        ];
+    }
+    let mut lines = vec![lookup("gui-diagnosis-loader-ranges")];
+    lines.extend(ranges.into_iter().map(|(range, mods)| {
+        lookup_args(
+            "gui-diagnosis-loader-range-by",
+            [
+                ("range", Arg::from(range)),
+                ("mods", Arg::from(mods.join(", "))),
+            ],
+        )
+    }));
+    lines
+}
+
 fn required_by(requirement: &UnmetRequirement) -> String {
     let direct = requirement
         .chain
@@ -250,7 +280,7 @@ pub fn finding_view(finding: &Finding, mc: &str) -> FindingView {
         | FindingKind::JavaUnavailable { .. }
         | FindingKind::JavaCustomized { .. } => java_card(&finding.kind, mc),
         FindingKind::DependencyDisabled(_)
-        | FindingKind::DependencyMissing(_)
+        | FindingKind::DependencyMissing { .. }
         | FindingKind::DeclaredConflict(_)
         | FindingKind::LoaderReportedDependency(_)
         | FindingKind::HandPlacedMods { .. } => mod_card(&finding.kind),
@@ -366,19 +396,25 @@ fn mod_card(kind: &FindingKind) -> Card {
             card.chain = chain_with(requirement, &disabled.name);
             card
         }
-        FindingKind::DependencyMissing(requirement) => {
+        FindingKind::DependencyMissing {
+            requirement,
+            loader,
+        } => {
             let UnmetDependency::Missing { name, .. } = &requirement.dependency else {
                 return Card::new(String::new(), Vec::new(), None);
             };
+            let mut detail = vec![required_by(requirement)];
+            if let Some(loader) = loader {
+                detail.extend(accepted_versions(loader));
+                detail.push(lookup("gui-diagnosis-loader-detail"));
+            }
+            detail.push(lookup("gui-diagnosis-dependency-missing-detail"));
             let mut card = Card::new(
                 lookup_args(
                     "gui-diagnosis-dependency-missing",
                     [("name", Arg::from(name.as_str()))],
                 ),
-                vec![
-                    required_by(requirement),
-                    lookup("gui-diagnosis-dependency-missing-detail"),
-                ],
+                detail,
                 Some(FindingRoute::Mods),
             );
             card.chain = chain_with(requirement, name);
@@ -395,34 +431,22 @@ fn mod_card(kind: &FindingKind) -> Card {
             vec![lookup("gui-diagnosis-conflict-detail")],
             Some(FindingRoute::Mods),
         ),
-        FindingKind::LoaderReportedDependency(reported) => Card::new(
-            match &reported.actual {
-                None => lookup_args(
-                    "gui-diagnosis-loader-missing",
-                    [
-                        ("requester", Arg::from(reported.requested_by.as_str())),
-                        ("dependency", Arg::from(reported.mod_id.as_str())),
-                    ],
-                ),
+        FindingKind::LoaderReportedDependency(reported) => {
+            let dependency = Arg::from(reported.mod_id.as_str());
+            let title = match &reported.actual {
+                None => lookup_args("gui-diagnosis-loader-missing", [("dependency", dependency)]),
                 Some(actual) => lookup_args(
                     "gui-diagnosis-loader-version",
                     [
-                        ("requester", Arg::from(reported.requested_by.as_str())),
-                        ("dependency", Arg::from(reported.mod_id.as_str())),
-                        ("range", Arg::from(reported.expected_range.as_str())),
+                        ("dependency", dependency),
                         ("actual", Arg::from(actual.as_str())),
                     ],
                 ),
-            },
-            vec![
-                lookup_args(
-                    "gui-diagnosis-loader-range",
-                    [("range", Arg::from(reported.expected_range.as_str()))],
-                ),
-                lookup("gui-diagnosis-loader-detail"),
-            ],
-            Some(FindingRoute::Log),
-        ),
+            };
+            let mut detail = accepted_versions(reported);
+            detail.push(lookup("gui-diagnosis-loader-detail"));
+            Card::new(title, detail, Some(FindingRoute::Log))
+        }
         FindingKind::HandPlacedMods { names } => {
             let mut card = Card::new(
                 count("gui-diagnosis-hand-placed", names.len()),
@@ -558,7 +582,7 @@ fn checks(diagnosis: &HostDiagnosis, localized: &dyn Fn(&CoreError) -> String) -
         matches!(
             kind,
             FindingKind::DependencyDisabled(_)
-                | FindingKind::DependencyMissing(_)
+                | FindingKind::DependencyMissing { .. }
                 | FindingKind::DeclaredConflict(_)
         )
     });
@@ -583,7 +607,16 @@ fn checks(diagnosis: &HostDiagnosis, localized: &dyn Fn(&CoreError) -> String) -
         value: mods_value,
         state: if mods_problem { "problem" } else { "ok" },
     });
-    let loader_problem = has(|kind| matches!(kind, FindingKind::LoaderReportedDependency(_)));
+    let loader_problem = has(|kind| {
+        matches!(
+            kind,
+            FindingKind::LoaderReportedDependency(_)
+                | FindingKind::DependencyMissing {
+                    loader: Some(_),
+                    ..
+                }
+        )
+    });
     checks.push(CheckView {
         label: lookup("gui-diagnosis-check-log"),
         value: lookup(if !diagnosis.loader_log_read {
@@ -917,16 +950,19 @@ mod tests {
     #[test]
     fn a_missing_dependency_shows_the_whole_chain_ending_in_what_is_missing() {
         let finding = Finding {
-            kind: FindingKind::DependencyMissing(UnmetRequirement {
-                dependency: UnmetDependency::Missing {
-                    name: "Registrate".to_owned(),
-                    project_id: None,
-                    provider: None,
-                    proven: true,
+            kind: FindingKind::DependencyMissing {
+                requirement: UnmetRequirement {
+                    dependency: UnmetDependency::Missing {
+                        name: "Registrate".to_owned(),
+                        project_id: None,
+                        provider: None,
+                        proven: true,
+                    },
+                    chain: vec![impacted("Create"), impacted("Flywheel")],
+                    required_by: 1,
                 },
-                chain: vec![impacted("Create"), impacted("Flywheel")],
-                required_by: 1,
-            }),
+                loader: None,
+            },
             fix: None,
         };
 
@@ -939,6 +975,58 @@ mod tests {
             view.fix_label.is_empty(),
             "installing is never offered here"
         );
+    }
+
+    #[test]
+    fn what_the_loader_said_about_a_missing_mod_is_one_accepted_range() {
+        let finding = Finding {
+            kind: FindingKind::DependencyMissing {
+                requirement: UnmetRequirement {
+                    dependency: UnmetDependency::Missing {
+                        name: "LibX".to_owned(),
+                        project_id: Some("qEH6GYul".to_owned()),
+                        provider: Some(ephervex_model::ModProvider::Modrinth),
+                        proven: true,
+                    },
+                    chain: vec![impacted("Data Trader")],
+                    required_by: 7,
+                },
+                loader: Some(LoaderReportedRequirement {
+                    mod_id: "libx".to_owned(),
+                    actual: None,
+                    requests: vec![
+                        ephervex_core::LoaderRequest {
+                            requested_by: "datatrader".to_owned(),
+                            expected_range: "[1.19.3-4.3.0,)".to_owned(),
+                        },
+                        ephervex_core::LoaderRequest {
+                            requested_by: "packessentials".to_owned(),
+                            expected_range: "[1.20.1-5.0.14,)".to_owned(),
+                        },
+                    ],
+                    accepted_range: Some("[1.20.1-5.0.14,)".to_owned()),
+                }),
+            },
+            fix: None,
+        };
+
+        let view = finding_view(&finding, "1.20.1");
+
+        assert_eq!(
+            view.title,
+            lookup_args(
+                "gui-diagnosis-dependency-missing",
+                [("name", Arg::from("LibX"))]
+            )
+        );
+        assert!(view.detail.contains(&lookup_args(
+            "gui-diagnosis-loader-range",
+            [("range", Arg::from("[1.20.1-5.0.14,)"))]
+        )));
+        assert!(view.detail.contains(&lookup_args(
+            "gui-diagnosis-loader-asked-by",
+            [("mods", Arg::from("datatrader, packessentials"))]
+        )));
     }
 
     #[test]

@@ -1290,9 +1290,12 @@ gui-diagnosis-dependency-missing = { $name } is not installed
 gui-diagnosis-dependency-missing-detail = Install it from the Mods page. Diagnostics does not choose a version for you.
 gui-diagnosis-conflict = { $name } does not work with { $other }
 gui-diagnosis-conflict-detail = Its recorded relations say so. Turn one of them off to test without it.
-gui-diagnosis-loader-missing = { $requester } requires { $dependency }, which is not installed
-gui-diagnosis-loader-version = { $requester } requires another version of { $dependency } (found { $actual })
+gui-diagnosis-loader-missing = { $dependency } is not installed
+gui-diagnosis-loader-version = Another version of { $dependency } is required (found { $actual })
 gui-diagnosis-loader-range = Accepted versions: { $range }
+gui-diagnosis-loader-asked-by = Asked for by { $mods }
+gui-diagnosis-loader-ranges = The mods asking for it accept different versions:
+gui-diagnosis-loader-range-by = { $range } for { $mods }
 gui-diagnosis-loader-detail = Reported by the loader when this host last started.
 gui-diagnosis-hand-placed = { $count ->
     [one] 1 hand-placed mod

@@ -479,8 +479,56 @@ async fn the_loader_s_refusal_in_the_last_log_is_a_problem() {
     let [FindingKind::LoaderReportedDependency(reported)] = problems.as_slice() else {
         panic!("{problems:?}");
     };
-    assert_eq!(reported.expected_range, "[3.0,)");
+    assert_eq!(reported.accepted_range.as_deref(), Some("[3.0,)"));
+    assert_eq!(reported.requests[0].requested_by, "foo");
     assert_eq!(reported.actual.as_deref(), Some("2.4"));
+}
+
+/// Every mod the loader names as needing one missing library is one problem,
+/// the one the recorded relations report, with the narrowest range they all
+/// accept, and it leads because it explains the failure most directly.
+#[tokio::test]
+async fn one_missing_library_is_one_problem_whoever_asked_for_it() {
+    let fixture = Fixture::with_mods(&[("datatrader", &["libx"]), ("utilitix", &["libx"])]).await;
+    fixture.pin_java("21.0.8", None);
+    fixture.write(
+        "minecraft/logs/latest.log",
+        b"[12:00:01] [main/ERROR] [net.minecraftforge.fml.loading.ModSorter/LOADING]: Missing or unsupported mandatory dependencies:\n\
+          \tMod ID: 'libx', Requested by: 'datatrader', Expected range: '[1.19.3-4.3.0,)', Actual version: '[MISSING]'\n\
+          \tMod ID: 'libx', Requested by: 'utilitix', Expected range: '[1.20.1-5.0.1,)', Actual version: '[MISSING]'\n\
+          \tMod ID: 'libx', Requested by: 'packessentials', Expected range: '[1.20.1-5.0.14,)', Actual version: '[MISSING]'\n",
+    );
+    fixture.write(
+        "minecraft/crash-reports/crash-2026-09-28_18.13.39-fml.txt",
+        b"---- Minecraft Crash Report ----\nDescription: Mod loading error has occurred\n\njava.lang.Exception: Mod Loading has failed\n",
+    );
+
+    let diagnosis = fixture.diagnose(false).await;
+
+    let problems = kinds(&diagnosis, FindingClass::Problem);
+    let [
+        FindingKind::DependencyMissing {
+            requirement,
+            loader: Some(loader),
+        },
+        FindingKind::RecentCrash { .. },
+    ] = problems.as_slice()
+    else {
+        panic!("{problems:?}");
+    };
+    assert_eq!(requirement.required_by, 2);
+    assert_eq!(loader.accepted_range.as_deref(), Some("[1.20.1-5.0.14,)"));
+    assert_eq!(
+        loader.ranges_asked_for(),
+        [(
+            "[1.20.1-5.0.14,)".to_owned(),
+            vec![
+                "datatrader".to_owned(),
+                "utilitix".to_owned(),
+                "packessentials".to_owned()
+            ]
+        )]
+    );
 }
 
 #[tokio::test]

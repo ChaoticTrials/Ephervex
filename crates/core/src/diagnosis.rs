@@ -167,7 +167,7 @@ pub enum FindingKind {
         client_code_on_server: bool,
     },
     /// Forge or NeoForge refused to load without this dependency.
-    LoaderReportedDependency(LoaderReportedDependency),
+    LoaderReportedDependency(LoaderReportedRequirement),
     /// A pinned runtime cannot run this host.
     JavaIncompatible {
         layer: JavaLayer,
@@ -187,7 +187,11 @@ pub enum FindingKind {
     /// A required mod is turned off.
     DependencyDisabled(UnmetRequirement),
     /// A required mod is not installed.
-    DependencyMissing(UnmetRequirement),
+    DependencyMissing {
+        requirement: UnmetRequirement,
+        /// What the loader said about the same mod when the host last started.
+        loader: Option<LoaderReportedRequirement>,
+    },
     DeclaredConflict(DeclaredConflict),
     /// Recorded files are absent or damaged.
     ManagedFilesDamaged {
@@ -230,7 +234,7 @@ impl FindingKind {
             | Self::JavaUnusable { .. }
             | Self::JavaUnavailable { .. }
             | Self::DependencyDisabled(_)
-            | Self::DependencyMissing(_)
+            | Self::DependencyMissing { .. }
             | Self::DeclaredConflict(_)
             | Self::ManagedFilesDamaged { .. }
             | Self::SharedFilesDamaged { .. } => FindingClass::Problem,
@@ -239,6 +243,115 @@ impl FindingKind {
             | Self::MemoryCustomized { .. }
             | Self::HandPlacedMods { .. } => FindingClass::Customized,
         }
+    }
+}
+
+/// One dependency Forge or NeoForge refused to start without, with every mod
+/// that asked for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoaderReportedRequirement {
+    /// The mod id that is missing or at the wrong version.
+    pub mod_id: String,
+    /// The version found, or `None` when nothing was installed.
+    pub actual: Option<String>,
+    /// Each asking mod and the range it declared, exact, in the loader's order.
+    pub requests: Vec<LoaderRequest>,
+    /// The one range every request accepts, when that can be worked out with
+    /// certainty. Otherwise the requests' own ranges are what to show.
+    pub accepted_range: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoaderRequest {
+    pub requested_by: String,
+    pub expected_range: String,
+}
+
+impl LoaderReportedRequirement {
+    /// The loader's lines, one requirement per missing mod.
+    fn grouped(reports: Vec<LoaderReportedDependency>) -> Vec<Self> {
+        let mut grouped: Vec<Self> = Vec::new();
+        for report in reports {
+            let request = LoaderRequest {
+                requested_by: report.requested_by,
+                expected_range: report.expected_range,
+            };
+            match grouped
+                .iter_mut()
+                .find(|known| known.mod_id == report.mod_id && known.actual == report.actual)
+            {
+                Some(known) if known.requests.contains(&request) => {}
+                Some(known) => known.requests.push(request),
+                None => grouped.push(Self {
+                    mod_id: report.mod_id,
+                    actual: report.actual,
+                    requests: vec![request],
+                    accepted_range: None,
+                }),
+            }
+        }
+        for requirement in &mut grouped {
+            requirement.accepted_range = crate::loader_version_range::narrowest_range(
+                requirement
+                    .requests
+                    .iter()
+                    .map(|request| request.expected_range.as_str()),
+            );
+        }
+        grouped
+    }
+
+    /// Every range asked for, each with the mods that asked for it. When one
+    /// range satisfies them all, that range and everyone who asked.
+    #[must_use]
+    pub fn ranges_asked_for(&self) -> Vec<(String, Vec<String>)> {
+        let by = |range: Option<&str>| -> Vec<String> {
+            let mut names: Vec<String> = Vec::new();
+            for request in &self.requests {
+                if range.is_none_or(|range| range == request.expected_range)
+                    && !names.contains(&request.requested_by)
+                {
+                    names.push(request.requested_by.clone());
+                }
+            }
+            names
+        };
+        if let Some(range) = &self.accepted_range {
+            return vec![(range.clone(), by(None))];
+        }
+        let mut ranges: Vec<(String, Vec<String>)> = Vec::new();
+        for request in &self.requests {
+            if !ranges
+                .iter()
+                .any(|(range, _)| *range == request.expected_range)
+            {
+                ranges.push((
+                    request.expected_range.clone(),
+                    by(Some(&request.expected_range)),
+                ));
+            }
+        }
+        ranges
+    }
+
+    fn versions_asked_for(&self) -> String {
+        self.ranges_asked_for()
+            .into_iter()
+            .map(|(range, by)| format!("{range} (asked by {})", by.join(", ")))
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+
+    /// Whether this names the mod a catalog calls `name`. A mod id is the
+    /// name lowercased and without separators, such as `libx` for LibX.
+    fn is_about(&self, name: &str) -> bool {
+        let letters = |text: &str| -> String {
+            text.chars()
+                .filter(char::is_ascii_alphanumeric)
+                .map(|character| character.to_ascii_lowercase())
+                .collect()
+        };
+        self.actual.is_none() && letters(&self.mod_id) == letters(name)
     }
 }
 
@@ -492,34 +605,23 @@ impl App {
             unconfirmed,
         };
 
-        let mut findings = Vec::new();
-        let recent_crash = self.recent_crash(host, &mut findings);
+        // What the loader refused to start without explains a failure more
+        // directly than the crash report it wrote, so it leads, and a missing
+        // mod the loader also named leads that.
         let log = self.start_log(host);
-        if let Some(log) = log.as_deref() {
-            findings.extend(
-                loader_dependency_failures(log)
-                    .into_iter()
-                    .map(|reported| Finding {
-                        kind: FindingKind::LoaderReportedDependency(reported),
-                        fix: None,
-                    }),
-            );
-        }
+        let mut refusals = log
+            .as_deref()
+            .map(|log| LoaderReportedRequirement::grouped(loader_dependency_failures(log)))
+            .unwrap_or_default();
+        let (mut findings, relation_problems) =
+            self.relation_findings(host, requirements.unmet, &mut refusals);
+        findings.extend(refusals.into_iter().map(|requirement| Finding {
+            kind: FindingKind::LoaderReportedDependency(requirement),
+            fix: None,
+        }));
+        let recent_crash = self.recent_crash(host, &mut findings);
         findings.extend(java_problems);
-        for unmet in requirements.unmet {
-            findings.push(match &unmet.dependency {
-                UnmetDependency::Disabled(disabled) => Finding {
-                    fix: Some(DiagnosticFix::EnableMods(
-                        self.enable_order(host, &disabled.logical_path),
-                    )),
-                    kind: FindingKind::DependencyDisabled(unmet),
-                },
-                UnmetDependency::Missing { .. } => Finding {
-                    kind: FindingKind::DependencyMissing(unmet),
-                    fix: None,
-                },
-            });
-        }
+        findings.extend(relation_problems);
         findings.extend(requirements.conflicts.into_iter().map(|conflict| Finding {
             kind: FindingKind::DeclaredConflict(conflict),
             fix: None,
@@ -867,6 +969,54 @@ impl App {
             }
             Err(error) => Err(error),
         }
+    }
+
+    /// Unmet relations as findings: first the missing mods the loader also
+    /// named, each carrying what it said and taken out of `reported`, then
+    /// the rest in their own order.
+    fn relation_findings(
+        &self,
+        host: InstalledHost,
+        unmet: Vec<UnmetRequirement>,
+        reported: &mut Vec<LoaderReportedRequirement>,
+    ) -> (Vec<Finding>, Vec<Finding>) {
+        let mut confirmed = Vec::new();
+        let mut others = Vec::new();
+        for requirement in unmet {
+            match &requirement.dependency {
+                UnmetDependency::Disabled(target) => others.push(Finding {
+                    fix: Some(DiagnosticFix::EnableMods(
+                        self.enable_order(host, &target.logical_path),
+                    )),
+                    kind: FindingKind::DependencyDisabled(requirement),
+                }),
+                UnmetDependency::Missing { name, .. } => {
+                    let loader = reported
+                        .iter()
+                        .position(|report| report.is_about(name))
+                        .map(|index| reported.remove(index));
+                    let finding = Finding {
+                        fix: None,
+                        kind: FindingKind::DependencyMissing {
+                            requirement,
+                            loader,
+                        },
+                    };
+                    if matches!(
+                        finding.kind,
+                        FindingKind::DependencyMissing {
+                            loader: Some(_),
+                            ..
+                        }
+                    ) {
+                        confirmed.push(finding);
+                    } else {
+                        others.push(finding);
+                    }
+                }
+            }
+        }
+        (confirmed, others)
     }
 
     /// The crash report of the last run, if it crashed.
@@ -1308,10 +1458,9 @@ fn report_line(kind: &FindingKind, path: &dyn Fn(&Path) -> String) -> String {
             line
         }
         FindingKind::LoaderReportedDependency(reported) => format!(
-            "Loader refused to start: {} requires {} {}, found {}",
-            reported.requested_by,
+            "Loader refused to start without {} {}, found {}",
             reported.mod_id,
-            reported.expected_range,
+            reported.versions_asked_for(),
             reported.actual.as_deref().unwrap_or("nothing")
         ),
         FindingKind::JavaIncompatible { .. }
@@ -1327,14 +1476,25 @@ fn report_line(kind: &FindingKind, path: &dyn Fn(&Path) -> String) -> String {
                 chain(requirement)
             )
         }
-        FindingKind::DependencyMissing(requirement) => {
+        FindingKind::DependencyMissing {
+            requirement,
+            loader,
+        } => {
             let UnmetDependency::Missing { name, .. } = &requirement.dependency else {
                 return String::new();
             };
-            format!(
+            let mut line = format!(
                 "{name} is not installed; required by {}",
                 chain(requirement)
-            )
+            );
+            if let Some(loader) = loader {
+                let _ = write!(
+                    line,
+                    "; the loader refused to start without it: {}",
+                    loader.versions_asked_for()
+                );
+            }
+            line
         }
         FindingKind::DeclaredConflict(conflict) => format!(
             "{} declares it does not work with {}",
@@ -1463,6 +1623,38 @@ fn redact_home(path: &Path, home: Option<&Path>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn reported(requested_by: &str, range: &str) -> LoaderReportedDependency {
+        LoaderReportedDependency {
+            mod_id: "libx".to_owned(),
+            requested_by: requested_by.to_owned(),
+            expected_range: range.to_owned(),
+            actual: None,
+        }
+    }
+
+    #[test]
+    fn ranges_that_cannot_be_narrowed_are_each_shown_with_who_asked_once() {
+        let grouped = LoaderReportedRequirement::grouped(vec![
+            reported("datatrader", "[1.0-beta,)"),
+            reported("utilitix", "[1.2,)"),
+            reported("skyguis", "[1.0-beta,)"),
+            reported("skyguis", "[1.0-beta,)"),
+        ]);
+        assert_eq!(grouped.len(), 1, "{grouped:?}");
+        let requirement = &grouped[0];
+        assert_eq!(requirement.accepted_range, None);
+        assert_eq!(
+            requirement.ranges_asked_for(),
+            [
+                (
+                    "[1.0-beta,)".to_owned(),
+                    vec!["datatrader".to_owned(), "skyguis".to_owned()]
+                ),
+                ("[1.2,)".to_owned(), vec!["utilitix".to_owned()]),
+            ]
+        );
+    }
 
     #[test]
     fn report_paths_under_home_start_from_a_tilde() {
