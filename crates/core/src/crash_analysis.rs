@@ -595,10 +595,12 @@ impl CrashReview {
 }
 
 impl App {
-    /// Reads a host's newest crash report and names the mods it points at.
+    /// Reads the crash report of a host's last run and names the mods it
+    /// points at.
     ///
-    /// `Ok(None)` when the host has never crashed, which is the ordinary case
-    /// and not a failure. A report that parses to nothing still returns a
+    /// `Ok(None)` when the last run did not crash, which is the ordinary case
+    /// and not a failure: the newest report was written before the host last
+    /// started, or there is none. A report that parses to nothing still returns a
     /// review, so a frontend can say that a crash happened and that it named no
     /// mod, rather than silently showing the same thing as no crash at all.
     pub fn crash_review(&self, host: InstalledHost) -> CoreResult<Option<CrashReview>> {
@@ -610,6 +612,18 @@ impl App {
         else {
             return Ok(None);
         };
+        let last_started = match host {
+            InstalledHost::Instance(id) => self.client(id)?.last_launched_at,
+            InstalledHost::Server(id) => self.server(id)?.last_started_at,
+        };
+        let from_last_run = match (report.modified, last_started) {
+            (Some(reported), Some(started)) => reported >= started,
+            (_, None) => true,
+            (None, Some(_)) => false,
+        };
+        if !from_last_run {
+            return Ok(None);
+        }
 
         // The whole report rather than the default window: the `Mod List:`
         // table is the last thing in the file and is what turns an attribution

@@ -1633,7 +1633,7 @@ fn apply_server_tool_event(
     event: backend::ServerToolEvent,
 ) {
     if matches!(event, backend::ServerToolEvent::Started) {
-        diagnosis_flow::forget_run(workspace, InstalledHost::Server(server));
+        workspace.forget_last_run(InstalledHost::Server(server));
     }
     {
         let mut lifecycle = workspace.lifecycle.borrow_mut();
@@ -4453,6 +4453,18 @@ impl Workspace {
         self.state.borrow_mut().update(host, change)
     }
 
+    /// Clears what a host's last run left behind once it starts again. A new
+    /// failure brings its own notices.
+    fn forget_last_run(&self, host: InstalledHost) {
+        diagnosis_flow::forget_run(self, host);
+        self.update(host, |view| {
+            view.crash_report = SharedString::default();
+            view.crash_failure = SharedString::default();
+            view.crash_client_code_on_server = false;
+            view.crash_suggested = 0;
+        });
+    }
+
     fn open(&self, ui: &AppWindow, host: InstalledHost, surface: Surface) {
         let change = self.state.borrow_mut().open(host, surface);
         self.present(ui, Some(change));
@@ -4518,7 +4530,7 @@ impl Workspace {
             return HostStart::Refused;
         }
         let Some((client, server)) = self.state.borrow().pair_starting_together(host) else {
-            diagnosis_flow::forget_run(self, host);
+            self.forget_last_run(host);
             return HostStart::Alone;
         };
         let Some(operation) = lifecycle.begin_pair_start(client, server) else {
@@ -4531,8 +4543,8 @@ impl Workspace {
                 return HostStart::Refused;
             }
         }
-        diagnosis_flow::forget_run(self, client);
-        diagnosis_flow::forget_run(self, server);
+        self.forget_last_run(client);
+        self.forget_last_run(server);
         stamp_host_lifecycle(ui, &lifecycle);
         HostStart::Paired {
             operation,
@@ -10836,6 +10848,44 @@ mod tests {
 
         ui.invoke_launch_client(client.id().into());
         assert_eq!(run_notices(&ui), [String::new()]);
+    }
+
+    #[test]
+    fn starting_a_host_again_forgets_its_crash_banner() {
+        let crash_reports = |ui: &AppWindow| -> Vec<String> {
+            ui.get_host_views()
+                .iter()
+                .map(|view| view.crash_report.to_string())
+                .collect()
+        };
+        let crashed = |workspace: &Workspace, host: InstalledHost| {
+            workspace.update(host, |view| {
+                view.crash_report = "crash-2026-09-28_18.13.39-fml.txt".into();
+                view.crash_failure = "MISSING EXCEPTION MESSAGE".into();
+                view.crash_suggested = 2;
+            });
+        };
+        let ui = test_window();
+        let (workspace, _commands, _client, server) = paired_workspace(&ui);
+        let InstalledHost::Server(id) = server else {
+            unreachable!()
+        };
+        workspace.open(&ui, server, Surface::Overview);
+        crashed(&workspace, server);
+        assert_eq!(crash_reports(&ui), ["crash-2026-09-28_18.13.39-fml.txt"]);
+
+        ui.invoke_server_start(id.to_string().into());
+        assert_eq!(crash_reports(&ui), [String::new()]);
+        assert!(
+            ui.get_host_views()
+                .iter()
+                .all(|view| view.crash_suggested == 0 && view.crash_failure.is_empty())
+        );
+
+        // A start the user did not press here, such as a restart's new child.
+        crashed(&workspace, server);
+        apply_server_tool_event(&ui, &workspace, id, backend::ServerToolEvent::Started);
+        assert_eq!(crash_reports(&ui), [String::new()]);
     }
 
     #[test]

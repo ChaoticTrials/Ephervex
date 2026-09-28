@@ -443,6 +443,26 @@ async fn a_crash_is_a_problem_only_when_it_came_after_the_last_start() {
     assert!(diagnosis.is_healthy(), "{:?}", diagnosis.findings);
 }
 
+/// A crash report left from an earlier run does not describe the one since, so
+/// nothing that reviews the last run's crash offers it again.
+#[tokio::test]
+async fn a_crash_report_from_before_the_last_start_is_not_reviewed() {
+    let fixture = Fixture::with_mods(&[]).await;
+    fixture.write(
+        "minecraft/crash-reports/crash-2026-09-27_12.00.00-client.txt",
+        b"---- Minecraft Crash Report ----\nDescription: Ticking\n\njava.lang.IllegalStateException: boom\n",
+    );
+    let app = fixture.app();
+    assert!(app.crash_review(fixture.host()).unwrap().is_some());
+
+    let registry = Registry::open(fixture.paths.clone()).unwrap();
+    let mut record = registry.client(fixture.id).unwrap();
+    record.last_launched_at = Some(chrono::Utc::now() + chrono::Duration::hours(1));
+    registry.update_client(&mut record).unwrap();
+
+    assert!(app.crash_review(fixture.host()).unwrap().is_none());
+}
+
 #[tokio::test]
 async fn the_loader_s_refusal_in_the_last_log_is_a_problem() {
     let fixture = Fixture::with_mods(&[]).await;

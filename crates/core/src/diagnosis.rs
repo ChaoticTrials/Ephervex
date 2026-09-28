@@ -15,7 +15,6 @@
 
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Utc};
 use ephervex_download::OperationReporter;
 use ephervex_java::{JavaError, JavaPathChoice, JavaSourceKind, PinSource, RejectionReason};
 use ephervex_model::LoaderSelection;
@@ -450,7 +449,6 @@ struct HostFacts {
     loader: LoaderSelection,
     java_override: Option<PathBuf>,
     jvm_override: Option<ephervex_model::JvmSettings>,
-    last_started: Option<DateTime<Utc>>,
 }
 
 impl App {
@@ -495,7 +493,7 @@ impl App {
         };
 
         let mut findings = Vec::new();
-        let recent_crash = self.recent_crash(host, facts.last_started, &mut findings);
+        let recent_crash = self.recent_crash(host, &mut findings);
         let log = self.start_log(host);
         if let Some(log) = log.as_deref() {
             findings.extend(
@@ -727,7 +725,6 @@ impl App {
                     loader: record.loader,
                     java_override: record.java_override.map(|java| java.path),
                     jvm_override: record.jvm_override,
-                    last_started: record.last_launched_at,
                 }
             }
             InstalledHost::Server(id) => {
@@ -737,7 +734,6 @@ impl App {
                     loader: record.loader,
                     java_override: record.java_override.map(|java| java.path),
                     jvm_override: record.jvm_override,
-                    last_started: record.last_started_at,
                 }
             }
         })
@@ -873,22 +869,9 @@ impl App {
         }
     }
 
-    /// The newest crash report, when it was written after the last start.
-    fn recent_crash(
-        &self,
-        host: InstalledHost,
-        last_started: Option<DateTime<Utc>>,
-        findings: &mut Vec<Finding>,
-    ) -> Option<String> {
+    /// The crash report of the last run, if it crashed.
+    fn recent_crash(&self, host: InstalledHost, findings: &mut Vec<Finding>) -> Option<String> {
         let review = self.crash_review(host).ok().flatten()?;
-        let after_start = match (review.reported_at, last_started) {
-            (Some(reported), Some(started)) => reported >= started,
-            (_, None) => true,
-            (None, Some(_)) => false,
-        };
-        if !after_start {
-            return None;
-        }
         let mut suspects: Vec<String> = Vec::new();
         for suspect in review.analysis.stated() {
             let label = suspect.label().to_owned();
