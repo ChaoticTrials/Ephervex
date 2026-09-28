@@ -620,6 +620,14 @@ impl InstalledHost {
             Self::Server(_) => "server",
         }
     }
+
+    /// The side of the game whose entries of a recipe this host installs.
+    pub(crate) const fn side(self) -> PackSide {
+        match self {
+            Self::Instance(_) => PackSide::Client,
+            Self::Server(_) => PackSide::Server,
+        }
+    }
 }
 
 impl From<InstanceId> for InstalledHost {
@@ -1312,10 +1320,12 @@ impl App {
     pub fn host_mod_snapshot(&self, host: InstalledHost) -> CoreResult<ManagedModSnapshot> {
         let layout = self.host_layout(host)?;
 
+        // A server's recipe also records what only the client takes, which is
+        // not one of the server's mods.
         let mut mods: Vec<ManagedModEntry> = layout
             .recipe
             .as_ref()
-            .map(PackRecipe::recorded_mods)
+            .map(|recipe| recipe.recorded_mods_for(host.side()))
             .unwrap_or_default()
             .into_iter()
             .map(|recorded| ManagedModEntry::from_recorded(recorded, &layout.game_dir))

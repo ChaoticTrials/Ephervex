@@ -567,7 +567,13 @@ added jars and local debugging changes remain unmanaged. Required content is
 included, unsupported content is excluded, and optional content follows the
 recorded choice. Entries with undeclared server applicability require explicit
 confirmation for the current creation and otherwise become actionable server
-attention reasons. The original pack archive is not consulted.
+attention reasons. The original pack archive is not consulted. The server's own
+recipe still records the excluded content, and every reading of it keeps to
+the server's side. The server's mod list and verification and repair leave out
+what the server does not install. Dependency checks treat only content
+unsupported on the server as absent on purpose, never a requirement to
+satisfy; a deselected optional entry that an installed mod requires is still
+reported missing.
 
 Base installation, recipe files, overrides, managed network properties, source
 retention, and canonical metadata all land in the same hidden sibling root.

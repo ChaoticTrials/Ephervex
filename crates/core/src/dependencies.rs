@@ -892,6 +892,11 @@ pub(crate) struct ModGraph {
     by_project: BTreeMap<String, usize>,
     /// Where a jar name sits, lowercased, for a relation that named only one.
     by_file_name: BTreeMap<String, usize>,
+    /// Projects and lowercased jar names the recipe records as unsupported on
+    /// this host's side, such as a client-only mod on a server. Absent on
+    /// purpose, never unmet. A deselected optional entry is not among them: a
+    /// mod that requires it still needs it.
+    other_side: BTreeSet<String>,
 }
 
 #[derive(Debug)]
@@ -999,6 +1004,26 @@ impl ModGraph {
             })
             .unwrap_or_default();
 
+        let other_side: BTreeSet<String> = layout
+            .recipe
+            .iter()
+            .flat_map(|recipe| &recipe.files)
+            .filter(|file| {
+                file.requirement(host.side()) == ephervex_pack::SideRequirement::Unsupported
+            })
+            .flat_map(|file| {
+                let project = file
+                    .identity
+                    .as_ref()
+                    .and_then(|identity| identity.project_id.clone());
+                let name = file
+                    .logical_path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_ascii_lowercase());
+                project.into_iter().chain(name)
+            })
+            .collect();
+
         let mut entries = Vec::with_capacity(snapshot.mods.len());
         let mut by_project = BTreeMap::new();
         let mut by_file_name = BTreeMap::new();
@@ -1027,6 +1052,7 @@ impl ModGraph {
             entries,
             by_project,
             by_file_name,
+            other_side,
         })
     }
 
@@ -1150,6 +1176,7 @@ impl ModGraph {
             for relation in entry.relations.iter().flatten() {
                 let found = self.target_of(relation);
                 match (relation.kind, found) {
+                    (ModRelationKind::Required, None) if self.on_other_side(relation) => {}
                     (ModRelationKind::Required, None) => {
                         let (key, dependency) = self.absent(entry, relation, title);
                         note(key, dependency, requirer);
@@ -1218,6 +1245,16 @@ impl ModGraph {
                 .collect(),
             unanswered: enabled.count() - answered,
             answered,
+        }
+    }
+
+    /// Whether the recipe keeps the relation's target off this host's side.
+    fn on_other_side(&self, relation: &RecipeRelation) -> bool {
+        match &relation.target {
+            RelationTarget::Project { project_id, .. } => self.other_side.contains(project_id),
+            RelationTarget::File { file_name } => {
+                self.other_side.contains(&file_name.to_ascii_lowercase())
+            }
         }
     }
 
@@ -1516,6 +1553,166 @@ mod tests {
         SourceStore::new(ephervex_storage::metadata::source_dir(root))
             .read_recipe()
             .expect("the retained recipe")
+    }
+
+    /// Only content the recipe declares unsupported on a side is absent on
+    /// purpose there. A required mod that is a deselected optional entry, or
+    /// one with no declared side, is still missing on a client and a server.
+    #[tokio::test]
+    async fn a_required_mod_left_out_as_optional_is_still_reported_missing() {
+        const OPTIONAL: &str = "optionalLib";
+        for (requirement, selected) in [
+            (SideRequirement::Optional, Some(false)),
+            (SideRequirement::Unknown, None),
+        ] {
+            let base = tempfile::tempdir().expect("temp dir");
+            let app = App::open_at(Paths::rooted_at(base.path())).expect("app opens");
+            let loader = LoaderSelection::exact(LoaderKind::NeoForge, "21.1.77");
+            let client = app
+                .create_client_for_test(NewClient::new("Client", "1.21.1", loader.clone()))
+                .expect("create the client");
+            let server = app
+                .registry_for_services()
+                .create_server(ephervex_storage::NewServer::new(
+                    "Server",
+                    "1.21.1",
+                    loader.clone(),
+                ))
+                .expect("create the server");
+            for (host, root, game_dir) in [
+                (
+                    InstalledHost::Instance(client.id),
+                    &client.root,
+                    ephervex_storage::metadata::client_game_dir(&client.root),
+                ),
+                (
+                    InstalledHost::Server(server.id),
+                    &server.root,
+                    ephervex_storage::metadata::server_game_dir(&server.root),
+                ),
+            ] {
+                let mut optional = recorded("optional-lib.jar", OPTIONAL, "opt1");
+                optional.client = requirement;
+                optional.server = requirement;
+                optional.selected = selected;
+                let mut dependent = recorded("SkyblockBuilder.jar", DEPENDENT, DEPENDENT_RELEASE);
+                dependent.relations = Some(vec![RecipeRelation {
+                    kind: ModRelationKind::Required,
+                    target: RelationTarget::Project {
+                        project_id: OPTIONAL.to_owned(),
+                        version_id: None,
+                    },
+                }]);
+                let mut recipe = PackRecipe::for_manual_instance("Host", "1.21.1", loader.clone());
+                recipe.files = vec![dependent, optional];
+                SourceStore::new(ephervex_storage::metadata::source_dir(root))
+                    .write_recipe(&recipe)
+                    .expect("write the recipe");
+                let mods = game_dir.join("mods");
+                std::fs::create_dir_all(&mods).expect("mods");
+                std::fs::write(mods.join("SkyblockBuilder.jar"), b"").expect("jar");
+
+                let problems = ModGraph::build(&app, host)
+                    .expect("graph")
+                    .requirement_problems(&mut |_, _| None);
+                assert!(
+                    problems.unmet.iter().any(|unmet| matches!(
+                        &unmet.dependency,
+                        UnmetDependency::Missing { project_id: Some(project), .. } if project == OPTIONAL
+                    )),
+                    "{requirement:?} on {host:?}: {:?}",
+                    problems.unmet
+                );
+            }
+        }
+    }
+
+    /// A linked server's recipe is the client's, so it also records what only
+    /// the client takes. On the server those entries are absent on purpose:
+    /// they are not its mods, not files to restore, and not requirements to
+    /// satisfy, because loading one there crashes the server.
+    #[tokio::test]
+    async fn a_servers_recipe_entries_for_the_client_alone_are_absent_on_purpose() {
+        const CLIENT_ONLY: &str = "yjvKidNM";
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = App::open_at(Paths::rooted_at(base.path())).expect("app opens");
+        let record = app
+            .registry_for_services()
+            .create_server(ephervex_storage::NewServer::new(
+                "Linked Server",
+                "1.21.1",
+                LoaderSelection::exact(LoaderKind::NeoForge, "21.1.77"),
+            ))
+            .expect("create the server");
+        let host = InstalledHost::Server(record.id);
+
+        let mut client_only = recorded("lighty.jar", CLIENT_ONLY, "9xbi0x5Q");
+        client_only.server = SideRequirement::Unsupported;
+        let mut dependent = recorded("SkyblockBuilder.jar", DEPENDENT, DEPENDENT_RELEASE);
+        dependent.relations = Some(vec![
+            RecipeRelation {
+                kind: ModRelationKind::Required,
+                target: RelationTarget::Project {
+                    project_id: CLIENT_ONLY.to_owned(),
+                    version_id: None,
+                },
+            },
+            RecipeRelation {
+                kind: ModRelationKind::Required,
+                target: RelationTarget::Project {
+                    project_id: LIBRARY.to_owned(),
+                    version_id: None,
+                },
+            },
+        ]);
+        let mut recipe =
+            PackRecipe::for_manual_instance("Linked Server", "1.21.1", record.loader.clone());
+        recipe.files = vec![
+            recorded("LibX.jar", LIBRARY, LIBRARY_RELEASE),
+            dependent,
+            client_only,
+        ];
+        SourceStore::new(ephervex_storage::metadata::source_dir(&record.root))
+            .write_recipe(&recipe)
+            .expect("write the recipe");
+        // Empty jars match the recorded digest, so both server mods are intact.
+        let mods = ephervex_storage::metadata::server_game_dir(&record.root).join("mods");
+        std::fs::create_dir_all(&mods).expect("mods");
+        for name in ["LibX.jar", "SkyblockBuilder.jar"] {
+            std::fs::write(mods.join(name), b"").expect("jar");
+        }
+
+        let snapshot = app.host_mod_snapshot(host).expect("snapshot");
+        assert_eq!(snapshot.mods.len(), 2, "{:?}", snapshot.mods);
+        assert!(
+            snapshot
+                .mods
+                .iter()
+                .all(|entry| entry.file_name != "lighty.jar")
+        );
+
+        let verified = app
+            .verify_host(
+                host,
+                &OperationReporter::silent("verify"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("verify");
+        assert_eq!(verified.files.len(), 2);
+        assert!(
+            verified
+                .files
+                .iter()
+                .all(|file| file.integrity == crate::verify::Integrity::Intact),
+            "{:?}",
+            verified.files
+        );
+
+        let problems = ModGraph::build(&app, host)
+            .expect("graph")
+            .requirement_problems(&mut |_, _| None);
+        assert!(problems.unmet.is_empty(), "{:?}", problems.unmet);
     }
 
     const SKYGUIS: &str = "3Gdi7Qgq";

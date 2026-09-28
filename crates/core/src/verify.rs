@@ -281,14 +281,23 @@ impl App {
             return Ok(VerificationReport { files: Vec::new() });
         };
 
-        let total = u64::try_from(recipe.files.len()).unwrap_or(u64::MAX);
+        // A server's recipe also records what only the client takes. Those
+        // files are absent from the server on purpose, and restoring one would
+        // load client code on a dedicated server.
+        let selection = ephervex_pack::OptionalSelection::none();
+        let expected: Vec<_> = recipe
+            .files
+            .iter()
+            .filter(|file| file.is_installed_on(host.side(), &selection))
+            .collect();
+        let total = u64::try_from(expected.len()).unwrap_or(u64::MAX);
         reporter.set_items(Progress {
             current: 0,
             total: Some(total),
         });
 
-        let mut files = Vec::with_capacity(recipe.files.len());
-        for (index, file) in recipe.files.iter().enumerate() {
+        let mut files = Vec::with_capacity(expected.len());
+        for (index, file) in expected.into_iter().enumerate() {
             if cancel.is_cancelled() {
                 return Err(PackError::Canceled.into());
             }
