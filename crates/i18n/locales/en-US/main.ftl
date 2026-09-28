@@ -2794,7 +2794,6 @@ gui-server-managed-folder = Server root and Ephervex metadata
 gui-server-files-detail = Edit server.properties and arbitrary server files with your usual tools. Mod configuration is in config when the mod uses that folder.
 gui-server-log-locations-detail = Minecraft logs and crash reports are available after the server writes them. Ephervex captured output is stored separately.
 gui-server-captured-output = Captured output
-gui-server-files-log-detail = These files are written by Minecraft or the server software.
 gui-server-console-busy = Console input is busy. Wait for the current server operation to finish.
 gui-server-console-unavailable = Console input requires a running server with a live Ephervex control channel. Ephervex cannot take control of an orphaned process. Retained output is still available.
 gui-state-stopping = Stopping

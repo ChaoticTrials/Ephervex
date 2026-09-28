@@ -1275,7 +1275,6 @@ export component AppWindow inherits Window {
                                 // is filtered, and what is selected belong to this
                                 // pane alone.
                                 if host.available && pane.surface == "Logs" : VerticalLayout { spacing: 9px;
-                                    if !is-client && log-view.mode != "live" : BodyText { text: GuiI18n.text("gui-server-files-log-detail"); wrap: word-wrap; }
                                     HorizontalLayout { spacing: 8px;
                                         FilterChip { text: is-client ? GuiI18n.text("gui-live-latest-log") : GuiI18n.text("gui-server-captured-output"); accessible-name: self.text; selected: log-view.mode == "live"; clicked => { root.log-show(pane.id, "live"); } }
                                         FilterChip { text: GuiI18n.text("gui-log-files"); accessible-name: GuiI18n.text("gui-log-files"); selected: log-view.mode == "files"; clicked => { root.log-show(pane.id, "files"); } }
