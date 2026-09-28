@@ -626,6 +626,9 @@ export component AppWindow inherits Window {
     // (instance, catalog)
     callback switch-mod-catalog(string, string);
     callback install-from-browser(string, string, string);
+    // Like the browser's install, but the plan is always confirmed first:
+    // (instance, catalog, project).
+    callback install-from-diagnostics(string, string, string);
     // The user closed a browser install's confirmation. The queue behind it
     // has to hear that, or the next queued install never starts.
     callback abandon-browser-install();
@@ -1259,6 +1262,8 @@ export component AppWindow inherits Window {
                                     apply-fix => { root.apply-fix(host.kind, host.id); }
                                     copy-report => { root.copy-diagnosis-report(host.kind, host.id); }
                                     open-logs => { root.show-pane-surface(pane.id, "Logs"); }
+                                    // Offered on a client alone, which is what the install flow takes.
+                                    install-mod(provider, project) => { if host.kind == "client" { root.install-from-diagnostics(host.id, provider, project); } }
                                     open-route(route) => {
                                         if route == "mods" { root.show-pane-surface(pane.id, "Mods"); }
                                         if route == "settings" { root.show-pane-surface(pane.id, "Settings"); }

@@ -194,6 +194,10 @@ export struct DiagnosticFindingRow {
     // "mods", "settings", "java-settings", "log", "crash-report", or empty.
     route: string,
     route-label: string,
+    // A catalog project to install through the install confirmation, or empty.
+    install-label: string,
+    install-provider: string,
+    install-project: string,
 }
 
 // One line of what a diagnosis checked.

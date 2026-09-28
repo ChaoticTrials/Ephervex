@@ -428,19 +428,34 @@ impl App {
     ///
     /// Refused while the host runs or an isolation session is active, the same
     /// states that refuse a snapshot restore and an isolation start.
-    #[instrument(skip(self, reporter, cancel), fields(host = %host.id()))]
     pub async fn repair_host(
         &self,
         host: InstalledHost,
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<RepairReport> {
+        self.repair_host_files(host, None, reporter, cancel).await
+    }
+
+    /// The same repair, limited to `only` when given, so a change previewed
+    /// as restoring certain files restores those and nothing else.
+    #[instrument(skip(self, only, reporter, cancel), fields(host = %host.id()))]
+    pub(crate) async fn repair_host_files(
+        &self,
+        host: InstalledHost,
+        only: Option<&[PathBuf]>,
+        reporter: &OperationReporter,
+        cancel: &CancellationToken,
+    ) -> CoreResult<RepairReport> {
         self.refuse_repair(host)?;
         let layout = self.host_layout(host)?;
         let found = self.verify_host(host, reporter, cancel).await?;
+        let asked =
+            |file: &&VerifiedFile| only.is_none_or(|only| only.contains(&file.logical_path));
         let mut report = RepairReport {
             unrepairable: found
                 .unrepairable()
+                .filter(asked)
                 .map(|file| file.logical_path.clone())
                 .collect(),
             ..RepairReport::default()
@@ -448,6 +463,7 @@ impl App {
 
         let wanted: Vec<PathBuf> = found
             .repairable()
+            .filter(asked)
             .map(|file| file.logical_path.clone())
             .collect();
         for path in wanted {
@@ -877,6 +893,32 @@ mod tests {
             std::fs::read(mods.join("truncated.jar")).expect("read"),
             b"a ja",
             "the broken bytes are still there to look at"
+        );
+    }
+
+    /// A restore previewed for some files attempts those alone.
+    #[tokio::test]
+    async fn a_limited_repair_touches_only_the_files_it_names() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let (app, id, root) = instance(base.path());
+        let mods = ephervex_storage::metadata::client_game_dir(&root).join("mods");
+
+        let report = app
+            .repair_host_files(
+                InstalledHost::Instance(id),
+                Some(&[PathBuf::from("mods/gone.jar")]),
+                &OperationReporter::silent("test-repair"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("a repair reports rather than fails");
+
+        assert_eq!(report.failed, [PathBuf::from("mods/gone.jar")]);
+        assert!(report.unrepairable.is_empty());
+        assert_eq!(
+            std::fs::read(mods.join("truncated.jar")).expect("read"),
+            b"a ja",
+            "a file the repair was not asked about is left alone"
         );
     }
 

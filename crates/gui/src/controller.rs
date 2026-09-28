@@ -932,6 +932,10 @@ struct BrowserInstallQueue {
     /// installing. Nothing else starts while this is set.
     active: Option<BrowserInstall>,
     waiting: std::collections::VecDeque<BrowserInstall>,
+    /// Queued requests that show their plan before installing, however little
+    /// it leaves to decide, because what asked for them did not name the
+    /// release, as Diagnostics does not.
+    confirmed: Vec<BrowserInstall>,
 }
 
 impl BrowserInstallQueue {
@@ -950,6 +954,20 @@ impl BrowserInstallQueue {
         Some(request)
     }
 
+    /// The same, for a request that shows its plan before installing. A request
+    /// already queued keeps the way it was asked for.
+    fn enqueue_confirmed(&mut self, request: BrowserInstall) -> Option<BrowserInstall> {
+        if self.active.as_ref() != Some(&request) && !self.waiting.contains(&request) {
+            self.confirmed.push(request.clone());
+        }
+        self.enqueue(request)
+    }
+
+    /// Whether `request` shows its plan before installing.
+    fn confirms(&self, request: &BrowserInstall) -> bool {
+        self.confirmed.contains(request)
+    }
+
     /// Retires the running request, if `request` is it, and hands back the one
     /// to start next.
     ///
@@ -960,6 +978,7 @@ impl BrowserInstallQueue {
         if self.active.as_ref() != Some(request) {
             return None;
         }
+        self.confirmed.retain(|confirmed| confirmed != request);
         self.active = self.waiting.pop_front();
         self.active.clone()
     }
@@ -969,7 +988,8 @@ impl BrowserInstallQueue {
     /// For the endings that arrive without one, such as a confirmation the user
     /// closed.
     fn finish_active(&mut self) -> Option<BrowserInstall> {
-        self.active.take()?;
+        let finished = self.active.take()?;
+        self.confirmed.retain(|confirmed| *confirmed != finished);
         self.active = self.waiting.pop_front();
         self.active.clone()
     }
@@ -3655,7 +3675,35 @@ fn register_browser_install(ui: &AppWindow, commands: &Sender<Command>, workspac
         };
         let start = install_queue.installs.borrow_mut().enqueue(request);
         if let Some(request) = start {
-            start_browser_install(&ui, &sender, &request);
+            start_browser_install(&ui, &sender, &request, false);
+        }
+        mark_queued(&install_workspace);
+    });
+
+    // Diagnostics names a missing mod, not a release, so its plan is always
+    // shown before anything is installed.
+    let sender = commands.clone();
+    let handle = ui.as_weak();
+    let install_workspace = workspace.clone();
+    let install_queue = Rc::clone(&workspace.browser);
+    ui.on_install_from_diagnostics(move |instance, provider, project| {
+        let Some(ui) = handle.upgrade() else { return };
+        if backend::parse_instance_id(&instance).is_none()
+            || ModProvider::parse(&provider).is_none()
+        {
+            return;
+        }
+        let request = BrowserInstall {
+            instance: instance.to_string(),
+            provider: provider.to_string(),
+            project: project.to_string(),
+        };
+        let start = install_queue
+            .installs
+            .borrow_mut()
+            .enqueue_confirmed(request);
+        if let Some(request) = start {
+            start_browser_install(&ui, &sender, &request, true);
         }
         mark_queued(&install_workspace);
     });
@@ -3675,7 +3723,13 @@ fn register_browser_install(ui: &AppWindow, commands: &Sender<Command>, workspac
 }
 
 /// Asks for one queued install's plan and records the question it answers.
-fn start_browser_install(ui: &AppWindow, commands: &Sender<Command>, request: &BrowserInstall) {
+/// `confirm` shows the plan even when it leaves nothing to decide.
+fn start_browser_install(
+    ui: &AppWindow,
+    commands: &Sender<Command>,
+    request: &BrowserInstall,
+    confirm: bool,
+) {
     let (Some(instance), Some(catalog)) = (
         backend::parse_instance_id(&request.instance),
         ModProvider::parse(&request.provider),
@@ -3685,7 +3739,7 @@ fn start_browser_install(ui: &AppWindow, commands: &Sender<Command>, request: &B
     ui.set_mod_action_host(request.instance.as_str().into());
     ui.set_mod_plan_requested(request.project.as_str().into());
     ui.set_mod_plan_requested_provider(request.provider.as_str().into());
-    ui.set_mod_plan_direct(true);
+    ui.set_mod_plan_direct(!confirm);
     // The rows an earlier confirmation left behind name servers chosen for a
     // different operation, and a plan that needs no confirmation submits
     // whatever is in this model.
@@ -3708,7 +3762,8 @@ fn advance_browser_install(
     next: Option<BrowserInstall>,
 ) {
     if let Some(next) = next {
-        start_browser_install(ui, commands, &next);
+        let confirm = workspace.browser.installs.borrow().confirms(&next);
+        start_browser_install(ui, commands, &next, confirm);
     }
     mark_queued(workspace);
 }
@@ -9297,6 +9352,7 @@ mod tests {
             },
             fix,
             route: None,
+            install: None,
         }
     }
 
@@ -12819,6 +12875,102 @@ mod tests {
             plan_disposition(false, &plan(2, 0)),
             PlanDisposition::Confirm
         );
+    }
+
+    /// Diagnostics names a missing mod, not a release. Its install shows the
+    /// resolved plan, exact release included, and installs nothing until that
+    /// is confirmed, even when the plan leaves nothing else to decide. The
+    /// browser's own button still installs such a plan directly.
+    #[test]
+    fn a_diagnostics_install_is_confirmed_before_anything_installs() {
+        let installs = |commands: &std::sync::mpsc::Receiver<Command>| {
+            commands
+                .try_iter()
+                .filter_map(|command| match command {
+                    Command::InstallMod {
+                        project, version, ..
+                    } => Some((project, version)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        for from_diagnostics in [true, false] {
+            let ui = test_window();
+            let (workspace, commands) = test_workspace_sending(&ui);
+            register_browser_install(&ui, &workspace.commands, &workspace);
+            register_mod_mutations(&ui, &workspace.commands);
+            let instance = ephervex_model::InstanceId::new().to_string();
+            if from_diagnostics {
+                ui.invoke_install_from_diagnostics(
+                    instance.as_str().into(),
+                    "modrinth".into(),
+                    "utilitix".into(),
+                );
+            } else {
+                ui.invoke_install_from_browser(
+                    instance.as_str().into(),
+                    "modrinth".into(),
+                    "utilitix".into(),
+                );
+            }
+            assert!(
+                commands
+                    .try_iter()
+                    .any(|command| matches!(command, Command::PlanMod { .. })),
+                "the release is resolved first"
+            );
+
+            let mut resolved = plan(1, 0);
+            resolved.instance.clone_from(&instance);
+            resolved.linked.instance.clone_from(&instance);
+            apply_mod_install_plan(&ui, resolved, &workspace, &workspace.commands);
+
+            if from_diagnostics {
+                assert_eq!(ui.get_modal(), "mod-plan");
+                assert_eq!(ui.get_mod_plan_version(), "21.1.6");
+                assert!(installs(&commands).is_empty(), "nothing before confirming");
+
+                // What the confirmation's Install button sends.
+                ui.invoke_install_mod(
+                    ui.get_mod_plan_instance(),
+                    ui.get_mod_plan_provider(),
+                    ui.get_mod_plan_project(),
+                    ui.get_mod_plan_version_id(),
+                );
+                assert_eq!(
+                    installs(&commands),
+                    [("utilitix".to_owned(), "abcd1234".to_owned())]
+                );
+            } else {
+                assert_eq!(ui.get_modal(), "");
+                assert_eq!(
+                    installs(&commands),
+                    [("utilitix".to_owned(), "abcd1234".to_owned())]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_queued_diagnostics_install_is_still_confirmed_when_its_turn_comes() {
+        let request = |project: &str| BrowserInstall {
+            instance: "repro-client".to_owned(),
+            provider: "modrinth".to_owned(),
+            project: project.to_owned(),
+        };
+        let mut queue = BrowserInstallQueue::default();
+        assert_eq!(queue.enqueue(request("jei")), Some(request("jei")));
+        assert_eq!(queue.enqueue_confirmed(request("libx")), None);
+        assert!(!queue.confirms(&request("jei")));
+
+        let next = queue.finish(&request("jei"));
+        assert_eq!(next, Some(request("libx")));
+        assert!(queue.confirms(&request("libx")));
+
+        // Once it is done, the same mod from the browser installs directly.
+        assert_eq!(queue.finish(&request("libx")), None);
+        assert_eq!(queue.enqueue(request("libx")), Some(request("libx")));
+        assert!(!queue.confirms(&request("libx")));
     }
 
     #[test]

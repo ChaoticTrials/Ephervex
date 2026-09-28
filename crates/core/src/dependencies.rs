@@ -234,6 +234,9 @@ pub enum UnmetDependency {
         /// its own catalog, so a jar identified in another catalog, or in
         /// none, may be the one required until that catalog says otherwise.
         proven: bool,
+        /// The host's own entry for it, when the host records the mod and only
+        /// its jar is gone.
+        recorded: Option<PathBuf>,
     },
     /// The jar is here and turned off.
     Disabled(ImpactedMod),
@@ -650,6 +653,7 @@ impl App {
                         project_id: Some(project),
                         provider: Some(provider),
                         proven: true,
+                        ..
                     } if *provider == catalog && name == project => Some(project.clone()),
                     _ => None,
                 })
@@ -1082,6 +1086,7 @@ impl ModGraph {
                 project_id,
                 provider: entry.provider,
                 proven,
+                recorded: None,
             },
         )
     }
@@ -1197,6 +1202,7 @@ impl ModGraph {
                                     project_id: target.project_id.clone(),
                                     provider: self.entries[found].provider,
                                     proven: true,
+                                    recorded: Some(target.logical_path.clone()),
                                 },
                                 requirer,
                             ),
@@ -2022,6 +2028,7 @@ mod tests {
                 project_id: Some(REGISTRATE.to_owned()),
                 provider: Some(ModProvider::Modrinth),
                 proven: true,
+                recorded: None,
             },
             "with no remembered title the catalog's own id is all there is"
         );

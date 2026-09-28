@@ -484,50 +484,134 @@ async fn the_loader_s_refusal_in_the_last_log_is_a_problem() {
     assert_eq!(reported.actual.as_deref(), Some("2.4"));
 }
 
-/// Every mod the loader names as needing one missing library is one problem,
-/// the one the recorded relations report, with the narrowest range they all
-/// accept, and it leads because it explains the failure most directly.
+const LIBX_REFUSED: &[u8] = b"[12:00:01] [main/ERROR] [net.minecraftforge.fml.loading.ModSorter/LOADING]: Missing or unsupported mandatory dependencies:\n\
+    \tMod ID: 'libx', Requested by: 'datatrader', Expected range: '[1.19.3-4.3.0,)', Actual version: '[MISSING]'\n\
+    \tMod ID: 'libx', Requested by: 'utilitix', Expected range: '[1.20.1-5.0.1,)', Actual version: '[MISSING]'\n\
+    \tMod ID: 'libx', Requested by: 'packessentials', Expected range: '[1.20.1-5.0.14,)', Actual version: '[MISSING]'\n";
+
+/// The loader's refusal and a recorded relation are two observations. A
+/// loader mod id is not a catalog project, so a catalog requirement whose name
+/// reads like the mod id stays its own finding, and so does one named nothing
+/// like it. The loader's lines for one mod id are still one finding.
 #[tokio::test]
-async fn one_missing_library_is_one_problem_whoever_asked_for_it() {
-    let fixture = Fixture::with_mods(&[("datatrader", &["libx"]), ("utilitix", &["libx"])]).await;
+async fn a_loader_refusal_is_never_merged_with_a_catalog_requirement_by_name() {
+    for required in ["libx", "Library of Things"] {
+        let fixture = Fixture::with_mods(&[("datatrader", &[required])]).await;
+        fixture.pin_java("21.0.8", None);
+        fixture.write("minecraft/logs/latest.log", LIBX_REFUSED);
+
+        let diagnosis = fixture.diagnose(false).await;
+
+        let problems = kinds(&diagnosis, FindingClass::Problem);
+        let [
+            FindingKind::LoaderReportedDependency(loader),
+            FindingKind::DependencyMissing(requirement),
+        ] = problems.as_slice()
+        else {
+            panic!("{required}: {problems:?}");
+        };
+        let UnmetDependency::Missing { name, .. } = &requirement.dependency else {
+            panic!("{requirement:?}");
+        };
+        assert_eq!(name, required);
+        assert_eq!(loader.mod_id, "libx");
+        assert_eq!(loader.accepted_range.as_deref(), Some("[1.20.1-5.0.14,)"));
+        assert_eq!(
+            loader.ranges_asked_for(),
+            [(
+                "[1.20.1-5.0.14,)".to_owned(),
+                vec![
+                    "datatrader".to_owned(),
+                    "utilitix".to_owned(),
+                    "packessentials".to_owned()
+                ]
+            )]
+        );
+    }
+}
+
+/// A catalog finding may offer its mod back; a loader finding never does,
+/// because nothing proves which catalog project its mod id is.
+#[tokio::test]
+async fn only_the_catalog_finding_offers_its_mod_back() {
+    let fixture = Fixture::with_mods(&[("datatrader", &["libx"])]).await;
     fixture.pin_java("21.0.8", None);
-    fixture.write(
-        "minecraft/logs/latest.log",
-        b"[12:00:01] [main/ERROR] [net.minecraftforge.fml.loading.ModSorter/LOADING]: Missing or unsupported mandatory dependencies:\n\
-          \tMod ID: 'libx', Requested by: 'datatrader', Expected range: '[1.19.3-4.3.0,)', Actual version: '[MISSING]'\n\
-          \tMod ID: 'libx', Requested by: 'utilitix', Expected range: '[1.20.1-5.0.1,)', Actual version: '[MISSING]'\n\
-          \tMod ID: 'libx', Requested by: 'packessentials', Expected range: '[1.20.1-5.0.14,)', Actual version: '[MISSING]'\n",
-    );
-    fixture.write(
-        "minecraft/crash-reports/crash-2026-09-28_18.13.39-fml.txt",
-        b"---- Minecraft Crash Report ----\nDescription: Mod loading error has occurred\n\njava.lang.Exception: Mod Loading has failed\n",
-    );
+    fixture.write_recipe(&[
+        json!({
+            "logical_path": "mods/datatrader.jar", "hashes": [], "downloads": [], "size": 10,
+            "client": "required", "server": "required", "origin": "pack_declared",
+            "identity": {"provider": "modrinth", "project_id": "datatrader", "version_id": "datatrader1"},
+            "relations": [{"kind":"required","target":{"project":{"project_id":"libx"}}}],
+        }),
+        json!({
+            "logical_path": "mods/LibX-1.20.1-5.0.14.jar",
+            "hashes": [{"algorithm": "sha1", "digest": "da39a3ee5e6b4b0d3255bfef95601890afd80709"}],
+            "downloads": ["https://cdn.modrinth.com/data/qEH6GYul/versions/YHTMDq85/LibX-1.20.1-5.0.14.jar"],
+            "size": 1, "client": "required", "server": "required", "origin": "pack_declared",
+            "identity": {"provider": "modrinth", "project_id": "libx", "version_id": "YHTMDq85"},
+        }),
+    ]);
+    fixture.write("minecraft/logs/latest.log", LIBX_REFUSED);
 
     let diagnosis = fixture.diagnose(false).await;
 
-    let problems = kinds(&diagnosis, FindingClass::Problem);
-    let [
-        FindingKind::DependencyMissing {
-            requirement,
-            loader: Some(loader),
-        },
-        FindingKind::RecentCrash { .. },
-    ] = problems.as_slice()
-    else {
-        panic!("{problems:?}");
+    let fix_of = |test: fn(&FindingKind) -> bool| {
+        diagnosis
+            .findings
+            .iter()
+            .find(|finding| test(&finding.kind))
+            .map(|finding| finding.fix.clone())
     };
-    assert_eq!(requirement.required_by, 2);
-    assert_eq!(loader.accepted_range.as_deref(), Some("[1.20.1-5.0.14,)"));
     assert_eq!(
-        loader.ranges_asked_for(),
-        [(
-            "[1.20.1-5.0.14,)".to_owned(),
-            vec![
-                "datatrader".to_owned(),
-                "utilitix".to_owned(),
-                "packessentials".to_owned()
-            ]
-        )]
+        fix_of(|kind| matches!(kind, FindingKind::LoaderReportedDependency(_))),
+        Some(None)
+    );
+    assert_eq!(
+        fix_of(|kind| matches!(kind, FindingKind::DependencyMissing(_))),
+        Some(Some(DiagnosticFix::RestoreFiles(vec![PathBuf::from(
+            "mods/LibX-1.20.1-5.0.14.jar"
+        )])))
+    );
+}
+
+/// A required mod the host records, whose jar alone is gone, is restored at
+/// its recorded release: the quick pass offers that for this one file.
+#[tokio::test]
+async fn a_recorded_dependency_whose_jar_is_gone_is_offered_back() {
+    let fixture = Fixture::with_mods(&[("datatrader", &["libx"])]).await;
+    fixture.pin_java("21.0.8", None);
+    fixture.write_recipe(&[
+        json!({
+            "logical_path": "mods/datatrader.jar", "hashes": [], "downloads": [], "size": 10,
+            "client": "required", "server": "required", "origin": "pack_declared",
+            "identity": {"provider": "modrinth", "project_id": "datatrader", "version_id": "datatrader1"},
+            "relations": [{"kind":"required","target":{"project":{"project_id":"libx"}}}],
+        }),
+        json!({
+            "logical_path": "mods/LibX-1.20.1-5.0.14.jar",
+            "hashes": [{"algorithm": "sha1", "digest": "da39a3ee5e6b4b0d3255bfef95601890afd80709"}],
+            "downloads": ["https://cdn.modrinth.com/data/qEH6GYul/versions/YHTMDq85/LibX-1.20.1-5.0.14.jar"],
+            "size": 1, "client": "required", "server": "required", "origin": "pack_declared",
+            "identity": {"provider": "modrinth", "project_id": "libx", "version_id": "YHTMDq85"},
+        }),
+    ]);
+
+    let diagnosis = fixture.diagnose(false).await;
+
+    let restore = diagnosis
+        .findings
+        .iter()
+        .find_map(|finding| match &finding.kind {
+            FindingKind::DependencyMissing { .. } => Some(finding.fix.clone()),
+            _ => None,
+        });
+    assert_eq!(
+        restore,
+        Some(Some(DiagnosticFix::RestoreFiles(vec![PathBuf::from(
+            "mods/LibX-1.20.1-5.0.14.jar"
+        )]))),
+        "{:?}",
+        diagnosis.findings
     );
 }
 

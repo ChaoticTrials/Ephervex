@@ -30,10 +30,13 @@ digests. Nothing is inferred from file names, and no conflict is guessed at
 without metadata that states it.
 
 The loader names one line per asking mod, so its refusals are grouped by the
-mod they lack, and a group joins the relation finding about the same mod. The
-versions shown are the one range every asking mod accepts when that follows
-with certainty from Maven's range rules; otherwise each asking mod's range is
-shown as the loader wrote it.
+exact mod id they lack. A loader mod id is not a catalog project, a display
+name, or a jar name, so a loader refusal, a recorded relation, and a crash
+report stay separate findings however alike their names are, and only a
+finding backed by a recorded or proven catalog identity offers to restore or
+install a mod. The versions shown are the one range every asking mod accepts
+when that follows with certainty from Maven's range rules and version order;
+otherwise each asking mod's range is shown as the loader wrote it.
 
 A relation names a project in its requirer's own catalog, so it only proves an
 absence when every jar here is identified in that catalog. Otherwise Diagnose
@@ -54,12 +57,16 @@ dismisses it.
 carry a fix only when Ephervex knows exactly what to change: enabling
 turned-off required mods, removing this host's own Java override when
 automatic selection leads somewhere that works, or restoring recorded files
-from their recorded sources. The preview lists every change, and Apply
-performs exactly those changes with no further dialog. Each change is
-reported on its own, so a partial result says what did and did not change,
-and the host is diagnosed again afterwards. Where the change is ambiguous,
-such as which version of a missing mod to install, Diagnostics explains the
-problem and routes to the surface that owns it instead.
+from their recorded sources. A required mod the host records, whose jar alone
+is gone, is such a file: it comes back at the recorded release. The preview
+lists every change, and Apply performs exactly those changes with no further
+dialog. Each change is reported on its own, so a partial result says what did
+and did not change, and the host is diagnosed again afterwards. Where the
+change is ambiguous, such as which version of a missing mod to install,
+Diagnostics explains the problem and routes to the surface that owns it
+instead. A missing mod whose catalog project is known is offered to a client
+as an install of the newest compatible release through the install
+confirmation, which names the exact release before anything changes.
 
 **One diagnosis or fix at a time.** Results and previews are keyed by host and
 shared by every pane on it (ADR 0039). A fix claims the host like any other

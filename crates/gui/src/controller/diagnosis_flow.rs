@@ -267,6 +267,21 @@ fn finding_row(host: InstalledHost, key: String, finding: &FindingView) -> Diagn
         route_label: route
             .map_or_else(String::new, |route| lookup(route.label()))
             .into(),
+        install_label: finding
+            .install
+            .as_ref()
+            .map_or_else(String::new, |_| lookup("gui-diagnosis-install-latest"))
+            .into(),
+        install_provider: finding
+            .install
+            .as_ref()
+            .map_or("", |(provider, _)| provider.as_str())
+            .into(),
+        install_project: finding
+            .install
+            .as_ref()
+            .map_or("", |(_, project)| project.as_str())
+            .into(),
     }
 }
 

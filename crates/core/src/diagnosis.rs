@@ -187,11 +187,7 @@ pub enum FindingKind {
     /// A required mod is turned off.
     DependencyDisabled(UnmetRequirement),
     /// A required mod is not installed.
-    DependencyMissing {
-        requirement: UnmetRequirement,
-        /// What the loader said about the same mod when the host last started.
-        loader: Option<LoaderReportedRequirement>,
-    },
+    DependencyMissing(UnmetRequirement),
     DeclaredConflict(DeclaredConflict),
     /// Recorded files are absent or damaged.
     ManagedFilesDamaged {
@@ -234,7 +230,7 @@ impl FindingKind {
             | Self::JavaUnusable { .. }
             | Self::JavaUnavailable { .. }
             | Self::DependencyDisabled(_)
-            | Self::DependencyMissing { .. }
+            | Self::DependencyMissing(_)
             | Self::DeclaredConflict(_)
             | Self::ManagedFilesDamaged { .. }
             | Self::SharedFilesDamaged { .. } => FindingClass::Problem,
@@ -340,18 +336,6 @@ impl LoaderReportedRequirement {
             .map(|(range, by)| format!("{range} (asked by {})", by.join(", ")))
             .collect::<Vec<_>>()
             .join("; ")
-    }
-
-    /// Whether this names the mod a catalog calls `name`. A mod id is the
-    /// name lowercased and without separators, such as `libx` for LibX.
-    fn is_about(&self, name: &str) -> bool {
-        let letters = |text: &str| -> String {
-            text.chars()
-                .filter(char::is_ascii_alphanumeric)
-                .map(|character| character.to_ascii_lowercase())
-                .collect()
-        };
-        self.actual.is_none() && letters(&self.mod_id) == letters(name)
     }
 }
 
@@ -606,22 +590,23 @@ impl App {
         };
 
         // What the loader refused to start without explains a failure more
-        // directly than the crash report it wrote, so it leads, and a missing
-        // mod the loader also named leads that.
+        // directly than the crash report it wrote, so it leads. It stays its own
+        // evidence: a loader mod id is not a catalog project, however alike
+        // their names are.
         let log = self.start_log(host);
-        let mut refusals = log
+        let mut findings: Vec<Finding> = log
             .as_deref()
             .map(|log| LoaderReportedRequirement::grouped(loader_dependency_failures(log)))
-            .unwrap_or_default();
-        let (mut findings, relation_problems) =
-            self.relation_findings(host, requirements.unmet, &mut refusals);
-        findings.extend(refusals.into_iter().map(|requirement| Finding {
-            kind: FindingKind::LoaderReportedDependency(requirement),
-            fix: None,
-        }));
+            .unwrap_or_default()
+            .into_iter()
+            .map(|requirement| Finding {
+                kind: FindingKind::LoaderReportedDependency(requirement),
+                fix: None,
+            })
+            .collect();
         let recent_crash = self.recent_crash(host, &mut findings);
         findings.extend(java_problems);
-        findings.extend(relation_problems);
+        findings.extend(self.relation_findings(host, requirements.unmet));
         findings.extend(requirements.conflicts.into_iter().map(|conflict| Finding {
             kind: FindingKind::DeclaredConflict(conflict),
             fix: None,
@@ -800,8 +785,10 @@ impl App {
                     Err(error) => outcome.failed.push((name, error)),
                 }
             }
-            DiagnosticFix::RestoreFiles(_) => {
-                let report = self.repair_host(host, reporter, cancel).await?;
+            DiagnosticFix::RestoreFiles(paths) => {
+                let report = self
+                    .repair_host_files(host, Some(paths), reporter, cancel)
+                    .await?;
                 outcome.applied = report
                     .repaired
                     .iter()
@@ -971,52 +958,33 @@ impl App {
         }
     }
 
-    /// Unmet relations as findings: first the missing mods the loader also
-    /// named, each carrying what it said and taken out of `reported`, then
-    /// the rest in their own order.
-    fn relation_findings(
-        &self,
-        host: InstalledHost,
-        unmet: Vec<UnmetRequirement>,
-        reported: &mut Vec<LoaderReportedRequirement>,
-    ) -> (Vec<Finding>, Vec<Finding>) {
-        let mut confirmed = Vec::new();
-        let mut others = Vec::new();
-        for requirement in unmet {
-            match &requirement.dependency {
-                UnmetDependency::Disabled(target) => others.push(Finding {
+    /// Unmet relations as findings, in their own order.
+    fn relation_findings(&self, host: InstalledHost, unmet: Vec<UnmetRequirement>) -> Vec<Finding> {
+        // A recorded mod whose jar is gone comes back at the recorded release,
+        // when the recipe says where to fetch it.
+        let recipe = self.host_layout(host).ok().and_then(|layout| layout.recipe);
+        let restore = |path: &Path| {
+            recipe
+                .iter()
+                .flat_map(|recipe| &recipe.files)
+                .any(|file| file.logical_path == path && !file.downloads.is_empty())
+                .then(|| DiagnosticFix::RestoreFiles(vec![path.to_path_buf()]))
+        };
+        unmet
+            .into_iter()
+            .map(|requirement| match &requirement.dependency {
+                UnmetDependency::Disabled(target) => Finding {
                     fix: Some(DiagnosticFix::EnableMods(
                         self.enable_order(host, &target.logical_path),
                     )),
                     kind: FindingKind::DependencyDisabled(requirement),
-                }),
-                UnmetDependency::Missing { name, .. } => {
-                    let loader = reported
-                        .iter()
-                        .position(|report| report.is_about(name))
-                        .map(|index| reported.remove(index));
-                    let finding = Finding {
-                        fix: None,
-                        kind: FindingKind::DependencyMissing {
-                            requirement,
-                            loader,
-                        },
-                    };
-                    if matches!(
-                        finding.kind,
-                        FindingKind::DependencyMissing {
-                            loader: Some(_),
-                            ..
-                        }
-                    ) {
-                        confirmed.push(finding);
-                    } else {
-                        others.push(finding);
-                    }
-                }
-            }
-        }
-        (confirmed, others)
+                },
+                UnmetDependency::Missing { recorded, .. } => Finding {
+                    fix: recorded.as_deref().and_then(restore),
+                    kind: FindingKind::DependencyMissing(requirement),
+                },
+            })
+            .collect()
     }
 
     /// The crash report of the last run, if it crashed.
@@ -1476,25 +1444,14 @@ fn report_line(kind: &FindingKind, path: &dyn Fn(&Path) -> String) -> String {
                 chain(requirement)
             )
         }
-        FindingKind::DependencyMissing {
-            requirement,
-            loader,
-        } => {
+        FindingKind::DependencyMissing(requirement) => {
             let UnmetDependency::Missing { name, .. } = &requirement.dependency else {
                 return String::new();
             };
-            let mut line = format!(
+            format!(
                 "{name} is not installed; required by {}",
                 chain(requirement)
-            );
-            if let Some(loader) = loader {
-                let _ = write!(
-                    line,
-                    "; the loader refused to start without it: {}",
-                    loader.versions_asked_for()
-                );
-            }
-            line
+            )
         }
         FindingKind::DeclaredConflict(conflict) => format!(
             "{} declares it does not work with {}",

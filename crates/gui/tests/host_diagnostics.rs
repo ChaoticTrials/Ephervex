@@ -77,6 +77,9 @@ fn finding(key: &str, problem: bool, title: &str, fix: &str, route: &str) -> Dia
         } else {
             lookup("gui-diagnosis-open-mods").into()
         },
+        install_label: SharedString::default(),
+        install_provider: SharedString::default(),
+        install_project: SharedString::default(),
     }
 }
 
@@ -252,6 +255,61 @@ fn after_a_failed_run_the_likely_cause_leads_and_customizations_fold_away() {
     .mock_single_click(PointerEventButton::Left);
     settle(&ui);
     assert!(visible(&ui, &customized), "and are not hidden completely");
+}
+
+/// A missing mod the client can install carries its own install action, one
+/// per finding, and the action asks for that mod through the Diagnostics
+/// install, whose plan is always confirmed before it installs.
+#[test]
+fn each_missing_mod_offers_its_own_install_on_a_client() {
+    let ui = window();
+    let installs: Rc<RefCell<Vec<(String, String, String)>>> = Rc::default();
+    let record = Rc::clone(&installs);
+    // The browser's install never hears it: that one skips the confirmation.
+    ui.on_install_from_browser(|_, _, _| panic!("a Diagnostics install went the browser's way"));
+    ui.on_install_from_diagnostics(move |instance, provider, project| {
+        record.borrow_mut().push((
+            instance.to_string(),
+            provider.to_string(),
+            project.to_string(),
+        ));
+    });
+    diagnosed_surface(&ui, false, false);
+    let missing = |key: &str, title: &str, project: &str| {
+        let mut row = finding(key, true, title, "", "mods");
+        row.install_label = lookup("gui-diagnosis-install-latest").into();
+        row.install_provider = "modrinth".into();
+        row.install_project = project.into();
+        row
+    };
+    support::update_host(&ui, 0, |view| {
+        view.diagnosis_problems = rows(vec![
+            missing("p0", "LibX is not installed", "qEH6GYul"),
+            missing("p1", "Balm is not installed", "MBAkmtvl"),
+        ]);
+    });
+    settle(&ui);
+
+    let buttons: Vec<ElementHandle> = ElementHandle::find_by_accessible_label(
+        &ui,
+        &format!(
+            "{}: Balm is not installed",
+            lookup("gui-diagnosis-install-latest")
+        ),
+    )
+    .collect();
+    assert_eq!(buttons.len(), 1, "one install action per missing mod");
+    buttons[0].mock_single_click(PointerEventButton::Left);
+    settle(&ui);
+
+    assert_eq!(
+        installs.borrow().as_slice(),
+        [(
+            "host".to_owned(),
+            "modrinth".to_owned(),
+            "MBAkmtvl".to_owned()
+        )]
+    );
 }
 
 #[test]

@@ -131,6 +131,7 @@ component FindingCard inherits Rectangle {
     in property <bool> can-act;
     callback review-fix(string);
     callback open-route(string);
+    callback install(string, string);
     border-radius: 8px;
     border-width: 1px;
     border-color: root.item.problem ? Theme.warning.with-alpha(0.7) : Theme.border;
@@ -162,7 +163,7 @@ component FindingCard inherits Rectangle {
             for file in root.item.files : BodyText { text: file; color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
             if root.item.more-files != "" : BodyText { text: root.item.more-files; color: Theme.text-muted; font-size: Theme.caption-size; }
         }
-        if root.item.fix-label != "" || root.item.route != "" : HorizontalLayout {
+        if root.item.fix-label != "" || root.item.install-label != "" || root.item.route != "" : HorizontalLayout {
             spacing: 8px;
             alignment: start;
             if root.item.fix-label != "" : AppButton {
@@ -171,6 +172,13 @@ component FindingCard inherits Rectangle {
                 tone: root.item.problem ? "primary" : "secondary";
                 enabled: root.can-act;
                 clicked => { root.review-fix(root.item.key); }
+            }
+            if root.item.install-label != "" : AppButton {
+                text: root.item.install-label;
+                accessible-name: root.item.install-label + ": " + root.item.title;
+                tone: "primary";
+                enabled: root.can-act;
+                clicked => { root.install(root.item.install-provider, root.item.install-project); }
             }
             if root.item.route != "" : AppButton { text: root.item.route-label; clicked => { root.open-route(root.item.route); } }
         }
@@ -299,6 +307,7 @@ export component DiagnosticsSurface inherits Rectangle {
     callback cancel-fix();
     callback apply-fix();
     callback open-route(string);
+    callback install-mod(string, string);
     callback copy-report();
     callback open-logs();
     callback toggle-bundle-part(string, bool);
@@ -393,6 +402,7 @@ export component DiagnosticsSurface inherits Rectangle {
                     can-act: !root.working && root.host.fix-state != "applying";
                     review-fix(key) => { root.review-fix(key); }
                     open-route(route) => { root.open-route(route); }
+                    install(provider, project) => { root.install-mod(provider, project); }
                 }
             }
             // A customization is not a problem, and after a failed run it is
