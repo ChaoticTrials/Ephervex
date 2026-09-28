@@ -289,8 +289,8 @@ impl crate::app::App {
             detail: format!("{} could not be written: {source}", entry.display()),
         })?;
 
-        refresh_desktop_database(&directory);
-        set_default_handler();
+        refresh_desktop_database(self.paths(), &directory);
+        set_default_handler(self.paths());
 
         info!(entry = %entry.display(), command = %command.display(), "registered the link handler");
         Ok(self.url_handler_status())
@@ -316,7 +316,7 @@ impl crate::app::App {
                 });
             }
         }
-        refresh_desktop_database(&self.paths().desktop_entries_dir());
+        refresh_desktop_database(self.paths(), &self.paths().desktop_entries_dir());
         info!(entry = %entry.display(), "removed the link handler");
         Ok(true)
     }
@@ -327,13 +327,14 @@ impl crate::app::App {
 /// Best effort on purpose. The tool is not present on every system, and its
 /// absence costs a cache refresh rather than the registration: the entry is
 /// written either way, and most desktops pick it up without being told.
-fn refresh_desktop_database(directory: &std::path::Path) {
-    run_quietly("update-desktop-database", &[directory.as_os_str()]);
+fn refresh_desktop_database(paths: &ephervex_storage::Paths, directory: &std::path::Path) {
+    run_quietly(paths, "update-desktop-database", &[directory.as_os_str()]);
 }
 
 /// Asks the desktop to prefer this entry for the scheme.
-fn set_default_handler() {
+fn set_default_handler(paths: &ephervex_storage::Paths) {
     run_quietly(
+        paths,
         "xdg-mime",
         &[
             std::ffi::OsStr::new("default"),
@@ -343,8 +344,13 @@ fn set_default_handler() {
     );
 }
 
-fn run_quietly(program: &str, arguments: &[&std::ffi::OsStr]) {
-    match Command::new(program).args(arguments).output() {
+/// Runs a desktop tool in the desktop session `paths` belongs to.
+fn run_quietly(paths: &ephervex_storage::Paths, program: &str, arguments: &[&std::ffi::OsStr]) {
+    let output = Command::new(program)
+        .args(arguments)
+        .envs(paths.desktop_tool_environment())
+        .output();
+    match output {
         Ok(output) if output.status.success() => {}
         Ok(output) => warn!(
             program,
@@ -378,6 +384,33 @@ mod tests {
     /// question. What the system half does is covered on its own, below.
     fn user_status_of(app: &App) -> UrlHandlerStatus {
         status_from(entry_path(app.paths()), None)
+    }
+
+    /// The tools rewrite the session's `mimeapps.list`, so a test's registration
+    /// must run them inside its own root.
+    #[test]
+    fn desktop_tools_run_inside_throwaway_roots() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let paths = Paths::rooted_at(base.path());
+        let seen = base.path().join("seen");
+        let script = format!(
+            "printf '%s\\n%s\\n' \"$HOME\" \"$XDG_CONFIG_HOME\" > '{}'",
+            seen.display()
+        );
+        run_quietly(
+            &paths,
+            "sh",
+            &[std::ffi::OsStr::new("-c"), std::ffi::OsStr::new(&script)],
+        );
+        let seen = std::fs::read_to_string(seen).expect("the tool ran");
+        let lines: Vec<&str> = seen.lines().collect();
+        assert_eq!(lines.len(), 2, "{seen:?}");
+        for line in lines {
+            assert!(
+                std::path::Path::new(line).starts_with(base.path()),
+                "{line}"
+            );
+        }
     }
 
     #[test]

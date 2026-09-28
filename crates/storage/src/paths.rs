@@ -73,6 +73,9 @@ pub struct Paths {
     state: PathBuf,
     temp: PathBuf,
     persistent_instance_root: Option<PathBuf>,
+    /// Where desktop integration tools run when these are not the user's own
+    /// roots. `None` means the user's session.
+    desktop_home: Option<PathBuf>,
 }
 
 impl Paths {
@@ -102,6 +105,7 @@ impl Paths {
                 .map_or_else(|| dirs.data_dir().join("state"), Path::to_path_buf),
             temp: Self::os_temp_root(),
             persistent_instance_root: None,
+            desktop_home: None,
         })
     }
 
@@ -117,13 +121,17 @@ impl Paths {
         state: impl Into<PathBuf>,
         temp: impl Into<PathBuf>,
     ) -> Self {
+        let data = data.into();
+        // Beside the data root, where the desktop entries of these roots go.
+        let desktop_home = data.parent().unwrap_or(data.as_path()).to_path_buf();
         Self {
             config: config.into(),
-            data: data.into(),
+            data,
             cache: cache.into(),
             state: state.into(),
             temp: temp.into(),
             persistent_instance_root: None,
+            desktop_home: Some(desktop_home),
         }
     }
 
@@ -220,6 +228,25 @@ impl Paths {
             .parent()
             .unwrap_or(self.data.as_path())
             .join("applications")
+    }
+
+    /// The environment desktop integration tools such as `xdg-mime` run with.
+    ///
+    /// Empty for the roots resolved from the environment, so a tool acts on the
+    /// user's session. Explicit roots keep the tools beside them instead: the
+    /// tools rewrite the session's `mimeapps.list` and desktop caches, which
+    /// nothing run against throwaway roots may touch.
+    #[must_use]
+    pub fn desktop_tool_environment(&self) -> Vec<(&'static str, PathBuf)> {
+        self.desktop_home.as_ref().map_or_else(Vec::new, |home| {
+            vec![
+                ("HOME", home.clone()),
+                ("XDG_DATA_HOME", home.clone()),
+                ("XDG_CONFIG_HOME", home.join(".config")),
+                ("XDG_CACHE_HOME", home.join(".cache")),
+                ("XDG_STATE_HOME", home.join(".local").join("state")),
+            ]
+        })
     }
 
     /// Where persistent client instances live.
@@ -708,6 +735,34 @@ mod tests {
 
         // Idempotent: startup runs this on every launch.
         paths.ensure_base_directories().expect("second run");
+    }
+
+    #[test]
+    fn desktop_tools_stay_inside_explicit_roots_and_use_the_session_otherwise() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let paths = Paths::rooted_at(base.path());
+        let environment = paths.desktop_tool_environment();
+        for name in [
+            "HOME",
+            "XDG_DATA_HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_CACHE_HOME",
+            "XDG_STATE_HOME",
+        ] {
+            let (_, value) = environment
+                .iter()
+                .find(|(variable, _)| *variable == name)
+                .unwrap_or_else(|| panic!("{name} is set"));
+            assert!(value.starts_with(base.path()), "{name} is {value:?}");
+        }
+        let data_home = environment
+            .iter()
+            .find(|(variable, _)| *variable == "XDG_DATA_HOME")
+            .map(|(_, value)| value.join("applications"));
+        assert_eq!(data_home, Some(paths.desktop_entries_dir()));
+
+        let session = Paths::from_environment().expect("a home directory");
+        assert!(session.desktop_tool_environment().is_empty());
     }
 
     #[cfg(unix)]
