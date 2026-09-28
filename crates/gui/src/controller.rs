@@ -2761,7 +2761,13 @@ fn register_isolation_actions(ui: &AppWindow, commands: &Sender<Command>, worksp
             && setup.phase == "result"
         {
             "none".clone_into(&mut setup.phase);
-            views.update(host, |view| view.isolation_phase = "none".into());
+            views.update(host, |view| {
+                view.isolation_phase = "none".into();
+                view.workflow_id = SharedString::default();
+                view.workflow_title = SharedString::default();
+                view.workflow_summary = SharedString::default();
+                view.workflow_actions = model(Vec::new());
+            });
         }
         if let Some(ui) = weak.upgrade() {
             ui.set_modal_error(SharedString::default());
@@ -3001,6 +3007,7 @@ fn route_workflow_action(
         "gone" | "present" => ui.invoke_answer_isolation(kind, id, action.into()),
         "undo" => ui.invoke_undo_isolation(kind, id),
         "finish" => ui.invoke_finish_isolation(kind, id),
+        "dismiss" => ui.invoke_dismiss_isolation(kind, id),
         _ => {}
     }
 }
@@ -6348,10 +6355,14 @@ fn isolation_workflow(data: &IsolationData) -> WorkflowPresentation {
             actions.push(action("undo", "gui-isolation-undo", "secondary", true));
             actions.push(action("finish", "gui-isolation-finish", "primary", true));
         }
+        "result" => actions.push(action("dismiss", "gui-close", "primary", false)),
         _ => {}
     }
+    // A kept result leaves the host on the tested mods, so it stays in view
+    // until it is closed.
+    let kept = data.phase == "result";
     WorkflowPresentation {
-        id: if data.active {
+        id: if data.active || kept {
             ISOLATION_WORKFLOW.into()
         } else {
             SharedString::default()
@@ -6359,10 +6370,14 @@ fn isolation_workflow(data: &IsolationData) -> WorkflowPresentation {
         surface: Surface::Isolation.id().into(),
         title: if data.active {
             lookup("gui-isolation-active").into()
+        } else if kept {
+            lookup("gui-isolation-finished").into()
         } else {
             SharedString::default()
         },
-        summary: if data.recovery.is_empty() {
+        summary: if kept {
+            lookup("gui-isolation-finished-detail").into()
+        } else if data.recovery.is_empty() {
             data.summary.as_str().into()
         } else {
             lookup("gui-isolation-recovery-summary").into()
@@ -8867,6 +8882,28 @@ mod tests {
         apply_isolation_data(&ui, &workspace, isolation_data(&host.id(), false, "none"));
         assert_eq!(first_view(&ui).isolation_phase, "none");
         assert!(first_view(&ui).workflow_id.is_empty());
+    }
+
+    #[test]
+    fn a_kept_isolation_result_stays_on_every_surface_until_closed() {
+        let (ui, workspace, _, host) = isolation_window();
+        let (kind, id) = kind_and_id(host);
+        ui.invoke_show_pane_surface(1, "Mods".into());
+
+        apply_isolation_data(&ui, &workspace, isolation_data(&host.id(), false, "result"));
+        let view = first_view(&ui);
+        assert_eq!(view.workflow_id, ISOLATION_WORKFLOW);
+        assert_eq!(view.workflow_title, lookup("gui-isolation-finished"));
+        assert_eq!(
+            view.workflow_summary,
+            lookup("gui-isolation-finished-detail")
+        );
+        assert_eq!(view.workflow_pane, 0, "no pane shows the Isolation surface");
+
+        ui.invoke_workflow_action(1, kind, id, ISOLATION_WORKFLOW.into(), "dismiss".into());
+        let view = first_view(&ui);
+        assert!(view.workflow_id.is_empty());
+        assert_eq!(view.isolation_phase, "none");
     }
 
     #[test]

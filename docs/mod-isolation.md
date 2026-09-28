@@ -46,7 +46,9 @@ requires. Mods they require are listed separately, as are mods that were
 pinned throughout and the mods those pinned mods require. Pinned mods and their
 requirements were never tested for removal, so a remaining candidate is not
 presented as the sole cause. **Finish** leaves the smallest tested configuration enabled
-and keeps the pre-isolation snapshot in the Snapshots tab. **Cancel isolation**
+and keeps the pre-isolation snapshot in the Snapshots tab. Until the finished
+result is closed, the host's banner says the tested configuration is still
+enabled, whichever tab is shown. **Cancel isolation**
 restores the exact pre-isolation state instead. A client session never changes
 a linked server; isolate that server separately when its mods are also relevant.
 
