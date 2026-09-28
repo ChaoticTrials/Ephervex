@@ -137,6 +137,8 @@ export component SelectableText inherits Rectangle {
     in property <TextWrap> wrap: no-wrap;
     in property <string> font-family: Theme.mono-family;
     in property <length> font-size: Theme.label-size;
+    // Scrolls its text, so it fills its room instead of growing with the text.
+    vertical-stretch: 1;
     background: Theme.well;
     forward-focus: selectable-input;
     accessible-role: text-input;

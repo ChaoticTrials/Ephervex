@@ -612,6 +612,46 @@ fn saved_logs_and_crash_reports_start_at_the_same_height() {
     );
 }
 
+/// A crash report far taller than the pane scrolls inside its own viewer. The
+/// sub-tab stays where it was before the report was opened, and the report
+/// ends where the file list beside it does.
+#[test]
+fn an_open_crash_report_scrolls_inside_the_view_without_moving_it() {
+    let ui = window();
+    server_logs(&ui);
+    set_view(&ui, |view| {
+        view.files = ModelRc::new(VecModel::from(vec![log_file()]));
+        view.mode = "crashes".into();
+    });
+    settle(&ui);
+    let closed = file_list_top(&ui);
+
+    set_view(&ui, |view| {
+        view.file = "2026-08-30-1.log.gz".into();
+        view.report = "    at net.minecraft.server.Main.main(Main.java:125)\n"
+            .repeat(400)
+            .into();
+    });
+    settle(&ui);
+    let open = file_list_top(&ui);
+    assert!(
+        (closed - open).abs() < 1.0,
+        "the file list starts at {closed}px, and at {open}px once a report is open"
+    );
+    let copy = ElementHandle::find_by_accessible_label(&ui, &lookup("gui-copy"))
+        .find(|element| element.size().width > 0.0)
+        .expect("the open report can be copied");
+    let bottom = copy.absolute_position().y + copy.size().height;
+    let list = ElementHandle::find_by_element_type_name(&ui, "DiagnosticFileList")
+        .find(|list| list.size().width > 0.0)
+        .expect("the file list");
+    let list_bottom = list.absolute_position().y + list.size().height;
+    assert!(
+        (bottom - list_bottom).abs() < 1.0,
+        "the report ends at {bottom}px and the file list at {list_bottom}px"
+    );
+}
+
 /// Where the file list of whichever sub-tab is open begins.
 fn file_list_top(ui: &AppWindow) -> f32 {
     ElementHandle::find_by_element_type_name(ui, "DiagnosticFileList")
