@@ -4885,9 +4885,25 @@ async fn explain_failed_run(
 /// What went wrong with a server run that is worth explaining.
 fn server_failure(result: &CoreResult<ephervex_core::ServerExit>) -> Option<String> {
     match result {
-        Ok(exit) if exit.code != Some(0) => Some(lookup("gui-run-server-exited-with-error")),
+        Ok(exit) => server_exit_failure(exit),
         Err(error) if !error.is_cancellation() => Some(localized_error(error)),
-        _ => None,
+        Err(_) => None,
+    }
+}
+
+/// Why a server process's exit is a failure, if it is. A Stop or Kill the user
+/// asked for never is. Minecraft's server catches a startup exception, logs it,
+/// and exits with code 0, so a clean exit counts only once the server finished
+/// starting.
+fn server_exit_failure(exit: &ephervex_core::ServerExit) -> Option<String> {
+    if exit.stop_requested {
+        None
+    } else if exit.code != Some(0) {
+        Some(lookup("gui-run-server-exited-with-error"))
+    } else if !exit.finished_starting {
+        Some(lookup("gui-run-server-stopped-before-ready"))
+    } else {
+        None
     }
 }
 
@@ -6623,7 +6639,7 @@ fn report_server_run(
         Ok(exit) => (
             lookup("gui-activity-server-run"),
             lookup("gui-activity-server-exited"),
-            exit.code != Some(0),
+            server_exit_failure(exit).is_some(),
         ),
         Err(error) => {
             send_error(events, error);
@@ -6723,10 +6739,10 @@ fn forward_connect_server_event(
 ) {
     if let ServerEvent::Finished { exit } = event {
         refresh_snapshot(paths, events);
-        let failure = match exit {
-            Some(exit) if exit.code == Some(0) => None,
-            _ => Some(lookup("gui-run-server-exited-with-error")),
-        };
+        let failure = exit.map_or_else(
+            || Some(lookup("gui-run-server-exited-with-error")),
+            |exit| server_exit_failure(&exit),
+        );
         let _ = events.send(Event::ServerTool {
             server,
             event: ServerToolEvent::Finished { failure },
@@ -10005,7 +10021,9 @@ mod tests {
         assert!(matches!(
             server_restart_outcome(Ok(ControlResponse::Exited(ServerExit {
                 code: Some(0),
-                signal: None
+                signal: None,
+                finished_starting: true,
+                stop_requested: false,
             }))),
             RestartOutcome::Interrupted(_)
         ));
@@ -10041,19 +10059,23 @@ mod tests {
         let paths = Paths::rooted_at(root.path());
         let (events, received) = std::sync::mpsc::channel();
         let server = ServerId::new();
-        forward_connect_server_event(
-            &events,
-            "server",
-            &paths,
-            &Mutex::new(None),
-            server,
-            ServerEvent::Finished {
-                exit: Some(ephervex_core::ServerExit {
-                    code: Some(9),
-                    signal: None,
-                }),
-            },
-        );
+        for (code, finished_starting) in [(Some(9), true), (Some(0), false), (Some(0), true)] {
+            forward_connect_server_event(
+                &events,
+                "server",
+                &paths,
+                &Mutex::new(None),
+                server,
+                ServerEvent::Finished {
+                    exit: Some(ephervex_core::ServerExit {
+                        code,
+                        signal: None,
+                        finished_starting,
+                        stop_requested: false,
+                    }),
+                },
+            );
+        }
         let completions: Vec<_> = received
             .try_iter()
             .filter_map(|event| match event {
@@ -10066,7 +10088,11 @@ mod tests {
             .collect();
         assert_eq!(
             completions,
-            [(server, Some(lookup("gui-run-server-exited-with-error")))]
+            [
+                (server, Some(lookup("gui-run-server-exited-with-error"))),
+                (server, Some(lookup("gui-run-server-stopped-before-ready"))),
+                (server, None),
+            ]
         );
     }
 
@@ -10075,22 +10101,125 @@ mod tests {
         assert!(
             server_failure(&Ok(ephervex_core::ServerExit {
                 code: Some(0),
-                signal: None
+                signal: None,
+                finished_starting: true,
+                stop_requested: false,
             }))
             .is_none()
         );
-        for exit in [
-            ephervex_core::ServerExit {
-                code: Some(1),
-                signal: None,
-            },
-            ephervex_core::ServerExit {
-                code: None,
-                signal: Some(9),
-            },
-        ] {
-            assert!(server_failure(&Ok(exit)).is_some());
+        for finished_starting in [false, true] {
+            for exit in [
+                ephervex_core::ServerExit {
+                    code: Some(1),
+                    signal: None,
+                    finished_starting,
+                    stop_requested: false,
+                },
+                ephervex_core::ServerExit {
+                    code: None,
+                    signal: Some(9),
+                    finished_starting,
+                    stop_requested: false,
+                },
+            ] {
+                assert_eq!(
+                    server_failure(&Ok(exit)),
+                    Some(lookup("gui-run-server-exited-with-error"))
+                );
+            }
         }
+    }
+
+    /// Runs a supervised child that never logs that it finished starting and
+    /// exits with code 0 on either `stop` or `quit`: stopped through the
+    /// control channel, or ended by a console line nobody sent as a stop.
+    async fn supervised_exit(stopped: bool) -> ephervex_core::ServerExit {
+        let root = tempfile::tempdir().expect("root");
+        std::fs::create_dir_all(root.path().join(".launcher")).expect("launcher");
+        let capture = tempfile::tempdir().expect("capture");
+        let script = "while IFS= read -r line; do \
+                      [ \"$line\" = stop ] && exit 0; [ \"$line\" = quit ] && exit 0; done";
+        let command = ephervex_server::ServerCommand {
+            java: PathBuf::from("/bin/sh"),
+            arguments: vec!["-c".to_owned(), script.to_owned()],
+            working_directory: root.path().join("server"),
+        };
+        let (observer, mut events) = ServerObserver::channel();
+        let server_root = root.path().to_path_buf();
+        let capture_path = capture.path().to_path_buf();
+        let run = tokio::spawn(async move {
+            ephervex_server::ServerSupervisor::run(&command, &server_root, &capture_path, &observer)
+                .await
+        });
+        while let Some(event) = events.recv().await {
+            if matches!(event, ServerEvent::Started { .. }) {
+                break;
+            }
+        }
+        let action = if stopped {
+            ephervex_server::ControlAction::Stop
+        } else {
+            ephervex_server::ControlAction::Console("quit".to_owned())
+        };
+        ephervex_server::send_control(root.path(), &action)
+            .await
+            .expect("control");
+        run.await.expect("join").expect("supervise")
+    }
+
+    fn reported_as_failed(exit: ephervex_core::ServerExit) -> bool {
+        let (events, received) = std::sync::mpsc::channel();
+        report_server_run(
+            &events,
+            ServerId::new(),
+            "Repro Server",
+            &Mutex::new(None),
+            &Ok(exit),
+        );
+        received
+            .try_iter()
+            .find_map(|event| match event {
+                Event::Activity(activity) => Some(activity.item.failed),
+                _ => None,
+            })
+            .expect("the run is reported")
+    }
+
+    /// A Stop during startup ends the server with code 0 before it logs that it
+    /// finished starting. That is the user's stop, not a failed start, in the
+    /// run's own result and in its Activity entry alike. The same exit that
+    /// nobody asked for is still a failure.
+    #[tokio::test]
+    async fn a_stop_during_startup_is_reported_as_stopped_and_a_spontaneous_exit_as_failed() {
+        let stopped = supervised_exit(true).await;
+        assert_eq!(stopped.code, Some(0));
+        assert!(!stopped.finished_starting);
+        assert!(stopped.stop_requested);
+        assert_eq!(server_failure(&Ok(stopped)), None);
+        assert!(!reported_as_failed(stopped));
+
+        let spontaneous = supervised_exit(false).await;
+        assert_eq!(spontaneous.code, Some(0));
+        assert!(!spontaneous.finished_starting);
+        assert!(!spontaneous.stop_requested);
+        assert_eq!(
+            server_failure(&Ok(spontaneous)),
+            Some(lookup("gui-run-server-stopped-before-ready"))
+        );
+        assert!(reported_as_failed(spontaneous));
+    }
+
+    #[test]
+    fn a_clean_exit_before_the_server_finished_starting_is_a_failure() {
+        assert_eq!(
+            server_failure(&Ok(ephervex_core::ServerExit {
+                code: Some(0),
+                signal: None,
+                finished_starting: false,
+                stop_requested: false,
+            })),
+            Some(lookup("gui-run-server-stopped-before-ready"))
+        );
     }
 
     #[tokio::test]
@@ -10127,6 +10256,8 @@ mod tests {
             ControlResponse::Exited(ephervex_core::ServerExit {
                 code: Some(0),
                 signal: None,
+                finished_starting: true,
+                stop_requested: false,
             }),
         ] {
             assert!(command.message(response).is_err());

@@ -40,8 +40,9 @@ answer is recorded (ADR 0037).
 **Manual by default.** Opening Diagnostics runs nothing. Diagnose checks
 configuration and hashes recorded files, with progress and cancellation. When
 a run fails, Ephervex runs a quick pass that hashes nothing, shows a notice
-beside the host with the likely cause, and never navigates away from what the
-user is looking at.
+with the likely cause above whichever of the host's surfaces is open, and never
+navigates away from what the user is looking at. Any action on the notice
+dismisses it.
 
 **A fix is previewed, and the preview is the confirmation.** A finding may
 carry a fix only when Ephervex knows exactly what to change: enabling

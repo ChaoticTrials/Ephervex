@@ -1386,6 +1386,7 @@ gui-run-crashed = Minecraft crashed
 gui-run-failed-server = The server stopped with an error
 gui-run-exited-with-error = Minecraft exited with an error.
 gui-run-server-exited-with-error = The server exited with an error.
+gui-run-server-stopped-before-ready = The server stopped before it finished starting.
 gui-run-likely-cause = Likely cause: { $cause }
 gui-run-no-cause = Diagnostics found no configuration problem. The crash report or log has the details.
 gui-run-open-diagnostics = Open Diagnostics

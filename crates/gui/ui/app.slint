@@ -1112,6 +1112,15 @@ export component AppWindow inherits Window {
                                 add-account => { root.close-workspace(); root.page = 4; root.settings-tab = "Accounts"; }
                                 surface-selected(surface) => { root.show-pane-surface(pane.id, surface); }
                                 workflow-action(workflow, action) => { root.workflow-action(pane.id, host.kind, host.id, workflow, action); }
+                                // Above every surface but Diagnostics, which already leads
+                                // with the failure. Any of its actions retires it.
+                                if host.available && host.run-failure-title != "" && pane.surface != "Diagnostics" : RunFailureNotice {
+                                    host: host;
+                                    open-diagnostics => { root.show-pane-surface(pane.id, "Diagnostics"); root.dismiss-run-failure(host.kind, host.id); }
+                                    open-crash-report => { root.show-pane-surface(pane.id, "Logs"); root.log-show(pane.id, "crashes"); root.log-open-file(pane.id, host.run-crash-report); root.dismiss-run-failure(host.kind, host.id); }
+                                    open-log => { root.show-pane-surface(pane.id, "Logs"); root.log-show(pane.id, "live"); root.dismiss-run-failure(host.kind, host.id); }
+                                    dismiss => { root.dismiss-run-failure(host.kind, host.id); }
+                                }
                                 if !host.available : EmptyState {
                                     icon: @image-url("../../../assets/icons/nav-instances.svg");
                                     title: GuiI18n.text("gui-workspace-host-gone");
@@ -1126,13 +1135,6 @@ export component AppWindow inherits Window {
                                         property <bool> narrow: self.width < 620px;
                                         Heading { text: GuiI18n.text("gui-reproduction-environment"); overflow: elide; }
                                         BodyText { text: GuiI18n.text("gui-reproduction-environment-detail"); wrap: word-wrap; }
-                                        if host.run-failure-title != "" : RunFailureNotice {
-                                            host: host;
-                                            open-diagnostics => { root.show-pane-surface(pane.id, "Diagnostics"); }
-                                            open-crash-report => { root.show-pane-surface(pane.id, "Logs"); root.log-show(pane.id, "crashes"); root.log-open-file(pane.id, host.run-crash-report); }
-                                            open-log => { root.show-pane-surface(pane.id, "Logs"); root.log-show(pane.id, "live"); }
-                                            dismiss => { root.dismiss-run-failure(host.kind, host.id); }
-                                        }
                                         Rectangle { border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface;
                                             HorizontalLayout { padding: 18px; spacing: 18px; LoaderGlyph { kind: host.client.loader-kind; } VerticalLayout { horizontal-stretch: 1; Heading { text: host.client.name; overflow: elide; } BodyText { text: GuiI18n.values("gui-target-summary", host.client.minecraft, host.client.loader); overflow: elide; } BodyText { text: host.client.storage + " | " + host.client.source; overflow: elide; } BodyText { text: host.client.path; color: Theme.text-muted; overflow: elide; } if host.client.paired-server-id != "" : BodyText { text: GuiI18n.value("gui-paired-with-host", host.client.paired-server-name); color: Theme.accent; overflow: elide; } } if host.client.paired-server-id != "" && !host.pair-shown : VerticalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-pair-show-beside"); enabled: host.pair-room; hint: host.pair-room ? "" : GuiI18n.text("gui-pair-no-room"); clicked => { root.show-linked-pair(pane.id, "server", host.client.paired-server-id); } } } }
                                         }

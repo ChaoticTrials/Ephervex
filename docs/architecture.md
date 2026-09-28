@@ -302,7 +302,11 @@ restarting reject input, and a failed or timed-out stdin write disables further
 input for that child without abandoning process supervision or output capture.
 The same classified failure feeds the existing quick Diagnostics path. Control
 completion and final run completion can arrive in either order; only a genuine
-failure triggers diagnosis. Results for an earlier failed run are ignored after
+failure triggers diagnosis. A run the user did not stop, kill, or restart fails
+when its last child exits with a nonzero code or a signal, or exits cleanly
+before logging vanilla's `Done (...)! For help, type "help"` line: Minecraft's
+server catches a startup exception, logs it, and exits with code 0.
+Results for an earlier failed run are ignored after
 a new start. The server observer reports final completion separately from each
 child exit, so a linked run releases its server guard independently of the
 client and normal restarts do not produce failure notices.

@@ -734,6 +734,8 @@ mod tests {
             Ok(ServerExit {
                 code: Some(1),
                 signal: None,
+                finished_starting: false,
+                stop_requested: false,
             })
         });
         assert!(matches!(

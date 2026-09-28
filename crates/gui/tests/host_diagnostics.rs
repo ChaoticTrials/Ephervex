@@ -17,7 +17,7 @@ use i_slint_backend_testing::{
     AccessibleRole, ElementHandle, TestingBackend, TestingBackendOptions,
 };
 use slint::platform::PointerEventButton;
-use slint::{ComponentHandle, ModelRc, PhysicalSize, SharedString, VecModel};
+use slint::{ComponentHandle, Model as _, ModelRc, PhysicalSize, SharedString, VecModel};
 
 fn strings(values: &[&str]) -> ModelRc<SharedString> {
     ModelRc::new(VecModel::from(
@@ -356,6 +356,215 @@ fn a_failed_run_is_explained_on_the_client_overview_with_a_way_to_diagnostics() 
         requests.borrow().last(),
         Some(&(1, "Diagnostics".to_owned()))
     );
+}
+
+/// A server whose run failed, as the controller shows it after a quick
+/// diagnosis.
+fn failed_server(ui: &AppWindow, crash_report: &str) {
+    server_workspace(ui, server(false));
+    support::update_host(ui, 0, |view| {
+        view.run_failure_title = lookup("gui-run-failed-server").into();
+        view.run_failure = lookup("gui-run-server-exited-with-error").into();
+        view.run_likely_cause = lookup_args(
+            "gui-run-likely-cause",
+            [("cause", Arg::from("Flywheel is turned off"))],
+        )
+        .into();
+        view.run_crash_report = crash_report.into();
+    });
+    settle(ui);
+}
+
+/// The failed-run notice itself, found by the title it is labeled with.
+fn run_failure_notice(ui: &AppWindow, title: &str) -> Option<ElementHandle> {
+    ElementHandle::find_by_accessible_label(ui, title)
+        .find(|element| element.accessible_role() == Some(AccessibleRole::Groupbox))
+}
+
+/// The surfaces the host at `index` offers, by id.
+fn surface_ids(ui: &AppWindow, index: usize) -> Vec<String> {
+    support::host(ui, index)
+        .surfaces
+        .iter()
+        .map(|surface| surface.id.to_string())
+        .collect()
+}
+
+#[test]
+fn a_failed_run_is_shown_above_every_surface_but_diagnostics() {
+    let ui = window();
+    for server_host in [false, true] {
+        let title = if server_host {
+            failed_server(&ui, "");
+            lookup("gui-run-failed-server")
+        } else {
+            client_workspace(&ui, instance());
+            support::update_host(&ui, 0, |view| {
+                view.run_failure_title = lookup("gui-run-failed-client").into();
+                view.run_failure = lookup("gui-run-exited-with-error").into();
+            });
+            lookup("gui-run-failed-client")
+        };
+        let ids = surface_ids(&ui, 0);
+        assert!(ids.iter().any(|id| id == "Console" || id == "Logs"));
+        for id in ids {
+            support::set_surface(&ui, 1, &id);
+            settle(&ui);
+            assert_eq!(
+                run_failure_notice(&ui, &title).is_some(),
+                id != "Diagnostics",
+                "server: {server_host}, surface: {id}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_failed_server_run_offers_diagnostics_without_navigating() {
+    let ui = window();
+    let requests = support::follow_surface_requests(&ui);
+    failed_server(&ui, "");
+    support::set_surface(&ui, 1, "Console");
+    settle(&ui);
+
+    assert!(run_failure_notice(&ui, &lookup("gui-run-failed-server")).is_some());
+    assert!(visible(&ui, &lookup("gui-run-server-exited-with-error")));
+    assert!(visible(
+        &ui,
+        &lookup_args(
+            "gui-run-likely-cause",
+            [("cause", Arg::from("Flywheel is turned off"))]
+        )
+    ));
+    // Offered only when this run wrote a crash report.
+    assert!(find_button(&ui, "gui-diagnosis-open-crash-report").is_none());
+    assert!(requests.borrow().is_empty());
+    assert_eq!(support::surface(&ui, 0), "Console");
+
+    button(&ui, "gui-run-open-diagnostics").mock_single_click(PointerEventButton::Left);
+    settle(&ui);
+    assert_eq!(
+        requests.borrow().last(),
+        Some(&(1, "Diagnostics".to_owned()))
+    );
+    assert_eq!(support::surface(&ui, 0), "Diagnostics");
+}
+
+#[test]
+fn every_action_on_the_server_failure_notice_dismisses_it() {
+    let report = "crash-2026-09-27_12.00.00-server.txt";
+    let ui = window();
+    let requests = support::follow_surface_requests(&ui);
+    let shown = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&shown);
+    ui.on_log_show(move |pane, mode| sink.borrow_mut().push((pane, mode.to_string())));
+    let opened = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&opened);
+    ui.on_log_open_file(move |pane, name| sink.borrow_mut().push((pane, name.to_string())));
+    let dismissed = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&dismissed);
+    ui.on_dismiss_run_failure(move |kind, id| {
+        sink.borrow_mut().push((kind.to_string(), id.to_string()));
+    });
+    for (action, surface, mode) in [
+        ("gui-run-open-diagnostics", Some("Diagnostics"), None),
+        ("gui-diagnosis-open-log", Some("Logs"), Some("live")),
+        (
+            "gui-diagnosis-open-crash-report",
+            Some("Logs"),
+            Some("crashes"),
+        ),
+        ("gui-run-dismiss", None, None),
+    ] {
+        requests.borrow_mut().clear();
+        shown.borrow_mut().clear();
+        opened.borrow_mut().clear();
+        dismissed.borrow_mut().clear();
+        failed_server(&ui, report);
+        support::set_surface(&ui, 1, "Console");
+        settle(&ui);
+
+        button(&ui, action).mock_single_click(PointerEventButton::Left);
+        settle(&ui);
+        assert_eq!(
+            requests
+                .borrow()
+                .last()
+                .map(|(pane, id)| (*pane, id.as_str())),
+            surface.map(|surface| (1, surface)),
+            "{action}"
+        );
+        assert_eq!(
+            shown
+                .borrow()
+                .last()
+                .map(|(pane, mode)| (*pane, mode.as_str())),
+            mode.map(|mode| (1, mode)),
+            "{action}"
+        );
+        let expected_open: &[(i32, String)] = if action == "gui-diagnosis-open-crash-report" {
+            &[(1, report.to_owned())]
+        } else {
+            &[]
+        };
+        assert_eq!(opened.borrow().as_slice(), expected_open, "{action}");
+        assert_eq!(
+            dismissed.borrow().as_slice(),
+            [("server".to_owned(), "server".to_owned())],
+            "{action}"
+        );
+    }
+}
+
+/// Two server Overviews side by side on the smallest window: each notice's
+/// actions stay inside their own pane.
+#[test]
+fn the_server_failure_notice_stays_inside_its_pane_at_the_smallest_split() {
+    let ui = window();
+    ui.window().set_size(PhysicalSize::new(980, 3000));
+    for scale in [1.0, 1.5] {
+        ui.global::<Theme>().set_text_scale(scale);
+        failed_server(&ui, "crash-2026-09-27_12.00.00-server.txt");
+        let pane = |id: i32, column: i32| {
+            let mut pane = support::pane(id, 0, "Overview");
+            pane.column = column;
+            pane.can_split_beside = false;
+            pane.can_close = true;
+            pane
+        };
+        ui.set_workspace_panes(rows(vec![pane(1, 0), pane(2, 1)]));
+        settle(&ui);
+        let width = ui
+            .window()
+            .size()
+            .to_logical(ui.window().scale_factor())
+            .width;
+        for message in [
+            "gui-run-open-diagnostics",
+            "gui-diagnosis-open-crash-report",
+            "gui-diagnosis-open-log",
+            "gui-run-dismiss",
+        ] {
+            let mut placed: Vec<(f32, f32)> =
+                ElementHandle::find_by_accessible_label(&ui, &lookup(message))
+                    .filter(|element| element.accessible_role() == Some(AccessibleRole::Button))
+                    .map(|element| {
+                        let x = element.absolute_position().x;
+                        (x, x + element.size().width)
+                    })
+                    .collect();
+            placed.sort_by(|left, right| left.0.total_cmp(&right.0));
+            assert_eq!(placed.len(), 2, "at {scale}: one {message} per pane");
+            assert!(
+                placed[0].1 <= placed[1].0,
+                "at {scale}: {message} in the left pane reaches the right one: {placed:?}"
+            );
+            assert!(
+                placed[1].1 <= width + 0.5,
+                "at {scale}: {message} leaves the window: {placed:?}"
+            );
+        }
+    }
 }
 
 #[test]

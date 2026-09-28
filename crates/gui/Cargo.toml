@@ -54,3 +54,5 @@ i-slint-backend-testing.workspace = true
 # A disposable launcher root, so the settings screen's save path can be proven
 # against a real configuration file rather than a stand-in for one.
 tempfile.workspace = true
+# A real supervised child, so how a run is reported follows how it really ended.
+ephervex-server.workspace = true

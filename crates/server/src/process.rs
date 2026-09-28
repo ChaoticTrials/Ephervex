@@ -4,6 +4,7 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use ephervex_model::OperationId;
@@ -41,6 +42,14 @@ pub struct ServerCommand {
 pub struct ServerExit {
     pub code: Option<i32>,
     pub signal: Option<i32>,
+    /// Whether the process announced that it finished starting before it
+    /// ended. A server that fails during startup can still exit with code 0.
+    #[serde(default)]
+    pub finished_starting: bool,
+    /// Whether a Stop or Kill through the control channel ended the process.
+    /// A restart's stop is not one: the run goes on with a new process.
+    #[serde(default)]
+    pub stop_requested: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -213,7 +222,9 @@ async fn supervise_commands(
     let mut restart_waiters: Vec<oneshot::Sender<ControlResponse>> = Vec::new();
     let mut last_exit = None;
     loop {
-        let (mut child, mut stdin, readers, pid) = match spawn_child(command, observer, capture) {
+        let finished_starting = Arc::new(AtomicBool::new(false));
+        let spawned = spawn_child(command, observer, capture, &finished_starting);
+        let (mut child, mut stdin, readers, pid) = match spawned {
             Ok(spawned) => spawned,
             // The old child is gone, which is what the runtime evidence has to
             // say: the server is stopped, and whoever asked for the restart is
@@ -226,6 +237,8 @@ async fn supervise_commands(
                 return Ok(last_exit.unwrap_or(ServerExit {
                     code: None,
                     signal: None,
+                    finished_starting: false,
+                    stop_requested: false,
                 }));
             }
             Err(error) => return Err(error),
@@ -237,10 +250,12 @@ async fn supervise_commands(
             let _ = waiter.send(ControlResponse::Restarted { pid });
         }
 
-        let (exit, restart, waiters) = supervise_child(&mut child, &mut stdin, requests).await?;
+        let (mut exit, restart, waiters) =
+            supervise_child(&mut child, &mut stdin, requests).await?;
         for reader in readers {
             let _ = reader.await;
         }
+        exit.finished_starting = finished_starting.load(Ordering::Relaxed);
         observer.emit(ServerEvent::Exited(exit));
         last_exit = Some(exit);
         if restart {
@@ -261,6 +276,7 @@ fn spawn_child(
     command: &ServerCommand,
     observer: &ServerObserver,
     capture: &Arc<Mutex<OutputCapture>>,
+    finished_starting: &Arc<AtomicBool>,
 ) -> ServerResult<(Child, ChildStdin, Vec<ReaderTask>, u32)> {
     std::fs::create_dir_all(&command.working_directory).map_err(|source| ServerError::Io {
         path: command.working_directory.clone(),
@@ -293,12 +309,14 @@ fn spawn_child(
             CaptureStream::Stdout,
             Arc::clone(capture),
             observer.clone(),
+            Arc::clone(finished_starting),
         )),
         tokio::spawn(read_pipe(
             stderr,
             CaptureStream::Stderr,
             Arc::clone(capture),
             observer.clone(),
+            Arc::clone(finished_starting),
         )),
     ];
     Ok((child, stdin, readers, pid))
@@ -319,7 +337,9 @@ async fn supervise_child(
         tokio::select! {
             _ = interval.tick() => {
                 if let Some(status) = child.try_wait().map_err(ServerError::ProcessIo)? {
-                    return Ok((exit_from_status(status), restart, completion_waiters));
+                    let mut exit = exit_from_status(status);
+                    exit.stop_requested = stopping && !restart;
+                    return Ok((exit, restart, completion_waiters));
                 }
             }
             request = requests.recv() => {
@@ -411,6 +431,7 @@ async fn read_pipe<R>(
     stream: CaptureStream,
     capture: Arc<Mutex<OutputCapture>>,
     observer: ServerObserver,
+    finished_starting: Arc<AtomicBool>,
 ) where
     R: tokio::io::AsyncRead + Unpin,
 {
@@ -425,6 +446,9 @@ async fn read_pipe<R>(
             Ok(Some(omitted_bytes)) => {
                 let mut capture = capture.lock().await;
                 let line = capture.push_limited(stream, &bytes, omitted_bytes);
+                if announces_startup_finished(&line.text) {
+                    finished_starting.store(true, Ordering::Relaxed);
+                }
                 observer.emit(ServerEvent::Output(line));
                 for event in capture.drain_events() {
                     match event {
@@ -444,6 +468,15 @@ async fn read_pipe<R>(
             }
         }
     }
+}
+
+/// The dedicated server's own announcement that it accepts players:
+/// `Done (<seconds>)! For help, type "help"`, logged by vanilla's
+/// `DedicatedServer` once startup completes. Loaders keep the line as is.
+fn announces_startup_finished(text: &str) -> bool {
+    text.split_once("Done (")
+        .and_then(|(_, rest)| rest.split_once(')'))
+        .is_some_and(|(_, rest)| rest.starts_with("! For help, type \"help\""))
 }
 
 async fn read_limited_line<R>(
@@ -611,6 +644,8 @@ fn exit_from_status(status: std::process::ExitStatus) -> ServerExit {
     ServerExit {
         code: status.code(),
         signal: status.signal(),
+        finished_starting: false,
+        stop_requested: false,
     }
 }
 
@@ -1068,5 +1103,75 @@ mod tests {
             ControlResponse::Exited(_)
         ));
         task.await.expect("join").expect("supervise");
+    }
+
+    /// Runs a child that prints `line` and exits with code 0 once it reads a
+    /// console line that is not a stop, so nothing asked it to stop. It waits
+    /// for that line so its exit cannot outrun the supervisor recording it.
+    async fn run_to_exit(line: &str) -> ServerExit {
+        let root = tempfile::tempdir().expect("root");
+        std::fs::create_dir_all(root.path().join(".launcher")).expect("launcher");
+        let capture = tempfile::tempdir().expect("capture");
+        let script = format!(
+            "echo '{line}'; while IFS= read -r input; do [ \"$input\" = quit ] && exit 0; done"
+        );
+        let command = ServerCommand {
+            java: PathBuf::from("/bin/sh"),
+            arguments: vec!["-c".to_owned(), script],
+            working_directory: root.path().join("server"),
+        };
+        let (observer, mut events) = ServerObserver::channel();
+        let server_root = root.path().to_path_buf();
+        let capture_path = capture.path().to_path_buf();
+        let task = tokio::spawn(async move {
+            ServerSupervisor::run(&command, &server_root, &capture_path, &observer).await
+        });
+        while let Some(event) = events.recv().await {
+            if matches!(event, ServerEvent::Started { .. }) {
+                break;
+            }
+        }
+        send_control(root.path(), &ControlAction::Console("quit".to_owned()))
+            .await
+            .expect("console");
+        task.await.expect("join").expect("supervise")
+    }
+
+    #[tokio::test]
+    async fn a_clean_exit_before_startup_finished_is_recorded_as_such() {
+        let failed = run_to_exit(
+            "[main/ERROR] [net.minecraft.server.Main/FATAL]: Failed to start the minecraft server",
+        )
+        .await;
+        assert_eq!(failed.code, Some(0));
+        assert!(!failed.finished_starting);
+        assert!(!failed.stop_requested);
+
+        let stopped = run_to_exit(
+            r#"[Server thread/INFO] [minecraft/DedicatedServer]: Done (4.211s)! For help, type "help""#,
+        )
+        .await;
+        assert_eq!(stopped.code, Some(0));
+        assert!(stopped.finished_starting);
+        assert!(!stopped.stop_requested);
+    }
+
+    #[test]
+    fn only_the_dedicated_servers_ready_line_announces_startup_finished() {
+        for ready in [
+            r#"[28Sept.2026 17:49:01.433] [Server thread/INFO] [minecraft/DedicatedServer]: Done (12.345s)! For help, type "help""#,
+            r#"[12:00:00] [Server thread/INFO]: Done (5.0s)! For help, type "help""#,
+            r#"[12:00:00 INFO]: Done (3.101s)! For help, type "help" or "?""#,
+        ] {
+            assert!(announces_startup_finished(ready), "{ready}");
+        }
+        for other in [
+            "[main/ERROR] [net.minecraft.server.Main/FATAL]: Failed to start the minecraft server",
+            "[Worker-Main-1/INFO]: Done (preparing spawn area)",
+            "[Server thread/INFO]: Preparing spawn area: 0%",
+            r#"For help, type "help""#,
+        ] {
+            assert!(!announces_startup_finished(other), "{other}");
+        }
     }
 }
