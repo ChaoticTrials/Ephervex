@@ -13,9 +13,13 @@ mod support;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use ephervex_gui::ui::{AppWindow, DiagnosticRow, GuiI18n, LogChunk, LogView, ServerRow};
+use ephervex_gui::ui::{
+    AppWindow, DiagnosticRow, GuiI18n, InstanceRow, LogChunk, LogView, ServerRow,
+};
 use ephervex_i18n::{Arg, lookup, lookup_args};
-use i_slint_backend_testing::{ElementHandle, TestingBackend, TestingBackendOptions};
+use i_slint_backend_testing::{
+    AccessibleRole, ElementHandle, TestingBackend, TestingBackendOptions,
+};
 use slint::platform::{PointerEventButton, WindowEvent};
 use slint::{
     ComponentHandle, LogicalPosition, Model, ModelRc, PhysicalSize, SharedString, VecModel,
@@ -150,6 +154,88 @@ fn a_saved_log_is_filterable_like_the_live_one() {
         .mock_single_click(PointerEventButton::Left);
 
     assert_eq!(levels.borrow().as_slice(), ["error"]);
+}
+
+/// Saved logs are searched from the tab's header, as crash reports are, before
+/// and after one is opened, and the opened log does not bring a second field.
+#[test]
+fn saved_logs_are_searched_from_the_header_like_crash_reports() {
+    let ui = window();
+    let searches: Rc<RefCell<Vec<(i32, String)>>> = Rc::default();
+    let record = Rc::clone(&searches);
+    ui.on_log_search(move |pane, query| record.borrow_mut().push((pane, query.to_string())));
+    let fields = |ui: &AppWindow, message: &str| {
+        ElementHandle::find_by_accessible_label(ui, &lookup(message))
+            .filter(|element| element.accessible_role() == Some(AccessibleRole::TextInput))
+            .count()
+    };
+    let find = |ui: &AppWindow| {
+        ElementHandle::find_by_accessible_label(ui, &lookup("gui-find"))
+            .find(|element| element.size().width > 0.0)
+            .expect("a Find button")
+    };
+
+    server_logs(&ui);
+    set_view(&ui, |view| {
+        view.mode = "files".into();
+        view.files = ModelRc::new(VecModel::from(vec![log_file()]));
+    });
+    settle(&ui);
+    assert_eq!(fields(&ui, "gui-search-open-log"), 1);
+    assert_eq!(find(&ui).accessible_enabled(), Some(false));
+
+    set_view(&ui, |view| {
+        view.file = "2026-08-30-1.log.gz".into();
+        view.chunks = chunks(6);
+        view.has_content = true;
+    });
+    settle(&ui);
+    assert_eq!(fields(&ui, "gui-search-open-log"), 1);
+    assert_eq!(fields(&ui, "gui-search-retained-logs"), 0);
+    ElementHandle::find_by_accessible_label(&ui, &lookup("gui-search-open-log"))
+        .find(|element| element.accessible_role() == Some(AccessibleRole::TextInput))
+        .expect("the search field")
+        .mock_single_click(PointerEventButton::Left);
+    for character in "line 3".chars() {
+        key(&ui, &character.to_string());
+    }
+    find(&ui).mock_single_click(PointerEventButton::Left);
+    assert_eq!(searches.borrow().as_slice(), [(1, "line 3".to_owned())]);
+
+    // The captured output keeps the search of its own viewer.
+    set_view(&ui, |view| view.mode = "live".into());
+    settle(&ui);
+    assert_eq!(fields(&ui, "gui-search-open-log"), 0);
+    assert_eq!(fields(&ui, "gui-search-retained-logs"), 1);
+}
+
+/// The live log's Find stays a button beside its search field rather than
+/// taking the toolbar's spare width, on a client and a server.
+#[test]
+fn the_live_log_find_button_keeps_its_own_width() {
+    let ui = window();
+    for server_host in [true, false] {
+        if server_host {
+            server_logs(&ui);
+        } else {
+            support::show_client(&ui, client(), "Logs");
+            set_view(&ui, |view| view.mode = "live".into());
+        }
+        settle(&ui);
+        let field =
+            ElementHandle::find_by_accessible_label(&ui, &lookup("gui-search-retained-logs"))
+                .find(|element| element.accessible_role() == Some(AccessibleRole::TextInput))
+                .expect("the search field");
+        let find = ElementHandle::find_by_accessible_label(&ui, &lookup("gui-find"))
+            .find(|element| element.size().width > 0.0)
+            .expect("a Find button");
+        assert!(
+            find.size().width < field.size().width,
+            "server: {server_host}: Find is {}px beside a {}px field",
+            find.size().width,
+            field.size().width
+        );
+    }
 }
 
 /// A drag that leaves the row it began on has to reach the rows below it.
@@ -758,6 +844,14 @@ fn install_i18n(ui: &AppWindow) {
         )
         .into()
     });
+}
+
+fn client() -> InstanceRow {
+    InstanceRow {
+        id: "repro-client".into(),
+        name: "Repro Client".into(),
+        ..InstanceRow::default()
+    }
 }
 
 fn server() -> ServerRow {

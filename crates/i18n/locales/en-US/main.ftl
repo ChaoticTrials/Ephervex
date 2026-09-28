@@ -2013,6 +2013,7 @@ gui-crash-name = Crash: { $value }
 gui-log-name = Log: { $value }
 gui-select-diagnostic = Select a diagnostic file
 gui-search-open-report = Search the open report...
+gui-search-open-log = Search the open log...
 gui-find = Find
 gui-copy = Copy
 gui-folder = Folder

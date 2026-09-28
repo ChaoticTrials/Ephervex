@@ -18,6 +18,8 @@ export component LiveLogViewer inherits Rectangle {
     // The search the rows are narrowed by. The field starts from it and is
     // reset whenever it changes, such as when another log is opened.
     in property <string> query;
+    // False where the view it sits in already has the search field.
+    in property <bool> searchable: true;
     in property <bool> wrap-lines;
     in property <bool> follow;
     in property <bool> trace-enabled;
@@ -47,7 +49,6 @@ export component LiveLogViewer inherits Rectangle {
     callback select-all();
     callback follow-changed(bool);
     callback wrap-changed(bool);
-    changed query => { search-field.text = root.query; }
     // Ten characters wide divided by ten. Exact in a fixed-width family,
     // and the reason the monospace family has to resolve before a column
     // can be worked out from a pointer position.
@@ -89,8 +90,14 @@ export component LiveLogViewer inherits Rectangle {
             background: Theme.surface;
             HorizontalLayout {
                 padding-left: 10px; padding-right: 10px; spacing: 8px; cross-axis-alignment: center;
-                search-field := TextField { placeholder: GuiI18n.text("gui-search-retained-logs"); input-type: InputType.search; width: 230px; init => { self.text = root.query; } accepted => { root.search(self.text); } accessible-label: GuiI18n.text("gui-search-retained-logs"); }
-                AppButton { text: GuiI18n.text("gui-find"); clicked => { root.search(search-field.text); } }
+                if root.searchable : HorizontalLayout {
+                    spacing: 8px;
+                    horizontal-stretch: 0;
+                    property <string> query: root.query;
+                    changed query => { search-field.text = self.query; }
+                    search-field := TextField { placeholder: GuiI18n.text("gui-search-retained-logs"); input-type: InputType.search; width: 230px; init => { self.text = root.query; } accepted => { root.search(self.text); } accessible-label: GuiI18n.text("gui-search-retained-logs"); }
+                    AppButton { text: GuiI18n.text("gui-find"); clicked => { root.search(search-field.text); } }
+                }
                 FilterChip { text: GuiI18n.text("gui-wrap-lines"); accessible-name: GuiI18n.text("gui-wrap-lines"); selected: root.wrap-lines; clicked => { root.wrap-changed(!root.wrap-lines); } }
                 FilterChip { text: root.follow ? GuiI18n.text("gui-following") : GuiI18n.text("gui-jump-latest"); accessible-name: root.follow ? GuiI18n.text("gui-pause-following") : GuiI18n.text("gui-jump-latest"); selected: root.follow; clicked => { root.follow-changed(!root.follow); } }
                 AppButton { text: GuiI18n.text("gui-copy-selection"); enabled: root.has-selection; clicked => { root.copy-selection(); } }
