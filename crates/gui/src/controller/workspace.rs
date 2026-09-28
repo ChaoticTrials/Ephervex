@@ -335,8 +335,17 @@ impl WorkspaceState {
                     lifecycle.stamp_server(&mut view.server);
                     view.available = true;
                 }
+                let paired = self
+                    .clients
+                    .iter()
+                    .find(|row| !row.id.is_empty() && row.id == view.server.paired_client_id);
+                (view.pair_state, view.pair_state_kind) = paired
+                    .map_or_else(Default::default, |row| {
+                        (row.state.clone(), row.state_kind.clone())
+                    });
             }
         }
+        lifecycle.stamp_pair(&mut view);
         (view.pair_shown, view.pair_room) = pair_placement(self.layout.as_ref(), &view);
         view
     }
@@ -580,6 +589,9 @@ fn change_row(row: &mut HostView, reported: &HostView) {
     updated.pending_servers = row.pending_servers.clone();
     updated.pair_shown = row.pair_shown;
     updated.pair_room = row.pair_room;
+    updated.pair_state = row.pair_state.clone();
+    updated.pair_state_kind = row.pair_state_kind.clone();
+    updated.pair_restart_stage = row.pair_restart_stage.clone();
     *row = updated;
 }
 

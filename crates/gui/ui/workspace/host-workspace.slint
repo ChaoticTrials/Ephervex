@@ -211,8 +211,12 @@ export component HostWorkspace inherits Rectangle {
     in property <bool> can-split-beside;
     in property <bool> can-split-below;
     in property <bool> can-close;
-    // Whether this host is one side of a linked pair.
+    // Whether this host is one side of a linked pair, and what its pill
+    // says about the other side.
     in property <bool> paired;
+    in property <string> pair-label;
+    in property <string> pair-state-kind;
+    property <color> pair-tone: root.pair-state-kind == "starting" || root.pair-state-kind == "restarting" ? Theme.warning : root.pair-state-kind == "running" ? Theme.success : Theme.accent;
     callback choose-host();
     callback split-beside();
     callback split-below();
@@ -240,7 +244,7 @@ export component HostWorkspace inherits Rectangle {
                     clicked => { root.choose-host(); }
                 }
                 VerticalLayout { alignment: center; Pill { text: root.restart-stage != "" ? GuiI18n.text("gui-state-restarting") : root.status; tone-color: root.restart-stage != "" || root.status-kind == "starting" ? Theme.warning : root.status-kind == "running" ? Theme.success : Theme.text-secondary; } }
-                if root.paired && root.width >= 420px : VerticalLayout { alignment: center; Pill { text: GuiI18n.text("gui-paired"); tone-color: Theme.accent; } }
+                if root.paired && root.width >= 520px : VerticalLayout { alignment: center; Pill { text: root.pair-label; tone-color: root.pair-tone; } }
                 if root.kill-visible : AppButton { text: GuiI18n.text("gui-kill"); accessible-name: GuiI18n.values("gui-pane-action", GuiI18n.text("gui-kill"), root.pane-label); tone: "danger"; enabled: root.kill-enabled; clicked => { root.kill(); } }
                 if root.restart-visible : AppButton { text: GuiI18n.text("gui-restart"); accessible-name: GuiI18n.values("gui-pane-action", GuiI18n.text("gui-restart"), root.pane-label); enabled: root.restart-enabled && !root.occupied; hint: root.restart-hint; clicked => { root.restart(); } }
                 AppButton { text: root.primary-label; accessible-name: GuiI18n.values("gui-pane-action", root.primary-label, root.pane-label); tone: root.primary-tone; enabled: root.primary-enabled && !root.primary-waits; clicked => { root.primary(); } }
@@ -262,7 +266,7 @@ export component HostWorkspace inherits Rectangle {
             AppButton { text: root.back-label; clicked => { root.back(); } }
             Heading { text: root.title; font-size: Theme.workspace-title-size; overflow: elide; }
             VerticalLayout { alignment: center; Pill { text: root.restart-stage != "" ? GuiI18n.text("gui-state-restarting") : root.status; tone-color: root.restart-stage != "" || root.status-kind == "starting" ? Theme.warning : root.status-kind == "running" ? Theme.success : Theme.text-secondary; } }
-            if root.paired : VerticalLayout { alignment: center; Pill { text: GuiI18n.text("gui-paired"); tone-color: Theme.accent; } }
+            if root.paired : VerticalLayout { alignment: center; Pill { text: root.pair-label; tone-color: root.pair-tone; } }
             Rectangle { horizontal-stretch: 1; }
             if root.can-split-beside : IconButton { icon: @image-url("../../../../assets/icons/split-beside.svg"); accessible-name: GuiI18n.text("gui-workspace-split"); clicked => { root.split-beside(); } }
             AppButton { text: GuiI18n.text("gui-open-folder"); clicked => { root.open-folder(); } }

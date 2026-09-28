@@ -566,6 +566,10 @@ export struct HostView {
     // be added for it without changing any pane.
     pair-shown: bool,
     pair-room: bool,
+    // The paired host's state and restart stage, empty when there is none.
+    pair-state: string,
+    pair-state-kind: string,
+    pair-restart-stage: string,
     // The newest crash review; an empty report when the host never crashed.
     crash-report: string,
     crash-failure: string,

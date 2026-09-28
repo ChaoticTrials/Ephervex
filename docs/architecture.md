@@ -606,8 +606,9 @@ untouched, and keeps the client unpaired while the server it declined stays
 its first.
 
 Either side's Overview names its counterpart and pairs, unpairs, and shows it
-beside, and every pane showing a paired host carries a Paired badge beside its
-state, whichever surface is shown. Show beside reveals the counterpart through the layout model rather than by
+beside, and every pane showing a paired host carries a badge beside its state
+that names the counterpart's own state, restarts included, whichever surface is
+shown. Show beside reveals the counterpart through the layout model rather than by
 arranging panes itself:
 
 - a pane that already shows the counterpart is reused and nothing changes;

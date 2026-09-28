@@ -1589,6 +1589,40 @@ impl HostLifecycle {
         self.servers.stamp(server, row, !stage.is_empty());
         *row != before
     }
+
+    /// Writes the paired host's state onto a host view. A client's paired
+    /// server is one of its linked servers, which are stamped already; a
+    /// server's paired client keeps the state its row had at render.
+    fn stamp_pair(&self, view: &mut HostView) -> bool {
+        let before = (
+            view.pair_state.clone(),
+            view.pair_state_kind.clone(),
+            view.pair_restart_stage.clone(),
+        );
+        if view.kind == "client" {
+            let paired = view
+                .linked_servers
+                .iter()
+                .find(|row| !row.id.is_empty() && row.id == view.client.paired_server_id);
+            (
+                view.pair_state,
+                view.pair_state_kind,
+                view.pair_restart_stage,
+            ) = paired.map_or_else(Default::default, |row| {
+                (row.state, row.state_kind, row.restart_stage)
+            });
+        } else {
+            view.pair_restart_stage = backend::parse_instance_id(&view.server.paired_client_id)
+                .map_or("", |client| self.stage_of(InstalledHost::Instance(client)))
+                .into();
+        }
+        before
+            != (
+                view.pair_state.clone(),
+                view.pair_state_kind.clone(),
+                view.pair_restart_stage.clone(),
+            )
+    }
 }
 
 /// Only classified failures enter the existing quick Diagnostics path.
@@ -1642,6 +1676,7 @@ fn stamp_host_lifecycle(ui: &AppWindow, lifecycle: &HostLifecycle) {
             lifecycle.stamp_server(row)
         });
     }
+    stamp_rows(&views, |view: &mut HostView| lifecycle.stamp_pair(view));
 }
 
 /// Ends a pair start the worker settled, in every view of both sides.
@@ -10990,6 +11025,50 @@ mod tests {
             [(client, Surface::Mods), (server, Surface::Overview)]
         );
         assert!(first_view(&ui).pair_shown);
+    }
+
+    #[test]
+    fn each_side_of_a_pair_shows_the_state_of_the_other() {
+        let ui = test_window();
+        let (workspace, _, client, host) = paired_workspace(&ui);
+        let InstalledHost::Server(server) = host else {
+            unreachable!()
+        };
+        let (mut clients, servers) = paired_rows(client, host, false, false);
+        clients[0].state = "Running".into();
+        clients[0].state_kind = "running".into();
+        workspace.state.borrow_mut().set_rows(clients, servers);
+        workspace.open(&ui, client, Surface::Mods);
+        ui.invoke_split_pane_beside(1);
+        ui.invoke_choose_pane_host(2, "server".into(), host.id().into());
+        let view_of = |host: InstalledHost| {
+            ui.get_host_views()
+                .iter()
+                .find(|view| view.id == host.id().as_str())
+                .unwrap()
+        };
+        assert_eq!(view_of(host).pair_state, "Running");
+        assert_eq!(view_of(host).pair_state_kind, "running");
+
+        apply_server_tool_event(
+            &ui,
+            &workspace,
+            server,
+            backend::ServerToolEvent::Finished {
+                failure: Some("exit code 1".to_owned()),
+            },
+        );
+        assert_eq!(view_of(host).server.state_kind, "failed");
+        assert_eq!(view_of(client).pair_state, view_of(host).server.state);
+        assert_eq!(view_of(client).pair_state_kind, "failed");
+
+        assert!(workspace.lifecycle.borrow_mut().request(host).is_some());
+        assert!(workspace.lifecycle.borrow_mut().request(client).is_some());
+        stamp_host_lifecycle(&ui, &workspace.lifecycle.borrow());
+        assert_eq!(view_of(client).pair_state_kind, "restarting");
+        assert_eq!(view_of(client).pair_state, lookup("gui-state-restarting"));
+        assert_eq!(view_of(host).pair_restart_stage, "stopping");
+        assert_eq!(view_of(host).pair_state, "Running");
     }
 
     #[test]
