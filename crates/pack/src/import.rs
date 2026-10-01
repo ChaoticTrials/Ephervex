@@ -450,7 +450,7 @@ fn retain_source(
     let kind = recipe.source_kind;
     let manifest_entry = manifest_entry_for(kind);
     if let Some(entry) = manifest_entry {
-        let bytes = archive.read_entry(entry)?;
+        let bytes = archive.read_manifest(entry)?;
         let relative = store.retain_manifest(kind, entry, &bytes)?;
         recipe.provider_metadata.manifest_file = Some(relative);
     }

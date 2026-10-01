@@ -634,6 +634,7 @@ mod tests {
                 max_entries: 100,
                 max_total_bytes: 64,
                 max_entry_bytes: 64,
+                ..ExtractionLimits::default()
             },
             reserved: &[],
         })

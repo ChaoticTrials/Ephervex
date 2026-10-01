@@ -953,7 +953,7 @@ error-pack-entry-type-unsupported = The pack contains an archive entry Ephervex 
 .action = Ephervex extracts ordinary files and folders only.
 
 error-pack-limit-exceeded = The pack is larger than Ephervex is willing to unpack.
-.action = Ephervex stopped rather than filling the disk. The limits are deliberately generous.
+.action = Ephervex stopped before the pack could fill the disk or memory. The limits are deliberately generous.
 
 error-pack-entry-id-invalid = The pack names a mod by an id that identifies nothing.
 .action = { $field } is { $value }, which no project or file can have. Ephervex refused the whole pack rather than guessing which mod was meant.

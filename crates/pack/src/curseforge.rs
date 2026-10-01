@@ -106,7 +106,7 @@ pub struct ParsedExport {
 
 /// Reads and validates the `manifest.json` inside an open archive.
 pub fn read(archive: &mut PackArchive) -> PackResult<ParsedExport> {
-    let manifest = archive.read_entry(CURSEFORGE_MANIFEST)?;
+    let manifest = archive.read_manifest(CURSEFORGE_MANIFEST)?;
     let archive_name = archive.file_name().map(ToOwned::to_owned);
     let mut parsed = parse(&manifest, archive_name)?;
     // The manifest names the directory; the archive decides whether it is

@@ -81,7 +81,7 @@ pub struct ParsedPack {
 
 /// Reads and validates the `modrinth.index.json` inside an open archive.
 pub fn read(archive: &mut PackArchive, allowlist: &DomainAllowlist) -> PackResult<ParsedPack> {
-    let manifest = archive.read_entry(MODRINTH_INDEX)?;
+    let manifest = archive.read_manifest(MODRINTH_INDEX)?;
     let archive_name = archive.file_name().map(ToOwned::to_owned);
     let layers = present_layers(archive);
     let mut parsed = parse(&manifest, allowlist, archive_name)?;

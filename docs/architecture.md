@@ -1220,7 +1220,9 @@ Archive entry names, symlink targets, and provider paths are untrusted. The
 shared path validator rejects absolute paths, prefixes, traversal, empty
 normalized paths, and launcher-owned metadata destinations. Extractors also
 refuse writes through links created by earlier entries and enforce entry-count
-and uncompressed-size limits.
+and uncompressed-size limits. The pack archive reader enforces sizes while an
+entry is inflated, not only from its declared size, and gives a manifest a much
+smaller ceiling than other entries because it is held in memory to be parsed.
 
 Imported pre-launch commands, post-exit commands, wrapper commands, and custom
 Java paths are never executed. Unsupported customizations are reported or

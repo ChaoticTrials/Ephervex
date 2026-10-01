@@ -54,6 +54,7 @@ fn jar_limits() -> ExtractionLimits {
         max_entries: 200_000,
         max_total_bytes: MAX_LOCAL_MOD_BYTES,
         max_entry_bytes: MAX_LOCAL_MOD_BYTES,
+        ..ExtractionLimits::default()
     }
 }
 

@@ -22,14 +22,18 @@
 //!   `overrides/`, and `client-overrides/` to stay under three separate caps.
 //! * **Declared sizes are never trusted.** Each entry is read through a bounded
 //!   reader, because the central directory's size field is attacker-controlled
-//!   text like everything else in the file.
+//!   text like everything else in the file. The bound is the tighter of the
+//!   entry's own ceiling and what is left of the shared total, so no entry is
+//!   accepted past either.
+//! * **Manifests have their own, much smaller ceiling.** A manifest is held in
+//!   memory to be parsed, so the disk-sized entry ceiling is the wrong bound.
 //!
 //! Extraction is synchronous. `zip` is a blocking API, and wrapping it in
 //! `spawn_blocking` is the caller's decision because only the caller knows
 //! whether it is on a runtime.
 
 use std::fs::File;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use tracing::{debug, instrument};
@@ -53,6 +57,9 @@ pub struct ExtractionLimits {
     /// Guards against one entry claiming the whole budget, which is what a bomb
     /// built from a single stream looks like.
     pub max_entry_bytes: u64,
+    /// The largest manifest read into memory. A large real-world index is a
+    /// few megabytes.
+    pub max_manifest_bytes: u64,
 }
 
 impl Default for ExtractionLimits {
@@ -61,7 +68,35 @@ impl Default for ExtractionLimits {
             max_entries: 100_000,
             max_total_bytes: 8 * 1024 * 1024 * 1024,
             max_entry_bytes: 2 * 1024 * 1024 * 1024,
+            max_manifest_bytes: 64 * 1024 * 1024,
         }
+    }
+}
+
+/// How many more bytes one entry may produce, and which limit says so.
+#[derive(Debug, Clone, Copy)]
+struct Allowance {
+    limit: &'static str,
+    allowed: u64,
+    /// Already counted against `allowed` before this entry.
+    spent: u64,
+}
+
+impl Allowance {
+    const fn bytes(self) -> u64 {
+        self.allowed.saturating_sub(self.spent)
+    }
+
+    /// Refuses `produced` bytes when they overrun the allowance.
+    const fn check(self, produced: u64) -> PackResult<()> {
+        if produced > self.bytes() {
+            return Err(PackError::LimitExceeded {
+                limit: self.limit,
+                allowed: self.allowed,
+                reached: self.spent.saturating_add(produced),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -216,18 +251,23 @@ impl PackArchive {
         nested_directory.then_some(root).flatten()
     }
 
-    /// Reads one entry into memory, bounded by the per-entry limit.
+    /// Reads a manifest into memory, bounded by the manifest ceiling.
     ///
     /// Manifests are the only thing read this way; everything else is streamed
     /// to disk.
-    pub fn read_entry(&mut self, name: &'static str) -> PackResult<Vec<u8>> {
+    pub fn read_manifest(&mut self, name: &'static str) -> PackResult<Vec<u8>> {
         let index = self
             .zip
             .index_for_name(name)
             .ok_or(PackError::ManifestMissing { entry: name })?;
 
+        let allowance = self.allowance(&[
+            ("manifest-size", self.limits.max_manifest_bytes),
+            ("entry-size", self.limits.max_entry_bytes),
+        ]);
+        self.charge_entry()?;
+
         let path = self.path.clone();
-        let limit = self.limits.max_entry_bytes;
         let mut entry = self
             .zip
             .by_index(index)
@@ -235,17 +275,24 @@ impl PackArchive {
                 path: path.clone(),
                 source,
             })?;
+        // The declared size can lie, so the read below is bounded as well.
+        allowance.check(entry.size())?;
 
-        let mut bytes = Vec::new();
-        // Bounded by the limit rather than by the declared size: the header's
-        // figure is attacker-controlled, and a manifest is small enough that
-        // anything approaching the cap is already an attack.
-        let read = (&mut entry)
-            .take(limit.saturating_add(1))
-            .read_to_end(&mut bytes)
-            .map_err(|source| PackError::Unreadable { path, source })? as u64;
+        let ceiling = usize::try_from(allowance.bytes().saturating_add(1)).unwrap_or(usize::MAX);
+        let mut bytes = Vec::with_capacity(usize::try_from(entry.size()).unwrap_or(0));
+        let read = stream_entry(&mut entry, allowance, &path, &mut |chunk| {
+            // Doubling growth, capped so an understated size cannot double the
+            // ceiling either.
+            let needed = bytes.len().saturating_add(chunk.len());
+            if needed > bytes.capacity() {
+                let grown = needed.max(bytes.len().saturating_mul(2)).min(ceiling);
+                bytes.reserve_exact(grown.max(needed) - bytes.len());
+            }
+            bytes.extend_from_slice(chunk);
+            Ok(())
+        })?;
         drop(entry);
-        self.charge(read, 1)?;
+        self.spend_bytes(read);
         Ok(bytes)
     }
 
@@ -350,11 +397,11 @@ impl PackArchive {
                 continue;
             }
 
-            // Charged before the read so a bomb is refused on its declared size
-            // where it lies about it, and on its real size where it does not.
-            self.charge(declared, 1)?;
-            let written = self.write_entry(index, &target)?;
-            self.charge(written.saturating_sub(declared), 0)?;
+            let allowance = self.allowance(&[("entry-size", self.limits.max_entry_bytes)]);
+            self.charge_entry()?;
+            allowance.check(declared)?;
+            let written = self.write_entry(index, &target, allowance)?;
+            self.spend_bytes(written);
             report.files += 1;
             report.bytes = report.bytes.saturating_add(written);
         }
@@ -370,8 +417,13 @@ impl PackArchive {
         Ok(report)
     }
 
-    /// Streams one entry to disk through a bounded reader.
-    fn write_entry(&mut self, index: usize, target: &Path) -> PackResult<u64> {
+    /// Streams one entry to disk through a reader bounded by `allowance`.
+    fn write_entry(
+        &mut self,
+        index: usize,
+        target: &Path,
+        allowance: Allowance,
+    ) -> PackResult<u64> {
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent).map_err(|source| PackError::Unwritable {
                 path: parent.to_path_buf(),
@@ -379,51 +431,67 @@ impl PackArchive {
             })?;
         }
 
-        let limit = self.limits.max_entry_bytes;
         let archive_path = self.path.clone();
         let mut entry = self
             .zip
             .by_index(index)
             .map_err(|source| PackError::ArchiveInvalid {
-                path: archive_path,
+                path: archive_path.clone(),
                 source,
             })?;
 
-        let unwritable = |source: io::Error| PackError::Unwritable {
+        let mut file = File::create(target).map_err(|source| PackError::Unwritable {
             path: target.to_path_buf(),
             source,
-        };
-        let mut file = File::create(target).map_err(unwritable)?;
-        // `limit + 1` so an entry that fills the allowance exactly is
-        // distinguishable from one that overruns it.
-        let written = io::copy(&mut (&mut entry).take(limit.saturating_add(1)), &mut file)
-            .map_err(unwritable)?;
-        if written > limit {
-            // The partial file is removed rather than left looking complete.
+        })?;
+        let copied = stream_entry(&mut entry, allowance, &archive_path, &mut |chunk| {
+            file.write_all(chunk)
+                .map_err(|source| PackError::Unwritable {
+                    path: target.to_path_buf(),
+                    source,
+                })
+        });
+        if copied.is_err() {
+            // A refused or broken entry is removed rather than left looking
+            // complete.
+            drop(file);
             let _ = std::fs::remove_file(target);
-            return Err(PackError::LimitExceeded {
-                limit: "entry-size",
-                allowed: limit,
-                reached: written,
-            });
         }
 
         // Permission bits are deliberately not carried over from the archive.
         // Nothing in a modpack override needs to be executable, and honoring a
         // mode from untrusted input is how an archive gets to choose what runs
-        Ok(written)
+        copied
     }
 
-    /// Charges the shared extraction budget, refusing when a limit is reached.
-    fn charge(&mut self, bytes: u64, entries: u64) -> PackResult<()> {
-        if bytes > self.limits.max_entry_bytes {
-            return Err(PackError::LimitExceeded {
-                limit: "entry-size",
-                allowed: self.limits.max_entry_bytes,
-                reached: bytes,
-            });
-        }
-        self.spent_entries = self.spent_entries.saturating_add(entries);
+    /// The tightest of an entry's own ceilings and what is left of the shared
+    /// total. Ties go to the earliest ceiling, and any ceiling beats the total.
+    fn allowance(&self, ceilings: &[(&'static str, u64)]) -> Allowance {
+        let total = Allowance {
+            limit: "total-size",
+            allowed: self.limits.max_total_bytes,
+            spent: self.spent_bytes,
+        };
+        ceilings
+            .iter()
+            .rev()
+            .map(|&(limit, allowed)| Allowance {
+                limit,
+                allowed,
+                spent: 0,
+            })
+            .fold(total, |tightest, ceiling| {
+                if ceiling.bytes() <= tightest.bytes() {
+                    ceiling
+                } else {
+                    tightest
+                }
+            })
+    }
+
+    /// Counts one more entry against the shared budget.
+    fn charge_entry(&mut self) -> PackResult<()> {
+        self.spent_entries = self.spent_entries.saturating_add(1);
         if self.spent_entries > self.limits.max_entries {
             return Err(PackError::LimitExceeded {
                 limit: "entry-count",
@@ -431,16 +499,46 @@ impl PackArchive {
                 reached: self.spent_entries,
             });
         }
-        self.spent_bytes = self.spent_bytes.saturating_add(bytes);
-        if self.spent_bytes > self.limits.max_total_bytes {
-            return Err(PackError::LimitExceeded {
-                limit: "total-size",
-                allowed: self.limits.max_total_bytes,
-                reached: self.spent_bytes,
-            });
-        }
         Ok(())
     }
+
+    /// Records bytes an entry produced within its allowance.
+    const fn spend_bytes(&mut self, bytes: u64) {
+        self.spent_bytes = self.spent_bytes.saturating_add(bytes);
+    }
+}
+
+/// Streams an entry into `sink`, stopping one byte past the allowance so an
+/// entry that fills it exactly is distinguishable from one that overruns it.
+///
+/// A failed read is the archive's fault, typically a corrupt entry failing its
+/// checksum, so it is reported against the archive rather than the destination.
+fn stream_entry(
+    entry: &mut impl Read,
+    allowance: Allowance,
+    archive: &Path,
+    sink: &mut dyn FnMut(&[u8]) -> PackResult<()>,
+) -> PackResult<u64> {
+    let mut reader = entry.take(allowance.bytes().saturating_add(1));
+    let mut buffer = vec![0; 64 * 1024];
+    let mut produced = 0_u64;
+    loop {
+        let read = match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(source) => {
+                return Err(PackError::ArchiveInvalid {
+                    path: archive.to_path_buf(),
+                    source: zip::result::ZipError::Io(source),
+                });
+            }
+        };
+        sink(&buffer[..read])?;
+        produced = produced.saturating_add(read as u64);
+    }
+    allowance.check(produced)?;
+    Ok(produced)
 }
 
 /// Validates one entry name and returns its path relative to `prefix`, or
@@ -494,7 +592,6 @@ fn normalize_prefix(prefix: &str) -> String {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-    use std::io::Write as _;
 
     use super::*;
 
@@ -512,8 +609,313 @@ mod tests {
         writer.finish().expect("finish");
     }
 
+    /// Writes `stored` entries followed by one DEFLATE entry whose headers
+    /// declare `declared` as its uncompressed size, whatever it inflates to.
+    fn zip_with_understated_entry(
+        path: &Path,
+        stored: &[(&str, &[u8])],
+        name: &str,
+        body: &[u8],
+        declared: u32,
+    ) {
+        let file = File::create(path).expect("create archive");
+        let mut writer = zip::ZipWriter::new(file);
+        let plain: zip::write::FileOptions<'_, ()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        for (stored_name, stored_body) in stored {
+            writer.start_file(*stored_name, plain).expect("start entry");
+            writer.write_all(stored_body).expect("write entry");
+        }
+        let deflated = plain.compression_method(zip::CompressionMethod::Deflated);
+        writer.start_file(name, deflated).expect("start entry");
+        writer.write_all(body).expect("write entry");
+        writer.finish().expect("finish");
+
+        let mut bytes = std::fs::read(path).expect("read archive");
+        let last = |signature: &[u8]| {
+            bytes
+                .windows(4)
+                .rposition(|window| window == signature)
+                .expect("entry header")
+        };
+        let (local, central) = (last(b"PK\x03\x04"), last(b"PK\x01\x02"));
+        let actual = u32::try_from(body.len()).expect("small body").to_le_bytes();
+        // Little-endian size fields, checked so a misplaced patch fails loudly.
+        for offset in [local + 22, central + 24] {
+            assert_eq!(bytes[offset..offset + 4], actual, "uncompressed size field");
+            bytes[offset..offset + 4].copy_from_slice(&declared.to_le_bytes());
+        }
+        std::fs::write(path, bytes).expect("rewrite archive");
+    }
+
     fn open(path: &Path) -> PackArchive {
         PackArchive::open(path, ExtractionLimits::default()).expect("open")
+    }
+
+    #[test]
+    fn a_manifest_over_its_ceiling_is_refused_on_its_declared_size() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = dir.path().join("bomb.mrpack");
+        let body = vec![b' '; 64 * 1024];
+        zip_with_understated_entry(&archive, &[], "modrinth.index.json", &body, 64 * 1024);
+
+        let mut pack = PackArchive::open(
+            &archive,
+            ExtractionLimits {
+                max_manifest_bytes: 1024,
+                ..ExtractionLimits::default()
+            },
+        )
+        .expect("open");
+        let error = pack
+            .read_manifest("modrinth.index.json")
+            .expect_err("a manifest over its ceiling is refused");
+        assert!(
+            matches!(
+                error,
+                PackError::LimitExceeded {
+                    limit: "manifest-size",
+                    allowed: 1024,
+                    reached: 65536,
+                }
+            ),
+            "refused on the declared size before inflating: {error:?}"
+        );
+    }
+
+    #[test]
+    fn a_manifest_understating_its_size_stops_inflating_at_the_ceiling() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = dir.path().join("bomb.mrpack");
+        let body = vec![b' '; 64 * 1024];
+        zip_with_understated_entry(&archive, &[], "modrinth.index.json", &body, 1);
+
+        let mut pack = PackArchive::open(
+            &archive,
+            ExtractionLimits {
+                max_manifest_bytes: 1024,
+                ..ExtractionLimits::default()
+            },
+        )
+        .expect("open");
+        let error = pack
+            .read_manifest("modrinth.index.json")
+            .expect_err("a manifest over its ceiling is refused");
+        assert!(
+            matches!(
+                error,
+                PackError::LimitExceeded {
+                    limit: "manifest-size",
+                    reached: 1025,
+                    ..
+                }
+            ),
+            "reading stops one byte past the ceiling: {error:?}"
+        );
+    }
+
+    #[test]
+    fn a_manifest_read_is_bounded_by_the_remaining_total() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = dir.path().join("bomb.mrpack");
+        zip_with_understated_entry(
+            &archive,
+            &[("overrides/a.bin", &[b'x'; 40])],
+            "modrinth.index.json",
+            &[b' '; 80],
+            1,
+        );
+
+        let mut pack = PackArchive::open(
+            &archive,
+            ExtractionLimits {
+                max_total_bytes: 100,
+                ..ExtractionLimits::default()
+            },
+        )
+        .expect("open");
+        pack.extract_prefix("overrides", &dir.path().join("out"))
+            .expect("the layer fits");
+        let error = pack
+            .read_manifest("modrinth.index.json")
+            .expect_err("a manifest over what is left of the total is refused");
+        assert!(
+            matches!(
+                error,
+                PackError::LimitExceeded {
+                    limit: "total-size",
+                    allowed: 100,
+                    reached: 101,
+                }
+            ),
+            "reading stops one byte past the remaining total: {error:?}"
+        );
+    }
+
+    #[test]
+    fn a_manifest_at_both_ceilings_is_refused_under_the_manifest_ceiling() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = dir.path().join("bomb.mrpack");
+        zip_with_understated_entry(&archive, &[], "modrinth.index.json", &[b' '; 4096], 4096);
+
+        let mut pack = PackArchive::open(
+            &archive,
+            ExtractionLimits {
+                max_manifest_bytes: 1024,
+                max_entry_bytes: 1024,
+                ..ExtractionLimits::default()
+            },
+        )
+        .expect("open");
+        let error = pack
+            .read_manifest("modrinth.index.json")
+            .expect_err("a manifest over its ceiling is refused");
+        assert!(
+            matches!(
+                error,
+                PackError::LimitExceeded {
+                    limit: "manifest-size",
+                    ..
+                }
+            ),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    #[test]
+    fn entries_that_fill_their_allowance_exactly_are_accepted() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = dir.path().join("pack.mrpack");
+        zip_file(
+            &archive,
+            &[
+                ("modrinth.index.json", &[b' '; 64]),
+                ("overrides/a.bin", &[b'x'; 36]),
+            ],
+        );
+
+        let mut pack = PackArchive::open(
+            &archive,
+            ExtractionLimits {
+                max_total_bytes: 100,
+                max_manifest_bytes: 64,
+                ..ExtractionLimits::default()
+            },
+        )
+        .expect("open");
+        assert_eq!(
+            pack.read_manifest("modrinth.index.json")
+                .expect("a manifest at its ceiling is read")
+                .len(),
+            64
+        );
+        let report = pack
+            .extract_prefix("overrides", &dir.path().join("out"))
+            .expect("an entry filling the remaining total is extracted");
+        assert_eq!(report.bytes, 36);
+    }
+
+    #[test]
+    fn a_corrupt_entry_is_reported_against_the_archive_and_leaves_no_file() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = dir.path().join("broken.mrpack");
+        let body = b"0123456789abcdef".repeat(64);
+        zip_file(&archive, &[("overrides/a.bin", &body)]);
+
+        let mut bytes = std::fs::read(&archive).expect("read archive");
+        let at = bytes
+            .windows(body.len())
+            .position(|window| window == body.as_slice())
+            .expect("stored body");
+        bytes[at] ^= 0xff;
+        std::fs::write(&archive, bytes).expect("rewrite archive");
+
+        let destination = dir.path().join("out");
+        let error = open(&archive)
+            .extract_prefix("overrides", &destination)
+            .expect_err("a checksum mismatch is refused");
+        assert!(
+            matches!(&error, PackError::ArchiveInvalid { path, .. } if *path == archive),
+            "unexpected error: {error:?}"
+        );
+        assert!(
+            !destination.join("a.bin").exists(),
+            "the broken entry is removed rather than left behind"
+        );
+    }
+
+    #[test]
+    fn an_entry_understating_its_size_stops_at_the_remaining_total_and_leaves_no_file() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = dir.path().join("bomb.mrpack");
+        zip_with_understated_entry(
+            &archive,
+            &[("modrinth.index.json", &[b' '; 40])],
+            "overrides/big.bin",
+            &[b'x'; 80],
+            1,
+        );
+
+        let mut pack = PackArchive::open(
+            &archive,
+            ExtractionLimits {
+                max_total_bytes: 100,
+                ..ExtractionLimits::default()
+            },
+        )
+        .expect("open");
+        pack.read_manifest("modrinth.index.json")
+            .expect("the manifest fits");
+        let destination = dir.path().join("out");
+        let error = pack
+            .extract_prefix("overrides", &destination)
+            .expect_err("an entry over what is left of the total is refused");
+        assert!(
+            matches!(
+                error,
+                PackError::LimitExceeded {
+                    limit: "total-size",
+                    allowed: 100,
+                    reached: 101,
+                }
+            ),
+            "writing stops one byte past the remaining total: {error:?}"
+        );
+        assert!(
+            !destination.join("big.bin").exists(),
+            "the partially written entry is removed rather than left behind"
+        );
+    }
+
+    #[test]
+    fn an_entry_ceiling_tied_with_the_remaining_total_is_the_limit_reported() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = dir.path().join("bomb.mrpack");
+        zip_with_understated_entry(&archive, &[], "overrides/big.bin", &[b'x'; 4096], 1);
+
+        let mut pack = PackArchive::open(
+            &archive,
+            ExtractionLimits {
+                max_total_bytes: 100,
+                max_entry_bytes: 100,
+                ..ExtractionLimits::default()
+            },
+        )
+        .expect("open");
+        let error = pack
+            .extract_prefix("overrides", &dir.path().join("out"))
+            .expect_err("an oversize entry is refused");
+        assert!(
+            matches!(
+                error,
+                PackError::LimitExceeded {
+                    limit: "entry-size",
+                    allowed: 100,
+                    reached: 101,
+                }
+            ),
+            "unexpected error: {error:?}"
+        );
     }
 
     #[test]
@@ -782,11 +1184,13 @@ mod tests {
         assert_eq!(pack.format(), Some(PackFormat::ModrinthPack));
         assert!(pack.contains("modrinth.index.json"));
         assert_eq!(
-            pack.read_entry("modrinth.index.json").expect("read"),
+            pack.read_manifest("modrinth.index.json").expect("read"),
             br#"{"name":"x"}"#
         );
 
-        let error = pack.read_entry("manifest.json").expect_err("not present");
+        let error = pack
+            .read_manifest("manifest.json")
+            .expect_err("not present");
         assert!(matches!(
             error,
             PackError::ManifestMissing {
