@@ -296,6 +296,8 @@ impl AuthObserver {
 /// precisely so the services layer names the interface and not the
 /// implementation (ADR 0005).
 #[async_trait]
+// `async_trait` marks each boxed future it returns `#[must_use]`.
+#[allow(clippy::double_must_use)]
 pub trait AccountProvider: std::fmt::Debug + Send + Sync {
     /// Runs an interactive login and, on success, persists the refresh
     /// credential wherever this provider was told to put it.

@@ -34,6 +34,8 @@ pub struct ServerInstallRequest<'a> {
 }
 
 #[async_trait]
+// `async_trait` marks each boxed future it returns `#[must_use]`.
+#[allow(clippy::double_must_use)]
 pub trait LoaderProvider: std::fmt::Debug + Send + Sync {
     fn kind(&self) -> LoaderKind;
 

@@ -178,7 +178,7 @@ impl InstallationPlan {
         let xml = FileExtension::new("xml")?;
         let json = FileExtension::new("json")?;
 
-        let client = metadata.client_jar().map_err(&invalid)?;
+        let client = metadata.client_jar().map_err(invalid)?;
         let client_jar = PlannedArtifact {
             label: format!("{version}/client.jar"),
             path: layout.content(ContentStore::Downloads, &client.sha1, Some(&jar)),

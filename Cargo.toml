@@ -26,6 +26,9 @@ module_name_repetitions = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 must_use_candidate = "allow"
+# Its fix spells an empty collection as `[] as [T; 0]`, which reads worse than
+# the `is_empty()` it replaces.
+assert_is_empty = "allow"
 # Correctness rules that matter for a launcher handling untrusted archives.
 unwrap_used = "warn"
 expect_used = "warn"

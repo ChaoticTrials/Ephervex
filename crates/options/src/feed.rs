@@ -146,10 +146,7 @@ pub enum FeedError {
     /// The URL policy refused something, including a `raw_url` the response
     /// supplied that does not point at an allowed host.
     #[error("the Minecraft options feed named a location that is not permitted")]
-    Location {
-        #[from]
-        source: UrlPolicyError,
-    },
+    Location(#[from] UrlPolicyError),
     /// The Gist response did not contain the expected file.
     #[error("the Minecraft options feed response has no `{file}`")]
     FileMissing { file: String },
@@ -161,10 +158,7 @@ pub enum FeedError {
     },
     /// The document was fetched but is not a usable dataset.
     #[error("the published Minecraft options data was refused")]
-    Invalid {
-        #[from]
-        source: DatasetError,
-    },
+    Invalid(#[from] DatasetError),
     /// A valid publish tried to reuse an existing revision for different data.
     #[error("the Minecraft options feed reused revision {revision} for different content")]
     RevisionCollision { revision: u32 },

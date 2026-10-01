@@ -23,6 +23,8 @@ use crate::model::{InstanceTarget, ModProject, ModSearchQuery, ModSearchResults,
 
 /// One mod catalog.
 #[async_trait]
+// `async_trait` marks each boxed future it returns `#[must_use]`.
+#[allow(clippy::double_must_use)]
 pub trait ModProviderApi: std::fmt::Debug + Send + Sync {
     /// Which catalog this is.
     fn provider(&self) -> ModProvider;

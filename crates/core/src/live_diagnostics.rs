@@ -305,7 +305,6 @@ impl RetainedLog {
         self.enforce_limits();
     }
 
-    #[must_use]
     pub fn records(&self) -> impl ExactSizeIterator<Item = &LogRecord> {
         self.records.iter()
     }
