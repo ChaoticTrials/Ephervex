@@ -565,16 +565,42 @@ fn launch_id_of(name: &str) -> Option<LockName> {
     (!id.is_empty()).then(|| LockName::Additional(id.to_owned()))
 }
 
-/// Creates the lock file, failing if it already exists.
+/// Creates the lock file, failing with `AlreadyExists` if it already exists.
+///
+/// The body is staged and hard-linked into place, so a reader never sees an
+/// empty lock and mistakes a starting launch for none.
 fn write_new(path: &Path, state: &LaunchState) -> std::io::Result<()> {
+    let body = serde_json::to_vec(state).map_err(std::io::Error::other)?;
+    // Ends in a uuid, never `.lock`, so `launch_id_of` ignores it.
+    let mut staging_name = path.as_os_str().to_os_string();
+    staging_name.push(format!(".tmp.{}", uuid::Uuid::new_v4()));
+    let staging = PathBuf::from(staging_name);
+
+    let published =
+        create_with_body(&staging, &body).and_then(|()| std::fs::hard_link(&staging, path));
+    let _ = std::fs::remove_file(&staging);
+    match published {
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::Unsupported | std::io::ErrorKind::PermissionDenied
+            ) =>
+        {
+            create_with_body(path, &body)
+        }
+        result => result,
+    }
+}
+
+/// Creates `path` with `body`, failing if it already exists.
+fn create_with_body(path: &Path, body: &[u8]) -> std::io::Result<()> {
     use std::io::Write as _;
 
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(path)?;
-    let body = serde_json::to_vec(state).map_err(std::io::Error::other)?;
-    file.write_all(&body)?;
+    file.write_all(body)?;
     file.sync_all()
 }
 
@@ -854,6 +880,34 @@ mod tests {
         assert_eq!(launch_id_of("mod-display.json"), None);
         assert_eq!(launch_id_of("launch..lock"), None);
         assert_eq!(launch_id_of("server-runtime.json"), None);
+    }
+
+    #[test]
+    fn a_published_lock_is_complete_and_leaves_no_staging_file_behind() {
+        let root = instance();
+        let held = LaunchLock::acquire(root.path()).expect("lock");
+        let extra = LaunchLock::acquire_additional(root.path(), "bob").expect("additional");
+
+        for lock in [&held, &extra] {
+            let body = std::fs::read(lock.path()).expect("read lock");
+            let state: LaunchState = serde_json::from_slice(&body).expect("parseable lock");
+            assert_eq!(&state, lock.state());
+        }
+        let mut names: Vec<String> = std::fs::read_dir(metadata_dir(root.path()))
+            .expect("metadata dir")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .into_string()
+                    .expect("utf-8")
+            })
+            .collect();
+        names.sort();
+        assert_eq!(names, ["launch.bob.lock", LAUNCH_LOCK_FILE]);
+        assert_eq!(running_launches(root.path()).len(), 2);
+        assert_eq!(launch_id_of("launch.lock.tmp.0"), None);
+        assert_eq!(launch_id_of("launch.bob.lock.tmp.0"), None);
     }
 
     #[test]

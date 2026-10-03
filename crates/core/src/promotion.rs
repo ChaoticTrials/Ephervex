@@ -236,14 +236,7 @@ impl App {
         if record.storage == StorageClass::Persistent {
             return Err(CoreError::InstanceAlreadyPersistent { id: record.id });
         }
-        if let Some(state) = self.launch_state(record.id)? {
-            return Err(ephervex_storage::LockError::AlreadyRunning {
-                pid: state.game_pid.unwrap_or(state.owner_pid),
-                since: state.since,
-            }
-            .into());
-        }
-        Ok(())
+        self.refuse_while_running(record.id)
     }
 }
 
@@ -447,12 +440,7 @@ mod tests {
             .expect_err("a running instance cannot be moved underneath itself");
 
         assert!(
-            matches!(
-                error,
-                CoreError::Storage(ephervex_storage::StorageError::Lock(
-                    ephervex_storage::LockError::AlreadyRunning { .. }
-                ))
-            ),
+            matches!(error, CoreError::InstanceRunning { .. }),
             "expected an already-running refusal, got {error}"
         );
     }

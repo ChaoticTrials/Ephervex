@@ -855,6 +855,9 @@ error-pack-host-not-trusted = Ephervex has not been told it may download packs f
 .action = Open the link again and confirm the address, or import it once with `ephervex import <address> --trust always`.
 error-pack-archive-download-failed = The pack could not be downloaded.
 .action = Check that the address is still valid and that the machine serving it is reachable.
+# $pid is the process that holds the instance.
+error-instance-running = That instance is launching or running (process { $pid }).
+.action = Wait for the launch to finish and close the game, then try again.
 error-instance-already-persistent = That instance is already stored permanently.
 .action = Only a temporary instance can be made persistent. Delete it when you no longer need it.
 error-server-not-linked = That server does not belong to this instance.
@@ -1752,6 +1755,8 @@ gui-made-persistent = Moved to { $value }.
 # $first is a server name, $second is the reason it did not move.
 gui-server-not-made-persistent = { $first } could not be moved and is still temporary: { $second }
 gui-delete-instance = Delete Instance...
+# Shown in place of the action while the game is launching or running.
+gui-delete-instance-while-running = Delete Instance (stop the game first)
 gui-delete-server = Delete Server...
 gui-delete-instance-detail = Remove "{ $value }" from Ephervex?
 gui-delete-server-detail = Remove "{ $value }" from Ephervex?

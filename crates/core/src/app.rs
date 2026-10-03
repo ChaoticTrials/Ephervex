@@ -587,15 +587,27 @@ impl App {
     /// primitive: whether a linked server outlives its client is a product
     /// decision, not a storage invariant, so it is made here.
     ///
-    /// A running linked server refuses the whole deletion rather than being
-    /// stopped as a side effect. Nothing is removed in that case, so the user
-    /// can stop it and ask again.
+    /// A launching or running instance, or a running linked server, refuses
+    /// the whole deletion rather than being stopped as a side effect. Nothing
+    /// is removed in that case, so the user can stop it and ask again.
     #[instrument(skip(self))]
     pub fn delete_client(&self, id: InstanceId, files: FileDisposition) -> CoreResult<()> {
+        self.refuse_while_running(id)?;
         for server in self.linked_server_ids(id)? {
             self.delete_server(server, files)?;
         }
         Ok(self.registry().delete_client(id, files)?)
+    }
+
+    /// Refuses a change that cannot happen under a launching or running game.
+    pub(crate) fn refuse_while_running(&self, id: InstanceId) -> CoreResult<()> {
+        match self.launch_state(id)? {
+            Some(state) => Err(crate::CoreError::InstanceRunning {
+                pid: state.holder_pid(),
+                since: state.since,
+            }),
+            None => Ok(()),
+        }
     }
 
     /// Replaces one instance's Java and JVM overrides as one metadata mutation.
@@ -616,13 +628,7 @@ impl App {
         jvm_override: Option<ephervex_model::JvmSettings>,
     ) -> CoreResult<ClientRecord> {
         let mut record = self.client(id)?;
-        if let Some(state) = self.launch_state(id)? {
-            return Err(ephervex_storage::LockError::AlreadyRunning {
-                pid: state.game_pid.unwrap_or(state.owner_pid),
-                since: state.since,
-            }
-            .into());
-        }
+        self.refuse_while_running(id)?;
         record.java_override = java_override;
         record.jvm_override = jvm_override;
         self.registry().update_client(&mut record)?;
@@ -1730,6 +1736,47 @@ mod tests {
             "a linked server must not outlive the client it reproduces"
         );
         assert!(!server.root.exists(), "its files follow the same choice");
+    }
+
+    /// A running game keeps its directory, its lock, and its linked servers.
+    #[test]
+    fn a_running_client_refuses_deletion_and_keeps_everything() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let client = app
+            .create_client_for_test(NewClient::new(
+                "Bug Repro",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create");
+        let staging = base.path().join("staged-server");
+        std::fs::create_dir_all(&staging).expect("staging");
+        let server = app
+            .registry_for_services()
+            .prepare_server(ephervex_storage::NewServer::linked(
+                "Repro Server",
+                client.id,
+            ))
+            .expect("prepare");
+        app.registry_for_services()
+            .publish_staged_server(&server, &staging)
+            .expect("publish");
+        let _lock = ephervex_storage::LaunchLock::acquire(&client.root).expect("acquire lock");
+
+        let error = app
+            .delete_client(client.id, FileDisposition::Remove)
+            .expect_err("a running instance cannot be deleted underneath itself");
+
+        assert!(
+            matches!(error, crate::CoreError::InstanceRunning { .. }),
+            "expected an already-running refusal, got {error}"
+        );
+        assert_eq!(app.list_clients().expect("clients").len(), 1);
+        assert!(client.root.exists(), "the game directory stays");
+        assert_eq!(app.linked_server_ids(client.id).expect("linked").len(), 1);
+        assert!(server.root.exists(), "the linked server stays");
+        assert!(app.launch_state(client.id).expect("state").is_some());
     }
 
     #[test]

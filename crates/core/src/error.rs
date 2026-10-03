@@ -285,6 +285,13 @@ pub enum CoreError {
     #[error("instance {id} is already persistent")]
     InstanceAlreadyPersistent { id: InstanceId },
 
+    /// Asked to change an instance whose game is launching or running.
+    #[error("the instance is running as process {pid} since {since}")]
+    InstanceRunning {
+        pid: u32,
+        since: chrono::DateTime<chrono::Utc>,
+    },
+
     /// Asked to move a server that is not linked to the instance being moved.
     ///
     /// Promotion takes an explicit list of servers, and a list naming somebody
@@ -477,6 +484,7 @@ impl CoreError {
             Self::PackHostNotTrusted { .. } => "error-pack-host-not-trusted",
             Self::PackDownloadFailed { .. } => "error-pack-archive-download-failed",
             Self::InstanceAlreadyPersistent { .. } => "error-instance-already-persistent",
+            Self::InstanceRunning { .. } => "error-instance-running",
             Self::ServerNotLinkedToInstance { .. } => "error-server-not-linked",
             Self::ModFileMissing { .. } => "error-mod-file-missing",
             Self::ModFileNotToggled { .. } => "error-mod-file-not-toggled",
@@ -511,6 +519,7 @@ impl CoreError {
             Self::Connect(error) => error.message_args(),
             Self::ArtifactCacheLimitInvalid(error) => error.message_args(),
             Self::LoaderFamilyFixed { loader } => vec![("loader", loader.to_string())],
+            Self::InstanceRunning { pid, .. } => vec![("pid", pid.to_string())],
             Self::LoaderChangeBlockedByMods { incompatible } => {
                 vec![("count", incompatible.to_string())]
             }
@@ -685,6 +694,7 @@ impl CoreError {
             | Self::ModFileMissing { .. }
             | Self::ModFileNotToggled { .. }
             | Self::InstanceAlreadyPersistent { .. }
+            | Self::InstanceRunning { .. }
             | Self::ServerNotLinkedToInstance { .. }
             | Self::PackUrlInvalid { .. }
             | Self::PackHostNotTrusted { .. }
@@ -761,6 +771,7 @@ impl CoreError {
             | Self::LoaderChangeBlockedByMods { .. }
             | Self::ModCatalogPreferenceUnrecognized { .. }
             | Self::InstanceAlreadyPersistent { .. }
+            | Self::InstanceRunning { .. }
             | Self::ServerNotLinkedToInstance { .. }
             | Self::PackUrlInvalid { .. }
             | Self::PackHostNotTrusted { .. }
@@ -1025,6 +1036,11 @@ mod tests {
             }
             .message_id(),
             ephervex_model::ArtifactCacheLimitError::TooSmall.message_id(),
+            CoreError::InstanceRunning {
+                pid: 1,
+                since: chrono::Utc::now(),
+            }
+            .message_id(),
             ephervex_model::ArtifactCacheLimitError::TooLarge {
                 value: u64::MAX,
                 unit: ephervex_model::ByteUnit::Tebibytes,

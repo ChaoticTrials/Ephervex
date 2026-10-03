@@ -256,7 +256,7 @@ impl App {
         // check without introducing a second lock path here.
         if let Some(running) = self.launch_state(client_id)? {
             return Err(ephervex_storage::LockError::AlreadyRunning {
-                pid: running.owner_pid,
+                pid: running.holder_pid(),
                 since: running.since,
             }
             .into());
