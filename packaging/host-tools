@@ -32,14 +32,15 @@ EPHERVEX_APPIMAGETOOL_URL_aarch64=https://github.com/AppImage/appimagetool/relea
 EPHERVEX_APPIMAGETOOL_SHA256_aarch64=1b00524ba8c6b678dc15ef88a5c25ec24def36cdfc7e3abb32ddcd068e8007fe
 
 # The AppImage type-2 runtime, prepended to the artifact and the first thing the
-# kernel loads on a user's machine. continuous, fetched 2026-08-23 for x86_64
-# and 2026-09-20 for aarch64, with the x86_64 digest above unchanged in between.
+# kernel loads on a user's machine. continuous, git 8f39b89 (2026-09-28), both
+# architectures' signatures checked against the type2-runtime signing key
+# 570C77ACEA40C0F1B758902CBF96CCA56490F695.
 # It ships inside the artifact, so it is the *target's* architecture; since
 # releases are never cross-built, the two are the same architecture anyway.
 EPHERVEX_APPIMAGE_RUNTIME_URL_x86_64=https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-x86_64
-EPHERVEX_APPIMAGE_RUNTIME_SHA256_x86_64=1cc49bcf1e2ccd593c379adb17c9f85a36d619088296504de95b1d06215aebbf
+EPHERVEX_APPIMAGE_RUNTIME_SHA256_x86_64=156f4bdbde9c52d01814600013e0a273f0118dc2de98975f3c8c63427ec79074
 EPHERVEX_APPIMAGE_RUNTIME_URL_aarch64=https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-aarch64
-EPHERVEX_APPIMAGE_RUNTIME_SHA256_aarch64=7d5d772b7c32f0c84caf0a452a3072a5709027d7eac5856feb89a7a7a8881372
+EPHERVEX_APPIMAGE_RUNTIME_SHA256_aarch64=b4ff0030242d0c3bb12ce40541828303cf167493f4793456f0436edd6255c39d
 
 # The pinned appimagetool for an architecture, as "<url> <sha256>".
 #
