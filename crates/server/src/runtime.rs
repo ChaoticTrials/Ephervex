@@ -111,7 +111,7 @@ enum IdentityState {
 /// Classifies runtime evidence without signaling or adopting any process.
 pub fn classify_runtime(server_root: &Path) -> ServerResult<RuntimeClassification> {
     let Some(evidence) = read_runtime_evidence(server_root)? else {
-        return Ok(RuntimeClassification::Stopped);
+        return classify_lock_holder(server_root);
     };
     let supervisor = verify_process(&evidence.supervisor);
     let child = evidence.child.as_ref().map(verify_process);
@@ -140,6 +140,113 @@ pub fn classify_runtime(server_root: &Path) -> ServerResult<RuntimeClassificatio
     }
 }
 
+/// A supervisor holds its lock before it writes evidence and after it clears it.
+fn classify_lock_holder(server_root: &Path) -> ServerResult<RuntimeClassification> {
+    let path = runtime_lock_path(server_root);
+    let body = match std::fs::read(&path) {
+        Ok(body) => body,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(RuntimeClassification::Stopped);
+        }
+        Err(source) => return Err(ServerError::RuntimeState { path, source }),
+    };
+    // A lock written before holders were recorded names nobody to check.
+    let Ok(holder) = serde_json::from_slice::<ProcessEvidence>(&body) else {
+        return Ok(RuntimeClassification::Stopped);
+    };
+    Ok(match verify_process(&holder) {
+        IdentityState::ProvenDead => RuntimeClassification::ProvenStale {
+            evidence: RuntimeEvidence {
+                generation: Uuid::nil(),
+                supervisor: holder,
+                child: None,
+            },
+        },
+        IdentityState::VerifiedAlive | IdentityState::Unverifiable => {
+            RuntimeClassification::UnknownRunning {
+                supervisor: holder,
+                child: None,
+            }
+        }
+    })
+}
+
+/// The prefix of the file a lock is written in before it is published.
+const RUNTIME_LOCK_STAGING_PREFIX: &str = "server-runtime.lock.tmp.";
+/// How old a staged lock must be to count as left behind by a dead supervisor.
+const ABANDONED_STAGING_AGE: Duration = Duration::from_secs(60);
+
+/// Creates the runtime lock with its holder already in it, so no reader finds
+/// it empty. Fails with `AlreadyExists` when another lock is there.
+pub(crate) fn create_runtime_lock(server_root: &Path) -> ServerResult<std::fs::File> {
+    let path = runtime_lock_path(server_root);
+    if let Some(directory) = path.parent() {
+        remove_abandoned_staging(directory);
+    }
+    let holder = capture_process(std::process::id(), ProcessRole::Supervisor)?;
+    let body = serde_json::to_vec(&holder).map_err(|error| ServerError::RuntimeState {
+        path: path.clone(),
+        source: std::io::Error::new(std::io::ErrorKind::InvalidData, error),
+    })?;
+    let temporary = path.with_file_name(format!("{RUNTIME_LOCK_STAGING_PREFIX}{}", Uuid::new_v4()));
+    let staged = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        file.write_all(&body)?;
+        file.sync_all()?;
+        Ok::<_, std::io::Error>(file)
+    })();
+    let result = staged.and_then(|file| match std::fs::hard_link(&temporary, &path) {
+        Ok(()) => Ok(file),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::NotFound
+            ) =>
+        {
+            Err(error)
+        }
+        // A filesystem without working hard links gets the lock created in place instead.
+        Err(_) => {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)?;
+            file.write_all(&body)?;
+            file.sync_all()?;
+            Ok(file)
+        }
+    });
+    let _ = std::fs::remove_file(&temporary);
+    result.map_err(|source| ServerError::RuntimeState { path, source })
+}
+
+/// Removes staged locks old enough that no live supervisor is still writing them.
+fn remove_abandoned_staging(directory: &Path) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let staged = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with(RUNTIME_LOCK_STAGING_PREFIX));
+        let abandoned = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .is_ok_and(|modified| {
+                modified
+                    .elapsed()
+                    .is_ok_and(|age| age >= ABANDONED_STAGING_AGE)
+            });
+        if staged && abandoned {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 /// Clears runtime artifacts only when every recorded process is proven gone.
 pub fn clear_stale_runtime(server_root: &Path) -> ServerResult<()> {
     let evidence = match classify_runtime(server_root)? {
@@ -149,7 +256,7 @@ pub fn clear_stale_runtime(server_root: &Path) -> ServerResult<()> {
     };
     let mut paths = vec![
         runtime_path(server_root),
-        server_root.join(".launcher").join(RUNTIME_LOCK_FILE),
+        runtime_lock_path(server_root),
         server_root
             .join(".launcher")
             .join(LEGACY_CONTROL_SOCKET_FILE),
@@ -219,6 +326,11 @@ pub fn read_runtime_evidence(server_root: &Path) -> ServerResult<Option<RuntimeE
             path,
             source: std::io::Error::new(std::io::ErrorKind::InvalidData, error),
         })
+}
+
+#[must_use]
+pub(crate) fn runtime_lock_path(server_root: &Path) -> PathBuf {
+    server_root.join(".launcher").join(RUNTIME_LOCK_FILE)
 }
 
 #[must_use]
@@ -443,6 +555,68 @@ mod tests {
         let root = tempfile::tempdir().expect("temp dir");
         std::fs::create_dir_all(root.path().join(".launcher")).expect("launcher dir");
         root
+    }
+
+    /// A supervisor holds its lock before it writes evidence and after it
+    /// clears it, and the lock names it so a dead one is not waited on.
+    #[test]
+    fn a_held_runtime_lock_is_running_until_its_holder_is_proven_dead() {
+        let root = root();
+        create_runtime_lock(root.path()).expect("lock");
+        assert!(matches!(
+            classify_runtime(root.path()).expect("classify"),
+            RuntimeClassification::UnknownRunning { child: None, .. }
+        ));
+
+        let lock = runtime_lock_path(root.path());
+        let mut holder: ProcessEvidence =
+            serde_json::from_slice(&std::fs::read(&lock).expect("read")).expect("holder");
+        holder.start_ticks = 0;
+        std::fs::write(&lock, serde_json::to_vec(&holder).expect("holder")).expect("write");
+        assert!(matches!(
+            classify_runtime(root.path()).expect("classify"),
+            RuntimeClassification::ProvenStale { .. }
+        ));
+        clear_stale_runtime(root.path()).expect("clear");
+        assert!(!lock.exists());
+        assert!(matches!(
+            classify_runtime(root.path()).expect("classify"),
+            RuntimeClassification::Stopped
+        ));
+    }
+
+    #[test]
+    fn creating_a_runtime_lock_clears_only_abandoned_staged_locks() {
+        let root = root();
+        let launcher = root.path().join(".launcher");
+        let abandoned = launcher.join(format!("{RUNTIME_LOCK_STAGING_PREFIX}abandoned"));
+        let fresh = launcher.join(format!("{RUNTIME_LOCK_STAGING_PREFIX}fresh"));
+        std::fs::write(&fresh, b"").expect("fresh");
+        std::fs::File::create(&abandoned)
+            .expect("abandoned")
+            .set_modified(std::time::SystemTime::now() - ABANDONED_STAGING_AGE * 2)
+            .expect("age");
+
+        create_runtime_lock(root.path()).expect("lock");
+
+        assert!(
+            !abandoned.exists(),
+            "a dead supervisor's staging is cleared"
+        );
+        assert!(fresh.exists(), "a live supervisor's staging is left alone");
+    }
+
+    #[test]
+    fn a_runtime_lock_is_created_once_and_never_empty() {
+        let root = root();
+        create_runtime_lock(root.path()).expect("lock");
+        let body = std::fs::read(runtime_lock_path(root.path())).expect("read");
+        assert!(serde_json::from_slice::<ProcessEvidence>(&body).is_ok());
+        assert!(matches!(
+            create_runtime_lock(root.path()),
+            Err(ServerError::RuntimeState { source, .. })
+                if source.kind() == std::io::ErrorKind::AlreadyExists
+        ));
     }
 
     #[test]

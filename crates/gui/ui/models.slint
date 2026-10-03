@@ -37,6 +37,10 @@ export struct InstanceRow {
     path: string,
     updated: string,
     linked-servers: int,
+    // How many of those run under a supervisor, which deleting the instance stops first.
+    stoppable-linked-servers: int,
+    // How many may be running where Ephervex cannot stop them, which deleting the instance refuses.
+    unstoppable-linked-servers: int,
     mods: int,
     needs-attention: bool,
     state: string,

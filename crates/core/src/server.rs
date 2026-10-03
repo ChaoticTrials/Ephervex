@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use chrono::Utc;
 use ephervex_download::{CacheLayout, OperationReporter};
 use ephervex_model::{
-    AccountKind, AttentionReason, ImportSourceKind, JavaOverride, JvmSettings, OperationId,
-    ServerId, ServerInstallation, ServerLaunch, ServerRelativePath,
+    AccountKind, AttentionReason, ImportSourceKind, InstanceId, JavaOverride, JvmSettings,
+    OperationId, ServerId, ServerInstallation, ServerLaunch, ServerRelativePath,
 };
 use ephervex_pack::{
     ArtifactFetch, PackError, PackRecipe, ServerMaterializeRequest, SourceStore, UnknownServerFiles,
@@ -544,6 +544,38 @@ impl App {
         refuse_if_running(&record)?;
         self.forget_linked_server_list_entry(&record);
         Ok(self.registry_for_services().delete_server(id, files)?)
+    }
+
+    /// Stops every running linked server of a client that is about to be deleted.
+    ///
+    /// A server whose files are kept is stopped cleanly where it allows it, and
+    /// killed otherwise. A server that cannot be stopped through its supervisor
+    /// refuses before any server is stopped. A stop that fails refuses too, and
+    /// the other servers stay stopped.
+    pub(crate) async fn stop_linked_servers_for_deletion(
+        &self,
+        client: InstanceId,
+        files: FileDisposition,
+    ) -> CoreResult<()> {
+        let mut running = Vec::new();
+        for id in self.linked_server_ids(client)? {
+            let record = self.canonical_server_for_mutation(id)?;
+            let runtime = settled_runtime(&record.root)?;
+            if stoppable_for_deletion(&runtime) {
+                running.push(record);
+            } else if runtime.may_be_running() {
+                return Err(CoreError::LinkedServerUnstoppable { name: record.name });
+            }
+        }
+        // Concurrent, and every stop runs to its end, so a failure leaves none half done.
+        futures_util::future::join_all(
+            running
+                .iter()
+                .map(|record| stop_for_deletion(record, files)),
+        )
+        .await
+        .into_iter()
+        .collect()
     }
 
     pub fn server_properties(&self, id: ServerId) -> CoreResult<PropertiesDocument> {
@@ -1122,6 +1154,58 @@ fn ensure_empty_directory(path: &Path) -> CoreResult<()> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(source) => Err(storage_io(path, source)),
     }
+}
+
+/// How long a runtime may stay uncertain before it is believed. A server holds
+/// its lock for a moment while it starts and while it stops.
+pub(crate) const RUNTIME_SETTLE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The runtime once a starting or stopping server has had a moment to settle.
+pub(crate) fn settled_runtime(root: &Path) -> CoreResult<RuntimeClassification> {
+    let deadline = std::time::Instant::now() + RUNTIME_SETTLE;
+    loop {
+        let runtime = classify_runtime(root)?;
+        if !matches!(runtime, RuntimeClassification::UnknownRunning { .. })
+            || std::time::Instant::now() >= deadline
+        {
+            return Ok(runtime);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+/// Stops one server whose client is being deleted. The server goes away either
+/// way, so a clean stop that is refused or runs out of time becomes a kill.
+async fn stop_for_deletion(record: &ServerRecord, files: FileDisposition) -> CoreResult<()> {
+    if files == FileDisposition::Keep
+        && matches!(
+            send_control(&record.root, &ControlAction::Stop).await,
+            Ok(ControlResponse::Exited(_))
+        )
+    {
+        return Ok(());
+    }
+    let outcome = send_control(&record.root, &ControlAction::Kill).await;
+    if matches!(outcome, Ok(ControlResponse::Exited(_)))
+        || !settled_runtime(&record.root)?.may_be_running()
+    {
+        return Ok(());
+    }
+    Err(CoreError::LinkedServerNotStopped {
+        name: record.name.clone(),
+        detail: match outcome {
+            Ok(ControlResponse::Refused(reason) | ControlResponse::StartFailed(reason)) => reason,
+            Ok(_) => "the server answered without stopping".to_owned(),
+            Err(error) => error.to_string(),
+        },
+    })
+}
+
+/// Whether deleting a server's client may stop it: only through a supervisor
+/// that answers. A server that may be running otherwise blocks the deletion.
+#[must_use]
+pub const fn stoppable_for_deletion(runtime: &RuntimeClassification) -> bool {
+    runtime.is_controlled()
 }
 
 pub(crate) fn refuse_if_running(record: &ServerRecord) -> CoreResult<()> {

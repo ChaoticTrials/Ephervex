@@ -163,7 +163,10 @@ pub use promotion::{
     PromotableServer, PromotionOutcome, PromotionPlan, PromotionRequest, PromotionWarning,
 };
 pub use running::{ProcessMonitor, ProcessUsage, RunningProcess};
-pub use server::{CaptureSnapshot, ServerCreateOptions, ServerPersistenceHealth, ServerStatus};
+pub use server::{
+    CaptureSnapshot, ServerCreateOptions, ServerPersistenceHealth, ServerStatus,
+    stoppable_for_deletion,
+};
 pub use server_pack::{IdentificationOutcome, ServerContentSource, ServerPackOutcome};
 pub use single_instance::{PrimaryInstance, Startup as SingleInstanceStartup};
 pub use snapshot::{

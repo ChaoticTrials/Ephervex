@@ -155,6 +155,8 @@ fn instance() -> InstanceRow {
         path: "/tmp/ephervex/instances/host".into(),
         updated: "Just now".into(),
         linked_servers: 0,
+        stoppable_linked_servers: 0,
+        unstoppable_linked_servers: 0,
         mods: 2,
         needs_attention: false,
         state: "Ready".into(),

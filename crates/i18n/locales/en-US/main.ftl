@@ -855,6 +855,15 @@ error-pack-host-not-trusted = Ephervex has not been told it may download packs f
 .action = Open the link again and confirm the address, or import it once with `ephervex import <address> --trust always`.
 error-pack-archive-download-failed = The pack could not be downloaded.
 .action = Check that the address is still valid and that the machine serving it is reachable.
+# $name is the linked server's name.
+error-linked-server-running = The linked server { $name } is running.
+.action = Nothing was removed. Stop it first, or delete with the option to stop linked servers.
+# $name is the linked server's name.
+error-linked-server-unstoppable = The linked server { $name } may still be running, and Ephervex cannot stop it.
+.action = Nothing was removed. Check it on its server page, then try again.
+# $name is the linked server's name.
+error-linked-server-not-stopped = Ephervex could not stop the linked server { $name }.
+.action = Nothing was removed. Check the server on its server page, then try again.
 # $pid is the process that holds the instance.
 error-instance-running = That instance is launching or running (process { $pid }).
 .action = Wait for the launch to finish and close the game, then try again.
@@ -1772,8 +1781,25 @@ gui-delete-instance-linked = { $count ->
     [one] Its linked server is deleted with it, the same way.
    *[other] Its { $count } linked servers are deleted with it, the same way.
 }
+# Shown in the delete dialog while linked servers are running.
+gui-delete-instance-stops-servers = { $count ->
+    [one] Its linked server is running. It is stopped first: shut down cleanly if you keep files, or killed if you delete them.
+   *[other] { $count } of its linked servers are running. They are stopped first: shut down cleanly if you keep files, or killed if you delete them.
+}
+# Shown in the delete dialog. Deleting is refused while this applies.
+gui-delete-instance-unstoppable-servers = { $count ->
+    [one] Its linked server may still be running, and Ephervex cannot stop it. Check it on its server page, then try again.
+   *[other] { $count } of its linked servers may still be running, and Ephervex cannot stop them. Check them on their server pages, then try again.
+}
 gui-remove-from-ephervex = Keep Files
 gui-delete-files = Delete Files
+gui-stop-and-keep-files = Stop and Keep Files
+gui-stop-and-delete-files = Stop and Delete Files
+gui-instance-stopping-servers = Stopping linked servers before removing the instance...
+gui-instance-deleting = This instance and its linked servers are being removed. Wait until that finishes.
+gui-linked-server-deleting = This server is being removed with its instance. Wait until that finishes.
+# $first is the linked server's name, $second is why it is busy.
+gui-delete-instance-linked-server-busy = Its linked server { $first } is busy: { $second }
 gui-instance-deleted = Instance removed.
 gui-server-deleted = Server removed.
 gui-notification-error = Action Needed

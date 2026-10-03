@@ -1002,11 +1002,19 @@ enum InstanceCommand {
         clear: bool,
     },
     /// Remove a client instance from the index.
+    ///
+    /// Its linked servers are deleted with it. A running one refuses the
+    /// deletion unless `--stop-linked-servers` is given.
     Delete {
         id: InstanceId,
         /// Leave the instance directory on disk.
         #[arg(long)]
         keep_files: bool,
+        /// Stop running linked servers first instead of refusing. With
+        /// `--keep-files` they are shut down cleanly where they allow it, and
+        /// killed otherwise.
+        #[arg(long)]
+        stop_linked_servers: bool,
     },
     /// Keep a temporary instance for good, by moving it out of temporary
     /// storage.
@@ -1995,30 +2003,47 @@ async fn run_instance_command(
             print_folder(path.as_deref(), folder.as_str(), json)?;
         }
         InstanceCommand::Runtime { .. } => run_instance_runtime(app, command, json)?,
-        InstanceCommand::Delete { id, keep_files } => {
-            let files = if *keep_files {
-                FileDisposition::Keep
-            } else {
-                FileDisposition::Remove
-            };
-            app.delete_client(*id, files)?;
-            if json {
-                outln!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "deleted": id.to_string(),
-                        "files": if *keep_files { "kept" } else { "removed" },
-                    }))?
-                );
-            } else {
-                outln!("deleted {id}");
-            }
-        }
+        InstanceCommand::Delete {
+            id,
+            keep_files,
+            stop_linked_servers,
+        } => run_instance_delete(app, *id, *keep_files, *stop_linked_servers, json).await?,
         InstanceCommand::Persist {
             id,
             servers,
             no_servers,
         } => run_instance_persist(app, *id, servers, *no_servers, json)?,
+    }
+    Ok(())
+}
+
+async fn run_instance_delete(
+    app: &App,
+    id: InstanceId,
+    keep_files: bool,
+    stop_linked_servers: bool,
+    json: bool,
+) -> anyhow::Result<()> {
+    let files = if keep_files {
+        FileDisposition::Keep
+    } else {
+        FileDisposition::Remove
+    };
+    if stop_linked_servers {
+        app.delete_client_stopping_linked_servers(id, files).await?;
+    } else {
+        app.delete_client(id, files)?;
+    }
+    if json {
+        outln!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "deleted": id.to_string(),
+                "files": if keep_files { "kept" } else { "removed" },
+            }))?
+        );
+    } else {
+        outln!("deleted {id}");
     }
     Ok(())
 }

@@ -285,6 +285,18 @@ pub enum CoreError {
     #[error("instance {id} is already persistent")]
     InstanceAlreadyPersistent { id: InstanceId },
 
+    /// Asked to delete an instance while one of its linked servers runs.
+    #[error("the linked server {name} is running")]
+    LinkedServerRunning { name: String },
+
+    /// A linked server may be running where Ephervex cannot stop it.
+    #[error("the linked server {name} may still be running and cannot be stopped")]
+    LinkedServerUnstoppable { name: String },
+
+    /// A linked server did not stop for its instance's deletion.
+    #[error("the linked server {name} could not be stopped: {detail}")]
+    LinkedServerNotStopped { name: String, detail: String },
+
     /// Asked to change an instance whose game is launching or running.
     #[error("the instance is running as process {pid} since {since}")]
     InstanceRunning {
@@ -485,6 +497,9 @@ impl CoreError {
             Self::PackDownloadFailed { .. } => "error-pack-archive-download-failed",
             Self::InstanceAlreadyPersistent { .. } => "error-instance-already-persistent",
             Self::InstanceRunning { .. } => "error-instance-running",
+            Self::LinkedServerRunning { .. } => "error-linked-server-running",
+            Self::LinkedServerUnstoppable { .. } => "error-linked-server-unstoppable",
+            Self::LinkedServerNotStopped { .. } => "error-linked-server-not-stopped",
             Self::ServerNotLinkedToInstance { .. } => "error-server-not-linked",
             Self::ModFileMissing { .. } => "error-mod-file-missing",
             Self::ModFileNotToggled { .. } => "error-mod-file-not-toggled",
@@ -520,6 +535,11 @@ impl CoreError {
             Self::ArtifactCacheLimitInvalid(error) => error.message_args(),
             Self::LoaderFamilyFixed { loader } => vec![("loader", loader.to_string())],
             Self::InstanceRunning { pid, .. } => vec![("pid", pid.to_string())],
+            Self::LinkedServerRunning { name }
+            | Self::LinkedServerUnstoppable { name }
+            | Self::LinkedServerNotStopped { name, .. } => {
+                vec![("name", name.clone())]
+            }
             Self::LoaderChangeBlockedByMods { incompatible } => {
                 vec![("count", incompatible.to_string())]
             }
@@ -695,6 +715,9 @@ impl CoreError {
             | Self::ModFileNotToggled { .. }
             | Self::InstanceAlreadyPersistent { .. }
             | Self::InstanceRunning { .. }
+            | Self::LinkedServerRunning { .. }
+            | Self::LinkedServerUnstoppable { .. }
+            | Self::LinkedServerNotStopped { .. }
             | Self::ServerNotLinkedToInstance { .. }
             | Self::PackUrlInvalid { .. }
             | Self::PackHostNotTrusted { .. }
@@ -772,6 +795,9 @@ impl CoreError {
             | Self::ModCatalogPreferenceUnrecognized { .. }
             | Self::InstanceAlreadyPersistent { .. }
             | Self::InstanceRunning { .. }
+            | Self::LinkedServerRunning { .. }
+            | Self::LinkedServerUnstoppable { .. }
+            | Self::LinkedServerNotStopped { .. }
             | Self::ServerNotLinkedToInstance { .. }
             | Self::PackUrlInvalid { .. }
             | Self::PackHostNotTrusted { .. }
@@ -1039,6 +1065,19 @@ mod tests {
             CoreError::InstanceRunning {
                 pid: 1,
                 since: chrono::Utc::now(),
+            }
+            .message_id(),
+            CoreError::LinkedServerRunning {
+                name: String::new(),
+            }
+            .message_id(),
+            CoreError::LinkedServerUnstoppable {
+                name: String::new(),
+            }
+            .message_id(),
+            CoreError::LinkedServerNotStopped {
+                name: String::new(),
+                detail: String::new(),
             }
             .message_id(),
             ephervex_model::ArtifactCacheLimitError::TooLarge {

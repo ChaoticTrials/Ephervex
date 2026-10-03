@@ -295,6 +295,8 @@ fn idle_instance() -> InstanceRow {
         path: "/tmp/ephervex/instances/repro".into(),
         updated: "just now".into(),
         linked_servers: 0,
+        stoppable_linked_servers: 0,
+        unstoppable_linked_servers: 0,
         mods: 1,
         needs_attention: false,
         state: "Idle".into(),

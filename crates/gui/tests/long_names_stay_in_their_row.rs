@@ -175,6 +175,8 @@ fn connectable() -> InstanceRow {
         path: "/tmp/ephervex/instances/repro-client".into(),
         updated: "Just now".into(),
         linked_servers: 1,
+        stoppable_linked_servers: 0,
+        unstoppable_linked_servers: 0,
         mods: 84,
         needs_attention: false,
         state: "Ready".into(),

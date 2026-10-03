@@ -3339,9 +3339,16 @@ fn register_client_actions(
     });
 
     let sender = commands.clone();
-    ui.on_delete_client(move |id, files| {
+    ui.on_delete_client(move |id, files, stop_linked_servers| {
         if let Some(id) = backend::parse_instance_id(&id) {
-            send(&sender, Command::DeleteClient { id, files });
+            send(
+                &sender,
+                Command::DeleteClient {
+                    id,
+                    files,
+                    stop_linked_servers,
+                },
+            );
         }
     });
 
@@ -8045,6 +8052,8 @@ fn apply_instance_snapshot(
             path: item.path.into(),
             updated: lookup("gui-available").into(),
             linked_servers: to_i32(item.linked_servers),
+            stoppable_linked_servers: to_i32(item.stoppable_linked_servers),
+            unstoppable_linked_servers: to_i32(item.unstoppable_linked_servers),
             mods: to_i32(item.managed_mods),
             needs_attention: item.needs_attention,
             state: item.state.into(),

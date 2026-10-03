@@ -589,14 +589,44 @@ impl App {
     ///
     /// A launching or running instance, or a running linked server, refuses
     /// the whole deletion rather than being stopped as a side effect. Nothing
-    /// is removed in that case, so the user can stop it and ask again.
+    /// is removed in that case, so the user can stop it and ask again, or ask
+    /// [`App::delete_client_stopping_linked_servers`] to stop the servers.
     #[instrument(skip(self))]
     pub fn delete_client(&self, id: InstanceId, files: FileDisposition) -> CoreResult<()> {
         self.refuse_while_running(id)?;
-        for server in self.linked_server_ids(id)? {
+        let servers = self.linked_server_ids(id)?;
+        // Every server is checked before any is deleted, so a refusal removes nothing.
+        for server in &servers {
+            let record = self.canonical_server_for_mutation(*server)?;
+            let runtime = crate::server::settled_runtime(&record.root)?;
+            if crate::server::stoppable_for_deletion(&runtime) {
+                return Err(crate::CoreError::LinkedServerRunning { name: record.name });
+            }
+            if runtime.may_be_running() {
+                return Err(crate::CoreError::LinkedServerUnstoppable { name: record.name });
+            }
+        }
+        for server in servers {
             self.delete_server(server, files)?;
         }
         Ok(self.registry().delete_client(id, files)?)
+    }
+
+    /// Deletes a client instance like [`App::delete_client`], stopping its
+    /// running linked servers first.
+    ///
+    /// For a deletion the user confirmed knowing those servers are running.
+    /// A running instance still refuses, and a server that cannot be stopped
+    /// refuses before anything is removed.
+    #[instrument(skip(self))]
+    pub async fn delete_client_stopping_linked_servers(
+        &self,
+        id: InstanceId,
+        files: FileDisposition,
+    ) -> CoreResult<()> {
+        self.refuse_while_running(id)?;
+        self.stop_linked_servers_for_deletion(id, files).await?;
+        self.delete_client(id, files)
     }
 
     /// Refuses a change that cannot happen under a launching or running game.
@@ -1705,26 +1735,8 @@ mod tests {
     fn deleting_a_client_takes_the_servers_linked_to_it() {
         let base = tempfile::tempdir().expect("temp dir");
         let app = app_rooted_at(base.path());
-        let client = app
-            .create_client_for_test(NewClient::new(
-                "Bug Repro",
-                "1.20.1",
-                LoaderSelection::vanilla(),
-            ))
-            .expect("create");
-
-        let staging = base.path().join("staged-server");
-        std::fs::create_dir_all(&staging).expect("staging");
-        let server = app
-            .registry_for_services()
-            .prepare_server(ephervex_storage::NewServer::linked(
-                "Repro Server",
-                client.id,
-            ))
-            .expect("prepare");
-        app.registry_for_services()
-            .publish_staged_server(&server, &staging)
-            .expect("publish");
+        let client = repro_client(&app);
+        let server = linked_server(&app, base.path(), client.id, "Repro Server");
         assert_eq!(app.linked_server_ids(client.id).expect("linked").len(), 1);
 
         app.delete_client(client.id, FileDisposition::Remove)
@@ -1743,25 +1755,8 @@ mod tests {
     fn a_running_client_refuses_deletion_and_keeps_everything() {
         let base = tempfile::tempdir().expect("temp dir");
         let app = app_rooted_at(base.path());
-        let client = app
-            .create_client_for_test(NewClient::new(
-                "Bug Repro",
-                "1.20.1",
-                LoaderSelection::vanilla(),
-            ))
-            .expect("create");
-        let staging = base.path().join("staged-server");
-        std::fs::create_dir_all(&staging).expect("staging");
-        let server = app
-            .registry_for_services()
-            .prepare_server(ephervex_storage::NewServer::linked(
-                "Repro Server",
-                client.id,
-            ))
-            .expect("prepare");
-        app.registry_for_services()
-            .publish_staged_server(&server, &staging)
-            .expect("publish");
+        let client = repro_client(&app);
+        let server = linked_server(&app, base.path(), client.id, "Repro Server");
         let _lock = ephervex_storage::LaunchLock::acquire(&client.root).expect("acquire lock");
 
         let error = app
@@ -1777,6 +1772,184 @@ mod tests {
         assert_eq!(app.linked_server_ids(client.id).expect("linked").len(), 1);
         assert!(server.root.exists(), "the linked server stays");
         assert!(app.launch_state(client.id).expect("state").is_some());
+    }
+
+    /// One running linked server keeps every other one, not only itself. One
+    /// without a supervisor to stop it refuses even a deletion that stops servers.
+    #[tokio::test]
+    async fn a_running_linked_server_refuses_deletion_before_any_server_is_removed() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let client = repro_client(&app);
+        let stopped = linked_server(&app, base.path(), client.id, "A Server");
+        let running = linked_server(&app, base.path(), client.id, "B Server");
+        let evidence =
+            ephervex_server::RuntimeEvidence::for_current_supervisor().expect("runtime evidence");
+        ephervex_server::write_runtime_evidence(&running.root, &evidence).expect("mark running");
+
+        let refusals = [
+            app.delete_client(client.id, FileDisposition::Remove),
+            app.delete_client_stopping_linked_servers(client.id, FileDisposition::Remove)
+                .await,
+        ];
+
+        for refusal in refusals {
+            let error = refusal.expect_err("a running linked server refuses the deletion");
+            assert!(
+                matches!(
+                    &error,
+                    crate::CoreError::LinkedServerUnstoppable { name } if name == "B Server"
+                ),
+                "expected the running server to be named, got {error}"
+            );
+        }
+        assert_eq!(app.list_clients().expect("clients").len(), 1);
+        assert_eq!(app.list_servers().expect("servers").len(), 2);
+        assert!(stopped.root.exists(), "the stopped server stays");
+        assert!(running.root.exists(), "the running server stays");
+    }
+
+    /// Only a kill ends this server, so its deletion cannot wait on a clean stop.
+    #[tokio::test]
+    async fn deleting_files_kills_a_running_linked_server_and_removes_everything() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let client = repro_client(&app);
+        let server = linked_server(&app, base.path(), client.id, "Repro Server");
+        let supervisor = supervise(&server, "while IFS= read -r line; do :; done").await;
+
+        app.delete_client_stopping_linked_servers(client.id, FileDisposition::Remove)
+            .await
+            .expect("delete");
+
+        let exit = supervisor.await.expect("join").expect("supervised");
+        assert!(exit.signal.is_some(), "the server was killed, got {exit:?}");
+        assert!(app.list_clients().expect("clients").is_empty());
+        assert!(app.list_servers().expect("servers").is_empty());
+        assert!(!client.root.exists());
+        assert!(!server.root.exists());
+    }
+
+    /// Kept files are a world someone may open again, so it is saved on the way out.
+    #[tokio::test]
+    async fn keeping_files_stops_a_running_linked_server_cleanly() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let client = repro_client(&app);
+        let server = linked_server(&app, base.path(), client.id, "Repro Server");
+        let supervisor = supervise(
+            &server,
+            "while IFS= read -r line; do [ \"$line\" = stop ] && exit 0; done",
+        )
+        .await;
+
+        app.delete_client_stopping_linked_servers(client.id, FileDisposition::Keep)
+            .await
+            .expect("delete");
+
+        let exit = supervisor.await.expect("join").expect("supervised");
+        assert_eq!(
+            exit.code,
+            Some(0),
+            "the server stopped itself, got {exit:?}"
+        );
+        assert!(app.list_clients().expect("clients").is_empty());
+        assert!(app.list_servers().expect("servers").is_empty());
+        assert!(client.root.exists());
+        assert!(server.root.exists());
+    }
+
+    /// A deletion that is refused anyway has no reason to take the server down.
+    #[tokio::test]
+    async fn a_running_client_refuses_before_any_linked_server_is_stopped() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let client = repro_client(&app);
+        let server = linked_server(&app, base.path(), client.id, "Repro Server");
+        let _supervisor = supervise(&server, "while IFS= read -r line; do :; done").await;
+        let _lock = ephervex_storage::LaunchLock::acquire(&client.root).expect("acquire lock");
+
+        let error = app
+            .delete_client_stopping_linked_servers(client.id, FileDisposition::Remove)
+            .await
+            .expect_err("a running instance cannot be deleted underneath itself");
+
+        assert!(
+            matches!(error, crate::CoreError::InstanceRunning { .. }),
+            "expected an already-running refusal, got {error}"
+        );
+        assert!(matches!(
+            ephervex_server::classify_runtime(&server.root),
+            Ok(ephervex_server::RuntimeClassification::Controlled { .. })
+        ));
+        ephervex_server::send_control(&server.root, &ephervex_server::ControlAction::Kill)
+            .await
+            .expect("clean up the server");
+    }
+
+    /// Runs `script` as the server's process under a real supervisor.
+    async fn supervise(
+        server: &ServerRecord,
+        script: &str,
+    ) -> tokio::task::JoinHandle<ephervex_server::ServerResult<ephervex_server::ServerExit>> {
+        let root = server.root.clone();
+        let capture = root.join("capture-for-test");
+        std::fs::create_dir_all(root.join("server")).expect("server directory");
+        let command = ephervex_server::ServerCommand {
+            java: PathBuf::from("/bin/sh"),
+            arguments: vec!["-c".to_owned(), script.to_owned()],
+            working_directory: root.join("server"),
+        };
+        let supervisor = tokio::spawn(async move {
+            ephervex_server::ServerSupervisor::run(
+                &command,
+                &root,
+                &capture,
+                &ephervex_server::ServerObserver::silent(),
+            )
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if matches!(
+                    ephervex_server::classify_runtime(&server.root),
+                    Ok(ephervex_server::RuntimeClassification::Controlled { .. })
+                ) {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("controlled runtime");
+        supervisor
+    }
+
+    fn repro_client(app: &App) -> ClientRecord {
+        app.create_client_for_test(NewClient::new(
+            "Bug Repro",
+            "1.20.1",
+            LoaderSelection::vanilla(),
+        ))
+        .expect("create")
+    }
+
+    fn linked_server(
+        app: &App,
+        base: &std::path::Path,
+        client: InstanceId,
+        name: &str,
+    ) -> ServerRecord {
+        let staging = base.join(format!("staged-{name}"));
+        std::fs::create_dir_all(&staging).expect("staging");
+        let server = app
+            .registry_for_services()
+            .prepare_server(ephervex_storage::NewServer::linked(name, client))
+            .expect("prepare");
+        app.registry_for_services()
+            .publish_staged_server(&server, &staging)
+            .expect("publish");
+        server
     }
 
     #[test]

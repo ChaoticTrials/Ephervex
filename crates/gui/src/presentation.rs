@@ -116,6 +116,10 @@ pub struct InstancePresentation {
     pub source: String,
     pub path: String,
     pub linked_servers: usize,
+    /// How many linked servers run under a supervisor, which deleting the instance stops first.
+    pub stoppable_linked_servers: usize,
+    /// How many linked servers may be running where Ephervex cannot stop them.
+    pub unstoppable_linked_servers: usize,
     pub managed_mods: usize,
     pub needs_attention: bool,
     pub state: String,
@@ -207,6 +211,8 @@ impl InstancePresentation {
             source: record.source.kind.to_string(),
             path: record.root.display().to_string(),
             linked_servers,
+            stoppable_linked_servers: 0,
+            unstoppable_linked_servers: 0,
             managed_mods,
             needs_attention: record.needs_attention(),
             state,

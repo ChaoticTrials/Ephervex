@@ -16,9 +16,9 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 
 use crate::capture::{CaptureStream, CapturedLine, OutputCapture, ServerOutputEvent};
 use crate::runtime::{
-    RUNTIME_LOCK_FILE, RuntimeClassification, RuntimeEvidence, active_control_socket_path,
-    capture_java_child, classify_runtime, clear_stale_runtime, prepare_control_socket_path,
-    runtime_path, write_runtime_evidence,
+    RuntimeClassification, RuntimeEvidence, active_control_socket_path, capture_java_child,
+    classify_runtime, clear_stale_runtime, create_runtime_lock, prepare_control_socket_path,
+    runtime_lock_path, runtime_path, write_runtime_evidence,
 };
 use crate::{ServerError, ServerResult};
 
@@ -164,7 +164,7 @@ impl ServerSupervisor {
         capture_directory: &Path,
         observer: &ServerObserver,
     ) -> ServerResult<ServerExit> {
-        let _guard = RuntimeGuard::acquire(server_root)?;
+        let guard = RuntimeGuard::acquire(server_root)?;
         let mut evidence = RuntimeEvidence::for_current_supervisor()?;
         let socket_path = prepare_control_socket_path(server_root, evidence.generation)?;
         if let Err(error) = std::fs::remove_file(&socket_path)
@@ -207,7 +207,13 @@ impl ServerSupervisor {
         if result.is_ok() {
             let _ = std::fs::remove_file(runtime_path(server_root));
         }
-        result
+        drop(guard);
+        // Answered once the server is released, so an answered stop means nothing writes into it.
+        let (exit, waiters) = result?;
+        for waiter in waiters {
+            let _ = waiter.send(ControlResponse::Exited(exit));
+        }
+        Ok(exit)
     }
 }
 
@@ -218,7 +224,7 @@ async fn supervise_commands(
     capture: &Arc<Mutex<OutputCapture>>,
     evidence: &mut RuntimeEvidence,
     requests: &mut mpsc::UnboundedReceiver<ControlRequest>,
-) -> ServerResult<ServerExit> {
+) -> ServerResult<(ServerExit, Vec<oneshot::Sender<ControlResponse>>)> {
     let mut restart_waiters: Vec<oneshot::Sender<ControlResponse>> = Vec::new();
     let mut last_exit = None;
     loop {
@@ -234,12 +240,13 @@ async fn supervise_commands(
                 for waiter in restart_waiters.drain(..) {
                     let _ = waiter.send(ControlResponse::StartFailed(detail.clone()));
                 }
-                return Ok(last_exit.unwrap_or(ServerExit {
+                let exit = last_exit.unwrap_or(ServerExit {
                     code: None,
                     signal: None,
                     finished_starting: false,
                     stop_requested: false,
-                }));
+                });
+                return Ok((exit, Vec::new()));
             }
             Err(error) => return Err(error),
         };
@@ -263,10 +270,7 @@ async fn supervise_commands(
             restart_waiters = waiters;
             continue;
         }
-        for waiter in waiters {
-            let _ = waiter.send(ControlResponse::Exited(exit));
-        }
-        return Ok(exit);
+        return Ok((exit, waiters));
     }
 }
 
@@ -662,19 +666,17 @@ impl RuntimeGuard {
             RuntimeClassification::ProvenStale { .. } => clear_stale_runtime(server_root)?,
             _ => return Err(ServerError::AlreadyRunning),
         }
-        let path = server_root.join(".launcher").join(RUNTIME_LOCK_FILE);
+        let path = runtime_lock_path(server_root);
         let parent = path.parent().unwrap_or(server_root);
         std::fs::create_dir_all(parent).map_err(|source| ServerError::RuntimeState {
             path: parent.to_path_buf(),
             source,
         })?;
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
+        match create_runtime_lock(server_root) {
             Ok(file) => Ok(Self { path, _file: file }),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err(ServerError::RuntimeState { source, .. })
+                if source.kind() == std::io::ErrorKind::AlreadyExists =>
+            {
                 // A stale lock is removable only when runtime evidence proves
                 // the former owner and child are gone.
                 if matches!(
@@ -682,27 +684,13 @@ impl RuntimeGuard {
                     RuntimeClassification::ProvenStale { .. }
                 ) {
                     clear_stale_runtime(server_root)?;
-                    std::fs::remove_file(&path).map_err(|source| ServerError::RuntimeState {
-                        path: path.clone(),
-                        source,
-                    })?;
-                    let file = std::fs::OpenOptions::new()
-                        .write(true)
-                        .create_new(true)
-                        .open(&path)
-                        .map_err(|source| ServerError::RuntimeState {
-                            path: path.clone(),
-                            source,
-                        })?;
+                    let file = create_runtime_lock(server_root)?;
                     Ok(Self { path, _file: file })
                 } else {
                     Err(ServerError::AlreadyRunning)
                 }
             }
-            Err(source) => Err(ServerError::RuntimeState {
-                path: path.clone(),
-                source,
-            }),
+            Err(error) => Err(error),
         }
     }
 }
@@ -764,6 +752,13 @@ mod tests {
                 .await
                 .expect("stop"),
             ControlResponse::Exited(ServerExit { code: Some(0), .. })
+        ));
+        // The answer waits for the release, so nothing is left to wait on.
+        assert!(!runtime_path(root.path()).exists());
+        assert!(!runtime_lock_path(root.path()).exists());
+        assert!(matches!(
+            classify_runtime(root.path()).expect("classify"),
+            RuntimeClassification::Stopped
         ));
         assert_eq!(task.await.expect("join").expect("supervise").code, Some(0));
         let mut output = Vec::new();

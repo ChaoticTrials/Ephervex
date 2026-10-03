@@ -101,6 +101,8 @@ fn instance(id: &str, name: &str) -> InstanceRow {
         path: "/tmp/ephervex/instances/repro".into(),
         updated: "Just now".into(),
         linked_servers: 0,
+        stoppable_linked_servers: 0,
+        unstoppable_linked_servers: 0,
         mods: 0,
         needs_attention: false,
         state: "Ready".into(),

@@ -234,6 +234,7 @@ pub enum Command {
     DeleteClient {
         id: InstanceId,
         files: bool,
+        stop_linked_servers: bool,
     },
     DeleteServer {
         id: ServerId,
@@ -1973,6 +1974,14 @@ impl Drop for HostChangeInFlight {
     }
 }
 
+/// The refusal a change in flight on `host` gives, if one is.
+fn change_in_flight(hosts: &ChangingHosts, host: InstalledHost) -> Option<&'static str> {
+    hosts
+        .lock()
+        .ok()
+        .and_then(|hosts| hosts.get(&host_key(host)).copied())
+}
+
 /// Refuses to start a host, or to change it again, while a change is
 /// rewriting its files.
 fn refuse_while_changing(
@@ -1980,10 +1989,7 @@ fn refuse_while_changing(
     host: InstalledHost,
     events: &Sender<Event>,
 ) -> bool {
-    let refusal = hosts
-        .lock()
-        .ok()
-        .and_then(|hosts| hosts.get(&host_key(host)).copied());
+    let refusal = change_in_flight(hosts, host);
     if let Some(refusal) = refusal {
         let _ = events.send(Event::Toast {
             message: lookup(refusal),
@@ -2613,12 +2619,71 @@ fn run_worker(
                     Err(error) => send_error(&events, &error),
                 }
             }
-            Command::DeleteClient { id, files } => {
+            Command::DeleteClient {
+                id,
+                files,
+                stop_linked_servers,
+            } => {
                 let disposition = if files {
                     ephervex_core::FileDisposition::Remove
                 } else {
                     ephervex_core::FileDisposition::Keep
                 };
+                // The linked servers are deleted too, so a change to any of them refuses.
+                let hosts = match app.linked_server_ids(id) {
+                    Ok(servers) => std::iter::once(InstalledHost::Instance(id))
+                        .chain(servers.into_iter().map(InstalledHost::Server))
+                        .collect::<Vec<_>>(),
+                    Err(error) => {
+                        send_modal_error(&events, &error);
+                        continue;
+                    }
+                };
+                // Said in the dialog, which is still open and would otherwise look ignored.
+                if let Some((host, refusal)) = hosts.iter().find_map(|host| {
+                    change_in_flight(&changing, *host).map(|refusal| (*host, refusal))
+                }) {
+                    let message =
+                        match host {
+                            InstalledHost::Server(server) => lookup_args(
+                                "gui-delete-instance-linked-server-busy",
+                                [
+                                    (
+                                        "first",
+                                        Arg::from(app.server(server).map_or_else(
+                                            |_| server.to_string(),
+                                            |record| record.name,
+                                        )),
+                                    ),
+                                    ("second", Arg::from(lookup(refusal))),
+                                ],
+                            ),
+                            InstalledHost::Instance(_) => lookup(refusal),
+                        };
+                    let _ = events.send(Event::ModalError(message));
+                    continue;
+                }
+                if stop_linked_servers {
+                    // Starts and guarded changes on these refuse until the deletion is over.
+                    let in_flight = hosts
+                        .into_iter()
+                        .map(|host| {
+                            let refusal = match host {
+                                InstalledHost::Instance(_) => "gui-instance-deleting",
+                                InstalledHost::Server(_) => "gui-linked-server-deleting",
+                            };
+                            HostChangeInFlight::mark(&changing, host, refusal)
+                        })
+                        .collect();
+                    spawn_client_deletion_stopping_servers(
+                        app.paths().clone(),
+                        &events,
+                        id,
+                        disposition,
+                        in_flight,
+                    );
+                    continue;
+                }
                 match app.delete_client(id, disposition) {
                     Ok(()) => {
                         let _ = events.send(Event::CloseModal);
@@ -4551,6 +4616,10 @@ fn send_snapshot(app: &App, events: &Sender<Event>) {
 
 fn snapshot(app: &App) -> Result<Snapshot, CoreError> {
     let servers = app.list_servers()?;
+    let statuses = servers
+        .iter()
+        .map(|server| app.server_status(server.id))
+        .collect::<Result<Vec<_>, _>>()?;
     let clients = app.list_clients()?;
     let pairs = app.linked_pairs()?;
     let mut connection_states = std::collections::HashMap::new();
@@ -4582,15 +4651,23 @@ fn snapshot(app: &App) -> Result<Snapshot, CoreError> {
             launch_state.as_ref(),
             connections,
         );
+        for status in statuses.iter().filter(|status| {
+            status.record.linked_client_id == Some(record.id) && status.runtime.may_be_running()
+        }) {
+            if ephervex_core::stoppable_for_deletion(&status.runtime) {
+                presentation.stoppable_linked_servers += 1;
+            } else {
+                presentation.unstoppable_linked_servers += 1;
+            }
+        }
         presentation.pair = PairPresentation::of(record.id.into(), &pairs, &clients, &servers);
         presentation.snapshot_deletion_note =
             snapshot_deletion_note(app, InstalledHost::Instance(record.id));
         instance_rows.push(presentation);
     }
     let mut server_rows = Vec::new();
-    for server in &servers {
-        let status = app.server_status(server.id)?;
-        let mut presentation = ServerPresentation::from_status(&status);
+    for (server, status) in servers.iter().zip(&statuses) {
+        let mut presentation = ServerPresentation::from_status(status);
         presentation.pair = PairPresentation::of(server.id.into(), &pairs, &clients, &servers);
         presentation.snapshot_deletion_note =
             snapshot_deletion_note(app, InstalledHost::Server(server.id));
@@ -8020,6 +8097,41 @@ impl ServerControl {
             _ => Err(lookup("gui-server-control-unconfirmed")),
         }
     }
+}
+
+/// Stops a client's running linked servers and then deletes it, off the
+/// command thread because a clean stop can take as long as the server needs.
+fn spawn_client_deletion_stopping_servers(
+    paths: Paths,
+    events: &Sender<Event>,
+    id: InstanceId,
+    files: ephervex_core::FileDisposition,
+    in_flight: Vec<HostChangeInFlight>,
+) {
+    let _ = events.send(Event::CloseModal);
+    let _ = events.send(Event::Toast {
+        message: lookup("gui-instance-stopping-servers"),
+        error: false,
+    });
+    spawn_detached_with_setup_failure(
+        paths,
+        events.clone(),
+        |_| {},
+        move |app, events, runtime| {
+            let result = runtime.block_on(app.delete_client_stopping_linked_servers(id, files));
+            drop(in_flight);
+            match result {
+                Ok(()) => {
+                    let _ = events.send(Event::Toast {
+                        message: lookup("gui-instance-deleted"),
+                        error: false,
+                    });
+                }
+                Err(error) => send_error(&events, &error),
+            }
+            send_snapshot(&app, &events);
+        },
+    );
 }
 
 fn spawn_server_control(

@@ -358,17 +358,21 @@ async fn wait_for_managed_server(
 
 async fn wait_for_controlled_server_to_stop(server: ServerId, root: &std::path::Path) -> CoreError {
     let mut interval = tokio::time::interval(Duration::from_millis(100));
+    let mut uncertain_since = None;
     loop {
         interval.tick().await;
         match classify_runtime(root) {
-            Ok(RuntimeClassification::Controlled { .. }) => {}
+            Ok(RuntimeClassification::Controlled { .. }) => uncertain_since = None,
             Ok(RuntimeClassification::Stopped | RuntimeClassification::ProvenStale { .. }) => {
                 return ConnectError::ServerStoppedBeforeReady { server }.into();
             }
-            Ok(
-                RuntimeClassification::UnknownRunning { .. }
-                | RuntimeClassification::Orphaned { .. },
-            ) => {
+            Ok(RuntimeClassification::UnknownRunning { .. }) => {
+                let since = *uncertain_since.get_or_insert_with(std::time::Instant::now);
+                if since.elapsed() >= crate::server::RUNTIME_SETTLE {
+                    return ConnectError::RuntimeUncertain { server }.into();
+                }
+            }
+            Ok(RuntimeClassification::Orphaned { .. }) => {
                 return ConnectError::RuntimeUncertain { server }.into();
             }
             Err(error) => return error.into(),

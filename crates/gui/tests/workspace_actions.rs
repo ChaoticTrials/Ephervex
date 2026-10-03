@@ -192,6 +192,8 @@ fn instance() -> InstanceRow {
         path: "/tmp/ephervex/instances/repro-client".into(),
         updated: "Just now".into(),
         linked_servers: 0,
+        stoppable_linked_servers: 0,
+        unstoppable_linked_servers: 0,
         mods: 0,
         needs_attention: false,
         state: "Ready".into(),
