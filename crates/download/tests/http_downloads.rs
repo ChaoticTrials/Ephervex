@@ -17,7 +17,7 @@ use ephervex_download::{
     DownloadManager, DownloadRequest, DownloaderConfig, FileExtension, HttpConfig,
     OperationReporter, ProgressSink, RetryPolicy, UrlPolicyError,
 };
-use ephervex_model::{Hash, HashAlgorithm, OperationStatus};
+use ephervex_model::{Hash, HashAlgorithm, OperationStatus, Progress};
 use sha1::{Digest, Sha1};
 use sha2::Sha512;
 use tempfile::TempDir;
@@ -78,6 +78,58 @@ fn sha512_of(bytes: &[u8]) -> Hash {
     hasher.update(bytes);
     Hash::new(HashAlgorithm::Sha512, &hex::encode(hasher.finalize()))
         .expect("computed sha512 is valid")
+}
+
+#[tokio::test]
+async fn downloads_are_stages_that_never_end_the_callers_operation() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/artifact.jar"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(BODY))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/missing.jar"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+    let dir = TempDir::new().expect("temp dir");
+    let found = |name: &str| {
+        request(&server, "/artifact.jar", &dir.path().join(name)).verifying(sha1_of(BODY))
+    };
+    let missing = request(&server, "/missing.jar", &dir.path().join("missing.jar"));
+    let manager = manager(RetryPolicy::none());
+    let (sink, mut events) = ChannelSink::new();
+    let sink: Arc<dyn ProgressSink> = sink;
+    let reporter = OperationReporter::new("launch", true, sink);
+    reporter.begin(None);
+    let cancel = CancellationToken::new();
+
+    manager
+        .download(&found("single.jar"), &reporter, &cancel)
+        .await
+        .expect("single download");
+    manager
+        .download_all(&[found("batch.jar")], &reporter, &cancel)
+        .await
+        .expect("batch download");
+    manager
+        .download(&missing, &reporter, &cancel)
+        .await
+        .expect_err("missing single download");
+    manager
+        .download_all(std::slice::from_ref(&missing), &reporter, &cancel)
+        .await
+        .expect_err("missing batch download");
+
+    assert_eq!(reporter.snapshot().status, OperationStatus::Running);
+    while let Ok(operation) = events.try_recv() {
+        assert_eq!(
+            operation.status,
+            OperationStatus::Running,
+            "a download published an end to the caller's operation"
+        );
+    }
 }
 
 #[tokio::test]
@@ -532,8 +584,8 @@ async fn a_canceled_download_leaves_no_file_behind() {
     assert!(no_partial_siblings(&destination));
     assert_eq!(
         reporter.snapshot().status,
-        OperationStatus::Canceled,
-        "cancellation is a distinct outcome from failure"
+        OperationStatus::Pending,
+        "a download never ends the caller's operation"
     );
 }
 
@@ -878,7 +930,8 @@ async fn a_batch_downloads_every_file_and_reports_one_operation() {
         snapshots.push(operation);
     }
     let last = snapshots.last().expect("at least one snapshot");
-    assert_eq!(last.status, OperationStatus::Completed);
+    assert_eq!(last.status, OperationStatus::Pending);
+    assert_eq!(last.items, Progress::new(5, 5));
     assert_eq!(last.progress.total, Some(5 * BODY.len() as u64));
     assert_eq!(last.progress.fraction(), Some(1.0));
     assert!(
@@ -1042,7 +1095,7 @@ async fn the_file_named_beside_a_batch_count_advances_with_it() {
         last = Some(operation);
     }
     let last = last.expect("at least one snapshot");
-    assert_eq!(last.status, OperationStatus::Completed);
+    assert_eq!(last.status, OperationStatus::Pending);
     assert_eq!(last.items.current, 8);
     assert_eq!(last.current_step.as_deref(), Some("file-4.jar"));
 }

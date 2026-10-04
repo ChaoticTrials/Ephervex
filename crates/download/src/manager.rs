@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
-use ephervex_model::{Hash, OperationStatus, Progress, SecretString};
+use ephervex_model::{Hash, Progress, SecretString};
 use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
 use reqwest::header::{
@@ -517,7 +517,11 @@ impl DownloadManager {
         revalidate_cached(request).await
     }
 
-    /// Fetches one artifact, reporting byte progress.
+    /// Fetches one artifact as a stage of the caller's operation.
+    ///
+    /// Names the artifact and reports byte progress, but never begins or
+    /// finishes the operation: only its owner knows when the whole thing is
+    /// done.
     pub async fn download(
         &self,
         request: &DownloadRequest,
@@ -529,46 +533,22 @@ impl DownloadManager {
             tally: None,
             contributed: 0,
         };
-        reporter.begin(request.label.clone());
+        reporter.set_step(request.label.clone());
         let outcome = self.fetch(request, &mut cursor, cancel).await;
-        reporter.finish(match &outcome {
-            Ok(_) => OperationStatus::Completed,
-            Err(error) if error.is_cancellation() => OperationStatus::Canceled,
-            Err(error) => OperationStatus::Failed(error.to_string()),
-        });
+        reporter.flush();
         outcome
     }
 
-    /// Fetches many artifacts with bounded concurrency, reporting one
-    /// aggregated byte-progress bar for the batch.
+    /// Fetches many artifacts with bounded concurrency as a stage of the
+    /// caller's operation, reporting one aggregated byte-progress bar, the
+    /// file that last landed, and how many are done.
     ///
+    /// Like [`Self::download`], it never begins or finishes the operation.
     /// The first failure cancels the remaining transfers: a pack import that
     /// has already lost a required file gains nothing by continuing to hammer
-    /// the CDN for the rest. The error names that failure's request by index.
+    /// the CDN for the rest. The error names that failure's request by its
+    /// index in `requests`.
     pub async fn download_all(
-        &self,
-        requests: &[DownloadRequest],
-        reporter: &OperationReporter,
-        cancel: &CancellationToken,
-    ) -> Result<Vec<DownloadOutcome>, BatchDownloadError> {
-        reporter.begin(None);
-        let outcomes = self.download_all_within(requests, reporter, cancel).await;
-        match &outcomes {
-            Ok(_) => reporter.finish(OperationStatus::Completed),
-            Err(error) if error.is_cancellation() => reporter.finish(OperationStatus::Canceled),
-            Err(error) => reporter.finish(OperationStatus::Failed(error.to_string())),
-        }
-        outcomes
-    }
-
-    /// The same batch as one stage of a longer operation.
-    ///
-    /// Reports progress, the file in flight, and how many are done, but does
-    /// not begin or finish the operation: an import has work to do after its
-    /// downloads, and a batch that marked the whole thing complete left the
-    /// activity reading 100% with a cancel button gone while overrides were
-    /// still being extracted.
-    pub async fn download_all_within(
         &self,
         requests: &[DownloadRequest],
         reporter: &OperationReporter,
@@ -605,7 +585,9 @@ impl DownloadManager {
         let mut failure: Option<BatchDownloadError> = None;
         let total = requests.len() as u64;
         let mut done = 0;
+        // A new batch replaces the last one's count at once.
         reporter.set_items(Progress::new(0, total));
+        reporter.flush();
         while let Some((index, result)) = pending.next().await {
             match result {
                 Ok(outcome) => outcomes[index] = Some(outcome),
@@ -630,6 +612,7 @@ impl DownloadManager {
             reporter.set_items_at(Progress::new(done, total), requests[index].label.clone());
         }
 
+        reporter.flush();
         failure.map_or_else(|| Ok(outcomes.into_iter().flatten().collect()), Err)
     }
 

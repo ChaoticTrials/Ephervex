@@ -6581,7 +6581,7 @@ fn forward_launch_event(
                 operation.to_string(),
                 &lookup("gui-activity-launching-minecraft"),
                 entity,
-                &lookup("gui-activity-preparing-environment"),
+                &lookup("operation-stage-preparing-environment"),
                 "running",
                 true,
                 false,
@@ -6590,7 +6590,8 @@ fn forward_launch_event(
             refresh_snapshot(paths, events);
         }
         LaunchEvent::Downloading(operation) => {
-            send_operation(events, &operation, entity.to_owned(), false);
+            // Canceling goes through the token held at Preparing.
+            send_operation(events, &operation, entity.to_owned(), true);
         }
         LaunchEvent::Starting(_) => {
             let _ = events.send(Event::Toast {

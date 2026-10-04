@@ -676,6 +676,7 @@ operation-stage-publishing = Finishing up
 operation-stage-installing-server = Installing the linked server
 operation-stage-installing-server-pack = Installing the server files
 operation-stage-relocating-files = Moving the files
+operation-stage-preparing-environment = Preparing exact environment
 operation-importing-pack = Importing modpack
 operation-installing-mods = Installing mods
 operation-creating-server = Creating server

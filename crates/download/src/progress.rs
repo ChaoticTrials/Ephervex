@@ -54,11 +54,16 @@ impl ProgressSink for ChannelSink {
 struct ReporterState {
     operation: Operation,
     last_emit: Option<Instant>,
+    /// A change the throttle has not published yet.
+    held_back: bool,
 }
 
 #[derive(Debug)]
 struct ReporterInner {
     state: Mutex<ReporterState>,
+    /// Held while publishing, so snapshots reach the sink in the order the
+    /// state changed and a stale one never follows a newer one.
+    publishing: Mutex<()>,
     sink: Option<Arc<dyn ProgressSink>>,
     min_interval: Duration,
 }
@@ -101,14 +106,25 @@ impl OperationReporter {
         cancellable: bool,
         sink: Option<Arc<dyn ProgressSink>>,
     ) -> Self {
+        Self::build_with_interval(title, cancellable, sink, Self::DEFAULT_MIN_INTERVAL)
+    }
+
+    fn build_with_interval(
+        title: impl Into<String>,
+        cancellable: bool,
+        sink: Option<Arc<dyn ProgressSink>>,
+        min_interval: Duration,
+    ) -> Self {
         Self {
             inner: Arc::new(ReporterInner {
                 state: Mutex::new(ReporterState {
                     operation: Operation::new(title, cancellable),
                     last_emit: None,
+                    held_back: false,
                 }),
+                publishing: Mutex::new(()),
                 sink,
-                min_interval: Self::DEFAULT_MIN_INTERVAL,
+                min_interval,
             }),
         }
     }
@@ -127,11 +143,35 @@ impl OperationReporter {
     }
 
     /// Marks the operation running and names what it is doing.
+    ///
+    /// A finished operation stays finished: only its owner ends it, and a late
+    /// stage cannot reopen it.
     pub fn begin(&self, step: Option<String>) {
         self.update(true, |state| {
             state.operation.status = OperationStatus::Running;
             state.operation.current_step = step;
         });
+    }
+
+    /// Marks the operation running in a named phase, as one published change.
+    pub fn begin_stage(&self, stage: String) {
+        self.update(true, |state| {
+            state.operation.status = OperationStatus::Running;
+            enter_stage(&mut state.operation, Some(stage));
+        });
+    }
+
+    /// Publishes an update the throttle held back, so a stage's last state is
+    /// not lost while the operation moves on.
+    pub fn flush(&self) {
+        let held_back = {
+            let mut state = self.lock_state();
+            // A finished operation was published when it finished.
+            !state.operation.status.is_terminal() && std::mem::take(&mut state.held_back)
+        };
+        if held_back {
+            self.publish(true);
+        }
     }
 
     /// Updates the human-readable step without touching progress.
@@ -149,12 +189,7 @@ impl OperationReporter {
     /// Emitted immediately: a stage change is the thing a waiting user is
     /// watching for, and throttling it would be throttling the answer.
     pub fn set_stage(&self, stage: Option<String>) {
-        self.update(true, |state| {
-            state.operation.stage = stage;
-            // The counts belonged to the phase that just ended.
-            state.operation.items = Progress::indeterminate();
-            state.operation.current_step = None;
-        });
+        self.update(true, |state| enter_stage(&mut state.operation, stage));
     }
 
     /// Publishes how many of the current stage's units are done. Throttled.
@@ -177,7 +212,8 @@ impl OperationReporter {
         });
     }
 
-    /// Moves the operation to a terminal state and emits immediately.
+    /// Moves the operation to a terminal state and emits immediately. Only
+    /// the first call has an effect.
     pub fn finish(&self, status: OperationStatus) {
         self.update(true, |state| {
             if status == OperationStatus::Completed {
@@ -192,51 +228,76 @@ impl OperationReporter {
     }
 
     fn with_state<R>(&self, read: impl FnOnce(&ReporterState) -> R) -> R {
-        // A poisoned lock here means some other thread panicked mid-update. The
-        // operation is a progress snapshot, not an invariant-bearing structure,
-        // so recovering is strictly better than propagating the panic into a
-        // download that is otherwise fine.
-        let state = self
-            .inner
-            .state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        read(&state)
+        read(&self.lock_state())
     }
 
     fn update(&self, force: bool, mutate: impl FnOnce(&mut ReporterState)) {
-        let Some(sink) = self.inner.sink.as_ref() else {
-            // Still apply the mutation so `snapshot` stays accurate.
-            let mut state = self
-                .inner
-                .state
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            mutate(&mut state);
-            return;
-        };
-
-        let snapshot = {
-            let mut state = self
-                .inner
-                .state
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
+        let due = {
+            let mut state = self.lock_state();
+            // A finished operation stays finished: its owner ends it once, and
+            // a late stage can neither reopen nor rewrite it.
+            if state.operation.status.is_terminal() {
+                return;
+            }
             mutate(&mut state);
             let now = Instant::now();
             let due = force
                 || state
                     .last_emit
                     .is_none_or(|last| now.duration_since(last) >= self.inner.min_interval);
-            if !due {
-                return;
+            // Claimed here, so concurrent updates in the same window do not all publish.
+            if due {
+                state.last_emit = Some(now);
             }
-            state.last_emit = Some(now);
+            state.held_back = !due;
+            due
+        };
+        if due {
+            self.publish(force);
+        }
+    }
+
+    /// Sends the state as it is now, outside the state lock.
+    ///
+    /// Publishing is serialized so a stale snapshot never follows a newer one.
+    /// A forced change waits its turn; a throttled one never blocks a download's
+    /// write loop and is held back for the next publish instead.
+    fn publish(&self, force: bool) {
+        let Some(sink) = self.inner.sink.as_ref() else {
+            return;
+        };
+        let _order = if force {
+            self.inner
+                .publishing
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+        } else {
+            match self.inner.publishing.try_lock() {
+                Ok(order) => order,
+                Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    self.lock_state().held_back = true;
+                    return;
+                }
+            }
+        };
+        let snapshot = {
+            let mut state = self.lock_state();
+            // Whatever was held back is in this snapshot.
+            state.held_back = false;
             state.operation.clone()
         };
-        // Emitted outside the lock: a sink that blocks must not block the
-        // download's write loop while holding the state mutex.
         sink.operation_changed(&snapshot);
+    }
+
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, ReporterState> {
+        // A poisoned lock means another thread panicked mid-update. The
+        // operation is a progress snapshot, not an invariant-bearing structure,
+        // so recovering beats propagating the panic into a working download.
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -286,6 +347,14 @@ impl ByteTally {
             total: self.total,
         }
     }
+}
+
+/// Starts a phase: the counts, bytes and step belonged to the one that ended.
+fn enter_stage(operation: &mut Operation, stage: Option<String>) {
+    operation.stage = stage;
+    operation.items = Progress::indeterminate();
+    operation.progress = Progress::indeterminate();
+    operation.current_step = None;
 }
 
 #[cfg(test)]
@@ -339,6 +408,57 @@ mod tests {
         let snapshots = sink.snapshots();
         let last = snapshots.last().expect("at least one snapshot");
         assert_eq!(last.status, OperationStatus::Completed);
+    }
+
+    #[test]
+    fn a_finished_operation_cannot_be_reopened_or_rewritten() {
+        let sink = Arc::new(RecordingSink::default());
+        let reporter = OperationReporter::new("download", true, sink.clone());
+        reporter.begin(Some("first".to_owned()));
+        reporter.finish(OperationStatus::Failed("lost".to_owned()));
+        let published = sink.snapshots().len();
+
+        reporter.begin(Some("second".to_owned()));
+        reporter.set_step(Some("third".to_owned()));
+        reporter.set_items(Progress::new(1, 1));
+        reporter.finish(OperationStatus::Completed);
+
+        let snapshot = reporter.snapshot();
+        assert_eq!(snapshot.status, OperationStatus::Failed("lost".to_owned()));
+        assert_eq!(snapshot.current_step.as_deref(), Some("first"));
+        assert_eq!(
+            sink.snapshots().len(),
+            published,
+            "nothing more was published"
+        );
+    }
+
+    #[test]
+    fn flushing_publishes_only_an_update_the_throttle_held_back() {
+        let sink = Arc::new(RecordingSink::default());
+        let reporter = OperationReporter::build_with_interval(
+            "download",
+            true,
+            Some(sink.clone()),
+            Duration::from_secs(3600),
+        );
+        reporter.begin(None);
+        reporter.flush();
+        assert_eq!(sink.snapshots().len(), 1, "nothing was held back yet");
+
+        reporter.set_items(Progress::new(7, 8));
+        reporter.set_items(Progress::new(8, 8));
+        assert_ne!(
+            sink.snapshots().pop().expect("begin").items,
+            Progress::new(8, 8)
+        );
+        reporter.flush();
+
+        let snapshots = sink.snapshots();
+        assert_eq!(snapshots.len(), 2);
+        let last = snapshots.last().expect("flushed");
+        assert_eq!(last.items, Progress::new(8, 8));
+        assert_eq!(last.status, OperationStatus::Running);
     }
 
     #[test]

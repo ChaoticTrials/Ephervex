@@ -226,6 +226,8 @@ impl App {
         observer.emit(LaunchEvent::Preparing {
             operation: reporter.id(),
         });
+        // Downloads are stages of this operation and never begin it themselves.
+        reporter.begin_stage("operation-stage-preparing-environment".to_owned());
 
         let mut record = self.client(instance)?;
 
@@ -469,6 +471,50 @@ mod tests {
             "authentication failures retain the shared LaunchError::AuthenticationRequired type"
         );
         assert_eq!(error.message_id(), "error-auth-not-signed-in");
+    }
+
+    #[tokio::test]
+    async fn a_launch_announces_its_operation_before_reporting_it_running() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        let instance = vanilla(&app, "1.20.1").id;
+        let (observer, mut events) = LaunchObserver::channel();
+
+        app.launch(
+            instance,
+            &LaunchOptions {
+                dry_run: true,
+                ..LaunchOptions::default()
+            },
+            &observer,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("nobody is signed in");
+
+        let events: Vec<_> = std::iter::from_fn(|| events.try_recv().ok()).collect();
+        let Some(LaunchEvent::Preparing { operation }) = events.first() else {
+            panic!("the launch did not announce itself first: {events:?}");
+        };
+        let progress: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                LaunchEvent::Downloading(snapshot) => Some(snapshot),
+                _ => None,
+            })
+            .collect();
+        assert!(!progress.is_empty(), "the operation was never begun");
+        for snapshot in &progress {
+            assert_eq!(snapshot.id, *operation);
+            assert_eq!(snapshot.status, ephervex_model::OperationStatus::Running);
+        }
+        assert_eq!(
+            progress
+                .last()
+                .and_then(|snapshot| snapshot.stage.as_deref()),
+            Some("operation-stage-preparing-environment"),
+            "the launch says what it is doing"
+        );
     }
 
     #[tokio::test]

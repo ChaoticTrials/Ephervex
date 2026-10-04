@@ -494,9 +494,9 @@ pub(crate) async fn fetch_all(
             }
         }
     }
-    // Deliberately not short-circuited when everything was cached: the batch
-    // still reports its own beginning and completion, so a frontend showing an
-    // operation sees the same lifecycle whether or not any bytes moved.
+    if missing.is_empty() {
+        return Ok(outcomes.into_iter().flatten().collect());
+    }
     let wanted: Vec<&PackFileRecipe> = missing.iter().map(|index| files[*index]).collect();
     let fetched = fetch_missing(&wanted, fetch).await?;
     for (index, outcome) in missing.into_iter().zip(fetched) {
@@ -518,11 +518,9 @@ async fn fetch_missing(
         })
         .collect::<PackResult<_>>()?;
 
-    // Within, not as the whole operation: an import still has overrides to
-    // extract, a source to retain, and a record to publish afterwards.
     match fetch
         .manager
-        .download_all_within(&requests, fetch.reporter, fetch.cancel)
+        .download_all(&requests, fetch.reporter, fetch.cancel)
         .await
     {
         // The batch answers positionally, and the caller places each outcome
