@@ -60,7 +60,7 @@ use crate::error::{LaunchError, LaunchResult};
 use crate::library::{Artifact, Library};
 use crate::natives;
 use crate::platform::Platform;
-use crate::rules::{RuleContext, rules_allow};
+use crate::rules::{OsName, RuleContext, rules_allow};
 use crate::version::VersionMetadata;
 
 /// One file the plan says must exist, and where.
@@ -220,7 +220,7 @@ impl InstallationPlan {
             // ships a classpath jar *and* a natives classifier. The two are
             // therefore considered independently rather than as an either/or.
             if library.is_legacy_natives() {
-                match plan_legacy_natives(library, &context.platform, layout) {
+                match plan_legacy_natives(library, &context.platform, layout)? {
                     Some(planned) => natives.push(planned),
                     None => excluded.push(ExcludedLibrary {
                         name: library.name.clone(),
@@ -238,6 +238,10 @@ impl InstallationPlan {
                 }
                 continue;
             };
+
+            if let Some(classifier) = library.coordinate.classifier() {
+                validate_linux_lwjgl_natives(library, classifier, &context.platform)?;
+            }
 
             let path = layout.library(&library.coordinate);
             if !placed.insert(path.clone()) {
@@ -316,13 +320,17 @@ fn plan_legacy_natives(
     library: &Library,
     platform: &Platform,
     layout: &CacheLayout,
-) -> Option<PlannedNatives> {
-    let classifier = library
-        .natives_classifier(platform.natives_key())?
-        .replace("${arch}", platform.natives_arch());
-    let artifact = library.classifier(&classifier)?;
+) -> LaunchResult<Option<PlannedNatives>> {
+    let Some(classifier) = library.natives_classifier(platform.natives_key()) else {
+        return Ok(None);
+    };
+    let classifier = classifier.replace("${arch}", platform.natives_arch());
+    validate_linux_lwjgl_natives(library, &classifier, platform)?;
+    let Some(artifact) = library.classifier(&classifier) else {
+        return Ok(None);
+    };
 
-    Some(PlannedNatives {
+    Ok(Some(PlannedNatives {
         artifact: PlannedArtifact {
             label: format!("{}:{classifier}", library.name),
             // Classifier jars are content-addressed rather than filed under the
@@ -340,7 +348,40 @@ fn plan_legacy_natives(
             .as_ref()
             .map(|rules| rules.exclude.clone())
             .unwrap_or_default(),
-    })
+    }))
+}
+
+/// OS-only rules do not establish native architecture compatibility. LWJGL 3
+/// publishes separate Linux classifiers (see LWJGL's `build.xml`, `natives-jar`);
+/// LWJGL 2's generic Linux jar instead bundles both x86 widths.
+fn validate_linux_lwjgl_natives(
+    library: &Library,
+    classifier: &str,
+    platform: &Platform,
+) -> LaunchResult<()> {
+    if platform.os != OsName::Linux || !classifier.starts_with("natives-") {
+        return Ok(());
+    }
+    let compatible = match library.coordinate.group() {
+        "org.lwjgl" => match classifier {
+            "natives-linux" => platform.arch == "x86_64",
+            "natives-linux-arm64" => platform.arch == "arm64",
+            "natives-linux-arm32" => platform.arch == "arm",
+            _ => false,
+        },
+        "org.lwjgl.lwjgl" => {
+            classifier == "natives-linux" && matches!(platform.arch.as_str(), "x86" | "x86_64")
+        }
+        _ => return Ok(()),
+    };
+    if !compatible {
+        return Err(LaunchError::IncompatibleNativeLibrary {
+            library: library.name.clone(),
+            classifier: classifier.to_owned(),
+            platform: Box::new(platform.clone()),
+        });
+    }
+    Ok(())
 }
 
 /// What an installation actually did.
@@ -640,6 +681,138 @@ mod tests {
             .iter()
             .map(|planned| planned.label.as_str())
             .collect()
+    }
+
+    #[test]
+    fn linux_arm_refuses_x86_natives_in_both_metadata_formats() {
+        for name in ["1.12.2.json", "1.20.1.json", "1.21.1.json"] {
+            for arch in ["arm64", "arm"] {
+                let context = RuleContext::new(Platform::new(OsName::Linux, arch, ""));
+                let error = InstallationPlan::resolve(&metadata(name), &context, &layout())
+                    .expect_err("x86 natives cannot run on ARM");
+                assert_eq!(
+                    error.message_id(),
+                    "error-launch-incompatible-native-library"
+                );
+                assert!(
+                    matches!(
+                        error,
+                        LaunchError::IncompatibleNativeLibrary { library, classifier, platform }
+                            if library.starts_with("org.lwjgl")
+                                && classifier == "natives-linux"
+                                && *platform == context.platform
+                    ),
+                    "{name}: {arch}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn compatible_arm_natives_keep_the_selected_version_and_artifact() {
+        let mut metadata = metadata("1.21.1.json");
+        let mut library = metadata
+            .libraries
+            .iter()
+            .find(|library| library.name.ends_with(":natives-linux"))
+            .expect("Linux LWJGL fixture")
+            .clone();
+        library.name = "org.lwjgl:lwjgl-glfw:3.3.3:natives-linux-arm64".to_owned();
+        library.coordinate =
+            ephervex_download::MavenCoordinate::parse(&library.name).expect("valid ARM coordinate");
+        let artifact = library
+            .downloads
+            .artifact
+            .as_mut()
+            .expect("native artifact");
+        artifact.url = "https://libraries.minecraft.net/org/lwjgl/lwjgl-glfw/3.3.3/lwjgl-glfw-3.3.3-natives-linux-arm64.jar".to_owned();
+        artifact.path = Some(
+            library
+                .coordinate
+                .relative_path()
+                .to_string_lossy()
+                .into_owned(),
+        );
+        metadata.libraries = vec![library.clone()];
+
+        let context = RuleContext::new(Platform::new(OsName::Linux, "arm64", ""));
+        let plan = InstallationPlan::resolve(&metadata, &context, &layout())
+            .expect("explicit ARM metadata is supported");
+        assert_eq!(plan.version, metadata.id);
+        assert_eq!(plan.libraries.len(), 1);
+        assert_eq!(plan.libraries[0].label, library.name);
+        assert_eq!(
+            plan.libraries[0].artifact,
+            library.downloads.artifact.unwrap()
+        );
+        assert_eq!(
+            plan.libraries[0].path,
+            layout().library(&library.coordinate)
+        );
+        assert!(plan.natives.is_empty());
+        assert!(
+            matches!(
+                InstallationPlan::resolve(&metadata, &linux(), &layout()),
+                Err(LaunchError::IncompatibleNativeLibrary { .. })
+            ),
+            "ARM natives must not be accepted on x86-64 either"
+        );
+    }
+
+    #[test]
+    fn legacy_lwjgl3_natives_are_checked_before_extraction() {
+        let mut metadata = metadata("1.12.2.json");
+        let mut library = metadata
+            .libraries
+            .iter()
+            .find(|library| library.coordinate.group() == "org.lwjgl.lwjgl")
+            .expect("legacy LWJGL fixture")
+            .clone();
+        library.name = "org.lwjgl:lwjgl:3.3.1".to_owned();
+        library.coordinate =
+            ephervex_download::MavenCoordinate::parse(&library.name).expect("valid coordinate");
+        metadata.libraries = vec![library.clone()];
+        let context = RuleContext::new(Platform::new(OsName::Linux, "arm64", ""));
+        assert!(matches!(
+            InstallationPlan::resolve(&metadata, &context, &layout()),
+            Err(LaunchError::IncompatibleNativeLibrary { .. })
+        ));
+
+        let artifact = library
+            .downloads
+            .classifiers
+            .remove("natives-linux")
+            .expect("native artifact");
+        library
+            .downloads
+            .classifiers
+            .insert("natives-linux-arm64".to_owned(), artifact.clone());
+        library
+            .natives
+            .insert("linux".to_owned(), "natives-linux-arm64".to_owned());
+        metadata.libraries = vec![library];
+        let plan = InstallationPlan::resolve(&metadata, &context, &layout())
+            .expect("legacy metadata can explicitly select ARM natives");
+        assert_eq!(plan.natives.len(), 1);
+        assert_eq!(plan.natives[0].artifact.artifact, artifact);
+        assert_eq!(
+            plan.natives[0].artifact.label,
+            "org.lwjgl:lwjgl:3.3.1:natives-linux-arm64"
+        );
+    }
+
+    #[test]
+    fn incompatible_natives_excluded_by_rules_do_not_block_a_plan() {
+        let mut metadata = metadata("1.21.1.json");
+        metadata
+            .libraries
+            .retain(|library| library.name.ends_with(":natives-windows"));
+        assert!(!metadata.libraries.is_empty());
+        let context = RuleContext::new(Platform::new(OsName::Linux, "arm64", ""));
+        let plan = InstallationPlan::resolve(&metadata, &context, &layout())
+            .expect("excluded libraries cannot prevent a launch");
+        assert!(plan.libraries.is_empty());
+        assert_eq!(plan.excluded.len(), metadata.libraries.len());
     }
 
     #[test]

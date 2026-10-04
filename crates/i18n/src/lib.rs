@@ -714,6 +714,7 @@ mod tests {
             "error-launch-lock-busy",
             "error-launch-invalid-version-metadata",
             "error-launch-loader-not-supported",
+            "error-launch-incompatible-native-library",
             "error-launch-download-failed",
             "error-launch-artifact-mismatched",
             "error-loader-metadata-unavailable",

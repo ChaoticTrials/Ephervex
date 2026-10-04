@@ -706,6 +706,9 @@ error-launch-invalid-version-metadata = That version's metadata does not describ
 error-launch-loader-not-supported = This build does not support the { $loader } loader.
 .action = Ephervex refuses to substitute Vanilla or another loader because that would not reproduce the selected instance.
 
+error-launch-incompatible-native-library = This version selects native libraries that do not support your Linux CPU architecture.
+.action = Run this instance on a compatible machine. Ephervex keeps the selected versions and does not substitute native downloads.
+
 error-launch-download-failed = A file Minecraft needs could not be downloaded.
 .action = Check your network connection and try again. Nothing partial or unverified is kept, so a retry starts clean.
 

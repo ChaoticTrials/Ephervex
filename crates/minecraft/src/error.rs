@@ -199,6 +199,15 @@ pub enum LaunchError {
     #[error("`{loader}` instances cannot be launched by the vanilla pipeline")]
     LoaderNotSupported { loader: String },
 
+    /// The selected LWJGL native artifact does not support the target Linux
+    /// architecture. Never substitute an unverified artifact or library version.
+    #[error("native classifier `{classifier}` for `{library}` does not support `{platform}`")]
+    IncompatibleNativeLibrary {
+        library: String,
+        classifier: String,
+        platform: Box<crate::platform::Platform>,
+    },
+
     /// A required artifact could not be fetched or failed its hash.
     #[error("could not obtain `{artifact}`")]
     DownloadFailed {
@@ -272,6 +281,7 @@ impl LaunchError {
         match self {
             Self::InvalidVersionMetadata { .. } => "error-launch-invalid-version-metadata",
             Self::LoaderNotSupported { .. } => "error-launch-loader-not-supported",
+            Self::IncompatibleNativeLibrary { .. } => "error-launch-incompatible-native-library",
             // A digest that does not match is not a network problem and does
             // not have a network answer: what was served is wrong, and trying
             // the same address again will serve it again.

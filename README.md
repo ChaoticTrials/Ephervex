@@ -183,6 +183,10 @@ shell configuration files or install completion scripts automatically.
   complete desktop preference interface.
 * `x86_64` and `aarch64` are released, on a glibc 2.35 baseline. Distributions
   older than Ubuntu 22.04 or Debian 12 are unsupported.
+* Linux ARM client launches require compatible LWJGL natives in the selected
+  version's metadata. Versions that select x86 natives, including Vanilla
+  1.12.2, 1.20.1, and 1.21.1, are refused before installation. Ephervex does not
+  substitute native downloads or change the selected versions.
 * Debian packages reach the ChaoticTrials apt repository; the RPM packages are
   downloadable release artifacts, with no repository to upgrade from.
 * Running the AppImage needs FUSE. Where it is unavailable,
