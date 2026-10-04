@@ -86,14 +86,32 @@ const CONFIG_LOCK_PATIENCE: std::time::Duration = std::time::Duration::from_secs
 
 /// Held while one update reloads, changes, and writes the configuration.
 ///
-/// A `flock`, which the kernel drops if the holder dies, plus a process-wide
-/// mutex, because NFS gives all threads of a process one shared lock.
+/// A `flock`, which the kernel drops if the holder dies, plus a claim on the
+/// lock file within this process, because NFS gives all threads of a process
+/// one shared lock. The claim is per file, so unrelated configurations never
+/// wait on each other.
 struct ConfigWriteLock {
+    // Declared first so the flock is released before the in-process claim.
     _file: Option<std::fs::File>,
-    _process: std::sync::MutexGuard<'static, ()>,
+    _claim: ConfigWriteClaim,
 }
 
-static CONFIG_WRITES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// This process's claim on one configuration lock file.
+struct ConfigWriteClaim(PathBuf);
+
+static CONFIG_WRITES: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+static CONFIG_WRITE_FINISHED: std::sync::Condvar = std::sync::Condvar::new();
+
+impl Drop for ConfigWriteClaim {
+    fn drop(&mut self) {
+        let mut claimed = CONFIG_WRITES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        claimed.retain(|path| *path != self.0);
+        drop(claimed);
+        CONFIG_WRITE_FINISHED.notify_all();
+    }
+}
 
 impl ConfigWriteLock {
     fn take(path: &Path) -> Result<Self, ConfigError> {
@@ -104,22 +122,25 @@ impl ConfigWriteLock {
         let busy = || ConfigError::Busy {
             path: path.to_path_buf(),
         };
-        let wait = || {
-            if std::time::Instant::now() < deadline {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-                Ok(())
-            } else {
-                Err(busy())
+
+        // The registry guards no data a panic could tear, so poisoning is ignored.
+        let mut claimed = CONFIG_WRITES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while claimed.iter().any(|held| held == path) {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(busy());
             }
-        };
-        let process = loop {
-            match CONFIG_WRITES.try_lock() {
-                Ok(held) => break held,
-                // The mutex guards no data, so a panic while it was held leaves nothing torn.
-                Err(std::sync::TryLockError::Poisoned(poisoned)) => break poisoned.into_inner(),
-                Err(std::sync::TryLockError::WouldBlock) => wait()?,
-            }
-        };
+            claimed = CONFIG_WRITE_FINISHED
+                .wait_timeout(claimed, remaining)
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
+        }
+        claimed.push(path.to_path_buf());
+        drop(claimed);
+        let claim = ConfigWriteClaim(path.to_path_buf());
+
         let unwritable = |errno: Errno| ConfigError::Unwritable {
             path: path.to_path_buf(),
             source: errno.into(),
@@ -136,17 +157,20 @@ impl ConfigWriteLock {
                 Ok(()) => {
                     return Ok(Self {
                         _file: Some(file),
-                        _process: process,
+                        _claim: claim,
                     });
                 }
                 Err(Errno::INTR) => {}
-                Err(Errno::WOULDBLOCK) => wait()?,
+                Err(Errno::WOULDBLOCK) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(Errno::WOULDBLOCK) => return Err(busy()),
                 // Without locking, updates within this process stay serialized.
                 Err(errno @ (Errno::NOLCK | Errno::OPNOTSUPP | Errno::NOSYS)) => {
                     tracing::warn!(path = %path.display(), %errno, "configuration updates are not locked across processes here");
                     return Ok(Self {
                         _file: None,
-                        _process: process,
+                        _claim: claim,
                     });
                 }
                 Err(errno) => return Err(unwritable(errno)),
@@ -1103,7 +1127,14 @@ impl Config {
     /// Returns what was written.
     pub fn update(paths: &Paths, change: impl FnOnce(&mut Self)) -> Result<Self, ConfigError> {
         crate::paths::create_dir_all(paths.config_dir())?;
-        let _writing = ConfigWriteLock::take(&paths.config_dir().join(CONFIG_LOCK_FILE))?;
+        // Canonical, so two spellings of one directory claim the same lock.
+        let directory = std::fs::canonicalize(paths.config_dir()).map_err(|source| {
+            ConfigError::Unwritable {
+                path: paths.config_dir().to_path_buf(),
+                source,
+            }
+        })?;
+        let _writing = ConfigWriteLock::take(&directory.join(CONFIG_LOCK_FILE))?;
         let mut config = Self::load_or_default(paths)?;
         change(&mut config);
         config.save_to(&paths.config_file())?;
@@ -1662,6 +1693,43 @@ mod tests {
                 .display
                 .show_linked_servers
         );
+    }
+
+    #[test]
+    fn updates_to_different_configurations_do_not_wait_on_each_other() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let held = Paths::rooted_at(base.path().join("held"));
+        let other = Paths::rooted_at(base.path().join("other"));
+        crate::paths::create_dir_all(held.config_dir()).expect("config dir");
+        let _writing =
+            ConfigWriteLock::take(&held.config_dir().join(CONFIG_LOCK_FILE)).expect("lock");
+
+        Config::update(&other, |config| config.display.show_linked_servers = true)
+            .expect("an unrelated configuration updates at once");
+    }
+
+    #[test]
+    fn writers_of_one_configuration_in_one_process_wait_for_each_other() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let paths = Paths::rooted_at(base.path());
+        crate::paths::create_dir_all(paths.config_dir()).expect("config dir");
+        let lock = std::fs::canonicalize(paths.config_dir())
+            .expect("canonical")
+            .join(CONFIG_LOCK_FILE);
+        let first_writer = ConfigWriteLock::take(&lock).expect("lock");
+
+        let waiting = std::thread::spawn({
+            let paths = paths.clone();
+            move || Config::update(&paths, |config| config.display.show_linked_servers = true)
+        });
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(
+            !waiting.is_finished(),
+            "the second writer waits for the first"
+        );
+
+        drop(first_writer);
+        waiting.join().expect("no panic").expect("update");
     }
 
     #[test]
