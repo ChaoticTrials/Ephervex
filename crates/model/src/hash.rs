@@ -6,7 +6,7 @@
 
 use std::fmt;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// Hash algorithms the launcher can verify.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -51,10 +51,32 @@ impl fmt::Display for HashAlgorithm {
 /// The stored digest is always lowercase, so comparison is a plain string
 /// equality check and case differences between providers cannot cause a
 /// spurious mismatch.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct Hash {
     pub algorithm: HashAlgorithm,
     digest: String,
+}
+
+impl<'de> Deserialize<'de> for Hash {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct HashFields {
+            algorithm: HashAlgorithm,
+            digest: String,
+        }
+
+        let fields = HashFields::deserialize(deserializer)?;
+        Self::new(fields.algorithm, &fields.digest).ok_or_else(|| {
+            serde::de::Error::custom(format_args!(
+                "invalid {} digest: expected {} hexadecimal characters",
+                fields.algorithm,
+                fields.algorithm.hex_len()
+            ))
+        })
+    }
 }
 
 impl Hash {
@@ -102,6 +124,34 @@ mod tests {
         let hash = Hash::new(HashAlgorithm::Sha1, &SHA1_OF_EMPTY.to_ascii_uppercase())
             .expect("valid sha1");
         assert_eq!(hash.digest(), SHA1_OF_EMPTY);
+    }
+
+    #[test]
+    fn deserialization_normalizes_digests_to_lowercase() {
+        let hash: Hash = serde_json::from_value(serde_json::json!({
+            "algorithm": "sha1",
+            "digest": SHA1_OF_EMPTY.to_ascii_uppercase(),
+        }))
+        .expect("valid sha1");
+
+        assert_eq!(hash.digest(), SHA1_OF_EMPTY);
+    }
+
+    #[test]
+    fn deserialization_rejects_malformed_digests() {
+        for digest in [
+            "",
+            "da39a3ee5e6b4b0d3255bfef95601890afd8070",
+            "za39a3ee5e6b4b0d3255bfef95601890afd80709",
+            "../../../../victim/important-notes",
+        ] {
+            let result = serde_json::from_value::<Hash>(serde_json::json!({
+                "algorithm": "sha1",
+                "digest": digest,
+            }));
+
+            assert!(result.is_err(), "accepted malformed digest `{digest}`");
+        }
     }
 
     #[test]

@@ -332,6 +332,31 @@ mod tests {
     }
 
     #[test]
+    fn a_recipe_with_a_malformed_digest_is_invalid() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = SourceStore::new(dir.path().join("source"));
+        let path = store.write_recipe(&recipe()).expect("write");
+
+        let mut stored: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("parse");
+        stored["files"] = serde_json::json!([{
+            "logical_path": "mods/a.jar",
+            "hashes": [{
+                "algorithm": "sha1",
+                "digest": "../../../../victim/important-notes"
+            }],
+            "client": "required",
+            "server": "required"
+        }]);
+        std::fs::write(&path, serde_json::to_vec(&stored).expect("serialize")).expect("write");
+
+        assert!(matches!(
+            store.read_recipe().expect_err("must refuse"),
+            PackError::RecipeInvalid { .. }
+        ));
+    }
+
+    #[test]
     fn a_recipe_written_before_managed_mods_existed_still_reads() {
         // Version 1 recipes are on disk in every instance imported by an
         // earlier build. Refusing them, or misreading their files, would strand
