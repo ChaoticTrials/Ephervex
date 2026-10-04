@@ -709,6 +709,9 @@ error-launch-loader-not-supported = This build does not support the { $loader } 
 error-launch-incompatible-native-library = This version selects native libraries that do not support your Linux CPU architecture.
 .action = Run this instance on a compatible machine. Ephervex keeps the selected versions and does not substitute native downloads.
 
+error-launch-missing-native-artifact = A required native library is missing from this version's download information.
+.action = Report the incomplete download information to the version's provider.
+
 error-launch-download-failed = A file Minecraft needs could not be downloaded.
 .action = Check your network connection and try again. Nothing partial or unverified is kept, so a retry starts clean.
 

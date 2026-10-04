@@ -208,6 +208,10 @@ pub enum LaunchError {
         platform: Box<crate::platform::Platform>,
     },
 
+    /// A native map selects a classifier with no downloadable artifact.
+    #[error("native classifier `{classifier}` for `{library}` has no download artifact")]
+    MissingNativeArtifact { library: String, classifier: String },
+
     /// A required artifact could not be fetched or failed its hash.
     #[error("could not obtain `{artifact}`")]
     DownloadFailed {
@@ -282,6 +286,7 @@ impl LaunchError {
             Self::InvalidVersionMetadata { .. } => "error-launch-invalid-version-metadata",
             Self::LoaderNotSupported { .. } => "error-launch-loader-not-supported",
             Self::IncompatibleNativeLibrary { .. } => "error-launch-incompatible-native-library",
+            Self::MissingNativeArtifact { .. } => "error-launch-missing-native-artifact",
             // A digest that does not match is not a network problem and does
             // not have a network answer: what was served is wrong, and trying
             // the same address again will serve it again.

@@ -316,6 +316,8 @@ impl InstallationPlan {
 }
 
 /// Picks the natives classifier for a platform, substituting `${arch}`.
+/// A map without this OS is inapplicable; a selected classifier without an
+/// artifact is incomplete metadata and must not produce a launch plan.
 fn plan_legacy_natives(
     library: &Library,
     platform: &Platform,
@@ -326,9 +328,13 @@ fn plan_legacy_natives(
     };
     let classifier = classifier.replace("${arch}", platform.natives_arch());
     validate_linux_lwjgl_natives(library, &classifier, platform)?;
-    let Some(artifact) = library.classifier(&classifier) else {
-        return Ok(None);
-    };
+    let artifact =
+        library
+            .classifier(&classifier)
+            .ok_or_else(|| LaunchError::MissingNativeArtifact {
+                library: library.name.clone(),
+                classifier: classifier.clone(),
+            })?;
 
     Ok(Some(PlannedNatives {
         artifact: PlannedArtifact {
@@ -681,6 +687,99 @@ mod tests {
             .iter()
             .map(|planned| planned.label.as_str())
             .collect()
+    }
+
+    #[test]
+    fn a_selected_legacy_native_without_an_artifact_refuses_the_plan() {
+        for name in [
+            "org.lwjgl.lwjgl:lwjgl-platform:2.9.4-nightly-20150209",
+            "net.java.jinput:jinput-platform:2.0.5",
+        ] {
+            let mut metadata = metadata("1.12.2.json");
+            let library = metadata
+                .libraries
+                .iter_mut()
+                .find(|library| library.name == name)
+                .expect("native library");
+            assert!(
+                library
+                    .downloads
+                    .classifiers
+                    .remove("natives-linux")
+                    .is_some()
+            );
+            assert_eq!(library.natives_classifier("linux"), Some("natives-linux"));
+
+            let error = InstallationPlan::resolve(&metadata, &linux(), &layout())
+                .expect_err("a declared native dependency cannot be omitted");
+            assert_eq!(error.message_id(), "error-launch-missing-native-artifact");
+            assert!(
+                matches!(error, LaunchError::MissingNativeArtifact { library, classifier }
+                if library == name && classifier == "natives-linux")
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_native_artifact_names_the_substituted_architecture() {
+        let mut metadata = metadata("1.12.2.json");
+        metadata.libraries.retain(|library| {
+            library.name == "com.mojang:text2speech:1.10.3" && library.is_legacy_natives()
+        });
+        assert_eq!(metadata.libraries.len(), 1);
+        metadata.libraries[0]
+            .natives
+            .insert("windows".to_owned(), "natives-windows-${arch}".to_owned());
+        for (arch, classifier) in [
+            ("x86", "natives-windows-32"),
+            ("x86_64", "natives-windows-64"),
+        ] {
+            let context = RuleContext::new(Platform::new(OsName::Windows, arch, ""));
+            let error = InstallationPlan::resolve(&metadata, &context, &layout())
+                .expect_err("the generic Windows artifact is not a fallback");
+            assert!(
+                matches!(error, LaunchError::MissingNativeArtifact { library, classifier: selected }
+                if library == "com.mojang:text2speech:1.10.3" && selected == classifier)
+            );
+        }
+    }
+
+    #[test]
+    fn a_native_map_without_the_target_os_remains_inapplicable() {
+        let mut metadata = metadata("1.12.2.json");
+        let name = "org.lwjgl.lwjgl:lwjgl-platform:2.9.4-nightly-20150209";
+        let library = metadata
+            .libraries
+            .iter_mut()
+            .find(|library| library.name == name)
+            .expect("native library");
+        library.natives.remove("linux");
+        let plan = InstallationPlan::resolve(&metadata, &linux(), &layout())
+            .expect("a map for other operating systems is not a broken reference");
+        assert!(plan.excluded.iter().any(|library| library.name == name
+            && library.reason == ExclusionReason::NoNativesForPlatform));
+        assert!(
+            plan.libraries.iter().any(|library| library.label == name),
+            "the ordinary classpath artifact remains applicable"
+        );
+    }
+
+    #[test]
+    fn missing_native_artifacts_in_rule_excluded_libraries_do_not_block_a_plan() {
+        let mut metadata = metadata("1.12.2.json");
+        let name = "org.lwjgl.lwjgl:lwjgl-platform:2.9.2-nightly-20140822";
+        let library = metadata
+            .libraries
+            .iter_mut()
+            .find(|library| library.name == name)
+            .expect("macOS-only native library");
+        library.downloads.classifiers.clear();
+        let plan = InstallationPlan::resolve(&metadata, &linux(), &layout())
+            .expect("inapplicable native artifacts are not required");
+        assert!(
+            plan.excluded.iter().any(|library| library.name == name
+                && library.reason == ExclusionReason::RuleNotSatisfied)
+        );
     }
 
     #[test]
