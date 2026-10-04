@@ -90,12 +90,15 @@ pub enum ArtifactCacheLimitError {
     /// The value times its unit does not fit the representable range.
     #[error("a cache limit of {value} {unit} is larger than this launcher can represent")]
     TooLarge { value: u64, unit: ByteUnit },
+    /// An exact byte count exceeds the representable range.
+    #[error("a cache limit of {bytes} bytes is larger than this launcher can represent")]
+    TooLargeBytes { bytes: u64 },
     /// A limit of zero bytes, which would evict every artifact the moment its
     /// operation finished.
     #[error("a cache limit has to be at least one {}", ByteUnit::Mebibytes)]
     TooSmall,
     /// The text in a custom-size field is not a whole number.
-    #[error("`{value}` is not a whole number of bytes")]
+    #[error("`{value}` is not a valid cache limit value")]
     Malformed { value: String },
 }
 
@@ -104,7 +107,9 @@ impl ArtifactCacheLimitError {
     #[must_use]
     pub const fn message_id(&self) -> &'static str {
         match self {
-            Self::TooLarge { .. } => "error-artifact-cache-limit-too-large",
+            Self::TooLarge { .. } | Self::TooLargeBytes { .. } => {
+                "error-artifact-cache-limit-too-large"
+            }
             Self::TooSmall => "error-artifact-cache-limit-too-small",
             Self::Malformed { .. } => "error-artifact-cache-limit-malformed",
         }
@@ -118,7 +123,7 @@ impl ArtifactCacheLimitError {
     #[must_use]
     pub fn message_args(&self) -> Vec<(&'static str, String)> {
         match self {
-            Self::TooLarge { .. } => vec![(
+            Self::TooLarge { .. } | Self::TooLargeBytes { .. } => vec![(
                 "maximum",
                 format_binary_bytes(MAX_ARTIFACT_CACHE_LIMIT_BYTES),
             )],
@@ -201,10 +206,7 @@ impl ArtifactCacheLimit {
             return Err(ArtifactCacheLimitError::TooSmall);
         }
         if bytes > MAX_ARTIFACT_CACHE_LIMIT_BYTES {
-            return Err(ArtifactCacheLimitError::TooLarge {
-                value: bytes,
-                unit: ByteUnit::Mebibytes,
-            });
+            return Err(ArtifactCacheLimitError::TooLargeBytes { bytes });
         }
         Ok(Self::Limited(bytes))
     }
@@ -373,6 +375,27 @@ mod tests {
         assert!(ArtifactCacheLimit::from_bytes(MAX_ARTIFACT_CACHE_LIMIT_BYTES + 1).is_err());
         // Whatever the ceiling is, the settings file has to be able to carry it.
         assert!(i64::try_from(MAX_ARTIFACT_CACHE_LIMIT_BYTES).is_ok());
+    }
+
+    #[test]
+    fn oversized_limits_report_the_exact_input_and_unit() {
+        for bytes in [MAX_ARTIFACT_CACHE_LIMIT_BYTES + 1, u64::MAX] {
+            let error = ArtifactCacheLimit::from_bytes(bytes).expect_err("too large");
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "a cache limit of {bytes} bytes is larger than this launcher can represent"
+                )
+            );
+            let unit_error =
+                ArtifactCacheLimit::from_unit(bytes, ByteUnit::Tebibytes).expect_err("too large");
+            assert_eq!(
+                unit_error.to_string(),
+                format!("a cache limit of {bytes} TiB is larger than this launcher can represent")
+            );
+            assert_eq!(error.message_id(), unit_error.message_id());
+            assert_eq!(error.message_args(), unit_error.message_args());
+        }
     }
 
     #[test]
