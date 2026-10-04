@@ -35,6 +35,7 @@ pub enum ModProvider {
     /// API key, a rejected one, a response that could not be read - names the
     /// catalog it came from, and so a pack imported from a CurseForge export
     /// records the catalog its files came from.
+    #[serde(rename = "curseforge")]
     CurseForge,
 }
 
@@ -478,10 +479,13 @@ mod tests {
 
     #[test]
     fn the_stored_spelling_is_what_serde_writes() {
-        let json = serde_json::to_string(&ModProvider::Modrinth).expect("serialize");
-        assert_eq!(json, "\"modrinth\"");
-        let back: ModProvider = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(back, ModProvider::Modrinth);
+        for provider in [ModProvider::Modrinth, ModProvider::CurseForge] {
+            let json = serde_json::to_string(&provider).expect("serialize");
+            assert_eq!(json, format!("\"{}\"", provider.as_str()));
+            let back: ModProvider = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(back, provider);
+            assert_eq!(ModProvider::parse(provider.as_str()), Some(provider));
+        }
     }
     #[test]
     fn no_recorded_catalog_is_the_built_in_default_rather_than_a_choice() {
