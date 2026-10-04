@@ -53,6 +53,11 @@ fn java_script(version: &str, home: &str) -> Vec<u8> {
 /// A tarball shaped like Temurin's: everything under one wrapper directory,
 /// including the relative `legal/` symlinks the real archive is full of.
 fn temurin_archive() -> Vec<u8> {
+    temurin_archive_reporting("21.0.12")
+}
+
+/// [`temurin_archive`] whose `bin/java` reports `version`.
+fn temurin_archive_reporting(version: &str) -> Vec<u8> {
     let home = format!("/opt/{RELEASE_NAME}");
     let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
         Vec::new(),
@@ -68,7 +73,7 @@ fn temurin_archive() -> Vec<u8> {
         (
             format!("{RELEASE_NAME}/bin/java"),
             0o755,
-            java_script("21.0.12", &home),
+            java_script(version, &home),
         ),
         (
             format!("{RELEASE_NAME}/legal/java.base/LICENSE"),
@@ -431,6 +436,43 @@ async fn an_archive_whose_checksum_does_not_match_is_never_extracted() {
         !java_dir.join("21/eclipse-jdk-21.0.12+8").exists(),
         "nothing may be installed from an archive that failed verification"
     );
+}
+
+#[tokio::test]
+async fn a_runtime_of_the_wrong_major_is_never_installed_and_a_retry_checks_again() {
+    let server = MockServer::start().await;
+    let archive = temurin_archive_reporting("17.0.9");
+    let checksum = sha256(&archive);
+    mount(&server, archive, &checksum).await;
+
+    let temp = tempfile::tempdir().expect("temp");
+    let java_dir = temp.path().join("data/java");
+    let directory = java_dir.join("21/eclipse-jdk-21.0.12+8");
+    let provider = provider(&server, &temp.path().join("cache"), &java_dir);
+
+    for attempt in ["first", "retry"] {
+        let error = provider
+            .install(21, &reporter(), &CancellationToken::new())
+            .await
+            .expect_err("a Java 17 runtime cannot satisfy a Java 21 install");
+        match error {
+            JavaError::ManagedRuntimeWrongMajor {
+                path,
+                requested,
+                found,
+            } => {
+                assert_eq!(path, directory.join("bin/java"), "{attempt}");
+                assert_eq!((requested, found), (21, 17), "{attempt}");
+            }
+            other => panic!("{attempt}: {other:?}"),
+        }
+        assert!(!directory.exists(), "{attempt}: nothing may be published");
+        assert_eq!(
+            staging_left_in(&java_dir.join("21")),
+            Vec::<String>::new(),
+            "{attempt}"
+        );
+    }
 }
 
 #[tokio::test]

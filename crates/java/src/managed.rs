@@ -22,9 +22,9 @@
 //!    archive is remote input; the fact that it came from Adoptium over HTTPS
 //!    is a reason to *expect* it to be well-formed, not a reason to skip
 //!    checking.
-//! 4. **Probe** the installed `bin/java` and confirm it is the major that was
-//!    asked for. An install that produces something unusable must fail here,
-//!    not at launch.
+//! 4. **Probe** the unpacked `bin/java` and confirm it is the major that was
+//!    asked for, before it is renamed into place. An install that produces
+//!    something unusable must fail here, not at launch.
 //!
 //! # Extraction is not done in place
 //!
@@ -50,7 +50,7 @@ use crate::archive::{ExtractionLimits, extract_tar_gz};
 use crate::discovery::{JavaOrigin, JavaRuntime, JavaSourceKind};
 use crate::error::JavaError;
 use crate::install_lock::InstallLock;
-use crate::probe::probe;
+use crate::probe::{ProbeReport, probe};
 
 /// Ends the name of every staging directory.
 const STAGING_SUFFIX: &str = ".incomplete";
@@ -227,6 +227,12 @@ impl ManagedJavaProvider {
         let staging = self
             .unpack(&archive, &major_directory, &name, Arc::clone(&lock))
             .await?;
+        // Before publication, so a runtime that fails it is never installed.
+        let staged = staging.path().join("bin").join("java");
+        if let Err(error) = probe_requested(&staged, &executable, major).await {
+            discard(staging).await;
+            return Err(error);
+        }
         publish(staging, &directory, Arc::clone(&lock)).await?;
 
         let runtime = self.identify(&executable, major).await?;
@@ -336,25 +342,7 @@ impl ManagedJavaProvider {
 
     /// Probes the installed executable and checks it is what was asked for.
     async fn identify(&self, executable: &Path, major: u32) -> Result<JavaRuntime, JavaError> {
-        let report =
-            probe(executable)
-                .await
-                .map_err(|source| JavaError::ManagedRuntimeUnusable {
-                    path: executable.to_path_buf(),
-                    source: Box::new(source),
-                })?;
-
-        if report.version.major != major {
-            // Adoptium served a different major than the URL asked for, or the
-            // archive was not what its name said. Either way the install is not
-            // what was requested and must not be offered as if it were.
-            return Err(JavaError::ManagedRuntimeWrongMajor {
-                path: executable.to_path_buf(),
-                requested: major,
-                found: report.version.major,
-            });
-        }
-
+        let report = probe_requested(executable, executable, major).await?;
         let canonical = fs::canonicalize(executable)
             .await
             .unwrap_or_else(|_| executable.to_path_buf());
@@ -367,6 +355,33 @@ impl ManagedJavaProvider {
             },
         ))
     }
+}
+
+/// Probes `executable` and checks it is the major that was asked for. Failures
+/// name `reported_as`, the path the runtime is installed at.
+async fn probe_requested(
+    executable: &Path,
+    reported_as: &Path,
+    major: u32,
+) -> Result<ProbeReport, JavaError> {
+    let report = probe(executable)
+        .await
+        .map_err(|source| JavaError::ManagedRuntimeUnusable {
+            path: reported_as.to_path_buf(),
+            source: Box::new(source),
+        })?;
+
+    if report.version.major != major {
+        // Adoptium served a different major than the URL asked for, or the
+        // archive was not what its name said. Either way the install is not
+        // what was requested and must not be offered as if it were.
+        return Err(JavaError::ManagedRuntimeWrongMajor {
+            path: reported_as.to_path_buf(),
+            requested: major,
+            found: report.version.major,
+        });
+    }
+    Ok(report)
 }
 
 /// Takes the lock that serializes installs of release `name`, waiting for any
