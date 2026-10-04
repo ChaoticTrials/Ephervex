@@ -149,6 +149,9 @@ impl VersionBound {
 
     /// Requires no more than this version, inclusive.
     ///
+    /// Every vendor build of the bound's own update counts as at the bound:
+    /// `21.0.3+9` is at most `21.0.3`. A build on the bound itself is ignored.
+    ///
     /// This is the bound old Forge needs, and the one a major-only check cannot
     /// express.
     #[must_use]
@@ -162,6 +165,11 @@ impl VersionBound {
     pub const fn maximum(&self) -> Option<JavaVersion> {
         self.maximum
     }
+}
+
+/// The release a runtime is on, without its vendor build.
+const fn release_update(version: JavaVersion) -> (u32, u32, u32) {
+    (version.major, version.minor, version.update)
 }
 
 impl JavaCompatibilityRule for VersionBound {
@@ -192,7 +200,7 @@ impl JavaCompatibilityRule for VersionBound {
             return reject(RejectionReason::TooOld { minimum, found });
         }
         if let Some(maximum) = self.maximum
-            && found > maximum
+            && release_update(found) > release_update(maximum)
         {
             return reject(RejectionReason::TooNew { maximum, found });
         }
@@ -365,6 +373,37 @@ mod tests {
         );
         assert!(
             rule.evaluate(&runtime(JavaVersion::new(25, 0, 3)))
+                .is_accepted()
+        );
+    }
+
+    #[test]
+    fn an_at_most_bound_accepts_a_build_on_its_own_update() {
+        let rule = VersionBound::new("x")
+            .major(21)
+            .at_most(JavaVersion::new(21, 0, 3));
+        assert!(
+            rule.evaluate(&runtime(JavaVersion::new(21, 0, 3).with_build(9)))
+                .is_accepted(),
+            "a build on the bound's own update is at the bound, not past it"
+        );
+    }
+
+    #[test]
+    fn an_at_most_bound_still_rejects_a_build_on_the_next_update() {
+        let rule = VersionBound::new("x")
+            .major(21)
+            .at_most(JavaVersion::new(21, 0, 3));
+        assert!(
+            !rule
+                .evaluate(&runtime(JavaVersion::new(21, 0, 4).with_build(1)))
+                .is_accepted()
+        );
+        assert!(
+            !forge_1_12_2()
+                .evaluate(&runtime(
+                    JavaVersion::new(8, 0, LEGACY_FORGE_MAX_JAVA_8_UPDATE + 1).with_build(7)
+                ))
                 .is_accepted()
         );
     }
