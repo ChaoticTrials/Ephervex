@@ -607,6 +607,7 @@ mod tests {
             "error-java-managed-download-failed",
             "error-java-managed-extraction-failed",
             "error-java-managed-runtime-unusable",
+            "error-java-managed-install-blocked",
             "error-java-managed-cache-key-invalid",
             "error-java-io",
             "error-java-archive-unsafe",

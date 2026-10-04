@@ -476,6 +476,126 @@ async fn a_runtime_of_the_wrong_major_is_never_installed_and_a_retry_checks_agai
 }
 
 #[tokio::test]
+async fn an_install_directory_without_a_usable_runtime_is_replaced() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    /// What sits at `bin` in the stale install.
+    enum Bin {
+        Missing,
+        File,
+        Java(Vec<u8>),
+    }
+
+    for (case, bin) in [
+        ("no bin/java", Bin::Missing),
+        ("bin is a file", Bin::File),
+        ("java 17 under 21", Bin::Java(java_script("17.0.9", "/opt"))),
+    ] {
+        let server = MockServer::start().await;
+        let archive = temurin_archive();
+        let checksum = sha256(&archive);
+        mount(&server, archive, &checksum).await;
+
+        let temp = tempfile::tempdir().expect("temp");
+        let java_dir = temp.path().join("data/java");
+        let directory = java_dir.join("21/eclipse-jdk-21.0.12+8");
+        std::fs::create_dir_all(directory.join("lib")).expect("create");
+        std::fs::write(directory.join("lib/leftover"), b"stale\n").expect("write");
+        match bin {
+            Bin::Missing => {}
+            Bin::File => std::fs::write(directory.join("bin"), b"").expect("write"),
+            Bin::Java(java) => {
+                std::fs::create_dir_all(directory.join("bin")).expect("create");
+                std::fs::write(directory.join("bin/java"), java).expect("write");
+                std::fs::set_permissions(
+                    directory.join("bin/java"),
+                    std::fs::Permissions::from_mode(0o755),
+                )
+                .expect("chmod");
+            }
+        }
+        let provider = provider(&server, &temp.path().join("cache"), &java_dir);
+
+        let installed = provider
+            .install(21, &reporter(), &CancellationToken::new())
+            .await
+            .unwrap_or_else(|error| panic!("{case}: {error:?}"));
+        assert!(installed.newly_installed, "{case}");
+        assert_eq!(installed.runtime.version.major, 21, "{case}");
+        assert!(directory.join("release").is_file(), "{case}");
+        assert!(!directory.join("lib/leftover").exists(), "{case}");
+        assert_eq!(
+            staging_left_in(&java_dir.join("21")),
+            Vec::<String>::new(),
+            "{case}"
+        );
+
+        let again = provider
+            .install(21, &reporter(), &CancellationToken::new())
+            .await
+            .expect("install again");
+        assert!(!again.newly_installed, "{case}");
+    }
+}
+
+#[tokio::test]
+async fn a_file_at_the_install_path_is_reported_rather_than_replaced() {
+    let server = MockServer::start().await;
+    let archive = temurin_archive();
+    let checksum = sha256(&archive);
+    mount(&server, archive, &checksum).await;
+
+    let temp = tempfile::tempdir().expect("temp");
+    let java_dir = temp.path().join("data/java");
+    let directory = java_dir.join("21/eclipse-jdk-21.0.12+8");
+    std::fs::create_dir_all(directory.parent().expect("parent")).expect("create");
+    std::fs::write(&directory, b"not an install\n").expect("write");
+
+    let error = provider(&server, &temp.path().join("cache"), &java_dir)
+        .install(21, &reporter(), &CancellationToken::new())
+        .await
+        .expect_err("a file is not an install to replace");
+    match error {
+        JavaError::ManagedInstallBlocked { path } => assert_eq!(path, directory),
+        other => panic!("{other:?}"),
+    }
+    assert!(directory.is_file(), "the file must be left alone");
+}
+
+#[tokio::test]
+async fn an_install_whose_runtime_only_failed_to_start_is_kept() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let server = MockServer::start().await;
+    let archive = temurin_archive();
+    let checksum = sha256(&archive);
+    mount(&server, archive, &checksum).await;
+
+    let temp = tempfile::tempdir().expect("temp");
+    let java_dir = temp.path().join("data/java");
+    let directory = java_dir.join("21/eclipse-jdk-21.0.12+8");
+    std::fs::create_dir_all(directory.join("bin")).expect("create");
+    std::fs::write(directory.join("lib"), b"kept\n").expect("write");
+    // What a JVM that cannot reserve its heap looks like.
+    std::fs::write(directory.join("bin/java"), b"#!/bin/sh\nexit 1\n").expect("write");
+    std::fs::set_permissions(
+        directory.join("bin/java"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .expect("chmod");
+
+    let error = provider(&server, &temp.path().join("cache"), &java_dir)
+        .install(21, &reporter(), &CancellationToken::new())
+        .await
+        .expect_err("a runtime that failed to start is reported, not replaced");
+    assert!(
+        matches!(error, JavaError::ManagedRuntimeUnusable { .. }),
+        "{error:?}"
+    );
+    assert!(directory.join("lib").is_file(), "the install must be kept");
+}
+
+#[tokio::test]
 async fn an_archive_that_tries_to_escape_its_directory_is_refused() {
     let server = MockServer::start().await;
     let archive = escaping_archive();
@@ -562,6 +682,7 @@ async fn an_installed_runtime_is_removed_with_the_directory_that_held_it() {
 
     assert_eq!(removed.canonicalize().ok(), directory.canonicalize().ok());
     assert!(!directory.exists(), "the install directory has to be gone");
+    assert_eq!(staging_left_in(&java_dir.join("21")), Vec::<String>::new());
     // The major's own directory stays: it is where the next install of this
     // major goes, and it was not what the user asked to remove.
     assert!(java_dir.join("21").is_dir());

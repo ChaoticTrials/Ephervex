@@ -130,6 +130,12 @@ pub enum JavaError {
         found: u32,
     },
 
+    /// Something at a release's install path cannot be replaced safely: it is
+    /// not a directory, or this filesystem cannot lock out another process
+    /// that may be installing there.
+    #[error("{path} is in the way of a managed java install and cannot be replaced safely")]
+    ManagedInstallBlocked { path: PathBuf },
+
     /// A cache destination could not be formed.
     #[error("a managed runtime could not be given a safe cache location")]
     ManagedCacheKey {
@@ -177,6 +183,7 @@ impl JavaError {
             Self::ManagedRuntimeUnusable { .. } | Self::ManagedRuntimeWrongMajor { .. } => {
                 "error-java-managed-runtime-unusable"
             }
+            Self::ManagedInstallBlocked { .. } => "error-java-managed-install-blocked",
             Self::ManagedCacheKey { .. } => "error-java-managed-cache-key-invalid",
             Self::NotManaged { .. } => "error-java-not-managed",
             Self::Io { .. } => "error-java-io",
@@ -194,6 +201,7 @@ impl JavaError {
             | Self::RuntimeUnusable { path, .. }
             | Self::ManagedRuntimeUnusable { path, .. }
             | Self::ManagedRuntimeWrongMajor { path, .. }
+            | Self::ManagedInstallBlocked { path }
             | Self::NotManaged { path }
             | Self::Io { path, .. } => Some(path.clone()),
             _ => None,

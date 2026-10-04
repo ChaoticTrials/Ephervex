@@ -48,7 +48,7 @@ use tracing::{debug, info, instrument, warn};
 use crate::adoptium::{AdoptiumArchitecture, AdoptiumClient, ManagedRelease};
 use crate::archive::{ExtractionLimits, extract_tar_gz};
 use crate::discovery::{JavaOrigin, JavaRuntime, JavaSourceKind};
-use crate::error::JavaError;
+use crate::error::{JavaError, ProbeError};
 use crate::install_lock::InstallLock;
 use crate::probe::{ProbeReport, probe};
 
@@ -119,15 +119,44 @@ impl ManagedJavaProvider {
     /// `<java_dir>/<major>/<build>` directory is ever removed. A runtime found
     /// on the system belongs to whoever installed it, and the rest of the data
     /// directory is not Java's to delete.
+    ///
+    /// The tree is moved aside under a staging name before it is deleted, and
+    /// under the release lock, so an install never meets a half-deleted runtime
+    /// and an interrupted removal leaves only a staging directory.
     #[instrument(skip(self))]
     pub async fn remove(&self, executable: &Path) -> Result<PathBuf, JavaError> {
         let directory = self.installed_directory(executable)?;
-        fs::remove_dir_all(&directory)
+        let (Some(major_directory), Some(name)) = (
+            directory.parent(),
+            directory.file_name().and_then(|name| name.to_str()),
+        ) else {
+            return Err(JavaError::NotManaged {
+                path: executable.to_path_buf(),
+            });
+        };
+        let identity = |metadata: std::fs::Metadata| {
+            use std::os::unix::fs::MetadataExt as _;
+            (metadata.dev(), metadata.ino())
+        };
+        let chosen = fs::metadata(&directory).await.ok().map(identity);
+        let _lock = lock_release(major_directory, name, &CancellationToken::new()).await?;
+        // An install may have replaced it while this waited, and the runtime
+        // that was chosen is then already gone.
+        if fs::metadata(&directory).await.ok().map(identity) != chosen {
+            debug!(path = %directory.display(), "the managed java runtime was replaced before its removal");
+            return Ok(directory);
+        }
+        let retired = new_staging(major_directory, name)?;
+        // Onto an empty directory, which a rename replaces.
+        fs::rename(&directory, retired.path())
             .await
             .map_err(|source| JavaError::Io {
                 path: directory.clone(),
                 source,
             })?;
+        // The runtime is gone from its path either way. A tree that cannot be
+        // deleted now is left under its staging name.
+        discard(retired).await;
         info!(path = %directory.display(), "removed a managed java runtime");
         Ok(directory)
     }
@@ -212,15 +241,42 @@ impl ManagedJavaProvider {
             newly_installed,
         };
 
-        if let Some(runtime) = self.installed_runtime(&executable, major).await? {
+        // A failure here is decided under the lock, where a removal or
+        // replacement cannot be renaming the tree away mid-check.
+        if let Ok(Installed::Runtime(runtime)) =
+            self.installed(&directory, &executable, major).await
+        {
             return Ok(finish(runtime, false));
         }
 
-        let lock = Arc::new(lock_release(&major_directory, &name, &release, cancel).await?);
-        // Another install may have finished while this one waited.
-        if let Some(runtime) = self.installed_runtime(&executable, major).await? {
-            return Ok(finish(runtime, false));
-        }
+        let Some(lock) = lock_release(&major_directory, &name, cancel).await? else {
+            return Err(JavaError::ManagedDownloadFailed {
+                major,
+                release: release.release_name.clone(),
+                source: Box::new(DownloadError::Canceled {
+                    url: redacted(&release.url),
+                }),
+            });
+        };
+        let lock = Arc::new(lock);
+        // Decided again under the lock: another install may have finished
+        // while this one waited.
+        let replace = match self.installed(&directory, &executable, major).await? {
+            Installed::Runtime(runtime) => return Ok(finish(runtime, false)),
+            Installed::Nothing => false,
+            Installed::Unusable if lock.excludes_other_processes() => true,
+            // Without the lock, the directory could be another process's
+            // install that is just being published, so only an empty one,
+            // which a rename replaces, is installed over.
+            Installed::Unusable => {
+                if !is_empty(&directory).await? {
+                    return Err(JavaError::ManagedInstallBlocked {
+                        path: directory.clone(),
+                    });
+                }
+                false
+            }
+        };
         remove_abandoned_staging(&major_directory, &name, &lock).await;
 
         let archive = self.download(&release, reporter, cancel).await?;
@@ -233,7 +289,7 @@ impl ManagedJavaProvider {
             discard(staging).await;
             return Err(error);
         }
-        publish(staging, &directory, Arc::clone(&lock)).await?;
+        publish(staging, &major_directory, &name, replace, Arc::clone(&lock)).await?;
 
         let runtime = self.identify(&executable, major).await?;
         info!(
@@ -245,17 +301,39 @@ impl ManagedJavaProvider {
         Ok(finish(runtime, true))
     }
 
-    /// The runtime already installed at `executable`, if there is one.
-    async fn installed_runtime(
+    /// What is installed at `directory`, whose runtime is `executable`.
+    async fn installed(
         &self,
+        directory: &Path,
         executable: &Path,
         major: u32,
-    ) -> Result<Option<JavaRuntime>, JavaError> {
-        if !fs::try_exists(executable).await.unwrap_or(false) {
-            return Ok(None);
+    ) -> Result<Installed, JavaError> {
+        if !exists(directory).await? {
+            return Ok(Installed::Nothing);
         }
-        debug!(path = %executable.display(), "the managed runtime is already installed");
-        self.identify(executable, major).await.map(Some)
+        // Not something an install leaves, so not something to replace.
+        if !fs::metadata(directory)
+            .await
+            .is_ok_and(|metadata| metadata.is_dir())
+        {
+            return Err(JavaError::ManagedInstallBlocked {
+                path: directory.to_path_buf(),
+            });
+        }
+        if !exists(executable).await? {
+            return Ok(Installed::Unusable);
+        }
+        match self.identify(executable, major).await {
+            Ok(runtime) => {
+                debug!(path = %executable.display(), "the managed runtime is already installed");
+                Ok(Installed::Runtime(runtime))
+            }
+            Err(error) if proves_unusable(&error) => {
+                debug!(%error, "the installed managed java runtime can never run");
+                Ok(Installed::Unusable)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Fetches the archive into the content-addressed download cache.
@@ -384,14 +462,35 @@ async fn probe_requested(
     Ok(report)
 }
 
+async fn is_empty(directory: &Path) -> Result<bool, JavaError> {
+    let io = |source| JavaError::Io {
+        path: directory.to_path_buf(),
+        source,
+    };
+    let mut entries = fs::read_dir(directory).await.map_err(io)?;
+    Ok(entries.next_entry().await.map_err(io)?.is_none())
+}
+
+/// Whether `path` exists. Nothing exists beneath a file.
+async fn exists(path: &Path) -> Result<bool, JavaError> {
+    match fs::try_exists(path).await {
+        Err(error) if error.kind() == std::io::ErrorKind::NotADirectory => Ok(false),
+        result => result.map_err(|source| JavaError::Io {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
 /// Takes the lock that serializes installs of release `name`, waiting for any
 /// install of it already running.
+///
+/// `None` when `cancel` fired first.
 async fn lock_release(
     major_directory: &Path,
     name: &str,
-    release: &ManagedRelease,
     cancel: &CancellationToken,
-) -> Result<InstallLock, JavaError> {
+) -> Result<Option<InstallLock>, JavaError> {
     let io = |source| JavaError::Io {
         path: major_directory.to_path_buf(),
         source,
@@ -402,17 +501,9 @@ async fn lock_release(
         .await
         .map_err(io)?
         .join(format!(".{name}.lock"));
-    match InstallLock::acquire(&path, cancel).await {
-        Ok(Some(lock)) => Ok(lock),
-        Ok(None) => Err(JavaError::ManagedDownloadFailed {
-            major: release.major,
-            release: release.release_name.clone(),
-            source: Box::new(DownloadError::Canceled {
-                url: redacted(&release.url),
-            }),
-        }),
-        Err(source) => Err(JavaError::Io { path, source }),
-    }
+    InstallLock::acquire(&path, cancel)
+        .await
+        .map_err(|source| JavaError::Io { path, source })
 }
 
 /// A new staging directory for release `name`, unique to this attempt.
@@ -476,32 +567,133 @@ async fn remove_abandoned_staging(major_directory: &Path, name: &str, lock: &Ins
     }
 }
 
-/// Renames a finished staging directory into place.
+/// Renames a finished staging directory into place as release `name`, in
+/// place of the unusable install there when `replace` is set.
 ///
 /// The rename owns the staging directory and the lock, so a dropped install
 /// cannot remove the tree while it is being renamed, or let another in first.
 async fn publish(
     staging: TempDir,
-    directory: &Path,
+    major_directory: &Path,
+    name: &str,
+    replace: bool,
     lock: Arc<InstallLock>,
 ) -> Result<(), JavaError> {
-    let destination = directory.to_path_buf();
-    let renamed = tokio::task::spawn_blocking(move || {
-        let renamed = std::fs::rename(staging.path(), &destination);
-        if renamed.is_ok() {
+    let major_directory = major_directory.to_path_buf();
+    let name = name.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let destination = major_directory.join(&name);
+        let published = if replace {
+            replace_unusable(staging.path(), &major_directory, &name)
+        } else {
+            std::fs::rename(staging.path(), &destination).map_err(|source| JavaError::Io {
+                path: destination,
+                source,
+            })
+        };
+        // Whatever is left at the staging path is not the install.
+        if staging.path().exists() {
+            if let Err(error) = staging.close() {
+                warn!(%error, "could not remove a managed java staging directory");
+            }
+        } else {
             let _ = staging.keep();
-        } else if let Err(error) = staging.close() {
-            warn!(%error, "could not remove a managed java staging directory");
         }
         drop(lock);
-        renamed
+        published
     })
     .await
-    .map_err(|_| JavaError::ManagedExtractionPanicked)?;
-    renamed.map_err(|source| JavaError::Io {
-        path: directory.to_path_buf(),
+    .map_err(|_| JavaError::ManagedExtractionPanicked)?
+}
+
+/// Puts `staging` at `destination` in place of the unusable install there.
+///
+/// Swapped in one step where the filesystem allows it, so the path never
+/// holds nothing.
+fn replace_unusable(staging: &Path, major_directory: &Path, name: &str) -> Result<(), JavaError> {
+    use rustix::fs::{CWD, RenameFlags, renameat_with};
+    use rustix::io::Errno;
+
+    let destination = &major_directory.join(name);
+    warn!(path = %destination.display(), "replacing a managed java install that can never run");
+    match renameat_with(CWD, staging, CWD, destination, RenameFlags::EXCHANGE) {
+        Ok(()) => Ok(()),
+        // Unsupported by the filesystem, or refused by a sandbox.
+        Err(Errno::INVAL | Errno::NOSYS | Errno::OPNOTSUPP | Errno::PERM) => {
+            replace_by_moving_aside(staging, major_directory, name)
+        }
+        Err(errno) => Err(JavaError::Io {
+            path: destination.clone(),
+            source: errno.into(),
+        }),
+    }
+}
+
+/// [`replace_unusable`] in two renames.
+///
+/// The old tree is moved aside under a staging name first, so one that cannot
+/// be removed now is removed by the next install of the release. If the new
+/// tree cannot take its place, the old one is moved back, or kept under that
+/// name.
+fn replace_by_moving_aside(
+    staging: &Path,
+    major_directory: &Path,
+    name: &str,
+) -> Result<(), JavaError> {
+    let destination = &major_directory.join(name);
+    let at_destination = |source| JavaError::Io {
+        path: destination.clone(),
         source,
-    })
+    };
+    let retired = new_staging(major_directory, name)?;
+    // Onto an empty directory, which a rename replaces.
+    std::fs::rename(destination, retired.path()).map_err(at_destination)?;
+    if let Err(source) = std::fs::rename(staging, destination) {
+        // Kept either way: back in place, or under its staging name.
+        let retired = retired.keep();
+        if let Err(error) = std::fs::rename(&retired, destination) {
+            warn!(path = %retired.display(), %error, "could not move a replaced managed java install back");
+        }
+        return Err(at_destination(source));
+    }
+    if let Err(error) = retired.close() {
+        warn!(%error, "could not remove a replaced managed java install");
+    }
+    Ok(())
+}
+
+/// Whether a failed check of an installed runtime proves it can never run.
+///
+/// Only the install's own files prove that: an answer that is not a JVM's, an
+/// executable the kernel refuses to start, or a runtime of another major,
+/// which runs but sits where this release belongs. A timeout, a non-zero exit
+/// or a spawn failure such as running out of memory can come from the machine,
+/// and replacing a working install over one could pull it out from under a
+/// game that runs on it. The replacement is published only once it passes the
+/// same probe, so a refusal from the filesystem itself replaces nothing.
+fn proves_unusable(error: &JavaError) -> bool {
+    match error {
+        JavaError::ManagedRuntimeWrongMajor { .. } => true,
+        JavaError::ManagedRuntimeUnusable { source, .. } => match &**source {
+            ProbeError::Unintelligible { .. } => true,
+            // Not an executable, or naming a loader that is not there: both
+            // said by the file, not the machine.
+            ProbeError::NotExecutable { source, .. } => {
+                source.raw_os_error() == Some(rustix::io::Errno::NOEXEC.raw_os_error())
+                    || source.kind() == std::io::ErrorKind::NotFound
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// What is at a release's install directory.
+enum Installed {
+    Nothing,
+    Runtime(JavaRuntime),
+    /// A directory whose runtime is missing or can never run.
+    Unusable,
 }
 
 /// Removes a staging directory off the async runtime: a JDK is thousands of files.
@@ -533,6 +725,64 @@ mod tests {
             let entry = staging.path().file_name().unwrap().to_str().unwrap();
             assert!(is_staging_of(entry, NAME), "{entry}");
         }
+    }
+
+    #[test]
+    fn moving_an_unusable_install_aside_leaves_only_the_new_tree() {
+        let temp = tempfile::tempdir().unwrap();
+        let major = temp.path();
+        let destination = major.join(NAME);
+        std::fs::create_dir_all(destination.join("lib")).unwrap();
+        std::fs::write(destination.join("lib/leftover"), b"old").unwrap();
+        let staging = new_staging(major, NAME).unwrap();
+        std::fs::create_dir_all(staging.path().join("bin")).unwrap();
+        std::fs::write(staging.path().join("bin/java"), b"new").unwrap();
+
+        replace_by_moving_aside(staging.path(), major, NAME).unwrap();
+
+        assert_eq!(std::fs::read(destination.join("bin/java")).unwrap(), b"new");
+        assert!(!destination.join("lib").exists());
+        let left: Vec<_> = std::fs::read_dir(major)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(left, [std::ffi::OsString::from(NAME)]);
+    }
+
+    #[test]
+    fn only_an_answer_from_the_runtime_proves_it_can_never_run() {
+        let path = PathBuf::from("/java/21/build/bin/java");
+        let unusable = |source| JavaError::ManagedRuntimeUnusable {
+            path: path.clone(),
+            source: Box::new(source),
+        };
+
+        assert!(proves_unusable(&JavaError::ManagedRuntimeWrongMajor {
+            path: path.clone(),
+            requested: 21,
+            found: 17,
+        }));
+        assert!(proves_unusable(&unusable(ProbeError::Unintelligible {
+            path: path.clone(),
+        })));
+        assert!(!proves_unusable(&unusable(ProbeError::TimedOut {
+            path: path.clone(),
+            seconds: 15,
+        })));
+        assert!(!proves_unusable(&unusable(ProbeError::Failed {
+            path: path.clone(),
+            status: Some(1),
+        })));
+        let spawn = |errno: rustix::io::Errno| ProbeError::NotExecutable {
+            path: path.clone(),
+            source: errno.into(),
+        };
+        assert!(proves_unusable(&unusable(spawn(rustix::io::Errno::NOEXEC))));
+        assert!(!proves_unusable(&unusable(spawn(
+            rustix::io::Errno::ACCESS
+        ))));
+        assert!(!proves_unusable(&unusable(spawn(rustix::io::Errno::NOMEM))));
+        assert!(!proves_unusable(&unusable(spawn(rustix::io::Errno::AGAIN))));
     }
 
     #[test]

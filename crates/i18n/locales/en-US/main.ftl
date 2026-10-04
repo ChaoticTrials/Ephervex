@@ -422,6 +422,9 @@ error-java-managed-extraction-failed = Unpacking the Java runtime did not finish
 error-java-managed-runtime-unusable = The downloaded Java runtime could not be started.
 .action = Ephervex did not use it. Try again, or install a Java runtime through your distribution's package manager.
 
+error-java-managed-install-blocked = Something Ephervex cannot safely replace is in the way of this Java runtime.
+    .action = Delete { $path } and try again.
+
 error-java-managed-cache-key-invalid = The Java runtime could not be given a safe location in the cache.
 
 error-java-not-managed = That Java runtime is not one Ephervex installed, so it cannot be removed here.
